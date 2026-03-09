@@ -15,8 +15,9 @@ use crate::{
     error::{AirtableError, AirtableResult},
     types::{
         AirtableApiError, AttachmentDownload, BaseSchemaResponse, CreateRecordsResponse,
-        DeleteRecordResponse, DeleteRecordsResponse, ListBasesResponse, ListRecordsResponse,
-        Record, SortSpec, UpsertRecordsResponse,
+        CreateWebhookResponse, DeleteRecordResponse, DeleteRecordsResponse, ListBasesResponse,
+        ListRecordsResponse, ListWebhookPayloadsResponse, ListWebhooksResponse, Record,
+        RefreshWebhookResponse, SortSpec, UpsertRecordsResponse,
     },
 };
 
@@ -167,6 +168,88 @@ impl AirtableClient {
     pub async fn get_base_schema(&self, base_id: &str) -> AirtableResult<BaseSchemaResponse> {
         let path = format!("/meta/bases/{base_id}/tables");
         self.get_with_params(&path, &[]).await
+    }
+
+    // ── Webhook operations ──────────────────────────────────────────
+
+    /// List webhooks configured for a base.
+    #[instrument(skip(self))]
+    pub async fn list_webhooks(&self, base_id: &str) -> AirtableResult<ListWebhooksResponse> {
+        let path = format!("/bases/{base_id}/webhooks");
+        self.get_with_params(&path, &[]).await
+    }
+
+    /// Create a webhook for a base.
+    #[instrument(skip(self, specification))]
+    pub async fn create_webhook(
+        &self,
+        base_id: &str,
+        notification_url: Option<&str>,
+        specification: &serde_json::Value,
+    ) -> AirtableResult<CreateWebhookResponse> {
+        let path = format!("/bases/{base_id}/webhooks");
+        let mut body = serde_json::json!({
+            "specification": specification,
+        });
+        if let Some(url) = notification_url {
+            body["notificationUrl"] = serde_json::Value::String(url.to_string());
+        }
+        self.post_json(&path, &body).await
+    }
+
+    /// Delete a webhook.
+    #[instrument(skip(self))]
+    pub async fn delete_webhook(
+        &self,
+        base_id: &str,
+        webhook_id: &str,
+    ) -> AirtableResult<serde_json::Value> {
+        let path = format!("/bases/{base_id}/webhooks/{webhook_id}");
+        self.delete(&path).await
+    }
+
+    /// Refresh a webhook before it expires.
+    #[instrument(skip(self))]
+    pub async fn refresh_webhook(
+        &self,
+        base_id: &str,
+        webhook_id: &str,
+    ) -> AirtableResult<RefreshWebhookResponse> {
+        let path = format!("/bases/{base_id}/webhooks/{webhook_id}/refresh");
+        self.post_json(&path, &serde_json::json!({})).await
+    }
+
+    /// Enable or disable webhook notifications.
+    #[instrument(skip(self))]
+    pub async fn set_webhook_notifications(
+        &self,
+        base_id: &str,
+        webhook_id: &str,
+        enable: bool,
+    ) -> AirtableResult<serde_json::Value> {
+        let path = format!("/bases/{base_id}/webhooks/{webhook_id}/enableNotifications");
+        self.post_json(&path, &serde_json::json!({ "enable": enable }))
+            .await
+    }
+
+    /// List webhook payload history starting from a cursor.
+    #[instrument(skip(self))]
+    pub async fn list_webhook_payloads(
+        &self,
+        base_id: &str,
+        webhook_id: &str,
+        cursor: Option<u64>,
+        limit: Option<u32>,
+    ) -> AirtableResult<ListWebhookPayloadsResponse> {
+        let path = format!("/bases/{base_id}/webhooks/{webhook_id}/payloads");
+        let mut params = Vec::new();
+        if let Some(cursor) = cursor {
+            params.push(("cursor", cursor.to_string()));
+        }
+        if let Some(limit) = limit {
+            params.push(("limit", limit.to_string()));
+        }
+        self.get_with_params(&path, &params).await
     }
 
     // ── Record operations ───────────────────────────────────────────
@@ -885,7 +968,7 @@ fn is_local_test_host(host: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{bearer_token, header, method, path};
+    use wiremock::matchers::{bearer_token, body_json, header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[fcp_async_core::runtime::test]
@@ -934,6 +1017,184 @@ mod tests {
             .unwrap();
         assert_eq!(record.id, "recDEF");
         assert_eq!(record.fields["Name"], "Test Record");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_list_webhooks() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/bases/appABC/webhooks"))
+            .and(bearer_token("test_token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "webhooks": [
+                    {
+                        "id": "ach123",
+                        "notificationUrl": "https://hooks.flywheel.dev/airtable",
+                        "cursorForNextPayload": 5,
+                        "isHookEnabled": true,
+                        "areNotificationsEnabled": true
+                    }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let client = AirtableClient::new("test_token")
+            .unwrap()
+            .with_base_url(server.uri());
+        let result = client.list_webhooks("appABC").await.unwrap();
+        assert_eq!(result.webhooks.len(), 1);
+        assert_eq!(result.webhooks[0].id, "ach123");
+        assert_eq!(result.webhooks[0].cursor_for_next_payload, Some(5));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_create_webhook() {
+        let server = MockServer::start().await;
+        let specification = serde_json::json!({
+            "options": {
+                "filters": {
+                    "dataTypes": ["tableData"],
+                    "recordChangeScope": "tblXYZ"
+                }
+            }
+        });
+
+        Mock::given(method("POST"))
+            .and(path("/bases/appABC/webhooks"))
+            .and(bearer_token("test_token"))
+            .and(header("content-type", "application/json"))
+            .and(body_json(serde_json::json!({
+                "notificationUrl": "https://hooks.flywheel.dev/airtable",
+                "specification": specification
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "ach123",
+                "macSecretBase64": "Zm9vYmFy",
+                "expirationTime": "2026-03-16T00:00:00.000Z"
+            })))
+            .mount(&server)
+            .await;
+
+        let client = AirtableClient::new("test_token")
+            .unwrap()
+            .with_base_url(server.uri());
+        let result = client
+            .create_webhook(
+                "appABC",
+                Some("https://hooks.flywheel.dev/airtable"),
+                &specification,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.id, "ach123");
+        assert_eq!(result.mac_secret_base64, "Zm9vYmFy");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_refresh_webhook() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/bases/appABC/webhooks/ach123/refresh"))
+            .and(bearer_token("test_token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "expirationTime": "2026-03-16T00:00:00.000Z"
+            })))
+            .mount(&server)
+            .await;
+
+        let client = AirtableClient::new("test_token")
+            .unwrap()
+            .with_base_url(server.uri());
+        let result = client.refresh_webhook("appABC", "ach123").await.unwrap();
+        assert_eq!(
+            result.expiration_time.as_deref(),
+            Some("2026-03-16T00:00:00.000Z")
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_set_webhook_notifications() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/bases/appABC/webhooks/ach123/enableNotifications"))
+            .and(bearer_token("test_token"))
+            .and(header("content-type", "application/json"))
+            .and(body_json(serde_json::json!({
+                "enable": false
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "ach123",
+                "areNotificationsEnabled": false
+            })))
+            .mount(&server)
+            .await;
+
+        let client = AirtableClient::new("test_token")
+            .unwrap()
+            .with_base_url(server.uri());
+        let result = client
+            .set_webhook_notifications("appABC", "ach123", false)
+            .await
+            .unwrap();
+        assert_eq!(result["id"], "ach123");
+        assert_eq!(result["areNotificationsEnabled"], false);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_delete_webhook() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/bases/appABC/webhooks/ach123"))
+            .and(bearer_token("test_token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "ach123",
+                "isHookEnabled": false,
+                "areNotificationsEnabled": false
+            })))
+            .mount(&server)
+            .await;
+
+        let client = AirtableClient::new("test_token")
+            .unwrap()
+            .with_base_url(server.uri());
+        let result = client.delete_webhook("appABC", "ach123").await.unwrap();
+        assert_eq!(result["id"], "ach123");
+        assert_eq!(result["areNotificationsEnabled"], false);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_list_webhook_payloads() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/bases/appABC/webhooks/ach123/payloads"))
+            .and(query_param("cursor", "4"))
+            .and(query_param("limit", "10"))
+            .and(bearer_token("test_token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "cursor": 5,
+                "mightHaveMore": false,
+                "payloads": [
+                    {
+                        "timestamp": "2026-03-09T00:00:00.000Z",
+                        "baseTransactionNumber": 4,
+                        "payloadFormat": "v0"
+                    }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let client = AirtableClient::new("test_token")
+            .unwrap()
+            .with_base_url(server.uri());
+        let result = client
+            .list_webhook_payloads("appABC", "ach123", Some(4), Some(10))
+            .await
+            .unwrap();
+        assert_eq!(result.cursor, Some(5));
+        assert!(!result.might_have_more);
+        assert_eq!(result.payloads.len(), 1);
     }
 
     #[fcp_async_core::runtime::test]

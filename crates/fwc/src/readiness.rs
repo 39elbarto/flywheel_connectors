@@ -8,6 +8,12 @@
 //! Gap categories identify what is missing so cohort remediation beads can
 //! systematically bring connectors to full readiness.
 
+use std::collections::BTreeSet;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result};
+use fcp_manifest::{ConnectorManifest, ConnectorRuntimeFormat, ManifestApprovalMode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -67,6 +73,35 @@ pub enum ConnectorCohort {
     Vectordb,
     Iot,
     Other,
+}
+
+impl ConnectorCohort {
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Messaging => "messaging",
+            Self::Social => "social",
+            Self::Workspace => "workspace",
+            Self::Productivity => "productivity",
+            Self::Ai => "ai",
+            Self::DevTools => "dev-tools",
+            Self::Infra => "infra",
+            Self::Data => "data",
+            Self::Storage => "storage",
+            Self::Analytics => "analytics",
+            Self::Finance => "finance",
+            Self::Business => "business",
+            Self::Browser => "browser",
+            Self::Knowledge => "knowledge",
+            Self::Automation => "automation",
+            Self::Community => "community",
+            Self::Security => "security",
+            Self::Media => "media",
+            Self::Vectordb => "vectordb",
+            Self::Iot => "iot",
+            Self::Other => "other",
+        }
+    }
 }
 
 // ── Per-area checklists ─────────────────────────────────────────────────
@@ -254,6 +289,8 @@ pub struct ConnectorSummary {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ConnectorState {
+    /// Host/runtime state has not been queried yet.
+    Unknown,
     /// Not yet configured.
     Unconfigured,
     /// Configured but not handshaken.
@@ -324,6 +361,757 @@ pub struct RateLimitSummary {
     pub requests: u32,
     /// Window duration (e.g. "60s").
     pub window: String,
+}
+
+// ── Manifest-backed discovery catalog ──────────────────────────────────
+
+#[derive(Clone, Debug)]
+pub struct DiscoveryCatalog {
+    connectors: Vec<DiscoveredConnector>,
+}
+
+impl DiscoveryCatalog {
+    /// Load the current workspace connector catalog from `connectors/*/manifest.toml`.
+    ///
+    /// This stays honest about runtime state: discovery is manifest-backed until
+    /// host-backed lifecycle/status surfaces land in later beads.
+    pub fn load() -> Result<Self> {
+        let connectors_dir = workspace_root().join("connectors");
+        let mut connectors = Vec::new();
+
+        for entry in fs::read_dir(&connectors_dir)
+            .with_context(|| format!("failed to read {}", connectors_dir.display()))?
+        {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if !file_type.is_dir() {
+                continue;
+            }
+
+            let slug = entry.file_name().to_string_lossy().into_owned();
+            let manifest_path = entry.path().join("manifest.toml");
+            if !manifest_path.is_file() {
+                continue;
+            }
+
+            if let Ok(connector) = DiscoveredConnector::from_manifest(&slug, &manifest_path) {
+                connectors.push(connector);
+            }
+        }
+
+        connectors.sort_by(|left, right| left.slug.cmp(&right.slug));
+        Ok(Self { connectors })
+    }
+
+    #[must_use]
+    pub fn connectors(&self) -> &[DiscoveredConnector] {
+        &self.connectors
+    }
+
+    #[must_use]
+    pub fn list(&self, zone: Option<&str>, category: Option<&str>) -> Vec<&DiscoveredConnector> {
+        let zone = zone.map(normalize_zone_selector);
+        let category = category.map(normalize_category_selector);
+
+        self.connectors
+            .iter()
+            .filter(|connector| {
+                zone.as_ref()
+                    .is_none_or(|requested| connector.matches_zone(requested))
+                    && category
+                        .as_ref()
+                        .is_none_or(|requested| connector.matches_category(requested))
+            })
+            .collect()
+    }
+
+    pub fn resolve_connector(&self, selector: &str) -> Result<&DiscoveredConnector, SelectorError> {
+        let normalized = normalize_connector_selector(selector);
+        let exact = self
+            .connectors
+            .iter()
+            .filter(|connector| connector.matches_selector(&normalized))
+            .collect::<Vec<_>>();
+
+        if exact.len() == 1 {
+            return Ok(exact[0]);
+        }
+        if exact.len() > 1 {
+            return Err(SelectorError::ambiguous(
+                selector,
+                exact
+                    .iter()
+                    .map(|connector| connector.slug.clone())
+                    .collect(),
+            ));
+        }
+
+        let prefix = self
+            .connectors
+            .iter()
+            .filter(|connector| connector.matches_prefix(&normalized))
+            .collect::<Vec<_>>();
+
+        match prefix.as_slice() {
+            [connector] => Ok(*connector),
+            [] => Err(SelectorError::not_found(
+                selector,
+                suggest_connector_slugs(&self.connectors, &normalized),
+            )),
+            _ => Err(SelectorError::ambiguous(
+                selector,
+                prefix
+                    .iter()
+                    .map(|connector| connector.slug.clone())
+                    .take(5)
+                    .collect(),
+            )),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct DiscoveredConnector {
+    pub slug: String,
+    pub manifest_path: String,
+    pub cohort: String,
+    pub runtime_format: String,
+    pub state_model: Option<String>,
+    pub supported_zones: Vec<String>,
+    pub detail: ConnectorDetail,
+    pub zones: Value,
+    pub capabilities: Value,
+    pub connector_schema: Value,
+    pub operations: Vec<DiscoveredOperation>,
+}
+
+impl DiscoveredConnector {
+    #[allow(clippy::too_many_lines)]
+    fn from_manifest(slug: &str, manifest_path: &Path) -> Result<Self> {
+        let raw = fs::read_to_string(manifest_path)
+            .with_context(|| format!("failed to read {}", manifest_path.display()))?;
+        // Discovery should tolerate stale interface hashes so the CLI can still
+        // surface real connector metadata while validation is being repaired.
+        let manifest = ConnectorManifest::parse_str_unchecked(&raw)
+            .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
+
+        let inventory_entry = CONNECTOR_INVENTORY.iter().find(|entry| entry.name == slug);
+        let cohort = inventory_entry.map_or_else(
+            || ConnectorCohort::Other.as_str().to_owned(),
+            |entry| entry.cohort.as_str().to_owned(),
+        );
+
+        let namespace = manifest
+            .connector
+            .id
+            .as_str()
+            .strip_prefix("fcp.")
+            .unwrap_or_else(|| manifest.connector.id.as_str())
+            .to_owned();
+        let runtime_format = runtime_format_label(manifest.connector.format).to_owned();
+        let state_model = manifest
+            .connector
+            .state
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()?
+            .and_then(|json| {
+                json.get("model")
+                    .and_then(Value::as_str)
+                    .map(std::borrow::ToOwned::to_owned)
+            });
+
+        let mut operations = manifest
+            .provides
+            .operations
+            .iter()
+            .map(|(operation_id, operation)| {
+                DiscoveredOperation::from_manifest(
+                    &namespace,
+                    operation_id,
+                    operation,
+                    manifest.rate_limits.as_ref(),
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        operations.sort_by(|left, right| left.preferred_selector.cmp(&right.preferred_selector));
+
+        let max_risk = operations
+            .iter()
+            .map(|operation| operation.summary.risk_level.as_str())
+            .max_by_key(|risk| risk_rank(risk))
+            .unwrap_or("low")
+            .to_owned();
+        let has_events = manifest
+            .event_caps
+            .as_ref()
+            .is_some_and(|caps| caps.streaming || caps.replay)
+            || !manifest.provides.events.is_empty();
+        let supported_zones = manifest
+            .zones
+            .allowed_sources
+            .iter()
+            .chain(manifest.zones.allowed_targets.iter())
+            .chain(std::iter::once(&manifest.zones.home))
+            .map(|zone| zone.as_str().to_owned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let connector_rate_limits = manifest
+            .rate_limits
+            .as_ref()
+            .map(|rate_limits| {
+                rate_limits
+                    .pools
+                    .iter()
+                    .map(|pool| RateLimitSummary {
+                        scope: pool.id.clone(),
+                        requests: pool.requests,
+                        window: human_window_ms(pool.window_ms),
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let connector_id = manifest.connector.id.as_str().to_owned();
+        let connector_name = manifest.connector.name.clone();
+        let connector_version = manifest.connector.version.to_string();
+        let connector_description = manifest.connector.description.clone();
+        let archetypes = manifest
+            .connector
+            .archetypes
+            .iter()
+            .map(|archetype| archetype.as_str().to_owned())
+            .collect::<Vec<_>>();
+        let summary = ConnectorSummary {
+            id: connector_id.clone(),
+            name: connector_name.clone(),
+            version: connector_version.clone(),
+            description: connector_description.clone(),
+            archetypes: archetypes.clone(),
+            state: ConnectorState::Unknown,
+            operation_count: operations.len(),
+            max_risk,
+            has_events,
+        };
+        let operation_summaries = operations
+            .iter()
+            .map(|operation| operation.summary.clone())
+            .collect();
+        let zones = serde_json::to_value(&manifest.zones)?;
+        let capabilities = serde_json::to_value(&manifest.capabilities)?;
+        let event_caps = manifest
+            .event_caps
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()?;
+        let sandbox = serde_json::to_value(&manifest.sandbox)?;
+        let rate_limits = manifest
+            .rate_limits
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()?;
+        let connector_schema = serde_json::json!({
+            "connector": {
+                "id": &connector_id,
+                "name": &connector_name,
+                "version": &connector_version,
+                "description": &connector_description,
+                "archetypes": archetypes,
+                "format": &runtime_format,
+                "state_model": state_model,
+            },
+            "zones": zones,
+            "capabilities": capabilities,
+            "events": {
+                "event_caps": event_caps,
+                "declared_topics": manifest.provides.events.keys().cloned().collect::<Vec<_>>(),
+            },
+            "sandbox": sandbox,
+            "rate_limits": rate_limits,
+            "operations": operations
+                .iter()
+                .map(|operation| serde_json::json!({
+                    "selector": &operation.preferred_selector,
+                    "canonical_id": &operation.actual_id,
+                    "aliases": operation.aliases.clone(),
+                }))
+                .collect::<Vec<_>>(),
+            "note": "This connector-level schema comes from the manifest. Config schema remains under `fwc config schema` once host-backed config introspection is wired.",
+        });
+
+        Ok(Self {
+            slug: slug.to_owned(),
+            manifest_path: relative_to_workspace(manifest_path),
+            cohort,
+            runtime_format,
+            state_model,
+            supported_zones,
+            detail: ConnectorDetail {
+                summary,
+                operations: operation_summaries,
+                config_schema: None,
+                health: None,
+                rate_limits: connector_rate_limits,
+            },
+            zones,
+            capabilities,
+            connector_schema,
+            operations,
+        })
+    }
+
+    #[must_use]
+    pub fn matches_zone(&self, zone: &str) -> bool {
+        self.supported_zones
+            .iter()
+            .any(|candidate| candidate == zone)
+    }
+
+    #[must_use]
+    pub fn matches_category(&self, category: &str) -> bool {
+        self.cohort == category
+            || self
+                .detail
+                .summary
+                .archetypes
+                .iter()
+                .map(|archetype| normalize_category_selector(archetype))
+                .any(|archetype| archetype == category)
+    }
+
+    pub fn resolve_operation(&self, selector: &str) -> Result<&DiscoveredOperation, SelectorError> {
+        let normalized = normalize_operation_selector(selector);
+        let exact = self
+            .operations
+            .iter()
+            .filter(|operation| operation.matches_selector(&normalized))
+            .collect::<Vec<_>>();
+
+        if exact.len() == 1 {
+            return Ok(exact[0]);
+        }
+        if exact.len() > 1 {
+            return Err(SelectorError::ambiguous(
+                selector,
+                exact
+                    .iter()
+                    .map(|operation| operation.preferred_selector.clone())
+                    .collect(),
+            ));
+        }
+
+        let prefix = self
+            .operations
+            .iter()
+            .filter(|operation| operation.matches_prefix(&normalized))
+            .collect::<Vec<_>>();
+
+        match prefix.as_slice() {
+            [operation] => Ok(*operation),
+            [] => Err(SelectorError::not_found(
+                selector,
+                suggest_operation_selectors(&self.operations, &normalized),
+            )),
+            _ => Err(SelectorError::ambiguous(
+                selector,
+                prefix
+                    .iter()
+                    .map(|operation| operation.preferred_selector.clone())
+                    .take(5)
+                    .collect(),
+            )),
+        }
+    }
+
+    fn matches_selector(&self, selector: &str) -> bool {
+        self.selector_keys()
+            .into_iter()
+            .any(|candidate| candidate == selector)
+    }
+
+    fn matches_prefix(&self, selector: &str) -> bool {
+        self.selector_keys()
+            .into_iter()
+            .any(|candidate| candidate.starts_with(selector))
+    }
+
+    fn selector_keys(&self) -> Vec<String> {
+        let canonical = self.detail.summary.id.to_lowercase();
+        let stripped = canonical
+            .strip_prefix("fcp.")
+            .unwrap_or(canonical.as_str())
+            .to_owned();
+        let normalized_name = normalize_connector_selector(&self.detail.summary.name);
+        let compact_name = normalized_name.replace("-connector", "");
+
+        [
+            self.slug.to_lowercase(),
+            canonical,
+            stripped,
+            normalized_name,
+            compact_name,
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct DiscoveredOperation {
+    pub actual_id: String,
+    pub local_id: String,
+    pub preferred_selector: String,
+    pub aliases: Vec<String>,
+    pub description: String,
+    pub summary: OperationSummary,
+    pub input_schema: Value,
+    pub output_schema: Value,
+    pub approval_mode: String,
+    pub when_to_use: String,
+    pub common_mistakes: Vec<String>,
+    pub examples: Vec<String>,
+    pub related: Vec<String>,
+    pub network_constraints: Option<Value>,
+    pub rate_limits: Vec<RateLimitSummary>,
+}
+
+impl DiscoveredOperation {
+    fn from_manifest(
+        namespace: &str,
+        operation_id: &str,
+        operation: &fcp_manifest::OperationSection,
+        rate_limits: Option<&fcp_manifest::RateLimitsSection>,
+    ) -> Result<Self> {
+        let local_id = operation_id
+            .strip_prefix(&format!("{namespace}."))
+            .unwrap_or(operation_id)
+            .to_owned();
+        let preferred_selector = preferred_operation_selector(&local_id);
+        let aliases = operation_aliases(namespace, operation_id, &local_id);
+        let rate_limits = summarize_operation_rate_limits(operation_id, operation, rate_limits);
+
+        Ok(Self {
+            actual_id: operation_id.to_owned(),
+            local_id,
+            preferred_selector,
+            aliases,
+            description: operation.description.clone(),
+            summary: OperationSummary {
+                id: operation_id.to_owned(),
+                summary: operation.description.clone(),
+                capability: operation.capability.as_str().to_owned(),
+                risk_level: risk_level_label(operation.risk_level).to_owned(),
+                safety_tier: safety_tier_label(operation.safety_tier).to_owned(),
+                idempotency: idempotency_label(operation.idempotency).to_owned(),
+                requires_approval: !matches!(
+                    operation.requires_approval,
+                    ManifestApprovalMode::None
+                ),
+                supports_simulate: true,
+            },
+            input_schema: operation.input_schema.clone(),
+            output_schema: operation.output_schema.clone(),
+            approval_mode: approval_mode_label(operation.requires_approval).to_owned(),
+            when_to_use: operation.ai_hints.when_to_use.clone(),
+            common_mistakes: operation.ai_hints.common_mistakes.clone(),
+            examples: operation.ai_hints.examples.clone(),
+            related: operation
+                .ai_hints
+                .related
+                .iter()
+                .map(|related| related.as_str().to_owned())
+                .collect(),
+            network_constraints: operation
+                .network_constraints
+                .as_ref()
+                .map(serde_json::to_value)
+                .transpose()?,
+            rate_limits,
+        })
+    }
+
+    fn matches_selector(&self, selector: &str) -> bool {
+        self.selector_keys()
+            .into_iter()
+            .any(|candidate| candidate == selector)
+    }
+
+    fn matches_prefix(&self, selector: &str) -> bool {
+        self.selector_keys()
+            .into_iter()
+            .any(|candidate| candidate.starts_with(selector))
+    }
+
+    fn selector_keys(&self) -> Vec<String> {
+        self.aliases
+            .iter()
+            .map(|alias| normalize_operation_selector(alias))
+            .chain([
+                normalize_operation_selector(&self.actual_id),
+                normalize_operation_selector(&self.local_id),
+                normalize_operation_selector(&self.preferred_selector),
+            ])
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SelectorErrorKind {
+    NotFound,
+    Ambiguous,
+}
+
+#[derive(Clone, Debug)]
+pub struct SelectorError {
+    pub kind: SelectorErrorKind,
+    pub selector: String,
+    pub suggestions: Vec<String>,
+}
+
+impl SelectorError {
+    fn not_found(selector: &str, suggestions: Vec<String>) -> Self {
+        Self {
+            kind: SelectorErrorKind::NotFound,
+            selector: selector.to_owned(),
+            suggestions,
+        }
+    }
+
+    fn ambiguous(selector: &str, suggestions: Vec<String>) -> Self {
+        Self {
+            kind: SelectorErrorKind::Ambiguous,
+            selector: selector.to_owned(),
+            suggestions,
+        }
+    }
+}
+
+fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("fwc crate should live under crates/fwc")
+        .to_path_buf()
+}
+
+fn relative_to_workspace(path: &Path) -> String {
+    path.strip_prefix(workspace_root())
+        .unwrap_or(path)
+        .display()
+        .to_string()
+}
+
+const fn runtime_format_label(format: ConnectorRuntimeFormat) -> &'static str {
+    match format {
+        ConnectorRuntimeFormat::Native => "native",
+        ConnectorRuntimeFormat::Wasi => "wasi",
+    }
+}
+
+const fn risk_level_label(level: fcp_core::RiskLevel) -> &'static str {
+    match level {
+        fcp_core::RiskLevel::Low => "low",
+        fcp_core::RiskLevel::Medium => "medium",
+        fcp_core::RiskLevel::High => "high",
+        fcp_core::RiskLevel::Critical => "critical",
+    }
+}
+
+const fn safety_tier_label(tier: fcp_core::SafetyTier) -> &'static str {
+    match tier {
+        fcp_core::SafetyTier::Safe => "safe",
+        fcp_core::SafetyTier::Risky => "risky",
+        fcp_core::SafetyTier::Dangerous => "dangerous",
+        fcp_core::SafetyTier::Critical => "critical",
+        fcp_core::SafetyTier::Forbidden => "forbidden",
+    }
+}
+
+const fn idempotency_label(idempotency: fcp_core::IdempotencyClass) -> &'static str {
+    match idempotency {
+        fcp_core::IdempotencyClass::None => "none",
+        fcp_core::IdempotencyClass::BestEffort => "best-effort",
+        fcp_core::IdempotencyClass::Strict => "strict",
+    }
+}
+
+const fn approval_mode_label(mode: ManifestApprovalMode) -> &'static str {
+    match mode {
+        ManifestApprovalMode::None => "none",
+        ManifestApprovalMode::Policy => "policy",
+        ManifestApprovalMode::Interactive => "interactive",
+        ManifestApprovalMode::ElevationToken => "elevation-token",
+    }
+}
+
+fn summarize_operation_rate_limits(
+    operation_id: &str,
+    operation: &fcp_manifest::OperationSection,
+    rate_limits: Option<&fcp_manifest::RateLimitsSection>,
+) -> Vec<RateLimitSummary> {
+    let mut summaries = Vec::new();
+
+    if let Some(inline) = operation.rate_limit.as_ref() {
+        summaries.push(RateLimitSummary {
+            scope: "inline".to_owned(),
+            requests: inline.as_inner().max,
+            window: human_window_ms(inline.as_inner().per_ms),
+        });
+    }
+
+    if let Some(rate_limits) = rate_limits {
+        for pool_id in rate_limits
+            .operation_pools
+            .get(operation_id)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(pool) = rate_limits.pools.iter().find(|pool| pool.id == *pool_id) {
+                summaries.push(RateLimitSummary {
+                    scope: pool.id.clone(),
+                    requests: pool.requests,
+                    window: human_window_ms(pool.window_ms),
+                });
+            }
+        }
+    }
+
+    summaries
+}
+
+fn preferred_operation_selector(local_id: &str) -> String {
+    if let Some((verb, object)) = local_id.split_once('_') {
+        let plural = pluralize_object(object);
+        return format!("{plural}.{verb}");
+    }
+    local_id.to_owned()
+}
+
+fn operation_aliases(namespace: &str, actual_id: &str, local_id: &str) -> Vec<String> {
+    let mut aliases = BTreeSet::from([actual_id.to_owned(), local_id.to_owned()]);
+
+    if let Some((verb, object)) = local_id.split_once('_') {
+        let singular = object.to_owned();
+        let plural = pluralize_object(object);
+        for noun in [
+            singular.clone(),
+            plural.clone(),
+            singular.replace('_', "-"),
+            plural.replace('_', "-"),
+        ] {
+            aliases.insert(format!("{noun}.{verb}"));
+        }
+    }
+
+    aliases.insert(format!("{namespace}.{local_id}"));
+    aliases.into_iter().collect()
+}
+
+fn pluralize_object(object: &str) -> String {
+    if object.ends_with('s') {
+        object.to_owned()
+    } else {
+        format!("{object}s")
+    }
+}
+
+fn normalize_connector_selector(selector: &str) -> String {
+    selector
+        .trim()
+        .to_lowercase()
+        .replace(" connector", "")
+        .replace([' ', '_'], "-")
+}
+
+fn normalize_category_selector(selector: &str) -> String {
+    selector.trim().to_lowercase().replace(' ', "-")
+}
+
+fn normalize_zone_selector(selector: &str) -> String {
+    selector.trim().to_lowercase()
+}
+
+fn normalize_operation_selector(selector: &str) -> String {
+    selector.trim().to_lowercase().replace('-', "_")
+}
+
+fn suggest_connector_slugs(connectors: &[DiscoveredConnector], selector: &str) -> Vec<String> {
+    let mut candidates = connectors
+        .iter()
+        .map(|connector| {
+            let distance = selector_distance(selector, &connector.slug);
+            (connector.slug.clone(), distance)
+        })
+        .filter(|(slug, distance)| slug.starts_with(selector) || *distance <= 4)
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0)));
+    candidates
+        .into_iter()
+        .map(|(slug, _)| slug)
+        .take(5)
+        .collect()
+}
+
+fn suggest_operation_selectors(operations: &[DiscoveredOperation], selector: &str) -> Vec<String> {
+    let mut candidates = operations
+        .iter()
+        .map(|operation| {
+            let distance = selector_distance(selector, &operation.preferred_selector);
+            (operation.preferred_selector.clone(), distance)
+        })
+        .filter(|(candidate, distance)| candidate.starts_with(selector) || *distance <= 5)
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0)));
+    candidates
+        .into_iter()
+        .map(|(candidate, _)| candidate)
+        .take(5)
+        .collect()
+}
+
+fn selector_distance(left: &str, right: &str) -> usize {
+    let right_chars = right.chars().collect::<Vec<_>>();
+    let mut costs = (0..=right_chars.len()).collect::<Vec<_>>();
+
+    for (left_index, left_char) in left.chars().enumerate() {
+        let mut previous = costs[0];
+        costs[0] = left_index + 1;
+
+        for (right_index, right_char) in right_chars.iter().enumerate() {
+            let insertion = costs[right_index + 1] + 1;
+            let deletion = costs[right_index] + 1;
+            let substitution = previous + usize::from(left_char != *right_char);
+            previous = costs[right_index + 1];
+            costs[right_index + 1] = insertion.min(deletion).min(substitution);
+        }
+    }
+
+    costs[right_chars.len()]
+}
+
+fn human_window_ms(window_ms: u64) -> String {
+    match window_ms {
+        1_000 => "1s".to_owned(),
+        60_000 => "60s".to_owned(),
+        3_600_000 => "1h".to_owned(),
+        86_400_000 => "1d".to_owned(),
+        _ if window_ms % 1_000 == 0 => format!("{}s", window_ms / 1_000),
+        _ => format!("{window_ms}ms"),
+    }
+}
+
+fn risk_rank(level: &str) -> u8 {
+    match level {
+        "critical" => 4,
+        "high" => 3,
+        "medium" => 2,
+        "low" => 1,
+        _ => 0,
+    }
 }
 
 // ── Readiness evaluation ────────────────────────────────────────────────
@@ -1908,6 +2696,7 @@ mod tests {
     #[test]
     fn all_connector_state_variants_serde_round_trip() {
         let all = [
+            ConnectorState::Unknown,
             ConnectorState::Unconfigured,
             ConnectorState::Configured,
             ConnectorState::Ready,
@@ -1915,7 +2704,7 @@ mod tests {
             ConnectorState::Disabled,
             ConnectorState::Error,
         ];
-        assert_eq!(all.len(), 6, "must cover all 6 variants");
+        assert_eq!(all.len(), 7, "must cover all 7 variants");
         for state in all {
             let json = serde_json::to_string(&state).unwrap();
             let back: ConnectorState = serde_json::from_str(&json).unwrap();
@@ -1925,6 +2714,10 @@ mod tests {
 
     #[test]
     fn connector_state_kebab_case_values() {
+        assert_eq!(
+            serde_json::to_string(&ConnectorState::Unknown).unwrap(),
+            "\"unknown\""
+        );
         assert_eq!(
             serde_json::to_string(&ConnectorState::Unconfigured).unwrap(),
             "\"unconfigured\""

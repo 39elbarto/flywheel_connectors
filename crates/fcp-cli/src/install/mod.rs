@@ -33,9 +33,16 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use base64::{Engine, engine::general_purpose::STANDARD};
-use chrono::Utc;
+use blake3::Hasher;
+use chrono::{TimeZone, Utc};
 use clap::Args;
-use fcp_core::{ObjectIdKey, ZoneId};
+use fcp_core::{
+    AttestationMaterial, AttestationMetadata, AttestationPredicateType, HashAlgorithm, ObjectIdKey,
+    SBOM_SIGNED_FIELDS, SUPPLY_CHAIN_ATTESTATION_SIGNED_FIELDS, SbomComponent, SbomFormat,
+    SoftwareBillOfMaterials, SupplyChainAttestation, SupplyChainSignature,
+    SupplyChainVerificationPolicy, TrustRootBinding, VerificationDecision, VerificationPipeline,
+    ZoneId,
+};
 use fcp_crypto::ed25519::{Ed25519SigningKey, Ed25519VerifyingKey};
 use fcp_manifest::ConnectorManifest;
 use fcp_registry::{
@@ -76,6 +83,22 @@ pub struct InstallArgs {
     #[arg(long, default_value_t = false)]
     pub skip_supply_chain: bool,
 
+    /// Path to attestation file (JSON). If omitted, demo evidence is synthesized.
+    #[arg(long)]
+    pub attestation: Option<String>,
+
+    /// Path to SBOM file (JSON). If omitted, demo evidence is synthesized.
+    #[arg(long)]
+    pub sbom: Option<String>,
+
+    /// Minimum SLSA level required (0-4).
+    #[arg(long, default_value_t = 0)]
+    pub min_slsa_level: u8,
+
+    /// Allow unsigned artifacts (dev mode only).
+    #[arg(long, default_value_t = false)]
+    pub allow_unsigned: bool,
+
     /// Path to trust policy file (defaults to zone policy).
     #[arg(long)]
     pub trust_policy: Option<String>,
@@ -113,16 +136,7 @@ async fn run_async(args: InstallArgs) -> Result<()> {
     // Validate zone format
     if !args.zone.starts_with("z:") {
         let err = InstallError::zone_not_found(&args.zone);
-        if args.json {
-            let output = serde_json::to_string_pretty(&err).context("failed to serialize error")?;
-            println!("{output}");
-        } else {
-            eprintln!("Error: {err}");
-            for hint in &err.hints {
-                eprintln!("  Hint: {hint}");
-            }
-        }
-        return Ok(());
+        exit_with_install_error(args.json, &err);
     }
 
     // Progress reporting helper
@@ -162,17 +176,7 @@ async fn run_async(args: InstallArgs) -> Result<()> {
             Ok(b) => b,
             Err(err) => {
                 let install_err = registry_error_to_install_error(&connector_id, err);
-                if args.json {
-                    let output = serde_json::to_string_pretty(&install_err)
-                        .context("failed to serialize error")?;
-                    println!("{output}");
-                } else {
-                    eprintln!("Error: {install_err}");
-                    for hint in &install_err.hints {
-                        eprintln!("  Hint: {hint}");
-                    }
-                }
-                return Ok(());
+                exit_with_install_error(args.json, &install_err);
             }
         };
 
@@ -182,7 +186,7 @@ async fn run_async(args: InstallArgs) -> Result<()> {
         "checking publisher and registry signatures",
     );
 
-    let (verified_bundle, verification) = match verify_bundle(
+    let (verified_bundle, mut verification) = match verify_bundle(
         &bundle,
         &demo_keys,
         args.trust_policy.as_deref(),
@@ -191,17 +195,7 @@ async fn run_async(args: InstallArgs) -> Result<()> {
         Ok(v) => v,
         Err(err) => {
             let install_err = registry_error_to_install_error(&connector_id, err);
-            if args.json {
-                let output = serde_json::to_string_pretty(&install_err)
-                    .context("failed to serialize error")?;
-                println!("{output}");
-            } else {
-                eprintln!("Error: {install_err}");
-                for hint in &install_err.hints {
-                    eprintln!("  Hint: {hint}");
-                }
-            }
-            return Ok(());
+            exit_with_install_error(args.json, &install_err);
         }
     };
 
@@ -215,11 +209,23 @@ async fn run_async(args: InstallArgs) -> Result<()> {
     );
 
     // Phase 4: Check supply chain (unless skipped)
-    if !args.skip_supply_chain {
+    if args.skip_supply_chain {
+        verification.supply_chain_policy_satisfied = false;
+        verification.supply_chain_reason_code = Some("skipped".to_string());
+    } else {
         report_progress(
             InstallPhase::CheckingSupplyChain,
             "validating attestations and transparency log",
         );
+
+        match verify_supply_chain(&args, &connector_id, &bundle.binary, &mut verification) {
+            Ok(()) => {}
+            Err(err) => {
+                let install_err =
+                    InstallError::supply_chain_policy_violation(&connector_id, &err.to_string());
+                exit_with_install_error(args.json, &install_err);
+            }
+        }
     }
 
     // Phase 5: Mirror to mesh store (unless verify-only)
@@ -238,17 +244,7 @@ async fn run_async(args: InstallArgs) -> Result<()> {
             ),
             Err(err) => {
                 let install_err = registry_error_to_install_error(&connector_id, err);
-                if args.json {
-                    let output = serde_json::to_string_pretty(&install_err)
-                        .context("failed to serialize error")?;
-                    println!("{output}");
-                } else {
-                    eprintln!("Error: {install_err}");
-                    for hint in &install_err.hints {
-                        eprintln!("  Hint: {hint}");
-                    }
-                }
-                return Ok(());
+                exit_with_install_error(args.json, &install_err);
             }
         }
     };
@@ -635,9 +631,199 @@ fn verify_bundle(
         capability_ceiling_respected: true,
         verified_attestations: Vec::new(), // Demo doesn't have attestations
         slsa_level: None,                  // Demo doesn't have SLSA
+        supply_chain_reason_code: None,
+        supply_chain_evidence_digest: None,
+        supply_chain_artifact_digest: None,
     };
 
     Ok((verified_bundle, verification))
+}
+
+fn verify_supply_chain(
+    args: &InstallArgs,
+    connector_id: &str,
+    binary: &[u8],
+    verification: &mut VerificationDetails,
+) -> Result<()> {
+    let artifact_digest = binary_blake3_digest(binary);
+    let attestation = match args.attestation.as_deref() {
+        Some(path) => read_attestation_file(path)?,
+        None => demo_attestation(connector_id, &artifact_digest),
+    };
+    let sbom = match args.sbom.as_deref() {
+        Some(path) => read_sbom_file(path)?,
+        None => demo_sbom(connector_id, &artifact_digest),
+    };
+    let policy = SupplyChainVerificationPolicy {
+        require_attestation: true,
+        require_sbom: true,
+        min_slsa_level: args.min_slsa_level,
+        trusted_builders: vec![],
+        allow_unsigned: args.allow_unsigned,
+        require_digest_match: true,
+    };
+    let evidence =
+        VerificationPipeline::new(policy).verify(&artifact_digest, Some(&attestation), Some(&sbom));
+    let evidence_digest = evidence
+        .content_hash(HashAlgorithm::Blake3_256)
+        .map_err(|err| anyhow::anyhow!("evidence hash failed: {err}"))?;
+
+    verification.supply_chain_policy_satisfied = evidence.decision == VerificationDecision::Allow;
+    verification.supply_chain_reason_code =
+        Some(verification_reason_code_label(&evidence.reason_code));
+    verification.supply_chain_evidence_digest = Some(evidence_digest);
+    verification.supply_chain_artifact_digest = Some(artifact_digest);
+    verification.verified_attestations = vec![
+        attestation_label(&attestation).to_string(),
+        format!("sbom:{}", sbom_format_label(sbom.bom_format)),
+    ];
+    verification.slsa_level = Some(attestation.slsa_level);
+
+    if evidence.decision == VerificationDecision::Allow {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(verification_reason_code_label(
+            &evidence.reason_code
+        )))
+    }
+}
+
+fn read_attestation_file(path: &str) -> Result<SupplyChainAttestation> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read attestation file: {path}"))?;
+    serde_json::from_str(&content).with_context(|| format!("invalid attestation JSON in {path}"))
+}
+
+fn read_sbom_file(path: &str) -> Result<SoftwareBillOfMaterials> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read SBOM file: {path}"))?;
+    serde_json::from_str(&content).with_context(|| format!("invalid SBOM JSON in {path}"))
+}
+
+fn binary_blake3_digest(binary: &[u8]) -> String {
+    let mut hasher = Hasher::new();
+    hasher.update(binary);
+    format!("blake3-256:{}", hasher.finalize().to_hex())
+}
+
+fn demo_attestation(connector_id: &str, artifact_digest: &str) -> SupplyChainAttestation {
+    let builder_id = "builder://flywheel/demo-registry".to_string();
+    let root = TrustRootBinding {
+        root_type: "manual".to_string(),
+        root_id: "demo-root".to_string(),
+    };
+    SupplyChainAttestation {
+        format: "fcp-supply-chain-attestation".to_string(),
+        schema_version: "1.0".to_string(),
+        subject_digest: artifact_digest.to_string(),
+        predicate_type: AttestationPredicateType::SlsaProvenanceV1,
+        builder_id: builder_id.clone(),
+        build_type: "https://slsa.dev/container-based-build/v1".to_string(),
+        materials: vec![AttestationMaterial {
+            uri: format!("git+https://github.com/flywheel/connectors@refs/tags/{connector_id}"),
+            digest: format!("blake3-256:{}", "a".repeat(64)),
+        }],
+        metadata: AttestationMetadata {
+            build_started_at: Utc
+                .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+                .single()
+                .expect("valid build start"),
+            build_finished_at: Utc
+                .with_ymd_and_hms(2026, 1, 1, 0, 5, 0)
+                .single()
+                .expect("valid build finish"),
+            invocation_id: Some(format!("demo-build:{connector_id}")),
+        },
+        slsa_level: 3,
+        provenance_hash: format!("blake3-256:{}", "b".repeat(64)),
+        trust_root: root,
+        builder_allowlist: vec![builder_id],
+        signature: SupplyChainSignature::new(
+            "demo-attestor",
+            "demo-signature",
+            SUPPLY_CHAIN_ATTESTATION_SIGNED_FIELDS
+                .iter()
+                .map(|field| (*field).to_string())
+                .collect(),
+        ),
+    }
+}
+
+fn demo_sbom(connector_id: &str, artifact_digest: &str) -> SoftwareBillOfMaterials {
+    SoftwareBillOfMaterials {
+        format: "fcp-sbom".to_string(),
+        schema_version: "1.0".to_string(),
+        bom_format: SbomFormat::Cyclonedx,
+        bom_version: "1".to_string(),
+        tool_chain: vec!["cargo".to_string(), "rustc".to_string()],
+        components: vec![SbomComponent {
+            component_id: connector_id.to_string(),
+            name: connector_id.to_string(),
+            version: "1.0.0".to_string(),
+            hashes: vec![artifact_digest.to_string()],
+            licenses: vec!["Apache-2.0".to_string()],
+        }],
+        dependencies: vec![],
+        trust_root: TrustRootBinding {
+            root_type: "manual".to_string(),
+            root_id: "demo-root".to_string(),
+        },
+        signature: SupplyChainSignature::new(
+            "demo-sbom-signer",
+            "demo-signature",
+            SBOM_SIGNED_FIELDS
+                .iter()
+                .map(|field| (*field).to_string())
+                .collect(),
+        ),
+    }
+}
+
+const fn attestation_label(attestation: &SupplyChainAttestation) -> &'static str {
+    match attestation.predicate_type {
+        AttestationPredicateType::SlsaProvenanceV1 => "slsa-provenance-v1",
+        AttestationPredicateType::InTotoStatementV1 => "in-toto-statement-v1",
+    }
+}
+
+const fn sbom_format_label(format: SbomFormat) -> &'static str {
+    match format {
+        SbomFormat::Cyclonedx => "cyclonedx",
+        SbomFormat::Spdx => "spdx",
+    }
+}
+
+fn verification_reason_code_label(reason_code: &impl std::fmt::Debug) -> String {
+    let debug = format!("{reason_code:?}");
+    let mut output = String::with_capacity(debug.len() + 4);
+    for (index, ch) in debug.chars().enumerate() {
+        if ch.is_uppercase() {
+            if index > 0 {
+                output.push('_');
+            }
+            for lower in ch.to_lowercase() {
+                output.push(lower);
+            }
+        } else {
+            output.push(ch);
+        }
+    }
+    output
+}
+
+fn exit_with_install_error(json: bool, install_err: &InstallError) -> ! {
+    if json {
+        match serde_json::to_string_pretty(install_err) {
+            Ok(output) => println!("{output}"),
+            Err(err) => eprintln!("Error: {install_err} (serialization failed: {err})"),
+        }
+    } else {
+        eprintln!("Error: {install_err}");
+        for hint in &install_err.hints {
+            eprintln!("  Hint: {hint}");
+        }
+    }
+    std::process::exit(1);
 }
 
 /// Mirror a verified bundle to the mesh store.
@@ -755,6 +941,15 @@ fn output_human(output: &InstallOutput, verify_only: bool) {
     }
     if let Some(slsa) = v.slsa_level {
         println!("    SLSA Level:           {slsa}");
+    }
+    if let Some(reason_code) = &v.supply_chain_reason_code {
+        println!("    Supply chain:         {reason_code}");
+    }
+    if let Some(evidence_digest) = &v.supply_chain_evidence_digest {
+        println!(
+            "    Evidence bundle:      {}",
+            truncate(evidence_digest, 40)
+        );
     }
     println!();
 
@@ -1021,10 +1216,8 @@ mod tests {
 
     #[test]
     fn registry_error_transparency_log_missing() {
-        let err = registry_error_to_install_error(
-            "fcp.test:v1",
-            RegistryError::TransparencyLogMissing,
-        );
+        let err =
+            registry_error_to_install_error("fcp.test:v1", RegistryError::TransparencyLogMissing);
         assert_eq!(err.code, "FCP-4015");
     }
 
@@ -1067,10 +1260,7 @@ mod tests {
     #[test]
     fn fetch_connector_version_1_0_1() {
         let target = parse_target_triple("aarch64-apple-darwin");
-        for connector in &[
-            "fcp.telegram:base:v1",
-            "fcp.discord:base:v1",
-        ] {
+        for connector in &["fcp.telegram:base:v1", "fcp.discord:base:v1"] {
             let result = fetch_connector_bundle(connector, Some("1.0.1"), &target);
             assert!(result.is_ok(), "failed to fetch {connector}@1.0.1");
         }
@@ -1185,10 +1375,7 @@ mod tests {
         ] {
             let (bundle, keys) = fetch_connector_bundle(connector, None, &target).unwrap();
             let result = verify_bundle(&bundle, &keys, None, Some(&target));
-            assert!(
-                result.is_ok(),
-                "verify failed for {connector}: {result:?}"
-            );
+            assert!(result.is_ok(), "verify failed for {connector}: {result:?}");
         }
     }
 
@@ -1204,8 +1391,7 @@ mod tests {
     #[test]
     fn verify_bundle_details_populated() {
         let target = parse_target_triple("x86_64-unknown-linux-gnu");
-        let (bundle, keys) =
-            fetch_connector_bundle("fcp.telegram:base:v1", None, &target).unwrap();
+        let (bundle, keys) = fetch_connector_bundle("fcp.telegram:base:v1", None, &target).unwrap();
         let (_, details) = verify_bundle(&bundle, &keys, None, Some(&target)).unwrap();
         assert!(details.publisher_signature_verified);
         assert_eq!(details.publisher_signatures_valid, 1);
@@ -1217,8 +1403,7 @@ mod tests {
     #[test]
     fn verified_bundle_has_hashes() {
         let target = parse_target_triple("x86_64-unknown-linux-gnu");
-        let (bundle, keys) =
-            fetch_connector_bundle("fcp.telegram:base:v1", None, &target).unwrap();
+        let (bundle, keys) = fetch_connector_bundle("fcp.telegram:base:v1", None, &target).unwrap();
         let (verified, _) = verify_bundle(&bundle, &keys, None, Some(&target)).unwrap();
         assert!(!verified.manifest_hash.is_empty());
         assert!(!verified.binary_hash.is_empty());

@@ -12,18 +12,22 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use chrono::{TimeZone, Utc};
 use fcp_async_core::sync::Mutex;
 use fcp_core::{
-    CapabilityToken, ConnectorHealth, ConnectorId, CorrelationId, HandshakeRequest, HealthSnapshot,
-    Introspection, InvokeRequest, InvokeResponse, InvokeStatus, LifecycleState, LifecycleStatus,
-    OperationId, RequestId, RollbackRules, RolloutPolicy, SelfCheckReport, SuccessThresholds,
-    ZoneId,
+    AttestationMaterial, AttestationMetadata, AttestationPredicateType, CapabilityToken,
+    ConnectorHealth, ConnectorId, CorrelationId, HandshakeRequest, HealthSnapshot, Introspection,
+    InvokeRequest, InvokeResponse, InvokeStatus, LifecycleState, LifecycleStatus, OperationId,
+    RequestId, RollbackRules, RolloutPolicy, SBOM_SIGNED_FIELDS,
+    SUPPLY_CHAIN_ATTESTATION_SIGNED_FIELDS, SbomComponent, SbomDependency, SbomFormat,
+    SelfCheckReport, SoftwareBillOfMaterials, SuccessThresholds, SupplyChainAttestation,
+    SupplyChainSignature, TrustRootBinding, VerificationReasonCode, ZoneId,
 };
 use fcp_e2e::{AssertionsSummary, ConnectorProcessRunner, E2eLogEntry, E2eLogger};
 use fcp_host::{
     BatchInvokeResponse, BatchStatus, CancelReason, CancellationOutcome, CancellationRequest,
     CancellationResponse, CleanupBehavior, ConnectorArchetype, ConnectorRegistry, ConnectorSummary,
-    DiscoveryEndpoint, DiscoveryResponse, HostHealthResponse, HostHealthStatus,
+    DiscoveryEndpoint, DiscoveryResponse, GateOutcome, HostHealthResponse, HostHealthStatus,
     IntrospectionResponse, OperationResultStatus, PolicyEngine, PreflightRequest,
     PreflightResponse, RolloutDecision, RolloutOutcome,
 };
@@ -56,6 +60,84 @@ struct ManualRollbackResponse {
     from_version: semver::Version,
     to_version: semver::Version,
     message: String,
+}
+
+fn test_time() -> chrono::DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 3, 7, 12, 0, 0).unwrap()
+}
+
+fn valid_digest() -> String {
+    format!("blake3-256:{}", "a".repeat(64))
+}
+
+fn valid_attestation(digest: &str) -> SupplyChainAttestation {
+    SupplyChainAttestation {
+        format: "fcp-supply-chain-attestation".to_string(),
+        schema_version: "1.0".to_string(),
+        subject_digest: digest.to_string(),
+        predicate_type: AttestationPredicateType::SlsaProvenanceV1,
+        builder_id: "ci.example.com/builder".to_string(),
+        build_type: "container".to_string(),
+        materials: vec![AttestationMaterial {
+            uri: "https://github.com/example/repo".to_string(),
+            digest: format!("blake3-256:{}", "e".repeat(64)),
+        }],
+        metadata: AttestationMetadata {
+            build_started_at: test_time(),
+            build_finished_at: test_time(),
+            invocation_id: Some("inv-001".to_string()),
+        },
+        slsa_level: 2,
+        provenance_hash: format!("blake3-256:{}", "b".repeat(64)),
+        trust_root: TrustRootBinding {
+            root_type: "sigstore".to_string(),
+            root_id: "root-001".to_string(),
+        },
+        builder_allowlist: vec!["ci.example.com/builder".to_string()],
+        signature: SupplyChainSignature {
+            algorithm: "ed25519".to_string(),
+            key_id: "key-001".to_string(),
+            signature: "sig-placeholder".to_string(),
+            signed_fields: SUPPLY_CHAIN_ATTESTATION_SIGNED_FIELDS
+                .iter()
+                .map(|field| (*field).to_string())
+                .collect(),
+        },
+    }
+}
+
+fn valid_sbom() -> SoftwareBillOfMaterials {
+    SoftwareBillOfMaterials {
+        format: "fcp-sbom".to_string(),
+        schema_version: "1.0".to_string(),
+        bom_format: SbomFormat::Cyclonedx,
+        bom_version: "1.0.0".to_string(),
+        tool_chain: vec!["cargo".to_string()],
+        components: vec![SbomComponent {
+            component_id: "comp-001".to_string(),
+            name: "fcp-core".to_string(),
+            version: "0.1.0".to_string(),
+            hashes: vec![format!("blake3-256:{}", "c".repeat(64))],
+            licenses: vec!["Apache-2.0".to_string()],
+        }],
+        dependencies: vec![SbomDependency {
+            component_id: "comp-001".to_string(),
+            depends_on: vec![],
+        }],
+        trust_root: TrustRootBinding {
+            root_type: "sigstore".to_string(),
+            root_id: "root-002".to_string(),
+        },
+        signature: SupplyChainSignature {
+            algorithm: "ed25519".to_string(),
+            key_id: "key-002".to_string(),
+            signature: "sig-placeholder".to_string(),
+            signed_fields: SBOM_SIGNED_FIELDS
+                .iter()
+                .map(|field| (*field).to_string())
+                .collect(),
+        },
+    }
 }
 
 struct AllowAllPolicy;
@@ -599,20 +681,31 @@ impl HttpHostProcess {
     async fn spawn(
         connector_configs: Vec<serde_json::Value>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::spawn_with_env(connector_configs, &[]).await
+    }
+
+    async fn spawn_with_env(
+        connector_configs: Vec<serde_json::Value>,
+        extra_env: &[(&str, &str)],
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let bind_listener = StdTcpListener::bind("127.0.0.1:0")?;
         let bind_addr = bind_listener.local_addr()?;
         drop(bind_listener);
 
         let base_url = format!("http://{bind_addr}");
-        let mut child = Command::new(env!("CARGO_BIN_EXE_fcp-host"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_fcp-host"));
+        command
             .env("FCP_HOST_BIND", bind_addr.to_string())
             .env(
                 "FCP_HOST_CONNECTORS",
                 serde_json::to_string(&connector_configs)?,
             )
             .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()?;
+            .stderr(Stdio::piped());
+        for (name, value) in extra_env {
+            command.env(name, value);
+        }
+        let mut child = command.spawn()?;
         let (stderr_logs, stderr_thread) = spawn_stderr_capture(&mut child)?;
 
         let client = build_http_client(reqwest::Client::builder().timeout(Duration::from_secs(2)))?;
@@ -1042,6 +1135,145 @@ async fn fcp_host_binary_exposes_discovery_routes() -> Result<(), Box<dyn std::e
         &connector_b_id,
     )
     .await?;
+
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn fcp_host_binary_supply_chain_verify_route_allows_and_caches()
+-> Result<(), Box<dyn std::error::Error>> {
+    let host = HttpHostProcess::spawn(vec![]).await?;
+    let url = |path: &str| format!("{}{path}", host.base_url);
+    let connector_id = ConnectorId::from_static("fcp.test.supply-chain:utility:1.0.0");
+    let digest = valid_digest();
+    let attestation = valid_attestation(&digest);
+    let sbom = valid_sbom();
+    let request = json!({
+        "connector_id": connector_id.as_str(),
+        "version": "1.0.0",
+        "artifact_digest": digest,
+        "attestation": attestation,
+        "sbom": sbom,
+    });
+
+    let first: GateOutcome = http_post_json(
+        host.client.clone(),
+        url("/rpc/supply-chain/verify"),
+        request.clone(),
+    )
+    .await?;
+    assert!(first.allowed);
+    assert!(!first.cached);
+    assert!(!first.audit_event.cached);
+    assert_eq!(first.evidence.reason_code, VerificationReasonCode::Verified);
+
+    let second: GateOutcome = http_post_json(
+        host.client.clone(),
+        url("/rpc/supply-chain/verify"),
+        request,
+    )
+    .await?;
+    assert!(second.allowed);
+    assert!(second.cached);
+    assert!(second.audit_event.cached);
+    assert_eq!(
+        second.evidence.reason_code,
+        VerificationReasonCode::Verified
+    );
+    assert_eq!(first.evidence, second.evidence);
+    assert_eq!(
+        first.audit_event.evidence_digest,
+        second.audit_event.evidence_digest
+    );
+    assert_eq!(
+        first.audit_event.verified_at,
+        second.audit_event.verified_at
+    );
+
+    let logs = wait_for_log_events(
+        &host.stderr_logs,
+        &[
+            "supply_chain_verify_request",
+            "supply_chain_verify_response",
+        ],
+    )
+    .await?;
+    assert!(logs.iter().any(|entry| {
+        entry.get("event").and_then(Value::as_str) == Some("supply_chain_verify_request")
+            && entry.get("connector_id").and_then(Value::as_str) == Some(connector_id.as_str())
+    }));
+    assert!(logs.iter().any(|entry| {
+        entry.get("event").and_then(Value::as_str) == Some("supply_chain_verify_response")
+            && entry.get("connector_id").and_then(Value::as_str) == Some(connector_id.as_str())
+            && entry.get("cached").and_then(Value::as_bool) == Some(false)
+            && entry.get("reason_code").and_then(Value::as_str) == Some("VERIFIED")
+    }));
+    assert!(logs.iter().any(|entry| {
+        entry.get("event").and_then(Value::as_str) == Some("supply_chain_verify_response")
+            && entry.get("connector_id").and_then(Value::as_str) == Some(connector_id.as_str())
+            && entry.get("cached").and_then(Value::as_bool) == Some(true)
+            && entry.get("reason_code").and_then(Value::as_str) == Some("VERIFIED")
+    }));
+
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn fcp_host_binary_supply_chain_verify_route_denies_missing_attestation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let host = HttpHostProcess::spawn(vec![]).await?;
+    let url = |path: &str| format!("{}{path}", host.base_url);
+    let connector_id = ConnectorId::from_static("fcp.test.supply-chain-missing:utility:1.0.0");
+
+    let outcome: GateOutcome = http_post_json(
+        host.client.clone(),
+        url("/rpc/supply-chain/verify"),
+        json!({
+            "connector_id": connector_id.as_str(),
+            "version": "1.0.0",
+            "artifact_digest": valid_digest(),
+            "sbom": valid_sbom(),
+        }),
+    )
+    .await?;
+
+    assert!(!outcome.allowed);
+    assert!(!outcome.cached);
+    assert_eq!(
+        outcome.evidence.reason_code,
+        VerificationReasonCode::AttestationMissing
+    );
+
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn fcp_host_binary_supply_chain_verify_route_honors_dev_override_env()
+-> Result<(), Box<dyn std::error::Error>> {
+    let host = HttpHostProcess::spawn_with_env(
+        vec![],
+        &[("FCP_HOST_SUPPLY_CHAIN_ALLOW_DEV_OVERRIDES", "true")],
+    )
+    .await?;
+    let url = |path: &str| format!("{}{path}", host.base_url);
+    let connector_id = ConnectorId::from_static("fcp.test.supply-chain-dev:utility:0.1.0");
+
+    let outcome: GateOutcome = http_post_json(
+        host.client.clone(),
+        url("/rpc/supply-chain/verify"),
+        json!({
+            "connector_id": connector_id.as_str(),
+            "version": "0.1.0",
+            "artifact_digest": valid_digest(),
+        }),
+    )
+    .await?;
+
+    assert!(outcome.allowed);
+    assert_eq!(
+        outcome.evidence.reason_code,
+        VerificationReasonCode::AllowedUnsigned
+    );
 
     Ok(())
 }

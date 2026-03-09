@@ -2121,6 +2121,183 @@ async fn invoke_delete_records_through_connector() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn invoke_create_webhook_through_connector() {
+    let server = MockServer::start().await;
+    let specification = json!({
+        "options": {
+            "filters": {
+                "dataTypes": ["tableData"]
+            }
+        }
+    });
+    Mock::given(method("POST"))
+        .and(path("/bases/appABC123/webhooks"))
+        .and(body_json(json!({
+            "notificationUrl": "https://hooks.flywheel.dev/airtable",
+            "specification": specification
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "achCREATE",
+            "macSecretBase64": "dGVzdF9zZWNyZXQ=",
+            "expirationTime": "2026-03-16T00:00:00.000Z"
+        })))
+        .mount(&server)
+        .await;
+
+    let mut connector = AirtableConnector::new();
+    let signing_key = Ed25519SigningKey::generate();
+    setup_handshake(&mut connector, &signing_key, &["airtable.create_webhook"]).await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let token = generate_valid_token(&signing_key, "airtable.create_webhook");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "airtable.create_webhook",
+            "input": {
+                "base_id": "appABC123",
+                "notification_url": "https://hooks.flywheel.dev/airtable",
+                "specification": {
+                    "options": {
+                        "filters": {
+                            "dataTypes": ["tableData"]
+                        }
+                    }
+                }
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["id"], "achCREATE");
+    assert_eq!(result["macSecretBase64"], "dGVzdF9zZWNyZXQ=");
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_list_webhooks_through_connector() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/bases/appABC123/webhooks"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "webhooks": [
+                {
+                    "id": "achLIST",
+                    "notificationUrl": "https://hooks.flywheel.dev/airtable",
+                    "cursorForNextPayload": 11,
+                    "isHookEnabled": true,
+                    "areNotificationsEnabled": true
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let mut connector = AirtableConnector::new();
+    let signing_key = Ed25519SigningKey::generate();
+    setup_handshake(&mut connector, &signing_key, &["airtable.list_webhooks"]).await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let token = generate_valid_token(&signing_key, "airtable.list_webhooks");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "airtable.list_webhooks",
+            "input": {
+                "base_id": "appABC123"
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["webhooks"].as_array().unwrap().len(), 1);
+    assert_eq!(result["webhooks"][0]["id"], "achLIST");
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_delete_webhook_through_connector() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/bases/appABC123/webhooks/achDELETE"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "achDELETE",
+            "notificationUrl": "https://hooks.flywheel.dev/airtable",
+            "isHookEnabled": false,
+            "areNotificationsEnabled": false
+        })))
+        .mount(&server)
+        .await;
+
+    let mut connector = AirtableConnector::new();
+    let signing_key = Ed25519SigningKey::generate();
+    setup_handshake(&mut connector, &signing_key, &["airtable.delete_webhook"]).await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let token = generate_valid_token(&signing_key, "airtable.delete_webhook");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "airtable.delete_webhook",
+            "input": {
+                "base_id": "appABC123",
+                "webhook_id": "achDELETE"
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["id"], "achDELETE");
+    assert_eq!(result["isHookEnabled"], false);
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_list_webhook_payloads_through_connector() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/bases/appABC123/webhooks/achPAYLOAD/payloads"))
+        .and(query_param("cursor", "4"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "cursor": 5,
+            "mightHaveMore": true,
+            "payloads": [
+                {
+                    "timestamp": "2026-03-09T00:00:00.000Z",
+                    "baseTransactionNumber": 77
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let mut connector = AirtableConnector::new();
+    let signing_key = Ed25519SigningKey::generate();
+    setup_handshake(
+        &mut connector,
+        &signing_key,
+        &["airtable.list_webhook_payloads"],
+    )
+    .await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let token = generate_valid_token(&signing_key, "airtable.list_webhook_payloads");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "airtable.list_webhook_payloads",
+            "input": {
+                "base_id": "appABC123",
+                "webhook_id": "achPAYLOAD",
+                "cursor": 4
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["cursor"], 5);
+    assert_eq!(result["mightHaveMore"], true);
+    assert_eq!(result["payloads"][0]["baseTransactionNumber"], 77);
+}
+
+#[fcp_async_core::runtime::test]
 async fn invoke_upsert_records_requires_merge_fields() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

@@ -8,9 +8,10 @@ use std::time::{Duration, Instant};
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
-    ConnectorId, CredentialId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
-    SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
+    ConnectorId, CredentialId, EventCaps, EventData, EventEnvelope, FcpError, FcpResult,
+    HandshakeRequest, HandshakeResponse, IdempotencyClass, Introspection, OperationId,
+    OperationInfo, OrderingPolicy, Principal, RiskLevel, SafetyTier, SelfCheckReport, SessionId,
+    SimulateRequest, SimulateResponse, TrustLevel, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -19,7 +20,10 @@ use tracing::{info, instrument};
 use crate::{
     client::{AirtableAuth, AirtableClient, DEFAULT_BASE_URL},
     error::AirtableError,
-    types::{BaseSchemaResponse, FieldSchema, Record, SortSpec, TableSchema, ViewSchema},
+    types::{
+        BaseSchemaResponse, FieldSchema, ListWebhookPayloadsResponse, Record, SortSpec,
+        TableSchema, ViewSchema,
+    },
 };
 
 const SCHEMA_CACHE_TTL: Duration = Duration::from_secs(300);
@@ -153,6 +157,7 @@ pub struct AirtableConnector {
     client: Option<AirtableClient>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
+    zone_id: Option<ZoneId>,
     schema_cache: Arc<fcp_async_core::sync::Mutex<HashMap<String, CachedSchema>>>,
 }
 
@@ -166,6 +171,7 @@ impl AirtableConnector {
             client: None,
             verifier: None,
             session_id: None,
+            zone_id: None,
             schema_cache: Arc::new(fcp_async_core::sync::Mutex::new(HashMap::new())),
         }
     }
@@ -216,6 +222,7 @@ impl AirtableConnector {
             req.zone.clone(),
             self.base.instance_id.clone(),
         ));
+        self.zone_id = Some(req.zone.clone());
 
         let session_id = SessionId::new();
         self.session_id = Some(session_id.clone());
@@ -237,9 +244,9 @@ impl AirtableConnector {
             manifest_hash: "sha256:airtable-connector-v1".into(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
-                streaming: false,
-                replay: false,
-                min_buffer_events: 100,
+                streaming: true,
+                replay: true,
+                min_buffer_events: 50,
                 requires_ack: false,
             }),
             auth_caps: None,
@@ -1143,6 +1150,220 @@ impl AirtableConnector {
                     },
                 ),
                 op_info(
+                    "airtable.list_webhooks",
+                    "List webhook registrations for an Airtable base",
+                    json!({
+                        "type": "object",
+                        "required": ["base_id"],
+                        "properties": {
+                            "base_id": { "type": "string", "description": "Airtable base ID (starts with 'app')" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "required": ["webhooks"],
+                        "properties": {
+                            "webhooks": { "type": "array", "description": "Webhook registrations with notification status, expiry, and cursor metadata." }
+                        }
+                    }),
+                    "airtable.webhooks.manage",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Inspect existing Airtable webhook registrations and their next payload cursor.".into(),
+                        common_mistakes: vec![
+                            "Assuming the webhook metadata includes the MAC secret; Airtable only returns that at creation time.".into(),
+                        ],
+                        examples: vec![r#"{"base_id": "appXXXXXXXXXXXXXX"}"#.into()],
+                        related: vec![
+                            CapabilityId::from_static("airtable.create_webhook"),
+                            CapabilityId::from_static("airtable.list_webhook_payloads"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "airtable.create_webhook",
+                    "Create a managed Airtable webhook for a base",
+                    json!({
+                        "type": "object",
+                        "required": ["base_id", "notification_url", "specification"],
+                        "properties": {
+                            "base_id": { "type": "string", "description": "Airtable base ID (starts with 'app')" },
+                            "notification_url": { "type": "string", "description": "HTTPS endpoint owned by the host/webhook receiver for notification pings" },
+                            "specification": {
+                                "type": "object",
+                                "description": "Airtable webhook specification object containing an options.filters tree"
+                            }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "required": ["id", "macSecretBase64"],
+                        "properties": {
+                            "id": { "type": "string" },
+                            "macSecretBase64": { "type": "string" },
+                            "expirationTime": { "type": ["string", "null"] }
+                        }
+                    }),
+                    "airtable.webhooks.manage",
+                    RiskLevel::High,
+                    SafetyTier::Dangerous,
+                    IdempotencyClass::None,
+                    AgentHint {
+                        when_to_use: "Register Airtable change notifications so the host can ingest real-time updates.".into(),
+                        common_mistakes: vec![
+                            "Passing a notification_url that is not HTTPS.".into(),
+                            "Forgetting that the MAC secret is only returned once at creation time.".into(),
+                            "Using table or field names inside the specification instead of stable Airtable IDs.".into(),
+                        ],
+                        examples: vec![r#"{"base_id": "appXXXXXXXXXXXXXX", "notification_url": "https://hooks.flywheel.dev/airtable", "specification": {"options": {"filters": {"dataTypes": ["tableData"], "recordChangeScope": "tblXXXXXXXXXXXXXX"}}}}"#.into()],
+                        related: vec![
+                            CapabilityId::from_static("airtable.list_webhooks"),
+                            CapabilityId::from_static("airtable.refresh_webhook"),
+                            CapabilityId::from_static("airtable.delete_webhook"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "airtable.refresh_webhook",
+                    "Extend the lifetime of an active Airtable webhook by another 7 days",
+                    json!({
+                        "type": "object",
+                        "required": ["base_id", "webhook_id"],
+                        "properties": {
+                            "base_id": { "type": "string", "description": "Airtable base ID (starts with 'app')" },
+                            "webhook_id": { "type": "string", "description": "Webhook ID (starts with 'ach')" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "required": ["expirationTime"],
+                        "properties": {
+                            "expirationTime": { "type": ["string", "null"] }
+                        }
+                    }),
+                    "airtable.webhooks.manage",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Keep an existing webhook alive before Airtable disables it at expiry.".into(),
+                        common_mistakes: vec![
+                            "Refreshing after the webhook has already expired instead of re-creating it.".into(),
+                        ],
+                        examples: vec![r#"{"base_id": "appXXXXXXXXXXXXXX", "webhook_id": "achXXXXXXXXXXXXXX"}"#.into()],
+                        related: vec![
+                            CapabilityId::from_static("airtable.create_webhook"),
+                            CapabilityId::from_static("airtable.list_webhooks"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "airtable.set_webhook_notifications",
+                    "Enable or disable Airtable notification pings for a webhook",
+                    json!({
+                        "type": "object",
+                        "required": ["base_id", "webhook_id", "enable"],
+                        "properties": {
+                            "base_id": { "type": "string", "description": "Airtable base ID (starts with 'app')" },
+                            "webhook_id": { "type": "string", "description": "Webhook ID (starts with 'ach')" },
+                            "enable": { "type": "boolean", "description": "Whether Airtable should send notification pings" }
+                        }
+                    }),
+                    json!({
+                        "type": "object"
+                    }),
+                    "airtable.webhooks.manage",
+                    RiskLevel::Medium,
+                    SafetyTier::Risky,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Pause or resume notification pings without deleting the webhook registration.".into(),
+                        common_mistakes: vec![
+                            "Disabling notifications and assuming Airtable will keep retrying missed deliveries.".into(),
+                        ],
+                        examples: vec![r#"{"base_id": "appXXXXXXXXXXXXXX", "webhook_id": "achXXXXXXXXXXXXXX", "enable": false}"#.into()],
+                        related: vec![
+                            CapabilityId::from_static("airtable.list_webhooks"),
+                            CapabilityId::from_static("airtable.delete_webhook"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "airtable.delete_webhook",
+                    "Delete an Airtable webhook registration",
+                    json!({
+                        "type": "object",
+                        "required": ["base_id", "webhook_id"],
+                        "properties": {
+                            "base_id": { "type": "string", "description": "Airtable base ID (starts with 'app')" },
+                            "webhook_id": { "type": "string", "description": "Webhook ID (starts with 'ach')" }
+                        }
+                    }),
+                    json!({
+                        "type": "object"
+                    }),
+                    "airtable.webhooks.manage",
+                    RiskLevel::High,
+                    SafetyTier::Dangerous,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Remove a webhook when the integration no longer needs change notifications.".into(),
+                        common_mistakes: vec![
+                            "Deleting the webhook before capturing any final cursor state you still need.".into(),
+                        ],
+                        examples: vec![r#"{"base_id": "appXXXXXXXXXXXXXX", "webhook_id": "achXXXXXXXXXXXXXX"}"#.into()],
+                        related: vec![
+                            CapabilityId::from_static("airtable.list_webhooks"),
+                            CapabilityId::from_static("airtable.create_webhook"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "airtable.list_webhook_payloads",
+                    "Fetch Airtable webhook payload history and normalize it into event envelopes",
+                    json!({
+                        "type": "object",
+                        "required": ["base_id", "webhook_id"],
+                        "properties": {
+                            "base_id": { "type": "string", "description": "Airtable base ID (starts with 'app')" },
+                            "webhook_id": { "type": "string", "description": "Webhook ID (starts with 'ach')" },
+                            "cursor": { "type": "integer", "description": "Payload cursor to continue from; omit for the first read" },
+                            "limit": { "type": "integer", "description": "Maximum payloads to return (1-50)" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "required": ["payloads", "mightHaveMore", "events"],
+                        "properties": {
+                            "payloads": { "type": "array" },
+                            "cursor": { "type": "integer" },
+                            "mightHaveMore": { "type": "boolean" },
+                            "events": { "type": "array", "description": "Normalized EventEnvelope objects derived from the Airtable payload batch." }
+                        }
+                    }),
+                    "airtable.webhooks.manage",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Drain webhook payload history after Airtable notifies the host that new changes are available.".into(),
+                        common_mistakes: vec![
+                            "Failing to persist the returned cursor before the next poll.".into(),
+                            "Ignoring mightHaveMore when Airtable splits a single transaction across multiple payload batches.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"base_id": "appXXXXXXXXXXXXXX", "webhook_id": "achXXXXXXXXXXXXXX"}"#.into(),
+                            r#"{"base_id": "appXXXXXXXXXXXXXX", "webhook_id": "achXXXXXXXXXXXXXX", "cursor": 41, "limit": 10}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("airtable.list_webhooks"),
+                            CapabilityId::from_static("airtable.refresh_webhook"),
+                        ],
+                    },
+                ),
+                op_info(
                     "airtable.download_attachment",
                     "Download an attachment file from an Airtable record",
                     json!({
@@ -1276,6 +1497,14 @@ impl AirtableConnector {
             "airtable.replace_record" => self.invoke_replace_record(input).await,
             "airtable.delete_record" => self.invoke_delete_record(input).await,
             "airtable.delete_records" => self.invoke_delete_records(input).await,
+            "airtable.create_webhook" => self.invoke_create_webhook(input).await,
+            "airtable.list_webhooks" => self.invoke_list_webhooks(input).await,
+            "airtable.delete_webhook" => self.invoke_delete_webhook(input).await,
+            "airtable.list_webhook_payloads" => self.invoke_list_webhook_payloads(input).await,
+            "airtable.refresh_webhook" => self.invoke_refresh_webhook(input).await,
+            "airtable.set_webhook_notifications" => {
+                self.invoke_set_webhook_notifications(input).await
+            }
             "airtable.download_attachment" => self.invoke_download_attachment(input).await,
             _ => Err(FcpError::OperationNotGranted {
                 operation: operation.into(),
@@ -1701,6 +1930,178 @@ impl AirtableConnector {
         })
     }
 
+    async fn invoke_create_webhook(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let base_id = require_base_id(&input)?;
+        let notification_url = require_https_url(&input, "notification_url")?;
+        let specification = require_object_field(&input, "specification")?;
+
+        let result = client
+            .create_webhook(base_id, Some(notification_url), specification)
+            .await
+            .map_err(|e: AirtableError| e.to_fcp_error())?;
+
+        serde_json::to_value(result).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize result: {e}"),
+        })
+    }
+
+    async fn invoke_list_webhooks(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let base_id = require_base_id(&input)?;
+
+        let result = client
+            .list_webhooks(base_id)
+            .await
+            .map_err(|e: AirtableError| e.to_fcp_error())?;
+
+        Ok(json!({ "webhooks": result.webhooks }))
+    }
+
+    async fn invoke_delete_webhook(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let base_id = require_base_id(&input)?;
+        let webhook_id = require_webhook_id(&input)?;
+
+        let result = client
+            .delete_webhook(base_id, webhook_id)
+            .await
+            .map_err(|e: AirtableError| e.to_fcp_error())?;
+
+        serde_json::to_value(result).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize result: {e}"),
+        })
+    }
+
+    async fn invoke_list_webhook_payloads(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let base_id = require_base_id(&input)?;
+        let webhook_id = require_webhook_id(&input)?;
+        let cursor = parse_optional_u64(input.get("cursor"), "cursor")?;
+        let limit = parse_bounded_integer(&input, "limit", 1, 50)?;
+
+        let result = client
+            .list_webhook_payloads(base_id, webhook_id, cursor, limit)
+            .await
+            .map_err(|e: AirtableError| e.to_fcp_error())?;
+        let events = self.normalize_webhook_payload_events(base_id, webhook_id, cursor, &result)?;
+
+        Ok(json!({
+            "payloads": result.payloads,
+            "cursor": result.cursor,
+            "mightHaveMore": result.might_have_more,
+            "events": events,
+        }))
+    }
+
+    async fn invoke_refresh_webhook(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let base_id = require_base_id(&input)?;
+        let webhook_id = require_webhook_id(&input)?;
+
+        let result = client
+            .refresh_webhook(base_id, webhook_id)
+            .await
+            .map_err(|e: AirtableError| e.to_fcp_error())?;
+
+        serde_json::to_value(result).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize result: {e}"),
+        })
+    }
+
+    async fn invoke_set_webhook_notifications(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let base_id = require_base_id(&input)?;
+        let webhook_id = require_webhook_id(&input)?;
+        let enable = require_bool(&input, "enable")?;
+
+        let result = client
+            .set_webhook_notifications(base_id, webhook_id, enable)
+            .await
+            .map_err(|e: AirtableError| e.to_fcp_error())?;
+
+        serde_json::to_value(result).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize result: {e}"),
+        })
+    }
+
+    fn normalize_webhook_payload_events(
+        &self,
+        base_id: &str,
+        webhook_id: &str,
+        requested_cursor: Option<u64>,
+        response: &ListWebhookPayloadsResponse,
+    ) -> FcpResult<Vec<EventEnvelope>> {
+        let zone_id = self.zone_id.clone().ok_or(FcpError::NotHandshaken)?;
+        let connector_id = self.base.id.clone();
+        let instance_id = self.base.instance_id.clone();
+        let principal = Principal {
+            kind: "webhook".into(),
+            id: format!("airtable:webhook:{webhook_id}"),
+            trust: TrustLevel::Paired,
+            display: Some("Airtable Webhook".into()),
+        };
+        let resource_uris = vec![
+            format!("airtable:base:{base_id}"),
+            format!("airtable:webhook:{webhook_id}"),
+        ];
+        let stream_key = format!("{base_id}:{webhook_id}");
+        let fallback_seq = requested_cursor.unwrap_or(1);
+        let base_seq = response
+            .cursor
+            .and_then(|next_cursor| next_cursor.checked_sub(response.payloads.len() as u64))
+            .filter(|seq| *seq > 0)
+            .unwrap_or(fallback_seq);
+
+        Ok(response
+            .payloads
+            .iter()
+            .enumerate()
+            .map(|(index, payload)| {
+                let seq = base_seq.saturating_add(index as u64);
+                let event_payload = json!({
+                    "base_id": base_id,
+                    "webhook_id": webhook_id,
+                    "payload_cursor": seq,
+                    "payload": payload,
+                });
+                let event_data = EventData::new(
+                    connector_id.clone(),
+                    instance_id.clone(),
+                    zone_id.clone(),
+                    principal.clone(),
+                    event_payload,
+                )
+                .with_resource_uris(resource_uris.clone());
+
+                let mut event = EventEnvelope::new(webhook_payload_topic(payload), event_data)
+                    .with_seq(seq)
+                    .with_cursor(seq.saturating_add(1).to_string())
+                    .with_stream_key(stream_key.clone())
+                    .with_ordering(OrderingPolicy::PerKey);
+                if let Some(timestamp) = webhook_payload_timestamp(payload) {
+                    event.timestamp = timestamp;
+                }
+                event
+            })
+            .collect())
+    }
+
     async fn invoke_download_attachment(
         &self,
         input: serde_json::Value,
@@ -2005,6 +2406,42 @@ fn require_base_id(input: &serde_json::Value) -> FcpResult<&str> {
     Ok(base_id)
 }
 
+fn require_webhook_id(input: &serde_json::Value) -> FcpResult<&str> {
+    let webhook_id = require_nonempty_str(input, "webhook_id")?;
+    let valid_format = webhook_id.starts_with("ach")
+        && webhook_id.len() >= 6
+        && webhook_id.chars().all(|c| c.is_ascii_alphanumeric());
+    if !valid_format {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "webhook_id must match Airtable webhook format (e.g., achXXXXXXXXXXXXXX)"
+                .into(),
+        });
+    }
+    Ok(webhook_id)
+}
+
+fn require_https_url<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<&'a str> {
+    let url = require_nonempty_str(input, field)?;
+    if !url.starts_with("https://") {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} must be an HTTPS URL"),
+        });
+    }
+    Ok(url)
+}
+
+fn require_bool(input: &serde_json::Value, field: &str) -> FcpResult<bool> {
+    input
+        .get(field)
+        .and_then(|value| value.as_bool())
+        .ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} must be a boolean"),
+        })
+}
+
 fn require_fields_object(input: &serde_json::Value) -> FcpResult<&serde_json::Value> {
     let fields = input.get("fields").ok_or(FcpError::InvalidRequest {
         code: 1003,
@@ -2017,6 +2454,23 @@ fn require_fields_object(input: &serde_json::Value) -> FcpResult<&serde_json::Va
         });
     }
     Ok(fields)
+}
+
+fn require_object_field<'a>(
+    input: &'a serde_json::Value,
+    field: &str,
+) -> FcpResult<&'a serde_json::Value> {
+    let value = input.get(field).ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("Missing required field: {field}"),
+    })?;
+    if !value.is_object() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} must be an object"),
+        });
+    }
+    Ok(value)
 }
 
 fn parse_linked_expansion_config(
@@ -2499,6 +2953,32 @@ fn optional_nonempty_string(input: &serde_json::Value, field: &str) -> FcpResult
     Ok(Some(trimmed.to_string()))
 }
 
+fn parse_optional_u64(value: Option<&serde_json::Value>, field: &str) -> FcpResult<Option<u64>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    value.as_u64().map(Some).ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{field} must be an unsigned integer"),
+    })
+}
+
+fn webhook_payload_topic(payload: &serde_json::Value) -> &'static str {
+    if payload.get("error").and_then(serde_json::Value::as_bool) == Some(true) {
+        "airtable.webhook.error"
+    } else {
+        "airtable.webhook.payload"
+    }
+}
+
+fn webhook_payload_timestamp(payload: &serde_json::Value) -> Option<chrono::DateTime<chrono::Utc>> {
+    payload
+        .get("timestamp")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|timestamp| chrono::DateTime::parse_from_rfc3339(timestamp).ok())
+        .map(|timestamp| timestamp.with_timezone(&chrono::Utc))
+}
+
 fn parse_optional_string_array(
     input: &serde_json::Value,
     field: &str,
@@ -2769,6 +3249,55 @@ mod tests {
             .unwrap();
 
         assert_eq!(result["status"], "accepted");
+        assert_eq!(result["event_caps"]["streaming"], true);
+        assert_eq!(result["event_caps"]["replay"], true);
+        assert_eq!(result["event_caps"]["min_buffer_events"], 50);
+    }
+
+    #[test]
+    fn test_normalize_webhook_payload_events() {
+        let mut connector = AirtableConnector::new();
+        connector.zone_id = Some(ZoneId::work());
+
+        let payloads = ListWebhookPayloadsResponse {
+            payloads: vec![
+                json!({
+                    "timestamp": "2026-03-09T00:00:00.000Z",
+                    "baseTransactionNumber": 1001,
+                    "payloadFormat": "v0"
+                }),
+                json!({
+                    "timestamp": "2026-03-09T00:00:01.000Z",
+                    "error": true,
+                    "code": "INVALID_HOOK"
+                }),
+            ],
+            cursor: Some(43),
+            might_have_more: false,
+        };
+
+        let events = connector
+            .normalize_webhook_payload_events("appABC", "achXYZ", Some(41), &payloads)
+            .unwrap();
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].topic, "airtable.webhook.payload");
+        assert_eq!(events[0].seq, 41);
+        assert_eq!(events[0].cursor, "42");
+        assert_eq!(events[0].stream_key.as_deref(), Some("appABC:achXYZ"));
+        assert_eq!(events[0].ordering, Some(OrderingPolicy::PerKey));
+        assert_eq!(events[0].data.zone_id, ZoneId::work());
+        assert_eq!(events[0].data.principal.kind, "webhook");
+        assert_eq!(events[0].data.payload["base_id"], "appABC");
+        assert_eq!(events[0].data.payload["webhook_id"], "achXYZ");
+        assert_eq!(events[0].data.payload["payload_cursor"], 41);
+        assert_eq!(
+            events[0].data.payload["payload"]["baseTransactionNumber"],
+            1001
+        );
+        assert_eq!(events[1].topic, "airtable.webhook.error");
+        assert_eq!(events[1].seq, 42);
+        assert_eq!(events[1].cursor, "43");
     }
 
     #[fcp_async_core::runtime::test]
@@ -2880,8 +3409,14 @@ mod tests {
         assert!(op_ids.contains(&"airtable.replace_record"));
         assert!(op_ids.contains(&"airtable.delete_record"));
         assert!(op_ids.contains(&"airtable.delete_records"));
+        assert!(op_ids.contains(&"airtable.create_webhook"));
+        assert!(op_ids.contains(&"airtable.list_webhooks"));
+        assert!(op_ids.contains(&"airtable.delete_webhook"));
+        assert!(op_ids.contains(&"airtable.list_webhook_payloads"));
+        assert!(op_ids.contains(&"airtable.refresh_webhook"));
+        assert!(op_ids.contains(&"airtable.set_webhook_notifications"));
         assert!(op_ids.contains(&"airtable.download_attachment"));
-        assert_eq!(ops.len(), 19);
+        assert_eq!(ops.len(), 25);
     }
 
     #[fcp_async_core::runtime::test]

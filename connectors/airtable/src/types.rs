@@ -115,6 +115,65 @@ pub struct DeleteRecordsResponse {
     pub records: Vec<DeleteRecordResponse>,
 }
 
+// ── Webhook types ──────────────────────────────────────────────────
+
+/// Airtable webhook descriptor returned by the Webhooks API.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AirtableWebhook {
+    pub id: String,
+    #[serde(default, rename = "notificationUrl")]
+    pub notification_url: Option<String>,
+    #[serde(default, rename = "cursorForNextPayload")]
+    pub cursor_for_next_payload: Option<u64>,
+    #[serde(default, rename = "isHookEnabled")]
+    pub is_hook_enabled: Option<bool>,
+    #[serde(default, rename = "areNotificationsEnabled")]
+    pub are_notifications_enabled: Option<bool>,
+    #[serde(default, rename = "expirationTime")]
+    pub expiration_time: Option<String>,
+    #[serde(default, rename = "lastNotificationResult")]
+    pub last_notification_result: Option<serde_json::Value>,
+    #[serde(default, rename = "lastSuccessfulNotificationTime")]
+    pub last_successful_notification_time: Option<String>,
+    #[serde(default)]
+    pub specification: Option<serde_json::Value>,
+}
+
+/// Response for listing webhooks registered on a base.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListWebhooksResponse {
+    #[serde(default)]
+    pub webhooks: Vec<AirtableWebhook>,
+}
+
+/// Response for creating a webhook.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateWebhookResponse {
+    pub id: String,
+    #[serde(rename = "macSecretBase64")]
+    pub mac_secret_base64: String,
+    #[serde(default, rename = "expirationTime")]
+    pub expiration_time: Option<String>,
+}
+
+/// Response for refreshing a webhook.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RefreshWebhookResponse {
+    #[serde(default, rename = "expirationTime")]
+    pub expiration_time: Option<String>,
+}
+
+/// Response for listing Airtable webhook payload history.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListWebhookPayloadsResponse {
+    #[serde(default)]
+    pub payloads: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub cursor: Option<u64>,
+    #[serde(default, rename = "mightHaveMore")]
+    pub might_have_more: bool,
+}
+
 // ── Sort types ─────────────────────────────────────────────────────
 
 /// Sort specification for listing records.
@@ -218,6 +277,83 @@ mod tests {
         let json = serde_json::to_string(&resp).unwrap();
         let back: DeleteRecordResponse = serde_json::from_str(&json).unwrap();
         assert!(back.deleted);
+    }
+
+    #[test]
+    fn airtable_webhook_serde() {
+        let json = json!({
+            "id": "ach123",
+            "notificationUrl": "https://hooks.flywheel.dev/airtable",
+            "cursorForNextPayload": 7,
+            "isHookEnabled": true,
+            "areNotificationsEnabled": true,
+            "expirationTime": "2026-03-10T00:00:00.000Z",
+            "lastNotificationResult": null,
+            "specification": {
+                "options": {
+                    "filters": {
+                        "dataTypes": ["tableData"]
+                    }
+                }
+            }
+        });
+
+        let webhook: AirtableWebhook = serde_json::from_value(json).unwrap();
+        assert_eq!(webhook.id, "ach123");
+        assert_eq!(
+            webhook.notification_url.as_deref(),
+            Some("https://hooks.flywheel.dev/airtable")
+        );
+        assert_eq!(webhook.cursor_for_next_payload, Some(7));
+        assert_eq!(webhook.is_hook_enabled, Some(true));
+    }
+
+    #[test]
+    fn create_webhook_response_serde() {
+        let json = json!({
+            "id": "ach123",
+            "macSecretBase64": "Zm9vYmFy",
+            "expirationTime": "2026-03-16T00:00:00.000Z"
+        });
+        let resp: CreateWebhookResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.id, "ach123");
+        assert_eq!(resp.mac_secret_base64, "Zm9vYmFy");
+        assert_eq!(
+            resp.expiration_time.as_deref(),
+            Some("2026-03-16T00:00:00.000Z")
+        );
+    }
+
+    #[test]
+    fn refresh_webhook_response_serde() {
+        let json = json!({
+            "expirationTime": "2026-03-16T00:00:00.000Z"
+        });
+        let resp: RefreshWebhookResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            resp.expiration_time.as_deref(),
+            Some("2026-03-16T00:00:00.000Z")
+        );
+    }
+
+    #[test]
+    fn list_webhook_payloads_response_serde() {
+        let json = json!({
+            "cursor": 42,
+            "mightHaveMore": true,
+            "payloads": [
+                {
+                    "timestamp": "2026-03-09T00:00:00.000Z",
+                    "baseTransactionNumber": 101
+                }
+            ]
+        });
+
+        let resp: ListWebhookPayloadsResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.cursor, Some(42));
+        assert!(resp.might_have_more);
+        assert_eq!(resp.payloads.len(), 1);
+        assert_eq!(resp.payloads[0]["baseTransactionNumber"], 101);
     }
 
     #[test]

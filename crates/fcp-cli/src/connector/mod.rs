@@ -29,11 +29,12 @@ use clap::{Args, Subcommand};
 
 use crate::context::types::ContextConfig;
 use fcp_core::{
-    AgentHint, ApprovalMode, CapabilityId, ConnectorHealth, HashAlgorithm, IdempotencyClass,
-    LifecycleRecord, LifecycleState, LifecycleStatus, RateLimitConfig, RateLimitDeclarations,
-    RateLimitEnforcement, RateLimitPool, RateLimitScope, RateLimitUnit, RiskLevel, RolloutPolicy,
-    SafetyTier, SoftwareBillOfMaterials, SupplyChainAttestation, SupplyChainVerificationPolicy,
-    VerificationDecision, VerificationPipeline,
+    AgentHint, ApprovalMode, CanonicalEncoding, CapabilityId, ConnectorHealth, HashAlgorithm,
+    IdempotencyClass, LifecycleRecord, LifecycleState, LifecycleStatus, RateLimitConfig,
+    RateLimitDeclarations, RateLimitEnforcement, RateLimitPool, RateLimitScope, RateLimitUnit,
+    RiskLevel, RolloutPolicy, SafetyTier, SoftwareBillOfMaterials, SupplyChainAttestation,
+    SupplyChainVerificationPolicy, VerificationDecision, VerificationEvidence,
+    VerificationPipeline,
 };
 use types::{
     AuthCapsDescriptor, ConnectorHealthDisplay, ConnectorInfo, ConnectorIntrospection,
@@ -86,6 +87,9 @@ pub enum ConnectorCommand {
     /// Checks the attestation, SBOM, and policy gates, producing a
     /// verification evidence bundle as structured JSON.
     Verify(VerifyArgs),
+
+    /// Summarize supply-chain provenance, SBOM, trust roots, and policy decisions.
+    Report(ReportArgs),
 }
 
 /// Arguments for `fcp connector list`.
@@ -226,6 +230,41 @@ pub struct VerifyArgs {
     pub json: bool,
 }
 
+/// Arguments for `fcp connector report`.
+#[derive(Args, Debug)]
+pub struct ReportArgs {
+    /// Connector ID (e.g., "fcp.discord:messaging:v1").
+    pub connector_id: String,
+
+    /// Emit the supply-chain report surface.
+    #[arg(long, default_value_t = false)]
+    pub supply_chain: bool,
+
+    /// Path to attestation file (JSON).
+    #[arg(long)]
+    pub attestation: Option<String>,
+
+    /// Path to SBOM file (JSON).
+    #[arg(long)]
+    pub sbom: Option<String>,
+
+    /// Binary artifact digest (blake3-256:<hex>).
+    #[arg(long)]
+    pub digest: Option<String>,
+
+    /// Minimum SLSA level required (0-4).
+    #[arg(long, default_value_t = 0)]
+    pub min_slsa_level: u8,
+
+    /// Allow unsigned artifacts (dev mode only).
+    #[arg(long, default_value_t = false)]
+    pub allow_unsigned: bool,
+
+    /// Output JSON instead of human-readable format.
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+}
+
 /// Arguments for `fcp connector rollback`.
 #[derive(Args, Debug)]
 pub struct RollbackArgs {
@@ -252,6 +291,7 @@ pub fn run(args: &ConnectorArgs) -> Result<()> {
         ConnectorCommand::Rollout(rollout_args) => run_rollout(rollout_args),
         ConnectorCommand::Rollback(rollback_args) => run_rollback(rollback_args),
         ConnectorCommand::Verify(verify_args) => run_verify(verify_args),
+        ConnectorCommand::Report(report_args) => run_report(report_args),
     }
 }
 
@@ -1265,92 +1305,73 @@ struct VerifyPolicyOutput {
     allow_unsigned: bool,
 }
 
+#[derive(Debug, Clone)]
+struct SupplyChainEvaluation {
+    artifact_digest: String,
+    attestation: Option<SupplyChainAttestation>,
+    sbom: Option<SoftwareBillOfMaterials>,
+    policy: SupplyChainVerificationPolicy,
+    evidence: VerificationEvidence,
+    evidence_digest: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct SupplyChainReportOutput {
+    connector_id: String,
+    decision: String,
+    reason_code: String,
+    artifact_digest: String,
+    evidence_digest: String,
+    policy: VerifyPolicyOutput,
+    steps: Vec<VerifyStepOutput>,
+    attestation: Option<SupplyChainAttestationReport>,
+    sbom: Option<SupplyChainSbomReport>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct SupplyChainAttestationReport {
+    predicate_type: String,
+    builder_id: String,
+    build_type: String,
+    subject_digest: String,
+    slsa_level: u8,
+    provenance_hash: String,
+    content_digest: String,
+    trust_root: TrustRootReport,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct SupplyChainSbomReport {
+    bom_format: String,
+    bom_version: String,
+    component_count: usize,
+    dependency_count: usize,
+    tool_chain: Vec<String>,
+    content_digest: String,
+    trust_root: TrustRootReport,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct TrustRootReport {
+    root_type: String,
+    root_id: String,
+}
+
 fn run_verify(args: &VerifyArgs) -> Result<()> {
-    let policy = SupplyChainVerificationPolicy {
-        require_attestation: args.attestation.is_some() || !args.allow_unsigned,
-        require_sbom: args.sbom.is_some() || !args.allow_unsigned,
-        min_slsa_level: args.min_slsa_level,
-        trusted_builders: vec![],
-        allow_unsigned: args.allow_unsigned,
-        require_digest_match: args.digest.is_some(),
-    };
-
-    let attestation: Option<SupplyChainAttestation> = match &args.attestation {
-        Some(path) => {
-            let content = std::fs::read_to_string(path)
-                .with_context(|| format!("failed to read attestation file: {path}"))?;
-            Some(
-                serde_json::from_str(&content)
-                    .with_context(|| format!("invalid attestation JSON in {path}"))?,
-            )
-        }
-        None => None,
-    };
-
-    let sbom: Option<SoftwareBillOfMaterials> = match &args.sbom {
-        Some(path) => {
-            let content = std::fs::read_to_string(path)
-                .with_context(|| format!("failed to read SBOM file: {path}"))?;
-            Some(
-                serde_json::from_str(&content)
-                    .with_context(|| format!("invalid SBOM JSON in {path}"))?,
-            )
-        }
-        None => None,
-    };
-
-    let artifact_digest = args.digest.clone().unwrap_or_default();
-
-    let pipeline = VerificationPipeline::new(policy.clone());
-    let evidence = pipeline.verify(&artifact_digest, attestation.as_ref(), sbom.as_ref());
-
-    let evidence_digest = evidence
-        .content_hash(HashAlgorithm::Blake3_256)
-        .map_err(|e| anyhow::anyhow!("evidence hash failed: {e}"))?;
-
-    let output = VerifyOutput {
-        connector_id: args.connector_id.clone(),
-        decision: format!("{:?}", evidence.decision).to_lowercase(),
-        reason_code: format!("{}", evidence.reason_code),
-        artifact_digest: evidence.artifact_digest.clone(),
-        steps: evidence
-            .steps
-            .iter()
-            .map(|s| VerifyStepOutput {
-                step: s.step.clone(),
-                passed: s.passed,
-                detail: s.detail.clone(),
-            })
-            .collect(),
-        evidence_digest,
-        policy: VerifyPolicyOutput {
-            require_attestation: policy.require_attestation,
-            require_sbom: policy.require_sbom,
-            min_slsa_level: policy.min_slsa_level,
-            allow_unsigned: policy.allow_unsigned,
-        },
-    };
-
-    let allowed = evidence.decision == VerificationDecision::Allow;
+    let evaluation = evaluate_supply_chain(
+        args.attestation.as_deref(),
+        args.sbom.as_deref(),
+        args.digest.as_deref(),
+        args.min_slsa_level,
+        args.allow_unsigned,
+    )?;
+    let output = build_verify_output(&args.connector_id, &evaluation);
+    let allowed = evaluation.evidence.decision == VerificationDecision::Allow;
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&output)?);
-    } else if allowed {
-        println!("Verification PASSED for {}", args.connector_id);
-        println!("  Reason: {}", output.reason_code);
-        for step in &output.steps {
-            let icon = if step.passed { "  pass" } else { "  FAIL" };
-            println!("  {icon}: {} — {}", step.step, step.detail);
-        }
-        println!("  Evidence: {}", output.evidence_digest);
     } else {
-        println!("Verification FAILED for {}", args.connector_id);
-        println!("  Reason: {}", output.reason_code);
-        for step in &output.steps {
-            let icon = if step.passed { "  pass" } else { "  FAIL" };
-            println!("  {icon}: {} — {}", step.step, step.detail);
-        }
-        println!("  Evidence: {}", output.evidence_digest);
+        print_verify_output(&args.connector_id, &output, allowed);
     }
 
     if !allowed {
@@ -1358,6 +1379,303 @@ fn run_verify(args: &VerifyArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn run_report(args: &ReportArgs) -> Result<()> {
+    if !args.supply_chain {
+        anyhow::bail!("`fcp connector report` currently supports only `--supply-chain`");
+    }
+
+    let evaluation = evaluate_supply_chain(
+        args.attestation.as_deref(),
+        args.sbom.as_deref(),
+        args.digest.as_deref(),
+        args.min_slsa_level,
+        args.allow_unsigned,
+    )?;
+    let output = build_report_output(&args.connector_id, &evaluation)?;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        print_supply_chain_report(&args.connector_id, &output);
+    }
+
+    Ok(())
+}
+
+fn evaluate_supply_chain(
+    attestation_path: Option<&str>,
+    sbom_path: Option<&str>,
+    digest: Option<&str>,
+    min_slsa_level: u8,
+    allow_unsigned: bool,
+) -> Result<SupplyChainEvaluation> {
+    let attestation = read_attestation(attestation_path)?;
+    let sbom = read_sbom(sbom_path)?;
+    let artifact_digest = digest
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            attestation
+                .as_ref()
+                .map(|value| value.subject_digest.clone())
+        })
+        .unwrap_or_default();
+    let policy = build_verification_policy(
+        attestation.is_some(),
+        sbom.is_some(),
+        min_slsa_level,
+        allow_unsigned,
+        digest.is_some(),
+    );
+    let pipeline = VerificationPipeline::new(policy.clone());
+    let evidence = pipeline.verify(&artifact_digest, attestation.as_ref(), sbom.as_ref());
+    let evidence_digest = evidence
+        .content_hash(HashAlgorithm::Blake3_256)
+        .map_err(|e| anyhow::anyhow!("evidence hash failed: {e}"))?;
+
+    Ok(SupplyChainEvaluation {
+        artifact_digest,
+        attestation,
+        sbom,
+        policy,
+        evidence,
+        evidence_digest,
+    })
+}
+
+fn read_attestation(path: Option<&str>) -> Result<Option<SupplyChainAttestation>> {
+    path.map(|path| {
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read attestation file: {path}"))?;
+        serde_json::from_str(&content)
+            .with_context(|| format!("invalid attestation JSON in {path}"))
+    })
+    .transpose()
+}
+
+fn read_sbom(path: Option<&str>) -> Result<Option<SoftwareBillOfMaterials>> {
+    path.map(|path| {
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read SBOM file: {path}"))?;
+        serde_json::from_str(&content).with_context(|| format!("invalid SBOM JSON in {path}"))
+    })
+    .transpose()
+}
+
+#[allow(clippy::fn_params_excessive_bools, clippy::missing_const_for_fn)]
+fn build_verification_policy(
+    has_attestation: bool,
+    has_sbom: bool,
+    min_slsa_level: u8,
+    allow_unsigned: bool,
+    require_digest_match: bool,
+) -> SupplyChainVerificationPolicy {
+    SupplyChainVerificationPolicy {
+        require_attestation: has_attestation || !allow_unsigned,
+        require_sbom: has_sbom || !allow_unsigned,
+        min_slsa_level,
+        trusted_builders: vec![],
+        allow_unsigned,
+        require_digest_match,
+    }
+}
+
+fn build_verify_output(connector_id: &str, evaluation: &SupplyChainEvaluation) -> VerifyOutput {
+    VerifyOutput {
+        connector_id: connector_id.to_string(),
+        decision: verification_decision_label(evaluation.evidence.decision),
+        reason_code: verification_reason_code_label(&evaluation.evidence.reason_code),
+        artifact_digest: evaluation.artifact_digest.clone(),
+        steps: evaluation
+            .evidence
+            .steps
+            .iter()
+            .map(|step| VerifyStepOutput {
+                step: step.step.clone(),
+                passed: step.passed,
+                detail: step.detail.clone(),
+            })
+            .collect(),
+        evidence_digest: evaluation.evidence_digest.clone(),
+        policy: VerifyPolicyOutput {
+            require_attestation: evaluation.policy.require_attestation,
+            require_sbom: evaluation.policy.require_sbom,
+            min_slsa_level: evaluation.policy.min_slsa_level,
+            allow_unsigned: evaluation.policy.allow_unsigned,
+        },
+    }
+}
+
+fn build_report_output(
+    connector_id: &str,
+    evaluation: &SupplyChainEvaluation,
+) -> Result<SupplyChainReportOutput> {
+    Ok(SupplyChainReportOutput {
+        connector_id: connector_id.to_string(),
+        decision: verification_decision_label(evaluation.evidence.decision),
+        reason_code: verification_reason_code_label(&evaluation.evidence.reason_code),
+        artifact_digest: evaluation.artifact_digest.clone(),
+        evidence_digest: evaluation.evidence_digest.clone(),
+        policy: VerifyPolicyOutput {
+            require_attestation: evaluation.policy.require_attestation,
+            require_sbom: evaluation.policy.require_sbom,
+            min_slsa_level: evaluation.policy.min_slsa_level,
+            allow_unsigned: evaluation.policy.allow_unsigned,
+        },
+        steps: evaluation
+            .evidence
+            .steps
+            .iter()
+            .map(|step| VerifyStepOutput {
+                step: step.step.clone(),
+                passed: step.passed,
+                detail: step.detail.clone(),
+            })
+            .collect(),
+        attestation: evaluation
+            .attestation
+            .as_ref()
+            .map(build_attestation_report)
+            .transpose()?,
+        sbom: evaluation
+            .sbom
+            .as_ref()
+            .map(build_sbom_report)
+            .transpose()?,
+    })
+}
+
+fn build_attestation_report(
+    attestation: &SupplyChainAttestation,
+) -> Result<SupplyChainAttestationReport> {
+    Ok(SupplyChainAttestationReport {
+        predicate_type: json_string_value(&attestation.predicate_type)?,
+        builder_id: attestation.builder_id.clone(),
+        build_type: attestation.build_type.clone(),
+        subject_digest: attestation.subject_digest.clone(),
+        slsa_level: attestation.slsa_level,
+        provenance_hash: attestation.provenance_hash.clone(),
+        content_digest: attestation
+            .content_hash(CanonicalEncoding::Json, HashAlgorithm::Blake3_256)?,
+        trust_root: TrustRootReport {
+            root_type: attestation.trust_root.root_type.clone(),
+            root_id: attestation.trust_root.root_id.clone(),
+        },
+    })
+}
+
+fn build_sbom_report(sbom: &SoftwareBillOfMaterials) -> Result<SupplyChainSbomReport> {
+    Ok(SupplyChainSbomReport {
+        bom_format: json_string_value(&sbom.bom_format)?,
+        bom_version: sbom.bom_version.clone(),
+        component_count: sbom.components.len(),
+        dependency_count: sbom.dependencies.len(),
+        tool_chain: sbom.tool_chain.clone(),
+        content_digest: sbom.content_hash(CanonicalEncoding::Json, HashAlgorithm::Blake3_256)?,
+        trust_root: TrustRootReport {
+            root_type: sbom.trust_root.root_type.clone(),
+            root_id: sbom.trust_root.root_id.clone(),
+        },
+    })
+}
+
+fn json_string_value<T: serde::Serialize>(value: &T) -> Result<String> {
+    let value = serde_json::to_value(value)?;
+    value
+        .as_str()
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| anyhow::anyhow!("expected JSON string value"))
+}
+
+fn verification_decision_label(decision: VerificationDecision) -> String {
+    match decision {
+        VerificationDecision::Allow => "allow".to_string(),
+        VerificationDecision::Deny => "deny".to_string(),
+    }
+}
+
+fn verification_reason_code_label(reason_code: &impl std::fmt::Debug) -> String {
+    let debug = format!("{reason_code:?}");
+    camel_to_snake_case(&debug)
+}
+
+fn camel_to_snake_case(value: &str) -> String {
+    let mut output = String::with_capacity(value.len() + 4);
+    for (index, ch) in value.chars().enumerate() {
+        if ch.is_uppercase() {
+            if index > 0 {
+                output.push('_');
+            }
+            for lower in ch.to_lowercase() {
+                output.push(lower);
+            }
+        } else {
+            output.push(ch);
+        }
+    }
+    output
+}
+
+fn print_verify_output(connector_id: &str, output: &VerifyOutput, allowed: bool) {
+    if allowed {
+        println!("Verification PASSED for {connector_id}");
+    } else {
+        println!("Verification FAILED for {connector_id}");
+    }
+    println!("  Reason: {}", output.reason_code);
+    for step in &output.steps {
+        let icon = if step.passed { "  pass" } else { "  FAIL" };
+        println!("  {icon}: {} — {}", step.step, step.detail);
+    }
+    println!("  Evidence: {}", output.evidence_digest);
+}
+
+fn print_supply_chain_report(connector_id: &str, output: &SupplyChainReportOutput) {
+    println!("Supply-chain report for {connector_id}");
+    println!("  Decision: {} ({})", output.decision, output.reason_code);
+    println!("  Artifact: {}", output.artifact_digest);
+    println!("  Evidence: {}", output.evidence_digest);
+    println!(
+        "  Policy: attestation={} sbom={} min_slsa={} allow_unsigned={}",
+        output.policy.require_attestation,
+        output.policy.require_sbom,
+        output.policy.min_slsa_level,
+        output.policy.allow_unsigned
+    );
+
+    if let Some(attestation) = &output.attestation {
+        println!("  Attestation:");
+        println!("    Predicate: {}", attestation.predicate_type);
+        println!("    Builder: {}", attestation.builder_id);
+        println!("    SLSA: {}", attestation.slsa_level);
+        println!(
+            "    Trust Root: {}/{}",
+            attestation.trust_root.root_type, attestation.trust_root.root_id
+        );
+        println!("    Content: {}", attestation.content_digest);
+    }
+
+    if let Some(sbom) = &output.sbom {
+        println!("  SBOM:");
+        println!("    Format: {}", sbom.bom_format);
+        println!("    Version: {}", sbom.bom_version);
+        println!(
+            "    Components: {} (dependencies: {})",
+            sbom.component_count, sbom.dependency_count
+        );
+        println!(
+            "    Trust Root: {}/{}",
+            sbom.trust_root.root_type, sbom.trust_root.root_id
+        );
+        println!("    Content: {}", sbom.content_digest);
+    }
+
+    println!("  Steps:");
+    for step in &output.steps {
+        let icon = if step.passed { "pass" } else { "FAIL" };
+        println!("    {icon}: {} — {}", step.step, step.detail);
+    }
 }
 
 // ── Lifecycle: pin/unpin/rollout/rollback ─────────────────────
@@ -2769,6 +3087,77 @@ mod tests {
         assert_eq!(policy.min_slsa_level, 2);
     }
 
+    #[test]
+    fn build_verification_policy_requires_missing_inputs_by_default() {
+        let policy = build_verification_policy(false, false, 1, false, true);
+        assert!(policy.require_attestation);
+        assert!(policy.require_sbom);
+        assert_eq!(policy.min_slsa_level, 1);
+        assert!(policy.require_digest_match);
+    }
+
+    #[test]
+    fn report_output_serializes_attestation_and_sbom_sections() {
+        let output = SupplyChainReportOutput {
+            connector_id: "fcp.test:utility:v1".to_string(),
+            decision: "allow".to_string(),
+            reason_code: "verified".to_string(),
+            artifact_digest: "blake3-256:abcd".to_string(),
+            evidence_digest: "blake3-256:efgh".to_string(),
+            policy: VerifyPolicyOutput {
+                require_attestation: true,
+                require_sbom: true,
+                min_slsa_level: 3,
+                allow_unsigned: false,
+            },
+            steps: vec![VerifyStepOutput {
+                step: "attestation_presence".to_string(),
+                passed: true,
+                detail: "attestation provided".to_string(),
+            }],
+            attestation: Some(SupplyChainAttestationReport {
+                predicate_type: "https://slsa.dev/provenance/v1".to_string(),
+                builder_id: "builder://github/actions".to_string(),
+                build_type: "https://slsa.dev/container-based-build/v1".to_string(),
+                subject_digest: "blake3-256:abcd".to_string(),
+                slsa_level: 3,
+                provenance_hash: "blake3-256:1234".to_string(),
+                content_digest: "blake3-256:5678".to_string(),
+                trust_root: TrustRootReport {
+                    root_type: "sigstore".to_string(),
+                    root_id: "sigstore-public-good".to_string(),
+                },
+            }),
+            sbom: Some(SupplyChainSbomReport {
+                bom_format: "cyclonedx".to_string(),
+                bom_version: "1".to_string(),
+                component_count: 2,
+                dependency_count: 1,
+                tool_chain: vec!["cargo".to_string()],
+                content_digest: "blake3-256:9999".to_string(),
+                trust_root: TrustRootReport {
+                    root_type: "manual".to_string(),
+                    root_id: "demo-root".to_string(),
+                },
+            }),
+        };
+
+        let json = serde_json::to_string(&output).unwrap();
+        assert!(json.contains("\"attestation\""));
+        assert!(json.contains("\"sbom\""));
+        assert!(json.contains("\"trust_root\""));
+        assert!(json.contains("\"component_count\":2"));
+    }
+
+    #[test]
+    fn camel_to_snake_case_converts_reason_codes() {
+        assert_eq!(
+            camel_to_snake_case("SlsaLevelInsufficient"),
+            "slsa_level_insufficient"
+        );
+        assert_eq!(camel_to_snake_case("Verified"), "verified");
+    }
+
     // ── HostEndpoint Tests ──────────────────────────────────────────
 
     #[test]
@@ -3380,11 +3769,19 @@ mod tests {
     #[test]
     fn info_twitter_operations_have_correct_risk_levels() {
         let info = simulate_connector_info("fcp.twitter:social:v1").unwrap();
-        let get_timeline = info.operations.iter().find(|o| o.id == "twitter.get_timeline").unwrap();
+        let get_timeline = info
+            .operations
+            .iter()
+            .find(|o| o.id == "twitter.get_timeline")
+            .unwrap();
         assert_eq!(get_timeline.risk_level, RiskLevel::Low);
         assert_eq!(get_timeline.safety_tier, SafetyTier::Safe);
 
-        let post_tweet = info.operations.iter().find(|o| o.id == "twitter.post_tweet").unwrap();
+        let post_tweet = info
+            .operations
+            .iter()
+            .find(|o| o.id == "twitter.post_tweet")
+            .unwrap();
         assert_eq!(post_tweet.risk_level, RiskLevel::Medium);
         assert_eq!(post_tweet.safety_tier, SafetyTier::Risky);
     }
@@ -3402,7 +3799,11 @@ mod tests {
     fn introspect_twitter_events_have_schemas() {
         let intro = simulate_introspection("fcp.twitter:social:v1", None).unwrap();
         for event in &intro.events {
-            assert!(event.schema.is_object(), "event {} missing schema", event.topic);
+            assert!(
+                event.schema.is_object(),
+                "event {} missing schema",
+                event.topic
+            );
             assert!(event.requires_ack);
         }
     }
@@ -3411,7 +3812,11 @@ mod tests {
     fn introspect_twitter_resource_types_have_uris() {
         let intro = simulate_introspection("fcp.twitter:social:v1", None).unwrap();
         for rt in &intro.resource_types {
-            assert!(rt.uri_pattern.starts_with("fcp://"), "bad URI pattern for {}", rt.name);
+            assert!(
+                rt.uri_pattern.starts_with("fcp://"),
+                "bad URI pattern for {}",
+                rt.name
+            );
             assert!(rt.schema.is_object(), "missing schema for {}", rt.name);
         }
     }

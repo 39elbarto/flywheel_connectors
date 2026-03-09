@@ -15,6 +15,7 @@ description = "FCP connector for Airtable flexible database and spreadsheet plat
 archetypes = [
     "storage",
     "operational",
+    "streaming",
 ]
 format = "wasi"
 
@@ -526,6 +527,434 @@ examples = ['{"base_id": "appXXX", "table_id": "Tasks", "record_ids": ["recA", "
 related = [
     "airtable.delete_record",
     "airtable.get_record",
+]
+
+[provides.operations.create_webhook]
+description = "Register an Airtable webhook for a base"
+capability = "airtable.webhooks.manage"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "none"
+
+[provides.operations.create_webhook.rate_limit]
+max = 20
+per_ms = 60000
+
+[provides.operations.create_webhook.input_schema]
+required = [
+    "base_id",
+    "notification_url",
+    "specification",
+]
+type = "object"
+
+[provides.operations.create_webhook.input_schema.properties.base_id]
+description = "Airtable base ID"
+pattern = "^app[a-zA-Z0-9]+$"
+type = "string"
+
+[provides.operations.create_webhook.input_schema.properties.notification_url]
+description = "Host-managed HTTPS endpoint Airtable should notify"
+type = "string"
+
+[provides.operations.create_webhook.input_schema.properties.specification]
+description = "Raw Airtable webhook specification passed through to the Webhooks API"
+type = "object"
+
+[provides.operations.create_webhook.output_schema]
+required = [
+    "id",
+    "macSecretBase64",
+]
+type = "object"
+
+[provides.operations.create_webhook.output_schema.properties.id]
+type = "string"
+
+[provides.operations.create_webhook.output_schema.properties.macSecretBase64]
+type = "string"
+
+[provides.operations.create_webhook.output_schema.properties.expirationTime]
+type = "string"
+
+[provides.operations.create_webhook.network_constraints]
+host_allow = ["api.airtable.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations.create_webhook.ai_hints]
+when_to_use = "Create a managed Airtable webhook that points at host-owned ingress instead of a connector-opened port."
+common_mistakes = [
+    "Passing an invalid Airtable webhook specification.",
+    "Pointing notification_url at an unmanaged endpoint.",
+    "Creating duplicate hooks without listing current hooks first.",
+    "Failing to persist the one-time MAC secret returned at creation time.",
+]
+examples = ['{"base_id":"appXXX","notification_url":"https://hooks.flywheel.dev/airtable","specification":{"options":{"filters":{"dataTypes":["tableData"]}}}}']
+related = [
+    "airtable.list_webhooks",
+    "airtable.refresh_webhook",
+    "airtable.delete_webhook",
+]
+
+[provides.operations.list_webhooks]
+description = "List registered Airtable webhooks for a base"
+capability = "airtable.webhooks.manage"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations.list_webhooks.rate_limit]
+max = 30
+per_ms = 60000
+
+[provides.operations.list_webhooks.input_schema]
+required = ["base_id"]
+type = "object"
+
+[provides.operations.list_webhooks.input_schema.properties.base_id]
+description = "Airtable base ID"
+pattern = "^app[a-zA-Z0-9]+$"
+type = "string"
+
+[provides.operations.list_webhooks.output_schema]
+required = ["webhooks"]
+type = "object"
+
+[provides.operations.list_webhooks.output_schema.properties.webhooks]
+type = "array"
+
+[provides.operations.list_webhooks.network_constraints]
+host_allow = ["api.airtable.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations.list_webhooks.ai_hints]
+when_to_use = "Inspect registered Airtable hooks before creating, rotating, or deleting them."
+common_mistakes = ["Assuming a hook already exists without checking."]
+examples = ['{"base_id":"appXXX"}']
+related = [
+    "airtable.create_webhook",
+    "airtable.list_webhook_payloads",
+]
+
+[provides.operations.refresh_webhook]
+description = "Refresh an Airtable webhook before it expires"
+capability = "airtable.webhooks.manage"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations.refresh_webhook.rate_limit]
+max = 20
+per_ms = 60000
+
+[provides.operations.refresh_webhook.input_schema]
+required = [
+    "base_id",
+    "webhook_id",
+]
+type = "object"
+
+[provides.operations.refresh_webhook.input_schema.properties.base_id]
+description = "Airtable base ID"
+pattern = "^app[a-zA-Z0-9]+$"
+type = "string"
+
+[provides.operations.refresh_webhook.input_schema.properties.webhook_id]
+description = "Webhook ID returned by Airtable (for example ach...)"
+type = "string"
+
+[provides.operations.refresh_webhook.output_schema]
+required = ["expirationTime"]
+type = "object"
+
+[provides.operations.refresh_webhook.output_schema.properties.expirationTime]
+type = "string"
+
+[provides.operations.refresh_webhook.network_constraints]
+host_allow = ["api.airtable.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations.refresh_webhook.ai_hints]
+when_to_use = "Keep an existing Airtable webhook alive before Airtable disables it."
+common_mistakes = ["Refreshing after the webhook has already expired."]
+examples = ['{"base_id":"appXXX","webhook_id":"achXXXXXXXXXXXXXX"}']
+related = [
+    "airtable.create_webhook",
+    "airtable.list_webhooks",
+]
+
+[provides.operations.set_webhook_notifications]
+description = "Enable or disable Airtable notification pings for a webhook"
+capability = "airtable.webhooks.manage"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations.set_webhook_notifications.rate_limit]
+max = 20
+per_ms = 60000
+
+[provides.operations.set_webhook_notifications.input_schema]
+required = [
+    "base_id",
+    "webhook_id",
+    "enable",
+]
+type = "object"
+
+[provides.operations.set_webhook_notifications.input_schema.properties.base_id]
+description = "Airtable base ID"
+pattern = "^app[a-zA-Z0-9]+$"
+type = "string"
+
+[provides.operations.set_webhook_notifications.input_schema.properties.webhook_id]
+description = "Webhook ID returned by Airtable (for example ach...)"
+type = "string"
+
+[provides.operations.set_webhook_notifications.input_schema.properties.enable]
+description = "Whether Airtable should emit notification pings"
+type = "boolean"
+
+[provides.operations.set_webhook_notifications.output_schema]
+type = "object"
+
+[provides.operations.set_webhook_notifications.network_constraints]
+host_allow = ["api.airtable.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations.set_webhook_notifications.ai_hints]
+when_to_use = "Pause or resume notifications without deleting the webhook registration."
+common_mistakes = [
+    "Disabling notifications and assuming Airtable will preserve every missed delivery.",
+]
+examples = ['{"base_id":"appXXX","webhook_id":"achXXXXXXXXXXXXXX","enable":false}']
+related = [
+    "airtable.list_webhooks",
+    "airtable.delete_webhook",
+]
+
+[provides.operations.delete_webhook]
+description = "Delete an Airtable webhook registration (irreversible)"
+capability = "airtable.webhooks.manage"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations.delete_webhook.rate_limit]
+max = 20
+per_ms = 60000
+
+[provides.operations.delete_webhook.input_schema]
+required = [
+    "base_id",
+    "webhook_id",
+]
+type = "object"
+
+[provides.operations.delete_webhook.input_schema.properties.base_id]
+description = "Airtable base ID"
+pattern = "^app[a-zA-Z0-9]+$"
+type = "string"
+
+[provides.operations.delete_webhook.input_schema.properties.webhook_id]
+description = "Webhook ID returned by Airtable (for example ach...)"
+type = "string"
+
+[provides.operations.delete_webhook.output_schema]
+required = ["id"]
+type = "object"
+
+[provides.operations.delete_webhook.output_schema.properties.id]
+type = "string"
+
+[provides.operations.delete_webhook.output_schema.properties.notificationUrl]
+type = "string"
+
+[provides.operations.delete_webhook.output_schema.properties.isHookEnabled]
+type = "boolean"
+
+[provides.operations.delete_webhook.output_schema.properties.areNotificationsEnabled]
+type = "boolean"
+
+[provides.operations.delete_webhook.network_constraints]
+host_allow = ["api.airtable.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations.delete_webhook.ai_hints]
+when_to_use = "Remove a stale or misconfigured Airtable webhook after verifying the ID."
+common_mistakes = [
+    "Deleting the wrong webhook without listing hooks first.",
+    "Assuming delivery history is still available after deletion.",
+]
+examples = ['{"base_id":"appXXX","webhook_id":"achXXXXXXXXXXXXXX"}']
+related = [
+    "airtable.list_webhooks",
+    "airtable.list_webhook_payloads",
+]
+
+[provides.operations.list_webhook_payloads]
+description = "Fetch Airtable webhook payload history and normalize it into events"
+capability = "airtable.webhooks.manage"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations.list_webhook_payloads.rate_limit]
+max = 30
+per_ms = 60000
+
+[provides.operations.list_webhook_payloads.input_schema]
+required = [
+    "base_id",
+    "webhook_id",
+]
+type = "object"
+
+[provides.operations.list_webhook_payloads.input_schema.properties.base_id]
+description = "Airtable base ID"
+pattern = "^app[a-zA-Z0-9]+$"
+type = "string"
+
+[provides.operations.list_webhook_payloads.input_schema.properties.webhook_id]
+description = "Webhook ID returned by Airtable"
+type = "string"
+
+[provides.operations.list_webhook_payloads.input_schema.properties.cursor]
+description = "Optional Airtable payload cursor for pagination or resume"
+type = "integer"
+
+[provides.operations.list_webhook_payloads.input_schema.properties.limit]
+description = "Maximum payloads to return (1-50)"
+type = "integer"
+
+[provides.operations.list_webhook_payloads.output_schema]
+required = [
+    "payloads",
+    "mightHaveMore",
+    "events",
+]
+type = "object"
+
+[provides.operations.list_webhook_payloads.output_schema.properties.payloads]
+type = "array"
+
+[provides.operations.list_webhook_payloads.output_schema.properties.cursor]
+type = "integer"
+
+[provides.operations.list_webhook_payloads.output_schema.properties.mightHaveMore]
+type = "boolean"
+
+[provides.operations.list_webhook_payloads.output_schema.properties.events]
+type = "array"
+
+[provides.operations.list_webhook_payloads.network_constraints]
+host_allow = ["api.airtable.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 5242880
+
+[provides.operations.list_webhook_payloads.ai_hints]
+when_to_use = "Drain Airtable webhook delivery payloads after the host receives a notification ping."
+common_mistakes = [
+    "Forgetting to persist the next payload cursor between polls.",
+    "Treating webhook payloads as trusted input instead of externally injected data.",
+    "Ignoring mightHaveMore when Airtable splits one transaction across multiple payload batches.",
+]
+examples = [
+    '{"base_id":"appXXX","webhook_id":"achXXXXXXXXXXXXXX"}',
+    '{"base_id":"appXXX","webhook_id":"achXXXXXXXXXXXXXX","cursor":7,"limit":10}',
+]
+related = [
+    "airtable.list_webhooks",
+    "airtable.refresh_webhook",
 ]
 
 [provides.operations.download_attachment]
@@ -1613,6 +2042,11 @@ related = [
     "airtable.replace_record",
 ]
 
+[event_caps]
+streaming = true
+replay = true
+min_buffer_events = 50
+
 [sandbox]
 profile = "strict"
 memory_mb = 256
@@ -1647,6 +2081,13 @@ window_ms = 60000
 burst = 5
 scope = "instance"
 
+[[rate_limits.pools]]
+id = "airtable.webhooks.manage"
+requests = 30
+window_ms = 60000
+burst = 5
+scope = "instance"
+
 [rate_limits.operation_pools]
 create_record = ["airtable.write"]
 update_record = ["airtable.write"]
@@ -1667,3 +2108,9 @@ list_bases = ["airtable.read"]
 download_attachment = ["airtable.read"]
 delete_record = ["airtable.delete"]
 delete_records = ["airtable.delete"]
+create_webhook = ["airtable.webhooks.manage"]
+list_webhooks = ["airtable.webhooks.manage"]
+refresh_webhook = ["airtable.webhooks.manage"]
+set_webhook_notifications = ["airtable.webhooks.manage"]
+delete_webhook = ["airtable.webhooks.manage"]
+list_webhook_payloads = ["airtable.webhooks.manage"]

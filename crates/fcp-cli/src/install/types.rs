@@ -73,6 +73,18 @@ pub struct VerificationDetails {
     /// SLSA level if verified.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub slsa_level: Option<u8>,
+
+    /// Supply-chain reason code for the final decision.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supply_chain_reason_code: Option<String>,
+
+    /// Deterministic evidence bundle hash for audit and CI correlation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supply_chain_evidence_digest: Option<String>,
+
+    /// Artifact digest used for supply-chain verification.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supply_chain_artifact_digest: Option<String>,
 }
 
 impl Default for VerificationDetails {
@@ -86,6 +98,9 @@ impl Default for VerificationDetails {
             capability_ceiling_respected: true,
             verified_attestations: Vec::new(),
             slsa_level: None,
+            supply_chain_reason_code: None,
+            supply_chain_evidence_digest: None,
+            supply_chain_artifact_digest: None,
         }
     }
 }
@@ -214,7 +229,7 @@ impl InstallError {
             hints: vec![
                 "The connector does not meet supply chain requirements".to_string(),
                 "Check if transparency log or attestations are required".to_string(),
-                "Use --skip-supply-chain-check to bypass (not recommended)".to_string(),
+                "Use --skip-supply-chain to bypass (not recommended)".to_string(),
             ],
             connector_id: Some(connector_id.to_string()),
             version: None,
@@ -371,6 +386,9 @@ mod tests {
                 capability_ceiling_respected: true,
                 verified_attestations: vec!["in-toto".to_string()],
                 slsa_level: Some(3),
+                supply_chain_reason_code: Some("verified".to_string()),
+                supply_chain_evidence_digest: Some("blake3-256:abcd".to_string()),
+                supply_chain_artifact_digest: Some("blake3-256:efgh".to_string()),
             },
             installed_at: 1_700_000_000,
             installed_at_iso: "2023-11-14T22:13:20Z".to_string(),
@@ -646,6 +664,9 @@ mod tests {
             capability_ceiling_respected: true,
             verified_attestations: vec!["in-toto".to_string(), "sigstore".to_string()],
             slsa_level: Some(3),
+            supply_chain_reason_code: Some("verified".to_string()),
+            supply_chain_evidence_digest: Some("blake3-256:abcd".to_string()),
+            supply_chain_artifact_digest: Some("blake3-256:efgh".to_string()),
         };
         let json = serde_json::to_string(&details).unwrap();
         let parsed: VerificationDetails = serde_json::from_str(&json).unwrap();
@@ -655,6 +676,11 @@ mod tests {
         assert_eq!(parsed.publisher_threshold, 2);
         assert_eq!(parsed.verified_attestations.len(), 2);
         assert_eq!(parsed.slsa_level, Some(3));
+        assert_eq!(parsed.supply_chain_reason_code.as_deref(), Some("verified"));
+        assert_eq!(
+            parsed.supply_chain_evidence_digest.as_deref(),
+            Some("blake3-256:abcd")
+        );
     }
 
     #[test]
@@ -665,6 +691,9 @@ mod tests {
         assert!(!json.contains("verified_attestations"));
         // None slsa_level should be skipped
         assert!(!json.contains("slsa_level"));
+        assert!(!json.contains("supply_chain_reason_code"));
+        assert!(!json.contains("supply_chain_evidence_digest"));
+        assert!(!json.contains("supply_chain_artifact_digest"));
     }
 
     // ── InstallOutput tests ─────────────────────────────────────
@@ -710,6 +739,9 @@ mod tests {
                 capability_ceiling_respected: true,
                 verified_attestations: Vec::new(),
                 slsa_level: None,
+                supply_chain_reason_code: Some("verified".to_string()),
+                supply_chain_evidence_digest: Some("blake3-256:feed".to_string()),
+                supply_chain_artifact_digest: Some("blake3-256:beef".to_string()),
             },
             installed_at: 1_700_000_000,
             installed_at_iso: "2023-11-14T22:13:20Z".to_string(),
@@ -717,6 +749,7 @@ mod tests {
         let json = serde_json::to_string(&output).unwrap();
         assert!(json.contains("\"manifest_object_id\""));
         assert!(json.contains("\"binary_object_id\""));
+        assert!(json.contains("\"supply_chain_evidence_digest\""));
     }
 
     #[test]
@@ -739,6 +772,9 @@ mod tests {
                 capability_ceiling_respected: true,
                 verified_attestations: vec!["in-toto".to_string()],
                 slsa_level: Some(2),
+                supply_chain_reason_code: Some("verified".to_string()),
+                supply_chain_evidence_digest: Some("blake3-256:cafe".to_string()),
+                supply_chain_artifact_digest: Some("blake3-256:babe".to_string()),
             },
             installed_at: 12345,
             installed_at_iso: "2020-01-01T00:00:00Z".to_string(),
@@ -772,11 +808,7 @@ mod tests {
             InstallError::mirror_failed("test", "reason"),
         ];
         for err in &errors {
-            assert!(
-                !err.hints.is_empty(),
-                "error {} has no hints",
-                err.code
-            );
+            assert!(!err.hints.is_empty(), "error {} has no hints", err.code);
         }
     }
 
@@ -796,10 +828,6 @@ mod tests {
         let mut unique = codes.clone();
         unique.sort();
         unique.dedup();
-        assert_eq!(
-            unique.len(),
-            codes.len(),
-            "duplicate error codes found"
-        );
+        assert_eq!(unique.len(), codes.len(), "duplicate error codes found");
     }
 }

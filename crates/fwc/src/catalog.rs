@@ -215,8 +215,8 @@ fn command_contract(command: &str) -> Option<Value> {
             "Operation summaries that let the caller narrow to one operation before asking for schema.",
         )),
         "schema" => Some(discovery_contract(
-            "Reveal exactly one config or operation schema at a time.",
-            "Single-schema output for a connector or connector operation.",
+            "Reveal exactly one connector contract or operation schema at a time.",
+            "Single-schema output for a connector manifest contract or one connector operation.",
         )),
         "example" | "examples" => Some(discovery_contract(
             "Return a minimal example request or config snippet for one connector or operation.",

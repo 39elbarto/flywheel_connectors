@@ -31,17 +31,19 @@ use fcp_async_core::task::{self, JoinHandle};
 use fcp_core::{
     ConnectorHealth, ConnectorId, HealthSnapshot, Introspection, InvokeRequest, InvokeResponse,
     LifecycleError, LifecycleManager, LifecycleRecord, LifecycleState, LifecycleStatus, RequestId,
-    RolloutPolicy, SafetyTier, SelfCheckReport, TransitionReason,
+    RolloutPolicy, SafetyTier, SelfCheckReport, SoftwareBillOfMaterials, SupplyChainAttestation,
+    TransitionReason,
 };
 use fcp_host::{
     BatchExecutor, BatchInvokeRequest, BatchInvokeResponse, BatchOperation, BatchOperationError,
     BatchOptions, BatchStatus, BudgetPolicyEngine, CacheMetadata, CacheValidator,
     CancellationController, CancellationRequest, CancellationResponse, ConnectorArchetype,
     ConnectorRegistry, ConnectorSummary, DiscoveryEndpoint, DiscoveryFilter, DiscoveryResponse,
-    DoctorReport, DoctorRequest, DoctorService, HostHealthResponse, HostHealthStatus,
+    DoctorReport, DoctorRequest, DoctorService, GateOutcome, HostHealthResponse, HostHealthStatus,
     IntrospectionResponse, OperationResult, OperationResultStatus, PreflightRequest,
     PreflightResponse, RequestPriority, ResilienceError, ResilienceLayer, RolloutController,
-    RolloutDecision, RolloutObservation, RolloutOutcome, SafetyTierExt, merge_connector_health,
+    RolloutDecision, RolloutObservation, RolloutOutcome, SafetyTierExt, SupplyChainGate,
+    SupplyChainGateConfig, merge_connector_health,
 };
 use fcp_host::{HostError, HostResult};
 use futures_util::future::join_all;
@@ -576,6 +578,7 @@ struct AppState {
     cancellation: Arc<CancellationController>,
     lifecycle: Arc<HostLifecycleManager>,
     rollout: Arc<RolloutController<SubprocessRegistry, HostLifecycleManager>>,
+    supply_chain: Arc<SupplyChainGate>,
     started_at: Instant,
 }
 
@@ -725,6 +728,18 @@ struct RollbackResponse {
     message: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SupplyChainVerifyRequest {
+    connector_id: String,
+    version: semver::Version,
+    artifact_digest: String,
+    #[serde(default)]
+    attestation: Option<SupplyChainAttestation>,
+    #[serde(default)]
+    sbom: Option<SoftwareBillOfMaterials>,
+}
+
 fn parse_http_datetime(value: &str) -> Option<DateTime<Utc>> {
     chrono::DateTime::parse_from_rfc2822(value)
         .ok()
@@ -852,6 +867,123 @@ fn resolve_self_check_timeout() -> HostResult<Option<Duration>> {
     Ok(Some(Duration::from_millis(millis)))
 }
 
+fn resolve_supply_chain_gate_config() -> HostResult<SupplyChainGateConfig> {
+    let mut config = SupplyChainGateConfig::default();
+
+    if let Some(cache_capacity) = read_env_usize("FCP_HOST_SUPPLY_CHAIN_CACHE_CAPACITY")? {
+        if cache_capacity == 0 {
+            return Err(HostError::InvalidFilter(
+                "FCP_HOST_SUPPLY_CHAIN_CACHE_CAPACITY must be >= 1".to_string(),
+            ));
+        }
+        config.cache_capacity = cache_capacity;
+    }
+
+    if let Some(allow_dev_overrides) = read_env_bool("FCP_HOST_SUPPLY_CHAIN_ALLOW_DEV_OVERRIDES")? {
+        config.allow_dev_overrides = allow_dev_overrides;
+    }
+
+    let policy = &mut config.policy;
+    if let Some(require_attestation) = read_env_bool("FCP_HOST_SUPPLY_CHAIN_REQUIRE_ATTESTATION")? {
+        policy.require_attestation = require_attestation;
+    }
+    if let Some(require_sbom) = read_env_bool("FCP_HOST_SUPPLY_CHAIN_REQUIRE_SBOM")? {
+        policy.require_sbom = require_sbom;
+    }
+    if let Some(min_slsa_level) = read_env_u8("FCP_HOST_SUPPLY_CHAIN_MIN_SLSA_LEVEL")? {
+        if min_slsa_level > 4 {
+            return Err(HostError::InvalidFilter(
+                "FCP_HOST_SUPPLY_CHAIN_MIN_SLSA_LEVEL must be between 0 and 4".to_string(),
+            ));
+        }
+        policy.min_slsa_level = min_slsa_level;
+    }
+    if let Some(trusted_builders) = read_env_csv("FCP_HOST_SUPPLY_CHAIN_TRUSTED_BUILDERS") {
+        policy.trusted_builders = trusted_builders;
+    }
+    if let Some(allow_unsigned) = read_env_bool("FCP_HOST_SUPPLY_CHAIN_ALLOW_UNSIGNED")? {
+        policy.allow_unsigned = allow_unsigned;
+    }
+    if let Some(require_digest_match) = read_env_bool("FCP_HOST_SUPPLY_CHAIN_REQUIRE_DIGEST_MATCH")?
+    {
+        policy.require_digest_match = require_digest_match;
+    }
+
+    Ok(config)
+}
+
+fn read_env_bool(name: &str) -> HostResult<Option<bool>> {
+    let raw = match std::env::var(name) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    parse_env_bool(name, trimmed).map(Some)
+}
+
+fn parse_env_bool(name: &str, raw: &str) -> HostResult<bool> {
+    if raw.eq_ignore_ascii_case("true")
+        || raw.eq_ignore_ascii_case("yes")
+        || raw.eq_ignore_ascii_case("on")
+        || raw == "1"
+    {
+        Ok(true)
+    } else if raw.eq_ignore_ascii_case("false")
+        || raw.eq_ignore_ascii_case("no")
+        || raw.eq_ignore_ascii_case("off")
+        || raw == "0"
+    {
+        Ok(false)
+    } else {
+        Err(HostError::InvalidFilter(format!(
+            "invalid boolean value for {name}: {raw}"
+        )))
+    }
+}
+
+fn read_env_u8(name: &str) -> HostResult<Option<u8>> {
+    let raw = match std::env::var(name) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let parsed = trimmed
+        .parse()
+        .map_err(|err| HostError::InvalidFilter(format!("invalid {name}: {err}")))?;
+    Ok(Some(parsed))
+}
+
+fn read_env_usize(name: &str) -> HostResult<Option<usize>> {
+    let raw = match std::env::var(name) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let parsed = trimmed
+        .parse()
+        .map_err(|err| HostError::InvalidFilter(format!("invalid {name}: {err}")))?;
+    Ok(Some(parsed))
+}
+
+fn read_env_csv(name: &str) -> Option<Vec<String>> {
+    std::env::var(name).ok().map(|raw| {
+        raw.split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(ToOwned::to_owned)
+            .collect()
+    })
+}
+
 fn resolve_bind_target() -> HostResult<BindTarget> {
     let raw = std::env::var("FCP_HOST_BIND").unwrap_or_else(|_| "127.0.0.1:9090".to_string());
     parse_bind_target(&raw)
@@ -976,6 +1108,9 @@ async fn async_main() -> HostResult<()> {
         Arc::clone(&registry),
         Arc::clone(&lifecycle),
     ));
+    let supply_chain = Arc::new(SupplyChainGate::with_config(
+        resolve_supply_chain_gate_config()?,
+    ));
     let cancellation = Arc::new(CancellationController::new());
     let state = Arc::new(AppState {
         registry,
@@ -984,6 +1119,7 @@ async fn async_main() -> HostResult<()> {
         cancellation,
         lifecycle,
         rollout,
+        supply_chain,
         started_at: Instant::now(),
     });
 
@@ -997,6 +1133,10 @@ async fn async_main() -> HostResult<()> {
         .route("/rpc/batch", post(batch_invoke_handler))
         .route("/rpc/batch-invoke", post(batch_invoke_handler))
         .route("/rpc/preflight", post(preflight_handler))
+        .route(
+            "/rpc/supply-chain/verify",
+            post(supply_chain_verify_handler),
+        )
         .route("/rpc/health", get(health_handler))
         .route(
             "/rpc/rollout/pin/{connector_id}",
@@ -1568,6 +1708,68 @@ async fn batch_invoke_handler(
         "batch invoke request complete"
     );
     Ok(Json(response))
+}
+
+async fn supply_chain_verify_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<SupplyChainVerifyRequest>,
+) -> Result<Json<GateOutcome>, (StatusCode, String)> {
+    let SupplyChainVerifyRequest {
+        connector_id,
+        version,
+        artifact_digest,
+        attestation,
+        sbom,
+    } = request;
+    let connector_id = parse_connector_id(&connector_id)?;
+    let version = version.to_string();
+    let attestation_present = attestation.is_some();
+    let sbom_present = sbom.is_some();
+    let started_at = Instant::now();
+
+    tracing::debug!(
+        event = "supply_chain_verify_request",
+        connector_id = %connector_id,
+        version = %version,
+        artifact_digest = %artifact_digest,
+        attestation_present,
+        sbom_present,
+        "processing supply-chain verification request"
+    );
+
+    match state.supply_chain.verify(
+        &connector_id,
+        &version,
+        &artifact_digest,
+        attestation.as_ref(),
+        sbom.as_ref(),
+    ) {
+        Ok(outcome) => {
+            tracing::info!(
+                event = "supply_chain_verify_response",
+                connector_id = %connector_id,
+                version = %version,
+                allowed = outcome.allowed,
+                cached = outcome.cached,
+                reason_code = %outcome.audit_event.reason_code,
+                evidence_digest = %outcome.audit_event.evidence_digest,
+                duration_ms = started_at.elapsed().as_millis() as u64,
+                "supply-chain verification request complete"
+            );
+            Ok(Json(outcome))
+        }
+        Err(err) => {
+            tracing::warn!(
+                event = "supply_chain_verify_error",
+                connector_id = %connector_id,
+                version = %version,
+                error = %err,
+                duration_ms = started_at.elapsed().as_millis() as u64,
+                "supply-chain verification request failed"
+            );
+            Err(map_host_error(err))
+        }
+    }
 }
 
 async fn health_handler(State(state): State<Arc<AppState>>) -> Json<HostHealthResponse> {
@@ -2643,6 +2845,7 @@ mod tests {
             cancellation: Arc::new(CancellationController::new()),
             lifecycle,
             rollout,
+            supply_chain: Arc::new(SupplyChainGate::default()),
             started_at: Instant::now(),
         };
         let cloned = state.clone();

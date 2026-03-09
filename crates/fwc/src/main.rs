@@ -12,7 +12,7 @@ mod recovery;
 mod render;
 mod workflow;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -21,6 +21,9 @@ use clap::{Args, Parser, Subcommand, ValueEnum, error::ErrorKind};
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use crate::readiness::{
+    DiscoveredConnector, DiscoveredOperation, DiscoveryCatalog, SelectorError, SelectorErrorKind,
+};
 use crate::render::{OutputFormat, render, token_stats};
 
 const ABOUT: &str =
@@ -372,7 +375,7 @@ struct SchemaArgs {
     /// Connector id, alias, or family name.
     connector: String,
 
-    /// Optional operation name. Omit to ask for connector-level config schema.
+    /// Optional operation name. Omit to inspect the connector contract schema.
     operation: Option<String>,
 }
 
@@ -706,12 +709,12 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
             intent_explain_dispatch(&args.request(intent::IntentMode::Explain))?
         }
         Commands::Do(args) => intent_do_dispatch(args)?,
-        Commands::List(args) => planned("list", args)?,
-        Commands::Search(args) => planned("search", args)?,
-        Commands::Show(args) => planned("show", args)?,
-        Commands::Ops(args) => planned("ops", args)?,
-        Commands::Schema(args) => planned("schema", args)?,
-        Commands::Examples(args) => planned("examples", args)?,
+        Commands::List(args) => list_dispatch(args)?,
+        Commands::Search(args) => search_dispatch(args)?,
+        Commands::Show(args) => show_dispatch(args)?,
+        Commands::Ops(args) => ops_dispatch(args)?,
+        Commands::Schema(args) => schema_dispatch(args)?,
+        Commands::Examples(args) => examples_dispatch(args)?,
         Commands::Status(args) => planned("status", args)?,
         Commands::Enable(args) => planned("enable", args)?,
         Commands::Disable(args) => planned("disable", args)?,
@@ -739,6 +742,677 @@ where
         payload: catalog::planned_payload(command, &serde_json::to_value(args)?),
         exit_code: CliExitCode::Success,
     })
+}
+
+fn list_dispatch(args: &ListArgs) -> Result<DispatchOutcome> {
+    let catalog = DiscoveryCatalog::load()?;
+    let connectors = catalog
+        .list(args.zone.as_deref(), args.category.as_deref())
+        .into_iter()
+        .map(connector_list_entry)
+        .collect::<Vec<_>>();
+    let filters = json!({
+        "zone": args.zone.clone(),
+        "category": args.category.clone(),
+    });
+
+    Ok(DispatchOutcome {
+        payload: json!({
+            "status": "ok",
+            "command": "list",
+            "source": "workspace-manifests",
+            "message": format!("Listed {} connectors from workspace manifests.", connectors.len()),
+            "filters": filters,
+            "connectors": connectors,
+            "next_actions": [
+                "Use `fwc show <connector>` to inspect one connector in detail.",
+                "Use `fwc ops <connector>` to enumerate operations before asking for schemas.",
+            ],
+        }),
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn search_dispatch(args: &SearchArgs) -> Result<DispatchOutcome> {
+    let catalog = DiscoveryCatalog::load()?;
+    let zone = args.zone.as_deref();
+    let tokens = search_tokens(&args.query);
+    let mut results = catalog
+        .connectors()
+        .iter()
+        .filter(|connector| zone.is_none_or(|requested| connector.matches_zone(requested)))
+        .filter_map(|connector| connector_search_result(connector, &tokens))
+        .collect::<Vec<_>>();
+    results.sort_by(|left, right| {
+        right["score"]
+            .as_i64()
+            .cmp(&left["score"].as_i64())
+            .then_with(|| left["slug"].as_str().cmp(&right["slug"].as_str()))
+    });
+
+    Ok(DispatchOutcome {
+        payload: json!({
+            "status": "ok",
+            "command": "search",
+            "source": "workspace-manifests",
+            "message": format!("Found {} matching connectors.", results.len()),
+            "query": &args.query,
+            "filters": {
+                "zone": args.zone.clone(),
+            },
+            "results": results,
+            "next_actions": [
+                "Use `fwc show <connector>` to inspect the best match in more detail.",
+                "Use `fwc schema <connector> <operation>` once one operation is clearly selected.",
+            ],
+        }),
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn show_dispatch(args: &ShowArgs) -> Result<DispatchOutcome> {
+    let catalog = DiscoveryCatalog::load()?;
+    let connector = match catalog.resolve_connector(&args.connector) {
+        Ok(connector) => connector,
+        Err(error) => {
+            return Ok(connector_resolution_dispatch(
+                "show",
+                &args.connector,
+                &error,
+            ));
+        }
+    };
+    let preview = connector
+        .operations
+        .iter()
+        .take(8)
+        .map(operation_summary_entry)
+        .collect::<Vec<_>>();
+    let preview_truncated = connector.operations.len() > preview.len();
+    let risky_count = connector
+        .operations
+        .iter()
+        .filter(|operation| {
+            matches!(
+                operation.summary.safety_tier.as_str(),
+                "risky" | "dangerous" | "critical"
+            )
+        })
+        .count();
+    let example_operation = connector.operations.first().map_or_else(
+        || "<operation>".to_owned(),
+        |operation| operation.preferred_selector.clone(),
+    );
+    let slug = connector.slug.clone();
+    let summary = &connector.detail.summary;
+
+    Ok(DispatchOutcome {
+        payload: json!({
+            "status": "ok",
+            "command": "show",
+            "source": "workspace-manifests",
+            "message": "Loaded connector detail from the workspace manifest.",
+            "connector": {
+                "slug": &slug,
+                "canonical_id": &summary.id,
+                "name": &summary.name,
+                "version": &summary.version,
+                "description": &summary.description,
+                "cohort": &connector.cohort,
+                "format": &connector.runtime_format,
+                "state": summary.state,
+                "state_model": connector.state_model.clone(),
+                "archetypes": summary.archetypes.clone(),
+                "operation_count": summary.operation_count,
+                "max_risk": &summary.max_risk,
+                "has_events": summary.has_events,
+                "manifest_path": &connector.manifest_path,
+            },
+            "zones": connector.zones.clone(),
+            "capabilities": connector.capabilities.clone(),
+            "rate_limits": connector.detail.rate_limits.clone(),
+            "operations": {
+                "preview": preview,
+                "preview_truncated": preview_truncated,
+                "risky_count": risky_count,
+                "safe_count": connector.operations.len().saturating_sub(risky_count),
+            },
+            "next_actions": [
+                format!("fwc ops {slug}"),
+                format!("fwc schema {slug} {example_operation}"),
+                format!("fwc examples {slug} {example_operation}"),
+                format!("fwc config schema {slug}"),
+            ],
+        }),
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn ops_dispatch(args: &OpsArgs) -> Result<DispatchOutcome> {
+    let catalog = DiscoveryCatalog::load()?;
+    let connector = match catalog.resolve_connector(&args.connector) {
+        Ok(connector) => connector,
+        Err(error) => {
+            return Ok(connector_resolution_dispatch(
+                "ops",
+                &args.connector,
+                &error,
+            ));
+        }
+    };
+    let slug = connector.slug.clone();
+    let operations = connector
+        .operations
+        .iter()
+        .filter(|operation| risk_filter_allows(operation, args.risk_at_most.as_deref()))
+        .map(operation_summary_entry)
+        .collect::<Vec<_>>();
+
+    Ok(DispatchOutcome {
+        payload: json!({
+            "status": "ok",
+            "command": "ops",
+            "source": "workspace-manifests",
+            "message": format!("Listed {} operations for `{slug}`.", operations.len()),
+            "connector": {
+                "slug": &slug,
+                "canonical_id": &connector.detail.summary.id,
+                "name": &connector.detail.summary.name,
+            },
+            "filters": {
+                "risk_at_most": args.risk_at_most.clone(),
+            },
+            "operations": operations,
+            "next_actions": [
+                format!("fwc schema {slug} <operation>"),
+                format!("fwc examples {slug} <operation>"),
+            ],
+        }),
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn schema_dispatch(args: &SchemaArgs) -> Result<DispatchOutcome> {
+    let catalog = DiscoveryCatalog::load()?;
+    let connector = match catalog.resolve_connector(&args.connector) {
+        Ok(connector) => connector,
+        Err(error) => {
+            return Ok(connector_resolution_dispatch(
+                "schema",
+                &args.connector,
+                &error,
+            ));
+        }
+    };
+
+    if let Some(operation_selector) = args.operation.as_deref() {
+        let operation = match connector.resolve_operation(operation_selector) {
+            Ok(operation) => operation,
+            Err(error) => {
+                return Ok(operation_resolution_dispatch(
+                    "schema",
+                    connector,
+                    operation_selector,
+                    &error,
+                ));
+            }
+        };
+
+        return Ok(DispatchOutcome {
+            payload: json!({
+                "status": "ok",
+                "command": "schema",
+                "source": "workspace-manifests",
+                "scope": "operation",
+                "message": "Loaded one operation schema from the connector manifest.",
+                "connector": {
+                    "slug": &connector.slug,
+                    "canonical_id": &connector.detail.summary.id,
+                    "name": &connector.detail.summary.name,
+                },
+                "operation": {
+                    "requested_selector": operation_selector,
+                    "selector": &operation.preferred_selector,
+                    "canonical_id": &operation.actual_id,
+                    "aliases": operation.aliases.clone(),
+                    "summary": &operation.summary.summary,
+                    "capability": &operation.summary.capability,
+                    "risk_level": &operation.summary.risk_level,
+                    "safety_tier": &operation.summary.safety_tier,
+                    "approval_mode": &operation.approval_mode,
+                },
+                "input_schema": operation.input_schema.clone(),
+                "output_schema": operation.output_schema.clone(),
+                "guidance": {
+                    "when_to_use": &operation.when_to_use,
+                    "common_mistakes": operation.common_mistakes.clone(),
+                    "related": operation.related.clone(),
+                },
+                "next_actions": [
+                    format!("fwc examples {} {}", connector.slug, operation.preferred_selector),
+                    format!("fwc simulate {} {} --file payload.json", connector.slug, operation.preferred_selector),
+                ],
+            }),
+            exit_code: CliExitCode::Success,
+        });
+    }
+
+    Ok(DispatchOutcome {
+        payload: json!({
+            "status": "ok",
+            "command": "schema",
+            "source": "workspace-manifests",
+            "scope": "connector",
+            "message": "Loaded the connector contract schema from the manifest.",
+            "connector": {
+                "slug": &connector.slug,
+                "canonical_id": &connector.detail.summary.id,
+                "name": &connector.detail.summary.name,
+            },
+            "schema": connector.connector_schema.clone(),
+            "next_actions": [
+                format!("fwc ops {}", connector.slug),
+                format!("fwc config schema {}", connector.slug),
+            ],
+        }),
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn examples_dispatch(args: &ExampleArgs) -> Result<DispatchOutcome> {
+    let catalog = DiscoveryCatalog::load()?;
+    let connector = match catalog.resolve_connector(&args.connector) {
+        Ok(connector) => connector,
+        Err(error) => {
+            return Ok(connector_resolution_dispatch(
+                "examples",
+                &args.connector,
+                &error,
+            ));
+        }
+    };
+
+    if let Some(operation_selector) = args.operation.as_deref() {
+        let operation = match connector.resolve_operation(operation_selector) {
+            Ok(operation) => operation,
+            Err(error) => {
+                return Ok(operation_resolution_dispatch(
+                    "examples",
+                    connector,
+                    operation_selector,
+                    &error,
+                ));
+            }
+        };
+
+        return Ok(DispatchOutcome {
+            payload: json!({
+                "status": "ok",
+                "command": "examples",
+                "source": "workspace-manifests",
+                "scope": "operation",
+                "message": "Loaded operation examples from the connector manifest.",
+                "connector": {
+                    "slug": &connector.slug,
+                    "canonical_id": &connector.detail.summary.id,
+                    "name": &connector.detail.summary.name,
+                },
+                "operation": {
+                    "requested_selector": operation_selector,
+                    "selector": &operation.preferred_selector,
+                    "canonical_id": &operation.actual_id,
+                    "aliases": operation.aliases.clone(),
+                    "when_to_use": &operation.when_to_use,
+                },
+                "examples": operation.examples.clone(),
+                "common_mistakes": operation.common_mistakes.clone(),
+                "next_actions": [
+                    format!("fwc schema {} {}", connector.slug, operation.preferred_selector),
+                    format!("fwc simulate {} {} --file payload.json", connector.slug, operation.preferred_selector),
+                ],
+            }),
+            exit_code: CliExitCode::Success,
+        });
+    }
+
+    let operation_examples = connector
+        .operations
+        .iter()
+        .filter(|operation| !operation.examples.is_empty())
+        .take(3)
+        .map(|operation| {
+            json!({
+                "selector": &operation.preferred_selector,
+                "canonical_id": &operation.actual_id,
+                "when_to_use": &operation.when_to_use,
+                "example": &operation.examples[0],
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Ok(DispatchOutcome {
+        payload: json!({
+            "status": "ok",
+            "command": "examples",
+            "source": "workspace-manifests",
+            "scope": "connector",
+            "message": "Loaded connector-level examples and suggested follow-up commands.",
+            "connector": {
+                "slug": &connector.slug,
+                "canonical_id": &connector.detail.summary.id,
+                "name": &connector.detail.summary.name,
+            },
+            "examples": {
+                "commands": [
+                    format!("fwc show {}", connector.slug),
+                    format!("fwc ops {}", connector.slug),
+                    format!("fwc config schema {}", connector.slug),
+                ],
+                "operations": operation_examples,
+            },
+            "next_actions": [
+                format!("fwc ops {}", connector.slug),
+                format!("fwc schema {} <operation>", connector.slug),
+            ],
+        }),
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn connector_list_entry(connector: &DiscoveredConnector) -> Value {
+    json!({
+        "slug": &connector.slug,
+        "canonical_id": &connector.detail.summary.id,
+        "name": &connector.detail.summary.name,
+        "description": &connector.detail.summary.description,
+        "version": &connector.detail.summary.version,
+        "cohort": &connector.cohort,
+        "format": &connector.runtime_format,
+        "state": connector.detail.summary.state,
+        "archetypes": connector.detail.summary.archetypes.clone(),
+        "home_zone": connector.zones.get("home").cloned().unwrap_or(Value::Null),
+        "operation_count": connector.detail.summary.operation_count,
+        "max_risk": &connector.detail.summary.max_risk,
+        "has_events": connector.detail.summary.has_events,
+        "next_actions": [
+            format!("fwc show {}", connector.slug),
+            format!("fwc ops {}", connector.slug),
+        ],
+    })
+}
+
+fn operation_summary_entry(operation: &DiscoveredOperation) -> Value {
+    json!({
+        "selector": &operation.preferred_selector,
+        "canonical_id": &operation.actual_id,
+        "local_id": &operation.local_id,
+        "aliases": operation.aliases.clone(),
+        "summary": &operation.summary.summary,
+        "capability": &operation.summary.capability,
+        "risk_level": &operation.summary.risk_level,
+        "safety_tier": &operation.summary.safety_tier,
+        "idempotency": &operation.summary.idempotency,
+        "requires_approval": operation.summary.requires_approval,
+        "supports_simulate": operation.summary.supports_simulate,
+        "example_count": operation.examples.len(),
+        "rate_limits": operation.rate_limits.clone(),
+    })
+}
+
+#[allow(clippy::too_many_lines)]
+fn connector_search_result(connector: &DiscoveredConnector, tokens: &[String]) -> Option<Value> {
+    if tokens.is_empty() {
+        return None;
+    }
+
+    let mut matched_fields = BTreeSet::new();
+    let mut score = 0_i64;
+    let slug = connector.slug.to_lowercase();
+    let canonical_id = connector.detail.summary.id.to_lowercase();
+    let name = connector.detail.summary.name.to_lowercase();
+    let description = connector.detail.summary.description.to_lowercase();
+    let cohort = connector.cohort.to_lowercase();
+
+    for token in tokens {
+        if slug == *token || canonical_id == *token || canonical_id.ends_with(token) {
+            matched_fields.insert("id");
+            score += 30;
+        } else if slug.contains(token) || canonical_id.contains(token) {
+            matched_fields.insert("id");
+            score += 14;
+        }
+        if name.contains(token) {
+            matched_fields.insert("name");
+            score += 12;
+        }
+        if description.contains(token) {
+            matched_fields.insert("description");
+            score += 6;
+        }
+        if cohort.contains(token) {
+            matched_fields.insert("cohort");
+            score += 5;
+        }
+        if connector
+            .detail
+            .summary
+            .archetypes
+            .iter()
+            .any(|archetype| archetype.to_lowercase().contains(token))
+        {
+            matched_fields.insert("archetype");
+            score += 4;
+        }
+    }
+
+    let mut operation_matches = connector
+        .operations
+        .iter()
+        .filter_map(|operation| {
+            let mut operation_score = 0_i64;
+            let operation_corpus = operation
+                .aliases
+                .iter()
+                .map(|alias| alias.to_lowercase())
+                .chain([
+                    operation.actual_id.to_lowercase(),
+                    operation.local_id.to_lowercase(),
+                    operation.summary.capability.to_lowercase(),
+                    operation.description.to_lowercase(),
+                    operation.when_to_use.to_lowercase(),
+                ])
+                .collect::<Vec<_>>();
+
+            for token in tokens {
+                if operation_corpus.iter().any(|candidate| candidate == token) {
+                    operation_score += 16;
+                } else if operation_corpus
+                    .iter()
+                    .any(|candidate| candidate.contains(token))
+                {
+                    operation_score += 7;
+                }
+            }
+
+            (operation_score > 0).then(|| {
+                (
+                    operation_score,
+                    json!({
+                        "selector": &operation.preferred_selector,
+                        "canonical_id": &operation.actual_id,
+                        "summary": &operation.summary.summary,
+                    }),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    operation_matches.sort_by(|left, right| {
+        right.0.cmp(&left.0).then_with(|| {
+            left.1["selector"]
+                .as_str()
+                .cmp(&right.1["selector"].as_str())
+        })
+    });
+
+    if score == 0 && operation_matches.is_empty() {
+        return None;
+    }
+
+    score += operation_matches
+        .iter()
+        .map(|(value, _)| *value)
+        .sum::<i64>();
+    Some(json!({
+        "slug": &connector.slug,
+        "canonical_id": &connector.detail.summary.id,
+        "name": &connector.detail.summary.name,
+        "score": score,
+        "matched_fields": matched_fields,
+        "matched_operations": operation_matches
+            .into_iter()
+            .map(|(_, payload)| payload)
+            .take(3)
+            .collect::<Vec<_>>(),
+        "next_actions": [
+            format!("fwc show {}", connector.slug),
+            format!("fwc ops {}", connector.slug),
+        ],
+    }))
+}
+
+fn search_tokens(query: &str) -> Vec<String> {
+    query
+        .split(|ch: char| {
+            !ch.is_ascii_alphanumeric() && ch != ':' && ch != '.' && ch != '_' && ch != '-'
+        })
+        .filter(|token| !token.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+fn risk_filter_allows(operation: &DiscoveredOperation, risk_at_most: Option<&str>) -> bool {
+    let Some(limit) = risk_at_most else {
+        return true;
+    };
+
+    risk_rank(&operation.summary.risk_level) <= risk_rank(limit)
+}
+
+fn risk_rank(risk: &str) -> u8 {
+    match risk.to_ascii_lowercase().as_str() {
+        "low" => 1,
+        "medium" => 2,
+        "high" => 3,
+        "critical" => 4,
+        _ => u8::MAX,
+    }
+}
+
+fn connector_resolution_dispatch(
+    command: &str,
+    selector: &str,
+    error: &SelectorError,
+) -> DispatchOutcome {
+    let error_type = match error.kind {
+        SelectorErrorKind::NotFound => "connector-not-found",
+        SelectorErrorKind::Ambiguous => "ambiguous-connector",
+    };
+    let message = match error.kind {
+        SelectorErrorKind::NotFound => {
+            format!("`{selector}` did not match any connector in the workspace catalog.")
+        }
+        SelectorErrorKind::Ambiguous => {
+            format!("`{selector}` matches multiple connectors; choose one explicit slug.")
+        }
+    };
+    let examples = if error.suggestions.is_empty() {
+        vec!["fwc list".to_owned()]
+    } else {
+        error
+            .suggestions
+            .iter()
+            .map(|suggestion| format!("fwc {command} {suggestion}"))
+            .collect()
+    };
+
+    discovery_error(
+        command,
+        error_type,
+        message,
+        selector,
+        &error.suggestions,
+        &examples,
+    )
+}
+
+fn operation_resolution_dispatch(
+    command: &str,
+    connector: &DiscoveredConnector,
+    selector: &str,
+    error: &SelectorError,
+) -> DispatchOutcome {
+    let error_type = match error.kind {
+        SelectorErrorKind::NotFound => "operation-not-found",
+        SelectorErrorKind::Ambiguous => "ambiguous-operation",
+    };
+    let message = match error.kind {
+        SelectorErrorKind::NotFound => format!(
+            "`{selector}` did not match any operation exposed by `{}`.",
+            connector.slug
+        ),
+        SelectorErrorKind::Ambiguous => format!(
+            "`{selector}` matches multiple operations on `{}`; choose one explicit selector.",
+            connector.slug
+        ),
+    };
+    let mut examples = if error.suggestions.is_empty() {
+        vec![format!("fwc ops {}", connector.slug)]
+    } else {
+        error
+            .suggestions
+            .iter()
+            .map(|suggestion| format!("fwc {command} {} {suggestion}", connector.slug))
+            .collect::<Vec<_>>()
+    };
+    examples.push(format!("fwc ops {}", connector.slug));
+
+    discovery_error(
+        command,
+        error_type,
+        message,
+        selector,
+        &error.suggestions,
+        &examples,
+    )
+}
+
+fn discovery_error(
+    command: &str,
+    error_type: &str,
+    message: impl Into<String>,
+    selector: &str,
+    suggestions: &[String],
+    examples: &[String],
+) -> DispatchOutcome {
+    DispatchOutcome {
+        payload: json!({
+            "status": "error",
+            "command": command,
+            "error": {
+                "type": error_type,
+                "message": message.into(),
+                "recoverable": true,
+                "selector": selector,
+                "did_you_mean": suggestions,
+                "examples": examples,
+                "next_actions": [
+                    "Use `fwc list` or `fwc search <term>` to narrow the connector first.",
+                    "Use `fwc ops <connector>` before `schema` or `examples` when the operation name is uncertain.",
+                ],
+            },
+        }),
+        exit_code: CliExitCode::Validation,
+    }
 }
 
 fn task_dispatch(args: &TaskArgs) -> Result<DispatchOutcome> {
@@ -2402,6 +3076,14 @@ mod tests {
     use clap::CommandFactory;
     use serde_json::Value;
 
+    fn execute_json(args: &[&str]) -> (std::process::ExitCode, Value) {
+        let owned_args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
+        let outcome = execute(&owned_args).expect("execution should not fail internally");
+        let payload: Value =
+            serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
+        (outcome.exit_code, payload)
+    }
+
     #[test]
     fn clap_command_tree_is_valid() {
         Cli::command().debug_assert();
@@ -3529,6 +4211,126 @@ mod tests {
 
         assert_eq!(outcome.exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "ops");
+    }
+
+    #[test]
+    fn execute_list_returns_manifest_backed_inventory() {
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "list"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "list");
+        assert_eq!(payload["source"], "workspace-manifests");
+        assert!(
+            payload["connectors"]
+                .as_array()
+                .is_some_and(|connectors| !connectors.is_empty())
+        );
+        assert!(
+            payload["connectors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|connector| {
+                    connector["slug"] == "github" && connector["canonical_id"] == "fcp.github"
+                })
+        );
+    }
+
+    #[test]
+    fn execute_search_surfaces_github_issue_matches() {
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "search", "github issue"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "search");
+        assert!(payload["results"].as_array().unwrap().iter().any(|result| {
+            result["slug"] == "github"
+                && result["matched_operations"].as_array().is_some_and(|ops| {
+                    ops.iter()
+                        .any(|op| op["canonical_id"] == "github.create_issue")
+                })
+        }));
+    }
+
+    #[test]
+    fn execute_show_github_returns_manifest_detail() {
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "show", "github"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "show");
+        assert_eq!(payload["source"], "workspace-manifests");
+        assert_eq!(payload["connector"]["slug"], "github");
+        assert_eq!(payload["connector"]["canonical_id"], "fcp.github");
+        assert_eq!(payload["connector"]["format"], "wasi");
+        assert_eq!(payload["connector"]["state"], "unknown");
+        assert_eq!(payload["zones"]["home"], "z:work");
+        assert!(
+            payload["operations"]["preview"]
+                .as_array()
+                .is_some_and(|preview| !preview.is_empty())
+        );
+    }
+
+    #[test]
+    fn execute_ops_filters_out_risky_operations() {
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "ops", "github", "--risk-at-most", "low"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "ops");
+        assert_eq!(payload["connector"]["slug"], "github");
+        assert!(
+            payload["operations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|operation| { operation["risk_level"] == "low" })
+        );
+        assert!(
+            payload["operations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|operation| { operation["canonical_id"] == "github.get_issue" })
+        );
+    }
+
+    #[test]
+    fn execute_schema_resolves_friendly_operation_selector() {
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "schema", "github", "issues.create"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "schema");
+        assert_eq!(payload["scope"], "operation");
+        assert_eq!(payload["operation"]["requested_selector"], "issues.create");
+        assert_eq!(payload["operation"]["selector"], "issues.create");
+        assert_eq!(payload["operation"]["canonical_id"], "github.create_issue");
+        assert_eq!(
+            payload["input_schema"]["properties"]["title"]["type"],
+            "string"
+        );
+        assert_eq!(
+            payload["guidance"]["when_to_use"],
+            "Create a new issue in a GitHub repository."
+        );
+    }
+
+    #[test]
+    fn execute_examples_resolves_friendly_operation_selector() {
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "examples", "github", "issues.create"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "examples");
+        assert_eq!(payload["scope"], "operation");
+        assert_eq!(payload["operation"]["selector"], "issues.create");
+        assert_eq!(payload["operation"]["canonical_id"], "github.create_issue");
+        assert!(payload["examples"].as_array().is_some_and(|examples| {
+            examples
+                .first()
+                .and_then(Value::as_str)
+                .is_some_and(|example| example.contains("\"title\": \"Bug report\""))
+        }));
     }
 
     // ── Intent recovery: config subcommand aliases ──────────────────────

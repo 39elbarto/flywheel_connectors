@@ -113,7 +113,7 @@ async fn lifecycle_introspect() {
     assert_eq!(intro["connector_id"], "fcp.spotify");
     assert_eq!(intro["version"], "0.1.0");
     let ops = intro["operations"].as_array().unwrap();
-    assert_eq!(ops.len(), 10);
+    assert_eq!(ops.len(), 33);
 }
 
 #[fcp_async_core::runtime::test]
@@ -1466,4 +1466,667 @@ async fn empty_200_response() {
         .unwrap();
     // Empty body returns {} which wraps into {"profile": {}}
     assert!(result["profile"].is_object());
+}
+
+// ============================================================
+// Playback Control
+// ============================================================
+
+#[fcp_async_core::runtime::test]
+async fn playback_get_state() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/me/player"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "is_playing": true,
+            "device": {"id": "dev1", "name": "My Speaker", "volume_percent": 50},
+            "item": {"id": "t1", "name": "Track 1"},
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "spotify.playback.get_state",
+            "input": {}
+        }))
+        .await
+        .unwrap();
+    assert!(result["state"]["is_playing"].as_bool().unwrap());
+    assert_eq!(result["state"]["device"]["name"], "My Speaker");
+}
+
+#[fcp_async_core::runtime::test]
+async fn playback_devices() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/me/player/devices"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "devices": [
+                {"id": "dev1", "name": "Laptop", "type": "Computer", "is_active": true},
+                {"id": "dev2", "name": "Phone", "type": "Smartphone", "is_active": false},
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "spotify.playback.devices",
+            "input": {}
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["devices"].as_array().unwrap().len(), 2);
+    assert_eq!(result["devices"][0]["name"], "Laptop");
+}
+
+#[fcp_async_core::runtime::test]
+async fn playback_play() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/me/player/play"))
+        .respond_with(ResponseTemplate::new(204).set_body_string(""))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "spotify.playback.play",
+            "input": {"context_uri": "spotify:album:4aawyAB9vmqN3uQ7FjRGTy"}
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["started"], true);
+}
+
+#[fcp_async_core::runtime::test]
+async fn playback_pause() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/me/player/pause"))
+        .respond_with(ResponseTemplate::new(204).set_body_string(""))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "spotify.playback.pause",
+            "input": {}
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["paused"], true);
+}
+
+#[fcp_async_core::runtime::test]
+async fn playback_skip_next() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/me/player/next"))
+        .respond_with(ResponseTemplate::new(204).set_body_string(""))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "spotify.playback.skip_next",
+            "input": {}
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["skipped"], "next");
+}
+
+#[fcp_async_core::runtime::test]
+async fn playback_skip_previous() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/me/player/previous"))
+        .respond_with(ResponseTemplate::new(204).set_body_string(""))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "spotify.playback.skip_previous",
+            "input": {}
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["skipped"], "previous");
+}
+
+#[fcp_async_core::runtime::test]
+async fn playback_seek() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/me/player/seek"))
+        .and(query_param("position_ms", "30000"))
+        .respond_with(ResponseTemplate::new(204).set_body_string(""))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "spotify.playback.seek",
+            "input": {"position_ms": 30000}
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["seeked_to_ms"], 30000);
+}
+
+#[fcp_async_core::runtime::test]
+async fn playback_volume() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/me/player/volume"))
+        .and(query_param("volume_percent", "75"))
+        .respond_with(ResponseTemplate::new(204).set_body_string(""))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "spotify.playback.volume",
+            "input": {"volume_percent": 75}
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["volume_percent"], 75);
+}
+
+#[fcp_async_core::runtime::test]
+async fn playback_shuffle() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/me/player/shuffle"))
+        .and(query_param("state", "true"))
+        .respond_with(ResponseTemplate::new(204).set_body_string(""))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "spotify.playback.shuffle",
+            "input": {"state": true}
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["shuffle"], true);
+}
+
+#[fcp_async_core::runtime::test]
+async fn playback_repeat() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/me/player/repeat"))
+        .and(query_param("state", "track"))
+        .respond_with(ResponseTemplate::new(204).set_body_string(""))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "spotify.playback.repeat",
+            "input": {"state": "track"}
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["repeat"], "track");
+}
+
+#[fcp_async_core::runtime::test]
+async fn playback_transfer() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/me/player"))
+        .respond_with(ResponseTemplate::new(204).set_body_string(""))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "spotify.playback.transfer",
+            "input": {"device_id": "dev123", "play": true}
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["transferred"], true);
+    assert_eq!(result["device_id"], "dev123");
+}
+
+#[fcp_async_core::runtime::test]
+async fn playback_transfer_missing_device_id() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "spotify.playback.transfer",
+            "input": {}
+        }))
+        .await
+        .is_err()
+    );
+}
+
+// ============================================================
+// Library Management
+// ============================================================
+
+#[fcp_async_core::runtime::test]
+async fn library_tracks_list() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/me/tracks"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "items": [
+                {"track": {"id": "t1", "name": "Track 1"}},
+                {"track": {"id": "t2", "name": "Track 2"}},
+            ],
+            "total": 100,
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "spotify.library.tracks.list",
+            "input": {"limit": 20, "offset": 0}
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["items"].as_array().unwrap().len(), 2);
+    assert_eq!(result["total"], 100);
+}
+
+#[fcp_async_core::runtime::test]
+async fn library_tracks_save() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/me/tracks"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(""))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "spotify.library.tracks.save",
+            "input": {"ids": ["t1", "t2"]}
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["saved"], true);
+}
+
+#[fcp_async_core::runtime::test]
+async fn library_tracks_remove() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/me/tracks"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(""))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "spotify.library.tracks.remove",
+            "input": {"ids": ["t1"]}
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["removed"], true);
+}
+
+#[fcp_async_core::runtime::test]
+async fn library_tracks_check() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/me/tracks/contains"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!([true, false])),
+        )
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "spotify.library.tracks.check",
+            "input": {"ids": ["t1", "t2"]}
+        }))
+        .await
+        .unwrap();
+    let results = result["results"].as_array().unwrap();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0], true);
+    assert_eq!(results[1], false);
+}
+
+#[fcp_async_core::runtime::test]
+async fn library_albums_list() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/me/albums"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "items": [{"album": {"id": "a1", "name": "Kind of Blue"}}],
+            "total": 50,
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "spotify.library.albums.list",
+            "input": {"limit": 10, "offset": 0}
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["items"].as_array().unwrap().len(), 1);
+    assert_eq!(result["total"], 50);
+}
+
+#[fcp_async_core::runtime::test]
+async fn library_albums_save() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/me/albums"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(""))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "spotify.library.albums.save",
+            "input": {"ids": ["a1"]}
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["saved"], true);
+}
+
+#[fcp_async_core::runtime::test]
+async fn library_albums_remove() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/me/albums"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(""))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "spotify.library.albums.remove",
+            "input": {"ids": ["a1"]}
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["removed"], true);
+}
+
+#[fcp_async_core::runtime::test]
+async fn library_tracks_save_missing_ids() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "spotify.library.tracks.save",
+            "input": {}
+        }))
+        .await
+        .is_err()
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn library_tracks_remove_missing_ids() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "spotify.library.tracks.remove",
+            "input": {}
+        }))
+        .await
+        .is_err()
+    );
+}
+
+// ============================================================
+// Playlist CRUD
+// ============================================================
+
+#[fcp_async_core::runtime::test]
+async fn playlist_create() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/users/user123/playlists"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "id": "pl_new",
+            "name": "My New Playlist",
+            "public": false,
+            "description": "A test playlist",
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "spotify.playlist.create",
+            "input": {
+                "user_id": "user123",
+                "name": "My New Playlist",
+                "public": false,
+                "description": "A test playlist"
+            }
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["playlist"]["id"], "pl_new");
+    assert_eq!(result["playlist"]["name"], "My New Playlist");
+}
+
+#[fcp_async_core::runtime::test]
+async fn playlist_create_missing_name() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "spotify.playlist.create",
+            "input": {"user_id": "user123"}
+        }))
+        .await
+        .is_err()
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn playlist_update() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/playlists/pl123"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(""))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "spotify.playlist.update",
+            "input": {
+                "playlist_id": "pl123",
+                "name": "Renamed Playlist",
+                "description": "Updated description"
+            }
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["updated"], true);
+}
+
+#[fcp_async_core::runtime::test]
+async fn playlist_tracks_list() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/playlists/pl123/tracks"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "items": [
+                {"track": {"id": "t1", "name": "Song 1"}},
+                {"track": {"id": "t2", "name": "Song 2"}},
+            ],
+            "total": 42,
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "spotify.playlist.tracks.list",
+            "input": {"playlist_id": "pl123", "limit": 20, "offset": 0}
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["items"].as_array().unwrap().len(), 2);
+    assert_eq!(result["total"], 42);
+}
+
+#[fcp_async_core::runtime::test]
+async fn playlist_tracks_add() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/playlists/pl123/tracks"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "snapshot_id": "snap_abc123"
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "spotify.playlist.tracks.add",
+            "input": {
+                "playlist_id": "pl123",
+                "uris": ["spotify:track:t1", "spotify:track:t2"]
+            }
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["snapshot_id"], "snap_abc123");
+}
+
+#[fcp_async_core::runtime::test]
+async fn playlist_tracks_remove() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/playlists/pl123/tracks"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "snapshot_id": "snap_def456"
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "spotify.playlist.tracks.remove",
+            "input": {
+                "playlist_id": "pl123",
+                "uris": ["spotify:track:t1"]
+            }
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["snapshot_id"], "snap_def456");
+}
+
+#[fcp_async_core::runtime::test]
+async fn playlist_tracks_add_missing_uris() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "spotify.playlist.tracks.add",
+            "input": {"playlist_id": "pl123"}
+        }))
+        .await
+        .is_err()
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn playlist_tracks_remove_missing_playlist_id() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "spotify.playlist.tracks.remove",
+            "input": {"uris": ["spotify:track:t1"]}
+        }))
+        .await
+        .is_err()
+    );
+}
+
+// ============================================================
+// Simulate for new operations
+// ============================================================
+
+#[fcp_async_core::runtime::test]
+async fn simulate_playback_play() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_simulate(json!({"operation_id": "spotify.playback.play"}))
+            .await
+            .unwrap()["allowed"]
+            .as_bool()
+            .unwrap()
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn simulate_library_tracks_save() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_simulate(json!({"operation_id": "spotify.library.tracks.save"}))
+            .await
+            .unwrap()["allowed"]
+            .as_bool()
+            .unwrap()
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn simulate_playlist_create() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_simulate(json!({"operation_id": "spotify.playlist.create"}))
+            .await
+            .unwrap()["allowed"]
+            .as_bool()
+            .unwrap()
+    );
 }

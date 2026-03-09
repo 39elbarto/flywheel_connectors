@@ -153,6 +153,88 @@ impl SpotifyClient {
         self.handle_response(resp).await
     }
 
+    #[instrument(skip(self, body), fields(url))]
+    async fn put(&self, path: &str, body: &serde_json::Value) -> SpotifyResult<serde_json::Value> {
+        let url = format!("{}{path}", self.base_url);
+        debug!(url = %url, "PUT request");
+        let req = self
+            .add_auth(self.client.put(&url))
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json")
+            .json(body);
+        let resp = req.send().await?;
+        self.handle_response(resp).await
+    }
+
+    #[instrument(skip(self), fields(url))]
+    async fn put_empty(&self, path: &str) -> SpotifyResult<serde_json::Value> {
+        let url = format!("{}{path}", self.base_url);
+        debug!(url = %url, "PUT (empty body) request");
+        let req = self
+            .add_auth(self.client.put(&url))
+            .header("Accept", "application/json")
+            .header("Content-Length", "0");
+        let resp = req.send().await?;
+        self.handle_response(resp).await
+    }
+
+    #[instrument(skip(self, body), fields(url))]
+    async fn post(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> SpotifyResult<serde_json::Value> {
+        let url = format!("{}{path}", self.base_url);
+        debug!(url = %url, "POST request");
+        let req = self
+            .add_auth(self.client.post(&url))
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json")
+            .json(body);
+        let resp = req.send().await?;
+        self.handle_response(resp).await
+    }
+
+    #[instrument(skip(self), fields(url))]
+    async fn post_empty(&self, path: &str) -> SpotifyResult<serde_json::Value> {
+        let url = format!("{}{path}", self.base_url);
+        debug!(url = %url, "POST (empty body) request");
+        let req = self
+            .add_auth(self.client.post(&url))
+            .header("Accept", "application/json")
+            .header("Content-Length", "0");
+        let resp = req.send().await?;
+        self.handle_response(resp).await
+    }
+
+    #[instrument(skip(self), fields(url))]
+    async fn delete(&self, path: &str) -> SpotifyResult<serde_json::Value> {
+        let url = format!("{}{path}", self.base_url);
+        debug!(url = %url, "DELETE request");
+        let req = self
+            .add_auth(self.client.delete(&url))
+            .header("Accept", "application/json");
+        let resp = req.send().await?;
+        self.handle_response(resp).await
+    }
+
+    #[instrument(skip(self, body), fields(url))]
+    async fn delete_with_body(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> SpotifyResult<serde_json::Value> {
+        let url = format!("{}{path}", self.base_url);
+        debug!(url = %url, "DELETE (with body) request");
+        let req = self
+            .add_auth(self.client.delete(&url))
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json")
+            .json(body);
+        let resp = req.send().await?;
+        self.handle_response(resp).await
+    }
+
     // -- Profile --
 
     /// Get the current user's profile.
@@ -243,6 +325,278 @@ impl SpotifyClient {
     ) -> SpotifyResult<serde_json::Value> {
         self.get(&format!(
             "/recommendations?seed_artists={seed_artists}&seed_genres={seed_genres}&limit={limit}"
+        ))
+        .await
+    }
+
+    // -- Playback Control --
+
+    /// Get the current playback state.
+    pub async fn get_playback_state(&self) -> SpotifyResult<serde_json::Value> {
+        self.get("/me/player").await
+    }
+
+    /// Get available devices.
+    pub async fn get_devices(&self) -> SpotifyResult<serde_json::Value> {
+        self.get("/me/player/devices").await
+    }
+
+    /// Start or resume playback.
+    pub async fn play(
+        &self,
+        device_id: Option<&str>,
+        context_uri: Option<&str>,
+        uris: Option<&[String]>,
+    ) -> SpotifyResult<serde_json::Value> {
+        let mut path = "/me/player/play".to_string();
+        if let Some(did) = device_id {
+            path = format!("{path}?device_id={did}");
+        }
+        let mut body = serde_json::json!({});
+        if let Some(ctx) = context_uri {
+            body["context_uri"] = serde_json::json!(ctx);
+        }
+        if let Some(u) = uris {
+            body["uris"] = serde_json::json!(u);
+        }
+        self.put(&path, &body).await
+    }
+
+    /// Pause playback.
+    pub async fn pause(
+        &self,
+        device_id: Option<&str>,
+    ) -> SpotifyResult<serde_json::Value> {
+        let mut path = "/me/player/pause".to_string();
+        if let Some(did) = device_id {
+            path = format!("{path}?device_id={did}");
+        }
+        self.put_empty(&path).await
+    }
+
+    /// Skip to next track.
+    pub async fn skip_next(
+        &self,
+        device_id: Option<&str>,
+    ) -> SpotifyResult<serde_json::Value> {
+        let mut path = "/me/player/next".to_string();
+        if let Some(did) = device_id {
+            path = format!("{path}?device_id={did}");
+        }
+        self.post_empty(&path).await
+    }
+
+    /// Skip to previous track.
+    pub async fn skip_previous(
+        &self,
+        device_id: Option<&str>,
+    ) -> SpotifyResult<serde_json::Value> {
+        let mut path = "/me/player/previous".to_string();
+        if let Some(did) = device_id {
+            path = format!("{path}?device_id={did}");
+        }
+        self.post_empty(&path).await
+    }
+
+    /// Seek to a position in the currently playing track.
+    pub async fn seek(
+        &self,
+        position_ms: u64,
+        device_id: Option<&str>,
+    ) -> SpotifyResult<serde_json::Value> {
+        let mut path = format!("/me/player/seek?position_ms={position_ms}");
+        if let Some(did) = device_id {
+            path = format!("{path}&device_id={did}");
+        }
+        self.put_empty(&path).await
+    }
+
+    /// Set the playback volume.
+    pub async fn set_volume(
+        &self,
+        volume_percent: u32,
+        device_id: Option<&str>,
+    ) -> SpotifyResult<serde_json::Value> {
+        let mut path = format!("/me/player/volume?volume_percent={volume_percent}");
+        if let Some(did) = device_id {
+            path = format!("{path}&device_id={did}");
+        }
+        self.put_empty(&path).await
+    }
+
+    /// Set shuffle mode.
+    pub async fn set_shuffle(
+        &self,
+        state: bool,
+        device_id: Option<&str>,
+    ) -> SpotifyResult<serde_json::Value> {
+        let mut path = format!("/me/player/shuffle?state={state}");
+        if let Some(did) = device_id {
+            path = format!("{path}&device_id={did}");
+        }
+        self.put_empty(&path).await
+    }
+
+    /// Set repeat mode.
+    pub async fn set_repeat(
+        &self,
+        state: &str,
+        device_id: Option<&str>,
+    ) -> SpotifyResult<serde_json::Value> {
+        let mut path = format!("/me/player/repeat?state={state}");
+        if let Some(did) = device_id {
+            path = format!("{path}&device_id={did}");
+        }
+        self.put_empty(&path).await
+    }
+
+    /// Transfer playback to a new device.
+    pub async fn transfer_playback(
+        &self,
+        device_id: &str,
+        play: bool,
+    ) -> SpotifyResult<serde_json::Value> {
+        let body = serde_json::json!({
+            "device_ids": [device_id],
+            "play": play,
+        });
+        self.put("/me/player", &body).await
+    }
+
+    // -- Library Management --
+
+    /// Get the current user's saved tracks.
+    pub async fn get_saved_tracks(
+        &self,
+        limit: u32,
+        offset: u32,
+    ) -> SpotifyResult<serde_json::Value> {
+        self.get(&format!("/me/tracks?limit={limit}&offset={offset}"))
+            .await
+    }
+
+    /// Save tracks to the current user's library.
+    pub async fn save_tracks(&self, ids: &[String]) -> SpotifyResult<serde_json::Value> {
+        let body = serde_json::json!({ "ids": ids });
+        self.put("/me/tracks", &body).await
+    }
+
+    /// Remove tracks from the current user's library.
+    pub async fn remove_saved_tracks(&self, ids: &[String]) -> SpotifyResult<serde_json::Value> {
+        let body = serde_json::json!({ "ids": ids });
+        self.delete_with_body("/me/tracks", &body).await
+    }
+
+    /// Check if tracks are saved in the current user's library.
+    pub async fn check_saved_tracks(&self, ids: &[String]) -> SpotifyResult<serde_json::Value> {
+        let ids_str = ids.join(",");
+        self.get(&format!("/me/tracks/contains?ids={ids_str}"))
+            .await
+    }
+
+    /// Get the current user's saved albums.
+    pub async fn get_saved_albums(
+        &self,
+        limit: u32,
+        offset: u32,
+    ) -> SpotifyResult<serde_json::Value> {
+        self.get(&format!("/me/albums?limit={limit}&offset={offset}"))
+            .await
+    }
+
+    /// Save albums to the current user's library.
+    pub async fn save_albums(&self, ids: &[String]) -> SpotifyResult<serde_json::Value> {
+        let body = serde_json::json!({ "ids": ids });
+        self.put("/me/albums", &body).await
+    }
+
+    /// Remove albums from the current user's library.
+    pub async fn remove_saved_albums(&self, ids: &[String]) -> SpotifyResult<serde_json::Value> {
+        let body = serde_json::json!({ "ids": ids });
+        self.delete_with_body("/me/albums", &body).await
+    }
+
+    // -- Playlist CRUD --
+
+    /// Create a new playlist.
+    pub async fn create_playlist(
+        &self,
+        user_id: &str,
+        name: &str,
+        public: bool,
+        description: Option<&str>,
+    ) -> SpotifyResult<serde_json::Value> {
+        let mut body = serde_json::json!({
+            "name": name,
+            "public": public,
+        });
+        if let Some(desc) = description {
+            body["description"] = serde_json::json!(desc);
+        }
+        self.post(&format!("/users/{user_id}/playlists"), &body)
+            .await
+    }
+
+    /// Update an existing playlist's details.
+    pub async fn update_playlist(
+        &self,
+        playlist_id: &str,
+        name: Option<&str>,
+        public: Option<bool>,
+        description: Option<&str>,
+    ) -> SpotifyResult<serde_json::Value> {
+        let mut body = serde_json::json!({});
+        if let Some(n) = name {
+            body["name"] = serde_json::json!(n);
+        }
+        if let Some(p) = public {
+            body["public"] = serde_json::json!(p);
+        }
+        if let Some(d) = description {
+            body["description"] = serde_json::json!(d);
+        }
+        self.put(&format!("/playlists/{playlist_id}"), &body).await
+    }
+
+    /// Add tracks to a playlist.
+    pub async fn add_tracks_to_playlist(
+        &self,
+        playlist_id: &str,
+        uris: &[String],
+        position: Option<u32>,
+    ) -> SpotifyResult<serde_json::Value> {
+        let mut body = serde_json::json!({ "uris": uris });
+        if let Some(pos) = position {
+            body["position"] = serde_json::json!(pos);
+        }
+        self.post(&format!("/playlists/{playlist_id}/tracks"), &body)
+            .await
+    }
+
+    /// Remove tracks from a playlist.
+    pub async fn remove_tracks_from_playlist(
+        &self,
+        playlist_id: &str,
+        uris: &[String],
+    ) -> SpotifyResult<serde_json::Value> {
+        let tracks: Vec<serde_json::Value> = uris
+            .iter()
+            .map(|u| serde_json::json!({"uri": u}))
+            .collect();
+        let body = serde_json::json!({ "tracks": tracks });
+        self.delete_with_body(&format!("/playlists/{playlist_id}/tracks"), &body)
+            .await
+    }
+
+    /// Get tracks from a playlist.
+    pub async fn get_playlist_tracks(
+        &self,
+        playlist_id: &str,
+        limit: u32,
+        offset: u32,
+    ) -> SpotifyResult<serde_json::Value> {
+        self.get(&format!(
+            "/playlists/{playlist_id}/tracks?limit={limit}&offset={offset}"
         ))
         .await
     }

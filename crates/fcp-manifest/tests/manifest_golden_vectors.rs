@@ -4177,12 +4177,32 @@ fn spotify_full_manifest_parses_with_all_operations() {
         "spotify.library.list_saved_tracks",
         "spotify.library.remove_track",
         "spotify.library.save_track",
+        "spotify.library.tracks.list",
+        "spotify.library.tracks.save",
+        "spotify.library.tracks.remove",
+        "spotify.library.tracks.check",
+        "spotify.library.albums.list",
+        "spotify.library.albums.save",
+        "spotify.library.albums.remove",
         "spotify.media.download_cover",
         "spotify.playback.get_state",
         "spotify.playback.pause",
         "spotify.playback.play",
+        "spotify.playback.devices",
+        "spotify.playback.skip_next",
+        "spotify.playback.skip_previous",
+        "spotify.playback.seek",
+        "spotify.playback.volume",
+        "spotify.playback.shuffle",
+        "spotify.playback.repeat",
+        "spotify.playback.transfer",
         "spotify.player.stream",
         "spotify.playlist.get",
+        "spotify.playlist.create",
+        "spotify.playlist.update",
+        "spotify.playlist.tracks.list",
+        "spotify.playlist.tracks.add",
+        "spotify.playlist.tracks.remove",
         "spotify.search",
         "spotify.track.get",
     ];
@@ -4192,7 +4212,7 @@ fn spotify_full_manifest_parses_with_all_operations() {
     assert_eq!(ops.len(), expected_ops.len());
 
     let pools = parsed.rate_limits.as_ref().expect("rate_limits");
-    assert_eq!(pools.pools.len(), 5);
+    assert_eq!(pools.pools.len(), 6);
 }
 
 // =============================================================================

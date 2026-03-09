@@ -512,6 +512,886 @@ common_mistakes = ["No active playback device."]
 examples = ["{}"]
 related = ["spotify.playback.play", "spotify.playback.get_state"]
 
+# ── Additional playback control operations ─────────────────────────────────────
+
+[provides.operations."spotify.playback.devices"]
+description = "List available playback devices"
+capability = "spotify.playback.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."spotify.playback.devices".input_schema]
+required = []
+type = "object"
+
+[provides.operations."spotify.playback.devices".output_schema]
+required = ["devices"]
+type = "object"
+[provides.operations."spotify.playback.devices".output_schema.properties.devices]
+type = "array"
+
+[provides.operations."spotify.playback.devices".network_constraints]
+host_allow = ["api.spotify.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."spotify.playback.devices".ai_hints]
+when_to_use = "List available Spotify Connect devices."
+common_mistakes = []
+examples = ["{}"]
+related = ["spotify.playback.transfer"]
+
+[provides.operations."spotify.playback.skip_next"]
+description = "Skip to the next track"
+capability = "spotify.playback.write"
+risk_level = "low"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "best_effort"
+
+[provides.operations."spotify.playback.skip_next".input_schema]
+required = []
+type = "object"
+[provides.operations."spotify.playback.skip_next".input_schema.properties.device_id]
+type = "string"
+
+[provides.operations."spotify.playback.skip_next".output_schema]
+required = ["skipped"]
+type = "object"
+[provides.operations."spotify.playback.skip_next".output_schema.properties.skipped]
+type = "string"
+
+[provides.operations."spotify.playback.skip_next".network_constraints]
+host_allow = ["api.spotify.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."spotify.playback.skip_next".ai_hints]
+when_to_use = "Skip to the next track in the queue."
+common_mistakes = []
+examples = ["{}"]
+related = ["spotify.playback.skip_previous"]
+
+[provides.operations."spotify.playback.skip_previous"]
+description = "Skip to the previous track"
+capability = "spotify.playback.write"
+risk_level = "low"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "best_effort"
+
+[provides.operations."spotify.playback.skip_previous".input_schema]
+required = []
+type = "object"
+[provides.operations."spotify.playback.skip_previous".input_schema.properties.device_id]
+type = "string"
+
+[provides.operations."spotify.playback.skip_previous".output_schema]
+required = ["skipped"]
+type = "object"
+[provides.operations."spotify.playback.skip_previous".output_schema.properties.skipped]
+type = "string"
+
+[provides.operations."spotify.playback.skip_previous".network_constraints]
+host_allow = ["api.spotify.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."spotify.playback.skip_previous".ai_hints]
+when_to_use = "Skip to the previous track."
+common_mistakes = []
+examples = ["{}"]
+related = ["spotify.playback.skip_next"]
+
+[provides.operations."spotify.playback.seek"]
+description = "Seek to position in current track"
+capability = "spotify.playback.write"
+risk_level = "low"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "best_effort"
+
+[provides.operations."spotify.playback.seek".input_schema]
+required = ["position_ms"]
+type = "object"
+[provides.operations."spotify.playback.seek".input_schema.properties.position_ms]
+type = "integer"
+minimum = 0
+[provides.operations."spotify.playback.seek".input_schema.properties.device_id]
+type = "string"
+
+[provides.operations."spotify.playback.seek".output_schema]
+required = ["seeked_to_ms"]
+type = "object"
+[provides.operations."spotify.playback.seek".output_schema.properties.seeked_to_ms]
+type = "integer"
+
+[provides.operations."spotify.playback.seek".network_constraints]
+host_allow = ["api.spotify.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."spotify.playback.seek".ai_hints]
+when_to_use = "Seek to a specific position in the currently playing track."
+common_mistakes = ["Seeking beyond track duration."]
+examples = ['{"position_ms": 30000}']
+related = ["spotify.playback.get_state"]
+
+[provides.operations."spotify.playback.volume"]
+description = "Set playback volume"
+capability = "spotify.playback.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "best_effort"
+
+[provides.operations."spotify.playback.volume".input_schema]
+required = ["volume_percent"]
+type = "object"
+[provides.operations."spotify.playback.volume".input_schema.properties.volume_percent]
+type = "integer"
+minimum = 0
+maximum = 100
+[provides.operations."spotify.playback.volume".input_schema.properties.device_id]
+type = "string"
+
+[provides.operations."spotify.playback.volume".output_schema]
+required = ["volume_percent"]
+type = "object"
+[provides.operations."spotify.playback.volume".output_schema.properties.volume_percent]
+type = "integer"
+
+[provides.operations."spotify.playback.volume".network_constraints]
+host_allow = ["api.spotify.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."spotify.playback.volume".ai_hints]
+when_to_use = "Adjust playback volume."
+common_mistakes = ["Setting volume too high unexpectedly."]
+examples = ['{"volume_percent": 50}']
+related = ["spotify.playback.get_state"]
+
+[provides.operations."spotify.playback.shuffle"]
+description = "Set shuffle mode"
+capability = "spotify.playback.write"
+risk_level = "low"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "best_effort"
+
+[provides.operations."spotify.playback.shuffle".input_schema]
+required = ["state"]
+type = "object"
+[provides.operations."spotify.playback.shuffle".input_schema.properties.state]
+type = "boolean"
+[provides.operations."spotify.playback.shuffle".input_schema.properties.device_id]
+type = "string"
+
+[provides.operations."spotify.playback.shuffle".output_schema]
+required = ["shuffle"]
+type = "object"
+[provides.operations."spotify.playback.shuffle".output_schema.properties.shuffle]
+type = "boolean"
+
+[provides.operations."spotify.playback.shuffle".network_constraints]
+host_allow = ["api.spotify.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."spotify.playback.shuffle".ai_hints]
+when_to_use = "Enable or disable shuffle mode."
+common_mistakes = []
+examples = ['{"state": true}']
+related = ["spotify.playback.repeat"]
+
+[provides.operations."spotify.playback.repeat"]
+description = "Set repeat mode"
+capability = "spotify.playback.write"
+risk_level = "low"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "best_effort"
+
+[provides.operations."spotify.playback.repeat".input_schema]
+required = ["state"]
+type = "object"
+[provides.operations."spotify.playback.repeat".input_schema.properties.state]
+type = "string"
+enum = ["track", "context", "off"]
+[provides.operations."spotify.playback.repeat".input_schema.properties.device_id]
+type = "string"
+
+[provides.operations."spotify.playback.repeat".output_schema]
+required = ["repeat"]
+type = "object"
+[provides.operations."spotify.playback.repeat".output_schema.properties.repeat]
+type = "string"
+
+[provides.operations."spotify.playback.repeat".network_constraints]
+host_allow = ["api.spotify.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."spotify.playback.repeat".ai_hints]
+when_to_use = "Set repeat mode to track, context, or off."
+common_mistakes = ["Using invalid state value."]
+examples = ['{"state": "track"}']
+related = ["spotify.playback.shuffle"]
+
+[provides.operations."spotify.playback.transfer"]
+description = "Transfer playback to another device"
+capability = "spotify.playback.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "best_effort"
+
+[provides.operations."spotify.playback.transfer".input_schema]
+required = ["device_id"]
+type = "object"
+[provides.operations."spotify.playback.transfer".input_schema.properties.device_id]
+type = "string"
+[provides.operations."spotify.playback.transfer".input_schema.properties.play]
+type = "boolean"
+
+[provides.operations."spotify.playback.transfer".output_schema]
+required = ["transferred"]
+type = "object"
+[provides.operations."spotify.playback.transfer".output_schema.properties.transferred]
+type = "boolean"
+[provides.operations."spotify.playback.transfer".output_schema.properties.device_id]
+type = "string"
+
+[provides.operations."spotify.playback.transfer".network_constraints]
+host_allow = ["api.spotify.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."spotify.playback.transfer".ai_hints]
+when_to_use = "Move playback to a different Spotify Connect device."
+common_mistakes = ["Target device not available or offline."]
+examples = ['{"device_id": "abc123", "play": true}']
+related = ["spotify.playback.devices"]
+
+# ── Library management operations ──────────────────────────────────────────────
+
+[provides.operations."spotify.library.tracks.list"]
+description = "List saved tracks in user library"
+capability = "spotify.library.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."spotify.library.tracks.list".input_schema]
+required = []
+type = "object"
+[provides.operations."spotify.library.tracks.list".input_schema.properties.limit]
+type = "integer"
+minimum = 1
+maximum = 50
+[provides.operations."spotify.library.tracks.list".input_schema.properties.offset]
+type = "integer"
+minimum = 0
+
+[provides.operations."spotify.library.tracks.list".output_schema]
+required = ["items"]
+type = "object"
+[provides.operations."spotify.library.tracks.list".output_schema.properties.items]
+type = "array"
+[provides.operations."spotify.library.tracks.list".output_schema.properties.total]
+type = "integer"
+
+[provides.operations."spotify.library.tracks.list".network_constraints]
+host_allow = ["api.spotify.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."spotify.library.tracks.list".ai_hints]
+when_to_use = "List the current user's saved/liked tracks."
+common_mistakes = ["Forgetting pagination for large libraries."]
+examples = ['{"limit": 20, "offset": 0}']
+related = ["spotify.library.tracks.save", "spotify.library.tracks.remove"]
+
+[provides.operations."spotify.library.tracks.save"]
+description = "Save tracks to user library"
+capability = "spotify.library.write"
+risk_level = "low"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."spotify.library.tracks.save".input_schema]
+required = ["ids"]
+type = "object"
+[provides.operations."spotify.library.tracks.save".input_schema.properties.ids]
+type = "array"
+
+[provides.operations."spotify.library.tracks.save".output_schema]
+required = ["saved"]
+type = "object"
+[provides.operations."spotify.library.tracks.save".output_schema.properties.saved]
+type = "boolean"
+
+[provides.operations."spotify.library.tracks.save".network_constraints]
+host_allow = ["api.spotify.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."spotify.library.tracks.save".ai_hints]
+when_to_use = "Save/like tracks to the user's library."
+common_mistakes = ["Passing URIs instead of track IDs."]
+examples = ['{"ids": ["11dFghVXANMlKmJXsNCbNl"]}']
+related = ["spotify.library.tracks.list", "spotify.library.tracks.remove"]
+
+[provides.operations."spotify.library.tracks.remove"]
+description = "Remove tracks from user library"
+capability = "spotify.library.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."spotify.library.tracks.remove".input_schema]
+required = ["ids"]
+type = "object"
+[provides.operations."spotify.library.tracks.remove".input_schema.properties.ids]
+type = "array"
+
+[provides.operations."spotify.library.tracks.remove".output_schema]
+required = ["removed"]
+type = "object"
+[provides.operations."spotify.library.tracks.remove".output_schema.properties.removed]
+type = "boolean"
+
+[provides.operations."spotify.library.tracks.remove".network_constraints]
+host_allow = ["api.spotify.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."spotify.library.tracks.remove".ai_hints]
+when_to_use = "Remove saved tracks from the user's library."
+common_mistakes = ["Removing a track that is not saved — API returns success silently."]
+examples = ['{"ids": ["11dFghVXANMlKmJXsNCbNl"]}']
+related = ["spotify.library.tracks.list", "spotify.library.tracks.save"]
+
+[provides.operations."spotify.library.tracks.check"]
+description = "Check if tracks are saved in user library"
+capability = "spotify.library.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."spotify.library.tracks.check".input_schema]
+required = ["ids"]
+type = "object"
+[provides.operations."spotify.library.tracks.check".input_schema.properties.ids]
+type = "array"
+
+[provides.operations."spotify.library.tracks.check".output_schema]
+required = ["results"]
+type = "object"
+[provides.operations."spotify.library.tracks.check".output_schema.properties.results]
+type = "array"
+
+[provides.operations."spotify.library.tracks.check".network_constraints]
+host_allow = ["api.spotify.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."spotify.library.tracks.check".ai_hints]
+when_to_use = "Check whether specific tracks are in the user's library."
+common_mistakes = []
+examples = ['{"ids": ["11dFghVXANMlKmJXsNCbNl"]}']
+related = ["spotify.library.tracks.list"]
+
+[provides.operations."spotify.library.albums.list"]
+description = "List saved albums in user library"
+capability = "spotify.library.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."spotify.library.albums.list".input_schema]
+required = []
+type = "object"
+[provides.operations."spotify.library.albums.list".input_schema.properties.limit]
+type = "integer"
+minimum = 1
+maximum = 50
+[provides.operations."spotify.library.albums.list".input_schema.properties.offset]
+type = "integer"
+minimum = 0
+
+[provides.operations."spotify.library.albums.list".output_schema]
+required = ["items"]
+type = "object"
+[provides.operations."spotify.library.albums.list".output_schema.properties.items]
+type = "array"
+[provides.operations."spotify.library.albums.list".output_schema.properties.total]
+type = "integer"
+
+[provides.operations."spotify.library.albums.list".network_constraints]
+host_allow = ["api.spotify.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."spotify.library.albums.list".ai_hints]
+when_to_use = "List the current user's saved albums."
+common_mistakes = ["Forgetting pagination for large libraries."]
+examples = ['{"limit": 20, "offset": 0}']
+related = ["spotify.library.albums.save", "spotify.library.albums.remove"]
+
+[provides.operations."spotify.library.albums.save"]
+description = "Save albums to user library"
+capability = "spotify.library.write"
+risk_level = "low"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."spotify.library.albums.save".input_schema]
+required = ["ids"]
+type = "object"
+[provides.operations."spotify.library.albums.save".input_schema.properties.ids]
+type = "array"
+
+[provides.operations."spotify.library.albums.save".output_schema]
+required = ["saved"]
+type = "object"
+[provides.operations."spotify.library.albums.save".output_schema.properties.saved]
+type = "boolean"
+
+[provides.operations."spotify.library.albums.save".network_constraints]
+host_allow = ["api.spotify.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."spotify.library.albums.save".ai_hints]
+when_to_use = "Save albums to the user's library."
+common_mistakes = ["Passing URIs instead of album IDs."]
+examples = ['{"ids": ["4aawyAB9vmqN3uQ7FjRGTy"]}']
+related = ["spotify.library.albums.list", "spotify.library.albums.remove"]
+
+[provides.operations."spotify.library.albums.remove"]
+description = "Remove albums from user library"
+capability = "spotify.library.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."spotify.library.albums.remove".input_schema]
+required = ["ids"]
+type = "object"
+[provides.operations."spotify.library.albums.remove".input_schema.properties.ids]
+type = "array"
+
+[provides.operations."spotify.library.albums.remove".output_schema]
+required = ["removed"]
+type = "object"
+[provides.operations."spotify.library.albums.remove".output_schema.properties.removed]
+type = "boolean"
+
+[provides.operations."spotify.library.albums.remove".network_constraints]
+host_allow = ["api.spotify.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."spotify.library.albums.remove".ai_hints]
+when_to_use = "Remove saved albums from the user's library."
+common_mistakes = ["Removing an album that is not saved — API returns success silently."]
+examples = ['{"ids": ["4aawyAB9vmqN3uQ7FjRGTy"]}']
+related = ["spotify.library.albums.list", "spotify.library.albums.save"]
+
+# ── Playlist CRUD operations ──────────────────────────────────────────────────
+
+[provides.operations."spotify.playlist.create"]
+description = "Create a new playlist"
+capability = "spotify.playlists.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "best_effort"
+
+[provides.operations."spotify.playlist.create".input_schema]
+required = ["user_id", "name"]
+type = "object"
+[provides.operations."spotify.playlist.create".input_schema.properties.user_id]
+type = "string"
+[provides.operations."spotify.playlist.create".input_schema.properties.name]
+type = "string"
+[provides.operations."spotify.playlist.create".input_schema.properties.public]
+type = "boolean"
+[provides.operations."spotify.playlist.create".input_schema.properties.description]
+type = "string"
+
+[provides.operations."spotify.playlist.create".output_schema]
+required = ["playlist"]
+type = "object"
+[provides.operations."spotify.playlist.create".output_schema.properties.playlist]
+type = "object"
+
+[provides.operations."spotify.playlist.create".network_constraints]
+host_allow = ["api.spotify.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."spotify.playlist.create".ai_hints]
+when_to_use = "Create a new playlist for a user."
+common_mistakes = ["Not providing the user_id of the playlist owner."]
+examples = ['{"user_id": "user123", "name": "My Playlist", "public": false}']
+related = ["spotify.playlist.update", "spotify.playlist.tracks.add"]
+
+[provides.operations."spotify.playlist.update"]
+description = "Update playlist details"
+capability = "spotify.playlists.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "best_effort"
+
+[provides.operations."spotify.playlist.update".input_schema]
+required = ["playlist_id"]
+type = "object"
+[provides.operations."spotify.playlist.update".input_schema.properties.playlist_id]
+type = "string"
+[provides.operations."spotify.playlist.update".input_schema.properties.name]
+type = "string"
+[provides.operations."spotify.playlist.update".input_schema.properties.public]
+type = "boolean"
+[provides.operations."spotify.playlist.update".input_schema.properties.description]
+type = "string"
+
+[provides.operations."spotify.playlist.update".output_schema]
+required = ["updated"]
+type = "object"
+[provides.operations."spotify.playlist.update".output_schema.properties.updated]
+type = "boolean"
+
+[provides.operations."spotify.playlist.update".network_constraints]
+host_allow = ["api.spotify.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."spotify.playlist.update".ai_hints]
+when_to_use = "Update a playlist's name, description, or visibility."
+common_mistakes = []
+examples = ['{"playlist_id": "abc123", "name": "Renamed Playlist"}']
+related = ["spotify.playlist.create", "spotify.playlist.get"]
+
+[provides.operations."spotify.playlist.tracks.list"]
+description = "List tracks in a playlist"
+capability = "spotify.playlists.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."spotify.playlist.tracks.list".input_schema]
+required = ["playlist_id"]
+type = "object"
+[provides.operations."spotify.playlist.tracks.list".input_schema.properties.playlist_id]
+type = "string"
+[provides.operations."spotify.playlist.tracks.list".input_schema.properties.limit]
+type = "integer"
+minimum = 1
+maximum = 100
+[provides.operations."spotify.playlist.tracks.list".input_schema.properties.offset]
+type = "integer"
+minimum = 0
+
+[provides.operations."spotify.playlist.tracks.list".output_schema]
+required = ["items"]
+type = "object"
+[provides.operations."spotify.playlist.tracks.list".output_schema.properties.items]
+type = "array"
+[provides.operations."spotify.playlist.tracks.list".output_schema.properties.total]
+type = "integer"
+
+[provides.operations."spotify.playlist.tracks.list".network_constraints]
+host_allow = ["api.spotify.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 4194304
+
+[provides.operations."spotify.playlist.tracks.list".ai_hints]
+when_to_use = "List the tracks in a specific playlist with pagination."
+common_mistakes = ["Forgetting pagination for large playlists."]
+examples = ['{"playlist_id": "37i9dQZF1DXcBWIGoYBM5M", "limit": 20}']
+related = ["spotify.playlist.tracks.add", "spotify.playlist.tracks.remove"]
+
+[provides.operations."spotify.playlist.tracks.add"]
+description = "Add tracks to a playlist"
+capability = "spotify.playlists.write"
+risk_level = "low"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "best_effort"
+
+[provides.operations."spotify.playlist.tracks.add".input_schema]
+required = ["playlist_id", "uris"]
+type = "object"
+[provides.operations."spotify.playlist.tracks.add".input_schema.properties.playlist_id]
+type = "string"
+[provides.operations."spotify.playlist.tracks.add".input_schema.properties.uris]
+type = "array"
+[provides.operations."spotify.playlist.tracks.add".input_schema.properties.position]
+type = "integer"
+minimum = 0
+
+[provides.operations."spotify.playlist.tracks.add".output_schema]
+type = "object"
+[provides.operations."spotify.playlist.tracks.add".output_schema.properties.snapshot_id]
+type = "string"
+
+[provides.operations."spotify.playlist.tracks.add".network_constraints]
+host_allow = ["api.spotify.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."spotify.playlist.tracks.add".ai_hints]
+when_to_use = "Add tracks to an existing playlist."
+common_mistakes = ["Using track IDs instead of track URIs (must be spotify:track:...)."]
+examples = ['{"playlist_id": "abc123", "uris": ["spotify:track:t1"]}']
+related = ["spotify.playlist.tracks.remove", "spotify.playlist.tracks.list"]
+
+[provides.operations."spotify.playlist.tracks.remove"]
+description = "Remove tracks from a playlist"
+capability = "spotify.playlists.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "best_effort"
+
+[provides.operations."spotify.playlist.tracks.remove".input_schema]
+required = ["playlist_id", "uris"]
+type = "object"
+[provides.operations."spotify.playlist.tracks.remove".input_schema.properties.playlist_id]
+type = "string"
+[provides.operations."spotify.playlist.tracks.remove".input_schema.properties.uris]
+type = "array"
+
+[provides.operations."spotify.playlist.tracks.remove".output_schema]
+type = "object"
+[provides.operations."spotify.playlist.tracks.remove".output_schema.properties.snapshot_id]
+type = "string"
+
+[provides.operations."spotify.playlist.tracks.remove".network_constraints]
+host_allow = ["api.spotify.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."spotify.playlist.tracks.remove".ai_hints]
+when_to_use = "Remove tracks from an existing playlist."
+common_mistakes = ["Using track IDs instead of track URIs."]
+examples = ['{"playlist_id": "abc123", "uris": ["spotify:track:t1"]}']
+related = ["spotify.playlist.tracks.add", "spotify.playlist.tracks.list"]
+
 # ── Streaming + media operations ───────────────────────────────────────────────
 
 [provides.operations."spotify.player.stream"]
@@ -653,6 +1533,13 @@ window_ms = 3600000
 burst = 20
 scope = "instance"
 
+[[rate_limits.pools]]
+id = "spotify.playlists"
+requests = 600
+window_ms = 3600000
+burst = 30
+scope = "instance"
+
 [rate_limits.operation_pools]
 "spotify.search" = ["spotify.read"]
 "spotify.track.get" = ["spotify.read"]
@@ -665,5 +1552,25 @@ scope = "instance"
 "spotify.playback.get_state" = ["spotify.playback"]
 "spotify.playback.play" = ["spotify.playback"]
 "spotify.playback.pause" = ["spotify.playback"]
+"spotify.playback.devices" = ["spotify.playback"]
+"spotify.playback.skip_next" = ["spotify.playback"]
+"spotify.playback.skip_previous" = ["spotify.playback"]
+"spotify.playback.seek" = ["spotify.playback"]
+"spotify.playback.volume" = ["spotify.playback"]
+"spotify.playback.shuffle" = ["spotify.playback"]
+"spotify.playback.repeat" = ["spotify.playback"]
+"spotify.playback.transfer" = ["spotify.playback"]
+"spotify.library.tracks.list" = ["spotify.library"]
+"spotify.library.tracks.save" = ["spotify.library"]
+"spotify.library.tracks.remove" = ["spotify.library"]
+"spotify.library.tracks.check" = ["spotify.library"]
+"spotify.library.albums.list" = ["spotify.library"]
+"spotify.library.albums.save" = ["spotify.library"]
+"spotify.library.albums.remove" = ["spotify.library"]
+"spotify.playlist.create" = ["spotify.playlists"]
+"spotify.playlist.update" = ["spotify.playlists"]
+"spotify.playlist.tracks.list" = ["spotify.playlists"]
+"spotify.playlist.tracks.add" = ["spotify.playlists"]
+"spotify.playlist.tracks.remove" = ["spotify.playlists"]
 "spotify.player.stream" = ["spotify.stream"]
 "spotify.media.download_cover" = ["spotify.media"]

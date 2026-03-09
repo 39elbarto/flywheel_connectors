@@ -427,6 +427,54 @@ impl SpotifyConnector {
             "spotify.player.recently_played" => self.invoke_recently_played(client, &input).await,
             "spotify.top_items" => self.invoke_top_items(client, &input).await,
             "spotify.recommendations.get" => self.invoke_recommendations(client, &input).await,
+            // Playback control
+            "spotify.playback.get_state" => self.invoke_playback_get_state(client).await,
+            "spotify.playback.devices" => self.invoke_playback_devices(client).await,
+            "spotify.playback.play" => self.invoke_playback_play(client, &input).await,
+            "spotify.playback.pause" => self.invoke_playback_pause(client, &input).await,
+            "spotify.playback.skip_next" => self.invoke_playback_skip_next(client, &input).await,
+            "spotify.playback.skip_previous" => {
+                self.invoke_playback_skip_previous(client, &input).await
+            }
+            "spotify.playback.seek" => self.invoke_playback_seek(client, &input).await,
+            "spotify.playback.volume" => self.invoke_playback_volume(client, &input).await,
+            "spotify.playback.shuffle" => self.invoke_playback_shuffle(client, &input).await,
+            "spotify.playback.repeat" => self.invoke_playback_repeat(client, &input).await,
+            "spotify.playback.transfer" => self.invoke_playback_transfer(client, &input).await,
+            // Library management
+            "spotify.library.tracks.list" => {
+                self.invoke_library_tracks_list(client, &input).await
+            }
+            "spotify.library.tracks.save" => {
+                self.invoke_library_tracks_save(client, &input).await
+            }
+            "spotify.library.tracks.remove" => {
+                self.invoke_library_tracks_remove(client, &input).await
+            }
+            "spotify.library.tracks.check" => {
+                self.invoke_library_tracks_check(client, &input).await
+            }
+            "spotify.library.albums.list" => {
+                self.invoke_library_albums_list(client, &input).await
+            }
+            "spotify.library.albums.save" => {
+                self.invoke_library_albums_save(client, &input).await
+            }
+            "spotify.library.albums.remove" => {
+                self.invoke_library_albums_remove(client, &input).await
+            }
+            // Playlist CRUD
+            "spotify.playlist.create" => self.invoke_playlist_create(client, &input).await,
+            "spotify.playlist.update" => self.invoke_playlist_update(client, &input).await,
+            "spotify.playlist.tracks.list" => {
+                self.invoke_playlist_tracks_list(client, &input).await
+            }
+            "spotify.playlist.tracks.add" => {
+                self.invoke_playlist_tracks_add(client, &input).await
+            }
+            "spotify.playlist.tracks.remove" => {
+                self.invoke_playlist_tracks_remove(client, &input).await
+            }
             _ => {
                 return Err(FcpError::InvalidRequest {
                     code: 1002,
@@ -603,6 +651,331 @@ impl SpotifyConnector {
         Ok(json!({ "tracks": tracks }))
     }
 
+    // -- Playback Control --
+
+    async fn invoke_playback_get_state(
+        &self,
+        client: &SpotifyClient,
+    ) -> Result<serde_json::Value, SpotifyError> {
+        let resp = client.get_playback_state().await?;
+        Ok(json!({ "state": resp }))
+    }
+
+    async fn invoke_playback_devices(
+        &self,
+        client: &SpotifyClient,
+    ) -> Result<serde_json::Value, SpotifyError> {
+        let resp = client.get_devices().await?;
+        let devices = resp.get("devices").cloned().unwrap_or_else(|| json!([]));
+        Ok(json!({ "devices": devices }))
+    }
+
+    async fn invoke_playback_play(
+        &self,
+        client: &SpotifyClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, SpotifyError> {
+        let device_id = input.get("device_id").and_then(serde_json::Value::as_str);
+        let context_uri = input.get("context_uri").and_then(serde_json::Value::as_str);
+        let uris = input
+            .get("uris")
+            .and_then(serde_json::Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            });
+        client
+            .play(device_id, context_uri, uris.as_deref())
+            .await?;
+        Ok(json!({ "started": true }))
+    }
+
+    async fn invoke_playback_pause(
+        &self,
+        client: &SpotifyClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, SpotifyError> {
+        let device_id = input.get("device_id").and_then(serde_json::Value::as_str);
+        client.pause(device_id).await?;
+        Ok(json!({ "paused": true }))
+    }
+
+    async fn invoke_playback_skip_next(
+        &self,
+        client: &SpotifyClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, SpotifyError> {
+        let device_id = input.get("device_id").and_then(serde_json::Value::as_str);
+        client.skip_next(device_id).await?;
+        Ok(json!({ "skipped": "next" }))
+    }
+
+    async fn invoke_playback_skip_previous(
+        &self,
+        client: &SpotifyClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, SpotifyError> {
+        let device_id = input.get("device_id").and_then(serde_json::Value::as_str);
+        client.skip_previous(device_id).await?;
+        Ok(json!({ "skipped": "previous" }))
+    }
+
+    async fn invoke_playback_seek(
+        &self,
+        client: &SpotifyClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, SpotifyError> {
+        let position_ms = input
+            .get("position_ms")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let device_id = input.get("device_id").and_then(serde_json::Value::as_str);
+        client.seek(position_ms, device_id).await?;
+        Ok(json!({ "seeked_to_ms": position_ms }))
+    }
+
+    async fn invoke_playback_volume(
+        &self,
+        client: &SpotifyClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, SpotifyError> {
+        let volume_percent = input
+            .get("volume_percent")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(50) as u32;
+        let device_id = input.get("device_id").and_then(serde_json::Value::as_str);
+        client.set_volume(volume_percent, device_id).await?;
+        Ok(json!({ "volume_percent": volume_percent }))
+    }
+
+    async fn invoke_playback_shuffle(
+        &self,
+        client: &SpotifyClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, SpotifyError> {
+        let state = input
+            .get("state")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let device_id = input.get("device_id").and_then(serde_json::Value::as_str);
+        client.set_shuffle(state, device_id).await?;
+        Ok(json!({ "shuffle": state }))
+    }
+
+    async fn invoke_playback_repeat(
+        &self,
+        client: &SpotifyClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, SpotifyError> {
+        let state = input
+            .get("state")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("off");
+        let device_id = input.get("device_id").and_then(serde_json::Value::as_str);
+        client.set_repeat(state, device_id).await?;
+        Ok(json!({ "repeat": state }))
+    }
+
+    async fn invoke_playback_transfer(
+        &self,
+        client: &SpotifyClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, SpotifyError> {
+        let device_id = require_str(input, "device_id")?;
+        let play = input
+            .get("play")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        client.transfer_playback(device_id, play).await?;
+        Ok(json!({ "transferred": true, "device_id": device_id }))
+    }
+
+    // -- Library Management --
+
+    async fn invoke_library_tracks_list(
+        &self,
+        client: &SpotifyClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, SpotifyError> {
+        let limit = input
+            .get("limit")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(20) as u32;
+        let offset = input
+            .get("offset")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0) as u32;
+        let resp = client.get_saved_tracks(limit, offset).await?;
+        Ok(json!({
+            "items": resp.get("items").cloned().unwrap_or(serde_json::Value::Null),
+            "total": resp.get("total").cloned().unwrap_or(serde_json::Value::Null),
+        }))
+    }
+
+    async fn invoke_library_tracks_save(
+        &self,
+        client: &SpotifyClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, SpotifyError> {
+        let ids = extract_string_array(input, "ids")?;
+        client.save_tracks(&ids).await?;
+        Ok(json!({ "saved": true }))
+    }
+
+    async fn invoke_library_tracks_remove(
+        &self,
+        client: &SpotifyClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, SpotifyError> {
+        let ids = extract_string_array(input, "ids")?;
+        client.remove_saved_tracks(&ids).await?;
+        Ok(json!({ "removed": true }))
+    }
+
+    async fn invoke_library_tracks_check(
+        &self,
+        client: &SpotifyClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, SpotifyError> {
+        let ids = extract_string_array(input, "ids")?;
+        let resp = client.check_saved_tracks(&ids).await?;
+        Ok(json!({ "results": resp }))
+    }
+
+    async fn invoke_library_albums_list(
+        &self,
+        client: &SpotifyClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, SpotifyError> {
+        let limit = input
+            .get("limit")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(20) as u32;
+        let offset = input
+            .get("offset")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0) as u32;
+        let resp = client.get_saved_albums(limit, offset).await?;
+        Ok(json!({
+            "items": resp.get("items").cloned().unwrap_or(serde_json::Value::Null),
+            "total": resp.get("total").cloned().unwrap_or(serde_json::Value::Null),
+        }))
+    }
+
+    async fn invoke_library_albums_save(
+        &self,
+        client: &SpotifyClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, SpotifyError> {
+        let ids = extract_string_array(input, "ids")?;
+        client.save_albums(&ids).await?;
+        Ok(json!({ "saved": true }))
+    }
+
+    async fn invoke_library_albums_remove(
+        &self,
+        client: &SpotifyClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, SpotifyError> {
+        let ids = extract_string_array(input, "ids")?;
+        client.remove_saved_albums(&ids).await?;
+        Ok(json!({ "removed": true }))
+    }
+
+    // -- Playlist CRUD --
+
+    async fn invoke_playlist_create(
+        &self,
+        client: &SpotifyClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, SpotifyError> {
+        let user_id = require_str(input, "user_id")?;
+        let name = require_str(input, "name")?;
+        let public = input
+            .get("public")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let description = input
+            .get("description")
+            .and_then(serde_json::Value::as_str);
+        let resp = client
+            .create_playlist(user_id, name, public, description)
+            .await?;
+        Ok(json!({ "playlist": resp }))
+    }
+
+    async fn invoke_playlist_update(
+        &self,
+        client: &SpotifyClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, SpotifyError> {
+        let playlist_id = require_str(input, "playlist_id")?;
+        let name = input.get("name").and_then(serde_json::Value::as_str);
+        let public = input.get("public").and_then(serde_json::Value::as_bool);
+        let description = input
+            .get("description")
+            .and_then(serde_json::Value::as_str);
+        client
+            .update_playlist(playlist_id, name, public, description)
+            .await?;
+        Ok(json!({ "updated": true }))
+    }
+
+    async fn invoke_playlist_tracks_list(
+        &self,
+        client: &SpotifyClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, SpotifyError> {
+        let playlist_id = require_str(input, "playlist_id")?;
+        let limit = input
+            .get("limit")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(20) as u32;
+        let offset = input
+            .get("offset")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0) as u32;
+        let resp = client
+            .get_playlist_tracks(playlist_id, limit, offset)
+            .await?;
+        Ok(json!({
+            "items": resp.get("items").cloned().unwrap_or(serde_json::Value::Null),
+            "total": resp.get("total").cloned().unwrap_or(serde_json::Value::Null),
+        }))
+    }
+
+    async fn invoke_playlist_tracks_add(
+        &self,
+        client: &SpotifyClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, SpotifyError> {
+        let playlist_id = require_str(input, "playlist_id")?;
+        let uris = extract_string_array(input, "uris")?;
+        let position = input
+            .get("position")
+            .and_then(serde_json::Value::as_u64)
+            .map(|v| v as u32);
+        let resp = client
+            .add_tracks_to_playlist(playlist_id, &uris, position)
+            .await?;
+        Ok(json!({ "snapshot_id": resp.get("snapshot_id").cloned().unwrap_or(serde_json::Value::Null) }))
+    }
+
+    async fn invoke_playlist_tracks_remove(
+        &self,
+        client: &SpotifyClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, SpotifyError> {
+        let playlist_id = require_str(input, "playlist_id")?;
+        let uris = extract_string_array(input, "uris")?;
+        let resp = client
+            .remove_tracks_from_playlist(playlist_id, &uris)
+            .await?;
+        Ok(json!({ "snapshot_id": resp.get("snapshot_id").cloned().unwrap_or(serde_json::Value::Null) }))
+    }
+
     fn serialize_self_check_report(report: SelfCheckReport) -> FcpResult<serde_json::Value> {
         info!(
             event = "spotify.provisioning.self_check",
@@ -634,8 +1007,12 @@ pub fn provisioning_recipe() -> ProvisioningRecipe {
                 scopes: vec![
                     "user-read-playback-state".into(),
                     "user-read-currently-playing".into(),
+                    "user-modify-playback-state".into(),
                     "user-library-read".into(),
+                    "user-library-modify".into(),
                     "playlist-read-private".into(),
+                    "playlist-modify-public".into(),
+                    "playlist-modify-private".into(),
                     "user-read-email".into(),
                     "user-read-private".into(),
                 ],
@@ -703,6 +1080,26 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
         .ok_or_else(|| SpotifyError::Api {
             status_code: 400,
             message: format!("Missing required field: {field}"),
+        })
+}
+
+/// Extract a required array of strings from input.
+fn extract_string_array(
+    input: &serde_json::Value,
+    field: &str,
+) -> Result<Vec<String>, SpotifyError> {
+    input
+        .get(field)
+        .and_then(serde_json::Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .ok_or_else(|| SpotifyError::Api {
+            status_code: 400,
+            message: format!("Missing required array field: {field}"),
         })
 }
 
@@ -1066,6 +1463,744 @@ fn operations_info() -> Vec<OperationInfo> {
                 ],
             },
         ),
+        // ── Playback Control ─────────────────────────────────────────
+        op_info(
+            "spotify.playback.get_state",
+            "Get current playback state and active device",
+            json!({ "type": "object", "properties": {} }),
+            json!({
+                "type": "object",
+                "required": ["state"],
+                "properties": { "state": { "type": "object" } }
+            }),
+            "spotify.playback.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Read current playback state before issuing control operations.".into(),
+                common_mistakes: vec![
+                    "Assuming an active playback device always exists.".into(),
+                ],
+                examples: vec!["{}".into()],
+                related: vec![
+                    CapabilityId::from_static("spotify.playback.play"),
+                    CapabilityId::from_static("spotify.playback.pause"),
+                ],
+            },
+        ),
+        op_info(
+            "spotify.playback.devices",
+            "List available playback devices",
+            json!({ "type": "object", "properties": {} }),
+            json!({
+                "type": "object",
+                "required": ["devices"],
+                "properties": { "devices": { "type": "array" } }
+            }),
+            "spotify.playback.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List available Spotify Connect devices.".into(),
+                common_mistakes: vec![],
+                examples: vec!["{}".into()],
+                related: vec![
+                    CapabilityId::from_static("spotify.playback.transfer"),
+                ],
+            },
+        ),
+        op_info(
+            "spotify.playback.play",
+            "Start or resume playback",
+            json!({
+                "type": "object",
+                "properties": {
+                    "device_id": { "type": "string" },
+                    "context_uri": { "type": "string" },
+                    "uris": { "type": "array", "items": { "type": "string" } }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["started"],
+                "properties": { "started": { "type": "boolean" } }
+            }),
+            "spotify.playback.control",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::BestEffort,
+            AgentHint {
+                when_to_use: "Start or resume playback on a Spotify device.".into(),
+                common_mistakes: vec![
+                    "No active device available.".into(),
+                    "Sending both context_uri and uris.".into(),
+                ],
+                examples: vec![
+                    r#"{"context_uri": "spotify:album:4aawyAB9vmqN3uQ7FjRGTy"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("spotify.playback.pause"),
+                    CapabilityId::from_static("spotify.playback.get_state"),
+                ],
+            },
+        ),
+        op_info(
+            "spotify.playback.pause",
+            "Pause playback",
+            json!({
+                "type": "object",
+                "properties": {
+                    "device_id": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["paused"],
+                "properties": { "paused": { "type": "boolean" } }
+            }),
+            "spotify.playback.control",
+            RiskLevel::Low,
+            SafetyTier::Risky,
+            IdempotencyClass::BestEffort,
+            AgentHint {
+                when_to_use: "Pause current playback.".into(),
+                common_mistakes: vec!["No active playback device.".into()],
+                examples: vec!["{}".into()],
+                related: vec![
+                    CapabilityId::from_static("spotify.playback.play"),
+                    CapabilityId::from_static("spotify.playback.get_state"),
+                ],
+            },
+        ),
+        op_info(
+            "spotify.playback.skip_next",
+            "Skip to next track",
+            json!({
+                "type": "object",
+                "properties": {
+                    "device_id": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["skipped"],
+                "properties": { "skipped": { "type": "string" } }
+            }),
+            "spotify.playback.control",
+            RiskLevel::Low,
+            SafetyTier::Risky,
+            IdempotencyClass::BestEffort,
+            AgentHint {
+                when_to_use: "Skip to the next track in the queue.".into(),
+                common_mistakes: vec![],
+                examples: vec!["{}".into()],
+                related: vec![
+                    CapabilityId::from_static("spotify.playback.skip_previous"),
+                ],
+            },
+        ),
+        op_info(
+            "spotify.playback.skip_previous",
+            "Skip to previous track",
+            json!({
+                "type": "object",
+                "properties": {
+                    "device_id": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["skipped"],
+                "properties": { "skipped": { "type": "string" } }
+            }),
+            "spotify.playback.control",
+            RiskLevel::Low,
+            SafetyTier::Risky,
+            IdempotencyClass::BestEffort,
+            AgentHint {
+                when_to_use: "Skip to the previous track.".into(),
+                common_mistakes: vec![],
+                examples: vec!["{}".into()],
+                related: vec![
+                    CapabilityId::from_static("spotify.playback.skip_next"),
+                ],
+            },
+        ),
+        op_info(
+            "spotify.playback.seek",
+            "Seek to position in current track",
+            json!({
+                "type": "object",
+                "required": ["position_ms"],
+                "properties": {
+                    "position_ms": { "type": "integer", "minimum": 0 },
+                    "device_id": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["seeked_to_ms"],
+                "properties": { "seeked_to_ms": { "type": "integer" } }
+            }),
+            "spotify.playback.control",
+            RiskLevel::Low,
+            SafetyTier::Risky,
+            IdempotencyClass::BestEffort,
+            AgentHint {
+                when_to_use: "Seek to a specific position in the currently playing track.".into(),
+                common_mistakes: vec![
+                    "Seeking beyond track duration.".into(),
+                ],
+                examples: vec![
+                    r#"{"position_ms": 30000}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("spotify.playback.get_state"),
+                ],
+            },
+        ),
+        op_info(
+            "spotify.playback.volume",
+            "Set playback volume",
+            json!({
+                "type": "object",
+                "required": ["volume_percent"],
+                "properties": {
+                    "volume_percent": { "type": "integer", "minimum": 0, "maximum": 100 },
+                    "device_id": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["volume_percent"],
+                "properties": { "volume_percent": { "type": "integer" } }
+            }),
+            "spotify.playback.control",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::BestEffort,
+            AgentHint {
+                when_to_use: "Adjust playback volume.".into(),
+                common_mistakes: vec![
+                    "Setting volume too high unexpectedly.".into(),
+                ],
+                examples: vec![
+                    r#"{"volume_percent": 50}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("spotify.playback.get_state"),
+                ],
+            },
+        ),
+        op_info(
+            "spotify.playback.shuffle",
+            "Set shuffle mode",
+            json!({
+                "type": "object",
+                "required": ["state"],
+                "properties": {
+                    "state": { "type": "boolean" },
+                    "device_id": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["shuffle"],
+                "properties": { "shuffle": { "type": "boolean" } }
+            }),
+            "spotify.playback.control",
+            RiskLevel::Low,
+            SafetyTier::Risky,
+            IdempotencyClass::BestEffort,
+            AgentHint {
+                when_to_use: "Enable or disable shuffle mode.".into(),
+                common_mistakes: vec![],
+                examples: vec![r#"{"state": true}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("spotify.playback.repeat"),
+                ],
+            },
+        ),
+        op_info(
+            "spotify.playback.repeat",
+            "Set repeat mode",
+            json!({
+                "type": "object",
+                "required": ["state"],
+                "properties": {
+                    "state": { "type": "string", "enum": ["track", "context", "off"] },
+                    "device_id": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["repeat"],
+                "properties": { "repeat": { "type": "string" } }
+            }),
+            "spotify.playback.control",
+            RiskLevel::Low,
+            SafetyTier::Risky,
+            IdempotencyClass::BestEffort,
+            AgentHint {
+                when_to_use: "Set repeat mode to track, context, or off.".into(),
+                common_mistakes: vec![
+                    "Using invalid state value (must be track, context, or off).".into(),
+                ],
+                examples: vec![r#"{"state": "track"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("spotify.playback.shuffle"),
+                ],
+            },
+        ),
+        op_info(
+            "spotify.playback.transfer",
+            "Transfer playback to another device",
+            json!({
+                "type": "object",
+                "required": ["device_id"],
+                "properties": {
+                    "device_id": { "type": "string" },
+                    "play": { "type": "boolean" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["transferred"],
+                "properties": {
+                    "transferred": { "type": "boolean" },
+                    "device_id": { "type": "string" }
+                }
+            }),
+            "spotify.playback.control",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::BestEffort,
+            AgentHint {
+                when_to_use: "Move playback to a different Spotify Connect device.".into(),
+                common_mistakes: vec![
+                    "Target device not available or offline.".into(),
+                ],
+                examples: vec![
+                    r#"{"device_id": "abc123", "play": true}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("spotify.playback.devices"),
+                ],
+            },
+        ),
+        // ── Library Management ───────────────────────────────────────
+        op_info(
+            "spotify.library.tracks.list",
+            "List saved tracks in user library",
+            json!({
+                "type": "object",
+                "properties": {
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 50 },
+                    "offset": { "type": "integer", "minimum": 0 }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["items"],
+                "properties": {
+                    "items": { "type": "array" },
+                    "total": { "type": "integer" }
+                }
+            }),
+            "spotify.library.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List the current user's saved/liked tracks.".into(),
+                common_mistakes: vec![
+                    "Forgetting pagination for large libraries.".into(),
+                ],
+                examples: vec![r#"{"limit": 20, "offset": 0}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("spotify.library.tracks.save"),
+                    CapabilityId::from_static("spotify.library.tracks.remove"),
+                ],
+            },
+        ),
+        op_info(
+            "spotify.library.tracks.save",
+            "Save tracks to user library",
+            json!({
+                "type": "object",
+                "required": ["ids"],
+                "properties": {
+                    "ids": { "type": "array", "items": { "type": "string" } }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["saved"],
+                "properties": { "saved": { "type": "boolean" } }
+            }),
+            "spotify.library.write",
+            RiskLevel::Low,
+            SafetyTier::Risky,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Save/like tracks to the user's library.".into(),
+                common_mistakes: vec![
+                    "Passing URIs instead of track IDs.".into(),
+                ],
+                examples: vec![
+                    r#"{"ids": ["11dFghVXANMlKmJXsNCbNl"]}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("spotify.library.tracks.list"),
+                    CapabilityId::from_static("spotify.library.tracks.remove"),
+                ],
+            },
+        ),
+        op_info(
+            "spotify.library.tracks.remove",
+            "Remove tracks from user library",
+            json!({
+                "type": "object",
+                "required": ["ids"],
+                "properties": {
+                    "ids": { "type": "array", "items": { "type": "string" } }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["removed"],
+                "properties": { "removed": { "type": "boolean" } }
+            }),
+            "spotify.library.write",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Remove saved tracks from the user's library.".into(),
+                common_mistakes: vec![
+                    "Removing a track that is not saved — API returns success silently.".into(),
+                ],
+                examples: vec![
+                    r#"{"ids": ["11dFghVXANMlKmJXsNCbNl"]}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("spotify.library.tracks.list"),
+                    CapabilityId::from_static("spotify.library.tracks.save"),
+                ],
+            },
+        ),
+        op_info(
+            "spotify.library.tracks.check",
+            "Check if tracks are saved in user library",
+            json!({
+                "type": "object",
+                "required": ["ids"],
+                "properties": {
+                    "ids": { "type": "array", "items": { "type": "string" } }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["results"],
+                "properties": { "results": { "type": "array" } }
+            }),
+            "spotify.library.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Check whether specific tracks are in the user's library.".into(),
+                common_mistakes: vec![],
+                examples: vec![
+                    r#"{"ids": ["11dFghVXANMlKmJXsNCbNl"]}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("spotify.library.tracks.list"),
+                ],
+            },
+        ),
+        op_info(
+            "spotify.library.albums.list",
+            "List saved albums in user library",
+            json!({
+                "type": "object",
+                "properties": {
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 50 },
+                    "offset": { "type": "integer", "minimum": 0 }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["items"],
+                "properties": {
+                    "items": { "type": "array" },
+                    "total": { "type": "integer" }
+                }
+            }),
+            "spotify.library.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List the current user's saved albums.".into(),
+                common_mistakes: vec![
+                    "Forgetting pagination for large libraries.".into(),
+                ],
+                examples: vec![r#"{"limit": 20, "offset": 0}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("spotify.library.albums.save"),
+                    CapabilityId::from_static("spotify.library.albums.remove"),
+                ],
+            },
+        ),
+        op_info(
+            "spotify.library.albums.save",
+            "Save albums to user library",
+            json!({
+                "type": "object",
+                "required": ["ids"],
+                "properties": {
+                    "ids": { "type": "array", "items": { "type": "string" } }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["saved"],
+                "properties": { "saved": { "type": "boolean" } }
+            }),
+            "spotify.library.write",
+            RiskLevel::Low,
+            SafetyTier::Risky,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Save albums to the user's library.".into(),
+                common_mistakes: vec![
+                    "Passing URIs instead of album IDs.".into(),
+                ],
+                examples: vec![
+                    r#"{"ids": ["4aawyAB9vmqN3uQ7FjRGTy"]}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("spotify.library.albums.list"),
+                    CapabilityId::from_static("spotify.library.albums.remove"),
+                ],
+            },
+        ),
+        op_info(
+            "spotify.library.albums.remove",
+            "Remove albums from user library",
+            json!({
+                "type": "object",
+                "required": ["ids"],
+                "properties": {
+                    "ids": { "type": "array", "items": { "type": "string" } }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["removed"],
+                "properties": { "removed": { "type": "boolean" } }
+            }),
+            "spotify.library.write",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Remove saved albums from the user's library.".into(),
+                common_mistakes: vec![
+                    "Removing an album that is not saved — API returns success silently.".into(),
+                ],
+                examples: vec![
+                    r#"{"ids": ["4aawyAB9vmqN3uQ7FjRGTy"]}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("spotify.library.albums.list"),
+                    CapabilityId::from_static("spotify.library.albums.save"),
+                ],
+            },
+        ),
+        // ── Playlist CRUD ────────────────────────────────────────────
+        op_info(
+            "spotify.playlist.create",
+            "Create a new playlist",
+            json!({
+                "type": "object",
+                "required": ["user_id", "name"],
+                "properties": {
+                    "user_id": { "type": "string" },
+                    "name": { "type": "string" },
+                    "public": { "type": "boolean" },
+                    "description": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["playlist"],
+                "properties": { "playlist": { "type": "object" } }
+            }),
+            "spotify.playlists.write",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::BestEffort,
+            AgentHint {
+                when_to_use: "Create a new playlist for a user.".into(),
+                common_mistakes: vec![
+                    "Not providing the user_id of the playlist owner.".into(),
+                ],
+                examples: vec![
+                    r#"{"user_id": "user123", "name": "My Playlist", "public": false}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("spotify.playlist.update"),
+                    CapabilityId::from_static("spotify.playlist.tracks.add"),
+                ],
+            },
+        ),
+        op_info(
+            "spotify.playlist.update",
+            "Update playlist details",
+            json!({
+                "type": "object",
+                "required": ["playlist_id"],
+                "properties": {
+                    "playlist_id": { "type": "string" },
+                    "name": { "type": "string" },
+                    "public": { "type": "boolean" },
+                    "description": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["updated"],
+                "properties": { "updated": { "type": "boolean" } }
+            }),
+            "spotify.playlists.write",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::BestEffort,
+            AgentHint {
+                when_to_use: "Update a playlist's name, description, or visibility.".into(),
+                common_mistakes: vec![],
+                examples: vec![
+                    r#"{"playlist_id": "abc123", "name": "Renamed Playlist"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("spotify.playlist.create"),
+                    CapabilityId::from_static("spotify.playlists.get"),
+                ],
+            },
+        ),
+        op_info(
+            "spotify.playlist.tracks.list",
+            "List tracks in a playlist",
+            json!({
+                "type": "object",
+                "required": ["playlist_id"],
+                "properties": {
+                    "playlist_id": { "type": "string" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
+                    "offset": { "type": "integer", "minimum": 0 }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["items"],
+                "properties": {
+                    "items": { "type": "array" },
+                    "total": { "type": "integer" }
+                }
+            }),
+            "spotify.playlists.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List the tracks in a specific playlist with pagination.".into(),
+                common_mistakes: vec![
+                    "Forgetting pagination for large playlists.".into(),
+                ],
+                examples: vec![
+                    r#"{"playlist_id": "37i9dQZF1DXcBWIGoYBM5M", "limit": 20}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("spotify.playlist.tracks.add"),
+                    CapabilityId::from_static("spotify.playlist.tracks.remove"),
+                ],
+            },
+        ),
+        op_info(
+            "spotify.playlist.tracks.add",
+            "Add tracks to a playlist",
+            json!({
+                "type": "object",
+                "required": ["playlist_id", "uris"],
+                "properties": {
+                    "playlist_id": { "type": "string" },
+                    "uris": { "type": "array", "items": { "type": "string" } },
+                    "position": { "type": "integer", "minimum": 0 }
+                }
+            }),
+            json!({
+                "type": "object",
+                "properties": {
+                    "snapshot_id": { "type": "string" }
+                }
+            }),
+            "spotify.playlists.write",
+            RiskLevel::Low,
+            SafetyTier::Risky,
+            IdempotencyClass::BestEffort,
+            AgentHint {
+                when_to_use: "Add tracks to an existing playlist.".into(),
+                common_mistakes: vec![
+                    "Using track IDs instead of track URIs (must be spotify:track:...).".into(),
+                ],
+                examples: vec![
+                    r#"{"playlist_id": "abc123", "uris": ["spotify:track:t1"]}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("spotify.playlist.tracks.remove"),
+                    CapabilityId::from_static("spotify.playlist.tracks.list"),
+                ],
+            },
+        ),
+        op_info(
+            "spotify.playlist.tracks.remove",
+            "Remove tracks from a playlist",
+            json!({
+                "type": "object",
+                "required": ["playlist_id", "uris"],
+                "properties": {
+                    "playlist_id": { "type": "string" },
+                    "uris": { "type": "array", "items": { "type": "string" } }
+                }
+            }),
+            json!({
+                "type": "object",
+                "properties": {
+                    "snapshot_id": { "type": "string" }
+                }
+            }),
+            "spotify.playlists.write",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::BestEffort,
+            AgentHint {
+                when_to_use: "Remove tracks from an existing playlist.".into(),
+                common_mistakes: vec![
+                    "Using track IDs instead of track URIs.".into(),
+                ],
+                examples: vec![
+                    r#"{"playlist_id": "abc123", "uris": ["spotify:track:t1"]}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("spotify.playlist.tracks.add"),
+                    CapabilityId::from_static("spotify.playlist.tracks.list"),
+                ],
+            },
+        ),
     ]
 }
 
@@ -1179,8 +2314,8 @@ mod tests {
     }
 
     #[test]
-    fn operations_info_has_10_operations() {
-        assert_eq!(operations_info().len(), 10);
+    fn operations_info_has_33_operations() {
+        assert_eq!(operations_info().len(), 33);
     }
 
     #[test]
@@ -1250,6 +2385,7 @@ mod tests {
     fn operations_contain_expected_ids() {
         let ops = operations_info();
         let ids: Vec<&str> = ops.iter().map(|o| o.id.as_ref()).collect();
+        // Original 10
         assert!(ids.contains(&"spotify.profile.get"));
         assert!(ids.contains(&"spotify.search"));
         assert!(ids.contains(&"spotify.tracks.get"));
@@ -1260,6 +2396,32 @@ mod tests {
         assert!(ids.contains(&"spotify.player.recently_played"));
         assert!(ids.contains(&"spotify.top_items"));
         assert!(ids.contains(&"spotify.recommendations.get"));
+        // Playback control (11)
+        assert!(ids.contains(&"spotify.playback.get_state"));
+        assert!(ids.contains(&"spotify.playback.devices"));
+        assert!(ids.contains(&"spotify.playback.play"));
+        assert!(ids.contains(&"spotify.playback.pause"));
+        assert!(ids.contains(&"spotify.playback.skip_next"));
+        assert!(ids.contains(&"spotify.playback.skip_previous"));
+        assert!(ids.contains(&"spotify.playback.seek"));
+        assert!(ids.contains(&"spotify.playback.volume"));
+        assert!(ids.contains(&"spotify.playback.shuffle"));
+        assert!(ids.contains(&"spotify.playback.repeat"));
+        assert!(ids.contains(&"spotify.playback.transfer"));
+        // Library management (7)
+        assert!(ids.contains(&"spotify.library.tracks.list"));
+        assert!(ids.contains(&"spotify.library.tracks.save"));
+        assert!(ids.contains(&"spotify.library.tracks.remove"));
+        assert!(ids.contains(&"spotify.library.tracks.check"));
+        assert!(ids.contains(&"spotify.library.albums.list"));
+        assert!(ids.contains(&"spotify.library.albums.save"));
+        assert!(ids.contains(&"spotify.library.albums.remove"));
+        // Playlist CRUD (5)
+        assert!(ids.contains(&"spotify.playlist.create"));
+        assert!(ids.contains(&"spotify.playlist.update"));
+        assert!(ids.contains(&"spotify.playlist.tracks.list"));
+        assert!(ids.contains(&"spotify.playlist.tracks.add"));
+        assert!(ids.contains(&"spotify.playlist.tracks.remove"));
     }
 
     #[test]
@@ -1361,15 +2523,26 @@ mod tests {
     }
 
     #[test]
-    fn all_operations_are_read_only() {
+    #[allow(clippy::case_sensitive_file_extension_comparisons)]
+    fn read_operations_are_safe_write_operations_are_risky() {
         let ops = operations_info();
         for op in &ops {
-            assert_eq!(
-                op.safety_tier,
-                SafetyTier::Safe,
-                "op {} should be safe (read-only connector)",
-                op.id.as_ref()
-            );
+            let cap = op.capability.as_ref();
+            if cap.ends_with(".read") {
+                assert_eq!(
+                    op.safety_tier,
+                    SafetyTier::Safe,
+                    "read op {} should be safe",
+                    op.id.as_ref()
+                );
+            } else {
+                assert_eq!(
+                    op.safety_tier,
+                    SafetyTier::Risky,
+                    "write op {} should be risky",
+                    op.id.as_ref()
+                );
+            }
         }
     }
 
@@ -1466,40 +2639,57 @@ mod tests {
     }
 
     #[test]
-    fn operations_all_low_risk() {
+    #[allow(clippy::case_sensitive_file_extension_comparisons)]
+    fn read_operations_are_low_risk() {
         let ops = operations_info();
         for op in &ops {
-            assert_eq!(
-                op.risk_level,
-                RiskLevel::Low,
-                "op {} should be low risk",
-                op.id.as_ref()
-            );
+            let cap = op.capability.as_ref();
+            if cap.ends_with(".read") {
+                assert_eq!(
+                    op.risk_level,
+                    RiskLevel::Low,
+                    "read op {} should be low risk",
+                    op.id.as_ref()
+                );
+            }
         }
     }
 
     #[test]
-    fn operations_all_strict_idempotency() {
+    #[allow(clippy::case_sensitive_file_extension_comparisons)]
+    fn read_operations_are_strict_idempotency() {
         let ops = operations_info();
         for op in &ops {
-            assert_eq!(
-                op.idempotency,
-                IdempotencyClass::Strict,
-                "op {} should have strict idempotency",
-                op.id.as_ref()
-            );
+            let cap = op.capability.as_ref();
+            if cap.ends_with(".read") {
+                assert_eq!(
+                    op.idempotency,
+                    IdempotencyClass::Strict,
+                    "read op {} should have strict idempotency",
+                    op.id.as_ref()
+                );
+            }
         }
     }
 
     #[test]
-    fn operations_all_spotify_read_capability() {
+    fn operations_have_valid_capabilities() {
         let ops = operations_info();
+        let valid_caps = [
+            "spotify.read",
+            "spotify.playback.read",
+            "spotify.playback.control",
+            "spotify.library.read",
+            "spotify.library.write",
+            "spotify.playlists.read",
+            "spotify.playlists.write",
+        ];
         for op in &ops {
-            assert_eq!(
-                op.capability.as_ref(),
-                "spotify.read",
-                "op {} should have spotify.read capability",
-                op.id.as_ref()
+            assert!(
+                valid_caps.contains(&op.capability.as_ref()),
+                "op {} has unexpected capability: {}",
+                op.id.as_ref(),
+                op.capability.as_ref()
             );
         }
     }
@@ -1627,11 +2817,15 @@ mod tests {
                     assert_eq!(token_url, "https://accounts.spotify.com/api/token");
                     assert!(scopes.contains(&"user-read-playback-state".to_string()));
                     assert!(scopes.contains(&"user-read-currently-playing".to_string()));
+                    assert!(scopes.contains(&"user-modify-playback-state".to_string()));
                     assert!(scopes.contains(&"user-library-read".to_string()));
+                    assert!(scopes.contains(&"user-library-modify".to_string()));
                     assert!(scopes.contains(&"playlist-read-private".to_string()));
+                    assert!(scopes.contains(&"playlist-modify-public".to_string()));
+                    assert!(scopes.contains(&"playlist-modify-private".to_string()));
                     assert!(scopes.contains(&"user-read-email".to_string()));
                     assert!(scopes.contains(&"user-read-private".to_string()));
-                    assert_eq!(scopes.len(), 6);
+                    assert_eq!(scopes.len(), 10);
                     assert!(*auto_browser);
                     assert_eq!(*callback_port, 8_899);
                 }

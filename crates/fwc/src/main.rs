@@ -15,6 +15,8 @@ mod batch_file;
 #[allow(dead_code)] // Progress tracking wired when host integration lands.
 mod batch_progress;
 mod catalog;
+#[allow(dead_code)] // Event checkpoint and replay from sequence/time.
+mod checkpoint;
 #[allow(dead_code)] // Auth verify + credential backend trait.
 mod credential;
 #[allow(dead_code)]
@@ -27,6 +29,8 @@ mod event_stream;
 mod events;
 mod export_tools;
 mod format_table;
+#[allow(dead_code)] // Cross-connector health aggregation dashboard.
+mod health;
 #[allow(
     dead_code,
     clippy::writeln_empty_string,
@@ -44,6 +48,8 @@ mod json_diff;
 mod op_lock;
 #[allow(dead_code)]
 mod pipe;
+#[allow(dead_code)] // Pipeline conditional branching and error handling.
+mod pipeline_cond;
 #[allow(dead_code)]
 mod rate_limit;
 #[allow(dead_code)] // Contract types wired into host-backed commands in later beads.
@@ -53,11 +59,19 @@ mod recovery;
 mod render;
 #[allow(dead_code)] // Operation replay from history with input override.
 mod replay;
+#[allow(dead_code)] // Smart connector auto-routing for ambiguous intents.
+mod routing;
 mod schema_nav;
 mod search;
+#[allow(dead_code)] // Secretless injection wired when egress proxy integration lands.
+mod secretless;
 #[allow(dead_code)]
 mod session;
 mod template;
+#[allow(dead_code)]
+mod throttle;
+#[allow(dead_code)] // Idempotent undo for reversible operations.
+mod undo;
 mod validate;
 mod workflow;
 

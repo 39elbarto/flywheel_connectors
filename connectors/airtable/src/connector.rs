@@ -1,6 +1,8 @@
 //! FCP Airtable Connector implementation.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -17,10 +19,14 @@ use tracing::{info, instrument};
 use crate::{
     client::{AirtableAuth, AirtableClient, DEFAULT_BASE_URL},
     error::AirtableError,
-    types::{BaseSchemaResponse, FieldSchema, SortSpec, TableSchema, ViewSchema},
+    types::{BaseSchemaResponse, FieldSchema, Record, SortSpec, TableSchema, ViewSchema},
 };
 
 const SCHEMA_CACHE_TTL: Duration = Duration::from_secs(300);
+const DEFAULT_LINKED_RECORD_DEPTH: u32 = 1;
+const MAX_LINKED_RECORD_DEPTH: u32 = 3;
+const DEFAULT_LINKED_RECORD_LIMIT: u32 = 25;
+const MAX_LINKED_RECORD_LIMIT: u32 = 50;
 
 /// Validated configuration for the Airtable connector.
 struct AirtableConfig {
@@ -106,6 +112,36 @@ enum DoctorStatus {
 struct CachedSchema {
     fetched_at: Instant,
     schema: BaseSchemaResponse,
+}
+
+#[derive(Debug, Clone)]
+struct LinkedExpansionConfig {
+    field_names: Option<HashSet<String>>,
+    max_depth: usize,
+    max_records: usize,
+}
+
+impl LinkedExpansionConfig {
+    fn expands_field(&self, field_name: &str) -> bool {
+        self.field_names
+            .as_ref()
+            .is_none_or(|field_names| field_names.contains(field_name))
+    }
+}
+
+#[derive(Debug)]
+struct LinkedExpansionState {
+    remaining_records: usize,
+    path: HashSet<(String, String)>,
+}
+
+impl LinkedExpansionState {
+    fn new(max_records: usize) -> Self {
+        Self {
+            remaining_records: max_records,
+            path: HashSet::new(),
+        }
+    }
 }
 
 /// FCP Airtable Connector.
@@ -704,7 +740,7 @@ impl AirtableConnector {
                 ),
                 op_info(
                     "airtable.list_records",
-                    "List records from an Airtable table with validated filtering, sorting, and optional view selection",
+                    "List records from an Airtable table with validated filtering, sorting, optional view selection, and bounded linked-record expansion",
                     json!({
                         "type": "object",
                         "required": ["base_id", "table_id"],
@@ -717,7 +753,11 @@ impl AirtableConnector {
                             "page_size": { "type": "integer", "description": "Records per page (1-100)" },
                             "sort": { "type": "array", "items": { "type": "object" }, "description": "Optional sort fields (field IDs or exact names). If combined with view, sort overrides the view ordering." },
                             "view": { "type": "string", "description": "Optional view ID (viw...) or exact view name used as a query preset" },
-                            "offset": { "type": "string", "description": "Pagination cursor" }
+                            "offset": { "type": "string", "description": "Pagination cursor" },
+                            "expand_linked_records": { "type": "boolean", "description": "If true, resolve linked-record fields into bounded nested record objects." },
+                            "linked_field_refs": { "type": "array", "items": { "type": "string" }, "description": "Optional subset of linked-record field IDs or exact names to expand." },
+                            "linked_record_depth": { "type": "integer", "description": "Maximum linked-record traversal depth (1-3)." },
+                            "linked_record_limit": { "type": "integer", "description": "Maximum linked records to resolve across the response (1-50)." }
                         }
                     }),
                     json!({
@@ -725,6 +765,7 @@ impl AirtableConnector {
                         "required": ["records"],
                         "properties": {
                             "records": { "type": "array" },
+                            "field_metadata": { "type": "object", "description": "Per-field type metadata including read_only/computed markers and linked-table summaries." },
                             "offset": { "type": "string" }
                         }
                     }),
@@ -733,15 +774,17 @@ impl AirtableConnector {
                     SafetyTier::Safe,
                     IdempotencyClass::Strict,
                     AgentHint {
-                        when_to_use: "Query records from an Airtable table with validated filters and deterministic sorting.".into(),
+                        when_to_use: "Query Airtable records with validated filters and optionally expand linked-record chains without unbounded joins.".into(),
                         common_mistakes: vec![
                             "Using SQL syntax instead of Airtable formula syntax.".into(),
                             "Using field IDs directly inside filter_by_formula instead of Airtable field names.".into(),
                             "Not handling pagination for large datasets.".into(),
+                            "Requesting linked_field_refs that are excluded from the projected fields list.".into(),
                         ],
                         examples: vec![
                             r#"{"base_id": "appXXX", "table_id": "Tasks", "filter_by_formula": "{Status} = \"Active\""}"#.into(),
                             r#"{"base_id": "appXXX", "table_id": "Tasks", "sort": [{"field": "Priority", "direction": "desc"}], "page_size": 50}"#.into(),
+                            r#"{"base_id": "appXXX", "table_id": "Tasks", "expand_linked_records": true, "linked_field_refs": ["Parent Task"], "linked_record_depth": 2}"#.into(),
                         ],
                         related: vec![
                             CapabilityId::from_static("airtable.list_view_records"),
@@ -752,14 +795,18 @@ impl AirtableConnector {
                 ),
                 op_info(
                     "airtable.get_record",
-                    "Get a single record by ID from an Airtable table",
+                    "Get a single record by ID from an Airtable table with optional linked-record expansion",
                     json!({
                         "type": "object",
                         "required": ["base_id", "table_id", "record_id"],
                         "properties": {
                             "base_id": { "type": "string", "description": "Airtable base ID" },
                             "table_id": { "type": "string", "description": "Table name or ID" },
-                            "record_id": { "type": "string", "description": "Record ID (starts with 'rec')" }
+                            "record_id": { "type": "string", "description": "Record ID (starts with 'rec')" },
+                            "expand_linked_records": { "type": "boolean", "description": "If true, resolve linked-record fields into bounded nested record objects." },
+                            "linked_field_refs": { "type": "array", "items": { "type": "string" }, "description": "Optional subset of linked-record field IDs or exact names to expand." },
+                            "linked_record_depth": { "type": "integer", "description": "Maximum linked-record traversal depth (1-3)." },
+                            "linked_record_limit": { "type": "integer", "description": "Maximum linked records to resolve across the response (1-50)." }
                         }
                     }),
                     json!({
@@ -768,7 +815,9 @@ impl AirtableConnector {
                         "properties": {
                             "id": { "type": "string" },
                             "fields": { "type": "object" },
-                            "createdTime": { "type": "string" }
+                            "createdTime": { "type": "string" },
+                            "field_metadata": { "type": "object", "description": "Per-field type metadata including read_only/computed markers and linked-table summaries." },
+                            "linked_records": { "type": "object", "description": "Expanded linked-record chains grouped by linked field name." }
                         }
                     }),
                     "airtable.read",
@@ -776,9 +825,15 @@ impl AirtableConnector {
                     SafetyTier::Safe,
                     IdempotencyClass::Strict,
                     AgentHint {
-                        when_to_use: "Retrieve a specific record when you know its ID.".into(),
-                        common_mistakes: vec!["Using row number instead of record ID.".into()],
-                        examples: vec![r#"{"base_id": "appXXX", "table_id": "Tasks", "record_id": "recYYY"}"#.into()],
+                        when_to_use: "Retrieve one Airtable record when you know its ID and optionally need a bounded expansion of linked records.".into(),
+                        common_mistakes: vec![
+                            "Using row number instead of record ID.".into(),
+                            "Forgetting to cap linked_record_depth for cyclic relationship graphs.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"base_id": "appXXX", "table_id": "Tasks", "record_id": "recYYY"}"#.into(),
+                            r#"{"base_id": "appXXX", "table_id": "Tasks", "record_id": "recYYY", "expand_linked_records": true, "linked_record_limit": 10}"#.into(),
+                        ],
                         related: vec![
                             CapabilityId::from_static("airtable.list_records"),
                             CapabilityId::from_static("airtable.update_record"),
@@ -1394,6 +1449,8 @@ impl AirtableConnector {
         let table = resolve_table(&schema.tables, table_ref)?;
 
         let fields = resolve_requested_fields(&input, table, false)?;
+        let linked_expansion = parse_linked_expansion_config(&input, table)?;
+        validate_linked_projection(fields.as_deref(), linked_expansion.as_ref())?;
         let filter_by_formula = parse_filter_by_formula(&input)?;
         let max_records = parse_record_bound(&input, "max_records")?;
         let page_size = parse_record_bound(&input, "page_size")?;
@@ -1418,7 +1475,24 @@ impl AirtableConnector {
             .await
             .map_err(|e: AirtableError| e.to_fcp_error())?;
 
-        let mut resp = json!({ "records": result.records });
+        let mut expansion_state = linked_expansion
+            .as_ref()
+            .map(|config| LinkedExpansionState::new(config.max_records));
+        let records = self
+            .serialize_record_list(
+                base_id,
+                &schema,
+                table,
+                result.records,
+                linked_expansion.as_ref(),
+                expansion_state.as_mut(),
+            )
+            .await?;
+        let visible_fields = collect_visible_fields_for_list(table, fields.as_deref(), &records);
+        let mut resp = json!({
+            "records": records,
+            "field_metadata": build_field_metadata(table, &schema, &visible_fields),
+        });
         if let Some(offset) = result.offset {
             resp["offset"] = json!(offset);
         }
@@ -1435,9 +1509,25 @@ impl AirtableConnector {
             .await
             .map_err(|e: AirtableError| e.to_fcp_error())?;
 
-        serde_json::to_value(record).map_err(|e| FcpError::Internal {
-            message: format!("Failed to serialize record: {e}"),
-        })
+        let schema = self.get_base_schema_cached(&base_id).await?;
+        let table = resolve_table(&schema.tables, &table_id)?;
+        let linked_expansion = parse_linked_expansion_config(&input, table)?;
+        let mut expansion_state = linked_expansion
+            .as_ref()
+            .map(|config| LinkedExpansionState::new(config.max_records));
+        self.serialize_record_with_links(
+            &base_id,
+            &schema,
+            table,
+            record,
+            linked_expansion.as_ref(),
+            expansion_state.as_mut(),
+            linked_expansion
+                .as_ref()
+                .map_or(0, |config| config.max_depth),
+            true,
+        )
+        .await
     }
 
     async fn invoke_create_record(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
@@ -1648,6 +1738,200 @@ impl AirtableConnector {
         Ok((base_id, table.id.clone()))
     }
 
+    async fn serialize_record_list(
+        &self,
+        base_id: &str,
+        schema: &BaseSchemaResponse,
+        table: &TableSchema,
+        records: Vec<Record>,
+        linked_expansion: Option<&LinkedExpansionConfig>,
+        mut expansion_state: Option<&mut LinkedExpansionState>,
+    ) -> FcpResult<Vec<serde_json::Value>> {
+        let mut serialized = Vec::with_capacity(records.len());
+        for record in records {
+            serialized.push(
+                self.serialize_record_with_links(
+                    base_id,
+                    schema,
+                    table,
+                    record,
+                    linked_expansion,
+                    expansion_state.as_deref_mut(),
+                    linked_expansion
+                        .as_ref()
+                        .map_or(0, |config| config.max_depth),
+                    false,
+                )
+                .await?,
+            );
+        }
+        Ok(serialized)
+    }
+
+    fn serialize_record_with_links<'a>(
+        &'a self,
+        base_id: &'a str,
+        schema: &'a BaseSchemaResponse,
+        table: &'a TableSchema,
+        record: Record,
+        linked_expansion: Option<&'a LinkedExpansionConfig>,
+        mut expansion_state: Option<&'a mut LinkedExpansionState>,
+        depth_remaining: usize,
+        include_field_metadata: bool,
+    ) -> Pin<Box<dyn Future<Output = FcpResult<serde_json::Value>> + 'a>> {
+        Box::pin(async move {
+            let record_path = (table.id.clone(), record.id.clone());
+            let path_inserted = expansion_state
+                .as_deref_mut()
+                .is_some_and(|state| state.path.insert(record_path.clone()));
+
+            let mut value = serde_json::to_value(&record).map_err(|error| FcpError::Internal {
+                message: format!("Failed to serialize record: {error}"),
+            })?;
+            let object = value.as_object_mut().ok_or(FcpError::Internal {
+                message: "Serialized Airtable record was not an object".into(),
+            })?;
+
+            if include_field_metadata {
+                let visible_fields = collect_record_field_names(&record);
+                object.insert(
+                    "field_metadata".into(),
+                    build_field_metadata(table, schema, &visible_fields),
+                );
+            }
+
+            if let (Some(config), Some(state)) =
+                (linked_expansion, expansion_state.as_deref_mut())
+            {
+                let linked_records = self
+                    .build_linked_records(
+                        base_id,
+                        schema,
+                        table,
+                        &record,
+                        config,
+                        state,
+                        depth_remaining,
+                    )
+                    .await?;
+                if !linked_records.is_empty() {
+                    object.insert("linked_records".into(), serde_json::Value::Object(linked_records));
+                }
+            }
+
+            if path_inserted {
+                if let Some(state) = expansion_state.as_deref_mut() {
+                    state.path.remove(&record_path);
+                }
+            }
+
+            Ok(value)
+        })
+    }
+
+    fn build_linked_records<'a>(
+        &'a self,
+        base_id: &'a str,
+        schema: &'a BaseSchemaResponse,
+        table: &'a TableSchema,
+        record: &'a Record,
+        config: &'a LinkedExpansionConfig,
+        state: &'a mut LinkedExpansionState,
+        depth_remaining: usize,
+    ) -> Pin<Box<dyn Future<Output = FcpResult<serde_json::Map<String, serde_json::Value>>> + 'a>>
+    {
+        Box::pin(async move {
+            if depth_remaining == 0 {
+                return Ok(serde_json::Map::new());
+            }
+
+            let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+            let Some(fields) = record.fields.as_object() else {
+                return Ok(serde_json::Map::new());
+            };
+
+            let mut linked_records = serde_json::Map::new();
+            for field in table
+                .fields
+                .iter()
+                .filter(|field| is_linked_record_field(field) && config.expands_field(&field.name))
+            {
+                let Some(raw_value) = fields.get(&field.name) else {
+                    continue;
+                };
+                let Some(linked_table_id) = linked_table_id(field) else {
+                    continue;
+                };
+                let target_table = resolve_table_by_id(&schema.tables, linked_table_id)?;
+                let linked_ids = linked_record_ids(raw_value);
+                let mut partial = false;
+                let mut resolved_records = Vec::with_capacity(linked_ids.len());
+
+                for linked_id in linked_ids {
+                    let linked_path = (target_table.id.clone(), linked_id.clone());
+                    if state.path.contains(&linked_path) {
+                        resolved_records
+                            .push(json!({ "id": linked_id, "status": "cycle" }));
+                        continue;
+                    }
+                    if state.remaining_records == 0 {
+                        partial = true;
+                        resolved_records
+                            .push(json!({ "id": linked_id, "status": "truncated" }));
+                        continue;
+                    }
+
+                    state.remaining_records -= 1;
+                    match client
+                        .get_record(base_id, &target_table.id, &linked_id)
+                        .await
+                    {
+                        Ok(linked_record) => {
+                            resolved_records.push(
+                                self.serialize_record_with_links(
+                                    base_id,
+                                    schema,
+                                    target_table,
+                                    linked_record,
+                                    Some(config),
+                                    Some(state),
+                                    depth_remaining.saturating_sub(1),
+                                    true,
+                                )
+                                .await?,
+                            );
+                        }
+                        Err(AirtableError::Api {
+                            status_code: Some(404),
+                            ..
+                        })
+                        | Err(AirtableError::RecordNotFound { .. }) => {
+                            resolved_records
+                                .push(json!({ "id": linked_id, "status": "missing" }));
+                        }
+                        Err(error) => return Err(error.to_fcp_error()),
+                    }
+                }
+
+                linked_records.insert(
+                    field.name.clone(),
+                    json!({
+                        "field_id": field.id,
+                        "field_type": field.field_type,
+                        "linked_table": {
+                            "id": target_table.id,
+                            "name": target_table.name,
+                        },
+                        "partial": partial,
+                        "records": resolved_records,
+                    }),
+                );
+            }
+
+            Ok(linked_records)
+        })
+    }
+
     /// Handle shutdown.
     ///
     /// # Errors
@@ -1718,6 +2002,162 @@ fn require_fields_object(input: &serde_json::Value) -> FcpResult<&serde_json::Va
     Ok(fields)
 }
 
+fn parse_linked_expansion_config(
+    input: &serde_json::Value,
+    table: &TableSchema,
+) -> FcpResult<Option<LinkedExpansionConfig>> {
+    let expand_flag = match input.get("expand_linked_records") {
+        Some(value) => Some(value.as_bool().ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: "expand_linked_records must be a boolean".into(),
+        })?),
+        None => None,
+    };
+    let linked_field_refs = parse_optional_string_array(input, "linked_field_refs")?;
+    let max_depth = parse_bounded_integer(
+        input,
+        "linked_record_depth",
+        1,
+        MAX_LINKED_RECORD_DEPTH,
+    )?
+    .unwrap_or(DEFAULT_LINKED_RECORD_DEPTH) as usize;
+    let max_records = parse_bounded_integer(
+        input,
+        "linked_record_limit",
+        1,
+        MAX_LINKED_RECORD_LIMIT,
+    )?
+    .unwrap_or(DEFAULT_LINKED_RECORD_LIMIT) as usize;
+
+    let enabled = expand_flag.unwrap_or(false)
+        || linked_field_refs.is_some()
+        || input.get("linked_record_depth").is_some()
+        || input.get("linked_record_limit").is_some();
+    if !enabled {
+        return Ok(None);
+    }
+
+    let field_names = linked_field_refs
+        .as_ref()
+        .map(|field_refs| {
+            let selectors = field_refs
+                .iter()
+                .cloned()
+                .map(serde_json::Value::String)
+                .collect::<Vec<_>>();
+            let resolved = resolve_fields(table, selectors.as_slice())?;
+            if let Some(non_linked) = resolved.iter().find(|field| !is_linked_record_field(field)) {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!(
+                        "linked_field_refs may only reference linked-record fields; '{}' is {}",
+                        non_linked.name, non_linked.field_type
+                    ),
+                });
+            }
+            Ok::<HashSet<String>, FcpError>(resolved.into_iter().map(|field| field.name).collect())
+        })
+        .transpose()?;
+
+    Ok(Some(LinkedExpansionConfig {
+        field_names,
+        max_depth,
+        max_records,
+    }))
+}
+
+fn validate_linked_projection(
+    projected_fields: Option<&[String]>,
+    linked_expansion: Option<&LinkedExpansionConfig>,
+) -> FcpResult<()> {
+    let Some(projected_fields) = projected_fields else {
+        return Ok(());
+    };
+    let Some(linked_field_names) = linked_expansion.and_then(|config| config.field_names.as_ref())
+    else {
+        return Ok(());
+    };
+
+    if let Some(missing_field) = linked_field_names
+        .iter()
+        .find(|field_name| !projected_fields.iter().any(|field| field == *field_name))
+    {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!(
+                "fields projection must include linked field '{missing_field}' when linked_field_refs are requested"
+            ),
+        });
+    }
+
+    Ok(())
+}
+
+fn collect_visible_fields_for_list(
+    table: &TableSchema,
+    projected_fields: Option<&[String]>,
+    records: &[serde_json::Value],
+) -> HashSet<String> {
+    let mut visible_fields = records
+        .iter()
+        .filter_map(serde_json::Value::as_object)
+        .filter_map(|record| record.get("fields"))
+        .filter_map(serde_json::Value::as_object)
+        .flat_map(|fields| fields.keys().cloned())
+        .collect::<HashSet<_>>();
+
+    if visible_fields.is_empty() {
+        if let Some(projected_fields) = projected_fields {
+            visible_fields.extend(projected_fields.iter().cloned());
+        } else {
+            visible_fields.extend(table.fields.iter().map(|field| field.name.clone()));
+        }
+    }
+
+    visible_fields
+}
+
+fn collect_record_field_names(record: &Record) -> HashSet<String> {
+    record
+        .fields
+        .as_object()
+        .map(|fields| fields.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+fn build_field_metadata(
+    table: &TableSchema,
+    schema: &BaseSchemaResponse,
+    visible_fields: &HashSet<String>,
+) -> serde_json::Value {
+    let mut metadata = serde_json::Map::new();
+    for field in table
+        .fields
+        .iter()
+        .filter(|field| visible_fields.contains(&field.name))
+    {
+        let mut entry = serde_json::Map::new();
+        entry.insert("field_id".into(), json!(field.id));
+        entry.insert("field_type".into(), json!(field.field_type));
+        entry.insert("read_only".into(), json!(is_read_only_computed_field(field)));
+
+        if let Some(linked_table_id) = linked_table_id(field) {
+            if let Ok(linked_table) = resolve_table_by_id(&schema.tables, linked_table_id) {
+                entry.insert(
+                    "linked_table".into(),
+                    json!({
+                        "id": linked_table.id,
+                        "name": linked_table.name,
+                    }),
+                );
+            }
+        }
+
+        metadata.insert(field.name.clone(), serde_json::Value::Object(entry));
+    }
+    serde_json::Value::Object(metadata)
+}
+
 fn resolve_table<'a>(tables: &'a [TableSchema], table_ref: &str) -> FcpResult<&'a TableSchema> {
     if let Some(table) = tables.iter().find(|table| table.id == table_ref) {
         return Ok(table);
@@ -1739,6 +2179,14 @@ fn resolve_table<'a>(tables: &'a [TableSchema], table_ref: &str) -> FcpResult<&'
             ),
         }),
     }
+}
+
+fn resolve_table_by_id<'a>(tables: &'a [TableSchema], table_id: &str) -> FcpResult<&'a TableSchema> {
+    tables.iter().find(|table| table.id == table_id).ok_or(
+        FcpError::ResourceNotFound {
+            resource: format!("airtable.table:{table_id}"),
+        },
+    )
 }
 
 fn resolve_view<'a>(views: &'a [ViewSchema], view_ref: &str) -> FcpResult<&'a ViewSchema> {
@@ -1876,6 +2324,30 @@ fn parse_record_bound(input: &serde_json::Value, field: &str) -> FcpResult<Optio
     Ok(Some(raw as u32))
 }
 
+fn parse_bounded_integer(
+    input: &serde_json::Value,
+    field: &str,
+    min: u32,
+    max: u32,
+) -> FcpResult<Option<u32>> {
+    let Some(value) = input.get(field) else {
+        return Ok(None);
+    };
+
+    let raw = value.as_u64().ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{field} must be an integer between {min} and {max}"),
+    })?;
+    if raw < u64::from(min) || raw > u64::from(max) {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} must be between {min} and {max}"),
+        });
+    }
+
+    Ok(Some(raw as u32))
+}
+
 fn parse_record_payloads(
     input: &serde_json::Value,
     require_ids: bool,
@@ -1952,6 +2424,45 @@ fn optional_nonempty_string(input: &serde_json::Value, field: &str) -> FcpResult
     Ok(Some(trimmed.to_string()))
 }
 
+fn parse_optional_string_array(
+    input: &serde_json::Value,
+    field: &str,
+) -> FcpResult<Option<Vec<String>>> {
+    let Some(value) = input.get(field) else {
+        return Ok(None);
+    };
+    let items = value.as_array().ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{field} must be an array of non-empty strings"),
+    })?;
+    if items.is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} must contain at least one linked field"),
+        });
+    }
+
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let raw = item.as_str().ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("{field}[{index}] must be a non-empty string"),
+            })?;
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("{field}[{index}] must be a non-empty string"),
+                });
+            }
+            Ok(trimmed.to_string())
+        })
+        .collect::<FcpResult<Vec<_>>>()
+        .map(Some)
+}
+
 fn parse_record_ids(input: &serde_json::Value, field: &str) -> FcpResult<Vec<String>> {
     let values =
         input
@@ -1986,6 +2497,35 @@ fn parse_record_ids(input: &serde_json::Value, field: &str) -> FcpResult<Vec<Str
             Ok(trimmed.to_string())
         })
         .collect()
+}
+
+fn linked_table_id(field: &FieldSchema) -> Option<&str> {
+    field
+        .options
+        .as_ref()
+        .and_then(|options| options.get("linkedTableId"))
+        .and_then(serde_json::Value::as_str)
+}
+
+fn linked_record_ids(value: &serde_json::Value) -> Vec<String> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn is_linked_record_field(field: &FieldSchema) -> bool {
+    field.field_type == "multipleRecordLinks"
+}
+
+fn is_read_only_computed_field(field: &FieldSchema) -> bool {
+    matches!(
+        field.field_type.as_str(),
+        "lookup" | "multipleLookupValues" | "rollup"
+    )
 }
 
 fn parse_sort_specs(

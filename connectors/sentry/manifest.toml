@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:d3e08331f5006c8a6fa0897fb70601c1dd8b58ad382de0b7e8147fe1b23e49e3"
+interface_hash = "blake3-256:fcp.interface.v2:20a160f7c148f3d8dee704e7580d8366141ed18fd1bdc6c3ecd930d20c4a06fa"
 
 [connector]
 id = "fcp.sentry"
@@ -222,6 +222,208 @@ examples = ['{"organization_slug": "my-org", "project_slug": "backend", "rule_id
 related = [
     "sentry.list_alert_rules",
     "sentry.create_alert_rule",
+]
+
+[provides.operations."sentry.disable_alert_rule"]
+description = "Disable a specific alert rule without deleting it"
+capability = "sentry.alerts"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."sentry.disable_alert_rule".input_schema]
+required = [
+    "organization_slug",
+    "project_slug",
+    "rule_id",
+]
+type = "object"
+
+[provides.operations."sentry.disable_alert_rule".input_schema.properties.organization_slug]
+description = "Sentry organization slug"
+type = "string"
+
+[provides.operations."sentry.disable_alert_rule".input_schema.properties.project_slug]
+description = "Sentry project slug"
+type = "string"
+
+[provides.operations."sentry.disable_alert_rule".input_schema.properties.rule_id]
+description = "Alert rule ID"
+type = "string"
+
+[provides.operations."sentry.disable_alert_rule".output_schema]
+type = "object"
+required = ["rule"]
+
+[provides.operations."sentry.disable_alert_rule".output_schema.properties.rule]
+type = "object"
+
+[provides.operations."sentry.disable_alert_rule".network_constraints]
+host_allow = [
+    "sentry.io",
+    "*.sentry.io",
+    "$sentry_host",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."sentry.disable_alert_rule".ai_hints]
+when_to_use = "Disable an active alert rule without deleting it. Sets the rule status to disabled."
+common_mistakes = ["Deleting a rule when disabling would be more appropriate — use this instead of delete for temporary suppression."]
+examples = ['{"organization_slug": "my-org", "project_slug": "backend", "rule_id": "12345"}']
+related = [
+    "sentry.get_alert_rule",
+    "sentry.enable_alert_rule",
+    "sentry.list_alert_rules",
+]
+
+[provides.operations."sentry.enable_alert_rule"]
+description = "Enable a previously disabled alert rule"
+capability = "sentry.alerts"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."sentry.enable_alert_rule".input_schema]
+required = [
+    "organization_slug",
+    "project_slug",
+    "rule_id",
+]
+type = "object"
+
+[provides.operations."sentry.enable_alert_rule".input_schema.properties.organization_slug]
+description = "Sentry organization slug"
+type = "string"
+
+[provides.operations."sentry.enable_alert_rule".input_schema.properties.project_slug]
+description = "Sentry project slug"
+type = "string"
+
+[provides.operations."sentry.enable_alert_rule".input_schema.properties.rule_id]
+description = "Alert rule ID"
+type = "string"
+
+[provides.operations."sentry.enable_alert_rule".output_schema]
+type = "object"
+required = ["rule"]
+
+[provides.operations."sentry.enable_alert_rule".output_schema.properties.rule]
+type = "object"
+
+[provides.operations."sentry.enable_alert_rule".network_constraints]
+host_allow = [
+    "sentry.io",
+    "*.sentry.io",
+    "$sentry_host",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."sentry.enable_alert_rule".ai_hints]
+when_to_use = "Enable a previously disabled alert rule. Sets the rule status to active."
+common_mistakes = ["Trying to enable a rule that is already active — the API will accept it but it is a no-op."]
+examples = ['{"organization_slug": "my-org", "project_slug": "backend", "rule_id": "12345"}']
+related = [
+    "sentry.get_alert_rule",
+    "sentry.disable_alert_rule",
+    "sentry.list_alert_rules",
+]
+
+[provides.operations."sentry.get_alert_rule"]
+description = "Get a single alert rule by ID"
+capability = "sentry.alerts"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."sentry.get_alert_rule".input_schema]
+required = [
+    "organization_slug",
+    "project_slug",
+    "rule_id",
+]
+type = "object"
+
+[provides.operations."sentry.get_alert_rule".input_schema.properties.organization_slug]
+description = "Sentry organization slug"
+type = "string"
+
+[provides.operations."sentry.get_alert_rule".input_schema.properties.project_slug]
+description = "Sentry project slug"
+type = "string"
+
+[provides.operations."sentry.get_alert_rule".input_schema.properties.rule_id]
+description = "Alert rule ID"
+type = "string"
+
+[provides.operations."sentry.get_alert_rule".output_schema]
+type = "object"
+required = ["rule"]
+
+[provides.operations."sentry.get_alert_rule".output_schema.properties.rule]
+type = "object"
+
+[provides.operations."sentry.get_alert_rule".network_constraints]
+host_allow = [
+    "sentry.io",
+    "*.sentry.io",
+    "$sentry_host",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."sentry.get_alert_rule".ai_hints]
+when_to_use = "Get details of a specific alert rule by its ID."
+common_mistakes = ["Using the alert rule name instead of the numeric ID."]
+examples = ['{"organization_slug": "my-org", "project_slug": "backend", "rule_id": "12345"}']
+related = [
+    "sentry.list_alert_rules",
+    "sentry.update_alert_rule",
+    "sentry.enable_alert_rule",
+    "sentry.disable_alert_rule",
 ]
 
 [provides.operations."sentry.delete_issue"]
@@ -2159,6 +2361,9 @@ scope = "instance"
 "sentry.list_alert_rules" = ["sentry.read"]
 "sentry.list_issues" = ["sentry.read"]
 "sentry.delete_alert_rule" = ["sentry.admin"]
+"sentry.get_alert_rule" = ["sentry.alerts"]
+"sentry.enable_alert_rule" = ["sentry.alerts"]
+"sentry.disable_alert_rule" = ["sentry.alerts"]
 "sentry.list_release_deploys" = ["sentry.read"]
 "sentry.stream_webhook_events" = ["sentry.read"]
 "sentry.get_transaction" = ["sentry.read"]

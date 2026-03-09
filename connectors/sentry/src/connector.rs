@@ -318,6 +318,9 @@ impl SentryConnector {
             "sentry.create_alert_rule" => self.invoke_create_alert_rule(client, &input).await,
             "sentry.update_alert_rule" => self.invoke_update_alert_rule(client, &input).await,
             "sentry.delete_alert_rule" => self.invoke_delete_alert_rule(client, &input).await,
+            "sentry.get_alert_rule" => self.invoke_get_alert_rule(client, &input).await,
+            "sentry.enable_alert_rule" => self.invoke_enable_alert_rule(client, &input).await,
+            "sentry.disable_alert_rule" => self.invoke_disable_alert_rule(client, &input).await,
             "sentry.issue.search" => self.invoke_issue_search(client, &input).await,
             "sentry.issue.get_summary" => self.invoke_issue_get_summary(client, &input).await,
             "sentry.issue.assign" => self.invoke_issue_assign(client, &input).await,
@@ -608,6 +611,42 @@ impl SentryConnector {
         let rule_id = require_str(input, "rule_id")?;
         client.delete_alert_rule(org, project, rule_id).await?;
         Ok(json!({ "deleted": true }))
+    }
+
+    async fn invoke_get_alert_rule(
+        &self,
+        client: &SentryClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, SentryError> {
+        let org = require_str(input, "organization_slug")?;
+        let project = require_str(input, "project_slug")?;
+        let rule_id = require_str(input, "rule_id")?;
+        let data = client.get_alert_rule(org, project, rule_id).await?;
+        Ok(json!({ "rule": data }))
+    }
+
+    async fn invoke_enable_alert_rule(
+        &self,
+        client: &SentryClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, SentryError> {
+        let org = require_str(input, "organization_slug")?;
+        let project = require_str(input, "project_slug")?;
+        let rule_id = require_str(input, "rule_id")?;
+        let data = client.enable_alert_rule(org, project, rule_id).await?;
+        Ok(json!({ "rule": data }))
+    }
+
+    async fn invoke_disable_alert_rule(
+        &self,
+        client: &SentryClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, SentryError> {
+        let org = require_str(input, "organization_slug")?;
+        let project = require_str(input, "project_slug")?;
+        let rule_id = require_str(input, "rule_id")?;
+        let data = client.disable_alert_rule(org, project, rule_id).await?;
+        Ok(json!({ "rule": data }))
     }
 
     async fn invoke_issue_search(
@@ -1434,6 +1473,121 @@ fn operations_info() -> Vec<OperationInfo> {
             },
         ),
         op_info(
+            "sentry.get_alert_rule",
+            "Get a single alert rule by ID",
+            json!({
+                "type": "object",
+                "required": ["organization_slug", "project_slug", "rule_id"],
+                "properties": {
+                    "organization_slug": { "type": "string", "description": "Sentry organization slug" },
+                    "project_slug": { "type": "string", "description": "Sentry project slug" },
+                    "rule_id": { "type": "string", "description": "Alert rule ID" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["rule"],
+                "properties": {
+                    "rule": { "type": "object" }
+                }
+            }),
+            "sentry.alerts",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Get details of a specific alert rule by its ID.".into(),
+                common_mistakes: vec![
+                    "Using the alert rule name instead of the numeric ID.".into(),
+                ],
+                examples: vec![
+                    r#"{"organization_slug": "my-org", "project_slug": "backend", "rule_id": "12345"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("sentry.list_alert_rules"),
+                    CapabilityId::from_static("sentry.update_alert_rule"),
+                    CapabilityId::from_static("sentry.enable_alert_rule"),
+                    CapabilityId::from_static("sentry.disable_alert_rule"),
+                ],
+            },
+        ),
+        op_info(
+            "sentry.enable_alert_rule",
+            "Enable a specific alert rule",
+            json!({
+                "type": "object",
+                "required": ["organization_slug", "project_slug", "rule_id"],
+                "properties": {
+                    "organization_slug": { "type": "string", "description": "Sentry organization slug" },
+                    "project_slug": { "type": "string", "description": "Sentry project slug" },
+                    "rule_id": { "type": "string", "description": "Alert rule ID" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["rule"],
+                "properties": {
+                    "rule": { "type": "object" }
+                }
+            }),
+            "sentry.alerts",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Enable a previously disabled alert rule. Sets the rule status to active.".into(),
+                common_mistakes: vec![
+                    "Trying to enable a rule that is already active — the API will accept it but it is a no-op.".into(),
+                ],
+                examples: vec![
+                    r#"{"organization_slug": "my-org", "project_slug": "backend", "rule_id": "12345"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("sentry.get_alert_rule"),
+                    CapabilityId::from_static("sentry.disable_alert_rule"),
+                    CapabilityId::from_static("sentry.list_alert_rules"),
+                ],
+            },
+        ),
+        op_info(
+            "sentry.disable_alert_rule",
+            "Disable a specific alert rule",
+            json!({
+                "type": "object",
+                "required": ["organization_slug", "project_slug", "rule_id"],
+                "properties": {
+                    "organization_slug": { "type": "string", "description": "Sentry organization slug" },
+                    "project_slug": { "type": "string", "description": "Sentry project slug" },
+                    "rule_id": { "type": "string", "description": "Alert rule ID" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["rule"],
+                "properties": {
+                    "rule": { "type": "object" }
+                }
+            }),
+            "sentry.alerts",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Disable an active alert rule without deleting it. Sets the rule status to disabled.".into(),
+                common_mistakes: vec![
+                    "Deleting a rule when disabling would be more appropriate — use this instead of delete for temporary suppression.".into(),
+                ],
+                examples: vec![
+                    r#"{"organization_slug": "my-org", "project_slug": "backend", "rule_id": "12345"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("sentry.get_alert_rule"),
+                    CapabilityId::from_static("sentry.enable_alert_rule"),
+                    CapabilityId::from_static("sentry.list_alert_rules"),
+                ],
+            },
+        ),
+        op_info(
             "sentry.issue.search",
             "Search issues with structured filters",
             json!({
@@ -1954,10 +2108,10 @@ mod tests {
     }
 
     #[test]
-    fn operations_info_has_26_operations() {
+    fn operations_info_has_29_operations() {
         let ops = ops_json();
         let arr = ops.as_array().unwrap();
-        assert_eq!(arr.len(), 26);
+        assert_eq!(arr.len(), 29);
     }
 
     #[test]

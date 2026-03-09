@@ -620,6 +620,45 @@ impl SentryClient {
         self.delete(&format!("/projects/{org}/{project}/rules/{rule_id}/"))
             .await
     }
+
+    /// Get a single alert rule by ID.
+    pub async fn get_alert_rule(
+        &self,
+        org: &str,
+        project: &str,
+        rule_id: &str,
+    ) -> SentryResult<serde_json::Value> {
+        self.get(&format!("/projects/{org}/{project}/rules/{rule_id}/"))
+            .await
+    }
+
+    /// Enable an alert rule.
+    pub async fn enable_alert_rule(
+        &self,
+        org: &str,
+        project: &str,
+        rule_id: &str,
+    ) -> SentryResult<serde_json::Value> {
+        self.put(
+            &format!("/projects/{org}/{project}/rules/{rule_id}/"),
+            &serde_json::json!({"status": "active"}),
+        )
+        .await
+    }
+
+    /// Disable an alert rule.
+    pub async fn disable_alert_rule(
+        &self,
+        org: &str,
+        project: &str,
+        rule_id: &str,
+    ) -> SentryResult<serde_json::Value> {
+        self.put(
+            &format!("/projects/{org}/{project}/rules/{rule_id}/"),
+            &serde_json::json!({"status": "disabled"}),
+        )
+        .await
+    }
 }
 
 /// Minimal URL encoding for version strings.

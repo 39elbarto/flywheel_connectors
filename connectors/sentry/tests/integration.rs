@@ -115,12 +115,15 @@ async fn introspect_lists_operations() {
     let connector = SentryConnector::new();
     let result = connector.handle_introspect().await.unwrap();
     let ops = result["operations"].as_array().expect("operations array");
-    assert!(ops.len() >= 26, "should have at least 26 operations");
+    assert!(ops.len() >= 29, "should have at least 29 operations");
     let ids: Vec<&str> = ops.iter().filter_map(|o| o["id"].as_str()).collect();
     assert!(ids.contains(&"sentry.list_issues"));
     assert!(ids.contains(&"sentry.get_event"));
     assert!(ids.contains(&"sentry.discover_query"));
     assert!(ids.contains(&"sentry.create_alert_rule"));
+    assert!(ids.contains(&"sentry.get_alert_rule"));
+    assert!(ids.contains(&"sentry.enable_alert_rule"));
+    assert!(ids.contains(&"sentry.disable_alert_rule"));
     assert!(ids.contains(&"sentry.issue.search"));
     assert!(ids.contains(&"sentry.issue.get_summary"));
     assert!(ids.contains(&"sentry.issue.assign"));
@@ -589,6 +592,108 @@ async fn invoke_delete_alert_rule() {
     assert_eq!(result["deleted"], true);
 }
 
+// ── Invoke: Get Alert Rule ───────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn invoke_get_alert_rule() {
+    let mock = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/projects/my-org/backend/rules/42/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "42",
+            "name": "High error rate",
+            "conditions": [{"id": "sentry.rules.conditions.first_seen_event.FirstSeenEventCondition"}],
+            "actions": [{"id": "sentry.mail.actions.NotifyEmailAction"}],
+            "frequency": 30,
+            "status": "active",
+        })))
+        .mount(&mock)
+        .await;
+
+    let connector = configured_connector(&mock).await;
+    let result = connector
+        .handle_invoke(json!({
+            "operation_id": "sentry.get_alert_rule",
+            "input": {
+                "organization_slug": "my-org",
+                "project_slug": "backend",
+                "rule_id": "42",
+            },
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["rule"]["id"], "42");
+    assert_eq!(result["rule"]["name"], "High error rate");
+    assert_eq!(result["rule"]["status"], "active");
+}
+
+// ── Invoke: Enable Alert Rule ────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn invoke_enable_alert_rule() {
+    let mock = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/projects/my-org/backend/rules/42/"))
+        .and(bearer_token("test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "42",
+            "name": "High error rate",
+            "status": "active",
+        })))
+        .mount(&mock)
+        .await;
+
+    let connector = configured_connector(&mock).await;
+    let result = connector
+        .handle_invoke(json!({
+            "operation_id": "sentry.enable_alert_rule",
+            "input": {
+                "organization_slug": "my-org",
+                "project_slug": "backend",
+                "rule_id": "42",
+            },
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["rule"]["id"], "42");
+    assert_eq!(result["rule"]["status"], "active");
+}
+
+// ── Invoke: Disable Alert Rule ───────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn invoke_disable_alert_rule() {
+    let mock = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/projects/my-org/backend/rules/42/"))
+        .and(bearer_token("test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "42",
+            "name": "High error rate",
+            "status": "disabled",
+        })))
+        .mount(&mock)
+        .await;
+
+    let connector = configured_connector(&mock).await;
+    let result = connector
+        .handle_invoke(json!({
+            "operation_id": "sentry.disable_alert_rule",
+            "input": {
+                "organization_slug": "my-org",
+                "project_slug": "backend",
+                "rule_id": "42",
+            },
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["rule"]["id"], "42");
+    assert_eq!(result["rule"]["status"], "disabled");
+}
+
 // ── Invoke: Discover Query ────────────────────────────────────────────
 
 #[fcp_async_core::runtime::test]
@@ -924,7 +1029,7 @@ async fn doctor_fully_configured() {
     assert!(checks.iter().all(|c| c["passed"] == true));
 }
 
-// ── Simulate: all 26 operations ──────────────────────────────────────
+// ── Simulate: all 29 operations ──────────────────────────────────────
 
 #[fcp_async_core::runtime::test]
 async fn simulate_all_known_operations() {
@@ -946,6 +1051,9 @@ async fn simulate_all_known_operations() {
         "sentry.create_alert_rule",
         "sentry.update_alert_rule",
         "sentry.delete_alert_rule",
+        "sentry.get_alert_rule",
+        "sentry.enable_alert_rule",
+        "sentry.disable_alert_rule",
         "sentry.issue.search",
         "sentry.issue.get_summary",
         "sentry.issue.assign",

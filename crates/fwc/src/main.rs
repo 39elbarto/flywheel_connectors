@@ -1,5 +1,7 @@
 #![deny(unsafe_code)]
 
+#[allow(dead_code)]
+mod auth_status;
 #[allow(dead_code)] // Audit types used by later CLI commands.
 mod audit;
 #[allow(
@@ -7003,12 +7005,12 @@ name = "notify-on-new-issues"
 
 [[steps]]
 id = "fetch"
-operation = "github.list_issues"
+operation = "github.search_issues"
 input = { owner = "{{params.owner}}", repo = "{{params.repo}}" }
 
 [[steps]]
 id = "notify"
-operation = "slack.send_message"
+operation = "slack.post_message"
 depends_on = ["fetch"]
 input = { channel = "{{params.channel}}", text = "New issues: {{steps.fetch.output.issues | length}}" }
 
@@ -7056,12 +7058,12 @@ name = "notify-on-new-issues"
 
 [[steps]]
 id = "fetch"
-operation = "github.list_issues"
+operation = "github.search_issues"
 input = { owner = "{{params.owner}}", repo = "{{params.repo}}" }
 
 [[steps]]
 id = "notify"
-operation = "slack.send_message"
+operation = "slack.post_message"
 depends_on = ["fetch"]
 input = { channel = "{{params.channel}}", text = "New issues: {{steps.fetch.output.issues | length}}" }
 condition = "{{steps.fetch.output.issues | length}} > 0"
@@ -7141,11 +7143,11 @@ name = "notify-on-new-issues"
 
 [[steps]]
 id = "fetch"
-operation = "github.list_issues"
+operation = "github.search_issues"
 
 [[steps]]
 id = "notify"
-operation = "slack.send_message"
+operation = "slack.post_message"
 depends_on = ["fetch"]
 condition = "{{steps.fetch.output.issues | length}} > 0"
 "#,

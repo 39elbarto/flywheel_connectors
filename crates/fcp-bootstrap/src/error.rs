@@ -403,9 +403,12 @@ mod tests {
 
     #[test]
     fn bootstrap_result_with_vec() {
-        let r: BootstrapResult<Vec<u8>> = Ok(vec![1, 2, 3]);
-        let v = r.expect("should be Ok");
-        assert_eq!(v.len(), 3);
+        let v = vec![1_u8, 2, 3];
+        let r: BootstrapResult<Vec<u8>> = Ok(v);
+        match r {
+            Ok(inner) => assert_eq!(inner.len(), 3),
+            Err(e) => panic!("unexpected error: {e}"),
+        }
     }
 
     #[test]

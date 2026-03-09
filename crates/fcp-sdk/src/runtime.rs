@@ -3935,7 +3935,7 @@ mod tests {
             shutdown_timeout_ms: 15_000,
             ..Default::default()
         };
-        assert_eq!(config.shutdown_timeout(), Duration::from_millis(15_000));
+        assert_eq!(config.shutdown_timeout(), Duration::from_secs(15));
     }
 
     #[test]
@@ -3944,7 +3944,7 @@ mod tests {
             cooldown_after_failure_ms: 120_000,
             ..Default::default()
         };
-        assert_eq!(config.cooldown_duration(), Duration::from_millis(120_000));
+        assert_eq!(config.cooldown_duration(), Duration::from_secs(120));
     }
 
     #[test]
@@ -3966,7 +3966,7 @@ mod tests {
         };
         assert_eq!(
             config.heartbeat_interval(),
-            Some(Duration::from_millis(10_000))
+            Some(Duration::from_secs(10))
         );
         let timeout = config.heartbeat_timeout().unwrap();
         // 10s * 3.0 = 30s
@@ -4261,6 +4261,7 @@ mod tests {
         let outcome = SupervisorOutcome::FatalError {
             message: "bad".to_string(),
         };
+        #[allow(clippy::redundant_clone)]
         let cloned = outcome.clone();
         match cloned {
             SupervisorOutcome::FatalError { message } => assert_eq!(message, "bad"),
@@ -4271,6 +4272,7 @@ mod tests {
     #[test]
     fn supervisor_outcome_max_failures_clone() {
         let outcome = SupervisorOutcome::MaxFailuresReached { failures: 5 };
+        #[allow(clippy::redundant_clone)]
         let cloned = outcome.clone();
         match cloned {
             SupervisorOutcome::MaxFailuresReached { failures } => assert_eq!(failures, 5),
@@ -4364,6 +4366,7 @@ mod tests {
         let t = HealthTransition::ToDegraded {
             reason: "test".to_string(),
         };
+        #[allow(clippy::redundant_clone)]
         let cloned = t.clone();
         match cloned {
             HealthTransition::ToDegraded { reason } => assert_eq!(reason, "test"),

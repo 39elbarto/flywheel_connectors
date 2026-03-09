@@ -27,6 +27,7 @@
     clippy::unused_async
 )]
 
+pub mod alerts;
 pub mod client;
 pub mod connector;
 pub mod error;

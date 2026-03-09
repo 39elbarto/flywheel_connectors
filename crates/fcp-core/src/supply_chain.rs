@@ -2542,4 +2542,946 @@ mod tests {
         let roundtrip: VerificationEvidence = serde_json::from_str(&json).unwrap();
         assert_eq!(roundtrip, evidence);
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: Constants coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn supply_chain_attestation_constants_are_stable() {
+        assert_eq!(
+            SUPPLY_CHAIN_ATTESTATION_FORMAT,
+            "fcp-supply-chain-attestation"
+        );
+        assert_eq!(SUPPLY_CHAIN_ATTESTATION_SCHEMA_VERSION, "1.0");
+        assert_eq!(
+            SUPPLY_CHAIN_ATTESTATION_SCHEMA_ID,
+            "fcp://schemas/supply-chain-attestation/v1"
+        );
+    }
+
+    #[test]
+    fn sbom_constants_are_stable() {
+        assert_eq!(SBOM_FORMAT, "fcp-sbom");
+        assert_eq!(SBOM_SCHEMA_VERSION, "1.0");
+        assert_eq!(SBOM_SCHEMA_ID, "fcp://schemas/sbom/v1");
+    }
+
+    #[test]
+    fn attestation_signed_fields_are_ordered() {
+        assert_eq!(SUPPLY_CHAIN_ATTESTATION_SIGNED_FIELDS.len(), 12);
+        assert_eq!(SUPPLY_CHAIN_ATTESTATION_SIGNED_FIELDS[0], "format");
+        assert_eq!(
+            SUPPLY_CHAIN_ATTESTATION_SIGNED_FIELDS[11],
+            "builder_allowlist"
+        );
+    }
+
+    #[test]
+    fn sbom_signed_fields_are_ordered() {
+        assert_eq!(SBOM_SIGNED_FIELDS.len(), 8);
+        assert_eq!(SBOM_SIGNED_FIELDS[0], "format");
+        assert_eq!(SBOM_SIGNED_FIELDS[7], "trust_root");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: CanonicalEncoding coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn canonical_encoding_clone_and_eq() {
+        let cbor = CanonicalEncoding::Cbor;
+        let cloned = cbor;
+        assert_eq!(cbor, cloned);
+
+        let json = CanonicalEncoding::Json;
+        assert_ne!(cbor, json);
+    }
+
+    #[test]
+    fn canonical_encoding_debug() {
+        let dbg = format!("{:?}", CanonicalEncoding::Cbor);
+        assert!(dbg.contains("Cbor"));
+        let dbg = format!("{:?}", CanonicalEncoding::Json);
+        assert!(dbg.contains("Json"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: HashAlgorithm serde roundtrip
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn hash_algorithm_serde_roundtrip_blake3() {
+        let algo = HashAlgorithm::Blake3_256;
+        let json = serde_json::to_string(&algo).unwrap();
+        assert_eq!(json, "\"blake3-256\"");
+        let roundtrip: HashAlgorithm = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtrip, algo);
+    }
+
+    #[test]
+    fn hash_algorithm_serde_roundtrip_sha256() {
+        let algo = HashAlgorithm::Sha256;
+        let json = serde_json::to_string(&algo).unwrap();
+        assert_eq!(json, "\"sha256\"");
+        let roundtrip: HashAlgorithm = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtrip, algo);
+    }
+
+    #[test]
+    fn hash_algorithm_clone_and_copy() {
+        let algo = HashAlgorithm::Blake3_256;
+        let copied = algo;
+        assert_eq!(algo, copied);
+    }
+
+    #[test]
+    fn hash_algorithm_debug() {
+        let dbg = format!("{:?}", HashAlgorithm::Blake3_256);
+        assert!(dbg.contains("Blake3_256"));
+        let dbg = format!("{:?}", HashAlgorithm::Sha256);
+        assert!(dbg.contains("Sha256"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: SbomFormat serde roundtrip
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn sbom_format_serde_roundtrip_cyclonedx() {
+        let fmt = SbomFormat::Cyclonedx;
+        let json = serde_json::to_string(&fmt).unwrap();
+        assert_eq!(json, "\"cyclonedx\"");
+        let roundtrip: SbomFormat = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtrip, fmt);
+    }
+
+    #[test]
+    fn sbom_format_serde_roundtrip_spdx() {
+        let fmt = SbomFormat::Spdx;
+        let json = serde_json::to_string(&fmt).unwrap();
+        assert_eq!(json, "\"spdx\"");
+        let roundtrip: SbomFormat = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtrip, fmt);
+    }
+
+    #[test]
+    fn sbom_format_debug() {
+        let dbg = format!("{:?}", SbomFormat::Cyclonedx);
+        assert!(dbg.contains("Cyclonedx"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: AttestationPredicateType additional coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn attestation_predicate_type_serde_roundtrip_slsa() {
+        let pt = AttestationPredicateType::SlsaProvenanceV1;
+        let json = serde_json::to_string(&pt).unwrap();
+        let roundtrip: AttestationPredicateType = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtrip, pt);
+    }
+
+    #[test]
+    fn attestation_predicate_type_serde_roundtrip_intoto() {
+        let pt = AttestationPredicateType::InTotoStatementV1;
+        let json = serde_json::to_string(&pt).unwrap();
+        let roundtrip: AttestationPredicateType = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtrip, pt);
+    }
+
+    #[test]
+    fn attestation_predicate_type_debug() {
+        let dbg = format!("{:?}", AttestationPredicateType::SlsaProvenanceV1);
+        assert!(dbg.contains("SlsaProvenanceV1"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: AttestationMaterial clone and debug
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn attestation_material_clone() {
+        let mat = AttestationMaterial {
+            uri: "git+https://example.com".to_string(),
+            digest: format!("blake3-256:{}", "a".repeat(64)),
+        };
+        let cloned = mat.clone();
+        assert_eq!(mat.uri, cloned.uri);
+        assert_eq!(mat.digest, cloned.digest);
+    }
+
+    #[test]
+    fn attestation_material_debug() {
+        let mat = AttestationMaterial {
+            uri: "test-uri".to_string(),
+            digest: format!("blake3-256:{}", "b".repeat(64)),
+        };
+        let dbg = format!("{mat:?}");
+        assert!(dbg.contains("test-uri"));
+    }
+
+    #[test]
+    fn attestation_material_serde_roundtrip() {
+        let mat = AttestationMaterial {
+            uri: "git+https://example.com/repo".to_string(),
+            digest: format!("blake3-256:{}", "c".repeat(64)),
+        };
+        let json = serde_json::to_string(&mat).unwrap();
+        let roundtrip: AttestationMaterial = serde_json::from_str(&json).unwrap();
+        assert_eq!(mat, roundtrip);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: AttestationMetadata edge cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn attestation_metadata_equal_start_finish_is_valid() {
+        let ts = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).single().unwrap();
+        let meta = AttestationMetadata {
+            build_started_at: ts,
+            build_finished_at: ts,
+            invocation_id: None,
+        };
+        assert!(meta.validate().is_ok());
+    }
+
+    #[test]
+    fn attestation_metadata_clone() {
+        let meta = AttestationMetadata {
+            build_started_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).single().unwrap(),
+            build_finished_at: Utc.with_ymd_and_hms(2026, 1, 1, 1, 0, 0).single().unwrap(),
+            invocation_id: Some("run-99".to_string()),
+        };
+        let cloned = meta.clone();
+        assert_eq!(meta.build_started_at, cloned.build_started_at);
+        assert_eq!(meta.invocation_id, cloned.invocation_id);
+    }
+
+    #[test]
+    fn attestation_metadata_serde_roundtrip() {
+        let meta = AttestationMetadata {
+            build_started_at: Utc.with_ymd_and_hms(2026, 3, 1, 10, 0, 0).single().unwrap(),
+            build_finished_at: Utc.with_ymd_and_hms(2026, 3, 1, 10, 5, 0).single().unwrap(),
+            invocation_id: Some("ci-123".to_string()),
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        let roundtrip: AttestationMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(meta, roundtrip);
+    }
+
+    #[test]
+    fn attestation_metadata_serde_skips_none_invocation_id() {
+        let meta = AttestationMetadata {
+            build_started_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).single().unwrap(),
+            build_finished_at: Utc.with_ymd_and_hms(2026, 1, 1, 1, 0, 0).single().unwrap(),
+            invocation_id: None,
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        assert!(!json.contains("invocation_id"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: TrustRootBinding coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn trust_root_binding_clone() {
+        let root = TrustRootBinding {
+            root_type: "tuf".to_string(),
+            root_id: "tuf-root-001".to_string(),
+        };
+        let cloned = root.clone();
+        assert_eq!(root.root_type, cloned.root_type);
+        assert_eq!(root.root_id, cloned.root_id);
+    }
+
+    #[test]
+    fn trust_root_binding_serde_roundtrip() {
+        let root = TrustRootBinding {
+            root_type: "manual".to_string(),
+            root_id: "manual-root-42".to_string(),
+        };
+        let json = serde_json::to_string(&root).unwrap();
+        let roundtrip: TrustRootBinding = serde_json::from_str(&json).unwrap();
+        assert_eq!(root, roundtrip);
+    }
+
+    #[test]
+    fn trust_root_binding_rejects_whitespace_only_root_id() {
+        let root = TrustRootBinding {
+            root_type: "sigstore".to_string(),
+            root_id: "   ".to_string(),
+        };
+        let err = root.validate().unwrap_err();
+        assert!(matches!(err, SupplyChainError::InvalidTrustRoot { .. }));
+    }
+
+    #[test]
+    fn trust_root_binding_all_valid_types() {
+        for rt in &["sigstore", "tuf", "manual"] {
+            let root = TrustRootBinding {
+                root_type: rt.to_string(),
+                root_id: "test-id".to_string(),
+            };
+            assert!(root.validate().is_ok(), "root_type `{rt}` should be valid");
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: SupplyChainSignature coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn signature_clone() {
+        let sig = SupplyChainSignature::new("k1", "s1", vec!["f".to_string()]);
+        let cloned = sig.clone();
+        assert_eq!(sig.algorithm, cloned.algorithm);
+        assert_eq!(sig.key_id, cloned.key_id);
+        assert_eq!(sig.signature, cloned.signature);
+        assert_eq!(sig.signed_fields, cloned.signed_fields);
+    }
+
+    #[test]
+    fn signature_serde_roundtrip() {
+        let sig = SupplyChainSignature::new(
+            "key-abc",
+            "sig-xyz",
+            vec!["field_a".to_string(), "field_b".to_string()],
+        );
+        let json = serde_json::to_string(&sig).unwrap();
+        let roundtrip: SupplyChainSignature = serde_json::from_str(&json).unwrap();
+        assert_eq!(sig, roundtrip);
+    }
+
+    #[test]
+    fn signature_validate_rejects_whitespace_key_id() {
+        let sig = SupplyChainSignature {
+            algorithm: "ed25519".to_string(),
+            key_id: "   ".to_string(),
+            signature: "data".to_string(),
+            signed_fields: vec!["format".to_string()],
+        };
+        let err = sig.validate(&["format"]).unwrap_err();
+        assert!(matches!(err, SupplyChainError::InvalidSignature { .. }));
+        assert!(err.to_string().contains("key_id"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: SbomComponent edge cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn sbom_component_accepts_sha256_hash() {
+        let comp = SbomComponent {
+            component_id: "comp-1".to_string(),
+            name: "test-lib".to_string(),
+            version: "0.1.0".to_string(),
+            hashes: vec![format!("sha256:{}", "a".repeat(64))],
+            licenses: vec!["MIT".to_string()],
+        };
+        assert!(comp.validate().is_ok());
+    }
+
+    #[test]
+    fn sbom_component_accepts_mixed_hash_algorithms() {
+        let comp = SbomComponent {
+            component_id: "comp-2".to_string(),
+            name: "mixed-lib".to_string(),
+            version: "2.0.0".to_string(),
+            hashes: vec![
+                format!("blake3-256:{}", "b".repeat(64)),
+                format!("sha256:{}", "c".repeat(64)),
+            ],
+            licenses: vec!["Apache-2.0".to_string()],
+        };
+        assert!(comp.validate().is_ok());
+    }
+
+    #[test]
+    fn sbom_component_clone() {
+        let comp = SbomComponent {
+            component_id: "comp-3".to_string(),
+            name: "cloneable".to_string(),
+            version: "1.0.0".to_string(),
+            hashes: vec![format!("sha256:{}", "d".repeat(64))],
+            licenses: vec!["BSD-3-Clause".to_string()],
+        };
+        let cloned = comp.clone();
+        assert_eq!(comp.component_id, cloned.component_id);
+        assert_eq!(comp.name, cloned.name);
+    }
+
+    #[test]
+    fn sbom_component_serde_roundtrip() {
+        let comp = SbomComponent {
+            component_id: "comp-rt".to_string(),
+            name: "roundtrip-lib".to_string(),
+            version: "3.2.1".to_string(),
+            hashes: vec![format!("blake3-256:{}", "e".repeat(64))],
+            licenses: vec!["MIT".to_string(), "Apache-2.0".to_string()],
+        };
+        let json = serde_json::to_string(&comp).unwrap();
+        let roundtrip: SbomComponent = serde_json::from_str(&json).unwrap();
+        assert_eq!(comp, roundtrip);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: SbomDependency coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn sbom_dependency_leaf_node_no_depends_on() {
+        let dep = SbomDependency {
+            component_id: "leaf".to_string(),
+            depends_on: vec![],
+        };
+        let json = serde_json::to_string(&dep).unwrap();
+        assert!(!json.contains("depends_on"));
+        let roundtrip: SbomDependency = serde_json::from_str(&json).unwrap();
+        assert!(roundtrip.depends_on.is_empty());
+    }
+
+    #[test]
+    fn sbom_dependency_serde_roundtrip_with_deps() {
+        let dep = SbomDependency {
+            component_id: "parent".to_string(),
+            depends_on: vec!["child-a".to_string(), "child-b".to_string()],
+        };
+        let json = serde_json::to_string(&dep).unwrap();
+        let roundtrip: SbomDependency = serde_json::from_str(&json).unwrap();
+        assert_eq!(dep, roundtrip);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: SupplyChainError coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn supply_chain_error_clone() {
+        let err = SupplyChainError::InvalidAttestation {
+            reason: "cloneable".to_string(),
+        };
+        let cloned = err.clone();
+        assert_eq!(err, cloned);
+    }
+
+    #[test]
+    fn supply_chain_error_debug() {
+        let err = SupplyChainError::CanonicalizationFailed {
+            reason: "debug-test".to_string(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("CanonicalizationFailed"));
+        assert!(dbg.contains("debug-test"));
+    }
+
+    #[test]
+    fn supply_chain_error_eq() {
+        let a = SupplyChainError::InvalidSbom {
+            reason: "same".to_string(),
+        };
+        let b = SupplyChainError::InvalidSbom {
+            reason: "same".to_string(),
+        };
+        let c = SupplyChainError::InvalidSbom {
+            reason: "different".to_string(),
+        };
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn supply_chain_error_variants_are_distinct() {
+        let att = SupplyChainError::InvalidAttestation {
+            reason: "x".to_string(),
+        };
+        let sbom = SupplyChainError::InvalidSbom {
+            reason: "x".to_string(),
+        };
+        let sig = SupplyChainError::InvalidSignature {
+            reason: "x".to_string(),
+        };
+        let root = SupplyChainError::InvalidTrustRoot {
+            reason: "x".to_string(),
+        };
+        let canon = SupplyChainError::CanonicalizationFailed {
+            reason: "x".to_string(),
+        };
+        assert_ne!(att, sbom);
+        assert_ne!(sbom, sig);
+        assert_ne!(sig, root);
+        assert_ne!(root, canon);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: VerificationReasonCode Display for remaining variants
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn verification_reason_code_display_attestation_invalid() {
+        assert_eq!(
+            VerificationReasonCode::AttestationInvalid.to_string(),
+            "ATTESTATION_INVALID"
+        );
+    }
+
+    #[test]
+    fn verification_reason_code_display_signature_invalid() {
+        assert_eq!(
+            VerificationReasonCode::SignatureInvalid.to_string(),
+            "SIGNATURE_INVALID"
+        );
+    }
+
+    #[test]
+    fn verification_reason_code_display_sbom_invalid() {
+        assert_eq!(
+            VerificationReasonCode::SbomInvalid.to_string(),
+            "SBOM_INVALID"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: VerificationReasonCode serde roundtrip for all variants
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn verification_reason_code_all_variants_serde_roundtrip() {
+        let codes = [
+            VerificationReasonCode::Verified,
+            VerificationReasonCode::AttestationMissing,
+            VerificationReasonCode::AttestationInvalid,
+            VerificationReasonCode::SlsaLevelInsufficient,
+            VerificationReasonCode::BuilderUntrusted,
+            VerificationReasonCode::SubjectDigestMismatch,
+            VerificationReasonCode::SignatureInvalid,
+            VerificationReasonCode::SbomMissing,
+            VerificationReasonCode::SbomInvalid,
+            VerificationReasonCode::AllowedUnsigned,
+        ];
+        for code in codes {
+            let json = serde_json::to_string(&code).unwrap();
+            let roundtrip: VerificationReasonCode = serde_json::from_str(&json).unwrap();
+            assert_eq!(roundtrip, code);
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: VerificationStep serde roundtrip
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn verification_step_serde_roundtrip() {
+        let step = VerificationStep {
+            step: "test_step".to_string(),
+            passed: true,
+            detail: "all good".to_string(),
+        };
+        let json = serde_json::to_string(&step).unwrap();
+        let roundtrip: VerificationStep = serde_json::from_str(&json).unwrap();
+        assert_eq!(step, roundtrip);
+    }
+
+    #[test]
+    fn verification_step_clone() {
+        let step = VerificationStep {
+            step: "clone_test".to_string(),
+            passed: false,
+            detail: "failed step".to_string(),
+        };
+        let cloned = step.clone();
+        assert_eq!(step.step, cloned.step);
+        assert_eq!(step.passed, cloned.passed);
+        assert_eq!(step.detail, cloned.detail);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: SupplyChainVerificationPolicy coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn verification_policy_default_values() {
+        let p = SupplyChainVerificationPolicy::default();
+        assert!(p.require_attestation);
+        assert!(p.require_sbom);
+        assert_eq!(p.min_slsa_level, 0);
+        assert!(p.trusted_builders.is_empty());
+        assert!(!p.allow_unsigned);
+        assert!(p.require_digest_match);
+    }
+
+    #[test]
+    fn verification_policy_serde_roundtrip() {
+        let p = SupplyChainVerificationPolicy {
+            require_attestation: false,
+            require_sbom: true,
+            min_slsa_level: 3,
+            trusted_builders: vec!["builder-a".to_string(), "builder-b".to_string()],
+            allow_unsigned: true,
+            require_digest_match: false,
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        let roundtrip: SupplyChainVerificationPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(p, roundtrip);
+    }
+
+    #[test]
+    fn verification_policy_skips_empty_trusted_builders_in_json() {
+        let p = SupplyChainVerificationPolicy::default();
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(!json.contains("trusted_builders"));
+    }
+
+    #[test]
+    fn verification_policy_clone() {
+        let p = SupplyChainVerificationPolicy {
+            min_slsa_level: 2,
+            trusted_builders: vec!["x".to_string()],
+            ..Default::default()
+        };
+        let cloned = p.clone();
+        assert_eq!(p.min_slsa_level, cloned.min_slsa_level);
+        assert_eq!(p.trusted_builders, cloned.trusted_builders);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: Pipeline additional scenarios
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn pipeline_both_missing_without_allow_unsigned() {
+        let pipeline = default_pipeline();
+        let evidence = pipeline.verify(&artifact_digest(), None, None);
+        assert_eq!(evidence.decision, VerificationDecision::Deny);
+        // First failure is attestation missing (checked before SBOM)
+        assert_eq!(
+            evidence.reason_code,
+            VerificationReasonCode::AttestationMissing
+        );
+    }
+
+    #[test]
+    fn pipeline_attestation_not_required_sbom_missing() {
+        let policy = SupplyChainVerificationPolicy {
+            require_attestation: false,
+            require_sbom: true,
+            ..Default::default()
+        };
+        let pipeline = VerificationPipeline::new(policy);
+        let evidence = pipeline.verify(&artifact_digest(), None, None);
+        assert_eq!(evidence.decision, VerificationDecision::Deny);
+        assert_eq!(evidence.reason_code, VerificationReasonCode::SbomMissing);
+    }
+
+    #[test]
+    fn pipeline_sbom_not_required_attestation_missing() {
+        let policy = SupplyChainVerificationPolicy {
+            require_attestation: true,
+            require_sbom: false,
+            ..Default::default()
+        };
+        let pipeline = VerificationPipeline::new(policy);
+        let evidence = pipeline.verify(&artifact_digest(), None, None);
+        assert_eq!(evidence.decision, VerificationDecision::Deny);
+        assert_eq!(
+            evidence.reason_code,
+            VerificationReasonCode::AttestationMissing
+        );
+    }
+
+    #[test]
+    fn pipeline_allow_unsigned_with_attestation_required_but_missing() {
+        let policy = SupplyChainVerificationPolicy {
+            require_attestation: true,
+            require_sbom: true,
+            allow_unsigned: true,
+            ..Default::default()
+        };
+        let pipeline = VerificationPipeline::new(policy);
+        let evidence = pipeline.verify(&artifact_digest(), None, None);
+        // allow_unsigned overrides presence check
+        assert_eq!(evidence.decision, VerificationDecision::Allow);
+        assert_eq!(
+            evidence.reason_code,
+            VerificationReasonCode::AllowedUnsigned
+        );
+        assert!(evidence.steps.iter().all(|s| s.passed));
+    }
+
+    #[test]
+    fn pipeline_slsa_level_exact_match_passes() {
+        let policy = SupplyChainVerificationPolicy {
+            min_slsa_level: 3,
+            ..Default::default()
+        };
+        let pipeline = VerificationPipeline::new(policy);
+        let att = sample_attestation(); // slsa_level = 3
+        let sbom = sample_sbom();
+        let evidence = pipeline.verify(&artifact_digest(), Some(&att), Some(&sbom));
+        assert_eq!(evidence.decision, VerificationDecision::Allow);
+    }
+
+    #[test]
+    fn pipeline_slsa_level_above_minimum_passes() {
+        let policy = SupplyChainVerificationPolicy {
+            min_slsa_level: 1,
+            ..Default::default()
+        };
+        let pipeline = VerificationPipeline::new(policy);
+        let att = sample_attestation(); // slsa_level = 3
+        let sbom = sample_sbom();
+        let evidence = pipeline.verify(&artifact_digest(), Some(&att), Some(&sbom));
+        assert_eq!(evidence.decision, VerificationDecision::Allow);
+    }
+
+    #[test]
+    fn pipeline_trusted_builder_match_passes() {
+        let policy = SupplyChainVerificationPolicy {
+            trusted_builders: vec![
+                "builder://other-ci".to_string(),
+                "builder://github/actions".to_string(),
+            ],
+            ..Default::default()
+        };
+        let pipeline = VerificationPipeline::new(policy);
+        let att = sample_attestation();
+        let sbom = sample_sbom();
+        let evidence = pipeline.verify(&artifact_digest(), Some(&att), Some(&sbom));
+        assert_eq!(evidence.decision, VerificationDecision::Allow);
+    }
+
+    #[test]
+    fn pipeline_digest_match_disabled_allows_mismatch() {
+        let policy = SupplyChainVerificationPolicy {
+            require_digest_match: false,
+            ..Default::default()
+        };
+        let pipeline = VerificationPipeline::new(policy);
+        let att = sample_attestation();
+        let sbom = sample_sbom();
+        let wrong_digest = format!("blake3-256:{}", "z".repeat(64));
+        let evidence = pipeline.verify(&wrong_digest, Some(&att), Some(&sbom));
+        // No subject_digest_match step should be present
+        assert_eq!(evidence.decision, VerificationDecision::Allow);
+        assert!(
+            !evidence
+                .steps
+                .iter()
+                .any(|s| s.step == "subject_digest_match"),
+            "should skip digest match when not required"
+        );
+    }
+
+    #[test]
+    fn pipeline_evidence_captures_artifact_digest() {
+        let pipeline = default_pipeline();
+        let att = sample_attestation();
+        let sbom = sample_sbom();
+        let digest = artifact_digest();
+        let evidence = pipeline.verify(&digest, Some(&att), Some(&sbom));
+        assert_eq!(evidence.artifact_digest, digest);
+    }
+
+    #[test]
+    fn pipeline_evidence_content_hash_blake3() {
+        let pipeline = default_pipeline();
+        let att = sample_attestation();
+        let sbom = sample_sbom();
+        let evidence = pipeline.verify(&artifact_digest(), Some(&att), Some(&sbom));
+        let hash = evidence.content_hash(HashAlgorithm::Blake3_256).unwrap();
+        assert!(hash.starts_with("blake3-256:"));
+        assert_eq!(hash.len(), "blake3-256:".len() + 64);
+    }
+
+    #[test]
+    fn pipeline_evidence_content_hash_differs_for_different_decisions() {
+        let pipeline = default_pipeline();
+        let att = sample_attestation();
+        let sbom = sample_sbom();
+
+        let allow_evidence = pipeline.verify(&artifact_digest(), Some(&att), Some(&sbom));
+        let deny_evidence = pipeline.verify(&artifact_digest(), None, None);
+
+        let h1 = allow_evidence
+            .content_hash(HashAlgorithm::Sha256)
+            .unwrap();
+        let h2 = deny_evidence.content_hash(HashAlgorithm::Sha256).unwrap();
+        assert_ne!(h1, h2);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: VerificationDecision Debug and Copy
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn verification_decision_debug() {
+        let dbg = format!("{:?}", VerificationDecision::Allow);
+        assert!(dbg.contains("Allow"));
+        let dbg = format!("{:?}", VerificationDecision::Deny);
+        assert!(dbg.contains("Deny"));
+    }
+
+    #[test]
+    fn verification_decision_copy() {
+        let d = VerificationDecision::Allow;
+        let copied = d;
+        assert_eq!(d, copied);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: Attestation content hash with different data
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn attestation_content_hash_changes_with_modified_builder() {
+        let att_a = sample_attestation();
+        let mut att_b = sample_attestation();
+        att_b.builder_id = "builder://other-ci".to_string();
+        att_b.builder_allowlist = vec!["builder://other-ci".to_string()];
+
+        let h_a = att_a
+            .content_hash(CanonicalEncoding::Json, HashAlgorithm::Blake3_256)
+            .unwrap();
+        let h_b = att_b
+            .content_hash(CanonicalEncoding::Json, HashAlgorithm::Blake3_256)
+            .unwrap();
+        assert_ne!(h_a, h_b);
+    }
+
+    #[test]
+    fn attestation_all_slsa_levels_valid() {
+        for level in 0..=4u8 {
+            let mut att = sample_attestation();
+            att.slsa_level = level;
+            assert!(
+                att.validate().is_ok(),
+                "SLSA level {level} should be valid"
+            );
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: SBOM with SPDX format signing bytes differ from CycloneDX
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn sbom_signing_bytes_differ_for_different_bom_format() {
+        let sbom_a = sample_sbom(); // CycloneDX
+        let mut sbom_b = sample_sbom();
+        sbom_b.bom_format = SbomFormat::Spdx;
+
+        let bytes_a = sbom_a.signing_bytes().unwrap();
+        let bytes_b = sbom_b.signing_bytes().unwrap();
+        assert_ne!(bytes_a, bytes_b);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: Hash bytes determinism
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn hash_bytes_empty_input() {
+        let blake = hash_bytes(b"", HashAlgorithm::Blake3_256);
+        assert!(blake.starts_with("blake3-256:"));
+
+        let sha = hash_bytes(b"", HashAlgorithm::Sha256);
+        assert!(sha.starts_with("sha256:"));
+
+        // Both should produce valid 64-char hex
+        let blake_hex = blake.split(':').nth(1).unwrap();
+        assert_eq!(blake_hex.len(), 64);
+        let sha_hex = sha.split(':').nth(1).unwrap();
+        assert_eq!(sha_hex.len(), 64);
+    }
+
+    #[test]
+    fn hash_bytes_deterministic_same_input() {
+        let input = b"determinism test data";
+        let h1 = hash_bytes(input, HashAlgorithm::Blake3_256);
+        let h2 = hash_bytes(input, HashAlgorithm::Blake3_256);
+        assert_eq!(h1, h2);
+
+        let h3 = hash_bytes(input, HashAlgorithm::Sha256);
+        let h4 = hash_bytes(input, HashAlgorithm::Sha256);
+        assert_eq!(h3, h4);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: validate_digest_with_algo edge cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn validate_digest_with_algo_rejects_no_colon() {
+        let result = validate_digest_with_algo("nocolon", "field", HashAlgorithm::Blake3_256);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("format"));
+    }
+
+    #[test]
+    fn validate_digest_with_algo_rejects_wrong_algo() {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let result = validate_digest_with_algo(&digest, "field", HashAlgorithm::Blake3_256);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_digest_with_algo_accepts_correct() {
+        let digest = format!("blake3-256:{}", "a".repeat(64));
+        let result = validate_digest_with_algo(&digest, "field", HashAlgorithm::Blake3_256);
+        assert!(result.is_ok());
+
+        let digest = format!("sha256:{}", "b".repeat(64));
+        let result = validate_digest_with_algo(&digest, "field", HashAlgorithm::Sha256);
+        assert!(result.is_ok());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: Canonicalize JSON edge cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn canonicalize_json_empty_object() {
+        let input: Value = serde_json::from_str("{}").unwrap();
+        let canonical = canonicalize_json_value(input.clone());
+        assert_eq!(canonical, input);
+    }
+
+    #[test]
+    fn canonicalize_json_empty_array() {
+        let input: Value = serde_json::from_str("[]").unwrap();
+        let canonical = canonicalize_json_value(input.clone());
+        assert_eq!(canonical, input);
+    }
+
+    #[test]
+    fn canonicalize_json_deeply_nested() {
+        let input: Value =
+            serde_json::from_str(r#"{"z":{"y":{"x":{"w":1}}}}"#).unwrap();
+        let canonical = canonicalize_json_value(input);
+        // Should still navigate all the way down
+        assert_eq!(canonical["z"]["y"]["x"]["w"], 1);
+    }
+
+    #[test]
+    fn canonicalize_json_array_of_objects_sorted_keys() {
+        let input: Value =
+            serde_json::from_str(r#"[{"b":2,"a":1},{"d":4,"c":3}]"#).unwrap();
+        let canonical = canonicalize_json_value(input);
+        let arr = canonical.as_array().unwrap();
+        let keys0: Vec<&String> = arr[0].as_object().unwrap().keys().collect();
+        assert_eq!(keys0, vec!["a", "b"]);
+        let keys1: Vec<&String> = arr[1].as_object().unwrap().keys().collect();
+        assert_eq!(keys1, vec!["c", "d"]);
+    }
+
+    #[test]
+    fn canonicalize_json_number_values_preserved() {
+        let input: Value = serde_json::from_str(r#"{"val":42,"neg":-1}"#).unwrap();
+        let canonical = canonicalize_json_value(input);
+        assert_eq!(canonical["neg"], -1);
+        assert_eq!(canonical["val"], 42);
+    }
 }

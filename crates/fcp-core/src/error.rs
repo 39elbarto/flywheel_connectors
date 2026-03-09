@@ -1816,4 +1816,1152 @@ mod tests {
         assert!(resp.retryable);
         assert!(resp.details.is_some());
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Display message tests for every variant
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn display_checksum_mismatch() {
+        assert_eq!(FcpError::ChecksumMismatch.to_string(), "Checksum mismatch");
+    }
+
+    #[test]
+    fn display_token_expired() {
+        assert_eq!(FcpError::TokenExpired.to_string(), "Token expired");
+    }
+
+    #[test]
+    fn display_invalid_signature() {
+        assert_eq!(FcpError::InvalidSignature.to_string(), "Invalid signature");
+    }
+
+    #[test]
+    fn display_not_configured() {
+        assert_eq!(FcpError::NotConfigured.to_string(), "Connector not configured");
+    }
+
+    #[test]
+    fn display_not_handshaken() {
+        assert_eq!(FcpError::NotHandshaken.to_string(), "Connector not handshaken");
+    }
+
+    #[test]
+    fn display_streaming_not_supported() {
+        assert_eq!(FcpError::StreamingNotSupported.to_string(), "Streaming not supported");
+    }
+
+    #[test]
+    fn display_capability_denied() {
+        let err = FcpError::CapabilityDenied {
+            capability: "cap.write".into(),
+            reason: "not authorized".into(),
+        };
+        assert_eq!(err.to_string(), "Capability denied: cap.write");
+    }
+
+    #[test]
+    fn display_rate_limited() {
+        let err = FcpError::RateLimited {
+            retry_after_ms: 2500,
+            violation: None,
+        };
+        assert_eq!(err.to_string(), "Rate limited: retry after 2500ms");
+    }
+
+    #[test]
+    fn display_operation_not_granted() {
+        let err = FcpError::OperationNotGranted {
+            operation: "op.delete".into(),
+        };
+        assert_eq!(err.to_string(), "Operation not granted: op.delete");
+    }
+
+    #[test]
+    fn display_resource_not_allowed() {
+        let err = FcpError::ResourceNotAllowed {
+            resource: "secret.key".into(),
+        };
+        assert_eq!(err.to_string(), "Resource not allowed: secret.key");
+    }
+
+    #[test]
+    fn display_connector_unavailable() {
+        let err = FcpError::ConnectorUnavailable {
+            code: 5001,
+            message: "overloaded".into(),
+        };
+        assert_eq!(err.to_string(), "Connector unavailable: overloaded");
+    }
+
+    #[test]
+    fn display_health_check_failed() {
+        let err = FcpError::HealthCheckFailed {
+            reason: "connection refused".into(),
+        };
+        assert_eq!(err.to_string(), "Health check failed: connection refused");
+    }
+
+    #[test]
+    fn display_resource_not_found() {
+        let err = FcpError::ResourceNotFound {
+            resource: "user:42".into(),
+        };
+        assert_eq!(err.to_string(), "Resource not found: user:42");
+    }
+
+    #[test]
+    fn display_resource_exhausted() {
+        let err = FcpError::ResourceExhausted {
+            resource: "disk".into(),
+        };
+        assert_eq!(err.to_string(), "Resource exhausted: disk");
+    }
+
+    #[test]
+    fn display_conflict() {
+        let err = FcpError::Conflict {
+            message: "version mismatch".into(),
+        };
+        assert_eq!(err.to_string(), "Conflict: version mismatch");
+    }
+
+    #[test]
+    fn display_external() {
+        let err = FcpError::External {
+            service: "stripe".into(),
+            message: "payment failed".into(),
+            status_code: Some(402),
+            retryable: false,
+            retry_after: None,
+        };
+        assert_eq!(err.to_string(), "External service error: stripe - payment failed");
+    }
+
+    #[test]
+    fn display_upstream_timeout() {
+        let err = FcpError::UpstreamTimeout {
+            service: "db-primary".into(),
+        };
+        assert_eq!(err.to_string(), "Upstream timeout: db-primary");
+    }
+
+    #[test]
+    fn display_dependency_unavailable() {
+        let err = FcpError::DependencyUnavailable {
+            service: "redis-cache".into(),
+        };
+        assert_eq!(err.to_string(), "Dependency unavailable: redis-cache");
+    }
+
+    #[test]
+    fn display_internal() {
+        let err = FcpError::Internal {
+            message: "null pointer".into(),
+        };
+        assert_eq!(err.to_string(), "Internal error: null pointer");
+    }
+
+    #[test]
+    fn display_elevation_required() {
+        let err = FcpError::ElevationRequired {
+            capability: "cap.destroy".into(),
+            ttl_seconds: Some(120),
+        };
+        assert_eq!(err.to_string(), "Elevation required for cap.destroy");
+    }
+
+    #[test]
+    fn display_unauthorized() {
+        let err = FcpError::Unauthorized {
+            code: 2001,
+            message: "invalid token".into(),
+        };
+        assert_eq!(err.to_string(), "Unauthorized: invalid token");
+    }
+
+    #[test]
+    fn display_version_mismatch() {
+        let err = FcpError::VersionMismatch {
+            expected: "3.0".into(),
+            actual: "1.5".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "Protocol version mismatch: expected 3.0, got 1.5"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Clone tests (use original after clone to avoid redundant_clone lint)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn clone_invalid_request() {
+        let err = FcpError::InvalidRequest {
+            code: 1001,
+            message: "bad".into(),
+        };
+        let cloned = err.clone();
+        assert_eq!(err.to_string(), cloned.to_string());
+        assert_eq!(err.numeric_code(), cloned.numeric_code());
+    }
+
+    #[test]
+    fn clone_external_with_retry() {
+        let err = FcpError::External {
+            service: "svc".into(),
+            message: "err".into(),
+            status_code: Some(503),
+            retryable: true,
+            retry_after: Some(Duration::from_secs(10)),
+        };
+        let cloned = err.clone();
+        assert_eq!(err.to_string(), cloned.to_string());
+        assert_eq!(err.is_retryable(), cloned.is_retryable());
+        assert_eq!(err.retry_after(), cloned.retry_after());
+    }
+
+    #[test]
+    fn clone_rate_limited_with_violation() {
+        let violation = crate::ThrottleViolation {
+            violation_id: crate::ObjectId::from_bytes([1; 32]),
+            timestamp_ms: 1000,
+            zone_id: crate::ZoneId::owner(),
+            connector_id: None,
+            operation_id: None,
+            limit_type: crate::ratelimit::LimitType::Rpm,
+            limit_value: 100,
+            current_value: 150,
+            retry_after_ms: 5000,
+        };
+        let err = FcpError::RateLimited {
+            retry_after_ms: 5000,
+            violation: Some(Box::new(violation)),
+        };
+        let cloned = err.clone();
+        assert_eq!(err.to_string(), cloned.to_string());
+        assert_eq!(err.retry_after(), cloned.retry_after());
+    }
+
+    #[test]
+    fn clone_budget_exceeded() {
+        let err = FcpError::BudgetExceeded {
+            metric: UsageMetricKind::Bytes,
+            used: 999,
+            limit: 500,
+            window_seconds: 120,
+        };
+        let cloned = err.clone();
+        assert_eq!(err.to_string(), cloned.to_string());
+        assert_eq!(err.numeric_code(), cloned.numeric_code());
+    }
+
+    #[test]
+    fn clone_taint_violation() {
+        let err = FcpError::TaintViolation {
+            origin_zone: "z:work".into(),
+            target_zone: "z:owner".into(),
+            capability: "cap.exec".into(),
+        };
+        let cloned = err.clone();
+        assert_eq!(err.to_string(), cloned.to_string());
+        assert_eq!(err.category(), cloned.category());
+    }
+
+    #[test]
+    fn clone_unit_variants() {
+        let err = FcpError::ChecksumMismatch;
+        let cloned = err.clone();
+        assert_eq!(err.to_string(), cloned.to_string());
+
+        let err = FcpError::TokenExpired;
+        let cloned = err.clone();
+        assert_eq!(err.to_string(), cloned.to_string());
+
+        let err = FcpError::InvalidSignature;
+        let cloned = err.clone();
+        assert_eq!(err.to_string(), cloned.to_string());
+
+        let err = FcpError::NotConfigured;
+        let cloned = err.clone();
+        assert_eq!(err.to_string(), cloned.to_string());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Debug trait tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn debug_fcp_error_not_empty() {
+        let err = FcpError::Internal {
+            message: "oops".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(!dbg.is_empty());
+        assert!(dbg.contains("Internal"));
+    }
+
+    #[test]
+    fn debug_error_category() {
+        let cat = ErrorCategory::External;
+        let dbg = format!("{cat:?}");
+        assert_eq!(dbg, "External");
+    }
+
+    #[test]
+    fn debug_error_response() {
+        let resp = FcpErrorResponse {
+            code: "FCP-9001".into(),
+            message: "boom".into(),
+            retryable: false,
+            retry_after_ms: None,
+            details: None,
+            ai_recovery_hint: None,
+        };
+        let dbg = format!("{resp:?}");
+        assert!(dbg.contains("FCP-9001"));
+        assert!(dbg.contains("boom"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Serde roundtrip tests for all FcpError variants
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn serde_roundtrip_all_protocol_variants() {
+        let errors = vec![
+            FcpError::InvalidRequest {
+                code: 1001,
+                message: "bad input".into(),
+            },
+            FcpError::MalformedFrame {
+                code: 1002,
+                message: "corrupt cbor".into(),
+            },
+            FcpError::MissingField {
+                field: "connector_id".into(),
+            },
+            FcpError::ChecksumMismatch,
+            FcpError::VersionMismatch {
+                expected: "2.0".into(),
+                actual: "1.0".into(),
+            },
+        ];
+        for err in errors {
+            let json = serde_json::to_string(&err).unwrap();
+            let back: FcpError = serde_json::from_str(&json).unwrap();
+            assert_eq!(err.to_string(), back.to_string());
+            assert_eq!(err.numeric_code(), back.numeric_code());
+        }
+    }
+
+    #[test]
+    fn serde_roundtrip_all_auth_variants() {
+        let errors = vec![
+            FcpError::Unauthorized {
+                code: 2001,
+                message: "forbidden".into(),
+            },
+            FcpError::TokenExpired,
+            FcpError::InvalidSignature,
+        ];
+        for err in errors {
+            let json = serde_json::to_string(&err).unwrap();
+            let back: FcpError = serde_json::from_str(&json).unwrap();
+            assert_eq!(err.to_string(), back.to_string());
+        }
+    }
+
+    #[test]
+    fn serde_roundtrip_all_capability_variants() {
+        let errors = vec![
+            FcpError::CapabilityDenied {
+                capability: "cap.write".into(),
+                reason: "nope".into(),
+            },
+            FcpError::RateLimited {
+                retry_after_ms: 500,
+                violation: None,
+            },
+            FcpError::OperationNotGranted {
+                operation: "op.delete".into(),
+            },
+            FcpError::ResourceNotAllowed {
+                resource: "secret".into(),
+            },
+        ];
+        for err in errors {
+            let json = serde_json::to_string(&err).unwrap();
+            let back: FcpError = serde_json::from_str(&json).unwrap();
+            assert_eq!(err.to_string(), back.to_string());
+        }
+    }
+
+    #[test]
+    fn serde_roundtrip_all_zone_variants() {
+        let errors = vec![
+            FcpError::ZoneViolation {
+                source_zone: "z:public".into(),
+                target_zone: "z:owner".into(),
+                message: "nope".into(),
+            },
+            FcpError::TaintViolation {
+                origin_zone: "z:work".into(),
+                target_zone: "z:private".into(),
+                capability: "cap.read".into(),
+            },
+            FcpError::ElevationRequired {
+                capability: "cap.admin".into(),
+                ttl_seconds: Some(300),
+            },
+            FcpError::ElevationRequired {
+                capability: "cap.admin".into(),
+                ttl_seconds: None,
+            },
+        ];
+        for err in errors {
+            let json = serde_json::to_string(&err).unwrap();
+            let back: FcpError = serde_json::from_str(&json).unwrap();
+            assert_eq!(err.to_string(), back.to_string());
+        }
+    }
+
+    #[test]
+    fn serde_roundtrip_all_connector_variants() {
+        let errors = vec![
+            FcpError::ConnectorUnavailable {
+                code: 5001,
+                message: "down".into(),
+            },
+            FcpError::NotConfigured,
+            FcpError::NotHandshaken,
+            FcpError::HealthCheckFailed {
+                reason: "timeout".into(),
+            },
+            FcpError::StreamingNotSupported,
+        ];
+        for err in errors {
+            let json = serde_json::to_string(&err).unwrap();
+            let back: FcpError = serde_json::from_str(&json).unwrap();
+            assert_eq!(err.to_string(), back.to_string());
+        }
+    }
+
+    #[test]
+    fn serde_roundtrip_all_resource_variants() {
+        let errors = vec![
+            FcpError::ResourceNotFound {
+                resource: "obj:123".into(),
+            },
+            FcpError::ResourceExhausted {
+                resource: "cpu".into(),
+            },
+            FcpError::Conflict {
+                message: "stale etag".into(),
+            },
+            FcpError::BudgetExceeded {
+                metric: UsageMetricKind::Requests,
+                used: 1001,
+                limit: 1000,
+                window_seconds: 60,
+            },
+        ];
+        for err in errors {
+            let json = serde_json::to_string(&err).unwrap();
+            let back: FcpError = serde_json::from_str(&json).unwrap();
+            assert_eq!(err.to_string(), back.to_string());
+        }
+    }
+
+    #[test]
+    fn serde_roundtrip_all_external_variants() {
+        let errors = vec![
+            FcpError::External {
+                service: "api".into(),
+                message: "fail".into(),
+                status_code: Some(500),
+                retryable: true,
+                retry_after: Some(Duration::from_millis(1500)),
+            },
+            FcpError::External {
+                service: "api".into(),
+                message: "fail".into(),
+                status_code: None,
+                retryable: false,
+                retry_after: None,
+            },
+            FcpError::UpstreamTimeout {
+                service: "upstream".into(),
+            },
+            FcpError::DependencyUnavailable {
+                service: "dep".into(),
+            },
+        ];
+        for err in errors {
+            let json = serde_json::to_string(&err).unwrap();
+            let back: FcpError = serde_json::from_str(&json).unwrap();
+            assert_eq!(err.to_string(), back.to_string());
+        }
+    }
+
+    #[test]
+    fn serde_roundtrip_internal() {
+        let err = FcpError::Internal {
+            message: "stack overflow".into(),
+        };
+        let json = serde_json::to_string(&err).unwrap();
+        let back: FcpError = serde_json::from_str(&json).unwrap();
+        assert_eq!(err.to_string(), back.to_string());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Numeric code consistency: code is within category range
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn numeric_code_within_category_range_all_variants() {
+        let errors: Vec<FcpError> = vec![
+            FcpError::InvalidRequest { code: 1001, message: "x".into() },
+            FcpError::MalformedFrame { code: 1002, message: "x".into() },
+            FcpError::MissingField { field: "f".into() },
+            FcpError::ChecksumMismatch,
+            FcpError::VersionMismatch { expected: "1".into(), actual: "2".into() },
+            FcpError::Unauthorized { code: 2001, message: "x".into() },
+            FcpError::TokenExpired,
+            FcpError::InvalidSignature,
+            FcpError::CapabilityDenied { capability: "c".into(), reason: "r".into() },
+            FcpError::RateLimited { retry_after_ms: 100, violation: None },
+            FcpError::OperationNotGranted { operation: "o".into() },
+            FcpError::ResourceNotAllowed { resource: "r".into() },
+            FcpError::ZoneViolation { source_zone: "z:a".into(), target_zone: "z:b".into(), message: "m".into() },
+            FcpError::TaintViolation { origin_zone: "z:a".into(), target_zone: "z:b".into(), capability: "c".into() },
+            FcpError::ElevationRequired { capability: "c".into(), ttl_seconds: None },
+            FcpError::ConnectorUnavailable { code: 5001, message: "x".into() },
+            FcpError::NotConfigured,
+            FcpError::NotHandshaken,
+            FcpError::HealthCheckFailed { reason: "r".into() },
+            FcpError::StreamingNotSupported,
+            FcpError::ResourceNotFound { resource: "r".into() },
+            FcpError::ResourceExhausted { resource: "r".into() },
+            FcpError::BudgetExceeded { metric: UsageMetricKind::Tokens, used: 1, limit: 0, window_seconds: 1 },
+            FcpError::Conflict { message: "m".into() },
+            FcpError::UpstreamTimeout { service: "s".into() },
+            FcpError::DependencyUnavailable { service: "s".into() },
+            FcpError::Internal { message: "m".into() },
+        ];
+        for err in errors {
+            let code = err.numeric_code();
+            let (lo, hi) = err.category().code_range();
+            assert!(
+                code >= lo && code <= hi,
+                "Error {:?} numeric_code {} outside category range {}-{}",
+                err.category(),
+                code,
+                lo,
+                hi,
+            );
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // External error code mapping for different HTTP status codes
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn external_error_code_429() {
+        let err = FcpError::External {
+            service: "s".into(),
+            message: "m".into(),
+            status_code: Some(429),
+            retryable: true,
+            retry_after: None,
+        };
+        assert_eq!(err.numeric_code(), 7001);
+        assert_eq!(err.error_code(), "FCP-7001");
+    }
+
+    #[test]
+    fn external_error_code_504() {
+        let err = FcpError::External {
+            service: "s".into(),
+            message: "m".into(),
+            status_code: Some(504),
+            retryable: true,
+            retry_after: None,
+        };
+        assert_eq!(err.numeric_code(), 7002);
+        assert_eq!(err.error_code(), "FCP-7002");
+    }
+
+    #[test]
+    fn external_error_code_other_status() {
+        let err = FcpError::External {
+            service: "s".into(),
+            message: "m".into(),
+            status_code: Some(500),
+            retryable: true,
+            retry_after: None,
+        };
+        assert_eq!(err.numeric_code(), 7003);
+        assert_eq!(err.error_code(), "FCP-7003");
+    }
+
+    #[test]
+    fn external_error_code_none_status() {
+        let err = FcpError::External {
+            service: "s".into(),
+            message: "m".into(),
+            status_code: None,
+            retryable: false,
+            retry_after: None,
+        };
+        assert_eq!(err.numeric_code(), 7003);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Details tests for variants with/without details
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn details_none_for_simple_variants() {
+        assert!(FcpError::ChecksumMismatch.details().is_none());
+        assert!(FcpError::TokenExpired.details().is_none());
+        assert!(FcpError::InvalidSignature.details().is_none());
+        assert!(FcpError::NotConfigured.details().is_none());
+        assert!(FcpError::NotHandshaken.details().is_none());
+        assert!(FcpError::StreamingNotSupported.details().is_none());
+        assert!(FcpError::Internal { message: "x".into() }.details().is_none());
+        assert!(FcpError::UpstreamTimeout { service: "s".into() }.details().is_none());
+        assert!(FcpError::DependencyUnavailable { service: "s".into() }.details().is_none());
+        assert!(FcpError::ResourceNotFound { resource: "r".into() }.details().is_none());
+        assert!(FcpError::ResourceExhausted { resource: "r".into() }.details().is_none());
+        assert!(FcpError::Conflict { message: "m".into() }.details().is_none());
+        assert!(FcpError::InvalidRequest { code: 1001, message: "x".into() }.details().is_none());
+        assert!(FcpError::MalformedFrame { code: 1002, message: "x".into() }.details().is_none());
+        assert!(FcpError::Unauthorized { code: 2001, message: "x".into() }.details().is_none());
+        assert!(FcpError::MissingField { field: "f".into() }.details().is_none());
+        assert!(FcpError::OperationNotGranted { operation: "o".into() }.details().is_none());
+        assert!(FcpError::ResourceNotAllowed { resource: "r".into() }.details().is_none());
+        assert!(FcpError::HealthCheckFailed { reason: "r".into() }.details().is_none());
+        assert!(FcpError::ConnectorUnavailable { code: 5001, message: "x".into() }.details().is_none());
+        assert!(FcpError::VersionMismatch { expected: "1".into(), actual: "2".into() }.details().is_none());
+    }
+
+    #[test]
+    fn details_present_capability_denied() {
+        let err = FcpError::CapabilityDenied {
+            capability: "cap.exec".into(),
+            reason: "policy violation".into(),
+        };
+        let details = err.details().unwrap();
+        assert_eq!(details["capability"], "cap.exec");
+        assert_eq!(details["reason"], "policy violation");
+    }
+
+    #[test]
+    fn details_rate_limited_no_violation() {
+        let err = FcpError::RateLimited {
+            retry_after_ms: 1000,
+            violation: None,
+        };
+        assert!(err.details().is_none());
+    }
+
+    #[test]
+    fn details_rate_limited_with_violation() {
+        let violation = crate::ThrottleViolation {
+            violation_id: crate::ObjectId::from_bytes([2; 32]),
+            timestamp_ms: 2000,
+            zone_id: crate::ZoneId::owner(),
+            connector_id: None,
+            operation_id: None,
+            limit_type: crate::ratelimit::LimitType::Burst,
+            limit_value: 50,
+            current_value: 75,
+            retry_after_ms: 3000,
+        };
+        let err = FcpError::RateLimited {
+            retry_after_ms: 3000,
+            violation: Some(Box::new(violation)),
+        };
+        let details = err.details().unwrap();
+        assert!(details["throttle_violation"].is_object());
+    }
+
+    #[test]
+    fn details_budget_exceeded_fields() {
+        let err = FcpError::BudgetExceeded {
+            metric: UsageMetricKind::DurationMs,
+            used: 5000,
+            limit: 3000,
+            window_seconds: 300,
+        };
+        let details = err.details().unwrap();
+        assert_eq!(details["used"], 5000);
+        assert_eq!(details["limit"], 3000);
+        assert_eq!(details["window_seconds"], 300);
+    }
+
+    #[test]
+    fn details_zone_violation_fields() {
+        let err = FcpError::ZoneViolation {
+            source_zone: "z:community".into(),
+            target_zone: "z:owner".into(),
+            message: "denied".into(),
+        };
+        let details = err.details().unwrap();
+        assert_eq!(details["source_zone"], "z:community");
+        assert_eq!(details["target_zone"], "z:owner");
+    }
+
+    #[test]
+    fn details_taint_violation_fields() {
+        let err = FcpError::TaintViolation {
+            origin_zone: "z:public".into(),
+            target_zone: "z:private".into(),
+            capability: "cap.sensitive".into(),
+        };
+        let details = err.details().unwrap();
+        assert_eq!(details["origin_zone"], "z:public");
+        assert_eq!(details["target_zone"], "z:private");
+        assert_eq!(details["capability"], "cap.sensitive");
+    }
+
+    #[test]
+    fn details_elevation_required_with_ttl() {
+        let err = FcpError::ElevationRequired {
+            capability: "cap.destroy".into(),
+            ttl_seconds: Some(600),
+        };
+        let details = err.details().unwrap();
+        assert_eq!(details["capability"], "cap.destroy");
+        assert_eq!(details["ttl_seconds"], 600);
+    }
+
+    #[test]
+    fn details_elevation_required_without_ttl() {
+        let err = FcpError::ElevationRequired {
+            capability: "cap.nuke".into(),
+            ttl_seconds: None,
+        };
+        let details = err.details().unwrap();
+        assert_eq!(details["capability"], "cap.nuke");
+        assert!(details["ttl_seconds"].is_null());
+    }
+
+    #[test]
+    fn details_external_with_status_code() {
+        let err = FcpError::External {
+            service: "payment-gateway".into(),
+            message: "declined".into(),
+            status_code: Some(422),
+            retryable: false,
+            retry_after: None,
+        };
+        let details = err.details().unwrap();
+        assert_eq!(details["service"], "payment-gateway");
+        assert_eq!(details["status_code"], 422);
+    }
+
+    #[test]
+    fn details_external_without_status_code() {
+        let err = FcpError::External {
+            service: "dns".into(),
+            message: "resolution failed".into(),
+            status_code: None,
+            retryable: false,
+            retry_after: None,
+        };
+        let details = err.details().unwrap();
+        assert_eq!(details["service"], "dns");
+        assert!(details["status_code"].is_null());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Error response hint content tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn hint_elevation_required_with_ttl_mentions_seconds() {
+        let err = FcpError::ElevationRequired {
+            capability: "cap.admin".into(),
+            ttl_seconds: Some(7200),
+        };
+        let hint = err.to_response().ai_recovery_hint.unwrap();
+        assert!(hint.contains("7200"));
+    }
+
+    #[test]
+    fn hint_elevation_required_without_ttl_no_seconds() {
+        let err = FcpError::ElevationRequired {
+            capability: "cap.admin".into(),
+            ttl_seconds: None,
+        };
+        let hint = err.to_response().ai_recovery_hint.unwrap();
+        assert!(!hint.contains("valid for"));
+    }
+
+    #[test]
+    fn hint_external_retryable_mentions_retry() {
+        let err = FcpError::External {
+            service: "api".into(),
+            message: "error".into(),
+            status_code: Some(503),
+            retryable: true,
+            retry_after: None,
+        };
+        let hint = err.to_response().ai_recovery_hint.unwrap();
+        assert!(hint.contains("retryable"));
+    }
+
+    #[test]
+    fn hint_external_non_retryable_mentions_non_retryable() {
+        let err = FcpError::External {
+            service: "api".into(),
+            message: "error".into(),
+            status_code: Some(400),
+            retryable: false,
+            retry_after: None,
+        };
+        let hint = err.to_response().ai_recovery_hint.unwrap();
+        assert!(hint.contains("non-retryable"));
+    }
+
+    #[test]
+    fn hint_external_with_unknown_status() {
+        let err = FcpError::External {
+            service: "api".into(),
+            message: "error".into(),
+            status_code: None,
+            retryable: false,
+            retry_after: None,
+        };
+        let hint = err.to_response().ai_recovery_hint.unwrap();
+        assert!(hint.contains("unknown"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ErrorCategory serde rename_all snake_case
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn error_category_serde_snake_case_format() {
+        let json = serde_json::to_string(&ErrorCategory::External).unwrap();
+        assert_eq!(json, "\"external\"");
+        let json = serde_json::to_string(&ErrorCategory::Protocol).unwrap();
+        assert_eq!(json, "\"protocol\"");
+        let json = serde_json::to_string(&ErrorCategory::Auth).unwrap();
+        assert_eq!(json, "\"auth\"");
+        let json = serde_json::to_string(&ErrorCategory::Internal).unwrap();
+        assert_eq!(json, "\"internal\"");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // FcpError as std::error::Error (dyn dispatch)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn fcp_error_dyn_error_display() {
+        let err: Box<dyn std::error::Error> = Box::new(FcpError::ChecksumMismatch);
+        assert_eq!(err.to_string(), "Checksum mismatch");
+    }
+
+    #[test]
+    fn fcp_error_dyn_error_downcast() {
+        let err: Box<dyn std::error::Error> = Box::new(FcpError::TokenExpired);
+        assert!(err.downcast_ref::<FcpError>().is_some());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // FcpErrorResponse serde edge cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn error_response_with_details_roundtrip() {
+        let resp = FcpErrorResponse {
+            code: "FCP-3001".into(),
+            message: "Capability denied".into(),
+            retryable: false,
+            retry_after_ms: None,
+            details: Some(serde_json::json!({
+                "capability": "cap.write",
+                "reason": "no grant"
+            })),
+            ai_recovery_hint: Some("request grant".into()),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let back: FcpErrorResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.code, "FCP-3001");
+        assert_eq!(back.details.unwrap()["capability"], "cap.write");
+    }
+
+    #[test]
+    fn error_response_clone_with_details() {
+        let resp = FcpErrorResponse {
+            code: "FCP-6004".into(),
+            message: "Budget exceeded".into(),
+            retryable: true,
+            retry_after_ms: Some(60000),
+            details: Some(serde_json::json!({"metric": "tokens"})),
+            ai_recovery_hint: Some("wait".into()),
+        };
+        let cloned = resp.clone();
+        assert_eq!(resp.code, cloned.code);
+        assert_eq!(resp.retryable, cloned.retryable);
+        assert_eq!(resp.retry_after_ms, cloned.retry_after_ms);
+        assert_eq!(resp.message, cloned.message);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Boundary / edge case tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn rate_limited_zero_retry_after() {
+        let err = FcpError::RateLimited {
+            retry_after_ms: 0,
+            violation: None,
+        };
+        assert!(err.is_retryable());
+        assert_eq!(err.retry_after(), Some(Duration::from_millis(0)));
+        let resp = err.to_response();
+        assert_eq!(resp.retry_after_ms, Some(0));
+    }
+
+    #[test]
+    fn rate_limited_max_retry_after() {
+        let err = FcpError::RateLimited {
+            retry_after_ms: u64::MAX,
+            violation: None,
+        };
+        assert!(err.is_retryable());
+        assert_eq!(err.retry_after(), Some(Duration::from_millis(u64::MAX)));
+    }
+
+    #[test]
+    fn budget_exceeded_zero_window() {
+        let err = FcpError::BudgetExceeded {
+            metric: UsageMetricKind::Custom,
+            used: 0,
+            limit: 0,
+            window_seconds: 0,
+        };
+        assert!(err.is_retryable());
+        let msg = err.to_string();
+        assert!(msg.contains('0'));
+    }
+
+    #[test]
+    fn empty_string_fields() {
+        let err = FcpError::Internal { message: String::new() };
+        assert_eq!(err.to_string(), "Internal error: ");
+
+        let err = FcpError::ResourceNotFound { resource: String::new() };
+        assert_eq!(err.to_string(), "Resource not found: ");
+
+        let err = FcpError::MissingField { field: String::new() };
+        assert_eq!(err.to_string(), "Missing required field: ");
+    }
+
+    #[test]
+    fn error_code_format_with_custom_codes() {
+        let err = FcpError::InvalidRequest {
+            code: 1099,
+            message: "custom".into(),
+        };
+        assert_eq!(err.error_code(), "FCP-1099");
+
+        let err = FcpError::ConnectorUnavailable {
+            code: 5999,
+            message: "edge".into(),
+        };
+        assert_eq!(err.error_code(), "FCP-5999");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ErrorCategory equality and hash coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn error_category_all_distinct_hashes() {
+        use std::collections::HashSet;
+        let categories = [
+            ErrorCategory::Protocol,
+            ErrorCategory::Auth,
+            ErrorCategory::Capability,
+            ErrorCategory::Zone,
+            ErrorCategory::Connector,
+            ErrorCategory::Resource,
+            ErrorCategory::External,
+            ErrorCategory::Internal,
+        ];
+        let set: HashSet<ErrorCategory> = categories.iter().copied().collect();
+        assert_eq!(set.len(), 8);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Retryable exhaustive coverage for non-retryable variants
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn not_retryable_all_non_retryable_variants() {
+        let non_retryable = vec![
+            FcpError::InvalidRequest { code: 1001, message: "x".into() },
+            FcpError::MalformedFrame { code: 1002, message: "x".into() },
+            FcpError::MissingField { field: "f".into() },
+            FcpError::ChecksumMismatch,
+            FcpError::VersionMismatch { expected: "1".into(), actual: "2".into() },
+            FcpError::Unauthorized { code: 2001, message: "x".into() },
+            FcpError::TokenExpired,
+            FcpError::InvalidSignature,
+            FcpError::CapabilityDenied { capability: "c".into(), reason: "r".into() },
+            FcpError::OperationNotGranted { operation: "o".into() },
+            FcpError::ResourceNotAllowed { resource: "r".into() },
+            FcpError::ZoneViolation { source_zone: "z:a".into(), target_zone: "z:b".into(), message: "m".into() },
+            FcpError::TaintViolation { origin_zone: "z:a".into(), target_zone: "z:b".into(), capability: "c".into() },
+            FcpError::ElevationRequired { capability: "c".into(), ttl_seconds: None },
+            FcpError::NotConfigured,
+            FcpError::NotHandshaken,
+            FcpError::HealthCheckFailed { reason: "r".into() },
+            FcpError::StreamingNotSupported,
+            FcpError::ResourceNotFound { resource: "r".into() },
+            FcpError::Conflict { message: "m".into() },
+            FcpError::Internal { message: "m".into() },
+        ];
+        for err in non_retryable {
+            assert!(
+                !err.is_retryable(),
+                "Expected non-retryable but got retryable: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn retryable_all_retryable_variants() {
+        let retryable = vec![
+            FcpError::RateLimited { retry_after_ms: 100, violation: None },
+            FcpError::ResourceExhausted { resource: "mem".into() },
+            FcpError::BudgetExceeded { metric: UsageMetricKind::Tokens, used: 1, limit: 0, window_seconds: 1 },
+            FcpError::UpstreamTimeout { service: "s".into() },
+            FcpError::DependencyUnavailable { service: "s".into() },
+            FcpError::ConnectorUnavailable { code: 5001, message: "x".into() },
+            FcpError::External { service: "s".into(), message: "m".into(), status_code: None, retryable: true, retry_after: None },
+        ];
+        for err in retryable {
+            assert!(
+                err.is_retryable(),
+                "Expected retryable but got non-retryable: {err}"
+            );
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // retry_after returns None for most variants
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn retry_after_none_for_most_variants() {
+        assert!(FcpError::ChecksumMismatch.retry_after().is_none());
+        assert!(FcpError::TokenExpired.retry_after().is_none());
+        assert!(FcpError::NotConfigured.retry_after().is_none());
+        assert!(FcpError::Internal { message: "x".into() }.retry_after().is_none());
+        assert!(FcpError::UpstreamTimeout { service: "s".into() }.retry_after().is_none());
+        assert!(FcpError::ConnectorUnavailable { code: 5001, message: "x".into() }.retry_after().is_none());
+        assert!(FcpError::ResourceExhausted { resource: "x".into() }.retry_after().is_none());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // FcpError tagged serde: ensure `category` tag present
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn serde_tagged_category_field_present() {
+        let err = FcpError::TokenExpired;
+        let json = serde_json::to_string(&err).unwrap();
+        assert!(json.contains("\"category\""));
+        assert!(json.contains("\"TokenExpired\""));
+    }
+
+    #[test]
+    fn serde_tagged_external_has_all_fields() {
+        let err = FcpError::External {
+            service: "svc".into(),
+            message: "msg".into(),
+            status_code: Some(502),
+            retryable: true,
+            retry_after: Some(Duration::from_secs(5)),
+        };
+        let json = serde_json::to_string(&err).unwrap();
+        assert!(json.contains("\"category\":\"External\""));
+        assert!(json.contains("\"service\":\"svc\""));
+        assert!(json.contains("\"status_code\":502"));
+        assert!(json.contains("\"retryable\":true"));
+        // retry_after serialized as millis
+        assert!(json.contains("\"retry_after\":5000"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // FcpResult type alias
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn fcp_result_type_alias_works() {
+        // Verify FcpResult is a proper Result alias
+        let ok_val: FcpResult<u32> = Ok(42);
+        let err_val: FcpResult<u32> = Err(FcpError::NotConfigured);
+        assert!(ok_val.is_ok());
+        assert!(err_val.is_err());
+        // Verify the error variant carries the right message
+        if let Err(e) = err_val {
+            assert_eq!(e.to_string(), "Connector not configured");
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // to_response consistency: message matches Display
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn to_response_message_matches_display_all_variants() {
+        let errors: Vec<FcpError> = vec![
+            FcpError::InvalidRequest { code: 1001, message: "test".into() },
+            FcpError::MalformedFrame { code: 1002, message: "frame".into() },
+            FcpError::MissingField { field: "zone".into() },
+            FcpError::ChecksumMismatch,
+            FcpError::VersionMismatch { expected: "a".into(), actual: "b".into() },
+            FcpError::Unauthorized { code: 2001, message: "nope".into() },
+            FcpError::TokenExpired,
+            FcpError::InvalidSignature,
+            FcpError::CapabilityDenied { capability: "c".into(), reason: "r".into() },
+            FcpError::RateLimited { retry_after_ms: 100, violation: None },
+            FcpError::OperationNotGranted { operation: "o".into() },
+            FcpError::ResourceNotAllowed { resource: "r".into() },
+            FcpError::ZoneViolation { source_zone: "z:a".into(), target_zone: "z:b".into(), message: "m".into() },
+            FcpError::TaintViolation { origin_zone: "z:a".into(), target_zone: "z:b".into(), capability: "c".into() },
+            FcpError::ElevationRequired { capability: "c".into(), ttl_seconds: None },
+            FcpError::ConnectorUnavailable { code: 5001, message: "down".into() },
+            FcpError::NotConfigured,
+            FcpError::NotHandshaken,
+            FcpError::HealthCheckFailed { reason: "fail".into() },
+            FcpError::StreamingNotSupported,
+            FcpError::ResourceNotFound { resource: "r".into() },
+            FcpError::ResourceExhausted { resource: "r".into() },
+            FcpError::BudgetExceeded { metric: UsageMetricKind::Tokens, used: 1, limit: 0, window_seconds: 1 },
+            FcpError::Conflict { message: "conflict".into() },
+            FcpError::External { service: "s".into(), message: "m".into(), status_code: None, retryable: false, retry_after: None },
+            FcpError::UpstreamTimeout { service: "s".into() },
+            FcpError::DependencyUnavailable { service: "s".into() },
+            FcpError::Internal { message: "m".into() },
+        ];
+        for err in errors {
+            let resp = err.to_response();
+            assert_eq!(
+                resp.message,
+                err.to_string(),
+                "Response message should match Display for {:?}",
+                err.category()
+            );
+        }
+    }
 }

@@ -26,6 +26,7 @@
     clippy::unused_async
 )]
 
+pub mod cass;
 pub mod client;
 pub mod connector;
 pub mod error;

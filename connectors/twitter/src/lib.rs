@@ -47,6 +47,7 @@ mod connector;
 mod error;
 mod oauth;
 mod stream;
+pub mod streaming;
 mod types;
 
 pub use client::TwitterAuth;

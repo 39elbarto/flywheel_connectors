@@ -29,6 +29,8 @@
 pub mod client;
 pub mod connector;
 pub mod error;
+pub mod history;
 pub mod library;
 pub mod playback;
+pub mod search;
 pub mod types;

@@ -337,7 +337,7 @@ impl CoordinationHub {
             .push(msg);
     }
 
-    /// Read all unread messages for an agent.
+    /// Peek at all messages in an agent's inbox (non-consuming).
     pub fn inbox(&self, agent: &AgentId) -> Vec<&AgentMessage> {
         self.inboxes
             .get(agent.as_str())
@@ -345,7 +345,7 @@ impl CoordinationHub {
             .unwrap_or_default()
     }
 
-    /// Read and mark all messages as read.
+    /// Drain all messages from an agent's inbox, returning them.
     pub fn read_inbox(&mut self, agent: &AgentId) -> Vec<AgentMessage> {
         self.inboxes
             .get_mut(agent.as_str())
@@ -353,7 +353,7 @@ impl CoordinationHub {
             .unwrap_or_default()
     }
 
-    /// Count unread messages for an agent.
+    /// Count messages in an agent's inbox.
     pub fn unread_count(&self, agent: &AgentId) -> usize {
         self.inboxes
             .get(agent.as_str())

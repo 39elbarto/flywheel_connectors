@@ -32,8 +32,6 @@ mod new;
 mod package;
 mod policy;
 mod repair;
-#[allow(dead_code, clippy::similar_names)]
-mod tool_schema;
 mod trace;
 
 use std::io::{IsTerminal, Read, Write};

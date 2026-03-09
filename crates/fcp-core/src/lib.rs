@@ -36,6 +36,7 @@ mod revocation;
 mod secret;
 mod supply_chain;
 mod telemetry;
+pub mod tool_schema;
 pub mod util;
 mod zone_keys;
 

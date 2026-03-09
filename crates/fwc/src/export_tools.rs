@@ -3,6 +3,10 @@
 //! Converts [`DiscoveredOperation`] data from the discovery catalog into
 //! tool schemas consumable by external AI agent runtimes.
 
+use fcp_core::{
+    AgentHint, ApprovalMode, CapabilityId, IdempotencyClass, OperationId, OperationInfo,
+    RiskLevel, SafetyTier,
+};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -123,6 +127,7 @@ pub struct OpenAiFunction {
 
 // ── Codec ────────────────────────────────────────────────────────────────
 
+#[cfg(test)]
 fn make_tool_name(op_id: &str, opts: &ExportOptions, sanitize: bool) -> String {
     let mut name = opts.strip_prefix.as_ref().map_or_else(
         || op_id.to_string(),
@@ -139,6 +144,88 @@ fn make_tool_name(op_id: &str, opts: &ExportOptions, sanitize: bool) -> String {
     name
 }
 
+fn shared_export_options(opts: &ExportOptions, sanitize_name: bool) -> fcp_core::tool_schema::ExportOptions {
+    fcp_core::tool_schema::ExportOptions {
+        include_safety_metadata: opts.include_safety_metadata,
+        include_ai_hints: opts.include_ai_hints,
+        include_examples: opts.include_examples,
+        strip_prefix: opts.strip_prefix.clone(),
+        sanitize_name,
+    }
+}
+
+fn parse_risk_level(label: &str) -> RiskLevel {
+    match label {
+        "low" => RiskLevel::Low,
+        "medium" => RiskLevel::Medium,
+        "high" => RiskLevel::High,
+        "critical" => RiskLevel::Critical,
+        other => panic!("unexpected risk level label from discovery catalog: {other}"),
+    }
+}
+
+fn parse_safety_tier(label: &str) -> SafetyTier {
+    match label {
+        "safe" => SafetyTier::Safe,
+        "risky" => SafetyTier::Risky,
+        "dangerous" => SafetyTier::Dangerous,
+        "critical" => SafetyTier::Critical,
+        "forbidden" => SafetyTier::Forbidden,
+        other => panic!("unexpected safety tier label from discovery catalog: {other}"),
+    }
+}
+
+fn parse_idempotency(label: &str) -> IdempotencyClass {
+    match label {
+        "none" => IdempotencyClass::None,
+        "best-effort" | "best_effort" => IdempotencyClass::BestEffort,
+        "strict" => IdempotencyClass::Strict,
+        other => panic!("unexpected idempotency label from discovery catalog: {other}"),
+    }
+}
+
+fn parse_approval_mode(label: &str) -> Option<ApprovalMode> {
+    match label {
+        "none" => None,
+        "policy" => Some(ApprovalMode::Policy),
+        "interactive" => Some(ApprovalMode::Interactive),
+        "elevation-token" | "elevation_token" => Some(ApprovalMode::ElevationToken),
+        other => panic!("unexpected approval mode label from discovery catalog: {other}"),
+    }
+}
+
+fn to_operation_info(op: &DiscoveredOperation) -> OperationInfo {
+    OperationInfo {
+        id: OperationId::new(op.actual_id.clone())
+            .expect("discovery catalog should only surface canonical operation ids"),
+        summary: op.summary.summary.clone(),
+        description: Some(op.description.clone()).filter(|description| !description.is_empty()),
+        input_schema: op.input_schema.clone(),
+        output_schema: op.output_schema.clone(),
+        capability: CapabilityId::new(op.summary.capability.clone())
+            .expect("discovery catalog should only surface canonical capability ids"),
+        risk_level: parse_risk_level(&op.summary.risk_level),
+        safety_tier: parse_safety_tier(&op.summary.safety_tier),
+        idempotency: parse_idempotency(&op.summary.idempotency),
+        ai_hints: AgentHint {
+            when_to_use: op.when_to_use.clone(),
+            common_mistakes: op.common_mistakes.clone(),
+            examples: op.examples.clone(),
+            related: op
+                .related
+                .iter()
+                .filter_map(|related| CapabilityId::new(related.clone()).ok())
+                .collect(),
+        },
+        // The readiness catalog intentionally stores human-facing summaries rather
+        // than the raw rate-limit declaration, so the shared schema export path
+        // only preserves metadata required by the tool descriptors themselves.
+        rate_limit: None,
+        requires_approval: parse_approval_mode(&op.approval_mode),
+    }
+}
+
+#[cfg(test)]
 fn build_description(op: &DiscoveredOperation, opts: &ExportOptions) -> String {
     let mut parts: Vec<String> = Vec::new();
 
@@ -174,64 +261,56 @@ fn build_description(op: &DiscoveredOperation, opts: &ExportOptions) -> String {
     parts.join("\n\n")
 }
 
+#[cfg(test)]
 fn is_read_only(op: &DiscoveredOperation) -> bool {
     op.summary.safety_tier == "safe" && op.summary.idempotency == "strict"
 }
 
+#[cfg(test)]
 fn is_destructive(op: &DiscoveredOperation) -> bool {
     op.summary.safety_tier == "dangerous" || op.summary.safety_tier == "critical"
 }
 
 /// Convert a discovered operation to an MCP tool.
 pub fn to_mcp_tool(op: &DiscoveredOperation, opts: &ExportOptions) -> McpTool {
-    let name = make_tool_name(&op.actual_id, opts, false);
-    let description = build_description(op, opts);
-
-    let annotations = if opts.include_safety_metadata {
-        Some(McpToolAnnotations {
-            risk_level: Some(op.summary.risk_level.clone()),
-            safety_tier: Some(op.summary.safety_tier.clone()),
-            idempotency: Some(op.summary.idempotency.clone()),
-            capability: Some(op.summary.capability.clone()),
-            read_only: Some(is_read_only(op)),
-            destructive: Some(is_destructive(op)),
-        })
-    } else {
-        None
-    };
-
+    let tool = fcp_core::tool_schema::to_mcp_tool(&to_operation_info(op), &shared_export_options(opts, false));
     McpTool {
-        name,
-        description,
-        input_schema: op.input_schema.clone(),
-        annotations,
+        name: tool.name,
+        description: tool.description,
+        input_schema: tool.input_schema,
+        annotations: tool.annotations.map(|annotations| McpToolAnnotations {
+            risk_level: annotations.risk_level,
+            safety_tier: annotations.safety_tier,
+            idempotency: annotations.idempotency,
+            capability: annotations.capability,
+            read_only: annotations.read_only,
+            destructive: annotations.destructive,
+        }),
     }
 }
 
 /// Convert a discovered operation to a Claude tool.
 pub fn to_claude_tool(op: &DiscoveredOperation, opts: &ExportOptions) -> ClaudeTool {
-    let name = make_tool_name(&op.actual_id, opts, false);
-    let description = build_description(op, opts);
-
+    let tool =
+        fcp_core::tool_schema::to_claude_tool(&to_operation_info(op), &shared_export_options(opts, false));
     ClaudeTool {
-        name,
-        description,
-        input_schema: op.input_schema.clone(),
+        name: tool.name,
+        description: tool.description,
+        input_schema: tool.input_schema,
     }
 }
 
 /// Convert a discovered operation to an `OpenAI` tool.
 pub fn to_openai_tool(op: &DiscoveredOperation, opts: &ExportOptions) -> OpenAiTool {
-    let name = make_tool_name(&op.actual_id, opts, true);
-    let description = build_description(op, opts);
-
+    let tool =
+        fcp_core::tool_schema::to_openai_tool(&to_operation_info(op), &shared_export_options(opts, true));
     OpenAiTool {
-        tool_type: "function".to_string(),
+        tool_type: tool.tool_type,
         function: OpenAiFunction {
-            name,
-            description,
-            parameters: op.input_schema.clone(),
-            strict: None,
+            name: tool.function.name,
+            description: tool.function.description,
+            parameters: tool.function.parameters,
+            strict: tool.function.strict,
         },
     }
 }

@@ -11,7 +11,10 @@ mod intent;
 mod readiness;
 mod recovery;
 mod render;
+mod schema_nav;
 mod search;
+mod template;
+mod validate;
 mod workflow;
 
 use std::collections::BTreeMap;
@@ -204,6 +207,18 @@ enum Commands {
     /// already knowing connector names or operation IDs.
     #[command(visible_alias = "what-can-i-do")]
     Suggest(SuggestArgs),
+
+    /// Generate a fill-in-the-blanks JSON template for an operation.
+    ///
+    /// Produces scaffolded JSON with placeholder values and type annotations.
+    #[command(visible_alias = "scaffold")]
+    Template(TemplateArgs),
+
+    /// Validate an operation input against its schema before invoking.
+    ///
+    /// Reports structured errors with fix suggestions for each problem.
+    #[command(visible_alias = "check")]
+    Validate(ValidateArgs),
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -440,6 +455,22 @@ struct SchemaArgs {
 
     /// Optional operation name. Omit to inspect the connector contract schema.
     operation: Option<String>,
+
+    /// Show only required fields.
+    #[arg(long)]
+    required_only: bool,
+
+    /// Drill into a specific field path (e.g. `spec.containers`).
+    #[arg(long)]
+    field: Option<String>,
+
+    /// Include example values from `ai_hints`.
+    #[arg(long)]
+    examples: bool,
+
+    /// Generate a minimal JSON scaffold with required-field placeholders.
+    #[arg(long)]
+    scaffold: bool,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -659,6 +690,40 @@ struct SuggestArgs {
     limit: usize,
 }
 
+
+#[derive(Args, Debug, Serialize)]
+struct TemplateArgs {
+    /// Connector id, alias, or family name.
+    connector: String,
+
+    /// Operation name.
+    operation: String,
+
+    /// Only include required fields.
+    #[arg(long, default_value_t = false)]
+    required_only: bool,
+
+    /// Pre-fill values as key=value pairs (comma separated).
+    #[arg(long)]
+    fill: Option<String>,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct ValidateArgs {
+    /// Connector id, alias, or family name.
+    connector: String,
+
+    /// Operation name.
+    operation: String,
+
+    /// Inline JSON string input to validate.
+    #[arg(long)]
+    input: Option<String>,
+
+    /// File path for input JSON to validate.
+    #[arg(long, value_name = "PATH")]
+    input_file: Option<std::path::PathBuf>,
+}
 fn main() -> ExitCode {
     let raw_args = std::env::args().collect::<Vec<_>>();
     let fallback_format = infer_output_format(&raw_args);
@@ -1003,6 +1068,8 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         Commands::Logs(args) => planned("logs", args)?,
         Commands::ExportTools(args) => export_tools_dispatch(args)?,
         Commands::Suggest(args) => suggest_dispatch(args)?,
+        Commands::Template(args) => template_dispatch(args)?,
+        Commands::Validate(args) => validate_dispatch(args)?,
     };
 
     Ok(outcome)
@@ -1225,6 +1292,7 @@ fn ops_dispatch(args: &OpsArgs) -> Result<DispatchOutcome> {
     })
 }
 
+#[allow(clippy::too_many_lines)]
 fn schema_dispatch(args: &SchemaArgs) -> Result<DispatchOutcome> {
     let catalog = DiscoveryCatalog::load()?;
     let connector = match catalog.resolve_connector(&args.connector) {
@@ -1251,6 +1319,65 @@ fn schema_dispatch(args: &SchemaArgs) -> Result<DispatchOutcome> {
             }
         };
 
+        // ── Deep navigator mode ────────────────────────────────────
+        if args.scaffold {
+            let scaffold = schema_nav::scaffold_template(&operation.input_schema);
+            return Ok(DispatchOutcome {
+                payload: json!({
+                    "status": "ok",
+                    "command": "schema",
+                    "source": "workspace-manifests",
+                    "scope": "scaffold",
+                    "connector": { "slug": &connector.slug },
+                    "operation": { "selector": &operation.preferred_selector },
+                    "scaffold": scaffold,
+                }),
+                exit_code: CliExitCode::Success,
+            });
+        }
+
+        let example_strs: &[String] = if args.examples {
+            &operation.examples
+        } else {
+            &[]
+        };
+
+        let mut fields = schema_nav::walk_schema(&operation.input_schema, example_strs);
+
+        if args.required_only {
+            fields.retain(|f| f.required);
+        }
+        if let Some(ref field_path) = args.field {
+            fields = schema_nav::filter_by_field(&fields, field_path);
+        }
+
+        // When any navigator flag is active, return the annotated field listing.
+        if args.required_only || args.field.is_some() || args.examples {
+            return Ok(DispatchOutcome {
+                payload: json!({
+                    "status": "ok",
+                    "command": "schema",
+                    "source": "workspace-manifests",
+                    "scope": "fields",
+                    "connector": {
+                        "slug": &connector.slug,
+                        "canonical_id": &connector.detail.summary.id,
+                    },
+                    "operation": {
+                        "selector": &operation.preferred_selector,
+                        "canonical_id": &operation.actual_id,
+                    },
+                    "field_count": fields.len(),
+                    "fields": fields,
+                    "next_actions": [
+                        format!("fwc schema {} {} --scaffold", connector.slug, operation.preferred_selector),
+                    ],
+                }),
+                exit_code: CliExitCode::Success,
+            });
+        }
+
+        // ── Default: full schema view ────────────────────────────────
         return Ok(DispatchOutcome {
             payload: json!({
                 "status": "ok",
@@ -1283,6 +1410,8 @@ fn schema_dispatch(args: &SchemaArgs) -> Result<DispatchOutcome> {
                 },
                 "next_actions": [
                     format!("fwc examples {} {}", connector.slug, operation.preferred_selector),
+                    format!("fwc schema {} {} --required-only", connector.slug, operation.preferred_selector),
+                    format!("fwc schema {} {} --scaffold", connector.slug, operation.preferred_selector),
                     format!("fwc simulate {} {} --file payload.json", connector.slug, operation.preferred_selector),
                 ],
             }),
@@ -1735,6 +1864,180 @@ fn classify_action_family(capability: &str) -> String {
         "monitor".to_string()
     } else {
         "other".to_string()
+    }
+}
+
+
+fn template_dispatch(args: &TemplateArgs) -> Result<DispatchOutcome> {
+    let catalog = DiscoveryCatalog::load()?;
+    let connector = match catalog.resolve_connector(&args.connector) {
+        Ok(connector) => connector,
+        Err(error) => {
+            return Ok(connector_resolution_dispatch(
+                "template",
+                &args.connector,
+                &error,
+            ));
+        }
+    };
+
+    let operation = match connector.resolve_operation(&args.operation) {
+        Ok(operation) => operation,
+        Err(error) => {
+            return Ok(operation_resolution_dispatch(
+                "template",
+                connector,
+                &args.operation,
+                &error,
+            ));
+        }
+    };
+
+    let fill = args
+        .fill
+        .as_deref()
+        .map(template::parse_fill_args)
+        .unwrap_or_default();
+
+    let template_json =
+        template::generate_template(&operation.input_schema, args.required_only, &fill);
+
+    Ok(DispatchOutcome {
+        payload: json!({
+            "status": "ok",
+            "command": "template",
+            "source": "workspace-manifests",
+            "message": format!(
+                "Generated {} template for `{}.{}`.",
+                if args.required_only { "required-only" } else { "full" },
+                connector.slug,
+                operation.preferred_selector,
+            ),
+            "connector": {
+                "slug": &connector.slug,
+                "canonical_id": &connector.detail.summary.id,
+            },
+            "operation": {
+                "selector": &operation.preferred_selector,
+                "canonical_id": &operation.actual_id,
+                "summary": &operation.summary.summary,
+            },
+            "template": template_json,
+            "fill_applied": !fill.is_empty(),
+            "required_only": args.required_only,
+            "next_actions": [
+                format!("fwc schema {} {}", connector.slug, operation.preferred_selector),
+                format!("fwc simulate {} {} --file payload.json", connector.slug, operation.preferred_selector),
+            ],
+        }),
+        exit_code: CliExitCode::Success,
+    })
+}
+
+
+fn validate_dispatch(args: &ValidateArgs) -> Result<DispatchOutcome> {
+    let catalog = DiscoveryCatalog::load()?;
+    let connector = match catalog.resolve_connector(&args.connector) {
+        Ok(connector) => connector,
+        Err(error) => {
+            return Ok(connector_resolution_dispatch(
+                "validate",
+                &args.connector,
+                &error,
+            ));
+        }
+    };
+
+    let operation = match connector.resolve_operation(&args.operation) {
+        Ok(operation) => operation,
+        Err(error) => {
+            return Ok(operation_resolution_dispatch(
+                "validate",
+                connector,
+                &args.operation,
+                &error,
+            ));
+        }
+    };
+
+    // Parse input from --input or --input-file.
+    let input: Value = if let Some(json_str) = &args.input {
+        serde_json::from_str(json_str)?
+    } else if let Some(path) = &args.input_file {
+        let content = std::fs::read_to_string(path)?;
+        serde_json::from_str(&content)?
+    } else {
+        return Ok(DispatchOutcome {
+            payload: json!({
+                "status": "error",
+                "command": "validate",
+                "error": {
+                    "type": "missing-input",
+                    "message": "No input provided. Use --input or --input-file.",
+                },
+                "next_actions": [
+                    format!("fwc validate {} {} --input '{{...}}'", connector.slug, operation.preferred_selector),
+                    format!("fwc template {} {}", connector.slug, operation.preferred_selector),
+                ],
+            }),
+            exit_code: CliExitCode::UnknownCommand,
+        });
+    };
+
+    let result = validate::validate(&input, &operation.input_schema);
+
+    if result.is_valid() {
+        Ok(DispatchOutcome {
+            payload: json!({
+                "status": "ok",
+                "command": "validate",
+                "message": format!(
+                    "Input is valid for `{}.{}`.",
+                    connector.slug, operation.preferred_selector
+                ),
+                "connector": &connector.slug,
+                "operation": &operation.preferred_selector,
+                "valid": true,
+                "next_actions": [
+                    format!("fwc simulate {} {} --input '...'", connector.slug, operation.preferred_selector),
+                    format!("fwc invoke {} {} --input '...'", connector.slug, operation.preferred_selector),
+                ],
+            }),
+            exit_code: CliExitCode::Success,
+        })
+    } else {
+        let error_details: Vec<Value> = result
+            .errors
+            .iter()
+            .map(|e| {
+                json!({
+                    "path": e.path,
+                    "message": e.message,
+                    "suggestion": e.suggestion,
+                })
+            })
+            .collect();
+
+        Ok(DispatchOutcome {
+            payload: json!({
+                "status": "error",
+                "command": "validate",
+                "message": format!(
+                    "Validation failed for `{}.{}`: {} error(s).",
+                    connector.slug, operation.preferred_selector, result.errors.len()
+                ),
+                "connector": &connector.slug,
+                "operation": &operation.preferred_selector,
+                "valid": false,
+                "error_count": result.errors.len(),
+                "errors": error_details,
+                "next_actions": [
+                    format!("fwc template {} {}", connector.slug, operation.preferred_selector),
+                    format!("fwc schema {} {}", connector.slug, operation.preferred_selector),
+                ],
+            }),
+            exit_code: CliExitCode::UnknownCommand,
+        })
     }
 }
 

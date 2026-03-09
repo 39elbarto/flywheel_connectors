@@ -1005,4 +1005,414 @@ mod tests {
         assert!(lower.is_ok());
         assert_eq!(upper.unwrap(), lower.unwrap());
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CredentialId – serde transparency & JSON shape
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn credential_id_serde_transparent_is_bare_string() {
+        let id = CredentialId::test_id([0x11; 16]);
+        let json = serde_json::to_string(&id).unwrap();
+        // Should be a bare quoted UUID string, not {"uuid": "..."}
+        assert!(json.starts_with('"'));
+        assert!(json.ends_with('"'));
+        assert!(!json.contains('{'));
+    }
+
+    #[test]
+    fn credential_id_deserialize_from_bare_string() {
+        let json = r#""11111111-1111-1111-1111-111111111111""#;
+        let id: CredentialId = serde_json::from_str(json).unwrap();
+        assert_eq!(id.to_string(), "11111111-1111-1111-1111-111111111111");
+    }
+
+    #[test]
+    fn credential_id_parse_rejects_whitespace() {
+        assert!(CredentialId::parse(" 11223344-5566-7788-99aa-bbccddeeff00").is_err());
+        assert!(CredentialId::parse("11223344-5566-7788-99aa-bbccddeeff00 ").is_err());
+    }
+
+    #[test]
+    fn credential_id_parse_accepts_braces() {
+        // UUID's parse_str accepts brace-wrapped format
+        let result = CredentialId::parse("{11223344-5566-7788-99aa-bbccddeeff00}");
+        assert!(result.is_ok());
+        let expected = CredentialId::parse("11223344-5566-7788-99aa-bbccddeeff00").unwrap();
+        assert_eq!(result.unwrap(), expected);
+    }
+
+    #[test]
+    fn credential_id_ord_total_order() {
+        let a = CredentialId::test_id([0x00; 16]);
+        let b = CredentialId::test_id([0x80; 16]);
+        let c = CredentialId::test_id([0xFF; 16]);
+        assert!(a < b);
+        assert!(b < c);
+        assert!(a < c);
+        // Reflexive: equal elements are not strictly ordered
+        assert_eq!(a.cmp(&a), std::cmp::Ordering::Equal);
+    }
+
+    #[test]
+    fn credential_id_hash_different_ids() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        let a = CredentialId::test_id([0x01; 16]);
+        let b = CredentialId::test_id([0x02; 16]);
+        set.insert(a);
+        set.insert(b);
+        assert_eq!(set.len(), 2);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CredentialApplication – per-variant serde & debug coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn credential_application_tls_serde_tag() {
+        let app = CredentialApplication::TlsClientCertificate;
+        let json = serde_json::to_string(&app).unwrap();
+        assert!(json.contains("\"type\":\"tls_client_certificate\""));
+        let decoded: CredentialApplication = serde_json::from_str(&json).unwrap();
+        assert_eq!(app, decoded);
+    }
+
+    #[test]
+    fn credential_application_ssh_key_serde_tag() {
+        let app = CredentialApplication::SshKey;
+        let json = serde_json::to_string(&app).unwrap();
+        assert!(json.contains("\"type\":\"ssh_key\""));
+    }
+
+    #[test]
+    fn credential_application_database_connection_serde_tag() {
+        let app = CredentialApplication::DatabaseConnection;
+        let json = serde_json::to_string(&app).unwrap();
+        assert!(json.contains("\"type\":\"database_connection\""));
+    }
+
+    #[test]
+    fn credential_application_websocket_auth_serde_tag() {
+        let app = CredentialApplication::WebSocketAuth;
+        let json = serde_json::to_string(&app).unwrap();
+        assert!(json.contains("\"type\":\"web_socket_auth\""));
+    }
+
+    #[test]
+    fn credential_application_query_parameter_serde_tag() {
+        let app = CredentialApplication::QueryParameter {
+            name: "token".into(),
+        };
+        let json = serde_json::to_string(&app).unwrap();
+        assert!(json.contains("\"type\":\"query_parameter\""));
+        assert!(json.contains("\"name\":\"token\""));
+    }
+
+    #[test]
+    fn credential_application_generic_config_preserved() {
+        let config_str = r#"{"method":"oauth2","scope":"read"}"#;
+        let app = CredentialApplication::Generic {
+            config: config_str.into(),
+        };
+        let json = serde_json::to_string(&app).unwrap();
+        let decoded: CredentialApplication = serde_json::from_str(&json).unwrap();
+        if let CredentialApplication::Generic { config } = decoded {
+            assert_eq!(config, config_str);
+        } else {
+            panic!("Expected Generic variant");
+        }
+    }
+
+    #[test]
+    fn credential_application_debug_format() {
+        let app = CredentialApplication::HttpAuthorizationBearer;
+        let dbg = format!("{app:?}");
+        assert!(dbg.contains("HttpAuthorizationBearer"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Host matching – edge cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn host_allow_wildcard_deep_subdomain() {
+        let mut cred = test_credential();
+        cred.host_allow = vec!["*.example.com".into()];
+        // Multi-level subdomains should match *.example.com
+        assert!(cred.is_host_allowed("a.b.example.com"));
+        assert!(cred.is_host_allowed("deep.nested.sub.example.com"));
+    }
+
+    #[test]
+    fn host_allow_wildcard_does_not_match_partial_suffix() {
+        let mut cred = test_credential();
+        cred.host_allow = vec!["*.example.com".into()];
+        // "badexample.com" ends with "example.com" but not ".example.com"
+        assert!(!cred.is_host_allowed("badexample.com"));
+    }
+
+    #[test]
+    fn host_allow_multiple_patterns_any_match() {
+        let mut cred = test_credential();
+        cred.host_allow = vec![
+            "api.example.com".into(),
+            "*.internal.net".into(),
+            "special.host:9090".into(),
+        ];
+        assert!(cred.is_host_allowed("api.example.com"));
+        assert!(cred.is_host_allowed("svc.internal.net"));
+        assert!(cred.is_host_allowed("special.host:9090"));
+        assert!(!cred.is_host_allowed("other.com"));
+    }
+
+    #[test]
+    fn host_allow_empty_host_string() {
+        let mut cred = test_credential();
+        cred.host_allow = vec!["api.example.com".into()];
+        assert!(!cred.is_host_allowed(""));
+    }
+
+    #[test]
+    fn host_allow_case_insensitive_exact_mixed() {
+        let mut cred = test_credential();
+        cred.host_allow = vec!["Api.Example.COM".into()];
+        assert!(cred.is_host_allowed("api.example.com"));
+        assert!(cred.is_host_allowed("API.EXAMPLE.COM"));
+        assert!(cred.is_host_allowed("Api.Example.COM"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // IP literal – additional edge cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn is_ip_literal_ipv6_full_form() {
+        assert!(CredentialObject::is_ip_literal(
+            "2001:0db8:0000:0000:0000:0000:0000:0001"
+        ));
+    }
+
+    #[test]
+    fn is_ip_literal_mapped_ipv4_in_brackets() {
+        assert!(CredentialObject::is_ip_literal("[::ffff:192.168.1.1]"));
+        assert!(CredentialObject::is_ip_literal("[::ffff:192.168.1.1]:443"));
+    }
+
+    #[test]
+    fn is_ip_literal_rejects_hostname_with_numbers() {
+        // Hostnames with numbers should not be detected as IP literals
+        assert!(!CredentialObject::is_ip_literal("host123.example.com"));
+        assert!(!CredentialObject::is_ip_literal("192.168.1.1.example.com"));
+    }
+
+    #[test]
+    fn is_ip_literal_single_bracket_malformed() {
+        // Malformed bracket syntax
+        assert!(!CredentialObject::is_ip_literal("["));
+        assert!(!CredentialObject::is_ip_literal("[not-ip]"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // has_ip_literal_in_host_allow – wildcard prefix stripping
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn has_ip_literal_detects_wildcard_prefixed_ip() {
+        let mut cred = test_credential();
+        // *.192.168.1.1 — wildcard prefix stripped, then IP detected
+        cred.host_allow = vec!["*.192.168.1.1".into()];
+        assert!(cred.has_ip_literal_in_host_allow());
+    }
+
+    #[test]
+    fn has_ip_literal_ignores_wildcard_prefixed_hostname() {
+        let mut cred = test_credential();
+        cred.host_allow = vec!["*.sub.example.com".into()];
+        assert!(!cred.has_ip_literal_in_host_allow());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // validate_host_policy – more coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn validate_host_policy_wildcard_ip_rejected() {
+        let mut cred = test_credential();
+        cred.host_allow = vec!["*.10.0.0.1".into()];
+        let result = cred.validate_host_policy(true);
+        assert!(result.is_err());
+        if let Err(CredentialValidationError::HostNotAllowed { host, .. }) = result {
+            assert_eq!(host, "*.10.0.0.1");
+        } else {
+            panic!("Expected HostNotAllowed");
+        }
+    }
+
+    #[test]
+    fn validate_host_policy_mixed_host_ip_rejects_on_first_ip() {
+        let mut cred = test_credential();
+        cred.host_allow = vec![
+            "safe.example.com".into(),
+            "172.16.0.1".into(),
+            "also-safe.example.com".into(),
+        ];
+        let result = cred.validate_host_policy(true);
+        assert!(result.is_err());
+        if let Err(CredentialValidationError::HostNotAllowed { host, .. }) = result {
+            assert_eq!(host, "172.16.0.1");
+        } else {
+            panic!("Expected HostNotAllowed");
+        }
+    }
+
+    #[test]
+    fn validate_host_policy_error_contains_credential_id() {
+        let mut cred = test_credential();
+        let cred_id = CredentialId::test_id([0xAA; 16]);
+        cred.credential_id = cred_id;
+        cred.host_allow = vec!["127.0.0.1".into()];
+
+        let result = cred.validate_host_policy(true);
+        if let Err(CredentialValidationError::HostNotAllowed {
+            credential_id, ..
+        }) = result
+        {
+            assert_eq!(credential_id, cred_id);
+        } else {
+            panic!("Expected HostNotAllowed");
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // is_usable – combined conditions
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn is_usable_expired_and_host_disallowed() {
+        let mut cred = test_credential();
+        cred.expires_at = Some(1000);
+        cred.host_allow = vec!["allowed.example.com".into()];
+
+        // Both conditions fail: expired AND wrong host
+        assert!(!cred.is_usable(2000, "evil.com"));
+    }
+
+    #[test]
+    fn is_usable_not_expired_host_allowed() {
+        let mut cred = test_credential();
+        cred.expires_at = Some(5000);
+        cred.host_allow = vec!["*.example.com".into()];
+
+        assert!(cred.is_usable(1000, "api.example.com"));
+    }
+
+    #[test]
+    fn is_usable_at_exact_expiry_boundary() {
+        let mut cred = test_credential();
+        cred.expires_at = Some(1000);
+        cred.host_allow = vec!["api.example.com".into()];
+
+        assert!(cred.is_usable(999, "api.example.com"));
+        assert!(!cred.is_usable(1000, "api.example.com"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CredentialObject deserialization – missing optional fields
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn credential_object_deserialize_minimal_json() {
+        // Serialize with all optional fields absent, then verify defaults
+        let cred = CredentialObject {
+            header: test_header(),
+            credential_id: CredentialId::test_id([0x33; 16]),
+            label: None,
+            secret_id: SecretId::test_id([0x44; 16]),
+            application: CredentialApplication::HttpAuthorizationBearer,
+            host_allow: vec![],
+            expires_at: None,
+            description: None,
+            tags: vec![],
+        };
+        let json = serde_json::to_string(&cred).unwrap();
+        let decoded: CredentialObject = serde_json::from_str(&json).unwrap();
+        assert!(decoded.label.is_none());
+        assert!(decoded.host_allow.is_empty());
+        assert!(decoded.expires_at.is_none());
+        assert!(decoded.description.is_none());
+        assert!(decoded.tags.is_empty());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CredentialValidationError – Display format precision
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn credential_validation_error_expired_display_has_credential_id() {
+        let cred_id = CredentialId::test_id([0x55; 16]);
+        let err = CredentialValidationError::Expired {
+            credential_id: cred_id,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains(&cred_id.to_string()));
+        assert!(msg.contains("expired"));
+    }
+
+    #[test]
+    fn credential_validation_error_not_in_allow_display_has_id() {
+        let cred_id = CredentialId::test_id([0x66; 16]);
+        let err = CredentialValidationError::NotInCredentialAllow {
+            credential_id: cred_id,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains(&cred_id.to_string()));
+    }
+
+    #[test]
+    fn credential_validation_error_secret_not_found_display_has_id() {
+        let sid = SecretId::test_id([0x77; 16]);
+        let err = CredentialValidationError::SecretNotFound { secret_id: sid };
+        let msg = err.to_string();
+        assert!(msg.contains(&sid.to_string()));
+    }
+
+    #[test]
+    fn credential_validation_error_secret_revoked_display_has_id() {
+        let sid = SecretId::test_id([0x88; 16]);
+        let err = CredentialValidationError::SecretRevoked { secret_id: sid };
+        let msg = err.to_string();
+        assert!(msg.contains(&sid.to_string()));
+    }
+
+    #[test]
+    fn credential_validation_error_host_not_allowed_display_has_both() {
+        let cred_id = CredentialId::test_id([0x99; 16]);
+        let err = CredentialValidationError::HostNotAllowed {
+            credential_id: cred_id,
+            host: "bad.host.com".into(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains(&cred_id.to_string()));
+        assert!(msg.contains("bad.host.com"));
+    }
+
+    #[test]
+    fn credential_validation_error_debug_format() {
+        let err = CredentialValidationError::Expired {
+            credential_id: CredentialId::test_id([0x11; 16]),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Expired"));
+        assert!(dbg.contains("CredentialId"));
+    }
+
+    #[test]
+    fn credential_validation_error_source_is_none() {
+        let err = CredentialValidationError::Expired {
+            credential_id: CredentialId::test_id([0x11; 16]),
+        };
+        // std::error::Error::source() should be None (no inner error)
+        assert!(std::error::Error::source(&err).is_none());
+    }
 }

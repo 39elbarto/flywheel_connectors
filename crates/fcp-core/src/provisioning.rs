@@ -1860,4 +1860,864 @@ mod tests {
         })
         .expect("runtime should execute missing secret validation");
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // RecipeId — additional coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn recipe_id_hash_key() {
+        let mut map = HashMap::new();
+        map.insert(RecipeId::new("a"), 1);
+        map.insert(RecipeId::new("b"), 2);
+        map.insert(RecipeId::new("a"), 3);
+        assert_eq!(map.len(), 2);
+        assert_eq!(map[&RecipeId::new("a")], 3);
+    }
+
+    #[test]
+    fn recipe_id_debug_format() {
+        let id = RecipeId::new("debug/test");
+        let debug = format!("{id:?}");
+        assert!(debug.contains("debug/test"));
+    }
+
+    #[test]
+    fn recipe_id_empty_string() {
+        let id = RecipeId::new("");
+        assert_eq!(id.as_str(), "");
+        assert_eq!(format!("{id}"), "");
+    }
+
+    #[test]
+    fn recipe_id_unicode() {
+        let id = RecipeId::new("setup/\u{1f680}");
+        assert!(id.as_str().contains('\u{1f680}'));
+        let json = serde_json::to_string(&id).unwrap();
+        let decoded: RecipeId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, decoded);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // StepId — additional coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn step_id_equality_and_inequality() {
+        let a = StepId::new("same");
+        let b = StepId::new("same");
+        let c = StepId::new("other");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn step_id_clone() {
+        let original = StepId::new("cloned");
+        let cloned = original.clone();
+        assert_eq!(original, cloned);
+    }
+
+    #[test]
+    fn step_id_debug_format() {
+        let id = StepId::new("enter_token");
+        let debug = format!("{id:?}");
+        assert!(debug.contains("enter_token"));
+    }
+
+    #[test]
+    fn step_id_empty_string() {
+        let id = StepId::new("");
+        assert_eq!(id.as_str(), "");
+    }
+
+    #[test]
+    fn step_id_deserialize_from_json_string() {
+        let decoded: StepId = serde_json::from_str("\"my_step_id\"").unwrap();
+        assert_eq!(decoded.as_str(), "my_step_id");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ProvisioningRecipe — additional coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn recipe_clone_preserves_steps() {
+        let recipe = ProvisioningRecipe::new(RecipeId::new("orig"), "1", "Original")
+            .with_step(ProvisioningStep::new(
+                StepId::new("s1"),
+                ProvisioningStepType::PromptUser {
+                    message: "Hi".to_string(),
+                },
+            ));
+        let cloned = recipe.clone();
+        assert_eq!(recipe.id, cloned.id);
+        assert_eq!(recipe.steps.len(), cloned.steps.len());
+        assert_eq!(recipe.version, cloned.version);
+        assert_eq!(recipe.description, cloned.description);
+    }
+
+    #[test]
+    fn recipe_debug_format() {
+        let recipe = ProvisioningRecipe::new(RecipeId::new("dbg"), "1", "Debug recipe");
+        let debug = format!("{recipe:?}");
+        assert!(debug.contains("dbg"));
+        assert!(debug.contains("Debug recipe"));
+    }
+
+    #[test]
+    fn recipe_deserialize_without_steps_field() {
+        let json = r#"{"id":"test","version":"1","description":"No steps key"}"#;
+        let decoded: ProvisioningRecipe = serde_json::from_str(json).unwrap();
+        assert!(decoded.steps.is_empty());
+        assert_eq!(decoded.id.as_str(), "test");
+    }
+
+    #[test]
+    fn recipe_with_multiple_chained_steps() {
+        let recipe = ProvisioningRecipe::new(RecipeId::new("chain"), "1", "Chain")
+            .with_step(ProvisioningStep::new(
+                StepId::new("a"),
+                ProvisioningStepType::PromptUser {
+                    message: "A".to_string(),
+                },
+            ))
+            .with_step(ProvisioningStep::new(
+                StepId::new("b"),
+                ProvisioningStepType::PromptUser {
+                    message: "B".to_string(),
+                },
+            ))
+            .with_step(ProvisioningStep::new(
+                StepId::new("c"),
+                ProvisioningStepType::PromptUser {
+                    message: "C".to_string(),
+                },
+            ));
+        assert_eq!(recipe.steps.len(), 3);
+        assert_eq!(recipe.steps[2].id.as_str(), "c");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ProvisioningStep — additional coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn step_serde_with_depends_on_present() {
+        let step = ProvisioningStep::new(
+            StepId::new("s2"),
+            ProvisioningStepType::PromptUser {
+                message: "After s1".to_string(),
+            },
+        )
+        .depends_on(StepId::new("s1"));
+        let value = serde_json::to_value(&step).unwrap();
+        let deps = value["depends_on"].as_array().unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0], "s1");
+
+        let decoded: ProvisioningStep = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.depends_on.len(), 1);
+        assert_eq!(decoded.depends_on[0].as_str(), "s1");
+    }
+
+    #[test]
+    fn step_serde_with_requires_approval_true() {
+        let step = ProvisioningStep::new(
+            StepId::new("approve_me"),
+            ProvisioningStepType::PromptUser {
+                message: "Need approval".to_string(),
+            },
+        )
+        .with_approval();
+        let value = serde_json::to_value(&step).unwrap();
+        assert!(value["requires_approval"].as_bool().unwrap());
+
+        let decoded: ProvisioningStep = serde_json::from_value(value).unwrap();
+        assert!(decoded.requires_approval);
+    }
+
+    #[test]
+    fn step_clone_preserves_all_fields() {
+        let step = ProvisioningStep::new(
+            StepId::new("orig"),
+            ProvisioningStepType::PromptSecret {
+                message: "Token".to_string(),
+            },
+        )
+        .with_approval()
+        .depends_on(StepId::new("prev"));
+        let cloned = step.clone();
+        assert_eq!(step.id, cloned.id);
+        assert_eq!(step.requires_approval, cloned.requires_approval);
+        assert_eq!(step.depends_on.len(), cloned.depends_on.len());
+    }
+
+    #[test]
+    fn step_default_requires_approval_false_in_json() {
+        let step = ProvisioningStep::new(
+            StepId::new("s"),
+            ProvisioningStepType::PromptUser {
+                message: "Hi".to_string(),
+            },
+        );
+        let value = serde_json::to_value(&step).unwrap();
+        assert_eq!(value["requires_approval"], false);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // OAuthRecipe — additional coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn oauth_device_code_empty_scopes_omitted() {
+        let flow = OAuthRecipe::DeviceCode {
+            device_authorization_url: "https://auth.example.com/device".to_string(),
+            token_url: "https://auth.example.com/token".to_string(),
+            scopes: Vec::new(),
+            poll_interval_seconds: 5,
+        };
+        let value = serde_json::to_value(&flow).unwrap();
+        assert!(value.get("scopes").is_none());
+    }
+
+    #[test]
+    fn oauth_client_credentials_empty_scopes_omitted() {
+        let flow = OAuthRecipe::ClientCredentials {
+            token_url: "https://auth.example.com/token".to_string(),
+            scopes: Vec::new(),
+        };
+        let value = serde_json::to_value(&flow).unwrap();
+        assert!(value.get("scopes").is_none());
+    }
+
+    #[test]
+    fn oauth_pkce_auto_browser_default_false_roundtrip() {
+        let json = r#"{"type":"authorization_code_pkce","authorization_url":"https://a.test/auth","token_url":"https://a.test/token","callback_port":9090}"#;
+        let decoded: OAuthRecipe = serde_json::from_str(json).unwrap();
+        match decoded {
+            OAuthRecipe::AuthorizationCodePkce {
+                auto_browser,
+                callback_port,
+                scopes,
+                ..
+            } => {
+                assert!(!auto_browser);
+                assert_eq!(callback_port, 9090);
+                assert!(scopes.is_empty());
+            }
+            _ => panic!("expected AuthorizationCodePkce"),
+        }
+    }
+
+    #[test]
+    fn oauth_recipe_clone() {
+        let flow = OAuthRecipe::AuthorizationCodePkce {
+            authorization_url: "https://a.test/auth".to_string(),
+            token_url: "https://a.test/token".to_string(),
+            scopes: vec!["read".to_string()],
+            auto_browser: true,
+            callback_port: 8080,
+        };
+        let cloned = flow.clone();
+        let orig_json = serde_json::to_value(&flow).unwrap();
+        let clone_json = serde_json::to_value(&cloned).unwrap();
+        assert_eq!(orig_json, clone_json);
+    }
+
+    #[test]
+    fn oauth_recipe_debug() {
+        let flow = OAuthRecipe::ClientCredentials {
+            token_url: "https://auth.example.com/token".to_string(),
+            scopes: vec!["api".to_string()],
+        };
+        let debug = format!("{flow:?}");
+        assert!(debug.contains("ClientCredentials"));
+        assert!(debug.contains("api"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // WebhookVerification — additional coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn webhook_verification_clone() {
+        let ver = WebhookVerification::HmacSignature {
+            algorithm: "sha256".to_string(),
+            header: "X-Signature".to_string(),
+        };
+        let cloned = ver.clone();
+        let orig_json = serde_json::to_value(&ver).unwrap();
+        let clone_json = serde_json::to_value(&cloned).unwrap();
+        assert_eq!(orig_json, clone_json);
+    }
+
+    #[test]
+    fn webhook_verification_debug() {
+        let ver = WebhookVerification::ChallengeResponse {
+            challenge_param: "hub.challenge".to_string(),
+        };
+        let debug = format!("{ver:?}");
+        assert!(debug.contains("ChallengeResponse"));
+    }
+
+    #[test]
+    fn webhook_verification_all_variants_roundtrip() {
+        let variants: Vec<WebhookVerification> = vec![
+            WebhookVerification::HmacSignature {
+                algorithm: "sha512".to_string(),
+                header: "X-Sig".to_string(),
+            },
+            WebhookVerification::ChallengeResponse {
+                challenge_param: "verify_token".to_string(),
+            },
+            WebhookVerification::Ed25519Signature {
+                public_key_header: "X-PubKey".to_string(),
+            },
+        ];
+        let expected_types = ["hmac_signature", "challenge_response", "ed25519_signature"];
+        for (ver, expected_type) in variants.iter().zip(expected_types.iter()) {
+            let json = serde_json::to_string(ver).unwrap();
+            let decoded: WebhookVerification = serde_json::from_str(&json).unwrap();
+            let value = serde_json::to_value(&decoded).unwrap();
+            assert_eq!(value["type"], *expected_type);
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ProvisioningStatus — additional coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn provisioning_status_debug_all_variants() {
+        let variants = [
+            ProvisioningStatus::NotStarted,
+            ProvisioningStatus::InProgress,
+            ProvisioningStatus::AwaitingUser,
+            ProvisioningStatus::Completed,
+            ProvisioningStatus::Failed,
+            ProvisioningStatus::Aborted,
+        ];
+        for status in &variants {
+            let debug = format!("{status:?}");
+            assert!(!debug.is_empty());
+        }
+    }
+
+    #[test]
+    fn provisioning_status_clone_via_copy() {
+        let a = ProvisioningStatus::Failed;
+        let b = a;
+        let c = a;
+        assert_eq!(b, c);
+    }
+
+    #[test]
+    fn provisioning_status_inequality() {
+        assert_ne!(ProvisioningStatus::NotStarted, ProvisioningStatus::Completed);
+        assert_ne!(ProvisioningStatus::InProgress, ProvisioningStatus::Failed);
+        assert_ne!(ProvisioningStatus::AwaitingUser, ProvisioningStatus::Aborted);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ProvisioningState — additional coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn provisioning_state_clone() {
+        let state = ProvisioningState {
+            status: ProvisioningStatus::InProgress,
+            current_step: Some(StepId::new("s1")),
+            completed_steps: vec![StepId::new("s0")],
+            remaining_steps: vec![StepId::new("s2")],
+            awaiting_human: Vec::new(),
+            error_message: Some("partial".to_string()),
+        };
+        let cloned = state.clone();
+        assert_eq!(state.status, cloned.status);
+        assert_eq!(
+            state.current_step.as_ref().map(StepId::as_str),
+            cloned.current_step.as_ref().map(StepId::as_str)
+        );
+        assert_eq!(state.completed_steps.len(), cloned.completed_steps.len());
+        assert_eq!(state.error_message, cloned.error_message);
+    }
+
+    #[test]
+    fn provisioning_state_serde_error_roundtrip() {
+        let state = ProvisioningState {
+            status: ProvisioningStatus::Failed,
+            current_step: Some(StepId::new("bad_step")),
+            completed_steps: Vec::new(),
+            remaining_steps: vec![StepId::new("next")],
+            awaiting_human: Vec::new(),
+            error_message: Some("timeout after 30s".to_string()),
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        let decoded: ProvisioningState = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.status, ProvisioningStatus::Failed);
+        assert_eq!(decoded.error_message.as_deref(), Some("timeout after 30s"));
+        assert_eq!(decoded.current_step.unwrap().as_str(), "bad_step");
+        assert_eq!(decoded.remaining_steps.len(), 1);
+    }
+
+    #[test]
+    fn provisioning_state_debug() {
+        let state = ProvisioningState::new();
+        let debug = format!("{state:?}");
+        assert!(debug.contains("NotStarted"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ProvisioningProgress — additional coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn provisioning_progress_with_awaiting_human() {
+        let progress = ProvisioningProgress {
+            current_step: Some(StepId::new("oauth")),
+            completed: vec![StepId::new("prompt_user")],
+            remaining: vec![StepId::new("store")],
+            awaiting_human: vec![HumanPrompt {
+                step_id: StepId::new("oauth"),
+                prompt_type: HumanPromptType::Url,
+                message: "Open OAuth page".to_string(),
+                url: Some("https://example.com/auth".to_string()),
+            }],
+        };
+        let json = serde_json::to_string(&progress).unwrap();
+        let decoded: ProvisioningProgress = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.awaiting_human.len(), 1);
+        assert_eq!(decoded.awaiting_human[0].prompt_type, HumanPromptType::Url);
+    }
+
+    #[test]
+    fn provisioning_progress_clone() {
+        let progress = ProvisioningProgress {
+            current_step: Some(StepId::new("s1")),
+            completed: vec![StepId::new("s0")],
+            remaining: Vec::new(),
+            awaiting_human: Vec::new(),
+        };
+        let cloned = progress.clone();
+        assert_eq!(
+            progress.current_step.as_ref().map(StepId::as_str),
+            cloned.current_step.as_ref().map(StepId::as_str)
+        );
+        assert_eq!(progress.completed.len(), cloned.completed.len());
+    }
+
+    #[test]
+    fn provisioning_progress_debug() {
+        let progress = ProvisioningProgress {
+            current_step: None,
+            completed: Vec::new(),
+            remaining: Vec::new(),
+            awaiting_human: Vec::new(),
+        };
+        let debug = format!("{progress:?}");
+        assert!(debug.contains("ProvisioningProgress"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // HumanPrompt / HumanPromptType — additional coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn human_prompt_type_copy_semantics() {
+        let a = HumanPromptType::Secret;
+        let b = a;
+        let c = a;
+        assert_eq!(b, c);
+    }
+
+    #[test]
+    fn human_prompt_type_debug() {
+        let t = HumanPromptType::Approval;
+        let debug = format!("{t:?}");
+        assert!(debug.contains("Approval"));
+    }
+
+    #[test]
+    fn human_prompt_clone() {
+        let prompt = HumanPrompt {
+            step_id: StepId::new("p1"),
+            prompt_type: HumanPromptType::Text,
+            message: "Enter name".to_string(),
+            url: Some("https://example.com".to_string()),
+        };
+        let cloned = prompt.clone();
+        assert_eq!(prompt.step_id, cloned.step_id);
+        assert_eq!(prompt.message, cloned.message);
+        assert_eq!(prompt.url, cloned.url);
+    }
+
+    #[test]
+    fn human_prompt_debug() {
+        let prompt = HumanPrompt {
+            step_id: StepId::new("dbg"),
+            prompt_type: HumanPromptType::Secret,
+            message: "Token".to_string(),
+            url: None,
+        };
+        let debug = format!("{prompt:?}");
+        assert!(debug.contains("Token"));
+        assert!(debug.contains("Secret"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // SetupDescriptor — additional coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn setup_descriptor_clone() {
+        let desc = SetupDescriptor {
+            tool_descriptor: json!({"name": "test"}),
+            human_prompts: vec![HumanPrompt {
+                step_id: StepId::new("s1"),
+                prompt_type: HumanPromptType::Text,
+                message: "Name?".to_string(),
+                url: None,
+            }],
+            estimated_duration_ms: Some(5000),
+        };
+        let cloned = desc.clone();
+        assert_eq!(desc.tool_descriptor, cloned.tool_descriptor);
+        assert_eq!(desc.human_prompts.len(), cloned.human_prompts.len());
+        assert_eq!(desc.estimated_duration_ms, cloned.estimated_duration_ms);
+    }
+
+    #[test]
+    fn setup_descriptor_debug() {
+        let desc = SetupDescriptor {
+            tool_descriptor: json!({}),
+            human_prompts: Vec::new(),
+            estimated_duration_ms: None,
+        };
+        let debug = format!("{desc:?}");
+        assert!(debug.contains("SetupDescriptor"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ProvisioningStepResult — additional coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn step_result_clone() {
+        let result = ProvisioningStepResult::Completed {
+            step_id: StepId::new("done"),
+        };
+        let cloned = result.clone();
+        let orig_json = serde_json::to_value(&result).unwrap();
+        let clone_json = serde_json::to_value(&cloned).unwrap();
+        assert_eq!(orig_json, clone_json);
+    }
+
+    #[test]
+    fn step_result_awaiting_human_roundtrip() {
+        let result = ProvisioningStepResult::AwaitingHuman {
+            prompt: HumanPrompt {
+                step_id: StepId::new("consent"),
+                prompt_type: HumanPromptType::Approval,
+                message: "Allow?".to_string(),
+                url: None,
+            },
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let decoded: ProvisioningStepResult = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            decoded,
+            ProvisioningStepResult::AwaitingHuman { .. }
+        ));
+    }
+
+    #[test]
+    fn step_result_in_progress_roundtrip() {
+        let result = ProvisioningStepResult::InProgress {
+            step_id: StepId::new("polling"),
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let decoded: ProvisioningStepResult = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            decoded,
+            ProvisioningStepResult::InProgress { .. }
+        ));
+    }
+
+    #[test]
+    fn step_result_debug() {
+        let result = ProvisioningStepResult::InProgress {
+            step_id: StepId::new("running"),
+        };
+        let debug = format!("{result:?}");
+        assert!(debug.contains("InProgress"));
+        assert!(debug.contains("running"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ProvisioningValidation — additional coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn validation_clone() {
+        let v = ProvisioningValidation::failed(vec!["err1".to_string(), "err2".to_string()]);
+        let cloned = v.clone();
+        assert_eq!(v.valid, cloned.valid);
+        assert_eq!(v.errors.len(), cloned.errors.len());
+        assert_eq!(v.errors[0], cloned.errors[0]);
+    }
+
+    #[test]
+    fn validation_serde_roundtrip_with_errors() {
+        let v = ProvisioningValidation::failed(vec!["missing field".to_string()]);
+        let json = serde_json::to_string(&v).unwrap();
+        let decoded: ProvisioningValidation = serde_json::from_str(&json).unwrap();
+        assert!(!decoded.valid);
+        assert_eq!(decoded.errors, vec!["missing field"]);
+    }
+
+    #[test]
+    fn validation_debug() {
+        let v = ProvisioningValidation::ok();
+        let debug = format!("{v:?}");
+        assert!(debug.contains("valid"));
+    }
+
+    #[test]
+    fn validation_failed_empty_errors() {
+        let v = ProvisioningValidation::failed(Vec::new());
+        assert!(!v.valid);
+        assert!(v.errors.is_empty());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Operations constants — exact values
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn operations_start_exact_value() {
+        assert_eq!(operations::START, "fcp.provision.start");
+    }
+
+    #[test]
+    fn operations_poll_exact_value() {
+        assert_eq!(operations::POLL, "fcp.provision.poll");
+    }
+
+    #[test]
+    fn operations_complete_exact_value() {
+        assert_eq!(operations::COMPLETE, "fcp.provision.complete");
+    }
+
+    #[test]
+    fn operations_abort_exact_value() {
+        assert_eq!(operations::ABORT, "fcp.provision.abort");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // MockProvisioner — additional edge case coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn mock_provisioner_execute_unknown_step_returns_error() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let recipe = ProvisioningRecipe::new(RecipeId::new("test"), "1", "Empty recipe");
+            let mut provisioner = MockProvisioner::new(recipe);
+            let err = provisioner
+                .execute_step(StepId::new("nonexistent"))
+                .await
+                .expect_err("should fail for unknown step");
+            assert!(matches!(err, FcpError::ResourceNotFound { .. }));
+        })
+        .expect("runtime should execute unknown step test");
+    }
+
+    #[test]
+    fn mock_provisioner_prompt_user_flow() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let recipe =
+                ProvisioningRecipe::new(RecipeId::new("prompt-test"), "1", "Prompt test")
+                    .with_step(ProvisioningStep::new(
+                        StepId::new("ask_name"),
+                        ProvisioningStepType::PromptUser {
+                            message: "Enter your name".to_string(),
+                        },
+                    ));
+            let mut provisioner = MockProvisioner::new(recipe);
+            let result = provisioner
+                .execute_step(StepId::new("ask_name"))
+                .await
+                .unwrap();
+            let ProvisioningStepResult::AwaitingHuman { prompt } = result else {
+                panic!("expected AwaitingHuman for PromptUser");
+            };
+            assert_eq!(prompt.prompt_type, HumanPromptType::Text);
+            assert_eq!(prompt.message, "Enter your name");
+            assert_eq!(
+                provisioner.get_state().status,
+                ProvisioningStatus::AwaitingUser
+            );
+            assert_eq!(provisioner.get_state().awaiting_human.len(), 1);
+        })
+        .expect("runtime should execute prompt user flow");
+    }
+
+    #[test]
+    fn mock_provisioner_open_url_flow() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let recipe = ProvisioningRecipe::new(RecipeId::new("url-test"), "1", "URL test")
+                .with_step(ProvisioningStep::new(
+                    StepId::new("open_link"),
+                    ProvisioningStepType::OpenUrl {
+                        url: "https://t.me/BotFather".to_string(),
+                    },
+                ));
+            let mut provisioner = MockProvisioner::new(recipe);
+            let result = provisioner
+                .execute_step(StepId::new("open_link"))
+                .await
+                .unwrap();
+            let ProvisioningStepResult::AwaitingHuman { prompt } = result else {
+                panic!("expected AwaitingHuman for OpenUrl");
+            };
+            assert_eq!(prompt.prompt_type, HumanPromptType::Url);
+            assert_eq!(prompt.url.as_deref(), Some("https://t.me/BotFather"));
+            assert_eq!(
+                provisioner.get_state().status,
+                ProvisioningStatus::AwaitingUser
+            );
+        })
+        .expect("runtime should execute open url flow");
+    }
+
+    #[test]
+    fn mock_provisioner_describe_setup_collects_human_prompts() {
+        let recipe =
+            ProvisioningRecipe::new(RecipeId::new("desc-test"), "1", "Descriptor test")
+                .with_step(ProvisioningStep::new(
+                    StepId::new("user"),
+                    ProvisioningStepType::PromptUser {
+                        message: "Name?".to_string(),
+                    },
+                ))
+                .with_step(ProvisioningStep::new(
+                    StepId::new("secret"),
+                    ProvisioningStepType::PromptSecret {
+                        message: "Token?".to_string(),
+                    },
+                ))
+                .with_step(ProvisioningStep::new(
+                    StepId::new("link"),
+                    ProvisioningStepType::OpenUrl {
+                        url: "https://example.com".to_string(),
+                    },
+                ))
+                .with_step(ProvisioningStep::new(
+                    StepId::new("store"),
+                    ProvisioningStepType::StoreSecret {
+                        key: "k".to_string(),
+                        value_from: StepId::new("secret"),
+                        scope: "s".to_string(),
+                    },
+                ));
+        let provisioner = MockProvisioner::new(recipe);
+        let setup = provisioner.describe_setup();
+        // StoreSecret does not produce a human prompt; the other 3 do
+        assert_eq!(setup.human_prompts.len(), 3);
+        assert_eq!(setup.human_prompts[0].prompt_type, HumanPromptType::Text);
+        assert_eq!(setup.human_prompts[1].prompt_type, HumanPromptType::Secret);
+        assert_eq!(setup.human_prompts[2].prompt_type, HumanPromptType::Url);
+    }
+
+    #[test]
+    fn mock_provisioner_validate_pending_steps() {
+        let recipe =
+            ProvisioningRecipe::new(RecipeId::new("val-test"), "1", "Validation test")
+                .with_step(ProvisioningStep::new(
+                    StepId::new("s1"),
+                    ProvisioningStepType::PromptUser {
+                        message: "Hi".to_string(),
+                    },
+                ));
+        let provisioner = MockProvisioner::new(recipe);
+        let validation = provisioner.validate();
+        assert!(!validation.valid);
+        assert_eq!(validation.errors.len(), 1);
+        assert!(validation.errors[0].contains("1 steps still pending"));
+    }
+
+    #[test]
+    fn mock_provisioner_step_logs_track_outcomes() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let recipe =
+                ProvisioningRecipe::new(RecipeId::new("log-test"), "1", "Log test")
+                    .with_step(ProvisioningStep::new(
+                        StepId::new("oauth"),
+                        ProvisioningStepType::Oauth {
+                            flow: OAuthRecipe::ClientCredentials {
+                                token_url: "https://auth.test/token".to_string(),
+                                scopes: Vec::new(),
+                            },
+                        },
+                    ));
+            let mut provisioner = MockProvisioner::new(recipe);
+            provisioner
+                .execute_step(StepId::new("oauth"))
+                .await
+                .unwrap();
+            assert_eq!(provisioner.step_logs.len(), 1);
+            assert_eq!(provisioner.step_logs[0]["outcome"], "completed");
+            assert_eq!(provisioner.step_logs[0]["step_name"], "oauth");
+            assert_eq!(provisioner.step_logs[0]["recipe_id"], "log-test");
+        })
+        .expect("runtime should execute step log test");
+    }
+
+    #[test]
+    fn mock_provisioner_webhook_stores_registration_info() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let recipe =
+                ProvisioningRecipe::new(RecipeId::new("wh-test"), "1", "Webhook test")
+                    .with_step(ProvisioningStep::new(
+                        StepId::new("wh1"),
+                        ProvisioningStepType::Webhook {
+                            registration: WebhookRecipe {
+                                registration_url: "https://api.test/hooks".to_string(),
+                                events: vec!["push".to_string(), "pr".to_string()],
+                                verification: WebhookVerification::HmacSignature {
+                                    algorithm: "sha256".to_string(),
+                                    header: "X-Sig".to_string(),
+                                },
+                                retry_policy: RetryConfig::default(),
+                            },
+                        },
+                    ))
+                    .with_step(ProvisioningStep::new(
+                        StepId::new("wh2"),
+                        ProvisioningStepType::Webhook {
+                            registration: WebhookRecipe {
+                                registration_url: "https://api2.test/hooks".to_string(),
+                                events: vec!["issue".to_string()],
+                                verification: WebhookVerification::ChallengeResponse {
+                                    challenge_param: "c".to_string(),
+                                },
+                                retry_policy: RetryConfig::default(),
+                            },
+                        },
+                    ));
+            let mut provisioner = MockProvisioner::new(recipe);
+            provisioner
+                .execute_step(StepId::new("wh1"))
+                .await
+                .unwrap();
+            provisioner
+                .execute_step(StepId::new("wh2"))
+                .await
+                .unwrap();
+            assert_eq!(provisioner.webhook_registrations.len(), 2);
+            assert_eq!(provisioner.webhook_registrations[0].1.len(), 2);
+            assert_eq!(provisioner.webhook_registrations[1].1.len(), 1);
+        })
+        .expect("runtime should execute webhook registration test");
+    }
 }

@@ -890,12 +890,17 @@ async fn lifecycle_introspect_all_operations() {
         "twilio.video.room.end",
         "twilio.video.room.participants",
         "twilio.video.recording.list",
+        // Webhook handling
+        "twilio.webhook.validate_signature",
+        "twilio.webhook.parse_sms_event",
+        "twilio.webhook.parse_status_callback",
+        "twilio.webhook.parse_voice_event",
     ];
 
     for expected in &expected_ops {
         assert!(op_ids.contains(expected), "missing operation: {expected}");
     }
-    assert_eq!(ops.len(), 35);
+    assert_eq!(ops.len(), 39);
 
     for op in ops {
         assert!(
@@ -1270,6 +1275,527 @@ async fn validation_download_recording_missing_sid() {
             assert!(
                 message.contains("recording_sid"),
                 "error should mention recording_sid: {message}"
+            );
+        }
+        other => panic!("expected InvalidRequest, got: {other:?}"),
+    }
+}
+
+// ============================================================================
+// Webhook Handling Tests
+// ============================================================================
+
+/// Parse SMS webhook event — happy path.
+#[fcp_async_core::runtime::test]
+async fn webhook_parse_sms_event_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("twilio.webhook.parse_sms_event.happy_path");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = TwilioConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["twilio.webhook.parse_sms_event"]).await;
+    let token = generate_valid_token(&signing_key, "twilio.webhook.parse_sms_event");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "twilio.webhook.parse_sms_event",
+            "input": {
+                "body": {
+                    "MessageSid": "SM1234567890abcdef1234567890abcdef",
+                    "From": "+15551234567",
+                    "To": "+15559876543",
+                    "Body": "Hello from webhook!",
+                    "NumMedia": "2",
+                    "AccountSid": "ACtest123456789",
+                    "SmsSid": "SM1234567890abcdef1234567890abcdef",
+                    "NumSegments": "1"
+                }
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("parse_sms_event should succeed");
+
+    assert_eq!(result["event_type"], "sms.inbound");
+    assert_eq!(
+        result["message_sid"],
+        "SM1234567890abcdef1234567890abcdef"
+    );
+    assert_eq!(result["from"], "+15551234567");
+    assert_eq!(result["to"], "+15559876543");
+    assert_eq!(result["body"], "Hello from webhook!");
+    assert_eq!(result["num_media"], 2);
+    assert_eq!(result["account_sid"], "ACtest123456789");
+    assert_eq!(result["tainted"], true);
+    assert_eq!(
+        result["event_id"],
+        "evt_SM1234567890abcdef1234567890abcdef"
+    );
+}
+
+/// Parse SMS webhook event — missing required `MessageSid`.
+#[fcp_async_core::runtime::test]
+async fn webhook_parse_sms_event_missing_message_sid() {
+    let _ctx =
+        AsyncTestContext::for_scenario("twilio.webhook.parse_sms_event.missing_message_sid");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = TwilioConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["twilio.webhook.parse_sms_event"]).await;
+    let token = generate_valid_token(&signing_key, "twilio.webhook.parse_sms_event");
+
+    let err = connector
+        .handle_invoke(json!({
+            "operation": "twilio.webhook.parse_sms_event",
+            "input": {
+                "body": {
+                    "From": "+15551234567",
+                    "To": "+15559876543"
+                }
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect_err("should fail without MessageSid");
+
+    match &err {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(
+                message.contains("MessageSid"),
+                "error should mention MessageSid: {message}"
+            );
+        }
+        other => panic!("expected InvalidRequest, got: {other:?}"),
+    }
+}
+
+/// Parse SMS webhook event — minimal fields (no optional fields).
+#[fcp_async_core::runtime::test]
+async fn webhook_parse_sms_event_minimal() {
+    let _ctx = AsyncTestContext::for_scenario("twilio.webhook.parse_sms_event.minimal");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = TwilioConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["twilio.webhook.parse_sms_event"]).await;
+    let token = generate_valid_token(&signing_key, "twilio.webhook.parse_sms_event");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "twilio.webhook.parse_sms_event",
+            "input": {
+                "body": {
+                    "MessageSid": "SMminimal",
+                    "From": "+15550001111",
+                    "To": "+15552223333"
+                }
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("parse_sms_event should succeed with minimal fields");
+
+    assert_eq!(result["event_type"], "sms.inbound");
+    assert_eq!(result["message_sid"], "SMminimal");
+    assert!(result["body"].is_null());
+    assert!(result["num_media"].is_null());
+    assert_eq!(result["tainted"], true);
+}
+
+/// Parse status callback — message delivered.
+#[fcp_async_core::runtime::test]
+async fn webhook_parse_status_callback_message_delivered() {
+    let _ctx =
+        AsyncTestContext::for_scenario("twilio.webhook.parse_status_callback.message_delivered");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = TwilioConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["twilio.webhook.parse_status_callback"]).await;
+    let token = generate_valid_token(&signing_key, "twilio.webhook.parse_status_callback");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "twilio.webhook.parse_status_callback",
+            "input": {
+                "body": {
+                    "MessageSid": "SM9876543210",
+                    "MessageStatus": "delivered",
+                    "Timestamp": "2026-01-15T10:00:00Z"
+                }
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("parse_status_callback should succeed");
+
+    assert_eq!(result["event_type"], "message.status");
+    assert_eq!(result["resource_sid"], "SM9876543210");
+    assert_eq!(result["resource_type"], "message");
+    assert_eq!(result["status"], "delivered");
+    assert_eq!(result["timestamp"], "2026-01-15T10:00:00Z");
+    assert_eq!(result["tainted"], true);
+}
+
+/// Parse status callback — call completed.
+#[fcp_async_core::runtime::test]
+async fn webhook_parse_status_callback_call_completed() {
+    let _ctx =
+        AsyncTestContext::for_scenario("twilio.webhook.parse_status_callback.call_completed");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = TwilioConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["twilio.webhook.parse_status_callback"]).await;
+    let token = generate_valid_token(&signing_key, "twilio.webhook.parse_status_callback");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "twilio.webhook.parse_status_callback",
+            "input": {
+                "body": {
+                    "CallSid": "CA1234567890",
+                    "CallStatus": "completed"
+                }
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("parse_status_callback for call should succeed");
+
+    assert_eq!(result["event_type"], "call.status");
+    assert_eq!(result["resource_sid"], "CA1234567890");
+    assert_eq!(result["resource_type"], "call");
+    assert_eq!(result["status"], "completed");
+    assert_eq!(result["tainted"], true);
+}
+
+/// Parse status callback — message failed with error code.
+#[fcp_async_core::runtime::test]
+async fn webhook_parse_status_callback_with_error() {
+    let _ctx =
+        AsyncTestContext::for_scenario("twilio.webhook.parse_status_callback.with_error");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = TwilioConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["twilio.webhook.parse_status_callback"]).await;
+    let token = generate_valid_token(&signing_key, "twilio.webhook.parse_status_callback");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "twilio.webhook.parse_status_callback",
+            "input": {
+                "body": {
+                    "MessageSid": "SMfailed001",
+                    "MessageStatus": "failed",
+                    "ErrorCode": "30006",
+                    "ErrorMessage": "Landline or unreachable carrier"
+                }
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("parse_status_callback with error should succeed");
+
+    assert_eq!(result["status"], "failed");
+    assert_eq!(result["error_code"], "30006");
+    assert_eq!(result["error_message"], "Landline or unreachable carrier");
+}
+
+/// Parse status callback — missing both `MessageSid` and `CallSid`.
+#[fcp_async_core::runtime::test]
+async fn webhook_parse_status_callback_missing_sid() {
+    let _ctx =
+        AsyncTestContext::for_scenario("twilio.webhook.parse_status_callback.missing_sid");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = TwilioConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["twilio.webhook.parse_status_callback"]).await;
+    let token = generate_valid_token(&signing_key, "twilio.webhook.parse_status_callback");
+
+    let err = connector
+        .handle_invoke(json!({
+            "operation": "twilio.webhook.parse_status_callback",
+            "input": {
+                "body": {
+                    "SomeOtherField": "value"
+                }
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect_err("should fail without MessageSid or CallSid");
+
+    match &err {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(
+                message.contains("MessageSid") || message.contains("CallSid"),
+                "error should mention SID: {message}"
+            );
+        }
+        other => panic!("expected InvalidRequest, got: {other:?}"),
+    }
+}
+
+/// Parse voice webhook event — happy path.
+#[fcp_async_core::runtime::test]
+async fn webhook_parse_voice_event_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("twilio.webhook.parse_voice_event.happy_path");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = TwilioConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["twilio.webhook.parse_voice_event"]).await;
+    let token = generate_valid_token(&signing_key, "twilio.webhook.parse_voice_event");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "twilio.webhook.parse_voice_event",
+            "input": {
+                "body": {
+                    "CallSid": "CA0000111122223333",
+                    "From": "+15551112222",
+                    "To": "+15553334444",
+                    "CallStatus": "ringing",
+                    "Direction": "inbound",
+                    "AccountSid": "ACtest123456789",
+                    "CallerCity": "San Francisco",
+                    "CallerState": "CA",
+                    "CallerCountry": "US"
+                }
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("parse_voice_event should succeed");
+
+    assert_eq!(result["event_type"], "voice.inbound");
+    assert_eq!(result["call_sid"], "CA0000111122223333");
+    assert_eq!(result["from"], "+15551112222");
+    assert_eq!(result["to"], "+15553334444");
+    assert_eq!(result["call_status"], "ringing");
+    assert_eq!(result["direction"], "inbound");
+    assert_eq!(result["caller_city"], "San Francisco");
+    assert_eq!(result["caller_country"], "US");
+    assert_eq!(result["tainted"], true);
+}
+
+/// Parse voice webhook event — missing `CallSid`.
+#[fcp_async_core::runtime::test]
+async fn webhook_parse_voice_event_missing_call_sid() {
+    let _ctx =
+        AsyncTestContext::for_scenario("twilio.webhook.parse_voice_event.missing_call_sid");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = TwilioConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["twilio.webhook.parse_voice_event"]).await;
+    let token = generate_valid_token(&signing_key, "twilio.webhook.parse_voice_event");
+
+    let err = connector
+        .handle_invoke(json!({
+            "operation": "twilio.webhook.parse_voice_event",
+            "input": {
+                "body": {
+                    "From": "+15551112222",
+                    "To": "+15553334444"
+                }
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect_err("should fail without CallSid");
+
+    match &err {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(
+                message.contains("CallSid"),
+                "error should mention CallSid: {message}"
+            );
+        }
+        other => panic!("expected InvalidRequest, got: {other:?}"),
+    }
+}
+
+/// Validate signature — empty signature.
+#[fcp_async_core::runtime::test]
+async fn webhook_validate_signature_empty() {
+    let _ctx =
+        AsyncTestContext::for_scenario("twilio.webhook.validate_signature.empty");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = TwilioConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["twilio.webhook.validate_signature"]).await;
+    let token = generate_valid_token(&signing_key, "twilio.webhook.validate_signature");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "twilio.webhook.validate_signature",
+            "input": {
+                "url": "https://example.com/webhook",
+                "params": {"Body": "Hello"},
+                "signature": ""
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("validate_signature should succeed (returns valid=false)");
+
+    assert_eq!(result["valid"], false);
+    assert!(result["reason"].as_str().unwrap().contains("empty"));
+}
+
+/// Validate signature — invalid base64.
+#[fcp_async_core::runtime::test]
+async fn webhook_validate_signature_invalid_base64() {
+    let _ctx =
+        AsyncTestContext::for_scenario("twilio.webhook.validate_signature.invalid_base64");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = TwilioConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["twilio.webhook.validate_signature"]).await;
+    let token = generate_valid_token(&signing_key, "twilio.webhook.validate_signature");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "twilio.webhook.validate_signature",
+            "input": {
+                "url": "https://example.com/webhook",
+                "params": {"Body": "Hello"},
+                "signature": "not-valid-base64!!!@@@"
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("validate_signature should succeed (returns valid=false)");
+
+    assert_eq!(result["valid"], false);
+    assert!(result["reason"].as_str().unwrap().contains("base64"));
+}
+
+/// Validate signature — valid base64 but no `auth_token`.
+#[fcp_async_core::runtime::test]
+async fn webhook_validate_signature_no_auth_token() {
+    let _ctx =
+        AsyncTestContext::for_scenario("twilio.webhook.validate_signature.no_auth_token");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = TwilioConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["twilio.webhook.validate_signature"]).await;
+    let token = generate_valid_token(&signing_key, "twilio.webhook.validate_signature");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "twilio.webhook.validate_signature",
+            "input": {
+                "url": "https://example.com/webhook",
+                "params": {"Body": "Hello"},
+                "signature": "dGVzdA=="
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("validate_signature should succeed (returns valid=false)");
+
+    assert_eq!(result["valid"], false);
+    assert!(result["reason"].as_str().unwrap().contains("auth_token"));
+}
+
+/// Validate signature — valid format with `auth_token`.
+#[fcp_async_core::runtime::test]
+async fn webhook_validate_signature_with_auth_token() {
+    let _ctx =
+        AsyncTestContext::for_scenario("twilio.webhook.validate_signature.with_auth_token");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = TwilioConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["twilio.webhook.validate_signature"]).await;
+    let token = generate_valid_token(&signing_key, "twilio.webhook.validate_signature");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "twilio.webhook.validate_signature",
+            "input": {
+                "url": "https://example.com/webhook",
+                "params": {"Body": "Hello", "From": "+15551234567"},
+                "signature": "dGVzdA==",
+                "auth_token": "my_auth_token_123"
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("validate_signature should succeed");
+
+    assert_eq!(result["valid"], true);
+}
+
+/// Validate signature — missing required params field.
+#[fcp_async_core::runtime::test]
+async fn webhook_validate_signature_missing_params() {
+    let _ctx =
+        AsyncTestContext::for_scenario("twilio.webhook.validate_signature.missing_params");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = TwilioConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["twilio.webhook.validate_signature"]).await;
+    let token = generate_valid_token(&signing_key, "twilio.webhook.validate_signature");
+
+    let err = connector
+        .handle_invoke(json!({
+            "operation": "twilio.webhook.validate_signature",
+            "input": {
+                "url": "https://example.com/webhook",
+                "signature": "dGVzdA=="
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect_err("should fail without params");
+
+    match &err {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(
+                message.contains("params"),
+                "error should mention params: {message}"
+            );
+        }
+        other => panic!("expected InvalidRequest, got: {other:?}"),
+    }
+}
+
+/// Parse SMS event — missing body field.
+#[fcp_async_core::runtime::test]
+async fn webhook_parse_sms_event_missing_body() {
+    let _ctx = AsyncTestContext::for_scenario("twilio.webhook.parse_sms_event.missing_body");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = TwilioConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["twilio.webhook.parse_sms_event"]).await;
+    let token = generate_valid_token(&signing_key, "twilio.webhook.parse_sms_event");
+
+    let err = connector
+        .handle_invoke(json!({
+            "operation": "twilio.webhook.parse_sms_event",
+            "input": {},
+            "capability_token": token
+        }))
+        .await
+        .expect_err("should fail without body");
+
+    match &err {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(
+                message.contains("body"),
+                "error should mention body: {message}"
             );
         }
         other => panic!("expected InvalidRequest, got: {other:?}"),

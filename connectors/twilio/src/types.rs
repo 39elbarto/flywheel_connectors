@@ -351,6 +351,96 @@ pub struct VideoMeta {
     pub previous_page_url: Option<String>,
 }
 
+// ── Webhook Event Types ──────────────────────────────────────────────────
+
+/// Result of validating a Twilio webhook request signature.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignatureValidationResult {
+    /// Whether the signature format is valid.
+    pub valid: bool,
+    /// Human-readable reason for the validation result.
+    pub reason: String,
+}
+
+/// Parsed SMS/MMS webhook event from Twilio.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SmsWebhookEvent {
+    /// Unique event identifier (derived from MessageSid).
+    pub event_id: String,
+    /// Event type (always "sms.inbound").
+    pub event_type: String,
+    /// The Message SID.
+    pub message_sid: String,
+    /// Sender phone number (E.164).
+    pub from: String,
+    /// Recipient phone number (E.164).
+    pub to: String,
+    /// Message body text.
+    pub body: Option<String>,
+    /// Number of media attachments.
+    pub num_media: Option<u32>,
+    /// Account SID.
+    pub account_sid: Option<String>,
+    /// SMS SID (same as message_sid for SMS).
+    pub sms_sid: Option<String>,
+    /// Number of segments.
+    pub num_segments: Option<String>,
+    /// Inbound content is tainted (from external source).
+    pub tainted: bool,
+}
+
+/// Parsed status callback event from Twilio.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatusCallbackEvent {
+    /// Unique event identifier.
+    pub event_id: String,
+    /// Event type (e.g. "message.status" or "call.status").
+    pub event_type: String,
+    /// The resource SID (MessageSid or CallSid).
+    pub resource_sid: String,
+    /// Resource type ("message" or "call").
+    pub resource_type: String,
+    /// Status value (e.g. "delivered", "failed", "completed").
+    pub status: String,
+    /// Timestamp of the callback (if available).
+    pub timestamp: Option<String>,
+    /// Error code (if the status indicates an error).
+    pub error_code: Option<String>,
+    /// Error message (if available).
+    pub error_message: Option<String>,
+    /// Inbound content is tainted.
+    pub tainted: bool,
+}
+
+/// Parsed voice webhook event from Twilio.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VoiceWebhookEvent {
+    /// Unique event identifier (derived from CallSid).
+    pub event_id: String,
+    /// Event type (always "voice.inbound").
+    pub event_type: String,
+    /// The Call SID.
+    pub call_sid: String,
+    /// Caller phone number (E.164).
+    pub from: String,
+    /// Called phone number (E.164).
+    pub to: String,
+    /// Call status (e.g. "ringing", "in-progress").
+    pub call_status: Option<String>,
+    /// Call direction (e.g. "inbound").
+    pub direction: Option<String>,
+    /// Account SID.
+    pub account_sid: Option<String>,
+    /// Caller city (if available from Twilio lookup).
+    pub caller_city: Option<String>,
+    /// Caller state.
+    pub caller_state: Option<String>,
+    /// Caller country.
+    pub caller_country: Option<String>,
+    /// Inbound content is tainted.
+    pub tainted: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

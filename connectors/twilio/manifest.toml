@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:18bac3be47ea32bc71136c6a0833546a47470c0b65e13df2b9518076a6c7f491"
+interface_hash = "blake3-256:fcp.interface.v2:22cff6c8b1213cbf0800cec3a71bd92216183ab59b110da0bfbe20a5a22a1b29"
 
 [connector]
 id = "fcp.twilio"
@@ -2342,6 +2342,213 @@ examples = ['{"room_sid": "RMxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}']
 related = ["twilio.video.room.get"]
 
 # ---------------------------------------------------------------------------
+# Operations: Webhook Handling (local-only, no HTTP calls)
+# ---------------------------------------------------------------------------
+
+[provides.operations."twilio.webhook.validate_signature"]
+description = "Validate an incoming Twilio webhook request signature (local-only)"
+capability = "twilio.webhook"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."twilio.webhook.validate_signature".rate_limit]
+max = 200
+per_ms = 60000
+
+[provides.operations."twilio.webhook.validate_signature".input_schema]
+type = "object"
+required = ["url", "params", "signature"]
+
+[provides.operations."twilio.webhook.validate_signature".input_schema.properties.url]
+type = "string"
+description = "The full webhook URL"
+
+[provides.operations."twilio.webhook.validate_signature".input_schema.properties.params]
+type = "object"
+description = "Form-encoded POST parameters as key-value pairs"
+
+[provides.operations."twilio.webhook.validate_signature".input_schema.properties.signature]
+type = "string"
+description = "X-Twilio-Signature header value"
+
+[provides.operations."twilio.webhook.validate_signature".input_schema.properties.auth_token]
+type = "string"
+description = "Twilio auth token for HMAC computation"
+
+[provides.operations."twilio.webhook.validate_signature".output_schema]
+type = "object"
+
+[provides.operations."twilio.webhook.validate_signature".output_schema.properties.valid]
+type = "boolean"
+
+[provides.operations."twilio.webhook.validate_signature".output_schema.properties.reason]
+type = "string"
+
+[provides.operations."twilio.webhook.validate_signature".ai_hints]
+when_to_use = "Validate an incoming Twilio webhook signature before processing. Local-only, no HTTP call."
+common_mistakes = ["Not using the full URL including protocol and query string."]
+examples = ['{"url": "https://example.com/webhook", "params": {"Body": "Hello"}, "signature": "abc=="}']
+related = ["twilio.webhook.parse_sms_event", "twilio.webhook.parse_voice_event"]
+
+[provides.operations."twilio.webhook.parse_sms_event"]
+description = "Parse a Twilio SMS webhook payload into a structured event (local-only)"
+capability = "twilio.webhook"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."twilio.webhook.parse_sms_event".rate_limit]
+max = 200
+per_ms = 60000
+
+[provides.operations."twilio.webhook.parse_sms_event".input_schema]
+type = "object"
+required = ["body"]
+
+[provides.operations."twilio.webhook.parse_sms_event".input_schema.properties.body]
+type = "object"
+description = "Webhook payload fields (MessageSid, From, To, Body, etc.)"
+
+[provides.operations."twilio.webhook.parse_sms_event".output_schema]
+type = "object"
+
+[provides.operations."twilio.webhook.parse_sms_event".output_schema.properties.event_id]
+type = "string"
+
+[provides.operations."twilio.webhook.parse_sms_event".output_schema.properties.event_type]
+type = "string"
+
+[provides.operations."twilio.webhook.parse_sms_event".output_schema.properties.message_sid]
+type = "string"
+
+[provides.operations."twilio.webhook.parse_sms_event".output_schema.properties.from]
+type = "string"
+
+[provides.operations."twilio.webhook.parse_sms_event".output_schema.properties.to]
+type = "string"
+
+[provides.operations."twilio.webhook.parse_sms_event".output_schema.properties.body]
+type = "string"
+
+[provides.operations."twilio.webhook.parse_sms_event".output_schema.properties.num_media]
+type = "integer"
+
+[provides.operations."twilio.webhook.parse_sms_event".output_schema.properties.tainted]
+type = "boolean"
+
+[provides.operations."twilio.webhook.parse_sms_event".ai_hints]
+when_to_use = "Parse an incoming SMS/MMS webhook from Twilio into a typed event. Local-only."
+common_mistakes = ["Not validating the signature before trusting the payload."]
+examples = ['{"body": {"MessageSid": "SMxxx", "From": "+15551234567", "To": "+15559876543", "Body": "Hello"}}']
+related = ["twilio.webhook.validate_signature", "twilio.webhook.parse_status_callback"]
+
+[provides.operations."twilio.webhook.parse_status_callback"]
+description = "Parse a Twilio status callback payload into a structured event (local-only)"
+capability = "twilio.webhook"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."twilio.webhook.parse_status_callback".rate_limit]
+max = 200
+per_ms = 60000
+
+[provides.operations."twilio.webhook.parse_status_callback".input_schema]
+type = "object"
+required = ["body"]
+
+[provides.operations."twilio.webhook.parse_status_callback".input_schema.properties.body]
+type = "object"
+description = "Status callback fields (MessageSid/CallSid, MessageStatus/CallStatus, etc.)"
+
+[provides.operations."twilio.webhook.parse_status_callback".output_schema]
+type = "object"
+
+[provides.operations."twilio.webhook.parse_status_callback".output_schema.properties.event_id]
+type = "string"
+
+[provides.operations."twilio.webhook.parse_status_callback".output_schema.properties.event_type]
+type = "string"
+
+[provides.operations."twilio.webhook.parse_status_callback".output_schema.properties.resource_sid]
+type = "string"
+
+[provides.operations."twilio.webhook.parse_status_callback".output_schema.properties.resource_type]
+type = "string"
+
+[provides.operations."twilio.webhook.parse_status_callback".output_schema.properties.status]
+type = "string"
+
+[provides.operations."twilio.webhook.parse_status_callback".output_schema.properties.error_code]
+type = "string"
+
+[provides.operations."twilio.webhook.parse_status_callback".output_schema.properties.tainted]
+type = "boolean"
+
+[provides.operations."twilio.webhook.parse_status_callback".ai_hints]
+when_to_use = "Parse a delivery status callback into a typed event. Local-only."
+common_mistakes = ["Confusing SMS status callbacks with voice status callbacks."]
+examples = ['{"body": {"MessageSid": "SMxxx", "MessageStatus": "delivered"}}']
+related = ["twilio.webhook.validate_signature", "twilio.webhook.parse_sms_event"]
+
+[provides.operations."twilio.webhook.parse_voice_event"]
+description = "Parse a Twilio voice webhook payload into a structured event (local-only)"
+capability = "twilio.webhook"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."twilio.webhook.parse_voice_event".rate_limit]
+max = 200
+per_ms = 60000
+
+[provides.operations."twilio.webhook.parse_voice_event".input_schema]
+type = "object"
+required = ["body"]
+
+[provides.operations."twilio.webhook.parse_voice_event".input_schema.properties.body]
+type = "object"
+description = "Voice webhook fields (CallSid, From, To, CallStatus, Direction, etc.)"
+
+[provides.operations."twilio.webhook.parse_voice_event".output_schema]
+type = "object"
+
+[provides.operations."twilio.webhook.parse_voice_event".output_schema.properties.event_id]
+type = "string"
+
+[provides.operations."twilio.webhook.parse_voice_event".output_schema.properties.event_type]
+type = "string"
+
+[provides.operations."twilio.webhook.parse_voice_event".output_schema.properties.call_sid]
+type = "string"
+
+[provides.operations."twilio.webhook.parse_voice_event".output_schema.properties.from]
+type = "string"
+
+[provides.operations."twilio.webhook.parse_voice_event".output_schema.properties.to]
+type = "string"
+
+[provides.operations."twilio.webhook.parse_voice_event".output_schema.properties.call_status]
+type = "string"
+
+[provides.operations."twilio.webhook.parse_voice_event".output_schema.properties.direction]
+type = "string"
+
+[provides.operations."twilio.webhook.parse_voice_event".output_schema.properties.tainted]
+type = "boolean"
+
+[provides.operations."twilio.webhook.parse_voice_event".ai_hints]
+when_to_use = "Parse an incoming voice call webhook from Twilio into a typed event. Local-only."
+common_mistakes = ["Not validating the signature before trusting the payload."]
+examples = ['{"body": {"CallSid": "CAxxx", "From": "+15551234567", "To": "+15559876543", "CallStatus": "ringing"}}']
+related = ["twilio.webhook.validate_signature", "twilio.webhook.parse_status_callback"]
+
+# ---------------------------------------------------------------------------
 # Streaming / Event Capabilities
 # ---------------------------------------------------------------------------
 
@@ -2427,6 +2634,14 @@ window_ms = 60000
 burst = 20
 scope = "instance"
 
+[[rate_limits.pools]]
+id = "twilio.webhook"
+description = "Webhook handling operations (local-only)"
+requests = 200
+window_ms = 60000
+burst = 50
+scope = "instance"
+
 [rate_limits.operation_pools]
 "twilio.send_message" = ["twilio.message"]
 "twilio.get_message" = ["twilio.read"]
@@ -2463,3 +2678,7 @@ scope = "instance"
 "twilio.video.room.end" = ["twilio.video"]
 "twilio.video.room.participants" = ["twilio.video"]
 "twilio.video.recording.list" = ["twilio.video"]
+"twilio.webhook.validate_signature" = ["twilio.webhook"]
+"twilio.webhook.parse_sms_event" = ["twilio.webhook"]
+"twilio.webhook.parse_status_callback" = ["twilio.webhook"]
+"twilio.webhook.parse_voice_event" = ["twilio.webhook"]

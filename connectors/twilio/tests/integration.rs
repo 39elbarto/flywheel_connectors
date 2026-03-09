@@ -871,12 +871,20 @@ async fn lifecycle_introspect_all_operations() {
         "twilio.whatsapp_send_template",
         "twilio.whatsapp_get",
         "twilio.whatsapp_list",
+        // Conversations API
+        "twilio.conversation.create",
+        "twilio.conversation.get",
+        "twilio.conversation.list",
+        "twilio.conversation.participant.add",
+        "twilio.conversation.participant.remove",
+        "twilio.conversation.message.send",
+        "twilio.conversation.message.list",
     ];
 
     for expected in &expected_ops {
         assert!(op_ids.contains(expected), "missing operation: {expected}");
     }
-    assert_eq!(ops.len(), 19);
+    assert_eq!(ops.len(), 26);
 
     for op in ops {
         assert!(

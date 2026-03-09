@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:9cd41f1d641e37715cdcd21c3da9f970748d16868fefcc0b41034f002a343463"
+interface_hash = "blake3-256:fcp.interface.v2:7fcf0deedf57a8c19bbad51ab4a86dc7600ffffd4875126c19d4b49cbfbcc3d8"
 
 [connector]
 id = "fcp.twilio"
@@ -1491,6 +1491,376 @@ examples = ['{"from": "+14155238886", "page_size": 20}']
 related = ["twilio.whatsapp_get", "twilio.whatsapp_send"]
 
 # ---------------------------------------------------------------------------
+# Conversations API Operations
+# ---------------------------------------------------------------------------
+
+[provides.operations."twilio.conversation.create"]
+description = "Create a new multi-channel conversation"
+capability = "twilio.conversations"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."twilio.conversation.create".rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations."twilio.conversation.create".input_schema]
+type = "object"
+
+[provides.operations."twilio.conversation.create".input_schema.properties.friendly_name]
+type = "string"
+description = "Human-readable name for the conversation"
+
+[provides.operations."twilio.conversation.create".input_schema.properties.unique_name]
+type = "string"
+description = "Unique identifier name"
+
+[provides.operations."twilio.conversation.create".output_schema]
+type = "object"
+required = ["sid"]
+
+[provides.operations."twilio.conversation.create".output_schema.properties.sid]
+type = "string"
+description = "Conversation SID"
+
+[provides.operations."twilio.conversation.create".output_schema.properties.friendly_name]
+type = "string"
+
+[provides.operations."twilio.conversation.create".output_schema.properties.state]
+type = "string"
+
+[provides.operations."twilio.conversation.create".network_constraints]
+host_allow = ["conversations.twilio.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+require_sni = true
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."twilio.conversation.create".ai_hints]
+when_to_use = "Create a new multi-participant conversation for cross-channel messaging."
+common_mistakes = ["Forgetting to add participants after creating the conversation."]
+examples = ['{"friendly_name": "Support Chat #42"}']
+related = ["twilio.conversation.participant.add", "twilio.conversation.message.send"]
+
+[provides.operations."twilio.conversation.get"]
+description = "Get conversation details by SID"
+capability = "twilio.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."twilio.conversation.get".rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations."twilio.conversation.get".input_schema]
+type = "object"
+required = ["conversation_sid"]
+
+[provides.operations."twilio.conversation.get".input_schema.properties.conversation_sid]
+type = "string"
+description = "Conversation SID"
+
+[provides.operations."twilio.conversation.get".output_schema]
+type = "object"
+required = ["sid"]
+
+[provides.operations."twilio.conversation.get".output_schema.properties.sid]
+type = "string"
+
+[provides.operations."twilio.conversation.get".output_schema.properties.friendly_name]
+type = "string"
+
+[provides.operations."twilio.conversation.get".output_schema.properties.state]
+type = "string"
+
+[provides.operations."twilio.conversation.get".network_constraints]
+host_allow = ["conversations.twilio.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+require_sni = true
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."twilio.conversation.get".ai_hints]
+when_to_use = "Retrieve details of a specific conversation by its SID."
+common_mistakes = []
+examples = ['{"conversation_sid": "CHxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}']
+related = ["twilio.conversation.list"]
+
+[provides.operations."twilio.conversation.list"]
+description = "List conversations with pagination"
+capability = "twilio.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."twilio.conversation.list".rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations."twilio.conversation.list".input_schema]
+type = "object"
+
+[provides.operations."twilio.conversation.list".input_schema.properties.page_size]
+type = "integer"
+description = "Results per page (max 100)"
+
+[provides.operations."twilio.conversation.list".output_schema]
+type = "object"
+
+[provides.operations."twilio.conversation.list".output_schema.properties.conversations]
+type = "array"
+
+[provides.operations."twilio.conversation.list".output_schema.properties.meta]
+type = "object"
+
+[provides.operations."twilio.conversation.list".network_constraints]
+host_allow = ["conversations.twilio.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+require_sni = true
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."twilio.conversation.list".ai_hints]
+when_to_use = "List all conversations, optionally with pagination."
+common_mistakes = []
+examples = ['{"page_size": 20}']
+related = ["twilio.conversation.get"]
+
+[provides.operations."twilio.conversation.participant.add"]
+description = "Add a participant to a conversation"
+capability = "twilio.conversations.participants"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."twilio.conversation.participant.add".rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations."twilio.conversation.participant.add".input_schema]
+type = "object"
+required = ["conversation_sid"]
+
+[provides.operations."twilio.conversation.participant.add".input_schema.properties.conversation_sid]
+type = "string"
+description = "Conversation SID"
+
+[provides.operations."twilio.conversation.participant.add".input_schema.properties.identity]
+type = "string"
+description = "Chat identity of the participant"
+
+[provides.operations."twilio.conversation.participant.add".input_schema.properties.messaging_address]
+type = "string"
+description = "Phone number or channel address"
+
+[provides.operations."twilio.conversation.participant.add".input_schema.properties.messaging_proxy_address]
+type = "string"
+description = "Twilio proxy phone number"
+
+[provides.operations."twilio.conversation.participant.add".output_schema]
+type = "object"
+required = ["sid"]
+
+[provides.operations."twilio.conversation.participant.add".output_schema.properties.sid]
+type = "string"
+
+[provides.operations."twilio.conversation.participant.add".output_schema.properties.conversation_sid]
+type = "string"
+
+[provides.operations."twilio.conversation.participant.add".output_schema.properties.identity]
+type = "string"
+
+[provides.operations."twilio.conversation.participant.add".network_constraints]
+host_allow = ["conversations.twilio.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+require_sni = true
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."twilio.conversation.participant.add".ai_hints]
+when_to_use = "Add a person to an existing conversation by identity or phone number."
+common_mistakes = ["Must provide either identity or messaging_address.", "messaging_proxy_address is required when using messaging_address."]
+examples = ['{"conversation_sid": "CHxxx", "identity": "user@example.com"}']
+related = ["twilio.conversation.participant.remove"]
+
+[provides.operations."twilio.conversation.participant.remove"]
+description = "Remove a participant from a conversation"
+capability = "twilio.conversations.participants"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "none"
+idempotency = "best_effort"
+
+[provides.operations."twilio.conversation.participant.remove".rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations."twilio.conversation.participant.remove".input_schema]
+type = "object"
+required = ["conversation_sid", "participant_sid"]
+
+[provides.operations."twilio.conversation.participant.remove".input_schema.properties.conversation_sid]
+type = "string"
+description = "Conversation SID"
+
+[provides.operations."twilio.conversation.participant.remove".input_schema.properties.participant_sid]
+type = "string"
+description = "Participant SID to remove"
+
+[provides.operations."twilio.conversation.participant.remove".output_schema]
+type = "object"
+
+[provides.operations."twilio.conversation.participant.remove".output_schema.properties.success]
+type = "boolean"
+
+[provides.operations."twilio.conversation.participant.remove".network_constraints]
+host_allow = ["conversations.twilio.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+require_sni = true
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."twilio.conversation.participant.remove".ai_hints]
+when_to_use = "Remove a participant from a conversation. This is irreversible."
+common_mistakes = ["Removing the last participant effectively closes the conversation."]
+examples = ['{"conversation_sid": "CHxxx", "participant_sid": "MBxxx"}']
+related = ["twilio.conversation.participant.add"]
+
+[provides.operations."twilio.conversation.message.send"]
+description = "Send a message into a conversation"
+capability = "twilio.conversations"
+risk_level = "high"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."twilio.conversation.message.send".rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations."twilio.conversation.message.send".input_schema]
+type = "object"
+required = ["conversation_sid", "body"]
+
+[provides.operations."twilio.conversation.message.send".input_schema.properties.conversation_sid]
+type = "string"
+description = "Conversation SID"
+
+[provides.operations."twilio.conversation.message.send".input_schema.properties.body]
+type = "string"
+description = "Message text"
+
+[provides.operations."twilio.conversation.message.send".input_schema.properties.author]
+type = "string"
+description = "Author identity"
+
+[provides.operations."twilio.conversation.message.send".output_schema]
+type = "object"
+required = ["sid"]
+
+[provides.operations."twilio.conversation.message.send".output_schema.properties.sid]
+type = "string"
+
+[provides.operations."twilio.conversation.message.send".output_schema.properties.body]
+type = "string"
+
+[provides.operations."twilio.conversation.message.send".output_schema.properties.author]
+type = "string"
+
+[provides.operations."twilio.conversation.message.send".output_schema.properties.index]
+type = "integer"
+
+[provides.operations."twilio.conversation.message.send".network_constraints]
+host_allow = ["conversations.twilio.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+require_sni = true
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."twilio.conversation.message.send".ai_hints]
+when_to_use = "Send a text message into an existing conversation."
+common_mistakes = ["Message body must not be empty.", "Never log message body content (PII)."]
+examples = ['{"conversation_sid": "CHxxx", "body": "Hello!", "author": "agent"}']
+related = ["twilio.conversation.message.list"]
+
+[provides.operations."twilio.conversation.message.list"]
+description = "List messages in a conversation"
+capability = "twilio.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."twilio.conversation.message.list".rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations."twilio.conversation.message.list".input_schema]
+type = "object"
+required = ["conversation_sid"]
+
+[provides.operations."twilio.conversation.message.list".input_schema.properties.conversation_sid]
+type = "string"
+description = "Conversation SID"
+
+[provides.operations."twilio.conversation.message.list".input_schema.properties.page_size]
+type = "integer"
+description = "Results per page"
+
+[provides.operations."twilio.conversation.message.list".input_schema.properties.order]
+type = "string"
+description = "Sort order: asc or desc"
+
+[provides.operations."twilio.conversation.message.list".output_schema]
+type = "object"
+
+[provides.operations."twilio.conversation.message.list".output_schema.properties.messages]
+type = "array"
+
+[provides.operations."twilio.conversation.message.list".output_schema.properties.meta]
+type = "object"
+
+[provides.operations."twilio.conversation.message.list".network_constraints]
+host_allow = ["conversations.twilio.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+require_sni = true
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."twilio.conversation.message.list".ai_hints]
+when_to_use = "List messages within a specific conversation."
+common_mistakes = []
+examples = ['{"conversation_sid": "CHxxx", "page_size": 50}']
+related = ["twilio.conversation.message.send"]
+
+# ---------------------------------------------------------------------------
 # Streaming / Event Capabilities
 # ---------------------------------------------------------------------------
 
@@ -1552,6 +1922,14 @@ window_ms = 60000
 burst = 10
 scope = "instance"
 
+[[rate_limits.pools]]
+id = "twilio.conversations"
+description = "Conversations API operations"
+requests = 60
+window_ms = 60000
+burst = 10
+scope = "instance"
+
 [rate_limits.operation_pools]
 "twilio.send_message" = ["twilio.message"]
 "twilio.get_message" = ["twilio.read"]
@@ -1572,3 +1950,10 @@ scope = "instance"
 "twilio.whatsapp_send_template" = ["twilio.message"]
 "twilio.whatsapp_get" = ["twilio.read"]
 "twilio.whatsapp_list" = ["twilio.read"]
+"twilio.conversation.create" = ["twilio.conversations"]
+"twilio.conversation.get" = ["twilio.read"]
+"twilio.conversation.list" = ["twilio.read"]
+"twilio.conversation.participant.add" = ["twilio.conversations"]
+"twilio.conversation.participant.remove" = ["twilio.conversations"]
+"twilio.conversation.message.send" = ["twilio.conversations"]
+"twilio.conversation.message.list" = ["twilio.read"]

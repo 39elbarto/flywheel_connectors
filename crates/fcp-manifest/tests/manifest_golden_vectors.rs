@@ -1617,6 +1617,14 @@ fn twilio_full_manifest_parses_with_all_operations() {
         "twilio.whatsapp_send_template",
         "twilio.whatsapp_get",
         "twilio.whatsapp_list",
+        // Conversations API
+        "twilio.conversation.create",
+        "twilio.conversation.get",
+        "twilio.conversation.list",
+        "twilio.conversation.participant.add",
+        "twilio.conversation.participant.remove",
+        "twilio.conversation.message.send",
+        "twilio.conversation.message.list",
     ];
     for op_name in &expected_ops {
         assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
@@ -1635,9 +1643,9 @@ fn twilio_full_manifest_parses_with_all_operations() {
     let nc = dl_rec.network_constraints.as_ref().expect("nc");
     assert!(nc.host_allow.iter().any(|h| h == "media.twiliocdn.com"));
 
-    // Verify 4 rate limit pools
+    // Verify 5 rate limit pools (read, message, voice, media, conversations)
     let pools = parsed.rate_limits.as_ref().expect("rate_limits");
-    assert_eq!(pools.pools.len(), 4);
+    assert_eq!(pools.pools.len(), 5);
 }
 
 #[test]

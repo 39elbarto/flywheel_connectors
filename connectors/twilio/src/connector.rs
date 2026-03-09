@@ -1066,6 +1066,258 @@ impl TwilioConnector {
                         ],
                     },
                 ),
+                // ── Conversations API ───────────────────────────
+                op_info(
+                    "twilio.conversation.create",
+                    "Create a new multi-channel conversation",
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "friendly_name": { "type": "string", "description": "Human-readable name" },
+                            "unique_name": { "type": "string", "description": "Unique identifier name" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "sid": { "type": "string" },
+                            "friendly_name": { "type": "string" },
+                            "state": { "type": "string" },
+                            "date_created": { "type": "string" }
+                        }
+                    }),
+                    "twilio.conversations",
+                    RiskLevel::Medium,
+                    SafetyTier::Risky,
+                    IdempotencyClass::None,
+                    AgentHint {
+                        when_to_use: "Create a new multi-participant conversation for cross-channel messaging.".into(),
+                        common_mistakes: vec![
+                            "Forgetting to add participants after creating the conversation.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"friendly_name": "Support Chat #42"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("twilio.conversation.participant.add"),
+                            CapabilityId::from_static("twilio.conversation.message.send"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "twilio.conversation.get",
+                    "Get conversation details by SID",
+                    json!({
+                        "type": "object",
+                        "required": ["conversation_sid"],
+                        "properties": {
+                            "conversation_sid": { "type": "string", "description": "Conversation SID" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "sid": { "type": "string" },
+                            "friendly_name": { "type": "string" },
+                            "state": { "type": "string" },
+                            "date_created": { "type": "string" }
+                        }
+                    }),
+                    "twilio.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Retrieve details of a specific conversation by its SID.".into(),
+                        common_mistakes: vec![],
+                        examples: vec![
+                            r#"{"conversation_sid": "CHxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("twilio.conversation.list"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "twilio.conversation.list",
+                    "List conversations with pagination",
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "page_size": { "type": "integer", "description": "Results per page (max 100)" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "conversations": { "type": "array" },
+                            "meta": { "type": "object" }
+                        }
+                    }),
+                    "twilio.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "List all conversations, optionally with pagination.".into(),
+                        common_mistakes: vec![],
+                        examples: vec![
+                            r#"{"page_size": 20}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("twilio.conversation.get"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "twilio.conversation.participant.add",
+                    "Add a participant to a conversation",
+                    json!({
+                        "type": "object",
+                        "required": ["conversation_sid"],
+                        "properties": {
+                            "conversation_sid": { "type": "string" },
+                            "identity": { "type": "string", "description": "Chat identity of the participant" },
+                            "messaging_address": { "type": "string", "description": "Phone number or channel address" },
+                            "messaging_proxy_address": { "type": "string", "description": "Twilio proxy phone number" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "sid": { "type": "string" },
+                            "conversation_sid": { "type": "string" },
+                            "identity": { "type": "string" },
+                            "date_created": { "type": "string" }
+                        }
+                    }),
+                    "twilio.conversations.participants",
+                    RiskLevel::High,
+                    SafetyTier::Dangerous,
+                    IdempotencyClass::None,
+                    AgentHint {
+                        when_to_use: "Add a person to an existing conversation by identity or phone number.".into(),
+                        common_mistakes: vec![
+                            "Must provide either identity or messaging_address.".into(),
+                            "messaging_proxy_address is required when using messaging_address.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"conversation_sid": "CHxxx", "identity": "user@example.com"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("twilio.conversation.participant.remove"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "twilio.conversation.participant.remove",
+                    "Remove a participant from a conversation",
+                    json!({
+                        "type": "object",
+                        "required": ["conversation_sid", "participant_sid"],
+                        "properties": {
+                            "conversation_sid": { "type": "string" },
+                            "participant_sid": { "type": "string", "description": "Participant SID to remove" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "success": { "type": "boolean" }
+                        }
+                    }),
+                    "twilio.conversations.participants",
+                    RiskLevel::High,
+                    SafetyTier::Dangerous,
+                    IdempotencyClass::BestEffort,
+                    AgentHint {
+                        when_to_use: "Remove a participant from a conversation. This is irreversible.".into(),
+                        common_mistakes: vec![
+                            "Removing the last participant effectively closes the conversation.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"conversation_sid": "CHxxx", "participant_sid": "MBxxx"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("twilio.conversation.participant.add"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "twilio.conversation.message.send",
+                    "Send a message into a conversation",
+                    json!({
+                        "type": "object",
+                        "required": ["conversation_sid", "body"],
+                        "properties": {
+                            "conversation_sid": { "type": "string" },
+                            "body": { "type": "string", "description": "Message text" },
+                            "author": { "type": "string", "description": "Author identity" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "sid": { "type": "string" },
+                            "conversation_sid": { "type": "string" },
+                            "body": { "type": "string" },
+                            "author": { "type": "string" },
+                            "index": { "type": "integer" },
+                            "date_created": { "type": "string" }
+                        }
+                    }),
+                    "twilio.conversations",
+                    RiskLevel::High,
+                    SafetyTier::Risky,
+                    IdempotencyClass::None,
+                    AgentHint {
+                        when_to_use: "Send a text message into an existing conversation.".into(),
+                        common_mistakes: vec![
+                            "Message body must not be empty.".into(),
+                            "Never log message body content (PII).".into(),
+                        ],
+                        examples: vec![
+                            r#"{"conversation_sid": "CHxxx", "body": "Hello!", "author": "agent"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("twilio.conversation.message.list"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "twilio.conversation.message.list",
+                    "List messages in a conversation",
+                    json!({
+                        "type": "object",
+                        "required": ["conversation_sid"],
+                        "properties": {
+                            "conversation_sid": { "type": "string" },
+                            "page_size": { "type": "integer" },
+                            "order": { "type": "string", "description": "Sort order: asc or desc" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "messages": { "type": "array" },
+                            "meta": { "type": "object" }
+                        }
+                    }),
+                    "twilio.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "List messages within a specific conversation.".into(),
+                        common_mistakes: vec![],
+                        examples: vec![
+                            r#"{"conversation_sid": "CHxxx", "page_size": 50}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("twilio.conversation.message.send"),
+                        ],
+                    },
+                ),
             ],
             events: vec![],
             resource_types: vec![],
@@ -1167,6 +1419,22 @@ impl TwilioConnector {
             }
             "twilio.whatsapp_get" => self.invoke_whatsapp_get(input).await,
             "twilio.whatsapp_list" => self.invoke_whatsapp_list(input).await,
+            // Conversations API
+            "twilio.conversation.create" => self.invoke_conversation_create(input).await,
+            "twilio.conversation.get" => self.invoke_conversation_get(input).await,
+            "twilio.conversation.list" => self.invoke_conversation_list(input).await,
+            "twilio.conversation.participant.add" => {
+                self.invoke_conversation_participant_add(input).await
+            }
+            "twilio.conversation.participant.remove" => {
+                self.invoke_conversation_participant_remove(input).await
+            }
+            "twilio.conversation.message.send" => {
+                self.invoke_conversation_message_send(input).await
+            }
+            "twilio.conversation.message.list" => {
+                self.invoke_conversation_message_list(input).await
+            }
             _ => Err(FcpError::OperationNotGranted {
                 operation: operation.into(),
             }),
@@ -1545,6 +1813,132 @@ impl TwilioConnector {
         }))
     }
 
+    // ── Conversations API implementations ──────────────────────
+
+    async fn invoke_conversation_create(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let friendly_name = input.get("friendly_name").and_then(|v| v.as_str());
+        let unique_name = input.get("unique_name").and_then(|v| v.as_str());
+        let resp = client
+            .create_conversation(friendly_name, unique_name)
+            .await
+            .map_err(|e: TwilioError| e.to_fcp_error())?;
+        serde_json::to_value(resp).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize response: {e}"),
+        })
+    }
+
+    async fn invoke_conversation_get(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let sid = require_str(&input, "conversation_sid")?;
+        let resp = client
+            .get_conversation(sid)
+            .await
+            .map_err(|e: TwilioError| e.to_fcp_error())?;
+        serde_json::to_value(resp).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize response: {e}"),
+        })
+    }
+
+    async fn invoke_conversation_list(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let page_size = input
+            .get("page_size")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
+        let resp = client
+            .list_conversations(page_size)
+            .await
+            .map_err(|e: TwilioError| e.to_fcp_error())?;
+        Ok(json!({
+            "conversations": resp.conversations,
+            "meta": serde_json::to_value(&resp.meta).unwrap_or(json!(null)),
+        }))
+    }
+
+    async fn invoke_conversation_participant_add(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let conversation_sid = require_str(&input, "conversation_sid")?;
+        let identity = input.get("identity").and_then(|v| v.as_str());
+        let messaging_address = input.get("messaging_address").and_then(|v| v.as_str());
+        let messaging_proxy_address = input
+            .get("messaging_proxy_address")
+            .and_then(|v| v.as_str());
+        let resp = client
+            .add_participant(
+                conversation_sid,
+                identity,
+                messaging_address,
+                messaging_proxy_address,
+            )
+            .await
+            .map_err(|e: TwilioError| e.to_fcp_error())?;
+        serde_json::to_value(resp).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize response: {e}"),
+        })
+    }
+
+    async fn invoke_conversation_participant_remove(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let conversation_sid = require_str(&input, "conversation_sid")?;
+        let participant_sid = require_str(&input, "participant_sid")?;
+        client
+            .remove_participant(conversation_sid, participant_sid)
+            .await
+            .map_err(|e: TwilioError| e.to_fcp_error())?;
+        Ok(json!({ "success": true }))
+    }
+
+    async fn invoke_conversation_message_send(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let conversation_sid = require_str(&input, "conversation_sid")?;
+        let body = require_str(&input, "body")?;
+        let author = input.get("author").and_then(|v| v.as_str());
+        client
+            .send_conversation_message(conversation_sid, author, body)
+            .await
+            .map_err(|e: TwilioError| e.to_fcp_error())
+    }
+
+    async fn invoke_conversation_message_list(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let conversation_sid = require_str(&input, "conversation_sid")?;
+        let page_size = input
+            .get("page_size")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
+        let order = input.get("order").and_then(|v| v.as_str());
+        let resp = client
+            .list_conversation_messages(conversation_sid, page_size, order)
+            .await
+            .map_err(|e: TwilioError| e.to_fcp_error())?;
+        Ok(json!({
+            "messages": resp.messages,
+            "meta": serde_json::to_value(&resp.meta).unwrap_or(json!(null)),
+        }))
+    }
+
     /// Handle shutdown.
     pub async fn handle_shutdown(
         &self,
@@ -1741,7 +2135,15 @@ mod tests {
         assert!(op_ids.contains(&"twilio.whatsapp_send_template"));
         assert!(op_ids.contains(&"twilio.whatsapp_get"));
         assert!(op_ids.contains(&"twilio.whatsapp_list"));
-        assert_eq!(ops.len(), 19);
+        // Conversations API
+        assert!(op_ids.contains(&"twilio.conversation.create"));
+        assert!(op_ids.contains(&"twilio.conversation.get"));
+        assert!(op_ids.contains(&"twilio.conversation.list"));
+        assert!(op_ids.contains(&"twilio.conversation.participant.add"));
+        assert!(op_ids.contains(&"twilio.conversation.participant.remove"));
+        assert!(op_ids.contains(&"twilio.conversation.message.send"));
+        assert!(op_ids.contains(&"twilio.conversation.message.list"));
+        assert_eq!(ops.len(), 26);
     }
 
     // ── Provisioning tests ─────────────────────────────────────────

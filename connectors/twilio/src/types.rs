@@ -172,6 +172,72 @@ pub struct WhatsAppMessage {
     pub uri: Option<String>,
 }
 
+// ── Conversations API types ───────────────────────────────────
+
+/// A Twilio Conversation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TwilioConversation {
+    pub sid: String,
+    pub friendly_name: Option<String>,
+    pub state: Option<String>,
+    pub date_created: Option<String>,
+    pub date_updated: Option<String>,
+    pub unique_name: Option<String>,
+    pub chat_service_sid: Option<String>,
+    pub messaging_service_sid: Option<String>,
+    pub url: Option<String>,
+}
+
+/// A participant in a Twilio Conversation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationParticipant {
+    pub sid: String,
+    pub conversation_sid: Option<String>,
+    pub identity: Option<String>,
+    pub messaging_binding: Option<serde_json::Value>,
+    pub date_created: Option<String>,
+    pub date_updated: Option<String>,
+    pub url: Option<String>,
+    pub role_sid: Option<String>,
+}
+
+/// A message in a Twilio Conversation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationMessage {
+    pub sid: String,
+    pub conversation_sid: Option<String>,
+    pub author: Option<String>,
+    pub body: Option<String>,
+    pub index: Option<u32>,
+    pub date_created: Option<String>,
+    pub date_updated: Option<String>,
+    pub url: Option<String>,
+    pub participant_sid: Option<String>,
+}
+
+/// Twilio list response wrapper for conversations.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ConversationListResponse {
+    pub conversations: Vec<serde_json::Value>,
+    pub meta: Option<ConversationMeta>,
+}
+
+/// Twilio list response wrapper for conversation messages.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ConversationMessageListResponse {
+    pub messages: Vec<serde_json::Value>,
+    pub meta: Option<ConversationMeta>,
+}
+
+/// Metadata for paginated Conversations API responses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationMeta {
+    pub page: Option<u32>,
+    pub page_size: Option<u32>,
+    pub next_page_url: Option<String>,
+    pub previous_page_url: Option<String>,
+}
+
 /// Twilio API error response.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ApiErrorResponse {

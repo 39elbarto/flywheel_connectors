@@ -14,14 +14,19 @@ use tracing::{debug, warn};
 use crate::{
     error::{TwilioError, TwilioResult},
     types::{
-        ApiErrorResponse, CallListResponse, MediaListResponse, MessageListResponse,
-        PhoneNumberListResponse, RecordingListResponse, TwilioAccount, TwilioCall,
-        TwilioMediaResource, TwilioMessage, TwimlTemplate, WhatsAppMessage,
+        ApiErrorResponse, CallListResponse, ConversationListResponse,
+        ConversationMessageListResponse, ConversationParticipant, MediaListResponse,
+        MessageListResponse, PhoneNumberListResponse, RecordingListResponse, TwilioAccount,
+        TwilioCall, TwilioConversation, TwilioMediaResource, TwilioMessage, TwimlTemplate,
+        WhatsAppMessage,
     },
 };
 
 /// Default Twilio API base URL prefix.
 pub const DEFAULT_API_BASE: &str = "https://api.twilio.com/2010-04-01/Accounts";
+
+/// Default Twilio Conversations API base URL.
+pub const DEFAULT_CONVERSATIONS_BASE: &str = "https://conversations.twilio.com/v1";
 
 /// Authentication mode for the Twilio client.
 #[derive(Clone)]
@@ -88,6 +93,7 @@ pub struct TwilioClient {
     http: Client,
     auth: TwilioAuth,
     base_url: String,
+    conversations_base_url: String,
     account_sid: String,
     max_retries: u32,
 }
@@ -97,6 +103,7 @@ impl std::fmt::Debug for TwilioClient {
         f.debug_struct("TwilioClient")
             .field("auth", &self.auth)
             .field("base_url", &self.base_url)
+            .field("conversations_base_url", &self.conversations_base_url)
             .field("account_sid", &self.account_sid)
             .field("max_retries", &self.max_retries)
             .finish_non_exhaustive()
@@ -145,11 +152,13 @@ impl TwilioClient {
 
         let sid = auth.account_sid().to_string();
         let base_url = format!("{DEFAULT_API_BASE}/{sid}");
+        let conversations_base_url = DEFAULT_CONVERSATIONS_BASE.to_string();
 
         Ok(Self {
             http,
             auth,
             base_url,
+            conversations_base_url,
             account_sid: sid,
             max_retries: 2,
         })
@@ -164,6 +173,13 @@ impl TwilioClient {
     #[must_use]
     pub fn with_base_url(mut self, url: &str) -> Self {
         self.base_url = url.to_string();
+        self
+    }
+
+    /// Set a custom Conversations API base URL (for testing).
+    #[must_use]
+    pub fn with_conversations_base_url(mut self, url: &str) -> Self {
+        self.conversations_base_url = url.to_string();
         self
     }
 
@@ -607,6 +623,136 @@ impl TwilioClient {
         Ok(serde_json::from_value(data)?)
     }
 
+    // ── Conversations API ──────────────────────────────────────
+
+    /// Create a new conversation.
+    pub async fn create_conversation(
+        &self,
+        friendly_name: Option<&str>,
+        unique_name: Option<&str>,
+    ) -> TwilioResult<TwilioConversation> {
+        let url = format!("{}/Conversations", self.conversations_base_url);
+        let mut payload = serde_json::json!({});
+        if let Some(name) = friendly_name {
+            payload["FriendlyName"] = serde_json::Value::String(name.to_string());
+        }
+        if let Some(name) = unique_name {
+            payload["UniqueName"] = serde_json::Value::String(name.to_string());
+        }
+        let data = self.post_json(&url, &payload).await?;
+        Ok(serde_json::from_value(data)?)
+    }
+
+    /// Get a conversation by SID.
+    pub async fn get_conversation(
+        &self,
+        conversation_sid: &str,
+    ) -> TwilioResult<TwilioConversation> {
+        let url = format!(
+            "{}/Conversations/{conversation_sid}",
+            self.conversations_base_url
+        );
+        let data = self.get(&url).await?;
+        Ok(serde_json::from_value(data)?)
+    }
+
+    /// List conversations with optional pagination.
+    pub async fn list_conversations(
+        &self,
+        page_size: Option<u32>,
+    ) -> TwilioResult<ConversationListResponse> {
+        let base_url = format!("{}/Conversations", self.conversations_base_url);
+        let mut params: Vec<(&str, String)> = Vec::new();
+        if let Some(v) = page_size {
+            params.push(("PageSize", v.to_string()));
+        }
+        let data = self.get_with_params(&base_url, &params).await?;
+        Ok(serde_json::from_value(data)?)
+    }
+
+    /// Add a participant to a conversation.
+    pub async fn add_participant(
+        &self,
+        conversation_sid: &str,
+        identity: Option<&str>,
+        messaging_address: Option<&str>,
+        messaging_proxy_address: Option<&str>,
+    ) -> TwilioResult<ConversationParticipant> {
+        let url = format!(
+            "{}/Conversations/{conversation_sid}/Participants",
+            self.conversations_base_url
+        );
+        let mut payload = serde_json::json!({});
+        if let Some(id) = identity {
+            payload["Identity"] = serde_json::Value::String(id.to_string());
+        }
+        if let Some(addr) = messaging_address {
+            payload["MessagingBinding.Address"] =
+                serde_json::Value::String(addr.to_string());
+        }
+        if let Some(proxy) = messaging_proxy_address {
+            payload["MessagingBinding.ProxyAddress"] =
+                serde_json::Value::String(proxy.to_string());
+        }
+        let data = self.post_json(&url, &payload).await?;
+        Ok(serde_json::from_value(data)?)
+    }
+
+    /// Remove a participant from a conversation.
+    pub async fn remove_participant(
+        &self,
+        conversation_sid: &str,
+        participant_sid: &str,
+    ) -> TwilioResult<()> {
+        let url = format!(
+            "{}/Conversations/{conversation_sid}/Participants/{participant_sid}",
+            self.conversations_base_url
+        );
+        self.delete(&url).await
+    }
+
+    /// Send a message into a conversation.
+    pub async fn send_conversation_message(
+        &self,
+        conversation_sid: &str,
+        author: Option<&str>,
+        body: &str,
+    ) -> TwilioResult<serde_json::Value> {
+        let url = format!(
+            "{}/Conversations/{conversation_sid}/Messages",
+            self.conversations_base_url
+        );
+        let mut payload = serde_json::json!({
+            "Body": body,
+        });
+        if let Some(a) = author {
+            payload["Author"] = serde_json::Value::String(a.to_string());
+        }
+        self.post_json(&url, &payload).await
+    }
+
+    /// List messages in a conversation.
+    pub async fn list_conversation_messages(
+        &self,
+        conversation_sid: &str,
+        page_size: Option<u32>,
+        order: Option<&str>,
+    ) -> TwilioResult<ConversationMessageListResponse> {
+        let base_url = format!(
+            "{}/Conversations/{conversation_sid}/Messages",
+            self.conversations_base_url
+        );
+        let mut params: Vec<(&str, String)> = Vec::new();
+        if let Some(v) = page_size {
+            params.push(("PageSize", v.to_string()));
+        }
+        if let Some(v) = order {
+            params.push(("Order", v.to_string()));
+        }
+        let data = self.get_with_params(&base_url, &params).await?;
+        Ok(serde_json::from_value(data)?)
+    }
+
     // ── HTTP helpers ─────────────────────────────────────────────
 
     async fn get(&self, url: &str) -> TwilioResult<serde_json::Value> {
@@ -707,6 +853,14 @@ impl TwilioClient {
         body: &serde_json::Value,
     ) -> TwilioResult<serde_json::Value> {
         self.execute(|| self.http.post(url).json(body)).await
+    }
+
+    async fn delete(&self, url: &str) -> TwilioResult<()> {
+        let resp = self.execute(|| self.http.delete(url)).await;
+        match resp {
+            Ok(_) => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 
     async fn execute(

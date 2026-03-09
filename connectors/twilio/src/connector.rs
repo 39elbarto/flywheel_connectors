@@ -642,6 +642,128 @@ impl TwilioConnector {
                         ],
                     },
                 ),
+                op_info(
+                    "twilio.hangup_call",
+                    "End an active voice call",
+                    json!({
+                        "type": "object",
+                        "required": ["call_sid"],
+                        "properties": {
+                            "call_sid": { "type": "string" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "sid": { "type": "string" },
+                            "status": { "type": "string" },
+                            "to": { "type": "string" },
+                            "from": { "type": "string" },
+                            "duration": { "type": "string" },
+                            "date_created": { "type": "string" }
+                        }
+                    }),
+                    "twilio.voice",
+                    RiskLevel::High,
+                    SafetyTier::Dangerous,
+                    IdempotencyClass::AtMostOnce,
+                    AgentHint {
+                        when_to_use: "End an active call. The call must be in-progress.".into(),
+                        common_mistakes: vec![
+                            "Trying to hangup a call that has already completed.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"call_sid": "CAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("twilio.create_call"),
+                            CapabilityId::from_static("twilio.get_call"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "twilio.list_calls",
+                    "List voice calls with filters",
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "to": { "type": "string" },
+                            "from": { "type": "string" },
+                            "status": { "type": "string" },
+                            "start_time": { "type": "string" },
+                            "end_time": { "type": "string" },
+                            "page_size": { "type": "integer" },
+                            "page": { "type": "integer" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "calls": { "type": "array" },
+                            "next_page_uri": { "type": "string" }
+                        }
+                    }),
+                    "twilio.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "List calls with optional filters. Supports pagination.".into(),
+                        common_mistakes: vec![
+                            "Not handling pagination for large call histories.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"status": "completed", "page_size": 20}"#.into(),
+                            r#"{"to": "+15551234567"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("twilio.get_call"),
+                            CapabilityId::from_static("twilio.create_call"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "twilio.generate_twiml",
+                    "Generate TwiML XML from safe templates",
+                    json!({
+                        "type": "object",
+                        "required": ["template"],
+                        "properties": {
+                            "template": { "type": "string", "enum": ["say", "play", "gather", "dial", "pause", "reject", "hangup"] },
+                            "message": { "type": "string" },
+                            "url": { "type": "string" },
+                            "voice": { "type": "string" },
+                            "language": { "type": "string" },
+                            "digits": { "type": "string" },
+                            "number": { "type": "string" },
+                            "length": { "type": "integer" },
+                            "reason": { "type": "string" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "twiml": { "type": "string" }
+                        }
+                    }),
+                    "twilio.voice",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Generate TwiML XML locally from safe templates. No API call is made. Use the output as a TwiML URL payload.".into(),
+                        common_mistakes: vec![
+                            "Not hosting the generated TwiML at a URL accessible by Twilio.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"template": "say", "message": "Hello!", "voice": "alice"}"#.into(),
+                            r#"{"template": "gather", "message": "Press 1 for support.", "digits": "1"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("twilio.create_call"),
+                        ],
+                    },
+                ),
                 // ── Recordings and Media ─────────────────────────────
                 op_info(
                     "twilio.list_recordings",
@@ -887,6 +1009,9 @@ impl TwilioConnector {
             "twilio.get_media" => self.invoke_get_media(input).await,
             "twilio.create_call" => self.invoke_create_call(input).await,
             "twilio.get_call" => self.invoke_get_call(input).await,
+            "twilio.hangup_call" => self.invoke_hangup_call(input).await,
+            "twilio.list_calls" => self.invoke_list_calls(input).await,
+            "twilio.generate_twiml" => self.invoke_generate_twiml(input),
             "twilio.list_recordings" => self.invoke_list_recordings(input).await,
             "twilio.download_recording" => self.invoke_download_recording(input).await,
             "twilio.download_media" => self.invoke_download_media(input).await,
@@ -1025,6 +1150,75 @@ impl TwilioConnector {
         serde_json::to_value(resp).map_err(|e| FcpError::Internal {
             message: format!("Serialization error: {e}"),
         })
+    }
+
+    async fn invoke_hangup_call(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let call_sid = require_str(&input, "call_sid")?;
+
+        let resp = client
+            .hangup_call(call_sid)
+            .await
+            .map_err(|e: TwilioError| e.to_fcp_error())?;
+        serde_json::to_value(resp).map_err(|e| FcpError::Internal {
+            message: format!("Serialization error: {e}"),
+        })
+    }
+
+    async fn invoke_list_calls(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let to = input.get("to").and_then(|v| v.as_str());
+        let from = input.get("from").and_then(|v| v.as_str());
+        let status = input.get("status").and_then(|v| v.as_str());
+        let start_time = input.get("start_time").and_then(|v| v.as_str());
+        let end_time = input.get("end_time").and_then(|v| v.as_str());
+        let page_size = input
+            .get("page_size")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
+        let page = input.get("page").and_then(|v| v.as_u64()).map(|v| v as u32);
+
+        let resp = client
+            .list_calls(to, from, status, start_time, end_time, page_size, page)
+            .await
+            .map_err(|e: TwilioError| e.to_fcp_error())?;
+        Ok(json!({
+            "calls": resp.calls,
+            "next_page_uri": resp.next_page_uri,
+        }))
+    }
+
+    fn invoke_generate_twiml(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        use crate::types::TwimlTemplate;
+
+        let template_str = require_str(&input, "template")?;
+        let template: TwimlTemplate =
+            serde_json::from_value(serde_json::Value::String(template_str.to_string())).map_err(
+                |_| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!(
+                        "Invalid template: '{template_str}'. Valid: say, play, gather, dial, pause, reject, hangup"
+                    ),
+                },
+            )?;
+
+        let message = input.get("message").and_then(|v| v.as_str());
+        let url = input.get("url").and_then(|v| v.as_str());
+        let voice = input.get("voice").and_then(|v| v.as_str());
+        let language = input.get("language").and_then(|v| v.as_str());
+        let digits = input.get("digits").and_then(|v| v.as_str());
+        let number = input.get("number").and_then(|v| v.as_str());
+        let length = input
+            .get("length")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
+        let reason = input.get("reason").and_then(|v| v.as_str());
+
+        let twiml = crate::client::TwilioClient::generate_twiml(
+            &template, message, url, voice, language, digits, number, length, reason,
+        );
+
+        Ok(json!({ "twiml": twiml }))
     }
 
     async fn invoke_list_recordings(
@@ -1295,12 +1489,15 @@ mod tests {
         assert!(op_ids.contains(&"twilio.get_media"));
         assert!(op_ids.contains(&"twilio.create_call"));
         assert!(op_ids.contains(&"twilio.get_call"));
+        assert!(op_ids.contains(&"twilio.hangup_call"));
+        assert!(op_ids.contains(&"twilio.list_calls"));
+        assert!(op_ids.contains(&"twilio.generate_twiml"));
         assert!(op_ids.contains(&"twilio.list_recordings"));
         assert!(op_ids.contains(&"twilio.download_recording"));
         assert!(op_ids.contains(&"twilio.download_media"));
         assert!(op_ids.contains(&"twilio.get_account"));
         assert!(op_ids.contains(&"twilio.list_phone_numbers"));
-        assert_eq!(ops.len(), 12);
+        assert_eq!(ops.len(), 15);
     }
 
     // ── Provisioning tests ─────────────────────────────────────────
@@ -1640,6 +1837,7 @@ mod tests {
             "twilio.list_media",
             "twilio.get_media",
             "twilio.get_call",
+            "twilio.list_calls",
             "twilio.list_recordings",
             "twilio.download_recording",
             "twilio.download_media",
@@ -1672,10 +1870,12 @@ mod tests {
             "twilio.list_media",
             "twilio.get_media",
             "twilio.get_call",
+            "twilio.list_calls",
             "twilio.list_recordings",
             "twilio.download_media",
             "twilio.get_account",
             "twilio.list_phone_numbers",
+            "twilio.generate_twiml",
         ];
 
         for op in ops {
@@ -1712,6 +1912,48 @@ mod tests {
             .find(|o| o["id"] == "twilio.create_call")
             .unwrap();
         assert_eq!(op["safety_tier"].as_str().unwrap(), "dangerous");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_hangup_call_is_dangerous() {
+        let connector = TwilioConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        let op = ops
+            .iter()
+            .find(|o| o["id"] == "twilio.hangup_call")
+            .unwrap();
+        assert_eq!(op["safety_tier"].as_str().unwrap(), "dangerous");
+        assert_eq!(op["risk_level"].as_str().unwrap(), "high");
+        assert_eq!(op["capability"].as_str().unwrap(), "twilio.voice");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_generate_twiml_is_safe() {
+        let connector = TwilioConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        let op = ops
+            .iter()
+            .find(|o| o["id"] == "twilio.generate_twiml")
+            .unwrap();
+        assert_eq!(op["safety_tier"].as_str().unwrap(), "safe");
+        assert_eq!(op["risk_level"].as_str().unwrap(), "low");
+        assert_eq!(op["capability"].as_str().unwrap(), "twilio.voice");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_list_calls_is_safe() {
+        let connector = TwilioConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        let op = ops
+            .iter()
+            .find(|o| o["id"] == "twilio.list_calls")
+            .unwrap();
+        assert_eq!(op["safety_tier"].as_str().unwrap(), "safe");
+        assert_eq!(op["risk_level"].as_str().unwrap(), "low");
+        assert_eq!(op["capability"].as_str().unwrap(), "twilio.read");
     }
 
     // ── Risk level tests ─────────────────────────────────────────
@@ -1751,10 +1993,12 @@ mod tests {
             "twilio.list_media",
             "twilio.get_media",
             "twilio.get_call",
+            "twilio.list_calls",
             "twilio.list_recordings",
             "twilio.download_media",
             "twilio.get_account",
             "twilio.list_phone_numbers",
+            "twilio.generate_twiml",
         ];
 
         for op in ops {
@@ -1794,11 +2038,13 @@ mod tests {
             "twilio.list_media",
             "twilio.get_media",
             "twilio.get_call",
+            "twilio.list_calls",
             "twilio.list_recordings",
             "twilio.download_recording",
             "twilio.download_media",
             "twilio.get_account",
             "twilio.list_phone_numbers",
+            "twilio.generate_twiml",
         ];
 
         for op in ops {
@@ -1827,6 +2073,13 @@ mod tests {
                 "{id_str} should have none idempotency"
             );
         }
+
+        // hangup_call has at_most_once idempotency
+        let hangup = ops
+            .iter()
+            .find(|o| o["id"] == "twilio.hangup_call")
+            .unwrap();
+        assert_eq!(hangup["idempotency"].as_str().unwrap(), "at_most_once");
     }
 
     // ── Required fields in schemas ───────────────────────────────
@@ -1844,6 +2097,8 @@ mod tests {
             ("twilio.get_media", &["message_sid", "media_sid"]),
             ("twilio.create_call", &["to", "from", "url"]),
             ("twilio.get_call", &["call_sid"]),
+            ("twilio.hangup_call", &["call_sid"]),
+            ("twilio.generate_twiml", &["template"]),
             ("twilio.download_recording", &["recording_sid"]),
             ("twilio.download_media", &["message_sid", "media_sid"]),
         ];

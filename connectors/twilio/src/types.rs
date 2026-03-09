@@ -112,6 +112,33 @@ pub struct MediaListResponse {
     pub next_page_uri: Option<String>,
 }
 
+/// Twilio list response wrapper for calls.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CallListResponse {
+    pub calls: Vec<serde_json::Value>,
+    pub next_page_uri: Option<String>,
+}
+
+/// Supported TwiML template kinds for safe generation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TwimlTemplate {
+    /// Say a message with optional voice and language attributes.
+    Say,
+    /// Play an audio URL.
+    Play,
+    /// Gather DTMF digits with a prompt.
+    Gather,
+    /// Dial a phone number.
+    Dial,
+    /// Pause for a number of seconds.
+    Pause,
+    /// Reject a call.
+    Reject,
+    /// Hangup the call.
+    Hangup,
+}
+
 /// Twilio list response wrapper for recordings.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RecordingListResponse {

@@ -14,8 +14,9 @@ use tracing::{debug, warn};
 use crate::{
     error::{TwilioError, TwilioResult},
     types::{
-        ApiErrorResponse, MediaListResponse, MessageListResponse, PhoneNumberListResponse,
-        RecordingListResponse, TwilioAccount, TwilioCall, TwilioMediaResource, TwilioMessage,
+        ApiErrorResponse, CallListResponse, MediaListResponse, MessageListResponse,
+        PhoneNumberListResponse, RecordingListResponse, TwilioAccount, TwilioCall,
+        TwilioMediaResource, TwilioMessage, TwimlTemplate,
     },
 };
 
@@ -279,6 +280,121 @@ impl TwilioClient {
         let url = format!("{}/Calls/{call_sid}.json", self.base_url);
         let data = self.get(&url).await?;
         Ok(serde_json::from_value(data)?)
+    }
+
+    /// Hangup (end) a call by updating its status to "completed".
+    pub async fn hangup_call(&self, call_sid: &str) -> TwilioResult<TwilioCall> {
+        let url = format!("{}/Calls/{call_sid}.json", self.base_url);
+        let payload = serde_json::json!({ "Status": "completed" });
+        let data = self.post_json(&url, &payload).await?;
+        Ok(serde_json::from_value(data)?)
+    }
+
+    /// List calls with optional filters.
+    pub async fn list_calls(
+        &self,
+        to: Option<&str>,
+        from: Option<&str>,
+        status: Option<&str>,
+        start_time: Option<&str>,
+        end_time: Option<&str>,
+        page_size: Option<u32>,
+        page: Option<u32>,
+    ) -> TwilioResult<CallListResponse> {
+        let base_url = format!("{}/Calls.json", self.base_url);
+        let mut params: Vec<(&str, String)> = Vec::new();
+        if let Some(v) = to {
+            params.push(("To", v.to_string()));
+        }
+        if let Some(v) = from {
+            params.push(("From", v.to_string()));
+        }
+        if let Some(v) = status {
+            params.push(("Status", v.to_string()));
+        }
+        if let Some(v) = start_time {
+            params.push(("StartTime", v.to_string()));
+        }
+        if let Some(v) = end_time {
+            params.push(("EndTime", v.to_string()));
+        }
+        if let Some(v) = page_size {
+            params.push(("PageSize", v.to_string()));
+        }
+        if let Some(v) = page {
+            params.push(("Page", v.to_string()));
+        }
+        let data = self.get_with_params(&base_url, &params).await?;
+        Ok(serde_json::from_value(data)?)
+    }
+
+    /// Generate TwiML XML from a safe template.
+    ///
+    /// This is a local operation; no API call is made.
+    #[must_use]
+    pub fn generate_twiml(
+        template: &TwimlTemplate,
+        message: Option<&str>,
+        url: Option<&str>,
+        voice: Option<&str>,
+        language: Option<&str>,
+        digits: Option<&str>,
+        number: Option<&str>,
+        length: Option<u32>,
+        reason: Option<&str>,
+    ) -> String {
+        let mut xml = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Response>\n");
+
+        match template {
+            TwimlTemplate::Say => {
+                let msg = Self::escape_xml(message.unwrap_or("Hello from FCP."));
+                let v = voice.unwrap_or("alice");
+                let lang = language.unwrap_or("en-US");
+                xml.push_str(&format!(
+                    "  <Say voice=\"{v}\" language=\"{lang}\">{msg}</Say>\n"
+                ));
+            }
+            TwimlTemplate::Play => {
+                let u = Self::escape_xml(url.unwrap_or(""));
+                xml.push_str(&format!("  <Play>{u}</Play>\n"));
+            }
+            TwimlTemplate::Gather => {
+                let prompt = Self::escape_xml(message.unwrap_or("Please enter your selection."));
+                let v = voice.unwrap_or("alice");
+                let lang = language.unwrap_or("en-US");
+                let num_digits = digits.unwrap_or("1");
+                xml.push_str(&format!(
+                    "  <Gather numDigits=\"{num_digits}\">\n    <Say voice=\"{v}\" language=\"{lang}\">{prompt}</Say>\n  </Gather>\n"
+                ));
+            }
+            TwimlTemplate::Dial => {
+                let num = Self::escape_xml(number.unwrap_or(""));
+                xml.push_str(&format!("  <Dial>{num}</Dial>\n"));
+            }
+            TwimlTemplate::Pause => {
+                let len = length.unwrap_or(1);
+                xml.push_str(&format!("  <Pause length=\"{len}\"/>\n"));
+            }
+            TwimlTemplate::Reject => {
+                let r = reason.unwrap_or("rejected");
+                xml.push_str(&format!("  <Reject reason=\"{r}\"/>\n"));
+            }
+            TwimlTemplate::Hangup => {
+                xml.push_str("  <Hangup/>\n");
+            }
+        }
+
+        xml.push_str("</Response>");
+        xml
+    }
+
+    /// Escape XML special characters.
+    fn escape_xml(s: &str) -> String {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+            .replace('\'', "&apos;")
     }
 
     // ── Recording operations ─────────────────────────────────────
@@ -766,6 +882,306 @@ mod tests {
         let call = client.get_call("CAxyz").await.unwrap();
         assert_eq!(call.sid, "CAxyz");
         assert_eq!(call.duration.as_deref(), Some("42"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_hangup_call() {
+        let mock_server = MockServer::start().await;
+        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
+
+        Mock::given(method("POST"))
+            .and(path(
+                "/2010-04-01/Accounts/ACtest123/Calls/CAactive.json",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "sid": "CAactive",
+                "status": "completed",
+                "to": "+15551234567",
+                "from": "+15559876543",
+                "duration": "120",
+                "date_created": "2026-03-01T00:00:00Z"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = test_client(&base);
+        let call = client.hangup_call("CAactive").await.unwrap();
+        assert_eq!(call.sid, "CAactive");
+        assert_eq!(call.status, "completed");
+        assert_eq!(call.duration.as_deref(), Some("120"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_list_calls() {
+        let mock_server = MockServer::start().await;
+        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
+
+        Mock::given(method("GET"))
+            .and(path("/2010-04-01/Accounts/ACtest123/Calls.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "calls": [
+                    { "sid": "CA1", "status": "completed", "to": "+1", "from": "+2", "duration": "30" },
+                    { "sid": "CA2", "status": "in-progress", "to": "+3", "from": "+4" }
+                ],
+                "next_page_uri": null
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = test_client(&base);
+        let result = client
+            .list_calls(None, None, None, None, None, Some(20), None)
+            .await
+            .unwrap();
+        assert_eq!(result.calls.len(), 2);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_list_calls_with_filters() {
+        let mock_server = MockServer::start().await;
+        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
+
+        Mock::given(method("GET"))
+            .and(path("/2010-04-01/Accounts/ACtest123/Calls.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "calls": [
+                    { "sid": "CA1", "status": "completed", "to": "+15551234567", "from": "+2" }
+                ],
+                "next_page_uri": "/next"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = test_client(&base);
+        let result = client
+            .list_calls(
+                Some("+15551234567"),
+                None,
+                Some("completed"),
+                None,
+                None,
+                Some(10),
+                Some(0),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.calls.len(), 1);
+        assert_eq!(result.next_page_uri.as_deref(), Some("/next"));
+    }
+
+    #[test]
+    fn test_generate_twiml_say() {
+        let xml = TwilioClient::generate_twiml(
+            &TwimlTemplate::Say,
+            Some("Hello world"),
+            None,
+            Some("alice"),
+            Some("en-US"),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(xml.contains("<Response>"));
+        assert!(xml.contains("</Response>"));
+        assert!(xml.contains("<Say"));
+        assert!(xml.contains("voice=\"alice\""));
+        assert!(xml.contains("language=\"en-US\""));
+        assert!(xml.contains("Hello world"));
+    }
+
+    #[test]
+    fn test_generate_twiml_say_defaults() {
+        let xml = TwilioClient::generate_twiml(
+            &TwimlTemplate::Say,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(xml.contains("voice=\"alice\""));
+        assert!(xml.contains("language=\"en-US\""));
+        assert!(xml.contains("Hello from FCP."));
+    }
+
+    #[test]
+    fn test_generate_twiml_play() {
+        let xml = TwilioClient::generate_twiml(
+            &TwimlTemplate::Play,
+            None,
+            Some("https://example.com/audio.mp3"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(xml.contains("<Play>https://example.com/audio.mp3</Play>"));
+    }
+
+    #[test]
+    fn test_generate_twiml_gather() {
+        let xml = TwilioClient::generate_twiml(
+            &TwimlTemplate::Gather,
+            Some("Press 1 for help"),
+            None,
+            None,
+            None,
+            Some("1"),
+            None,
+            None,
+            None,
+        );
+        assert!(xml.contains("<Gather numDigits=\"1\">"));
+        assert!(xml.contains("Press 1 for help"));
+        assert!(xml.contains("</Gather>"));
+    }
+
+    #[test]
+    fn test_generate_twiml_dial() {
+        let xml = TwilioClient::generate_twiml(
+            &TwimlTemplate::Dial,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("+15551234567"),
+            None,
+            None,
+        );
+        assert!(xml.contains("<Dial>+15551234567</Dial>"));
+    }
+
+    #[test]
+    fn test_generate_twiml_pause() {
+        let xml = TwilioClient::generate_twiml(
+            &TwimlTemplate::Pause,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(5),
+            None,
+        );
+        assert!(xml.contains("<Pause length=\"5\"/>"));
+    }
+
+    #[test]
+    fn test_generate_twiml_pause_default_length() {
+        let xml = TwilioClient::generate_twiml(
+            &TwimlTemplate::Pause,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(xml.contains("<Pause length=\"1\"/>"));
+    }
+
+    #[test]
+    fn test_generate_twiml_reject() {
+        let xml = TwilioClient::generate_twiml(
+            &TwimlTemplate::Reject,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("busy"),
+        );
+        assert!(xml.contains("<Reject reason=\"busy\"/>"));
+    }
+
+    #[test]
+    fn test_generate_twiml_reject_default_reason() {
+        let xml = TwilioClient::generate_twiml(
+            &TwimlTemplate::Reject,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(xml.contains("<Reject reason=\"rejected\"/>"));
+    }
+
+    #[test]
+    fn test_generate_twiml_hangup() {
+        let xml = TwilioClient::generate_twiml(
+            &TwimlTemplate::Hangup,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(xml.contains("<Hangup/>"));
+    }
+
+    #[test]
+    fn test_generate_twiml_xml_escaping() {
+        let xml = TwilioClient::generate_twiml(
+            &TwimlTemplate::Say,
+            Some("Hello <world> & \"friends\""),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(xml.contains("Hello &lt;world&gt; &amp; &quot;friends&quot;"));
+        assert!(!xml.contains("<world>"));
+    }
+
+    #[test]
+    fn test_generate_twiml_has_xml_declaration() {
+        let xml = TwilioClient::generate_twiml(
+            &TwimlTemplate::Say,
+            Some("Hi"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(xml.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"));
+    }
+
+    #[test]
+    fn test_escape_xml() {
+        assert_eq!(TwilioClient::escape_xml("hello"), "hello");
+        assert_eq!(TwilioClient::escape_xml("<>"), "&lt;&gt;");
+        assert_eq!(TwilioClient::escape_xml("a&b"), "a&amp;b");
+        assert_eq!(TwilioClient::escape_xml("\"x\""), "&quot;x&quot;");
+        assert_eq!(TwilioClient::escape_xml("it's"), "it&apos;s");
+        assert_eq!(
+            TwilioClient::escape_xml("<script>alert('xss')</script>"),
+            "&lt;script&gt;alert(&apos;xss&apos;)&lt;/script&gt;"
+        );
     }
 
     #[fcp_async_core::runtime::test]

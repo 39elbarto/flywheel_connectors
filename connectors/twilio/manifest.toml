@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:40c0848a4ef092215077b4dbf797e0b625a4a3985442070a569f87fd5cb2fed8"
+interface_hash = "PLACEHOLDER_HASH"
 
 [connector]
 id = "fcp.twilio"
@@ -654,6 +654,251 @@ related = [
     "twilio.list_recordings",
 ]
 
+[provides.operations."twilio.hangup_call"]
+description = "End an active voice call"
+capability = "twilio.voice"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "at_most_once"
+
+[provides.operations."twilio.hangup_call".rate_limit]
+max = 30
+per_ms = 60000
+
+[provides.operations."twilio.hangup_call".input_schema]
+required = ["call_sid"]
+type = "object"
+
+[provides.operations."twilio.hangup_call".input_schema.properties.call_sid]
+description = "Call SID of the active call to end (e.g., 'CAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx')"
+pattern = "^CA[a-f0-9]{32}$"
+type = "string"
+
+[provides.operations."twilio.hangup_call".output_schema]
+required = [
+    "sid",
+    "status",
+    "to",
+    "from",
+    "date_created",
+]
+type = "object"
+
+[provides.operations."twilio.hangup_call".output_schema.properties.sid]
+type = "string"
+[provides.operations."twilio.hangup_call".output_schema.properties.status]
+type = "string"
+[provides.operations."twilio.hangup_call".output_schema.properties.to]
+type = "string"
+[provides.operations."twilio.hangup_call".output_schema.properties.from]
+type = "string"
+[provides.operations."twilio.hangup_call".output_schema.properties.duration]
+type = "string"
+[provides.operations."twilio.hangup_call".output_schema.properties.date_created]
+type = "string"
+
+[provides.operations."twilio.hangup_call".network_constraints]
+host_allow = ["api.twilio.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."twilio.hangup_call".ai_hints]
+when_to_use = "End an active call. The call must be in-progress. Use with extreme caution — this disconnects real people."
+common_mistakes = [
+    "Trying to hangup a call that has already completed.",
+    "Using a Message SID instead of a Call SID.",
+]
+examples = ['{"call_sid": "CAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}']
+related = [
+    "twilio.create_call",
+    "twilio.get_call",
+]
+
+[provides.operations."twilio.list_calls"]
+description = "List voice calls with filtering by date, sender, recipient, and status"
+capability = "twilio.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."twilio.list_calls".rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations."twilio.list_calls".input_schema]
+type = "object"
+
+[provides.operations."twilio.list_calls".input_schema.properties.to]
+description = "Filter by recipient number (E.164)"
+type = "string"
+
+[provides.operations."twilio.list_calls".input_schema.properties.from]
+description = "Filter by caller number"
+type = "string"
+
+[provides.operations."twilio.list_calls".input_schema.properties.status]
+description = "Filter by call status (queued, ringing, in-progress, completed, busy, no-answer, canceled, failed)"
+type = "string"
+
+[provides.operations."twilio.list_calls".input_schema.properties.start_time]
+description = "Filter by start time (YYYY-MM-DD)"
+type = "string"
+
+[provides.operations."twilio.list_calls".input_schema.properties.end_time]
+description = "Filter by end time (YYYY-MM-DD)"
+type = "string"
+
+[provides.operations."twilio.list_calls".input_schema.properties.page_size]
+description = "Results per page (default: 50, max: 1000)"
+minimum = 1
+maximum = 1000
+type = "integer"
+
+[provides.operations."twilio.list_calls".input_schema.properties.page]
+description = "Page number (0-indexed)"
+minimum = 0
+type = "integer"
+
+[provides.operations."twilio.list_calls".output_schema]
+required = ["calls"]
+type = "object"
+
+[provides.operations."twilio.list_calls".output_schema.properties.calls]
+description = "Call records"
+type = "array"
+[provides.operations."twilio.list_calls".output_schema.properties.calls.items]
+type = "object"
+
+[provides.operations."twilio.list_calls".output_schema.properties.next_page_uri]
+description = "URI for next page (null if last page)"
+type = "string"
+
+[provides.operations."twilio.list_calls".network_constraints]
+host_allow = ["api.twilio.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."twilio.list_calls".ai_hints]
+when_to_use = "List calls with optional filters. Supports pagination for large result sets."
+common_mistakes = [
+    "Not handling pagination for large call histories.",
+    "Using non-E.164 format for phone number filters.",
+]
+examples = [
+    '{"status": "completed", "page_size": 20}',
+    '{"to": "+15551234567", "start_time": "2026-03-01"}',
+]
+related = [
+    "twilio.get_call",
+    "twilio.create_call",
+]
+
+[provides.operations."twilio.generate_twiml"]
+description = "Generate TwiML XML from safe templates (no API call)"
+capability = "twilio.voice"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."twilio.generate_twiml".rate_limit]
+max = 200
+per_ms = 60000
+
+[provides.operations."twilio.generate_twiml".input_schema]
+required = ["template"]
+type = "object"
+
+[provides.operations."twilio.generate_twiml".input_schema.properties.template]
+description = "Template type: say, play, gather, dial, pause, reject, hangup"
+enum = ["say", "play", "gather", "dial", "pause", "reject", "hangup"]
+type = "string"
+
+[provides.operations."twilio.generate_twiml".input_schema.properties.message]
+description = "Text message for Say/Gather templates"
+type = "string"
+
+[provides.operations."twilio.generate_twiml".input_schema.properties.url]
+description = "Audio URL for Play template"
+type = "string"
+
+[provides.operations."twilio.generate_twiml".input_schema.properties.voice]
+description = "TTS voice name (default: 'alice')"
+type = "string"
+
+[provides.operations."twilio.generate_twiml".input_schema.properties.language]
+description = "BCP-47 language code (default: 'en-US')"
+type = "string"
+
+[provides.operations."twilio.generate_twiml".input_schema.properties.digits]
+description = "Number of digits to gather (default: '1')"
+type = "string"
+
+[provides.operations."twilio.generate_twiml".input_schema.properties.number]
+description = "Phone number for Dial template"
+type = "string"
+
+[provides.operations."twilio.generate_twiml".input_schema.properties.length]
+description = "Pause length in seconds (default: 1)"
+minimum = 1
+maximum = 120
+type = "integer"
+
+[provides.operations."twilio.generate_twiml".input_schema.properties.reason]
+description = "Reject reason (default: 'rejected')"
+type = "string"
+
+[provides.operations."twilio.generate_twiml".output_schema]
+required = ["twiml"]
+type = "object"
+
+[provides.operations."twilio.generate_twiml".output_schema.properties.twiml]
+description = "Generated TwiML XML string"
+type = "string"
+
+[provides.operations."twilio.generate_twiml".ai_hints]
+when_to_use = "Generate TwiML XML locally from safe templates. No API call. Use the output to host at a URL for create_call."
+common_mistakes = [
+    "Not hosting the generated TwiML at a URL accessible by Twilio.",
+    "Injecting raw user input without sanitization — use the message parameter which is XML-escaped.",
+]
+examples = [
+    '{"template": "say", "message": "Hello!", "voice": "alice", "language": "en-US"}',
+    '{"template": "gather", "message": "Press 1 for support.", "digits": "1"}',
+    '{"template": "hangup"}',
+]
+related = [
+    "twilio.create_call",
+]
+
 # ---------------------------------------------------------------------------
 # Operations: Recordings and Media
 # ---------------------------------------------------------------------------
@@ -1076,6 +1321,9 @@ scope = "instance"
 "twilio.get_media" = ["twilio.read"]
 "twilio.create_call" = ["twilio.voice"]
 "twilio.get_call" = ["twilio.read"]
+"twilio.hangup_call" = ["twilio.voice"]
+"twilio.list_calls" = ["twilio.read"]
+"twilio.generate_twiml" = ["twilio.voice"]
 "twilio.list_recordings" = ["twilio.read"]
 "twilio.download_recording" = ["twilio.media"]
 "twilio.download_media" = ["twilio.media"]

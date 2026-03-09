@@ -419,4 +419,87 @@ mod tests {
         assert_eq!(b, c);
         assert_eq!(a, c);
     }
+
+    // ── Additional OTI tests (batch 2) ───────────────────────────────────
+
+    #[test]
+    fn oti_is_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<ObjectTransmissionInformation>();
+    }
+
+    #[test]
+    fn oti_serde_roundtrip_large_transfer() {
+        let oti = ObjectTransmissionInformation::new(10_000_000_000, 1024, 1, 1, 8);
+        let json = serde_json::to_string(&oti).unwrap();
+        let decoded: ObjectTransmissionInformation = serde_json::from_str(&json).unwrap();
+        assert_eq!(oti, decoded);
+    }
+
+    #[test]
+    fn oti_serde_overflow_source_blocks_fails() {
+        // u8 max is 255, so 300 should fail
+        let json = r#"{"transfer_length":100,"symbol_size":64,"source_blocks":300,"sub_blocks":1,"alignment":8}"#;
+        let result = serde_json::from_str::<ObjectTransmissionInformation>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn oti_serde_overflow_alignment_fails() {
+        // u8 max is 255, so 256 should fail
+        let json = r#"{"transfer_length":100,"symbol_size":64,"source_blocks":1,"sub_blocks":1,"alignment":256}"#;
+        let result = serde_json::from_str::<ObjectTransmissionInformation>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn oti_debug_format_includes_struct_name() {
+        let oti = ObjectTransmissionInformation::new(0, 0, 0, 0, 0);
+        let debug = format!("{oti:?}");
+        assert!(debug.contains("ObjectTransmissionInformation"));
+    }
+
+    #[test]
+    fn oti_symbol_size_one() {
+        let oti = ObjectTransmissionInformation::new(1000, 1, 1, 1, 1);
+        assert_eq!(oti.symbol_size(), 1);
+        assert_eq!(oti.transfer_length(), 1000);
+    }
+
+    #[test]
+    fn oti_const_accessors_all_work() {
+        const OTI: ObjectTransmissionInformation =
+            ObjectTransmissionInformation::new(42, 8, 2, 3, 4);
+        assert_eq!(OTI.transfer_length(), 42);
+        assert_eq!(OTI.symbol_size(), 8);
+        assert_eq!(OTI.source_blocks(), 2);
+        assert_eq!(OTI.sub_blocks(), 3);
+        assert_eq!(OTI.symbol_alignment(), 4);
+    }
+
+    #[test]
+    fn oti_serde_preserves_field_order_in_json() {
+        let oti = ObjectTransmissionInformation::new(100, 64, 1, 1, 8);
+        let json = serde_json::to_string(&oti).unwrap();
+        // Verify all expected field names are present
+        assert!(json.contains("\"transfer_length\""));
+        assert!(json.contains("\"symbol_size\""));
+        assert!(json.contains("\"source_blocks\""));
+        assert!(json.contains("\"sub_blocks\""));
+        assert!(json.contains("\"alignment\""));
+    }
+
+    #[test]
+    fn oti_serde_float_transfer_length_fails() {
+        let json = r#"{"transfer_length":1.5,"symbol_size":64,"source_blocks":1,"sub_blocks":1,"alignment":8}"#;
+        let result = serde_json::from_str::<ObjectTransmissionInformation>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn oti_inequality_only_alignment_differs() {
+        let a = ObjectTransmissionInformation::new(100, 64, 1, 1, 4);
+        let b = ObjectTransmissionInformation::new(100, 64, 1, 1, 8);
+        assert_ne!(a, b);
+    }
 }

@@ -1043,4 +1043,177 @@ mod tests {
         let b = DecodeError::Cancelled;
         assert_eq!(a, b);
     }
+
+    // ── Additional error tests (batch 2) ──────────────────────────────────
+
+    #[test]
+    fn chunk_error_is_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<ChunkError>();
+    }
+
+    #[test]
+    fn encode_error_is_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<EncodeError>();
+    }
+
+    #[test]
+    fn decode_error_is_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<DecodeError>();
+    }
+
+    #[test]
+    fn chunk_error_missing_chunks_symmetric_equality() {
+        let a = ChunkError::MissingChunks {
+            expected: 5,
+            got: 3,
+        };
+        let b = ChunkError::MissingChunks {
+            expected: 5,
+            got: 3,
+        };
+        assert_eq!(a, b);
+        assert_eq!(b, a);
+    }
+
+    #[test]
+    fn decode_error_admission_denied_different_reasons() {
+        let a = DecodeError::AdmissionDenied {
+            reason: "reason A".into(),
+        };
+        let b = DecodeError::AdmissionDenied {
+            reason: "reason B".into(),
+        };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn decode_error_invalid_symbol_different_reasons() {
+        let a = DecodeError::InvalidSymbol {
+            reason: "size mismatch".into(),
+        };
+        let b = DecodeError::InvalidSymbol {
+            reason: "corrupt data".into(),
+        };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn decode_error_invalid_transmission_info_different_reasons() {
+        let a = DecodeError::InvalidTransmissionInfo {
+            reason: "zero symbol size".into(),
+        };
+        let b = DecodeError::InvalidTransmissionInfo {
+            reason: "zero transfer length".into(),
+        };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn decode_error_runtime_different_reasons() {
+        let a = DecodeError::Runtime {
+            reason: "join error".into(),
+        };
+        let b = DecodeError::Runtime {
+            reason: "panic".into(),
+        };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn chunk_error_length_mismatch_symmetric() {
+        let a = ChunkError::LengthMismatch {
+            expected: 1000,
+            got: 500,
+        };
+        let b = ChunkError::LengthMismatch {
+            expected: 1000,
+            got: 500,
+        };
+        assert_eq!(a, b);
+        assert_eq!(b, a);
+    }
+
+    #[test]
+    fn encode_error_payload_too_large_symmetric() {
+        let a = EncodeError::PayloadTooLarge {
+            size: 1000,
+            max: 500,
+        };
+        let b = EncodeError::PayloadTooLarge {
+            size: 1000,
+            max: 500,
+        };
+        assert_eq!(a, b);
+        assert_eq!(b, a);
+    }
+
+    #[test]
+    fn decode_error_insufficient_symbols_symmetric() {
+        let a = DecodeError::InsufficientSymbols {
+            received: 50,
+            needed: 100,
+        };
+        let b = DecodeError::InsufficientSymbols {
+            received: 50,
+            needed: 100,
+        };
+        assert_eq!(a, b);
+        assert_eq!(b, a);
+    }
+
+    #[test]
+    fn decode_error_symbol_buffer_exceeded_symmetric() {
+        let a = DecodeError::SymbolBufferExceeded {
+            buffered: 100,
+            limit: 50,
+        };
+        let b = DecodeError::SymbolBufferExceeded {
+            buffered: 100,
+            limit: 50,
+        };
+        assert_eq!(a, b);
+        assert_eq!(b, a);
+    }
+
+    #[test]
+    fn decode_error_memory_limit_exceeded_symmetric() {
+        let a = DecodeError::MemoryLimitExceeded {
+            used: 1000,
+            limit: 500,
+        };
+        let b = DecodeError::MemoryLimitExceeded {
+            used: 1000,
+            limit: 500,
+        };
+        assert_eq!(a, b);
+        assert_eq!(b, a);
+    }
+
+    #[test]
+    fn chunk_error_display_and_debug_differ() {
+        let err = ChunkError::HashMismatch;
+        let display = err.to_string();
+        let debug = format!("{err:?}");
+        // Display is human-friendly, Debug includes variant name
+        assert_ne!(display, debug);
+    }
+
+    #[test]
+    fn encode_error_display_and_debug_differ() {
+        let err = EncodeError::EmptyPayload;
+        let display = err.to_string();
+        let debug = format!("{err:?}");
+        assert_ne!(display, debug);
+    }
+
+    #[test]
+    fn decode_error_display_and_debug_differ() {
+        let err = DecodeError::Timeout;
+        let display = err.to_string();
+        let debug = format!("{err:?}");
+        assert_ne!(display, debug);
+    }
 }

@@ -77,7 +77,7 @@ async fn lifecycle_introspect() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     let intro = c.handle_introspect().await.unwrap();
-    assert_eq!(intro["operations"].as_array().unwrap().len(), 18);
+    assert_eq!(intro["operations"].as_array().unwrap().len(), 28);
 }
 
 // -- list_pods --
@@ -1045,4 +1045,628 @@ async fn counters_error_increment() {
     let h = c.handle_health().await.unwrap();
     assert_eq!(h["requests"], 1);
     assert_eq!(h["errors"], 1);
+}
+
+// ── Feature 2: Exec ──────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn exec_command() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path_regex(r"/api/v1/namespaces/default/pods/debug-pod/exec.*"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "stdout": "total 4\ndrwxr-xr-x 2 root root 4096 Jan 1 00:00 app\n",
+            "stderr": "",
+            "exit_code": 0
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c.handle_invoke(json!({
+        "operation_id": "kubernetes.exec",
+        "input": {
+            "namespace": "default",
+            "name": "debug-pod",
+            "command": ["ls", "-la", "/app"]
+        }
+    })).await.unwrap();
+    assert!(result["exec_result"]["stdout"].as_str().unwrap().contains("app"));
+    assert_eq!(result["exec_result"]["exit_code"], 0);
+}
+
+#[fcp_async_core::runtime::test]
+async fn exec_with_container() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path_regex(r"/api/v1/namespaces/default/pods/multi-pod/exec.*"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "stdout": "hello\n",
+            "stderr": "",
+            "exit_code": 0
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c.handle_invoke(json!({
+        "operation_id": "kubernetes.exec",
+        "input": {
+            "namespace": "default",
+            "name": "multi-pod",
+            "container": "sidecar",
+            "command": ["echo", "hello"]
+        }
+    })).await.unwrap();
+    assert!(result["exec_result"]["stdout"].as_str().unwrap().contains("hello"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn exec_missing_command() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(c.handle_invoke(json!({
+        "operation_id": "kubernetes.exec",
+        "input": {"namespace": "default", "name": "debug-pod"}
+    })).await.is_err());
+}
+
+#[fcp_async_core::runtime::test]
+async fn exec_empty_command() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(c.handle_invoke(json!({
+        "operation_id": "kubernetes.exec",
+        "input": {"namespace": "default", "name": "debug-pod", "command": []}
+    })).await.is_err());
+}
+
+#[fcp_async_core::runtime::test]
+async fn exec_missing_namespace() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(c.handle_invoke(json!({
+        "operation_id": "kubernetes.exec",
+        "input": {"name": "debug-pod", "command": ["ls"]}
+    })).await.is_err());
+}
+
+#[fcp_async_core::runtime::test]
+async fn exec_missing_name() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(c.handle_invoke(json!({
+        "operation_id": "kubernetes.exec",
+        "input": {"namespace": "default", "command": ["ls"]}
+    })).await.is_err());
+}
+
+#[fcp_async_core::runtime::test]
+async fn simulate_exec() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(c.handle_simulate(json!({"operation_id": "kubernetes.exec"}))
+        .await.unwrap()["allowed"].as_bool().unwrap());
+}
+
+// ── Feature 3: ConfigMap CRUD ────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn configmap_list() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/namespaces/default/configmaps"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "kind": "ConfigMapList",
+            "items": [
+                {"metadata": {"name": "app-config"}, "data": {"KEY": "value"}},
+                {"metadata": {"name": "nginx-config"}, "data": {"nginx.conf": "server {}"}}
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c.handle_invoke(json!({
+        "operation_id": "kubernetes.configmap.list",
+        "input": {"namespace": "default"}
+    })).await.unwrap();
+    assert_eq!(result["configmaps"].as_array().unwrap().len(), 2);
+}
+
+#[fcp_async_core::runtime::test]
+async fn configmap_list_empty() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/namespaces/production/configmaps"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "kind": "ConfigMapList", "items": []
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c.handle_invoke(json!({
+        "operation_id": "kubernetes.configmap.list",
+        "input": {"namespace": "production"}
+    })).await.unwrap();
+    assert!(result["configmaps"].as_array().unwrap().is_empty());
+}
+
+#[fcp_async_core::runtime::test]
+async fn configmap_list_missing_namespace() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(c.handle_invoke(json!({
+        "operation_id": "kubernetes.configmap.list",
+        "input": {}
+    })).await.is_err());
+}
+
+#[fcp_async_core::runtime::test]
+async fn configmap_get() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/namespaces/default/configmaps/app-config"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "kind": "ConfigMap",
+            "metadata": {"name": "app-config"},
+            "data": {"LOG_LEVEL": "info", "DB_HOST": "postgres"}
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c.handle_invoke(json!({
+        "operation_id": "kubernetes.configmap.get",
+        "input": {"namespace": "default", "name": "app-config"}
+    })).await.unwrap();
+    assert_eq!(result["configmap"]["data"]["LOG_LEVEL"], "info");
+}
+
+#[fcp_async_core::runtime::test]
+async fn configmap_get_missing_name() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(c.handle_invoke(json!({
+        "operation_id": "kubernetes.configmap.get",
+        "input": {"namespace": "default"}
+    })).await.is_err());
+}
+
+#[fcp_async_core::runtime::test]
+async fn configmap_create() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/namespaces/default/configmaps"))
+        .and(header("Content-Type", "application/json"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "kind": "ConfigMap",
+            "metadata": {"name": "new-config", "namespace": "default"},
+            "data": {"KEY": "value"}
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c.handle_invoke(json!({
+        "operation_id": "kubernetes.configmap.create",
+        "input": {
+            "namespace": "default",
+            "name": "new-config",
+            "data": {"KEY": "value"}
+        }
+    })).await.unwrap();
+    assert_eq!(result["configmap"]["metadata"]["name"], "new-config");
+}
+
+#[fcp_async_core::runtime::test]
+async fn configmap_create_with_labels() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/namespaces/default/configmaps"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "kind": "ConfigMap",
+            "metadata": {"name": "labeled-cm", "labels": {"app": "test"}},
+            "data": {"KEY": "val"}
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c.handle_invoke(json!({
+        "operation_id": "kubernetes.configmap.create",
+        "input": {
+            "namespace": "default",
+            "name": "labeled-cm",
+            "data": {"KEY": "val"},
+            "labels": {"app": "test"}
+        }
+    })).await.unwrap();
+    assert_eq!(result["configmap"]["metadata"]["name"], "labeled-cm");
+}
+
+#[fcp_async_core::runtime::test]
+async fn configmap_create_missing_data() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(c.handle_invoke(json!({
+        "operation_id": "kubernetes.configmap.create",
+        "input": {"namespace": "default", "name": "new-config"}
+    })).await.is_err());
+}
+
+#[fcp_async_core::runtime::test]
+async fn configmap_create_missing_name() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(c.handle_invoke(json!({
+        "operation_id": "kubernetes.configmap.create",
+        "input": {"namespace": "default", "data": {"K": "V"}}
+    })).await.is_err());
+}
+
+#[fcp_async_core::runtime::test]
+async fn configmap_update() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/api/v1/namespaces/default/configmaps/app-config"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "kind": "ConfigMap",
+            "metadata": {"name": "app-config"},
+            "data": {"LOG_LEVEL": "debug"}
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c.handle_invoke(json!({
+        "operation_id": "kubernetes.configmap.update",
+        "input": {"namespace": "default", "name": "app-config", "data": {"LOG_LEVEL": "debug"}}
+    })).await.unwrap();
+    assert_eq!(result["configmap"]["data"]["LOG_LEVEL"], "debug");
+}
+
+#[fcp_async_core::runtime::test]
+async fn configmap_update_missing_data() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(c.handle_invoke(json!({
+        "operation_id": "kubernetes.configmap.update",
+        "input": {"namespace": "default", "name": "app-config"}
+    })).await.is_err());
+}
+
+#[fcp_async_core::runtime::test]
+async fn configmap_delete() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/api/v1/namespaces/default/configmaps/old-config"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "kind": "Status", "status": "Success"
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c.handle_invoke(json!({
+        "operation_id": "kubernetes.configmap.delete",
+        "input": {"namespace": "default", "name": "old-config"}
+    })).await.unwrap();
+    assert_eq!(result["deleted"], true);
+}
+
+#[fcp_async_core::runtime::test]
+async fn configmap_delete_missing_name() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(c.handle_invoke(json!({
+        "operation_id": "kubernetes.configmap.delete",
+        "input": {"namespace": "default"}
+    })).await.is_err());
+}
+
+// ── Feature 3: Secret CRUD ───────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn secret_list() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/namespaces/default/secrets"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "kind": "SecretList",
+            "items": [
+                {"metadata": {"name": "db-creds"}, "type": "Opaque", "data": {"password": "c2VjcmV0"}},
+                {"metadata": {"name": "tls-cert"}, "type": "kubernetes.io/tls", "data": {"tls.crt": "...", "tls.key": "..."}}
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c.handle_invoke(json!({
+        "operation_id": "kubernetes.secret.list",
+        "input": {"namespace": "default"}
+    })).await.unwrap();
+    let secrets = result["secrets"].as_array().unwrap();
+    assert_eq!(secrets.len(), 2);
+    // Verify data is stripped from list results
+    for s in secrets {
+        assert!(s.get("data").is_none(), "secret data should be stripped in list");
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn secret_list_empty() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/namespaces/production/secrets"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "kind": "SecretList", "items": []
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c.handle_invoke(json!({
+        "operation_id": "kubernetes.secret.list",
+        "input": {"namespace": "production"}
+    })).await.unwrap();
+    assert!(result["secrets"].as_array().unwrap().is_empty());
+}
+
+#[fcp_async_core::runtime::test]
+async fn secret_list_missing_namespace() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(c.handle_invoke(json!({
+        "operation_id": "kubernetes.secret.list",
+        "input": {}
+    })).await.is_err());
+}
+
+#[fcp_async_core::runtime::test]
+async fn secret_get() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/namespaces/default/secrets/db-creds"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "kind": "Secret",
+            "metadata": {"name": "db-creds"},
+            "type": "Opaque",
+            "data": {"username": "YWRtaW4=", "password": "c2VjcmV0"}
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c.handle_invoke(json!({
+        "operation_id": "kubernetes.secret.get",
+        "input": {"namespace": "default", "name": "db-creds"}
+    })).await.unwrap();
+    assert!(result["secret"]["data"].is_object());
+    assert_eq!(result["secret"]["data"]["username"], "YWRtaW4=");
+}
+
+#[fcp_async_core::runtime::test]
+async fn secret_get_missing_name() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(c.handle_invoke(json!({
+        "operation_id": "kubernetes.secret.get",
+        "input": {"namespace": "default"}
+    })).await.is_err());
+}
+
+#[fcp_async_core::runtime::test]
+async fn secret_create() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/namespaces/default/secrets"))
+        .and(header("Content-Type", "application/json"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "kind": "Secret",
+            "metadata": {"name": "new-secret", "namespace": "default"},
+            "type": "Opaque",
+            "data": {"token": "dG9rZW4="}
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c.handle_invoke(json!({
+        "operation_id": "kubernetes.secret.create",
+        "input": {
+            "namespace": "default",
+            "name": "new-secret",
+            "data": {"token": "dG9rZW4="}
+        }
+    })).await.unwrap();
+    assert_eq!(result["secret"]["metadata"]["name"], "new-secret");
+}
+
+#[fcp_async_core::runtime::test]
+async fn secret_create_with_type() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/namespaces/default/secrets"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "kind": "Secret",
+            "metadata": {"name": "tls-secret"},
+            "type": "kubernetes.io/tls",
+            "data": {"tls.crt": "...", "tls.key": "..."}
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c.handle_invoke(json!({
+        "operation_id": "kubernetes.secret.create",
+        "input": {
+            "namespace": "default",
+            "name": "tls-secret",
+            "type": "kubernetes.io/tls",
+            "data": {"tls.crt": "...", "tls.key": "..."}
+        }
+    })).await.unwrap();
+    assert_eq!(result["secret"]["type"], "kubernetes.io/tls");
+}
+
+#[fcp_async_core::runtime::test]
+async fn secret_create_with_labels() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/namespaces/default/secrets"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "kind": "Secret",
+            "metadata": {"name": "labeled-secret", "labels": {"app": "test"}},
+            "data": {"key": "val"}
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c.handle_invoke(json!({
+        "operation_id": "kubernetes.secret.create",
+        "input": {
+            "namespace": "default",
+            "name": "labeled-secret",
+            "data": {"key": "val"},
+            "labels": {"app": "test"}
+        }
+    })).await.unwrap();
+    assert_eq!(result["secret"]["metadata"]["name"], "labeled-secret");
+}
+
+#[fcp_async_core::runtime::test]
+async fn secret_create_missing_data() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(c.handle_invoke(json!({
+        "operation_id": "kubernetes.secret.create",
+        "input": {"namespace": "default", "name": "new-secret"}
+    })).await.is_err());
+}
+
+#[fcp_async_core::runtime::test]
+async fn secret_create_missing_name() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(c.handle_invoke(json!({
+        "operation_id": "kubernetes.secret.create",
+        "input": {"namespace": "default", "data": {"k": "v"}}
+    })).await.is_err());
+}
+
+#[fcp_async_core::runtime::test]
+async fn secret_delete() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/api/v1/namespaces/default/secrets/old-creds"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "kind": "Status", "status": "Success"
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c.handle_invoke(json!({
+        "operation_id": "kubernetes.secret.delete",
+        "input": {"namespace": "default", "name": "old-creds"}
+    })).await.unwrap();
+    assert_eq!(result["deleted"], true);
+}
+
+#[fcp_async_core::runtime::test]
+async fn secret_delete_missing_name() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(c.handle_invoke(json!({
+        "operation_id": "kubernetes.secret.delete",
+        "input": {"namespace": "default"}
+    })).await.is_err());
+}
+
+#[fcp_async_core::runtime::test]
+async fn secret_delete_missing_namespace() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(c.handle_invoke(json!({
+        "operation_id": "kubernetes.secret.delete",
+        "input": {"name": "old-creds"}
+    })).await.is_err());
+}
+
+// ── Simulate new ops ────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn simulate_configmap_list() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(c.handle_simulate(json!({"operation_id": "kubernetes.configmap.list"}))
+        .await.unwrap()["allowed"].as_bool().unwrap());
+}
+
+#[fcp_async_core::runtime::test]
+async fn simulate_configmap_get() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(c.handle_simulate(json!({"operation_id": "kubernetes.configmap.get"}))
+        .await.unwrap()["allowed"].as_bool().unwrap());
+}
+
+#[fcp_async_core::runtime::test]
+async fn simulate_configmap_create() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(c.handle_simulate(json!({"operation_id": "kubernetes.configmap.create"}))
+        .await.unwrap()["allowed"].as_bool().unwrap());
+}
+
+#[fcp_async_core::runtime::test]
+async fn simulate_configmap_update() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(c.handle_simulate(json!({"operation_id": "kubernetes.configmap.update"}))
+        .await.unwrap()["allowed"].as_bool().unwrap());
+}
+
+#[fcp_async_core::runtime::test]
+async fn simulate_configmap_delete() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(c.handle_simulate(json!({"operation_id": "kubernetes.configmap.delete"}))
+        .await.unwrap()["allowed"].as_bool().unwrap());
+}
+
+#[fcp_async_core::runtime::test]
+async fn simulate_secret_list() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(c.handle_simulate(json!({"operation_id": "kubernetes.secret.list"}))
+        .await.unwrap()["allowed"].as_bool().unwrap());
+}
+
+#[fcp_async_core::runtime::test]
+async fn simulate_secret_get() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(c.handle_simulate(json!({"operation_id": "kubernetes.secret.get"}))
+        .await.unwrap()["allowed"].as_bool().unwrap());
+}
+
+#[fcp_async_core::runtime::test]
+async fn simulate_secret_create() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(c.handle_simulate(json!({"operation_id": "kubernetes.secret.create"}))
+        .await.unwrap()["allowed"].as_bool().unwrap());
+}
+
+#[fcp_async_core::runtime::test]
+async fn simulate_secret_delete() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(c.handle_simulate(json!({"operation_id": "kubernetes.secret.delete"}))
+        .await.unwrap()["allowed"].as_bool().unwrap());
 }

@@ -542,6 +542,106 @@ impl KubernetesClient {
             .await
     }
 
+    /// List configmaps in a namespace.
+    pub async fn list_configmaps(
+        &self,
+        namespace: &str,
+        label_selector: Option<&str>,
+    ) -> KubernetesResult<serde_json::Value> {
+        let mut path = format!("/api/v1/namespaces/{namespace}/configmaps");
+        if let Some(ls) = label_selector {
+            let _ = write!(path, "?labelSelector={ls}");
+        }
+        self.get(&path).await
+    }
+
+    /// Create a `ConfigMap`.
+    pub async fn create_configmap(
+        &self,
+        namespace: &str,
+        body: &serde_json::Value,
+    ) -> KubernetesResult<serde_json::Value> {
+        self.post(
+            &format!("/api/v1/namespaces/{namespace}/configmaps"),
+            body,
+        )
+        .await
+    }
+
+    /// Delete a `ConfigMap`.
+    pub async fn delete_configmap(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> KubernetesResult<serde_json::Value> {
+        self.delete(&format!("/api/v1/namespaces/{namespace}/configmaps/{name}"))
+            .await
+    }
+
+    /// List secrets in a namespace (metadata only).
+    pub async fn list_secrets(
+        &self,
+        namespace: &str,
+        label_selector: Option<&str>,
+    ) -> KubernetesResult<serde_json::Value> {
+        let mut path = format!("/api/v1/namespaces/{namespace}/secrets");
+        if let Some(ls) = label_selector {
+            let _ = write!(path, "?labelSelector={ls}");
+        }
+        self.get(&path).await
+    }
+
+    /// Create a secret.
+    pub async fn create_secret(
+        &self,
+        namespace: &str,
+        body: &serde_json::Value,
+    ) -> KubernetesResult<serde_json::Value> {
+        self.post(
+            &format!("/api/v1/namespaces/{namespace}/secrets"),
+            body,
+        )
+        .await
+    }
+
+    /// Delete a secret.
+    pub async fn delete_secret(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> KubernetesResult<serde_json::Value> {
+        self.delete(&format!("/api/v1/namespaces/{namespace}/secrets/{name}"))
+            .await
+    }
+
+    /// Execute a command in a pod container.
+    ///
+    /// NOTE: Real Kubernetes exec uses WebSocket upgrade; here we model it as
+    /// a POST for FCP connector purposes and return `stdout`/`stderr`/`exit_code`.
+    pub async fn exec_in_pod(
+        &self,
+        namespace: &str,
+        name: &str,
+        container: Option<&str>,
+        command: &[String],
+    ) -> KubernetesResult<serde_json::Value> {
+        let mut path = format!("/api/v1/namespaces/{namespace}/pods/{name}/exec");
+        let mut params = Vec::new();
+        for cmd in command {
+            params.push(format!("command={cmd}"));
+        }
+        params.push("stdout=true".to_string());
+        params.push("stderr=true".to_string());
+        if let Some(c) = container {
+            params.push(format!("container={c}"));
+        }
+        if !params.is_empty() {
+            path.push('?');
+            path.push_str(&params.join("&"));
+        }
+        self.post(&path, &serde_json::json!({})).await
+    }
+
     /// List events in a namespace.
     pub async fn list_events(
         &self,

@@ -1167,6 +1167,624 @@ common_mistakes = ["Not handling resourceVersion for reconnection"]
 examples = ['{"namespace": "production"}']
 related = ["kubernetes.stream_pod_logs"]
 
+[provides.operations."kubernetes.exec"]
+description = "Execute a command in a pod container"
+capability = "kubernetes.admin"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "none"
+
+[provides.operations."kubernetes.exec".input_schema]
+required = [
+    "namespace",
+    "name",
+    "command",
+]
+type = "object"
+
+[provides.operations."kubernetes.exec".input_schema.properties.namespace]
+type = "string"
+
+[provides.operations."kubernetes.exec".input_schema.properties.name]
+type = "string"
+
+[provides.operations."kubernetes.exec".input_schema.properties.container]
+type = "string"
+
+[provides.operations."kubernetes.exec".input_schema.properties.command]
+type = "array"
+
+[provides.operations."kubernetes.exec".input_schema.properties.command.items]
+type = "string"
+
+[provides.operations."kubernetes.exec".output_schema]
+required = ["exec_result"]
+type = "object"
+
+[provides.operations."kubernetes.exec".output_schema.properties.exec_result]
+type = "object"
+
+[provides.operations."kubernetes.exec".network_constraints]
+host_allow = ["$KUBE_API_HOST"]
+port_allow = [
+    443,
+    6443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = false
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 300000
+max_response_bytes = 10485760
+
+[provides.operations."kubernetes.exec".ai_hints]
+when_to_use = "Run a command inside a running pod container for debugging or maintenance."
+common_mistakes = [
+    "Running destructive commands without confirmation",
+    "Not specifying container in multi-container pods",
+    "Using exec for tasks that should be done via Deployments",
+]
+examples = ['{"namespace": "default", "name": "debug-pod", "command": ["ls", "-la", "/app"]}']
+related = [
+    "kubernetes.get_pod",
+    "kubernetes.get_pod_logs",
+]
+
+[provides.operations."kubernetes.configmap.list"]
+description = "List configmaps in a namespace"
+capability = "kubernetes.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."kubernetes.configmap.list".input_schema]
+required = ["namespace"]
+type = "object"
+
+[provides.operations."kubernetes.configmap.list".input_schema.properties.namespace]
+type = "string"
+
+[provides.operations."kubernetes.configmap.list".input_schema.properties.label_selector]
+type = "string"
+
+[provides.operations."kubernetes.configmap.list".output_schema]
+required = ["configmaps"]
+type = "object"
+
+[provides.operations."kubernetes.configmap.list".output_schema.properties.configmaps]
+type = "array"
+
+[provides.operations."kubernetes.configmap.list".network_constraints]
+host_allow = ["$KUBE_API_HOST"]
+port_allow = [
+    443,
+    6443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = false
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."kubernetes.configmap.list".ai_hints]
+when_to_use = "List all configmaps in a namespace."
+common_mistakes = []
+examples = ['{"namespace": "production"}']
+related = [
+    "kubernetes.configmap.get",
+    "kubernetes.configmap.create",
+]
+
+[provides.operations."kubernetes.configmap.get"]
+description = "Get a configmap by name"
+capability = "kubernetes.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."kubernetes.configmap.get".input_schema]
+required = [
+    "namespace",
+    "name",
+]
+type = "object"
+
+[provides.operations."kubernetes.configmap.get".input_schema.properties.namespace]
+type = "string"
+
+[provides.operations."kubernetes.configmap.get".input_schema.properties.name]
+type = "string"
+
+[provides.operations."kubernetes.configmap.get".output_schema]
+required = ["configmap"]
+type = "object"
+
+[provides.operations."kubernetes.configmap.get".output_schema.properties.configmap]
+type = "object"
+
+[provides.operations."kubernetes.configmap.get".network_constraints]
+host_allow = ["$KUBE_API_HOST"]
+port_allow = [
+    443,
+    6443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = false
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."kubernetes.configmap.get".ai_hints]
+when_to_use = "Retrieve a specific configmap by name."
+common_mistakes = []
+examples = ['{"namespace": "production", "name": "app-config"}']
+related = [
+    "kubernetes.configmap.list",
+    "kubernetes.configmap.update",
+]
+
+[provides.operations."kubernetes.configmap.create"]
+description = "Create a configmap"
+capability = "kubernetes.admin"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "none"
+
+[provides.operations."kubernetes.configmap.create".input_schema]
+required = [
+    "namespace",
+    "name",
+    "data",
+]
+type = "object"
+
+[provides.operations."kubernetes.configmap.create".input_schema.properties.namespace]
+type = "string"
+
+[provides.operations."kubernetes.configmap.create".input_schema.properties.name]
+type = "string"
+
+[provides.operations."kubernetes.configmap.create".input_schema.properties.data]
+type = "object"
+
+[provides.operations."kubernetes.configmap.create".input_schema.properties.labels]
+type = "object"
+
+[provides.operations."kubernetes.configmap.create".output_schema]
+required = ["configmap"]
+type = "object"
+
+[provides.operations."kubernetes.configmap.create".output_schema.properties.configmap]
+type = "object"
+
+[provides.operations."kubernetes.configmap.create".network_constraints]
+host_allow = ["$KUBE_API_HOST"]
+port_allow = [
+    443,
+    6443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = false
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."kubernetes.configmap.create".ai_hints]
+when_to_use = "Create a new configmap in a namespace."
+common_mistakes = ["Creating duplicate configmaps with the same name"]
+examples = ['{"namespace": "default", "name": "app-config", "data": {"LOG_LEVEL": "info"}}']
+related = [
+    "kubernetes.configmap.get",
+    "kubernetes.configmap.update",
+]
+
+[provides.operations."kubernetes.configmap.update"]
+description = "Update a configmap"
+capability = "kubernetes.write"
+risk_level = "medium"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "best_effort"
+
+[provides.operations."kubernetes.configmap.update".input_schema]
+required = [
+    "namespace",
+    "name",
+    "data",
+]
+type = "object"
+
+[provides.operations."kubernetes.configmap.update".input_schema.properties.namespace]
+type = "string"
+
+[provides.operations."kubernetes.configmap.update".input_schema.properties.name]
+type = "string"
+
+[provides.operations."kubernetes.configmap.update".input_schema.properties.data]
+type = "object"
+
+[provides.operations."kubernetes.configmap.update".output_schema]
+required = ["configmap"]
+type = "object"
+
+[provides.operations."kubernetes.configmap.update".output_schema.properties.configmap]
+type = "object"
+
+[provides.operations."kubernetes.configmap.update".network_constraints]
+host_allow = ["$KUBE_API_HOST"]
+port_allow = [
+    443,
+    6443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = false
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."kubernetes.configmap.update".ai_hints]
+when_to_use = "Update configuration data in an existing configmap."
+common_mistakes = [
+    "Overwriting all data instead of merging",
+    "Not restarting pods that consume the configmap",
+]
+examples = ['{"namespace": "production", "name": "app-config", "data": {"LOG_LEVEL": "debug"}}']
+related = [
+    "kubernetes.configmap.get",
+    "kubernetes.rollout_restart",
+]
+
+[provides.operations."kubernetes.configmap.delete"]
+description = "Delete a configmap"
+capability = "kubernetes.admin"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "best_effort"
+
+[provides.operations."kubernetes.configmap.delete".input_schema]
+required = [
+    "namespace",
+    "name",
+]
+type = "object"
+
+[provides.operations."kubernetes.configmap.delete".input_schema.properties.namespace]
+type = "string"
+
+[provides.operations."kubernetes.configmap.delete".input_schema.properties.name]
+type = "string"
+
+[provides.operations."kubernetes.configmap.delete".output_schema]
+required = ["deleted"]
+type = "object"
+
+[provides.operations."kubernetes.configmap.delete".output_schema.properties.deleted]
+type = "boolean"
+
+[provides.operations."kubernetes.configmap.delete".network_constraints]
+host_allow = ["$KUBE_API_HOST"]
+port_allow = [
+    443,
+    6443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = false
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."kubernetes.configmap.delete".ai_hints]
+when_to_use = "Delete a configmap from a namespace."
+common_mistakes = ["Deleting a configmap still referenced by running pods"]
+examples = ['{"namespace": "default", "name": "old-config"}']
+related = [
+    "kubernetes.configmap.get",
+    "kubernetes.configmap.list",
+]
+
+[provides.operations."kubernetes.secret.list"]
+description = "List secrets in a namespace (metadata only)"
+capability = "kubernetes.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."kubernetes.secret.list".input_schema]
+required = ["namespace"]
+type = "object"
+
+[provides.operations."kubernetes.secret.list".input_schema.properties.namespace]
+type = "string"
+
+[provides.operations."kubernetes.secret.list".input_schema.properties.label_selector]
+type = "string"
+
+[provides.operations."kubernetes.secret.list".output_schema]
+required = ["secrets"]
+type = "object"
+
+[provides.operations."kubernetes.secret.list".output_schema.properties.secrets]
+type = "array"
+
+[provides.operations."kubernetes.secret.list".network_constraints]
+host_allow = ["$KUBE_API_HOST"]
+port_allow = [
+    443,
+    6443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = false
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."kubernetes.secret.list".ai_hints]
+when_to_use = "List secrets in a namespace (returns metadata only, no secret data)."
+common_mistakes = []
+examples = ['{"namespace": "production"}']
+related = [
+    "kubernetes.secret.get",
+    "kubernetes.secret.create",
+]
+
+[provides.operations."kubernetes.secret.get"]
+description = "Get a secret by name (reveals secret data)"
+capability = "kubernetes.secrets"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."kubernetes.secret.get".input_schema]
+required = [
+    "namespace",
+    "name",
+]
+type = "object"
+
+[provides.operations."kubernetes.secret.get".input_schema.properties.namespace]
+type = "string"
+
+[provides.operations."kubernetes.secret.get".input_schema.properties.name]
+type = "string"
+
+[provides.operations."kubernetes.secret.get".output_schema]
+required = ["secret"]
+type = "object"
+
+[provides.operations."kubernetes.secret.get".output_schema.properties.secret]
+type = "object"
+
+[provides.operations."kubernetes.secret.get".network_constraints]
+host_allow = ["$KUBE_API_HOST"]
+port_allow = [
+    443,
+    6443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = false
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."kubernetes.secret.get".ai_hints]
+when_to_use = "Read a Kubernetes secret including its data (base64-encoded values)."
+common_mistakes = [
+    "Logging or exposing secret data",
+    "Not base64-decoding the values",
+]
+examples = ['{"namespace": "production", "name": "db-credentials"}']
+related = [
+    "kubernetes.secret.list",
+    "kubernetes.secret.create",
+]
+
+[provides.operations."kubernetes.secret.create"]
+description = "Create a secret"
+capability = "kubernetes.secrets"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "none"
+
+[provides.operations."kubernetes.secret.create".input_schema]
+required = [
+    "namespace",
+    "name",
+    "data",
+]
+type = "object"
+
+[provides.operations."kubernetes.secret.create".input_schema.properties.namespace]
+type = "string"
+
+[provides.operations."kubernetes.secret.create".input_schema.properties.name]
+type = "string"
+
+[provides.operations."kubernetes.secret.create".input_schema.properties.data]
+type = "object"
+
+[provides.operations."kubernetes.secret.create".input_schema.properties.type]
+type = "string"
+
+[provides.operations."kubernetes.secret.create".input_schema.properties.labels]
+type = "object"
+
+[provides.operations."kubernetes.secret.create".output_schema]
+required = ["secret"]
+type = "object"
+
+[provides.operations."kubernetes.secret.create".output_schema.properties.secret]
+type = "object"
+
+[provides.operations."kubernetes.secret.create".network_constraints]
+host_allow = ["$KUBE_API_HOST"]
+port_allow = [
+    443,
+    6443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = false
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."kubernetes.secret.create".ai_hints]
+when_to_use = "Create a new Kubernetes secret."
+common_mistakes = [
+    "Not base64-encoding secret values",
+    "Creating duplicate secrets with the same name",
+]
+examples = ['{"namespace": "default", "name": "db-creds", "data": {"username": "YWRtaW4=", "password": "c2VjcmV0"}}']
+related = [
+    "kubernetes.secret.get",
+    "kubernetes.secret.delete",
+]
+
+[provides.operations."kubernetes.secret.delete"]
+description = "Delete a secret"
+capability = "kubernetes.secrets"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "best_effort"
+
+[provides.operations."kubernetes.secret.delete".input_schema]
+required = [
+    "namespace",
+    "name",
+]
+type = "object"
+
+[provides.operations."kubernetes.secret.delete".input_schema.properties.namespace]
+type = "string"
+
+[provides.operations."kubernetes.secret.delete".input_schema.properties.name]
+type = "string"
+
+[provides.operations."kubernetes.secret.delete".output_schema]
+required = ["deleted"]
+type = "object"
+
+[provides.operations."kubernetes.secret.delete".output_schema.properties.deleted]
+type = "boolean"
+
+[provides.operations."kubernetes.secret.delete".network_constraints]
+host_allow = ["$KUBE_API_HOST"]
+port_allow = [
+    443,
+    6443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = false
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."kubernetes.secret.delete".ai_hints]
+when_to_use = "Delete a secret from a namespace."
+common_mistakes = ["Deleting a secret still referenced by running pods"]
+examples = ['{"namespace": "default", "name": "old-credentials"}']
+related = [
+    "kubernetes.secret.get",
+    "kubernetes.secret.list",
+]
+
 [event_caps]
 streaming = true
 replay = false
@@ -1232,3 +1850,13 @@ scope = "instance"
 "kubernetes.update_configmap" = ["kubernetes.write"]
 "kubernetes.get_configmap" = ["kubernetes.read"]
 "kubernetes.watch_events" = ["kubernetes.read"]
+"kubernetes.exec" = ["kubernetes.admin"]
+"kubernetes.configmap.list" = ["kubernetes.read"]
+"kubernetes.configmap.get" = ["kubernetes.read"]
+"kubernetes.configmap.create" = ["kubernetes.admin"]
+"kubernetes.configmap.update" = ["kubernetes.write"]
+"kubernetes.configmap.delete" = ["kubernetes.admin"]
+"kubernetes.secret.list" = ["kubernetes.read"]
+"kubernetes.secret.get" = ["kubernetes.secrets"]
+"kubernetes.secret.create" = ["kubernetes.secrets"]
+"kubernetes.secret.delete" = ["kubernetes.secrets"]

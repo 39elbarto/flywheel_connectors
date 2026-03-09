@@ -413,6 +413,16 @@ impl KubernetesConnector {
             "kubernetes.update_configmap" => self.op_update_configmap(client, &input).await,
             "kubernetes.get_secret" => self.op_get_secret(client, &input).await,
             "kubernetes.watch_events" => self.op_watch_events(client, &input).await,
+            "kubernetes.exec" => self.op_exec(client, &input).await,
+            "kubernetes.configmap.list" => self.op_configmap_list(client, &input).await,
+            "kubernetes.configmap.get" => self.op_configmap_get(client, &input).await,
+            "kubernetes.configmap.create" => self.op_configmap_create(client, &input).await,
+            "kubernetes.configmap.update" => self.op_configmap_update(client, &input).await,
+            "kubernetes.configmap.delete" => self.op_configmap_delete(client, &input).await,
+            "kubernetes.secret.list" => self.op_secret_list(client, &input).await,
+            "kubernetes.secret.get" => self.op_secret_get(client, &input).await,
+            "kubernetes.secret.create" => self.op_secret_create(client, &input).await,
+            "kubernetes.secret.delete" => self.op_secret_delete(client, &input).await,
             _ => {
                 return Err(FcpError::InvalidRequest {
                     code: 1002,
@@ -766,6 +776,207 @@ impl KubernetesConnector {
             .await?;
         let items = resp.get("items").cloned().unwrap_or(json!([]));
         Ok(json!({ "events": items }))
+    }
+
+    // ── Feature 2: Exec ──────────────────────────────────────────────
+
+    async fn op_exec(
+        &self,
+        client: &KubernetesClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, KubernetesError> {
+        let namespace = require_str(input, "namespace")?;
+        let name = require_str(input, "name")?;
+        let container = input.get("container").and_then(serde_json::Value::as_str);
+        let command = input
+            .get("command")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| KubernetesError::Api {
+                status_code: 400,
+                message: "Missing required field: command (must be an array of strings)".into(),
+            })?;
+        let command_strs: Vec<String> = command
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_string)
+            .collect();
+        if command_strs.is_empty() {
+            return Err(KubernetesError::Api {
+                status_code: 400,
+                message: "command array must contain at least one string element".into(),
+            });
+        }
+        let resp = client
+            .exec_in_pod(namespace, name, container, &command_strs)
+            .await?;
+        Ok(json!({ "exec_result": resp }))
+    }
+
+    // ── Feature 3: ConfigMap CRUD ────────────────────────────────────
+
+    async fn op_configmap_list(
+        &self,
+        client: &KubernetesClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, KubernetesError> {
+        let namespace = require_str(input, "namespace")?;
+        let label_selector = input
+            .get("label_selector")
+            .and_then(serde_json::Value::as_str);
+        let resp = client.list_configmaps(namespace, label_selector).await?;
+        let items = resp.get("items").cloned().unwrap_or(json!([]));
+        Ok(json!({ "configmaps": items }))
+    }
+
+    async fn op_configmap_get(
+        &self,
+        client: &KubernetesClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, KubernetesError> {
+        let namespace = require_str(input, "namespace")?;
+        let name = require_str(input, "name")?;
+        let resp = client.get_configmap(namespace, name).await?;
+        Ok(json!({ "configmap": resp }))
+    }
+
+    async fn op_configmap_create(
+        &self,
+        client: &KubernetesClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, KubernetesError> {
+        let namespace = require_str(input, "namespace")?;
+        let name = require_str(input, "name")?;
+        let data = input.get("data").ok_or_else(|| KubernetesError::Api {
+            status_code: 400,
+            message: "Missing required field: data".into(),
+        })?;
+        let labels = input.get("labels").cloned().unwrap_or(serde_json::Value::Null);
+
+        let mut body = json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {
+                "name": name,
+                "namespace": namespace,
+            },
+            "data": data,
+        });
+        if !labels.is_null() {
+            body["metadata"]["labels"] = labels;
+        }
+        let resp = client.create_configmap(namespace, &body).await?;
+        Ok(json!({ "configmap": resp }))
+    }
+
+    async fn op_configmap_update(
+        &self,
+        client: &KubernetesClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, KubernetesError> {
+        let namespace = require_str(input, "namespace")?;
+        let name = require_str(input, "name")?;
+        let data = input.get("data").ok_or_else(|| KubernetesError::Api {
+            status_code: 400,
+            message: "Missing required field: data".into(),
+        })?;
+        let resp = client.update_configmap(namespace, name, data).await?;
+        Ok(json!({ "configmap": resp }))
+    }
+
+    async fn op_configmap_delete(
+        &self,
+        client: &KubernetesClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, KubernetesError> {
+        let namespace = require_str(input, "namespace")?;
+        let name = require_str(input, "name")?;
+        let _resp = client.delete_configmap(namespace, name).await?;
+        Ok(json!({ "deleted": true }))
+    }
+
+    // ── Feature 3: Secret CRUD ───────────────────────────────────────
+
+    async fn op_secret_list(
+        &self,
+        client: &KubernetesClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, KubernetesError> {
+        let namespace = require_str(input, "namespace")?;
+        let label_selector = input
+            .get("label_selector")
+            .and_then(serde_json::Value::as_str);
+        let resp = client.list_secrets(namespace, label_selector).await?;
+        // Strip secret data from list results -- metadata only
+        let items = resp.get("items").cloned().unwrap_or(json!([]));
+        let sanitized: Vec<serde_json::Value> = items
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .map(|item| {
+                let mut s = item.clone();
+                if let Some(obj) = s.as_object_mut() {
+                    obj.remove("data");
+                }
+                s
+            })
+            .collect();
+        Ok(json!({ "secrets": sanitized }))
+    }
+
+    async fn op_secret_get(
+        &self,
+        client: &KubernetesClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, KubernetesError> {
+        let namespace = require_str(input, "namespace")?;
+        let name = require_str(input, "name")?;
+        let resp = client.get_secret(namespace, name).await?;
+        Ok(json!({ "secret": resp }))
+    }
+
+    async fn op_secret_create(
+        &self,
+        client: &KubernetesClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, KubernetesError> {
+        let namespace = require_str(input, "namespace")?;
+        let name = require_str(input, "name")?;
+        let data = input.get("data").ok_or_else(|| KubernetesError::Api {
+            status_code: 400,
+            message: "Missing required field: data".into(),
+        })?;
+        let secret_type = input
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("Opaque");
+        let labels = input.get("labels").cloned().unwrap_or(serde_json::Value::Null);
+
+        let mut body = json!({
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {
+                "name": name,
+                "namespace": namespace,
+            },
+            "type": secret_type,
+            "data": data,
+        });
+        if !labels.is_null() {
+            body["metadata"]["labels"] = labels;
+        }
+        let resp = client.create_secret(namespace, &body).await?;
+        Ok(json!({ "secret": resp }))
+    }
+
+    async fn op_secret_delete(
+        &self,
+        client: &KubernetesClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, KubernetesError> {
+        let namespace = require_str(input, "namespace")?;
+        let name = require_str(input, "name")?;
+        let _resp = client.delete_secret(namespace, name).await?;
+        Ok(json!({ "deleted": true }))
     }
 }
 
@@ -1444,6 +1655,352 @@ fn operations_info() -> Vec<OperationInfo> {
                 related: vec![CapabilityId::from_static("kubernetes.stream_pod_logs")],
             },
         ),
+        // ── Feature 2: Exec ──────────────────────────────────────────
+        op_info(
+            "kubernetes.exec",
+            "Execute a command in a pod container",
+            json!({
+                "type": "object",
+                "required": ["namespace", "name", "command"],
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "name": { "type": "string" },
+                    "container": { "type": "string" },
+                    "command": { "type": "array", "items": { "type": "string" } }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["exec_result"],
+                "properties": { "exec_result": { "type": "object" } }
+            }),
+            "kubernetes.admin",
+            RiskLevel::High,
+            SafetyTier::Dangerous,
+            IdempotencyClass::None,
+            AgentHint {
+                when_to_use: "Run a command inside a running pod container for debugging or maintenance.".into(),
+                common_mistakes: vec![
+                    "Running destructive commands without confirmation".into(),
+                    "Not specifying container in multi-container pods".into(),
+                    "Using exec for tasks that should be done via Deployments".into(),
+                ],
+                examples: vec![
+                    r#"{"namespace": "default", "name": "debug-pod", "command": ["ls", "-la", "/app"]}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("kubernetes.get_pod"),
+                    CapabilityId::from_static("kubernetes.get_pod_logs"),
+                ],
+            },
+        ),
+        // ── Feature 3: ConfigMap CRUD ────────────────────────────────
+        op_info(
+            "kubernetes.configmap.list",
+            "List configmaps in a namespace",
+            json!({
+                "type": "object",
+                "required": ["namespace"],
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "label_selector": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["configmaps"],
+                "properties": { "configmaps": { "type": "array" } }
+            }),
+            "kubernetes.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List all configmaps in a namespace.".into(),
+                common_mistakes: vec![],
+                examples: vec![r#"{"namespace": "production"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("kubernetes.configmap.get"),
+                    CapabilityId::from_static("kubernetes.configmap.create"),
+                ],
+            },
+        ),
+        op_info(
+            "kubernetes.configmap.get",
+            "Get a configmap by name",
+            json!({
+                "type": "object",
+                "required": ["namespace", "name"],
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "name": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["configmap"],
+                "properties": { "configmap": { "type": "object" } }
+            }),
+            "kubernetes.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Retrieve a specific configmap by name.".into(),
+                common_mistakes: vec![],
+                examples: vec![
+                    r#"{"namespace": "production", "name": "app-config"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("kubernetes.configmap.list"),
+                    CapabilityId::from_static("kubernetes.configmap.update"),
+                ],
+            },
+        ),
+        op_info(
+            "kubernetes.configmap.create",
+            "Create a configmap",
+            json!({
+                "type": "object",
+                "required": ["namespace", "name", "data"],
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "name": { "type": "string" },
+                    "data": { "type": "object" },
+                    "labels": { "type": "object" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["configmap"],
+                "properties": { "configmap": { "type": "object" } }
+            }),
+            "kubernetes.admin",
+            RiskLevel::High,
+            SafetyTier::Dangerous,
+            IdempotencyClass::None,
+            AgentHint {
+                when_to_use: "Create a new configmap in a namespace.".into(),
+                common_mistakes: vec![
+                    "Creating duplicate configmaps with the same name".into(),
+                ],
+                examples: vec![
+                    r#"{"namespace": "default", "name": "app-config", "data": {"LOG_LEVEL": "info"}}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("kubernetes.configmap.get"),
+                    CapabilityId::from_static("kubernetes.configmap.update"),
+                ],
+            },
+        ),
+        op_info(
+            "kubernetes.configmap.update",
+            "Update a configmap",
+            json!({
+                "type": "object",
+                "required": ["namespace", "name", "data"],
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "name": { "type": "string" },
+                    "data": { "type": "object" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["configmap"],
+                "properties": { "configmap": { "type": "object" } }
+            }),
+            "kubernetes.write",
+            RiskLevel::Medium,
+            SafetyTier::Dangerous,
+            IdempotencyClass::BestEffort,
+            AgentHint {
+                when_to_use: "Update configuration data in an existing configmap.".into(),
+                common_mistakes: vec![
+                    "Overwriting all data instead of merging".into(),
+                    "Not restarting pods that consume the configmap".into(),
+                ],
+                examples: vec![
+                    r#"{"namespace": "production", "name": "app-config", "data": {"LOG_LEVEL": "debug"}}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("kubernetes.configmap.get"),
+                    CapabilityId::from_static("kubernetes.rollout_restart"),
+                ],
+            },
+        ),
+        op_info(
+            "kubernetes.configmap.delete",
+            "Delete a configmap",
+            json!({
+                "type": "object",
+                "required": ["namespace", "name"],
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "name": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["deleted"],
+                "properties": { "deleted": { "type": "boolean" } }
+            }),
+            "kubernetes.admin",
+            RiskLevel::High,
+            SafetyTier::Dangerous,
+            IdempotencyClass::BestEffort,
+            AgentHint {
+                when_to_use: "Delete a configmap from a namespace.".into(),
+                common_mistakes: vec![
+                    "Deleting a configmap still referenced by running pods".into(),
+                ],
+                examples: vec![
+                    r#"{"namespace": "default", "name": "old-config"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("kubernetes.configmap.get"),
+                    CapabilityId::from_static("kubernetes.configmap.list"),
+                ],
+            },
+        ),
+        // ── Feature 3: Secret CRUD ───────────────────────────────────
+        op_info(
+            "kubernetes.secret.list",
+            "List secrets in a namespace (metadata only)",
+            json!({
+                "type": "object",
+                "required": ["namespace"],
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "label_selector": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["secrets"],
+                "properties": { "secrets": { "type": "array" } }
+            }),
+            "kubernetes.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List secrets in a namespace (returns metadata only, no secret data).".into(),
+                common_mistakes: vec![],
+                examples: vec![r#"{"namespace": "production"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("kubernetes.secret.get"),
+                    CapabilityId::from_static("kubernetes.secret.create"),
+                ],
+            },
+        ),
+        op_info(
+            "kubernetes.secret.get",
+            "Get a secret by name (reveals secret data)",
+            json!({
+                "type": "object",
+                "required": ["namespace", "name"],
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "name": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["secret"],
+                "properties": { "secret": { "type": "object" } }
+            }),
+            "kubernetes.secrets",
+            RiskLevel::High,
+            SafetyTier::Dangerous,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Read a Kubernetes secret including its data (base64-encoded values).".into(),
+                common_mistakes: vec![
+                    "Logging or exposing secret data".into(),
+                    "Not base64-decoding the values".into(),
+                ],
+                examples: vec![
+                    r#"{"namespace": "production", "name": "db-credentials"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("kubernetes.secret.list"),
+                    CapabilityId::from_static("kubernetes.secret.create"),
+                ],
+            },
+        ),
+        op_info(
+            "kubernetes.secret.create",
+            "Create a secret",
+            json!({
+                "type": "object",
+                "required": ["namespace", "name", "data"],
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "name": { "type": "string" },
+                    "data": { "type": "object" },
+                    "type": { "type": "string" },
+                    "labels": { "type": "object" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["secret"],
+                "properties": { "secret": { "type": "object" } }
+            }),
+            "kubernetes.secrets",
+            RiskLevel::High,
+            SafetyTier::Dangerous,
+            IdempotencyClass::None,
+            AgentHint {
+                when_to_use: "Create a new Kubernetes secret.".into(),
+                common_mistakes: vec![
+                    "Not base64-encoding secret values".into(),
+                    "Creating duplicate secrets with the same name".into(),
+                ],
+                examples: vec![
+                    r#"{"namespace": "default", "name": "db-creds", "data": {"username": "YWRtaW4=", "password": "c2VjcmV0"}}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("kubernetes.secret.get"),
+                    CapabilityId::from_static("kubernetes.secret.delete"),
+                ],
+            },
+        ),
+        op_info(
+            "kubernetes.secret.delete",
+            "Delete a secret",
+            json!({
+                "type": "object",
+                "required": ["namespace", "name"],
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "name": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["deleted"],
+                "properties": { "deleted": { "type": "boolean" } }
+            }),
+            "kubernetes.secrets",
+            RiskLevel::High,
+            SafetyTier::Dangerous,
+            IdempotencyClass::BestEffort,
+            AgentHint {
+                when_to_use: "Delete a secret from a namespace.".into(),
+                common_mistakes: vec![
+                    "Deleting a secret still referenced by running pods".into(),
+                ],
+                examples: vec![
+                    r#"{"namespace": "default", "name": "old-credentials"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("kubernetes.secret.get"),
+                    CapabilityId::from_static("kubernetes.secret.list"),
+                ],
+            },
+        ),
     ]
 }
 
@@ -1580,8 +2137,8 @@ mod tests {
     }
 
     #[test]
-    fn operations_info_has_18_operations() {
-        assert_eq!(operations_info().len(), 18);
+    fn operations_info_has_28_operations() {
+        assert_eq!(operations_info().len(), 28);
     }
 
     #[test]
@@ -1666,6 +2223,16 @@ mod tests {
             "kubernetes.update_configmap",
             "kubernetes.get_secret",
             "kubernetes.watch_events",
+            "kubernetes.exec",
+            "kubernetes.configmap.list",
+            "kubernetes.configmap.get",
+            "kubernetes.configmap.create",
+            "kubernetes.configmap.update",
+            "kubernetes.configmap.delete",
+            "kubernetes.secret.list",
+            "kubernetes.secret.get",
+            "kubernetes.secret.create",
+            "kubernetes.secret.delete",
         ] {
             assert!(ids.contains(expected), "missing: {expected}");
         }
@@ -2349,12 +2916,250 @@ mod tests {
                 || id == "kubernetes.apply_deployment"
                 || id == "kubernetes.delete_deployment"
                 || id == "kubernetes.delete_pod"
+                || id == "kubernetes.exec"
+                || id == "kubernetes.configmap.create"
+                || id == "kubernetes.configmap.delete"
             {
                 assert_eq!(
                     cap, "kubernetes.admin",
                     "op {id} should use kubernetes.admin"
                 );
             }
+        }
+    }
+
+    // ── New operations: exec, configmap.*, secret.* ──────────────────
+
+    #[test]
+    fn exec_is_dangerous() {
+        let ops = operations_info_json();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "kubernetes.exec")
+            .unwrap();
+        assert_eq!(op["risk_level"], "high");
+        assert_eq!(op["safety_tier"], "dangerous");
+        assert_eq!(op["capability"], "kubernetes.admin");
+        assert_eq!(op["idempotency"], "none");
+    }
+
+    #[test]
+    fn exec_has_input_schema() {
+        let ops = operations_info_json();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "kubernetes.exec")
+            .unwrap();
+        assert!(has_required_field(op, "namespace"));
+        assert!(has_required_field(op, "name"));
+        assert!(has_required_field(op, "command"));
+    }
+
+    #[test]
+    fn configmap_list_is_safe() {
+        let ops = operations_info_json();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "kubernetes.configmap.list")
+            .unwrap();
+        assert_eq!(op["risk_level"], "low");
+        assert_eq!(op["safety_tier"], "safe");
+        assert_eq!(op["capability"], "kubernetes.read");
+        assert_eq!(op["idempotency"], "strict");
+    }
+
+    #[test]
+    fn configmap_get_is_safe() {
+        let ops = operations_info_json();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "kubernetes.configmap.get")
+            .unwrap();
+        assert_eq!(op["risk_level"], "low");
+        assert_eq!(op["safety_tier"], "safe");
+        assert_eq!(op["capability"], "kubernetes.read");
+    }
+
+    #[test]
+    fn configmap_create_is_dangerous() {
+        let ops = operations_info_json();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "kubernetes.configmap.create")
+            .unwrap();
+        assert_eq!(op["risk_level"], "high");
+        assert_eq!(op["safety_tier"], "dangerous");
+        assert_eq!(op["capability"], "kubernetes.admin");
+        assert_eq!(op["idempotency"], "none");
+    }
+
+    #[test]
+    fn configmap_update_is_dangerous() {
+        let ops = operations_info_json();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "kubernetes.configmap.update")
+            .unwrap();
+        assert_eq!(op["risk_level"], "medium");
+        assert_eq!(op["safety_tier"], "dangerous");
+        assert_eq!(op["capability"], "kubernetes.write");
+    }
+
+    #[test]
+    fn configmap_delete_is_dangerous() {
+        let ops = operations_info_json();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "kubernetes.configmap.delete")
+            .unwrap();
+        assert_eq!(op["risk_level"], "high");
+        assert_eq!(op["safety_tier"], "dangerous");
+        assert_eq!(op["capability"], "kubernetes.admin");
+        assert_eq!(op["idempotency"], "best_effort");
+    }
+
+    #[test]
+    fn secret_list_is_safe() {
+        let ops = operations_info_json();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "kubernetes.secret.list")
+            .unwrap();
+        assert_eq!(op["risk_level"], "low");
+        assert_eq!(op["safety_tier"], "safe");
+        assert_eq!(op["capability"], "kubernetes.read");
+        assert_eq!(op["idempotency"], "strict");
+    }
+
+    #[test]
+    fn secret_get_is_dangerous() {
+        let ops = operations_info_json();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "kubernetes.secret.get")
+            .unwrap();
+        assert_eq!(op["risk_level"], "high");
+        assert_eq!(op["safety_tier"], "dangerous");
+        assert_eq!(op["capability"], "kubernetes.secrets");
+    }
+
+    #[test]
+    fn secret_create_is_dangerous() {
+        let ops = operations_info_json();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "kubernetes.secret.create")
+            .unwrap();
+        assert_eq!(op["risk_level"], "high");
+        assert_eq!(op["safety_tier"], "dangerous");
+        assert_eq!(op["capability"], "kubernetes.secrets");
+        assert_eq!(op["idempotency"], "none");
+    }
+
+    #[test]
+    fn secret_delete_is_dangerous() {
+        let ops = operations_info_json();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "kubernetes.secret.delete")
+            .unwrap();
+        assert_eq!(op["risk_level"], "high");
+        assert_eq!(op["safety_tier"], "dangerous");
+        assert_eq!(op["capability"], "kubernetes.secrets");
+        assert_eq!(op["idempotency"], "best_effort");
+    }
+
+    #[test]
+    fn configmap_create_has_input_schema() {
+        let ops = operations_info_json();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "kubernetes.configmap.create")
+            .unwrap();
+        assert!(has_required_field(op, "namespace"));
+        assert!(has_required_field(op, "name"));
+        assert!(has_required_field(op, "data"));
+    }
+
+    #[test]
+    fn secret_create_has_input_schema() {
+        let ops = operations_info_json();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "kubernetes.secret.create")
+            .unwrap();
+        assert!(has_required_field(op, "namespace"));
+        assert!(has_required_field(op, "name"));
+        assert!(has_required_field(op, "data"));
+    }
+
+    #[test]
+    fn new_ops_all_have_ai_hints() {
+        let ops = operations_info_json();
+        for id in &[
+            "kubernetes.exec",
+            "kubernetes.configmap.list",
+            "kubernetes.configmap.get",
+            "kubernetes.configmap.create",
+            "kubernetes.configmap.update",
+            "kubernetes.configmap.delete",
+            "kubernetes.secret.list",
+            "kubernetes.secret.get",
+            "kubernetes.secret.create",
+            "kubernetes.secret.delete",
+        ] {
+            let op = ops
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|o| o["id"].as_str() == Some(id))
+                .unwrap_or_else(|| panic!("missing op: {id}"));
+            assert!(op.get("ai_hints").is_some(), "op {id} missing ai_hints");
+        }
+    }
+
+    #[test]
+    fn new_read_ops_are_safe() {
+        let ops = operations_info_json();
+        for id in &[
+            "kubernetes.configmap.list",
+            "kubernetes.configmap.get",
+            "kubernetes.secret.list",
+        ] {
+            let op = ops
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|o| o["id"].as_str() == Some(id))
+                .unwrap();
+            assert_eq!(op["safety_tier"], "safe", "op {id} should be safe");
+            assert_eq!(op["risk_level"], "low", "op {id} should be low risk");
         }
     }
 }

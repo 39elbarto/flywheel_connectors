@@ -99,6 +99,34 @@ pub struct ServiceSpec {
     pub selector: Option<serde_json::Value>,
 }
 
+/// A Kubernetes `ConfigMap`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigMap {
+    pub name: Option<String>,
+    pub namespace: Option<String>,
+    pub data: Option<serde_json::Value>,
+    pub labels: Option<serde_json::Value>,
+    pub creation_timestamp: Option<String>,
+}
+
+/// A Kubernetes `Secret` (metadata view).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecretMeta {
+    pub name: Option<String>,
+    pub namespace: Option<String>,
+    pub r#type: Option<String>,
+    pub labels: Option<serde_json::Value>,
+    pub creation_timestamp: Option<String>,
+}
+
+/// Result of an `exec` command in a pod container.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecResult {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: i32,
+}
+
 /// Kubernetes API error response body (Status object).
 ///
 /// Kubernetes returns `{"kind": "Status", "message": "...", "reason": "NotFound", "code": 404}` on errors.
@@ -480,6 +508,167 @@ mod tests {
         let e: ApiErrorResponse = serde_json::from_value(json!({"message": "err"})).unwrap();
         let dbg = format!("{e:?}");
         assert!(dbg.contains("ApiErrorResponse"));
+    }
+
+    // ── ConfigMap ──────────────────────────────────────────────────
+
+    #[test]
+    fn configmap_roundtrip() {
+        let cm: ConfigMap = serde_json::from_value(json!({
+            "name": "app-config",
+            "namespace": "default",
+            "data": {"LOG_LEVEL": "info", "DB_HOST": "postgres"},
+            "labels": {"app": "web"},
+            "creation_timestamp": "2024-06-01T00:00:00Z",
+        }))
+        .unwrap();
+        assert_eq!(cm.name, Some("app-config".into()));
+        assert_eq!(cm.namespace, Some("default".into()));
+        assert!(cm.data.is_some());
+        let re = serde_json::to_value(&cm).unwrap();
+        assert_eq!(re["name"], "app-config");
+        assert_eq!(re["data"]["LOG_LEVEL"], "info");
+    }
+
+    #[test]
+    fn configmap_minimal() {
+        let cm: ConfigMap = serde_json::from_value(json!({})).unwrap();
+        assert!(cm.name.is_none());
+        assert!(cm.namespace.is_none());
+        assert!(cm.data.is_none());
+        assert!(cm.labels.is_none());
+        assert!(cm.creation_timestamp.is_none());
+    }
+
+    #[test]
+    fn configmap_clone() {
+        let cm: ConfigMap = serde_json::from_value(json!({"name": "test"})).unwrap();
+        let cm2 = cm.clone();
+        assert_eq!(cm.name, cm2.name);
+    }
+
+    #[test]
+    fn configmap_debug() {
+        let cm: ConfigMap = serde_json::from_value(json!({"name": "test"})).unwrap();
+        let dbg = format!("{cm:?}");
+        assert!(dbg.contains("ConfigMap"));
+    }
+
+    #[test]
+    fn configmap_extra_fields_ignored() {
+        let cm: ConfigMap = serde_json::from_value(json!({
+            "name": "test",
+            "unknown_field": 42,
+        }))
+        .unwrap();
+        assert_eq!(cm.name, Some("test".into()));
+    }
+
+    // ── SecretMeta ───────────────────────────────────────────────
+
+    #[test]
+    fn secret_meta_roundtrip() {
+        let s: SecretMeta = serde_json::from_value(json!({
+            "name": "db-creds",
+            "namespace": "production",
+            "type": "Opaque",
+            "labels": {"app": "db"},
+            "creation_timestamp": "2024-06-01T00:00:00Z",
+        }))
+        .unwrap();
+        assert_eq!(s.name, Some("db-creds".into()));
+        assert_eq!(s.namespace, Some("production".into()));
+        assert_eq!(s.r#type, Some("Opaque".into()));
+        let re = serde_json::to_value(&s).unwrap();
+        assert_eq!(re["name"], "db-creds");
+        assert_eq!(re["type"], "Opaque");
+    }
+
+    #[test]
+    fn secret_meta_minimal() {
+        let s: SecretMeta = serde_json::from_value(json!({})).unwrap();
+        assert!(s.name.is_none());
+        assert!(s.namespace.is_none());
+        assert!(s.r#type.is_none());
+    }
+
+    #[test]
+    fn secret_meta_clone() {
+        let s: SecretMeta = serde_json::from_value(json!({"name": "test"})).unwrap();
+        let s2 = s.clone();
+        assert_eq!(s.name, s2.name);
+    }
+
+    #[test]
+    fn secret_meta_debug() {
+        let s: SecretMeta = serde_json::from_value(json!({"name": "test"})).unwrap();
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("SecretMeta"));
+    }
+
+    // ── ExecResult ───────────────────────────────────────────────
+
+    #[test]
+    fn exec_result_roundtrip() {
+        let er: ExecResult = serde_json::from_value(json!({
+            "stdout": "hello world\n",
+            "stderr": "",
+            "exit_code": 0,
+        }))
+        .unwrap();
+        assert_eq!(er.stdout, "hello world\n");
+        assert_eq!(er.stderr, "");
+        assert_eq!(er.exit_code, 0);
+        let re = serde_json::to_value(&er).unwrap();
+        assert_eq!(re["exit_code"], 0);
+    }
+
+    #[test]
+    fn exec_result_with_stderr() {
+        let er: ExecResult = serde_json::from_value(json!({
+            "stdout": "",
+            "stderr": "command not found",
+            "exit_code": 127,
+        }))
+        .unwrap();
+        assert_eq!(er.stderr, "command not found");
+        assert_eq!(er.exit_code, 127);
+    }
+
+    #[test]
+    fn exec_result_clone() {
+        let er: ExecResult = serde_json::from_value(json!({
+            "stdout": "ok",
+            "stderr": "",
+            "exit_code": 0,
+        }))
+        .unwrap();
+        let er2 = er.clone();
+        assert_eq!(er.stdout, er2.stdout);
+        assert_eq!(er.exit_code, er2.exit_code);
+    }
+
+    #[test]
+    fn exec_result_debug() {
+        let er: ExecResult = serde_json::from_value(json!({
+            "stdout": "ok",
+            "stderr": "",
+            "exit_code": 0,
+        }))
+        .unwrap();
+        let dbg = format!("{er:?}");
+        assert!(dbg.contains("ExecResult"));
+    }
+
+    #[test]
+    fn exec_result_negative_exit_code() {
+        let er: ExecResult = serde_json::from_value(json!({
+            "stdout": "",
+            "stderr": "killed",
+            "exit_code": -1,
+        }))
+        .unwrap();
+        assert_eq!(er.exit_code, -1);
     }
 
     // ── Service ────────────────────────────────────────────────────

@@ -426,10 +426,13 @@ impl AirtableClient {
                 });
             }
 
-            if response
-                .content_length()
-                .is_some_and(|len| len > MAX_ATTACHMENT_DOWNLOAD_BYTES)
-            {
+            let declared_length = response
+                .headers()
+                .get(header::CONTENT_LENGTH)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok())
+                .or_else(|| response.content_length());
+            if declared_length.is_some_and(|len| len > MAX_ATTACHMENT_DOWNLOAD_BYTES) {
                 return Err(AirtableError::AttachmentTooLarge {
                     max_bytes: MAX_ATTACHMENT_DOWNLOAD_BYTES,
                 });
@@ -456,9 +459,8 @@ impl AirtableClient {
             let mut bytes = Vec::new();
             let mut total_bytes = 0_u64;
             while let Some(chunk) = response.chunk().await.map_err(AirtableError::Http)? {
-                total_bytes = total_bytes
-                    .checked_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX))
-                    .unwrap_or(u64::MAX);
+                total_bytes =
+                    total_bytes.saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
                 if total_bytes > MAX_ATTACHMENT_DOWNLOAD_BYTES {
                     return Err(AirtableError::AttachmentTooLarge {
                         max_bytes: MAX_ATTACHMENT_DOWNLOAD_BYTES,

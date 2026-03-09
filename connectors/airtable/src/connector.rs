@@ -144,6 +144,8 @@ impl LinkedExpansionState {
     }
 }
 
+type BoxFcpFuture<'a, T> = Pin<Box<dyn Future<Output = FcpResult<T>> + 'a>>;
+
 /// FCP Airtable Connector.
 pub struct AirtableConnector {
     base: Arc<BaseConnector>,
@@ -1778,7 +1780,7 @@ impl AirtableConnector {
         mut expansion_state: Option<&'a mut LinkedExpansionState>,
         depth_remaining: usize,
         include_field_metadata: bool,
-    ) -> Pin<Box<dyn Future<Output = FcpResult<serde_json::Value>> + 'a>> {
+    ) -> BoxFcpFuture<'a, serde_json::Value> {
         Box::pin(async move {
             let record_path = (table.id.clone(), record.id.clone());
             let path_inserted = expansion_state
@@ -1840,8 +1842,7 @@ impl AirtableConnector {
         config: &'a LinkedExpansionConfig,
         state: &'a mut LinkedExpansionState,
         depth_remaining: usize,
-    ) -> Pin<Box<dyn Future<Output = FcpResult<serde_json::Map<String, serde_json::Value>>> + 'a>>
-    {
+    ) -> BoxFcpFuture<'a, serde_json::Map<String, serde_json::Value>> {
         Box::pin(async move {
             if depth_remaining == 0 {
                 return Ok(serde_json::Map::new());
@@ -1901,11 +1902,13 @@ impl AirtableConnector {
                                 .await?,
                             );
                         }
-                        Err(AirtableError::Api {
-                            status_code: Some(404),
-                            ..
-                        })
-                        | Err(AirtableError::RecordNotFound { .. }) => {
+                        Err(
+                            AirtableError::Api {
+                                status_code: Some(404),
+                                ..
+                            }
+                            | AirtableError::RecordNotFound { .. },
+                        ) => {
                             resolved_records.push(json!({ "id": linked_id, "status": "missing" }));
                         }
                         Err(error) => return Err(error.to_fcp_error()),

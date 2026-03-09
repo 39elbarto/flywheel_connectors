@@ -670,30 +670,36 @@ async fn client_download_attachment_rejects_disallowed_host_without_leaking_quer
 
 #[fcp_async_core::runtime::test]
 async fn client_download_attachment_rejects_oversized_content_length() {
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/attachment.bin"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "application/octet-stream")
-                .insert_header("content-length", "104857601")
-                .set_body_bytes(Vec::new()),
-        )
-        .mount(&server)
-        .await;
+    use fcp_async_core::io::AsyncWriteExt;
 
+    let listener = fcp_async_core::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = fcp_async_core::task::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 104857601\r\n\r\n",
+            )
+            .await
+            .unwrap();
+    });
+
+    let base_url = format!("http://{addr}");
     let client = AirtableClient::new("test_tok")
         .unwrap()
-        .with_base_url(server.uri());
-    let url = format!("{}/attachment.bin", server.uri());
+        .with_base_url(&base_url);
+    let url = format!("{base_url}/attachment.bin");
     let result = client.download_attachment(&url).await;
 
     assert!(matches!(
         result.unwrap_err(),
         AirtableError::AttachmentTooLarge {
-            max_bytes: 104857600
+            max_bytes: 104_857_600
         }
     ));
+    server.await.unwrap();
 }
 
 #[fcp_async_core::runtime::test]

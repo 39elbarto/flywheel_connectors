@@ -243,6 +243,67 @@ impl SentryClient {
         self.get(&format!("/issues/{issue_id}/")).await
     }
 
+    /// Search issues with structured filters.
+    pub async fn search_issues(
+        &self,
+        org: &str,
+        project: &str,
+        query: Option<&str>,
+        status: Option<&str>,
+        assigned_to: Option<&str>,
+        level: Option<&str>,
+        first_seen_start: Option<&str>,
+        first_seen_end: Option<&str>,
+        sort: Option<&str>,
+        cursor: Option<&str>,
+        per_page: Option<u32>,
+    ) -> SentryResult<serde_json::Value> {
+        let mut parts = Vec::new();
+        // Build the Sentry search query string from structured params
+        if let Some(q) = query {
+            parts.push(q.to_string());
+        }
+        if let Some(s) = status {
+            parts.push(format!("is:{s}"));
+        }
+        if let Some(a) = assigned_to {
+            parts.push(format!("assigned:{a}"));
+        }
+        if let Some(l) = level {
+            parts.push(format!("level:{l}"));
+        }
+        if let Some(start) = first_seen_start {
+            parts.push(format!("firstSeen:>{start}"));
+        }
+        if let Some(end) = first_seen_end {
+            parts.push(format!("firstSeen:<{end}"));
+        }
+        let combined_query = parts.join(" ");
+
+        let mut params = Vec::new();
+        params.push(format!("project={project}"));
+        if !combined_query.is_empty() {
+            params.push(format!("query={combined_query}"));
+        }
+        if let Some(s) = sort {
+            params.push(format!("sort={s}"));
+        }
+        if let Some(c) = cursor {
+            params.push(format!("cursor={c}"));
+        }
+        if let Some(pp) = per_page {
+            params.push(format!("per_page={pp}"));
+        }
+        let qs = params.join("&");
+        self.get(&format!("/projects/{org}/{project}/issues/?{qs}"))
+            .await
+    }
+
+    /// Get issue summary (concise metadata without full event data).
+    pub async fn get_issue_summary(&self, issue_id: &str) -> SentryResult<serde_json::Value> {
+        self.get(&format!("/issues/{issue_id}/")).await
+    }
+
     /// Update an issue (status, assignment, etc.).
     pub async fn update_issue(
         &self,

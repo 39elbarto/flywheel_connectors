@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:07208b0dc54263b20f7b2044321aba3623f4a14e638b38f3c601ed3c0eb73d15"
+interface_hash = "blake3-256:fcp.interface.v2:c7a675e92e4d520ba2363e563a6e8a8b7fcbff59e22cd5c5ff13a43c30ee3b36"
 
 [connector]
 id = "fcp.sentry"
@@ -633,6 +633,180 @@ examples = ['{"organization_slug": "my-org", "project_slug": "backend", "event_i
 related = [
     "sentry.discover_query",
     "sentry.get_event",
+]
+
+[provides.operations."sentry.issue.get_summary"]
+description = "Get a concise summary of a Sentry issue without full event data"
+capability = "sentry.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."sentry.issue.get_summary".input_schema]
+required = ["issue_id"]
+type = "object"
+
+[provides.operations."sentry.issue.get_summary".input_schema.properties.issue_id]
+description = "Sentry issue ID"
+type = "string"
+
+[provides.operations."sentry.issue.get_summary".output_schema]
+required = ["summary"]
+type = "object"
+
+[provides.operations."sentry.issue.get_summary".output_schema.properties.summary]
+description = "Concise issue summary (id, title, status, level, count, userCount, firstSeen, lastSeen, assignedTo, shortId)"
+type = "object"
+
+[provides.operations."sentry.issue.get_summary".network_constraints]
+host_allow = [
+    "sentry.io",
+    "*.sentry.io",
+    "$sentry_host",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
+
+[provides.operations."sentry.issue.get_summary".ai_hints]
+when_to_use = "Get a concise summary of a Sentry issue without full event data. Useful for dashboards and quick triage."
+common_mistakes = ["Using get_issue when only summary metadata is needed (get_issue returns much more data)."]
+examples = ['{"issue_id": "1234567890"}']
+related = [
+    "sentry.get_issue",
+    "sentry.issue.search",
+    "sentry.list_issues",
+]
+
+[provides.operations."sentry.issue.search"]
+description = "Search Sentry issues with structured filters (status, assignee, level, time range)"
+capability = "sentry.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."sentry.issue.search".input_schema]
+required = [
+    "organization_slug",
+    "project_slug",
+]
+type = "object"
+
+[provides.operations."sentry.issue.search".input_schema.properties.assigned_to]
+description = "Filter by assignee (email or 'team:slug')"
+type = "string"
+
+[provides.operations."sentry.issue.search".input_schema.properties.cursor]
+description = "Pagination cursor"
+type = "string"
+
+[provides.operations."sentry.issue.search".input_schema.properties.first_seen_end]
+description = "ISO 8601 date — issues first seen before this date"
+type = "string"
+
+[provides.operations."sentry.issue.search".input_schema.properties.first_seen_start]
+description = "ISO 8601 date — issues first seen after this date"
+type = "string"
+
+[provides.operations."sentry.issue.search".input_schema.properties.level]
+description = "Filter by error level"
+enum = [
+    "error",
+    "warning",
+    "info",
+    "fatal",
+]
+type = "string"
+
+[provides.operations."sentry.issue.search".input_schema.properties.organization_slug]
+description = "Sentry organization slug"
+type = "string"
+
+[provides.operations."sentry.issue.search".input_schema.properties.per_page]
+description = "Results per page (max 100)"
+maximum = 100
+minimum = 1
+type = "integer"
+
+[provides.operations."sentry.issue.search".input_schema.properties.project_slug]
+description = "Sentry project slug"
+type = "string"
+
+[provides.operations."sentry.issue.search".input_schema.properties.query]
+description = "Free-text search query"
+type = "string"
+
+[provides.operations."sentry.issue.search".input_schema.properties.sort]
+description = "Sort order (date, new, priority, freq, user)"
+type = "string"
+
+[provides.operations."sentry.issue.search".input_schema.properties.status]
+description = "Filter by issue status"
+enum = [
+    "unresolved",
+    "resolved",
+    "ignored",
+]
+type = "string"
+
+[provides.operations."sentry.issue.search".output_schema]
+required = ["issues"]
+type = "object"
+
+[provides.operations."sentry.issue.search".output_schema.properties.issues]
+description = "Matching issue objects"
+type = "array"
+
+[provides.operations."sentry.issue.search".output_schema.properties.issues.items]
+type = "object"
+
+[provides.operations."sentry.issue.search".network_constraints]
+host_allow = [
+    "sentry.io",
+    "*.sentry.io",
+    "$sentry_host",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."sentry.issue.search".ai_hints]
+when_to_use = "Search Sentry issues with structured filters. More ergonomic than list_issues for filtered searches."
+common_mistakes = [
+    "Using raw Sentry search syntax instead of the structured filter parameters.",
+    "Not using cursor-based pagination for large result sets.",
+]
+examples = ['{"organization_slug": "my-org", "project_slug": "backend", "status": "unresolved", "level": "error", "sort": "priority"}']
+related = [
+    "sentry.list_issues",
+    "sentry.get_issue",
+    "sentry.issue.get_summary",
 ]
 
 [provides.operations."sentry.list_alert_rules"]
@@ -1371,6 +1545,8 @@ scope = "instance"
 "sentry.list_issue_events" = ["sentry.read"]
 "sentry.delete_issue" = ["sentry.admin"]
 "sentry.get_issue" = ["sentry.read"]
+"sentry.issue.get_summary" = ["sentry.read"]
+"sentry.issue.search" = ["sentry.read"]
 "sentry.list_alert_rules" = ["sentry.read"]
 "sentry.list_issues" = ["sentry.read"]
 "sentry.delete_alert_rule" = ["sentry.admin"]

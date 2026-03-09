@@ -318,6 +318,8 @@ impl SentryConnector {
             "sentry.create_alert_rule" => self.invoke_create_alert_rule(client, &input).await,
             "sentry.update_alert_rule" => self.invoke_update_alert_rule(client, &input).await,
             "sentry.delete_alert_rule" => self.invoke_delete_alert_rule(client, &input).await,
+            "sentry.issue.search" => self.invoke_issue_search(client, &input).await,
+            "sentry.issue.get_summary" => self.invoke_issue_get_summary(client, &input).await,
             _ => {
                 return Err(FcpError::InvalidRequest {
                     code: 1002,
@@ -592,6 +594,58 @@ impl SentryConnector {
         let rule_id = require_str(input, "rule_id")?;
         client.delete_alert_rule(org, project, rule_id).await?;
         Ok(json!({ "deleted": true }))
+    }
+
+    async fn invoke_issue_search(
+        &self,
+        client: &SentryClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, SentryError> {
+        let org = require_str(input, "organization_slug")?;
+        let project = require_str(input, "project_slug")?;
+        let query = input.get("query").and_then(|v| v.as_str());
+        let status = input.get("status").and_then(|v| v.as_str());
+        let assigned_to = input.get("assigned_to").and_then(|v| v.as_str());
+        let level = input.get("level").and_then(|v| v.as_str());
+        let first_seen_start = input.get("first_seen_start").and_then(|v| v.as_str());
+        let first_seen_end = input.get("first_seen_end").and_then(|v| v.as_str());
+        let sort = input.get("sort").and_then(|v| v.as_str());
+        let cursor = input.get("cursor").and_then(|v| v.as_str());
+        let per_page = input.get("per_page").and_then(|v| v.as_u64()).map(|v| v as u32);
+        let data = client
+            .search_issues(
+                org, project, query, status, assigned_to, level,
+                first_seen_start, first_seen_end, sort, cursor, per_page,
+            )
+            .await?;
+        Ok(json!({ "issues": data }))
+    }
+
+    async fn invoke_issue_get_summary(
+        &self,
+        client: &SentryClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, SentryError> {
+        let issue_id = require_str(input, "issue_id")?;
+        let data = client.get_issue_summary(issue_id).await?;
+        // Extract only summary fields from the full issue response
+        Ok(json!({
+            "summary": {
+                "id": data.get("id"),
+                "title": data.get("title"),
+                "shortId": data.get("shortId"),
+                "status": data.get("status"),
+                "level": data.get("level"),
+                "count": data.get("count"),
+                "userCount": data.get("userCount"),
+                "firstSeen": data.get("firstSeen"),
+                "lastSeen": data.get("lastSeen"),
+                "assignedTo": data.get("assignedTo"),
+                "metadata": data.get("metadata"),
+                "type": data.get("type"),
+                "platform": data.get("platform")
+            }
+        }))
     }
 }
 
@@ -1247,6 +1301,89 @@ fn operations_info() -> Vec<OperationInfo> {
                 ],
             },
         ),
+        op_info(
+            "sentry.issue.search",
+            "Search issues with structured filters",
+            json!({
+                "type": "object",
+                "required": ["organization_slug", "project_slug"],
+                "properties": {
+                    "organization_slug": { "type": "string", "description": "Sentry organization slug" },
+                    "project_slug": { "type": "string", "description": "Sentry project slug" },
+                    "query": { "type": "string", "description": "Free-text search query" },
+                    "status": { "type": "string", "enum": ["unresolved", "resolved", "ignored"], "description": "Filter by issue status" },
+                    "assigned_to": { "type": "string", "description": "Filter by assignee (email or 'team:slug')" },
+                    "level": { "type": "string", "enum": ["error", "warning", "info", "fatal"], "description": "Filter by error level" },
+                    "first_seen_start": { "type": "string", "description": "ISO 8601 date — issues first seen after this date" },
+                    "first_seen_end": { "type": "string", "description": "ISO 8601 date — issues first seen before this date" },
+                    "sort": { "type": "string", "description": "Sort order (date, new, priority, freq, user)" },
+                    "cursor": { "type": "string", "description": "Pagination cursor" },
+                    "per_page": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Results per page (max 100)" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["issues"],
+                "properties": {
+                    "issues": { "type": "array", "description": "Matching issue objects", "items": { "type": "object" } }
+                }
+            }),
+            "sentry.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Search Sentry issues with structured filters. More ergonomic than list_issues for filtered searches.".into(),
+                common_mistakes: vec![
+                    "Using raw Sentry search syntax instead of the structured filter parameters.".into(),
+                    "Not using cursor-based pagination for large result sets.".into(),
+                ],
+                examples: vec![
+                    r#"{"organization_slug": "my-org", "project_slug": "backend", "status": "unresolved", "level": "error", "sort": "priority"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("sentry.list_issues"),
+                    CapabilityId::from_static("sentry.get_issue"),
+                    CapabilityId::from_static("sentry.issue.get_summary"),
+                ],
+            },
+        ),
+        op_info(
+            "sentry.issue.get_summary",
+            "Get a concise summary of a Sentry issue",
+            json!({
+                "type": "object",
+                "required": ["issue_id"],
+                "properties": {
+                    "issue_id": { "type": "string", "description": "Sentry issue ID" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["summary"],
+                "properties": {
+                    "summary": { "type": "object", "description": "Concise issue summary (id, title, status, level, count, userCount, firstSeen, lastSeen, assignedTo, shortId)" }
+                }
+            }),
+            "sentry.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Get a concise summary of a Sentry issue without full event data. Useful for dashboards and quick triage.".into(),
+                common_mistakes: vec![
+                    "Using get_issue when only summary metadata is needed (get_issue returns much more data).".into(),
+                ],
+                examples: vec![
+                    r#"{"issue_id": "1234567890"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("sentry.get_issue"),
+                    CapabilityId::from_static("sentry.issue.search"),
+                    CapabilityId::from_static("sentry.list_issues"),
+                ],
+            },
+        ),
     ]
 }
 
@@ -1368,10 +1505,10 @@ mod tests {
     }
 
     #[test]
-    fn operations_info_has_16_operations() {
+    fn operations_info_has_18_operations() {
         let ops = ops_json();
         let arr = ops.as_array().unwrap();
-        assert_eq!(arr.len(), 16);
+        assert_eq!(arr.len(), 18);
     }
 
     #[test]

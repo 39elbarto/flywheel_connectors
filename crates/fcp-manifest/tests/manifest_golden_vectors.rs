@@ -3991,6 +3991,8 @@ fn sentry_full_manifest_parses_with_all_operations() {
         "sentry.get_issue",
         "sentry.get_release",
         "sentry.get_transaction",
+        "sentry.issue.get_summary",
+        "sentry.issue.search",
         "sentry.list_alert_rules",
         "sentry.list_issue_events",
         "sentry.list_issues",

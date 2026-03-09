@@ -115,12 +115,14 @@ async fn introspect_lists_operations() {
     let connector = SentryConnector::new();
     let result = connector.handle_introspect().await.unwrap();
     let ops = result["operations"].as_array().expect("operations array");
-    assert!(ops.len() >= 16, "should have at least 16 operations");
+    assert!(ops.len() >= 18, "should have at least 18 operations");
     let ids: Vec<&str> = ops.iter().filter_map(|o| o["id"].as_str()).collect();
     assert!(ids.contains(&"sentry.list_issues"));
     assert!(ids.contains(&"sentry.get_event"));
     assert!(ids.contains(&"sentry.discover_query"));
     assert!(ids.contains(&"sentry.create_alert_rule"));
+    assert!(ids.contains(&"sentry.issue.search"));
+    assert!(ids.contains(&"sentry.issue.get_summary"));
 }
 
 #[fcp_async_core::runtime::test]
@@ -246,6 +248,88 @@ async fn invoke_get_issue() {
         "TypeError: undefined is not a function"
     );
     assert_eq!(result["issue"]["count"], "42");
+}
+
+// ── Invoke: Issue Search ──────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn invoke_issue_search() {
+    let mock = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/projects/my-org/backend/issues/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {"id": "100", "title": "NullPointerException", "level": "error", "status": "unresolved"},
+            {"id": "101", "title": "TimeoutError", "level": "error", "status": "unresolved"},
+        ])))
+        .mount(&mock)
+        .await;
+
+    let connector = configured_connector(&mock).await;
+    let result = connector
+        .handle_invoke(json!({
+            "operation_id": "sentry.issue.search",
+            "input": {
+                "organization_slug": "my-org",
+                "project_slug": "backend",
+                "status": "unresolved",
+                "level": "error",
+                "sort": "priority",
+            },
+        }))
+        .await
+        .unwrap();
+
+    let issues = result["issues"].as_array().unwrap();
+    assert_eq!(issues.len(), 2);
+    assert_eq!(issues[0]["title"], "NullPointerException");
+}
+
+// ── Invoke: Issue Get Summary ────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn invoke_issue_get_summary() {
+    let mock = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/issues/12345/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "12345",
+            "title": "TypeError: undefined is not a function",
+            "shortId": "BACKEND-42",
+            "status": "unresolved",
+            "level": "error",
+            "count": "42",
+            "userCount": 15,
+            "firstSeen": "2026-01-01T00:00:00Z",
+            "lastSeen": "2026-03-09T12:00:00Z",
+            "assignedTo": {"name": "Alice", "email": "alice@example.com"},
+            "metadata": {"type": "TypeError"},
+            "type": "error",
+            "platform": "javascript",
+            "extra_field": "should_not_appear"
+        })))
+        .mount(&mock)
+        .await;
+
+    let connector = configured_connector(&mock).await;
+    let result = connector
+        .handle_invoke(json!({
+            "operation_id": "sentry.issue.get_summary",
+            "input": {"issue_id": "12345"},
+        }))
+        .await
+        .unwrap();
+
+    let summary = &result["summary"];
+    assert_eq!(summary["id"], "12345");
+    assert_eq!(summary["title"], "TypeError: undefined is not a function");
+    assert_eq!(summary["shortId"], "BACKEND-42");
+    assert_eq!(summary["status"], "unresolved");
+    assert_eq!(summary["level"], "error");
+    assert_eq!(summary["count"], "42");
+    assert_eq!(summary["userCount"], 15);
+    assert_eq!(summary["platform"], "javascript");
+    // Ensure extra fields are not leaked
+    assert!(result["summary"].get("extra_field").is_none());
 }
 
 // ── Invoke: Update Issue ──────────────────────────────────────────────
@@ -832,7 +916,7 @@ async fn doctor_fully_configured() {
     assert!(checks.iter().all(|c| c["passed"] == true));
 }
 
-// ── Simulate: all 16 operations ──────────────────────────────────────
+// ── Simulate: all 18 operations ──────────────────────────────────────
 
 #[fcp_async_core::runtime::test]
 async fn simulate_all_known_operations() {
@@ -854,6 +938,8 @@ async fn simulate_all_known_operations() {
         "sentry.create_alert_rule",
         "sentry.update_alert_rule",
         "sentry.delete_alert_rule",
+        "sentry.issue.search",
+        "sentry.issue.get_summary",
     ];
     for op in &ops {
         let result = connector

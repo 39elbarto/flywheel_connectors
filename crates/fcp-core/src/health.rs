@@ -1055,4 +1055,776 @@ mod tests {
         );
         assert_eq!(HealthState::Stopping.as_str(), "stopping");
     }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // HealthState – additional
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn health_state_debug_starting() {
+        let s = format!("{:?}", HealthState::Starting);
+        assert!(s.contains("Starting"));
+    }
+
+    #[test]
+    fn health_state_debug_ready() {
+        let s = format!("{:?}", HealthState::Ready);
+        assert!(s.contains("Ready"));
+    }
+
+    #[test]
+    fn health_state_debug_degraded_includes_reason() {
+        let state = HealthState::Degraded {
+            reason: "mem_pressure".to_string(),
+        };
+        let s = format!("{state:?}");
+        assert!(s.contains("Degraded"));
+        assert!(s.contains("mem_pressure"));
+    }
+
+    #[test]
+    fn health_state_debug_error_includes_reason() {
+        let state = HealthState::Error {
+            reason: "disk_full".to_string(),
+        };
+        let s = format!("{state:?}");
+        assert!(s.contains("Error"));
+        assert!(s.contains("disk_full"));
+    }
+
+    #[test]
+    fn health_state_debug_stopping() {
+        let s = format!("{:?}", HealthState::Stopping);
+        assert!(s.contains("Stopping"));
+    }
+
+    #[test]
+    fn health_state_clone_starting() {
+        let state = HealthState::Starting;
+        let cloned = Clone::clone(&state);
+        assert_eq!(cloned.as_str(), "starting");
+    }
+
+    #[test]
+    fn health_state_clone_ready() {
+        let state = HealthState::Ready;
+        let cloned = Clone::clone(&state);
+        assert_eq!(cloned.as_str(), "ready");
+    }
+
+    #[test]
+    fn health_state_clone_stopping() {
+        let state = HealthState::Stopping;
+        let cloned = Clone::clone(&state);
+        assert_eq!(cloned.as_str(), "stopping");
+    }
+
+    #[test]
+    fn health_state_clone_error_preserves_reason() {
+        let state = HealthState::Error {
+            reason: "oops".to_string(),
+        };
+        let cloned = Clone::clone(&state);
+        assert!(matches!(&cloned, HealthState::Error { reason } if reason == "oops"));
+    }
+
+    #[test]
+    fn health_state_degraded_empty_reason() {
+        let state = HealthState::Degraded {
+            reason: String::new(),
+        };
+        assert_eq!(state.as_str(), "degraded");
+        let json = serde_json::to_string(&state).unwrap();
+        let decoded: HealthState = serde_json::from_str(&json).unwrap();
+        assert!(matches!(&decoded, HealthState::Degraded { reason } if reason.is_empty()));
+    }
+
+    #[test]
+    fn health_state_error_empty_reason() {
+        let state = HealthState::Error {
+            reason: String::new(),
+        };
+        assert_eq!(state.as_str(), "error");
+    }
+
+    #[test]
+    fn health_state_roundtrip_all_variants() {
+        let states = vec![
+            HealthState::Starting,
+            HealthState::Ready,
+            HealthState::Degraded {
+                reason: "slow".to_string(),
+            },
+            HealthState::Error {
+                reason: "crash".to_string(),
+            },
+            HealthState::Stopping,
+        ];
+        for state in &states {
+            let json = serde_json::to_string(state).unwrap();
+            let decoded: HealthState = serde_json::from_str(&json).unwrap();
+            assert_eq!(state.as_str(), decoded.as_str());
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // HealthSnapshot – additional
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn health_snapshot_default_not_ready() {
+        let snap = HealthSnapshot::default();
+        assert!(!snap.is_ready());
+    }
+
+    #[test]
+    fn health_snapshot_default_not_healthy() {
+        let snap = HealthSnapshot::default();
+        assert!(!snap.is_healthy());
+    }
+
+    #[test]
+    fn health_snapshot_ready_uptime_zero() {
+        let snap = HealthSnapshot::ready();
+        assert_eq!(snap.uptime_ms, 0);
+    }
+
+    #[test]
+    fn health_snapshot_ready_no_load() {
+        let snap = HealthSnapshot::ready();
+        assert!(snap.load.is_none());
+    }
+
+    #[test]
+    fn health_snapshot_ready_no_details() {
+        let snap = HealthSnapshot::ready();
+        assert!(snap.details.is_none());
+    }
+
+    #[test]
+    fn health_snapshot_ready_no_rate_limit() {
+        let snap = HealthSnapshot::ready();
+        assert!(snap.rate_limit.is_none());
+    }
+
+    #[test]
+    fn health_snapshot_degraded_has_correct_reason() {
+        let snap = HealthSnapshot::degraded("latency spike");
+        assert!(
+            matches!(&snap.status, HealthState::Degraded { reason } if reason == "latency spike")
+        );
+    }
+
+    #[test]
+    fn health_snapshot_error_has_correct_reason() {
+        let snap = HealthSnapshot::error("timeout");
+        assert!(matches!(&snap.status, HealthState::Error { reason } if reason == "timeout"));
+    }
+
+    #[test]
+    fn health_snapshot_with_load() {
+        let mut snap = HealthSnapshot::ready();
+        snap.load = Some(0.5);
+        let json = serde_json::to_string(&snap).unwrap();
+        assert!(json.contains("\"load\""));
+        let decoded: HealthSnapshot = serde_json::from_str(&json).unwrap();
+        assert!((decoded.load.unwrap() - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn health_snapshot_load_zero() {
+        let mut snap = HealthSnapshot::ready();
+        snap.load = Some(0.0);
+        let json = serde_json::to_string(&snap).unwrap();
+        let decoded: HealthSnapshot = serde_json::from_str(&json).unwrap();
+        assert!((decoded.load.unwrap()).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn health_snapshot_load_one() {
+        let mut snap = HealthSnapshot::ready();
+        snap.load = Some(1.0);
+        let json = serde_json::to_string(&snap).unwrap();
+        let decoded: HealthSnapshot = serde_json::from_str(&json).unwrap();
+        assert!((decoded.load.unwrap() - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn health_snapshot_with_details_json() {
+        let mut snap = HealthSnapshot::ready();
+        snap.details = Some(json!({"version": "1.2.3", "active": true}));
+        let json = serde_json::to_string(&snap).unwrap();
+        assert!(json.contains("\"details\""));
+        let decoded: HealthSnapshot = serde_json::from_str(&json).unwrap();
+        let details = decoded.details.unwrap();
+        assert_eq!(details["version"], "1.2.3");
+        assert_eq!(details["active"], true);
+    }
+
+    #[test]
+    fn health_snapshot_max_uptime() {
+        let mut snap = HealthSnapshot::ready();
+        snap.uptime_ms = u64::MAX;
+        let json = serde_json::to_string(&snap).unwrap();
+        let decoded: HealthSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.uptime_ms, u64::MAX);
+    }
+
+    #[test]
+    fn health_snapshot_debug_format() {
+        let snap = HealthSnapshot::ready();
+        let debug = format!("{snap:?}");
+        assert!(debug.contains("HealthSnapshot"));
+    }
+
+    #[test]
+    fn health_snapshot_clone_preserves_fields() {
+        let mut snap = HealthSnapshot::ready();
+        snap.uptime_ms = 12345;
+        snap.load = Some(0.42);
+        let cloned = Clone::clone(&snap);
+        assert!(cloned.is_ready());
+        assert_eq!(cloned.uptime_ms, 12345);
+        assert!((cloned.load.unwrap() - 0.42).abs() < f32::EPSILON);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // RateLimitStatus – additional
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn rate_limit_status_not_limited_when_remaining_positive() {
+        let status = RateLimitStatus {
+            limit: 1000,
+            remaining: 1,
+            reset_at: 0,
+            window_seconds: 60,
+        };
+        assert!(!status.is_limited());
+    }
+
+    #[test]
+    fn rate_limit_status_limited_at_zero_remaining() {
+        let status = RateLimitStatus {
+            limit: 100,
+            remaining: 0,
+            reset_at: 0,
+            window_seconds: 60,
+        };
+        assert!(status.is_limited());
+    }
+
+    #[test]
+    fn rate_limit_status_debug_format() {
+        let status = RateLimitStatus {
+            limit: 50,
+            remaining: 25,
+            reset_at: 1_000_000,
+            window_seconds: 120,
+        };
+        let debug = format!("{status:?}");
+        assert!(debug.contains("RateLimitStatus"));
+        assert!(debug.contains("50"));
+        assert!(debug.contains("25"));
+    }
+
+    #[test]
+    fn rate_limit_status_clone_preserves_all_fields() {
+        let status = RateLimitStatus {
+            limit: 200,
+            remaining: 150,
+            reset_at: 9_999_999,
+            window_seconds: 3600,
+        };
+        let cloned = Clone::clone(&status);
+        assert_eq!(cloned.limit, 200);
+        assert_eq!(cloned.remaining, 150);
+        assert_eq!(cloned.reset_at, 9_999_999);
+        assert_eq!(cloned.window_seconds, 3600);
+    }
+
+    #[test]
+    fn rate_limit_status_json_field_names() {
+        let status = RateLimitStatus {
+            limit: 10,
+            remaining: 5,
+            reset_at: 100,
+            window_seconds: 30,
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(json.contains("\"limit\""));
+        assert!(json.contains("\"remaining\""));
+        assert!(json.contains("\"reset_at\""));
+        assert!(json.contains("\"window_seconds\""));
+    }
+
+    #[test]
+    fn rate_limit_status_max_values() {
+        let status = RateLimitStatus {
+            limit: u32::MAX,
+            remaining: u32::MAX,
+            reset_at: u64::MAX,
+            window_seconds: u32::MAX,
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        let decoded: RateLimitStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.limit, u32::MAX);
+        assert_eq!(decoded.remaining, u32::MAX);
+        assert_eq!(decoded.reset_at, u64::MAX);
+        assert_eq!(decoded.window_seconds, u32::MAX);
+    }
+
+    #[test]
+    fn rate_limit_status_zero_values() {
+        let status = RateLimitStatus {
+            limit: 0,
+            remaining: 0,
+            reset_at: 0,
+            window_seconds: 0,
+        };
+        assert!(status.is_limited());
+        let json = serde_json::to_string(&status).unwrap();
+        let decoded: RateLimitStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.limit, 0);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // ConnectorHealth – additional
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn connector_health_healthy_debug() {
+        let h = ConnectorHealth::healthy();
+        let debug = format!("{h:?}");
+        assert!(debug.contains("Healthy"));
+    }
+
+    #[test]
+    fn connector_health_degraded_debug() {
+        let h = ConnectorHealth::degraded("slow");
+        let debug = format!("{h:?}");
+        assert!(debug.contains("Degraded"));
+        assert!(debug.contains("slow"));
+    }
+
+    #[test]
+    fn connector_health_unavailable_debug() {
+        let h = ConnectorHealth::unavailable("down");
+        let debug = format!("{h:?}");
+        assert!(debug.contains("Unavailable"));
+        assert!(debug.contains("down"));
+    }
+
+    #[test]
+    fn connector_health_clone_healthy() {
+        let h = ConnectorHealth::healthy();
+        let cloned = Clone::clone(&h);
+        assert!(cloned.is_healthy());
+        assert!(cloned.is_available());
+    }
+
+    #[test]
+    fn connector_health_clone_unavailable() {
+        let h = ConnectorHealth::unavailable("err");
+        let cloned = Clone::clone(&h);
+        assert!(!cloned.is_healthy());
+        assert!(!cloned.is_available());
+    }
+
+    #[test]
+    fn connector_health_unavailable_has_since() {
+        let h = ConnectorHealth::unavailable("test");
+        match &h {
+            ConnectorHealth::Unavailable { since, .. } => {
+                let now = chrono::Utc::now();
+                let diff = (now - *since).num_seconds();
+                assert!(diff.abs() < 2);
+            }
+            _ => panic!("expected Unavailable"),
+        }
+    }
+
+    #[test]
+    fn connector_health_degraded_empty_reason() {
+        let h = ConnectorHealth::degraded("");
+        assert!(h.is_available());
+        assert!(!h.is_healthy());
+        assert!(matches!(&h, ConnectorHealth::Degraded { reason } if reason.is_empty()));
+    }
+
+    #[test]
+    fn connector_health_from_health_state_degraded_preserves_reason() {
+        let state = HealthState::Degraded {
+            reason: "high_latency".to_string(),
+        };
+        let ch = ConnectorHealth::from(&state);
+        assert!(
+            matches!(&ch, ConnectorHealth::Degraded { reason } if reason == "high_latency")
+        );
+    }
+
+    #[test]
+    fn connector_health_from_health_state_error_preserves_reason() {
+        let state = HealthState::Error {
+            reason: "segfault".to_string(),
+        };
+        let ch = ConnectorHealth::from(&state);
+        assert!(
+            matches!(&ch, ConnectorHealth::Unavailable { reason, .. } if reason == "segfault")
+        );
+    }
+
+    #[test]
+    fn connector_health_from_starting_reason_contains_starting() {
+        let state = HealthState::Starting;
+        let ch = ConnectorHealth::from(&state);
+        match &ch {
+            ConnectorHealth::Unavailable { reason, .. } => {
+                assert!(reason.contains("starting"));
+            }
+            _ => panic!("expected Unavailable, got {ch:?}"),
+        }
+    }
+
+    #[test]
+    fn connector_health_from_stopping_reason_contains_stopping() {
+        let state = HealthState::Stopping;
+        let ch = ConnectorHealth::from(&state);
+        match &ch {
+            ConnectorHealth::Unavailable { reason, .. } => {
+                assert!(reason.contains("stopping"));
+            }
+            _ => panic!("expected Unavailable, got {ch:?}"),
+        }
+    }
+
+    #[test]
+    fn connector_health_serde_roundtrip_degraded() {
+        let h = ConnectorHealth::degraded("throttled");
+        let json = serde_json::to_string(&h).unwrap();
+        let decoded: ConnectorHealth = serde_json::from_str(&json).unwrap();
+        assert!(decoded.is_available());
+        assert!(!decoded.is_healthy());
+    }
+
+    #[test]
+    fn connector_health_serde_roundtrip_unavailable() {
+        let h = ConnectorHealth::unavailable("network");
+        let json = serde_json::to_string(&h).unwrap();
+        let decoded: ConnectorHealth = serde_json::from_str(&json).unwrap();
+        assert!(!decoded.is_available());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // SelfCheckStatus – additional
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn self_check_status_debug() {
+        assert_eq!(format!("{:?}", SelfCheckStatus::Ok), "Ok");
+        assert_eq!(format!("{:?}", SelfCheckStatus::Degraded), "Degraded");
+        assert_eq!(format!("{:?}", SelfCheckStatus::Failed), "Failed");
+        assert_eq!(format!("{:?}", SelfCheckStatus::Unsupported), "Unsupported");
+    }
+
+    #[test]
+    fn self_check_status_serde_ok() {
+        let json = serde_json::to_string(&SelfCheckStatus::Ok).unwrap();
+        assert_eq!(json, "\"ok\"");
+    }
+
+    #[test]
+    fn self_check_status_serde_degraded() {
+        let json = serde_json::to_string(&SelfCheckStatus::Degraded).unwrap();
+        assert_eq!(json, "\"degraded\"");
+    }
+
+    #[test]
+    fn self_check_status_serde_failed() {
+        let json = serde_json::to_string(&SelfCheckStatus::Failed).unwrap();
+        assert_eq!(json, "\"failed\"");
+    }
+
+    #[test]
+    fn self_check_status_serde_unsupported() {
+        let json = serde_json::to_string(&SelfCheckStatus::Unsupported).unwrap();
+        assert_eq!(json, "\"unsupported\"");
+    }
+
+    #[test]
+    fn self_check_status_reject_unknown() {
+        let result = serde_json::from_str::<SelfCheckStatus>("\"unknown\"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn self_check_status_eq_reflexive() {
+        let s = SelfCheckStatus::Ok;
+        assert_eq!(s, s);
+    }
+
+    #[test]
+    fn self_check_status_all_ne_pairs() {
+        let all = [
+            SelfCheckStatus::Ok,
+            SelfCheckStatus::Degraded,
+            SelfCheckStatus::Failed,
+            SelfCheckStatus::Unsupported,
+        ];
+        for (i, a) in all.iter().enumerate() {
+            for (j, b) in all.iter().enumerate() {
+                if i == j {
+                    assert_eq!(a, b);
+                } else {
+                    assert_ne!(a, b);
+                }
+            }
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // SelfCheckReport – additional
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn self_check_report_ok_no_details() {
+        let report = SelfCheckReport::ok();
+        assert!(report.details.is_none());
+    }
+
+    #[test]
+    fn self_check_report_degraded_no_details() {
+        let report = SelfCheckReport::degraded("CODE", "msg");
+        assert!(report.details.is_none());
+    }
+
+    #[test]
+    fn self_check_report_failed_no_details() {
+        let report = SelfCheckReport::failed("CODE", "msg");
+        assert!(report.details.is_none());
+    }
+
+    #[test]
+    fn self_check_report_unsupported_reason_code() {
+        let report = SelfCheckReport::unsupported();
+        assert_eq!(report.reason_code.as_deref(), Some("self_check_unsupported"));
+    }
+
+    #[test]
+    fn self_check_report_unsupported_message() {
+        let report = SelfCheckReport::unsupported();
+        assert_eq!(
+            report.message.as_deref(),
+            Some("connector does not implement self-check")
+        );
+    }
+
+    #[test]
+    fn self_check_report_from_error_checksum_mismatch() {
+        let error = FcpError::ChecksumMismatch;
+        let report = SelfCheckReport::from_error(&error);
+        assert_eq!(report.status, SelfCheckStatus::Failed);
+        assert!(report.reason_code.is_some());
+    }
+
+    #[test]
+    fn self_check_report_from_error_token_expired() {
+        let error = FcpError::TokenExpired;
+        let report = SelfCheckReport::from_error(&error);
+        assert_eq!(report.status, SelfCheckStatus::Failed);
+        assert!(report.message.unwrap().contains("expired"));
+    }
+
+    #[test]
+    fn self_check_report_from_error_not_configured() {
+        let error = FcpError::NotConfigured;
+        let report = SelfCheckReport::from_error(&error);
+        assert_eq!(report.status, SelfCheckStatus::Failed);
+    }
+
+    #[test]
+    fn self_check_report_from_error_health_check_failed() {
+        let error = FcpError::HealthCheckFailed {
+            reason: "timeout".to_string(),
+        };
+        let report = SelfCheckReport::from_error(&error);
+        assert_eq!(report.status, SelfCheckStatus::Failed);
+        assert!(report.message.unwrap().contains("timeout"));
+    }
+
+    #[test]
+    fn self_check_report_serde_roundtrip_failed() {
+        let report = SelfCheckReport::failed("NET_ERR", "network error");
+        let json = serde_json::to_string(&report).unwrap();
+        let decoded: SelfCheckReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.status, SelfCheckStatus::Failed);
+        assert_eq!(decoded.reason_code.as_deref(), Some("NET_ERR"));
+        assert_eq!(decoded.message.as_deref(), Some("network error"));
+    }
+
+    #[test]
+    fn self_check_report_serde_roundtrip_unsupported() {
+        let report = SelfCheckReport::unsupported();
+        let json = serde_json::to_string(&report).unwrap();
+        let decoded: SelfCheckReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.status, SelfCheckStatus::Unsupported);
+    }
+
+    #[test]
+    fn self_check_report_debug_format() {
+        let report = SelfCheckReport::ok();
+        let debug = format!("{report:?}");
+        assert!(debug.contains("SelfCheckReport"));
+    }
+
+    #[test]
+    fn self_check_report_clone_all_fields() {
+        let report = SelfCheckReport::failed("X", "Y");
+        let cloned = report.clone();
+        assert_eq!(cloned.status, SelfCheckStatus::Failed);
+        assert_eq!(cloned.reason_code, report.reason_code);
+        assert_eq!(cloned.message, report.message);
+        assert_eq!(cloned.details.is_none(), report.details.is_none());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // LivenessResponse – additional
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn liveness_response_debug() {
+        let resp = LivenessResponse::default();
+        let debug = format!("{resp:?}");
+        assert!(debug.contains("LivenessResponse"));
+    }
+
+    #[test]
+    fn liveness_response_alive_field_in_json() {
+        let resp = LivenessResponse::default();
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"alive\":true"));
+    }
+
+    #[test]
+    fn liveness_response_not_alive_in_json() {
+        let resp = LivenessResponse {
+            alive: false,
+            timestamp: chrono::Utc::now(),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"alive\":false"));
+    }
+
+    #[test]
+    fn liveness_response_timestamp_in_json() {
+        let resp = LivenessResponse::default();
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"timestamp\""));
+    }
+
+    #[test]
+    fn liveness_response_clone_preserves_timestamp() {
+        let resp = LivenessResponse::default();
+        let cloned = resp.clone();
+        assert_eq!(resp.timestamp, cloned.timestamp);
+        assert_eq!(resp.alive, cloned.alive);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // ReadinessResponse – additional
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn readiness_response_debug() {
+        let resp = ReadinessResponse::default();
+        let debug = format!("{resp:?}");
+        assert!(debug.contains("ReadinessResponse"));
+    }
+
+    #[test]
+    fn readiness_response_not_ready() {
+        let resp = ReadinessResponse {
+            ready: false,
+            components: std::collections::HashMap::new(),
+            timestamp: chrono::Utc::now(),
+        };
+        assert!(!resp.ready);
+    }
+
+    #[test]
+    fn readiness_response_single_component() {
+        let mut components = std::collections::HashMap::new();
+        components.insert("db".to_string(), true);
+        let resp = ReadinessResponse {
+            ready: true,
+            components,
+            timestamp: chrono::Utc::now(),
+        };
+        assert_eq!(resp.components.len(), 1);
+        assert!(resp.components["db"]);
+    }
+
+    #[test]
+    fn readiness_response_many_components() {
+        let mut components = std::collections::HashMap::new();
+        for i in 0..10 {
+            components.insert(format!("svc_{i}"), i % 2 == 0);
+        }
+        let resp = ReadinessResponse {
+            ready: false,
+            components,
+            timestamp: chrono::Utc::now(),
+        };
+        assert_eq!(resp.components.len(), 10);
+    }
+
+    #[test]
+    fn readiness_response_serde_with_components() {
+        let mut components = std::collections::HashMap::new();
+        components.insert("cache".to_string(), true);
+        components.insert("queue".to_string(), false);
+        let resp = ReadinessResponse {
+            ready: true,
+            components,
+            timestamp: chrono::Utc::now(),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let decoded: ReadinessResponse = serde_json::from_str(&json).unwrap();
+        assert!(decoded.ready);
+        assert_eq!(decoded.components.len(), 2);
+        assert!(decoded.components["cache"]);
+        assert!(!decoded.components["queue"]);
+    }
+
+    #[test]
+    fn readiness_response_clone_preserves_components() {
+        let mut components = std::collections::HashMap::new();
+        components.insert("x".to_string(), true);
+        let resp = ReadinessResponse {
+            ready: true,
+            components,
+            timestamp: chrono::Utc::now(),
+        };
+        let cloned = Clone::clone(&resp);
+        assert_eq!(cloned.components.len(), 1);
+        assert!(cloned.components["x"]);
+    }
+
+    #[test]
+    fn readiness_response_json_ready_field() {
+        let resp = ReadinessResponse::default();
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"ready\":true"));
+    }
+
+    #[test]
+    fn readiness_response_from_raw_json_no_components() {
+        let raw = r#"{
+            "ready": false,
+            "timestamp": "2025-01-01T00:00:00Z"
+        }"#;
+        let resp: ReadinessResponse = serde_json::from_str(raw).unwrap();
+        assert!(!resp.ready);
+        assert!(resp.components.is_empty());
+    }
 }

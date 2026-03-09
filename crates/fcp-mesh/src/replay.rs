@@ -387,9 +387,7 @@ impl From<TraceError> for TraceReplayError {
 mod tests {
     use super::*;
 
-    use fcp_telemetry::trace_capture::{
-        AdmissionOutcome, GossipEvent, LeaseEvent, PolicyDecision, RoutingDecision, SessionEvent,
-    };
+    use fcp_telemetry::trace_capture::{AdmissionOutcome, PolicyDecision, RoutingDecision};
 
     fn sample_trace() -> CapturedTrace {
         let mut trace = CapturedTrace::new("trace-replay-test");
@@ -822,15 +820,52 @@ mod tests {
         assert!(decode_trace_bytes(b"not valid", TraceReplayInputFormat::Auto).is_err());
     }
 
-    // ── Batch: additional replay tests ──
+    // ---- TraceReplayInputFormat Copy/Clone ----
+
+    #[test]
+    fn trace_replay_input_format_copy() {
+        let a = TraceReplayInputFormat::Json;
+        let b = a; // Copy
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn trace_replay_input_format_eq_all_variants() {
+        assert_eq!(TraceReplayInputFormat::Auto, TraceReplayInputFormat::Auto);
+        assert_eq!(TraceReplayInputFormat::Json, TraceReplayInputFormat::Json);
+        assert_eq!(TraceReplayInputFormat::Cbor, TraceReplayInputFormat::Cbor);
+        assert_ne!(TraceReplayInputFormat::Auto, TraceReplayInputFormat::Json);
+        assert_ne!(TraceReplayInputFormat::Json, TraceReplayInputFormat::Cbor);
+        assert_ne!(TraceReplayInputFormat::Cbor, TraceReplayInputFormat::Auto);
+    }
+
+    #[test]
+    fn trace_replay_input_format_debug() {
+        let auto_dbg = format!("{:?}", TraceReplayInputFormat::Auto);
+        assert!(auto_dbg.contains("Auto"));
+        let json_dbg = format!("{:?}", TraceReplayInputFormat::Json);
+        assert!(json_dbg.contains("Json"));
+        let cbor_dbg = format!("{:?}", TraceReplayInputFormat::Cbor);
+        assert!(cbor_dbg.contains("Cbor"));
+    }
+
+    #[test]
+    fn trace_replay_input_format_cbor_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&TraceReplayInputFormat::Cbor).unwrap(),
+            "\"cbor\""
+        );
+    }
+
+    // ---- TraceReplayDiff ----
 
     #[test]
     fn trace_replay_diff_clone() {
         let diff = TraceReplayDiff {
-            index: 3,
-            event_type: "admission".to_string(),
-            expected_decision: Some("deny".to_string()),
-            actual_decision: None,
+            index: 7,
+            event_type: "policy".to_string(),
+            expected_decision: None,
+            actual_decision: Some("deny".to_string()),
             detail: "missing".to_string(),
         };
         let cloned = diff.clone();
@@ -838,23 +873,55 @@ mod tests {
     }
 
     #[test]
-    fn trace_replay_diff_debug() {
+    fn trace_replay_diff_with_none_decisions() {
         let diff = TraceReplayDiff {
             index: 0,
+            event_type: "gossip".to_string(),
+            expected_decision: None,
+            actual_decision: None,
+            detail: "event mismatch".to_string(),
+        };
+        let json = serde_json::to_string(&diff).unwrap();
+        let back: TraceReplayDiff = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.expected_decision, None);
+        assert_eq!(back.actual_decision, None);
+    }
+
+    #[test]
+    fn trace_replay_diff_debug() {
+        let diff = TraceReplayDiff {
+            index: 3,
+            event_type: "admission".to_string(),
+            expected_decision: Some("admit".to_string()),
+            actual_decision: Some("deny".to_string()),
+            detail: "mismatch".to_string(),
+        };
+        let dbg = format!("{diff:?}");
+        assert!(dbg.contains("admission"));
+        assert!(dbg.contains("admit"));
+    }
+
+    #[test]
+    fn trace_replay_diff_large_index() {
+        let diff = TraceReplayDiff {
+            index: usize::MAX,
             event_type: "routing".to_string(),
             expected_decision: None,
             actual_decision: None,
-            detail: "test".to_string(),
+            detail: "max index".to_string(),
         };
-        let debug = format!("{diff:?}");
-        assert!(debug.contains("TraceReplayDiff"));
+        let json = serde_json::to_string(&diff).unwrap();
+        let back: TraceReplayDiff = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.index, usize::MAX);
     }
+
+    // ---- TraceReplaySummary ----
 
     #[test]
     fn trace_replay_summary_clone() {
         let summary = TraceReplaySummary {
             total_events: 5,
-            event_type_counts: BTreeMap::new(),
+            event_type_counts: BTreeMap::from([("routing".to_string(), 3)]),
             expected_decision_counts: BTreeMap::new(),
             actual_decision_counts: BTreeMap::new(),
             matched_events: 5,
@@ -867,9 +934,71 @@ mod tests {
     }
 
     #[test]
+    fn trace_replay_summary_empty_maps() {
+        let summary = TraceReplaySummary {
+            total_events: 0,
+            event_type_counts: BTreeMap::new(),
+            expected_decision_counts: BTreeMap::new(),
+            actual_decision_counts: BTreeMap::new(),
+            matched_events: 0,
+            mismatched_events: 0,
+            matched_decisions: 0,
+            mismatched_decisions: 0,
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let back: TraceReplaySummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.total_events, 0);
+        assert!(back.event_type_counts.is_empty());
+    }
+
+    #[test]
+    fn trace_replay_summary_multiple_types() {
+        let summary = TraceReplaySummary {
+            total_events: 10,
+            event_type_counts: BTreeMap::from([
+                ("routing".to_string(), 3),
+                ("admission".to_string(), 4),
+                ("policy".to_string(), 2),
+                ("gossip".to_string(), 1),
+            ]),
+            expected_decision_counts: BTreeMap::from([
+                ("allow".to_string(), 5),
+                ("deny".to_string(), 2),
+            ]),
+            actual_decision_counts: BTreeMap::from([("allow".to_string(), 4)]),
+            matched_events: 8,
+            mismatched_events: 2,
+            matched_decisions: 4,
+            mismatched_decisions: 3,
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let back: TraceReplaySummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.event_type_counts.len(), 4);
+        assert_eq!(back.expected_decision_counts["deny"], 2);
+    }
+
+    #[test]
+    fn trace_replay_summary_debug() {
+        let summary = TraceReplaySummary {
+            total_events: 1,
+            event_type_counts: BTreeMap::new(),
+            expected_decision_counts: BTreeMap::new(),
+            actual_decision_counts: BTreeMap::new(),
+            matched_events: 0,
+            mismatched_events: 1,
+            matched_decisions: 0,
+            mismatched_decisions: 0,
+        };
+        let dbg = format!("{summary:?}");
+        assert!(dbg.contains("mismatched_events"));
+    }
+
+    // ---- TraceReplayReport ----
+
+    #[test]
     fn trace_replay_report_clone() {
         let report = TraceReplayReport {
-            source_trace_id: "t".to_string(),
+            source_trace_id: "t1".to_string(),
             source_capturing_node: None,
             input_events: 0,
             replayed_events: 0,
@@ -890,18 +1019,187 @@ mod tests {
     }
 
     #[test]
-    fn trace_replay_input_format_clone_copy() {
-        let fmt = TraceReplayInputFormat::Cbor;
-        let cloned = fmt;
-        assert_eq!(fmt, cloned);
+    fn trace_replay_report_no_capturing_node() {
+        let report = TraceReplayReport {
+            source_trace_id: "trace-abc".to_string(),
+            source_capturing_node: None,
+            input_events: 0,
+            replayed_events: 0,
+            summary: TraceReplaySummary {
+                total_events: 0,
+                event_type_counts: BTreeMap::new(),
+                expected_decision_counts: BTreeMap::new(),
+                actual_decision_counts: BTreeMap::new(),
+                matched_events: 0,
+                mismatched_events: 0,
+                matched_decisions: 0,
+                mismatched_decisions: 0,
+            },
+            diffs: vec![],
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        let back: TraceReplayReport = serde_json::from_str(&json).unwrap();
+        assert!(back.source_capturing_node.is_none());
     }
 
     #[test]
+    fn trace_replay_report_with_diffs() {
+        let diff = TraceReplayDiff {
+            index: 0,
+            event_type: "routing".to_string(),
+            expected_decision: Some("routed".to_string()),
+            actual_decision: Some("dropped".to_string()),
+            detail: "decision mismatch".to_string(),
+        };
+        let report = TraceReplayReport {
+            source_trace_id: "trace-1".to_string(),
+            source_capturing_node: Some("n1".to_string()),
+            input_events: 1,
+            replayed_events: 1,
+            summary: TraceReplaySummary {
+                total_events: 1,
+                event_type_counts: BTreeMap::from([("routing".to_string(), 1)]),
+                expected_decision_counts: BTreeMap::from([("routed".to_string(), 1)]),
+                actual_decision_counts: BTreeMap::from([("dropped".to_string(), 1)]),
+                matched_events: 0,
+                mismatched_events: 1,
+                matched_decisions: 0,
+                mismatched_decisions: 1,
+            },
+            diffs: vec![diff],
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        let back: TraceReplayReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.diffs.len(), 1);
+        assert_eq!(back.diffs[0].detail, "decision mismatch");
+    }
+
+    #[test]
+    fn trace_replay_report_debug() {
+        let report = TraceReplayReport {
+            source_trace_id: "t".to_string(),
+            source_capturing_node: None,
+            input_events: 0,
+            replayed_events: 0,
+            summary: TraceReplaySummary {
+                total_events: 0,
+                event_type_counts: BTreeMap::new(),
+                expected_decision_counts: BTreeMap::new(),
+                actual_decision_counts: BTreeMap::new(),
+                matched_events: 0,
+                mismatched_events: 0,
+                matched_decisions: 0,
+                mismatched_decisions: 0,
+            },
+            diffs: vec![],
+        };
+        let dbg = format!("{report:?}");
+        assert!(dbg.contains("source_trace_id"));
+    }
+
+    // ---- TraceReplayError ----
+
+    #[test]
+    fn trace_replay_error_io_fields() {
+        let err = TraceReplayError::Io {
+            path: "/some/path".to_string(),
+            message: "file not found".to_string(),
+        };
+        let s = err.to_string();
+        assert!(s.contains("/some/path"));
+        assert!(s.contains("file not found"));
+    }
+
+    #[test]
+    fn trace_replay_error_parse_various_formats() {
+        for fmt in ["json", "cbor", "trace", "unknown"] {
+            let err = TraceReplayError::Parse {
+                format: fmt,
+                message: "bad data".to_string(),
+            };
+            let s = err.to_string();
+            assert!(s.contains(fmt));
+            assert!(s.contains("bad data"));
+        }
+    }
+
+    #[test]
+    fn trace_replay_error_debug() {
+        let err = TraceReplayError::TraceCaptureUnavailable;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("TraceCaptureUnavailable"));
+    }
+
+    #[test]
+    fn trace_replay_error_from_trace_error() {
+        // TraceError → TraceReplayError::Parse via From impl
+        let te = TraceError::BufferFull;
+        let re: TraceReplayError = te.into();
+        let s = re.to_string();
+        assert!(s.contains("trace"));
+    }
+
+    // ---- looks_like_json edge cases ----
+
+    #[test]
+    fn looks_like_json_only_whitespace() {
+        assert!(!looks_like_json(b"   \t\n  "));
+    }
+
+    #[test]
+    fn looks_like_json_starts_with_number() {
+        assert!(!looks_like_json(b"123"));
+    }
+
+    #[test]
+    fn looks_like_json_starts_with_string() {
+        assert!(!looks_like_json(b"\"hello\""));
+    }
+
+    #[test]
+    fn looks_like_json_nested_object() {
+        assert!(looks_like_json(b"  { \"inner\": { \"key\": 1 } }"));
+    }
+
+    #[test]
+    fn looks_like_json_empty_array() {
+        assert!(looks_like_json(b"[]"));
+    }
+
+    #[test]
+    fn looks_like_json_empty_object() {
+        assert!(looks_like_json(b"{}"));
+    }
+
+    #[test]
+    fn looks_like_json_single_byte_open_brace() {
+        assert!(looks_like_json(b"{"));
+    }
+
+    #[test]
+    fn looks_like_json_single_byte_open_bracket() {
+        assert!(looks_like_json(b"["));
+    }
+
+    #[test]
+    fn looks_like_json_binary_prefix() {
+        assert!(!looks_like_json(&[0x00, 0x01, 0x02]));
+    }
+
+    #[test]
+    fn looks_like_json_high_bytes() {
+        assert!(!looks_like_json(&[0xff, 0xfe, 0xfd]));
+    }
+
+    // ---- event_type_label for all variants ----
+
+    #[test]
     fn event_type_label_gossip() {
+        use fcp_telemetry::trace_capture::GossipEvent;
         let event = TraceEvent::Gossip(GossipEvent {
             timestamp: 0,
             trace_id: String::new(),
-            gossip_type: String::new(),
+            gossip_type: "announce".to_string(),
             object_count: 0,
             peer_node: None,
             success: true,
@@ -911,12 +1209,13 @@ mod tests {
 
     #[test]
     fn event_type_label_lease() {
+        use fcp_telemetry::trace_capture::LeaseEvent;
         let event = TraceEvent::Lease(LeaseEvent {
             timestamp: 0,
             trace_id: String::new(),
-            operation: String::new(),
+            operation: "acquire".to_string(),
             subject_id: String::new(),
-            purpose: String::new(),
+            purpose: "singleton_writer".to_string(),
             node_id: String::new(),
             success: true,
             conflict_holder: None,
@@ -926,11 +1225,12 @@ mod tests {
 
     #[test]
     fn event_type_label_session() {
+        use fcp_telemetry::trace_capture::SessionEvent;
         let event = TraceEvent::Session(SessionEvent {
             timestamp: 0,
             trace_id: String::new(),
-            session_id: String::new(),
-            kind: String::new(),
+            session_id: "abc".to_string(),
+            kind: "hello".to_string(),
             peer_node: String::new(),
             suite: None,
             failure_reason: None,
@@ -938,71 +1238,753 @@ mod tests {
         assert_eq!(event_type_label(&event), "session");
     }
 
+    // ---- decision_label for non-decision variants ----
+
     #[test]
-    fn decision_label_gossip_is_none() {
+    fn decision_label_gossip_none() {
+        use fcp_telemetry::trace_capture::GossipEvent;
         let event = TraceEvent::Gossip(GossipEvent {
             timestamp: 0,
             trace_id: String::new(),
-            gossip_type: String::new(),
-            object_count: 0,
-            peer_node: None,
-            success: true,
+            gossip_type: "reconcile".to_string(),
+            object_count: 5,
+            peer_node: Some("peer-1".to_string()),
+            success: false,
         });
-        assert!(decision_label(&event).is_none());
+        assert_eq!(decision_label(&event), None);
     }
 
     #[test]
-    fn decision_label_lease_is_none() {
+    fn decision_label_lease_none() {
+        use fcp_telemetry::trace_capture::LeaseEvent;
         let event = TraceEvent::Lease(LeaseEvent {
             timestamp: 0,
             trace_id: String::new(),
-            operation: String::new(),
+            operation: "release".to_string(),
             subject_id: String::new(),
-            purpose: String::new(),
-            node_id: String::new(),
+            purpose: "coordinator".to_string(),
+            node_id: "n1".to_string(),
             success: true,
             conflict_holder: None,
         });
-        assert!(decision_label(&event).is_none());
+        assert_eq!(decision_label(&event), None);
     }
 
     #[test]
-    fn decision_label_session_is_none() {
+    fn decision_label_session_none() {
+        use fcp_telemetry::trace_capture::SessionEvent;
         let event = TraceEvent::Session(SessionEvent {
             timestamp: 0,
             trace_id: String::new(),
-            session_id: String::new(),
-            kind: String::new(),
-            peer_node: String::new(),
-            suite: None,
+            session_id: "sess-1".to_string(),
+            kind: "established".to_string(),
+            peer_node: "p1".to_string(),
+            suite: Some("suite-a".to_string()),
             failure_reason: None,
         });
-        assert!(decision_label(&event).is_none());
+        assert_eq!(decision_label(&event), None);
     }
+
+    #[test]
+    fn decision_label_routing_empty_decision() {
+        let event = TraceEvent::Routing(RoutingDecision {
+            timestamp: 0,
+            trace_id: String::new(),
+            source_node: String::new(),
+            target_node: None,
+            object_id: String::new(),
+            path_type: String::new(),
+            decision: String::new(),
+            reason: None,
+        });
+        assert_eq!(decision_label(&event), Some(""));
+    }
+
+    // ---- dedupe_diffs edge cases ----
+
+    #[test]
+    fn dedupe_diffs_single_element() {
+        let diff = TraceReplayDiff {
+            index: 0,
+            event_type: "routing".to_string(),
+            expected_decision: None,
+            actual_decision: None,
+            detail: "solo".to_string(),
+        };
+        let deduped = dedupe_diffs(vec![diff]);
+        assert_eq!(deduped.len(), 1);
+        assert_eq!(deduped[0].detail, "solo");
+    }
+
+    #[test]
+    fn dedupe_diffs_preserves_order() {
+        let d1 = TraceReplayDiff {
+            index: 0,
+            event_type: "routing".to_string(),
+            expected_decision: None,
+            actual_decision: None,
+            detail: "first".to_string(),
+        };
+        let d2 = TraceReplayDiff {
+            index: 1,
+            event_type: "admission".to_string(),
+            expected_decision: None,
+            actual_decision: None,
+            detail: "second".to_string(),
+        };
+        let d3 = TraceReplayDiff {
+            index: 2,
+            event_type: "policy".to_string(),
+            expected_decision: None,
+            actual_decision: None,
+            detail: "third".to_string(),
+        };
+        let deduped = dedupe_diffs(vec![d1, d2, d3]);
+        assert_eq!(deduped.len(), 3);
+        assert_eq!(deduped[0].detail, "first");
+        assert_eq!(deduped[1].detail, "second");
+        assert_eq!(deduped[2].detail, "third");
+    }
+
+    #[test]
+    fn dedupe_diffs_many_duplicates() {
+        let diff = TraceReplayDiff {
+            index: 5,
+            event_type: "gossip".to_string(),
+            expected_decision: None,
+            actual_decision: None,
+            detail: "repeated".to_string(),
+        };
+        let diffs = vec![diff.clone(), diff.clone(), diff.clone(), diff.clone(), diff];
+        let deduped = dedupe_diffs(diffs);
+        assert_eq!(deduped.len(), 1);
+    }
+
+    #[test]
+    fn dedupe_diffs_partial_overlap() {
+        let d1 = TraceReplayDiff {
+            index: 0,
+            event_type: "routing".to_string(),
+            expected_decision: Some("a".to_string()),
+            actual_decision: Some("b".to_string()),
+            detail: "mismatch".to_string(),
+        };
+        let d2 = TraceReplayDiff {
+            index: 0,
+            event_type: "routing".to_string(),
+            expected_decision: Some("a".to_string()),
+            actual_decision: Some("c".to_string()), // different
+            detail: "mismatch".to_string(),
+        };
+        let deduped = dedupe_diffs(vec![d1.clone(), d1, d2]);
+        assert_eq!(deduped.len(), 2);
+    }
+
+    // ---- compare_traces edge cases ----
+
+    #[test]
+    fn compare_traces_single_event_match() {
+        let mut trace = CapturedTrace::new("single");
+        trace.push(TraceEvent::Routing(RoutingDecision {
+            timestamp: 100,
+            trace_id: "t1".to_string(),
+            source_node: "n1".to_string(),
+            target_node: None,
+            object_id: "o1".to_string(),
+            path_type: "direct".to_string(),
+            decision: "routed".to_string(),
+            reason: None,
+        }));
+        let (diffs, summary) = compare_traces(&trace, &trace);
+        assert!(diffs.is_empty());
+        assert_eq!(summary.total_events, 1);
+        assert_eq!(summary.matched_events, 1);
+        assert_eq!(summary.matched_decisions, 1);
+    }
+
+    #[test]
+    fn compare_traces_decision_mismatch() {
+        let mut expected = CapturedTrace::new("expected");
+        expected.push(TraceEvent::Routing(RoutingDecision {
+            timestamp: 100,
+            trace_id: "t1".to_string(),
+            source_node: "n1".to_string(),
+            target_node: None,
+            object_id: "o1".to_string(),
+            path_type: "direct".to_string(),
+            decision: "routed".to_string(),
+            reason: None,
+        }));
+
+        let mut actual = CapturedTrace::new("actual");
+        actual.push(TraceEvent::Routing(RoutingDecision {
+            timestamp: 100,
+            trace_id: "t1".to_string(),
+            source_node: "n1".to_string(),
+            target_node: None,
+            object_id: "o1".to_string(),
+            path_type: "direct".to_string(),
+            decision: "dropped".to_string(),
+            reason: None,
+        }));
+
+        let (diffs, summary) = compare_traces(&expected, &actual);
+        assert!(!diffs.is_empty());
+        assert_eq!(summary.mismatched_decisions, 1);
+        assert!(diffs.iter().any(|d| d.detail == "decision mismatch"));
+    }
+
+    #[test]
+    fn compare_traces_with_gossip_events_no_decisions() {
+        use fcp_telemetry::trace_capture::GossipEvent;
+        let mut trace = CapturedTrace::new("gossip-trace");
+        trace.push(TraceEvent::Gossip(GossipEvent {
+            timestamp: 100,
+            trace_id: "t1".to_string(),
+            gossip_type: "announce".to_string(),
+            object_count: 3,
+            peer_node: Some("peer-1".to_string()),
+            success: true,
+        }));
+        let (diffs, summary) = compare_traces(&trace, &trace);
+        assert!(diffs.is_empty());
+        assert_eq!(summary.total_events, 1);
+        assert_eq!(summary.matched_events, 1);
+        // Gossip has no decision
+        assert_eq!(summary.matched_decisions, 0);
+        assert_eq!(summary.mismatched_decisions, 0);
+    }
+
+    #[test]
+    fn compare_traces_with_lease_events() {
+        use fcp_telemetry::trace_capture::LeaseEvent;
+        let mut trace = CapturedTrace::new("lease-trace");
+        trace.push(TraceEvent::Lease(LeaseEvent {
+            timestamp: 200,
+            trace_id: "t2".to_string(),
+            operation: "acquire".to_string(),
+            subject_id: "sub-1".to_string(),
+            purpose: "singleton_writer".to_string(),
+            node_id: "node-a".to_string(),
+            success: true,
+            conflict_holder: None,
+        }));
+        let (diffs, summary) = compare_traces(&trace, &trace);
+        assert!(diffs.is_empty());
+        assert_eq!(summary.event_type_counts["lease"], 1);
+    }
+
+    #[test]
+    fn compare_traces_with_session_events() {
+        use fcp_telemetry::trace_capture::SessionEvent;
+        let mut trace = CapturedTrace::new("session-trace");
+        trace.push(TraceEvent::Session(SessionEvent {
+            timestamp: 300,
+            trace_id: "t3".to_string(),
+            session_id: "sess-abc".to_string(),
+            kind: "hello".to_string(),
+            peer_node: "peer-2".to_string(),
+            suite: None,
+            failure_reason: None,
+        }));
+        let (diffs, summary) = compare_traces(&trace, &trace);
+        assert!(diffs.is_empty());
+        assert_eq!(summary.event_type_counts["session"], 1);
+    }
+
+    #[test]
+    fn compare_traces_mixed_event_types() {
+        use fcp_telemetry::trace_capture::{GossipEvent, LeaseEvent, SessionEvent};
+        let mut trace = CapturedTrace::new("mixed");
+        trace.push(TraceEvent::Routing(RoutingDecision {
+            timestamp: 1,
+            trace_id: "t".to_string(),
+            source_node: "n".to_string(),
+            target_node: None,
+            object_id: "o".to_string(),
+            path_type: "d".to_string(),
+            decision: "r".to_string(),
+            reason: None,
+        }));
+        trace.push(TraceEvent::Admission(AdmissionOutcome {
+            timestamp: 2,
+            trace_id: "t".to_string(),
+            peer_node: "p".to_string(),
+            request_type: "i".to_string(),
+            decision: "a".to_string(),
+            reason_code: None,
+            budget_remaining: None,
+            authenticated: true,
+        }));
+        trace.push(TraceEvent::Gossip(GossipEvent {
+            timestamp: 3,
+            trace_id: "t".to_string(),
+            gossip_type: "reconcile".to_string(),
+            object_count: 0,
+            peer_node: None,
+            success: true,
+        }));
+        trace.push(TraceEvent::Lease(LeaseEvent {
+            timestamp: 4,
+            trace_id: "t".to_string(),
+            operation: "renew".to_string(),
+            subject_id: "s".to_string(),
+            purpose: "op".to_string(),
+            node_id: "n".to_string(),
+            success: true,
+            conflict_holder: None,
+        }));
+        trace.push(TraceEvent::Session(SessionEvent {
+            timestamp: 5,
+            trace_id: "t".to_string(),
+            session_id: "s".to_string(),
+            kind: "ack".to_string(),
+            peer_node: "p".to_string(),
+            suite: None,
+            failure_reason: None,
+        }));
+        trace.push(TraceEvent::Policy(PolicyDecision {
+            timestamp: 6,
+            trace_id: "t".to_string(),
+            zone_id: "z".to_string(),
+            operation: "op".to_string(),
+            connector_id: "c".to_string(),
+            decision: "deny".to_string(),
+            reason_code: "NO_CAP".to_string(),
+            evidence: vec![],
+        }));
+
+        let (diffs, summary) = compare_traces(&trace, &trace);
+        assert!(diffs.is_empty());
+        assert_eq!(summary.total_events, 6);
+        assert_eq!(summary.matched_events, 6);
+        assert_eq!(summary.event_type_counts.len(), 6);
+        // 3 events have decisions: routing, admission, policy
+        assert_eq!(summary.matched_decisions, 3);
+    }
+
+    #[test]
+    fn compare_traces_actual_longer_than_expected() {
+        let mut expected = CapturedTrace::new("short");
+        expected.push(TraceEvent::Routing(RoutingDecision {
+            timestamp: 1,
+            trace_id: "t".to_string(),
+            source_node: "n".to_string(),
+            target_node: None,
+            object_id: "o".to_string(),
+            path_type: "d".to_string(),
+            decision: "r".to_string(),
+            reason: None,
+        }));
+
+        let mut actual = CapturedTrace::new("long");
+        actual.push(TraceEvent::Routing(RoutingDecision {
+            timestamp: 1,
+            trace_id: "t".to_string(),
+            source_node: "n".to_string(),
+            target_node: None,
+            object_id: "o".to_string(),
+            path_type: "d".to_string(),
+            decision: "r".to_string(),
+            reason: None,
+        }));
+        actual.push(TraceEvent::Policy(PolicyDecision {
+            timestamp: 2,
+            trace_id: "t".to_string(),
+            zone_id: "z".to_string(),
+            operation: "op".to_string(),
+            connector_id: "c".to_string(),
+            decision: "allow".to_string(),
+            reason_code: "OK".to_string(),
+            evidence: vec![],
+        }));
+
+        let (diffs, summary) = compare_traces(&expected, &actual);
+        assert!(!diffs.is_empty());
+        assert!(diffs.iter().any(|d| d.detail == "unexpected replay event"));
+        assert_eq!(summary.total_events, 1); // total_events is from expected
+    }
+
+    #[test]
+    fn compare_traces_both_empty() {
+        let t1 = CapturedTrace::new("e1");
+        let t2 = CapturedTrace::new("e2");
+        let (diffs, summary) = compare_traces(&t1, &t2);
+        assert!(diffs.is_empty());
+        assert_eq!(summary.total_events, 0);
+        assert_eq!(summary.matched_events, 0);
+        assert_eq!(summary.mismatched_events, 0);
+    }
+
+    // ---- decode_trace_bytes edge cases ----
+
+    #[test]
+    fn decode_trace_auto_prefers_json_for_json_like() {
+        let trace = sample_trace();
+        let json = trace.to_json().expect("to_json");
+        let parsed = decode_trace_bytes(json.as_bytes(), TraceReplayInputFormat::Auto)
+            .expect("auto should pick json");
+        assert_eq!(parsed.events.len(), trace.events.len());
+    }
+
+    #[test]
+    fn decode_trace_auto_prefers_cbor_for_binary() {
+        let trace = sample_trace();
+        let cbor = trace.to_cbor().expect("to_cbor");
+        // CBOR does not start with { or [, so auto tries CBOR first
+        let parsed = decode_trace_bytes(&cbor, TraceReplayInputFormat::Auto)
+            .expect("auto should pick cbor");
+        assert_eq!(parsed.events.len(), trace.events.len());
+    }
+
+    #[test]
+    fn decode_trace_cbor_rejects_json() {
+        let trace = sample_trace();
+        let json = trace.to_json().expect("to_json");
+        // CBOR format should reject valid JSON text
+        assert!(decode_trace_bytes(json.as_bytes(), TraceReplayInputFormat::Cbor).is_err());
+    }
+
+    #[test]
+    fn decode_trace_empty_bytes_all_formats() {
+        assert!(decode_trace_bytes(b"", TraceReplayInputFormat::Json).is_err());
+        assert!(decode_trace_bytes(b"", TraceReplayInputFormat::Cbor).is_err());
+        assert!(decode_trace_bytes(b"", TraceReplayInputFormat::Auto).is_err());
+    }
+
+    #[test]
+    fn decode_trace_truncated_json() {
+        assert!(decode_trace_bytes(b"{\"id\":", TraceReplayInputFormat::Json).is_err());
+    }
+
+    #[test]
+    fn decode_trace_non_utf8_json() {
+        let bad_bytes: &[u8] = &[0xff, 0xfe, 0x7b]; // invalid UTF-8 then {
+        assert!(decode_trace_bytes(bad_bytes, TraceReplayInputFormat::Json).is_err());
+    }
+
+    // ---- replay with various trace configurations ----
+
+    #[test]
+    fn replay_empty_trace() {
+        let trace = CapturedTrace::new("empty-replay");
+        let report = TraceReplayEngine::replay(&trace).expect("replay empty trace");
+        assert_eq!(report.input_events, 0);
+        assert_eq!(report.replayed_events, 0);
+        assert!(report.diffs.is_empty());
+        assert_eq!(report.summary.total_events, 0);
+    }
+
+    #[test]
+    fn replay_trace_source_id_preserved() {
+        let trace = CapturedTrace::new("my-unique-trace-id");
+        let report = TraceReplayEngine::replay(&trace).expect("replay");
+        assert_eq!(report.source_trace_id, "my-unique-trace-id");
+    }
+
+    #[test]
+    fn replay_trace_capturing_node_preserved() {
+        let mut trace = CapturedTrace::new("t");
+        trace.capturing_node = Some("my-node".to_string());
+        let report = TraceReplayEngine::replay(&trace).expect("replay");
+        assert_eq!(report.source_capturing_node.as_deref(), Some("my-node"));
+    }
+
+    #[test]
+    fn replay_trace_no_capturing_node_uses_default() {
+        let trace = CapturedTrace::new("t");
+        let report = TraceReplayEngine::replay(&trace).expect("replay");
+        assert!(report.source_capturing_node.is_none());
+    }
+
+    #[test]
+    fn replay_single_routing_event() {
+        let mut trace = CapturedTrace::new("single-routing");
+        trace.push(TraceEvent::Routing(RoutingDecision {
+            timestamp: 500,
+            trace_id: "tr-1".to_string(),
+            source_node: "src".to_string(),
+            target_node: Some("dst".to_string()),
+            object_id: "obj-x".to_string(),
+            path_type: "relay".to_string(),
+            decision: "forwarded".to_string(),
+            reason: Some("best path".to_string()),
+        }));
+        let report = TraceReplayEngine::replay(&trace).expect("replay");
+        assert_eq!(report.input_events, 1);
+        assert_eq!(report.replayed_events, 1);
+    }
+
+    #[test]
+    fn replay_single_admission_event() {
+        let mut trace = CapturedTrace::new("single-admission");
+        trace.push(TraceEvent::Admission(AdmissionOutcome {
+            timestamp: 600,
+            trace_id: "tr-2".to_string(),
+            peer_node: "peer-x".to_string(),
+            request_type: "query".to_string(),
+            decision: "deny".to_string(),
+            reason_code: Some("RATE_LIMITED".to_string()),
+            budget_remaining: Some(0),
+            authenticated: false,
+        }));
+        let report = TraceReplayEngine::replay(&trace).expect("replay");
+        assert_eq!(report.input_events, 1);
+        assert_eq!(report.summary.expected_decision_counts["deny"], 1);
+    }
+
+    #[test]
+    fn replay_single_policy_event() {
+        let mut trace = CapturedTrace::new("single-policy");
+        trace.push(TraceEvent::Policy(PolicyDecision {
+            timestamp: 700,
+            trace_id: "tr-3".to_string(),
+            zone_id: "z:prod".to_string(),
+            operation: "op.write".to_string(),
+            connector_id: "fcp.storage".to_string(),
+            decision: "deny".to_string(),
+            reason_code: "NO_CAP".to_string(),
+            evidence: vec!["ev-1".to_string(), "ev-2".to_string()],
+        }));
+        let report = TraceReplayEngine::replay(&trace).expect("replay");
+        assert_eq!(report.input_events, 1);
+    }
+
+    #[test]
+    fn replay_gossip_lease_session_events() {
+        use fcp_telemetry::trace_capture::{GossipEvent, LeaseEvent, SessionEvent};
+        let mut trace = CapturedTrace::new("non-decision-events");
+        trace.push(TraceEvent::Gossip(GossipEvent {
+            timestamp: 100,
+            trace_id: "t".to_string(),
+            gossip_type: "announce".to_string(),
+            object_count: 2,
+            peer_node: None,
+            success: true,
+        }));
+        trace.push(TraceEvent::Lease(LeaseEvent {
+            timestamp: 200,
+            trace_id: "t".to_string(),
+            operation: "acquire".to_string(),
+            subject_id: "s1".to_string(),
+            purpose: "op".to_string(),
+            node_id: "n1".to_string(),
+            success: true,
+            conflict_holder: None,
+        }));
+        trace.push(TraceEvent::Session(SessionEvent {
+            timestamp: 300,
+            trace_id: "t".to_string(),
+            session_id: "s".to_string(),
+            kind: "established".to_string(),
+            peer_node: "p".to_string(),
+            suite: Some("chacha".to_string()),
+            failure_reason: None,
+        }));
+        let report = TraceReplayEngine::replay(&trace).expect("replay");
+        assert_eq!(report.input_events, 3);
+        assert_eq!(report.replayed_events, 3);
+    }
+
+    // ---- load_trace_from_path error ----
 
     #[test]
     fn load_trace_from_nonexistent_path() {
-        let result =
-            TraceReplayEngine::load_trace_from_path("/nonexistent/path.json", TraceReplayInputFormat::Auto);
+        let result = TraceReplayEngine::load_trace_from_path(
+            "/tmp/nonexistent_trace_file_abc123.json",
+            TraceReplayInputFormat::Json,
+        );
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.to_string().contains("/nonexistent/path.json"));
+        let msg = err.to_string();
+        assert!(msg.contains("nonexistent_trace_file_abc123"));
     }
 
     #[test]
-    fn replay_path_nonexistent_returns_io_error() {
-        let result =
-            TraceReplayEngine::replay_path("/nonexistent.json", TraceReplayInputFormat::Json);
+    fn replay_path_nonexistent() {
+        let result = TraceReplayEngine::replay_path(
+            "/tmp/no_such_trace_xyz.cbor",
+            TraceReplayInputFormat::Cbor,
+        );
+        assert!(result.is_err());
+    }
+
+    // ---- JSON roundtrip for TraceReplayInputFormat deserialization edge cases ----
+
+    #[test]
+    fn trace_replay_input_format_deserialize_unknown_rejects() {
+        let result = serde_json::from_str::<TraceReplayInputFormat>("\"xml\"");
         assert!(result.is_err());
     }
 
     #[test]
-    fn looks_like_json_plain_text() {
-        assert!(!looks_like_json(b"hello world"));
+    fn trace_replay_input_format_deserialize_number_rejects() {
+        let result = serde_json::from_str::<TraceReplayInputFormat>("42");
+        assert!(result.is_err());
     }
 
+    // ---- TraceReplayReport serde with multiple diffs ----
+
     #[test]
-    fn looks_like_json_only_whitespace() {
-        assert!(!looks_like_json(b"   \n\t  "));
+    fn trace_replay_report_serde_multiple_diffs() {
+        let diffs = vec![
+            TraceReplayDiff {
+                index: 0,
+                event_type: "routing".to_string(),
+                expected_decision: Some("a".to_string()),
+                actual_decision: Some("b".to_string()),
+                detail: "d1".to_string(),
+            },
+            TraceReplayDiff {
+                index: 1,
+                event_type: "admission".to_string(),
+                expected_decision: None,
+                actual_decision: Some("x".to_string()),
+                detail: "d2".to_string(),
+            },
+            TraceReplayDiff {
+                index: 2,
+                event_type: "policy".to_string(),
+                expected_decision: Some("allow".to_string()),
+                actual_decision: None,
+                detail: "d3".to_string(),
+            },
+        ];
+        let report = TraceReplayReport {
+            source_trace_id: "multi-diff".to_string(),
+            source_capturing_node: Some("n1".to_string()),
+            input_events: 3,
+            replayed_events: 2,
+            summary: TraceReplaySummary {
+                total_events: 3,
+                event_type_counts: BTreeMap::new(),
+                expected_decision_counts: BTreeMap::new(),
+                actual_decision_counts: BTreeMap::new(),
+                matched_events: 0,
+                mismatched_events: 3,
+                matched_decisions: 0,
+                mismatched_decisions: 3,
+            },
+            diffs,
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        let back: TraceReplayReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.diffs.len(), 3);
+    }
+
+    // ---- TraceReplayDiff equality ----
+
+    #[test]
+    fn trace_replay_diff_equality_sensitive_to_all_fields() {
+        let base = TraceReplayDiff {
+            index: 0,
+            event_type: "routing".to_string(),
+            expected_decision: Some("a".to_string()),
+            actual_decision: Some("b".to_string()),
+            detail: "mismatch".to_string(),
+        };
+
+        let diff_index = TraceReplayDiff {
+            index: 1,
+            ..base.clone()
+        };
+        assert_ne!(base, diff_index);
+
+        let diff_type = TraceReplayDiff {
+            event_type: "admission".to_string(),
+            ..base.clone()
+        };
+        assert_ne!(base, diff_type);
+
+        let diff_expected = TraceReplayDiff {
+            expected_decision: None,
+            ..base.clone()
+        };
+        assert_ne!(base, diff_expected);
+
+        let diff_actual = TraceReplayDiff {
+            actual_decision: Some("z".to_string()),
+            ..base.clone()
+        };
+        assert_ne!(base, diff_actual);
+
+        let diff_detail = TraceReplayDiff {
+            detail: "other".to_string(),
+            ..base.clone()
+        };
+        assert_ne!(base, diff_detail);
+    }
+
+    // ---- compare_traces decision counting ----
+
+    #[test]
+    fn compare_traces_counts_expected_decisions() {
+        let mut trace = CapturedTrace::new("count-test");
+        trace.push(TraceEvent::Routing(RoutingDecision {
+            timestamp: 0,
+            trace_id: String::new(),
+            source_node: String::new(),
+            target_node: None,
+            object_id: String::new(),
+            path_type: String::new(),
+            decision: "allow".to_string(),
+            reason: None,
+        }));
+        trace.push(TraceEvent::Admission(AdmissionOutcome {
+            timestamp: 1,
+            trace_id: String::new(),
+            peer_node: String::new(),
+            request_type: String::new(),
+            decision: "allow".to_string(),
+            reason_code: None,
+            budget_remaining: None,
+            authenticated: true,
+        }));
+        trace.push(TraceEvent::Policy(PolicyDecision {
+            timestamp: 2,
+            trace_id: String::new(),
+            zone_id: String::new(),
+            operation: String::new(),
+            connector_id: String::new(),
+            decision: "deny".to_string(),
+            reason_code: String::new(),
+            evidence: vec![],
+        }));
+
+        let (_, summary) = compare_traces(&trace, &trace);
+        assert_eq!(summary.expected_decision_counts["allow"], 2);
+        assert_eq!(summary.expected_decision_counts["deny"], 1);
+    }
+
+    // ---- Summary mismatched_events calculation ----
+
+    #[test]
+    fn summary_mismatched_events_calculated_correctly() {
+        let mut expected = CapturedTrace::new("e");
+        expected.push(TraceEvent::Routing(RoutingDecision {
+            timestamp: 0,
+            trace_id: String::new(),
+            source_node: String::new(),
+            target_node: None,
+            object_id: String::new(),
+            path_type: String::new(),
+            decision: "a".to_string(),
+            reason: None,
+        }));
+        expected.push(TraceEvent::Routing(RoutingDecision {
+            timestamp: 1,
+            trace_id: String::new(),
+            source_node: String::new(),
+            target_node: None,
+            object_id: String::new(),
+            path_type: String::new(),
+            decision: "b".to_string(),
+            reason: None,
+        }));
+        // actual has none of these
+        let actual = CapturedTrace::new("a");
+        let (_, summary) = compare_traces(&expected, &actual);
+        assert_eq!(summary.mismatched_events, 2);
+        assert_eq!(summary.matched_events, 0);
     }
 }

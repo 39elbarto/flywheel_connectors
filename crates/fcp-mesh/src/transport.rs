@@ -795,90 +795,144 @@ mod tests {
         assert_eq!(best.path.kind, TransportPathKind::Derp);
     }
 
-    // ── Batch: additional transport edge cases ──
+    // ── Batch: TransportPathKind exhaustive tests ──
 
     #[test]
-    fn transport_path_clone_eq() {
-        let path = TransportPath::new(TransportPathKind::Mesh, peer("n"), "p", Some(5));
-        let cloned = path.clone();
-        assert_eq!(path, cloned);
+    fn path_kind_priority_values() {
+        assert_eq!(TransportPathKind::Direct.priority(), 4);
+        assert_eq!(TransportPathKind::Mesh.priority(), 3);
+        assert_eq!(TransportPathKind::Derp.priority(), 2);
+        assert_eq!(TransportPathKind::Funnel.priority(), 1);
     }
 
     #[test]
-    fn transport_path_debug_format() {
-        let path = TransportPath::new(TransportPathKind::Direct, peer("n1"), "path-1", Some(10));
-        let debug = format!("{path:?}");
-        assert!(debug.contains("Direct"));
-        assert!(debug.contains("path-1"));
+    fn path_kind_clone() {
+        let kind = TransportPathKind::Direct;
+        let cloned = kind;
+        assert_eq!(kind, cloned);
     }
 
     #[test]
-    fn transport_path_kind_debug_format() {
-        let kinds = [
-            TransportPathKind::Direct,
-            TransportPathKind::Mesh,
-            TransportPathKind::Derp,
-            TransportPathKind::Funnel,
-        ];
-        for kind in kinds {
-            let debug = format!("{kind:?}");
-            assert!(!debug.is_empty());
-        }
+    fn path_kind_debug_direct() {
+        let s = format!("{:?}", TransportPathKind::Direct);
+        assert_eq!(s, "Direct");
     }
+
+    #[test]
+    fn path_kind_debug_mesh() {
+        let s = format!("{:?}", TransportPathKind::Mesh);
+        assert_eq!(s, "Mesh");
+    }
+
+    #[test]
+    fn path_kind_debug_derp() {
+        let s = format!("{:?}", TransportPathKind::Derp);
+        assert_eq!(s, "Derp");
+    }
+
+    #[test]
+    fn path_kind_debug_funnel() {
+        let s = format!("{:?}", TransportPathKind::Funnel);
+        assert_eq!(s, "Funnel");
+    }
+
+    #[test]
+    fn path_kind_hash_all_distinct() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(TransportPathKind::Direct);
+        set.insert(TransportPathKind::Mesh);
+        set.insert(TransportPathKind::Derp);
+        set.insert(TransportPathKind::Funnel);
+        assert_eq!(set.len(), 4);
+    }
+
+    #[test]
+    fn path_kind_ne() {
+        assert_ne!(TransportPathKind::Direct, TransportPathKind::Mesh);
+        assert_ne!(TransportPathKind::Mesh, TransportPathKind::Derp);
+        assert_ne!(TransportPathKind::Derp, TransportPathKind::Funnel);
+        assert_ne!(TransportPathKind::Direct, TransportPathKind::Funnel);
+    }
+
+    // ── Batch: TransportPath construction and equality ──
 
     #[test]
     fn transport_path_ne_different_kind() {
-        let a = TransportPath::new(TransportPathKind::Direct, peer("n"), "p", None);
-        let b = TransportPath::new(TransportPathKind::Mesh, peer("n"), "p", None);
+        let a = TransportPath::new(TransportPathKind::Direct, peer("n"), "p", Some(10));
+        let b = TransportPath::new(TransportPathKind::Mesh, peer("n"), "p", Some(10));
         assert_ne!(a, b);
     }
 
     #[test]
     fn transport_path_ne_different_peer() {
-        let a = TransportPath::new(TransportPathKind::Direct, peer("n1"), "p", None);
-        let b = TransportPath::new(TransportPathKind::Direct, peer("n2"), "p", None);
+        let a = TransportPath::new(TransportPathKind::Direct, peer("n1"), "p", Some(10));
+        let b = TransportPath::new(TransportPathKind::Direct, peer("n2"), "p", Some(10));
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn transport_path_ne_different_path_id() {
+        let a = TransportPath::new(TransportPathKind::Direct, peer("n"), "p1", Some(10));
+        let b = TransportPath::new(TransportPathKind::Direct, peer("n"), "p2", Some(10));
         assert_ne!(a, b);
     }
 
     #[test]
     fn transport_path_ne_different_rtt() {
-        let a = TransportPath::new(TransportPathKind::Direct, peer("n"), "p", Some(5));
-        let b = TransportPath::new(TransportPathKind::Direct, peer("n"), "p", Some(10));
+        let a = TransportPath::new(TransportPathKind::Direct, peer("n"), "p", Some(10));
+        let b = TransportPath::new(TransportPathKind::Direct, peer("n"), "p", Some(20));
         assert_ne!(a, b);
     }
 
     #[test]
-    fn select_multipath_single_eligible_returned() {
-        let policy = ZoneTransportPolicy {
-            allow_lan: true,
-            allow_derp: false,
-            allow_funnel: false,
-        };
-        let paths = vec![
-            TransportPath::new(TransportPathKind::Direct, peer("p1"), "d1", None),
-            TransportPath::new(TransportPathKind::Derp, peer("p2"), "d2", None),
-            TransportPath::new(TransportPathKind::Funnel, peer("p3"), "f1", None),
-        ];
-        let obj = ObjectId::from_unscoped_bytes(b"test");
-        let selected = TransportSelector::select_multipath(&paths, &policy, &obj, 0, 5);
-        assert_eq!(selected.len(), 1);
-        assert_eq!(selected[0].kind, TransportPathKind::Direct);
+    fn transport_path_ne_some_vs_none_rtt() {
+        let a = TransportPath::new(TransportPathKind::Direct, peer("n"), "p", Some(10));
+        let b = TransportPath::new(TransportPathKind::Direct, peer("n"), "p", None);
+        assert_ne!(a, b);
     }
 
     #[test]
-    fn best_path_only_funnel_allowed() {
-        let policy = ZoneTransportPolicy {
-            allow_lan: false,
-            allow_derp: false,
-            allow_funnel: true,
-        };
-        let paths = vec![
-            TransportPath::new(TransportPathKind::Direct, peer("p1"), "d1", None),
-            TransportPath::new(TransportPathKind::Funnel, peer("p2"), "f1", None),
-        ];
-        let best = TransportSelector::best_path(&paths, &policy).unwrap();
-        assert_eq!(best.path.kind, TransportPathKind::Funnel);
+    fn transport_path_clone() {
+        let original = TransportPath::new(TransportPathKind::Mesh, peer("node"), "path-1", Some(5));
+        let cloned = original.clone();
+        assert_eq!(original, cloned);
     }
+
+    #[test]
+    fn transport_path_debug() {
+        let path = TransportPath::new(TransportPathKind::Derp, peer("n1"), "derp-path", Some(99));
+        let s = format!("{path:?}");
+        assert!(s.contains("Derp"));
+        assert!(s.contains("derp-path"));
+    }
+
+    #[test]
+    fn transport_path_zero_rtt() {
+        let path = TransportPath::new(TransportPathKind::Direct, peer("n"), "p", Some(0));
+        assert_eq!(path.estimated_rtt_ms, Some(0));
+    }
+
+    #[test]
+    fn transport_path_max_rtt() {
+        let path = TransportPath::new(TransportPathKind::Direct, peer("n"), "p", Some(u32::MAX));
+        assert_eq!(path.estimated_rtt_ms, Some(u32::MAX));
+    }
+
+    #[test]
+    fn transport_path_empty_path_id() {
+        let path = TransportPath::new(TransportPathKind::Direct, peer("n"), "", None);
+        assert_eq!(path.path_id, "");
+    }
+
+    #[test]
+    fn transport_path_long_path_id() {
+        let long_id = "x".repeat(1000);
+        let path = TransportPath::new(TransportPathKind::Direct, peer("n"), long_id.as_str(), None);
+        assert_eq!(path.path_id.len(), 1000);
+    }
+
+    // ── Batch: RankedPath ──
 
     #[test]
     fn ranked_path_clone() {
@@ -889,39 +943,24 @@ mod tests {
             reason: None,
         };
         let cloned = rp.clone();
-        // Use original after clone to avoid redundant_clone
-        assert_eq!(rp.priority, 4);
-        assert_eq!(cloned.priority, 4);
-        assert!(cloned.eligible);
+        assert_eq!(cloned.priority, rp.priority);
+        assert_eq!(cloned.eligible, rp.eligible);
+        assert!(cloned.reason.is_none());
     }
 
     #[test]
-    fn path_weight_differs_by_object_id() {
-        let obj1 = ObjectId::from_unscoped_bytes(b"abc");
-        let obj2 = ObjectId::from_unscoped_bytes(b"xyz");
-        let w1 = path_weight(&obj1, 0, "path");
-        let w2 = path_weight(&obj2, 0, "path");
-        assert_ne!(w1, w2);
-    }
-
-    #[test]
-    fn select_multipath_fanout_one_from_mixed_priorities() {
-        let policy = ZoneTransportPolicy {
-            allow_lan: true,
-            allow_derp: true,
-            allow_funnel: true,
+    fn ranked_path_with_reason() {
+        let rp = RankedPath {
+            path: TransportPath::new(TransportPathKind::Derp, peer("n"), "p", None),
+            priority: 2,
+            eligible: false,
+            reason: Some(DecisionReasonCode::TransportDerpForbidden),
         };
-        let paths = vec![
-            TransportPath::new(TransportPathKind::Funnel, peer("p1"), "f1", None),
-            TransportPath::new(TransportPathKind::Derp, peer("p2"), "d1", None),
-            TransportPath::new(TransportPathKind::Direct, peer("p3"), "x1", None),
-        ];
-        let obj = ObjectId::from_unscoped_bytes(b"select-test");
-        let selected = TransportSelector::select_multipath(&paths, &policy, &obj, 0, 1);
-        assert_eq!(selected.len(), 1);
-        // Should pick from Direct (highest priority)
-        assert_eq!(selected[0].kind, TransportPathKind::Direct);
+        assert!(!rp.eligible);
+        assert_eq!(rp.reason, Some(DecisionReasonCode::TransportDerpForbidden));
     }
+
+    // ── Batch: rank_paths sorting ──
 
     #[test]
     fn rank_paths_single_path() {
@@ -934,11 +973,496 @@ mod tests {
             TransportPathKind::Mesh,
             peer("p1"),
             "m1",
-            Some(15),
+            Some(10),
         )];
         let ranked = TransportSelector::rank_paths(&paths, &policy);
         assert_eq!(ranked.len(), 1);
         assert!(ranked[0].eligible);
-        assert_eq!(ranked[0].priority, TransportPathKind::Mesh.priority());
+        assert_eq!(ranked[0].priority, 3);
+    }
+
+    #[test]
+    fn rank_paths_all_same_kind_sorted_by_rtt() {
+        let policy = ZoneTransportPolicy {
+            allow_lan: true,
+            allow_derp: true,
+            allow_funnel: true,
+        };
+        let paths = vec![
+            TransportPath::new(TransportPathKind::Direct, peer("p1"), "a", Some(100)),
+            TransportPath::new(TransportPathKind::Direct, peer("p2"), "b", Some(10)),
+            TransportPath::new(TransportPathKind::Direct, peer("p3"), "c", Some(50)),
+        ];
+        let ranked = TransportSelector::rank_paths(&paths, &policy);
+        assert_eq!(ranked[0].path.estimated_rtt_ms, Some(10));
+        assert_eq!(ranked[1].path.estimated_rtt_ms, Some(50));
+        assert_eq!(ranked[2].path.estimated_rtt_ms, Some(100));
+    }
+
+    #[test]
+    fn rank_paths_mixed_none_rtt() {
+        let policy = ZoneTransportPolicy {
+            allow_lan: true,
+            allow_derp: true,
+            allow_funnel: true,
+        };
+        let paths = vec![
+            TransportPath::new(TransportPathKind::Direct, peer("p1"), "a", None),
+            TransportPath::new(TransportPathKind::Direct, peer("p2"), "b", Some(10)),
+            TransportPath::new(TransportPathKind::Direct, peer("p3"), "c", None),
+        ];
+        let ranked = TransportSelector::rank_paths(&paths, &policy);
+        // Known RTT first
+        assert_eq!(ranked[0].path.estimated_rtt_ms, Some(10));
+        // None RTTs after, sorted by path_id
+        assert!(ranked[1].path.estimated_rtt_ms.is_none());
+        assert!(ranked[2].path.estimated_rtt_ms.is_none());
+    }
+
+    #[test]
+    fn rank_paths_preserves_all_entries() {
+        let policy = ZoneTransportPolicy {
+            allow_lan: true,
+            allow_derp: false,
+            allow_funnel: true,
+        };
+        let paths = vec![
+            TransportPath::new(TransportPathKind::Direct, peer("p1"), "d1", None),
+            TransportPath::new(TransportPathKind::Derp, peer("p2"), "d2", None),
+            TransportPath::new(TransportPathKind::Funnel, peer("p3"), "f1", None),
+        ];
+        let ranked = TransportSelector::rank_paths(&paths, &policy);
+        assert_eq!(ranked.len(), 3);
+    }
+
+    // ── Batch: best_path ──
+
+    #[test]
+    fn best_path_skips_forbidden_returns_next() {
+        let policy = ZoneTransportPolicy {
+            allow_lan: false,
+            allow_derp: true,
+            allow_funnel: true,
+        };
+        let paths = vec![
+            TransportPath::new(TransportPathKind::Direct, peer("p1"), "direct", Some(1)),
+            TransportPath::new(TransportPathKind::Mesh, peer("p2"), "mesh", Some(1)),
+            TransportPath::new(TransportPathKind::Derp, peer("p3"), "derp", Some(1)),
+        ];
+        let best = TransportSelector::best_path(&paths, &policy).unwrap();
+        assert_eq!(best.path.kind, TransportPathKind::Derp);
+    }
+
+    #[test]
+    fn best_path_only_funnel_allowed() {
+        let policy = ZoneTransportPolicy {
+            allow_lan: false,
+            allow_derp: false,
+            allow_funnel: true,
+        };
+        let paths = vec![
+            TransportPath::new(TransportPathKind::Direct, peer("p1"), "d", None),
+            TransportPath::new(TransportPathKind::Derp, peer("p2"), "r", None),
+            TransportPath::new(TransportPathKind::Funnel, peer("p3"), "f", None),
+        ];
+        let best = TransportSelector::best_path(&paths, &policy).unwrap();
+        assert_eq!(best.path.kind, TransportPathKind::Funnel);
+    }
+
+    #[test]
+    fn best_path_only_derp_allowed() {
+        let policy = ZoneTransportPolicy {
+            allow_lan: false,
+            allow_derp: true,
+            allow_funnel: false,
+        };
+        let paths = vec![
+            TransportPath::new(TransportPathKind::Direct, peer("p1"), "d", None),
+            TransportPath::new(TransportPathKind::Derp, peer("p2"), "r", None),
+            TransportPath::new(TransportPathKind::Funnel, peer("p3"), "f", None),
+        ];
+        let best = TransportSelector::best_path(&paths, &policy).unwrap();
+        assert_eq!(best.path.kind, TransportPathKind::Derp);
+    }
+
+    #[test]
+    fn best_path_lowest_rtt_wins_among_equal_priority() {
+        let policy = ZoneTransportPolicy {
+            allow_lan: true,
+            allow_derp: true,
+            allow_funnel: true,
+        };
+        let paths = vec![
+            TransportPath::new(TransportPathKind::Mesh, peer("slow"), "m1", Some(200)),
+            TransportPath::new(TransportPathKind::Mesh, peer("fast"), "m2", Some(2)),
+        ];
+        let best = TransportSelector::best_path(&paths, &policy).unwrap();
+        assert_eq!(best.path.peer.as_str(), "fast");
+    }
+
+    // ── Batch: select_multipath ──
+
+    #[test]
+    fn select_multipath_fanout_one() {
+        let policy = ZoneTransportPolicy {
+            allow_lan: true,
+            allow_derp: true,
+            allow_funnel: true,
+        };
+        let paths = vec![
+            TransportPath::new(TransportPathKind::Direct, peer("p1"), "d1", None),
+            TransportPath::new(TransportPathKind::Mesh, peer("p2"), "m1", None),
+        ];
+        let obj = ObjectId::from_unscoped_bytes(b"test");
+        let selected = TransportSelector::select_multipath(&paths, &policy, &obj, 0, 1);
+        assert_eq!(selected.len(), 1);
+        // Should be Direct (highest priority)
+        assert_eq!(selected[0].kind, TransportPathKind::Direct);
+    }
+
+    #[test]
+    fn select_multipath_fills_from_lower_priority_groups() {
+        let policy = ZoneTransportPolicy {
+            allow_lan: true,
+            allow_derp: true,
+            allow_funnel: true,
+        };
+        let paths = vec![
+            TransportPath::new(TransportPathKind::Direct, peer("p1"), "d1", None),
+            TransportPath::new(TransportPathKind::Derp, peer("p2"), "r1", None),
+            TransportPath::new(TransportPathKind::Funnel, peer("p3"), "f1", None),
+        ];
+        let obj = ObjectId::from_unscoped_bytes(b"multipath");
+        let selected = TransportSelector::select_multipath(&paths, &policy, &obj, 0, 3);
+        assert_eq!(selected.len(), 3);
+        // First should be Direct, then Mesh-level (none here), then Derp, then Funnel
+        assert_eq!(selected[0].kind, TransportPathKind::Direct);
+    }
+
+    #[test]
+    fn select_multipath_skips_forbidden_paths() {
+        let policy = ZoneTransportPolicy {
+            allow_lan: false,
+            allow_derp: true,
+            allow_funnel: true,
+        };
+        let paths = vec![
+            TransportPath::new(TransportPathKind::Direct, peer("p1"), "d1", None),
+            TransportPath::new(TransportPathKind::Mesh, peer("p2"), "m1", None),
+            TransportPath::new(TransportPathKind::Derp, peer("p3"), "r1", None),
+            TransportPath::new(TransportPathKind::Funnel, peer("p4"), "f1", None),
+        ];
+        let obj = ObjectId::from_unscoped_bytes(b"test");
+        let selected = TransportSelector::select_multipath(&paths, &policy, &obj, 0, 4);
+        // Only Derp and Funnel are eligible
+        assert_eq!(selected.len(), 2);
+        for path in &selected {
+            assert_ne!(path.kind, TransportPathKind::Direct);
+            assert_ne!(path.kind, TransportPathKind::Mesh);
+        }
+    }
+
+    #[test]
+    fn select_multipath_determinism_across_calls() {
+        let policy = ZoneTransportPolicy {
+            allow_lan: true,
+            allow_derp: true,
+            allow_funnel: true,
+        };
+        let paths = vec![
+            TransportPath::new(TransportPathKind::Direct, peer("p1"), "d1", None),
+            TransportPath::new(TransportPathKind::Direct, peer("p2"), "d2", None),
+            TransportPath::new(TransportPathKind::Direct, peer("p3"), "d3", None),
+            TransportPath::new(TransportPathKind::Direct, peer("p4"), "d4", None),
+        ];
+        let obj = ObjectId::from_unscoped_bytes(b"determinism-test");
+        for _ in 0..10 {
+            let a = TransportSelector::select_multipath(&paths, &policy, &obj, 42, 2);
+            let b = TransportSelector::select_multipath(&paths, &policy, &obj, 42, 2);
+            assert_eq!(a, b);
+        }
+    }
+
+    #[test]
+    fn select_multipath_different_objects_may_differ() {
+        let policy = ZoneTransportPolicy {
+            allow_lan: true,
+            allow_derp: true,
+            allow_funnel: true,
+        };
+        let paths = vec![
+            TransportPath::new(TransportPathKind::Direct, peer("p1"), "d1", None),
+            TransportPath::new(TransportPathKind::Direct, peer("p2"), "d2", None),
+            TransportPath::new(TransportPathKind::Direct, peer("p3"), "d3", None),
+            TransportPath::new(TransportPathKind::Direct, peer("p4"), "d4", None),
+            TransportPath::new(TransportPathKind::Direct, peer("p5"), "d5", None),
+        ];
+        let obj_a = ObjectId::from_unscoped_bytes(b"object-a");
+        let obj_b = ObjectId::from_unscoped_bytes(b"object-b");
+        let sel_a = TransportSelector::select_multipath(&paths, &policy, &obj_a, 0, 2);
+        let sel_b = TransportSelector::select_multipath(&paths, &policy, &obj_b, 0, 2);
+        // With enough paths, different objects should yield different selections
+        // (not guaranteed but highly likely with 5 paths)
+        assert_eq!(sel_a.len(), 2);
+        assert_eq!(sel_b.len(), 2);
+    }
+
+    // ── Batch: policy_reason ──
+
+    #[test]
+    fn policy_reason_lan_only_allowed() {
+        let policy = ZoneTransportPolicy {
+            allow_lan: true,
+            allow_derp: false,
+            allow_funnel: false,
+        };
+        assert!(policy_reason(&policy, TransportPathKind::Direct).is_none());
+        assert!(policy_reason(&policy, TransportPathKind::Mesh).is_none());
+        assert!(policy_reason(&policy, TransportPathKind::Derp).is_some());
+        assert!(policy_reason(&policy, TransportPathKind::Funnel).is_some());
+    }
+
+    #[test]
+    fn policy_reason_derp_only_allowed() {
+        let policy = ZoneTransportPolicy {
+            allow_lan: false,
+            allow_derp: true,
+            allow_funnel: false,
+        };
+        assert!(policy_reason(&policy, TransportPathKind::Direct).is_some());
+        assert!(policy_reason(&policy, TransportPathKind::Mesh).is_some());
+        assert!(policy_reason(&policy, TransportPathKind::Derp).is_none());
+        assert!(policy_reason(&policy, TransportPathKind::Funnel).is_some());
+    }
+
+    #[test]
+    fn policy_reason_funnel_only_allowed() {
+        let policy = ZoneTransportPolicy {
+            allow_lan: false,
+            allow_derp: false,
+            allow_funnel: true,
+        };
+        assert!(policy_reason(&policy, TransportPathKind::Direct).is_some());
+        assert!(policy_reason(&policy, TransportPathKind::Mesh).is_some());
+        assert!(policy_reason(&policy, TransportPathKind::Derp).is_some());
+        assert!(policy_reason(&policy, TransportPathKind::Funnel).is_none());
+    }
+
+    #[test]
+    fn policy_reason_returns_correct_codes() {
+        let policy = ZoneTransportPolicy {
+            allow_lan: false,
+            allow_derp: false,
+            allow_funnel: false,
+        };
+        assert_eq!(
+            policy_reason(&policy, TransportPathKind::Direct),
+            Some(DecisionReasonCode::TransportLanForbidden)
+        );
+        assert_eq!(
+            policy_reason(&policy, TransportPathKind::Mesh),
+            Some(DecisionReasonCode::TransportLanForbidden)
+        );
+        assert_eq!(
+            policy_reason(&policy, TransportPathKind::Derp),
+            Some(DecisionReasonCode::TransportDerpForbidden)
+        );
+        assert_eq!(
+            policy_reason(&policy, TransportPathKind::Funnel),
+            Some(DecisionReasonCode::TransportFunnelForbidden)
+        );
+    }
+
+    // ── Batch: path_weight ──
+
+    #[test]
+    fn path_weight_differs_by_object() {
+        let obj_a = ObjectId::from_unscoped_bytes(b"obj-a");
+        let obj_b = ObjectId::from_unscoped_bytes(b"obj-b");
+        assert_ne!(path_weight(&obj_a, 0, "path"), path_weight(&obj_b, 0, "path"));
+    }
+
+    #[test]
+    fn path_weight_empty_path_id() {
+        let obj = ObjectId::from_unscoped_bytes(b"obj");
+        let w = path_weight(&obj, 0, "");
+        assert_ne!(w, [0u8; 32]); // Should still produce a non-zero hash
+    }
+
+    #[test]
+    fn path_weight_long_path_id() {
+        let obj = ObjectId::from_unscoped_bytes(b"obj");
+        let long_id = "a".repeat(10_000);
+        let w = path_weight(&obj, 0, &long_id);
+        assert_ne!(w, [0u8; 32]);
+    }
+
+    #[test]
+    fn path_weight_max_symbol_index() {
+        let obj = ObjectId::from_unscoped_bytes(b"obj");
+        let w = path_weight(&obj, u32::MAX, "path");
+        assert_ne!(w, [0u8; 32]);
+    }
+
+    #[test]
+    fn path_weight_zero_symbol_index() {
+        let obj = ObjectId::from_unscoped_bytes(b"obj");
+        let w = path_weight(&obj, 0, "path");
+        assert_ne!(w, [0u8; 32]);
+    }
+
+    // ── Batch: TransportSelector ──
+
+    #[test]
+    fn transport_selector_default_construction() {
+        let sel = TransportSelector;
+        let debug = format!("{sel:?}");
+        assert!(!debug.is_empty());
+    }
+
+    // ── Batch: rank_paths with all four kinds ──
+
+    #[test]
+    fn rank_paths_all_kinds_all_allowed() {
+        let policy = ZoneTransportPolicy {
+            allow_lan: true,
+            allow_derp: true,
+            allow_funnel: true,
+        };
+        let paths = vec![
+            TransportPath::new(TransportPathKind::Funnel, peer("p1"), "f", Some(1)),
+            TransportPath::new(TransportPathKind::Derp, peer("p2"), "d", Some(1)),
+            TransportPath::new(TransportPathKind::Mesh, peer("p3"), "m", Some(1)),
+            TransportPath::new(TransportPathKind::Direct, peer("p4"), "x", Some(1)),
+        ];
+        let ranked = TransportSelector::rank_paths(&paths, &policy);
+        assert!(ranked.iter().all(|r| r.eligible));
+        // Order: Direct(4), Mesh(3), Derp(2), Funnel(1)
+        assert_eq!(ranked[0].path.kind, TransportPathKind::Direct);
+        assert_eq!(ranked[1].path.kind, TransportPathKind::Mesh);
+        assert_eq!(ranked[2].path.kind, TransportPathKind::Derp);
+        assert_eq!(ranked[3].path.kind, TransportPathKind::Funnel);
+    }
+
+    #[test]
+    fn rank_paths_all_kinds_all_forbidden() {
+        let policy = ZoneTransportPolicy {
+            allow_lan: false,
+            allow_derp: false,
+            allow_funnel: false,
+        };
+        let paths = vec![
+            TransportPath::new(TransportPathKind::Direct, peer("p1"), "d", None),
+            TransportPath::new(TransportPathKind::Mesh, peer("p2"), "m", None),
+            TransportPath::new(TransportPathKind::Derp, peer("p3"), "r", None),
+            TransportPath::new(TransportPathKind::Funnel, peer("p4"), "f", None),
+        ];
+        let ranked = TransportSelector::rank_paths(&paths, &policy);
+        assert!(ranked.iter().all(|r| !r.eligible));
+    }
+
+    // ── Batch: rank_paths stability ──
+
+    #[test]
+    fn rank_paths_stable_ordering() {
+        let policy = ZoneTransportPolicy {
+            allow_lan: true,
+            allow_derp: true,
+            allow_funnel: true,
+        };
+        let paths = vec![
+            TransportPath::new(TransportPathKind::Direct, peer("p1"), "a", Some(10)),
+            TransportPath::new(TransportPathKind::Direct, peer("p2"), "b", Some(10)),
+            TransportPath::new(TransportPathKind::Direct, peer("p3"), "c", Some(10)),
+        ];
+        let r1 = TransportSelector::rank_paths(&paths, &policy);
+        let r2 = TransportSelector::rank_paths(&paths, &policy);
+        let ids1: Vec<&str> = r1.iter().map(|r| r.path.path_id.as_str()).collect();
+        let ids2: Vec<&str> = r2.iter().map(|r| r.path.path_id.as_str()).collect();
+        assert_eq!(ids1, ids2);
+    }
+
+    #[test]
+    fn rank_paths_many_paths() {
+        let policy = ZoneTransportPolicy {
+            allow_lan: true,
+            allow_derp: true,
+            allow_funnel: true,
+        };
+        let paths: Vec<TransportPath> = (0..100)
+            .map(|i| {
+                TransportPath::new(
+                    TransportPathKind::Direct,
+                    peer(&format!("p{i}")),
+                    format!("path-{i}"),
+                    Some(i),
+                )
+            })
+            .collect();
+        let ranked = TransportSelector::rank_paths(&paths, &policy);
+        assert_eq!(ranked.len(), 100);
+        // Should be sorted by RTT ascending
+        for window in ranked.windows(2) {
+            let rtt_a = window[0].path.estimated_rtt_ms.unwrap_or(u32::MAX);
+            let rtt_b = window[1].path.estimated_rtt_ms.unwrap_or(u32::MAX);
+            assert!(rtt_a <= rtt_b);
+        }
+    }
+
+    // ── Batch: multipath with mixed priorities ──
+
+    #[test]
+    fn select_multipath_crosses_priority_groups() {
+        let policy = ZoneTransportPolicy {
+            allow_lan: true,
+            allow_derp: true,
+            allow_funnel: true,
+        };
+        let paths = vec![
+            TransportPath::new(TransportPathKind::Direct, peer("p1"), "d1", None),
+            TransportPath::new(TransportPathKind::Derp, peer("p2"), "r1", None),
+        ];
+        let obj = ObjectId::from_unscoped_bytes(b"cross");
+        let selected = TransportSelector::select_multipath(&paths, &policy, &obj, 0, 2);
+        assert_eq!(selected.len(), 2);
+        // First should be Direct (priority 4)
+        assert_eq!(selected[0].kind, TransportPathKind::Direct);
+        // Second should be Derp (priority 2)
+        assert_eq!(selected[1].kind, TransportPathKind::Derp);
+    }
+
+    #[test]
+    fn select_multipath_single_eligible_path() {
+        let policy = ZoneTransportPolicy {
+            allow_lan: false,
+            allow_derp: false,
+            allow_funnel: true,
+        };
+        let paths = vec![
+            TransportPath::new(TransportPathKind::Direct, peer("p1"), "d1", None),
+            TransportPath::new(TransportPathKind::Funnel, peer("p2"), "f1", None),
+        ];
+        let obj = ObjectId::from_unscoped_bytes(b"single");
+        let selected = TransportSelector::select_multipath(&paths, &policy, &obj, 0, 5);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].kind, TransportPathKind::Funnel);
+    }
+
+    #[test]
+    fn select_multipath_all_same_priority() {
+        let policy = ZoneTransportPolicy {
+            allow_lan: true,
+            allow_derp: true,
+            allow_funnel: true,
+        };
+        let paths = vec![
+            TransportPath::new(TransportPathKind::Mesh, peer("p1"), "m1", None),
+            TransportPath::new(TransportPathKind::Mesh, peer("p2"), "m2", None),
+            TransportPath::new(TransportPathKind::Mesh, peer("p3"), "m3", None),
+        ];
+        let obj = ObjectId::from_unscoped_bytes(b"same-priority");
+        let selected = TransportSelector::select_multipath(&paths, &policy, &obj, 0, 2);
+        assert_eq!(selected.len(), 2);
+        assert!(selected.iter().all(|p| p.kind == TransportPathKind::Mesh));
     }
 }

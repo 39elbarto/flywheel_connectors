@@ -1505,127 +1505,717 @@ mod tests {
         assert_eq!(lease.expires_at, 9999);
     }
 
-    // ── Batch: additional planner tests ──
+    // ============================================================
+    // Additional tests
+    // ============================================================
+
+    // ---- version_gte extended edge cases ----
 
     #[test]
-    fn lease_purpose_display_all_variants() {
-        assert_eq!(LeasePurpose::SingletonWriter.to_string(), "singleton_writer");
-        assert_eq!(
-            LeasePurpose::OperationExecution.to_string(),
-            "operation_execution"
-        );
-        assert_eq!(
-            LeasePurpose::CoordinatorElection.to_string(),
-            "coordinator_election"
-        );
-        assert_eq!(LeasePurpose::Other.to_string(), "other");
+    fn version_gte_equal_multipart() {
+        assert!(version_gte("1.2.3", "1.2.3"));
     }
 
     #[test]
-    fn planner_context_builder_chain() {
+    fn version_gte_patch_less() {
+        assert!(!version_gte("1.0.0", "1.0.1"));
+    }
+
+    #[test]
+    fn version_gte_minor_dominates() {
+        assert!(version_gte("1.5.0", "1.4.99"));
+        assert!(!version_gte("1.4.99", "1.5.0"));
+    }
+
+    #[test]
+    fn version_gte_single_component() {
+        assert!(version_gte("3", "2"));
+        assert!(version_gte("2", "2"));
+        assert!(!version_gte("1", "2"));
+    }
+
+    #[test]
+    fn version_gte_four_components() {
+        assert!(version_gte("1.2.3.4", "1.2.3.4"));
+        assert!(version_gte("1.2.3.5", "1.2.3.4"));
+        assert!(!version_gte("1.2.3.3", "1.2.3.4"));
+    }
+
+    #[test]
+    fn version_gte_installed_longer_than_required() {
+        // "1.2.3" vs "1.2" => after "1.2" is exhausted, it's >=
+        assert!(version_gte("1.2.3", "1.2"));
+    }
+
+    #[test]
+    fn version_gte_installed_shorter_than_required() {
+        // "1.2" vs "1.2.3" => missing installed component treated as 0 < 3
+        assert!(!version_gte("1.2", "1.2.3"));
+    }
+
+    #[test]
+    fn version_gte_all_non_numeric() {
+        // "alpha.beta" => [] vs [] => true (vacuously)
+        assert!(version_gte("alpha.beta", "gamma.delta"));
+    }
+
+    #[test]
+    fn version_gte_zero_versions() {
+        assert!(version_gte("0.0.0", "0.0.0"));
+        assert!(!version_gte("0.0.0", "0.0.1"));
+    }
+
+    #[test]
+    fn version_gte_large_numbers() {
+        assert!(version_gte("999.999.999", "999.999.999"));
+        assert!(version_gte("1000.0.0", "999.999.999"));
+    }
+
+    // ---- LeasePurpose ----
+
+    #[test]
+    fn lease_purpose_copy_semantics() {
+        let a = LeasePurpose::CoordinatorElection;
+        let b = a; // Copy
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn lease_purpose_all_variants_distinct() {
+        let variants = [
+            LeasePurpose::SingletonWriter,
+            LeasePurpose::OperationExecution,
+            LeasePurpose::CoordinatorElection,
+            LeasePurpose::Other,
+        ];
+        for (i, v1) in variants.iter().enumerate() {
+            for (j, v2) in variants.iter().enumerate() {
+                if i == j {
+                    assert_eq!(v1, v2);
+                } else {
+                    assert_ne!(v1, v2);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lease_purpose_hash_consistency() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(LeasePurpose::SingletonWriter);
+        set.insert(LeasePurpose::OperationExecution);
+        set.insert(LeasePurpose::CoordinatorElection);
+        set.insert(LeasePurpose::Other);
+        assert_eq!(set.len(), 4);
+        // Inserting duplicate should not increase size
+        set.insert(LeasePurpose::Other);
+        assert_eq!(set.len(), 4);
+    }
+
+    #[test]
+    fn lease_purpose_debug() {
+        let dbg = format!("{:?}", LeasePurpose::SingletonWriter);
+        assert!(dbg.contains("SingletonWriter"));
+    }
+
+    // ---- AdjustmentFactor ----
+
+    #[test]
+    fn adjustment_factor_all_variants_debug() {
+        let variants = [
+            AdjustmentFactor::Connector,
+            AdjustmentFactor::DataLocality,
+            AdjustmentFactor::LeaseConstraint,
+            AdjustmentFactor::ZoneRestriction,
+            AdjustmentFactor::Custom,
+        ];
+        for v in &variants {
+            let dbg = format!("{v:?}");
+            assert!(!dbg.is_empty());
+        }
+    }
+
+    #[test]
+    fn adjustment_factor_hash_all_distinct() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(AdjustmentFactor::Connector);
+        set.insert(AdjustmentFactor::DataLocality);
+        set.insert(AdjustmentFactor::LeaseConstraint);
+        set.insert(AdjustmentFactor::ZoneRestriction);
+        set.insert(AdjustmentFactor::Custom);
+        assert_eq!(set.len(), 5);
+    }
+
+    // ---- CandidateNode ----
+
+    #[test]
+    fn candidate_node_new_defaults() {
+        let c = CandidateNode::new(test_node_id("test"), 75.5);
+        assert_eq!(c.node_id.as_str(), "node-test");
+        assert!((c.score - 75.5).abs() < f64::EPSILON);
+        assert!((c.base_fitness - 75.5).abs() < f64::EPSILON);
+        assert!(c.adjustments.is_empty());
+        assert!(c.eligible);
+        assert!(c.decision_reasons.is_empty());
+    }
+
+    #[test]
+    fn candidate_node_multiple_adjustments() {
+        let mut c = CandidateNode::new(test_node_id("m"), 100.0);
+        c.adjust(ScoreAdjustment::bonus(
+            AdjustmentFactor::DataLocality,
+            10.0,
+            "local data",
+        ));
+        c.adjust(ScoreAdjustment::penalty(
+            AdjustmentFactor::Connector,
+            20.0,
+            "old version",
+        ));
+        c.adjust(ScoreAdjustment::bonus(
+            AdjustmentFactor::Custom,
+            5.0,
+            "custom boost",
+        ));
+        assert_eq!(c.adjustments.len(), 3);
+        // 100 + 10 - 20 + 5 = 95
+        assert!((c.score - 95.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn candidate_node_mark_ineligible_clears_score() {
+        let mut c = CandidateNode::new(test_node_id("x"), 200.0);
+        c.adjust(ScoreAdjustment::bonus(
+            AdjustmentFactor::DataLocality,
+            50.0,
+            "boost",
+        ));
+        assert!((c.score - 250.0).abs() < f64::EPSILON);
+        c.mark_ineligible(DecisionReason::MissingConnector {
+            connector_id: "c".to_string(),
+        });
+        assert!(!c.eligible);
+        assert!((c.score).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn candidate_node_ord_nan_handling() {
+        // If scores are NaN, the comparison falls through to node_id string comparison
+        let a = CandidateNode::new(test_node_id("a"), f64::NAN);
+        let b = CandidateNode::new(test_node_id("b"), f64::NAN);
+        let mut v = [b, a];
+        v.sort();
+        // NaN partial_cmp returns None, so tiebreak by node_id
+        assert_eq!(v[0].node_id.as_str(), "node-a");
+        assert_eq!(v[1].node_id.as_str(), "node-b");
+    }
+
+    #[test]
+    fn candidate_node_eq_ignores_score_and_adjustments() {
+        let mut a = CandidateNode::new(test_node_id("same"), 100.0);
+        a.adjust(ScoreAdjustment::bonus(
+            AdjustmentFactor::DataLocality,
+            50.0,
+            "bonus",
+        ));
+        let b = CandidateNode::new(test_node_id("same"), 0.0);
+        assert_eq!(a, b); // PartialEq only on node_id
+    }
+
+    #[test]
+    fn candidate_node_clone() {
+        let mut c = CandidateNode::new(test_node_id("c"), 80.0);
+        c.adjust(ScoreAdjustment::bonus(
+            AdjustmentFactor::Custom,
+            5.0,
+            "test",
+        ));
+        c.add_reason(DecisionReason::SelectedAsBest { rank: 1 });
+        let cloned = c.clone();
+        assert_eq!(c.node_id.as_str(), cloned.node_id.as_str());
+        assert!((c.score - cloned.score).abs() < f64::EPSILON);
+        assert_eq!(c.adjustments.len(), cloned.adjustments.len());
+    }
+
+    #[test]
+    fn candidate_node_ord_zero_vs_positive() {
+        let zero = CandidateNode::new(test_node_id("z"), 0.0);
+        let pos = CandidateNode::new(test_node_id("p"), 1.0);
+        let mut v = [zero, pos];
+        v.sort();
+        assert_eq!(v[0].node_id.as_str(), "node-p"); // higher score first
+    }
+
+    #[test]
+    fn candidate_node_ord_negative_score() {
+        let neg = CandidateNode::new(test_node_id("n"), -50.0);
+        let pos = CandidateNode::new(test_node_id("p"), 50.0);
+        let mut v = [neg, pos];
+        v.sort();
+        assert_eq!(v[0].node_id.as_str(), "node-p");
+    }
+
+    // ---- ScoreAdjustment ----
+
+    #[test]
+    fn score_adjustment_bonus_zero() {
+        let adj = ScoreAdjustment::bonus(AdjustmentFactor::Custom, 0.0, "zero bonus");
+        assert!((adj.delta).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn score_adjustment_penalty_zero() {
+        let adj = ScoreAdjustment::penalty(AdjustmentFactor::Custom, 0.0, "zero penalty");
+        assert!((adj.delta).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn score_adjustment_clone() {
+        let adj = ScoreAdjustment::bonus(AdjustmentFactor::DataLocality, 15.0, "locality");
+        let cloned = adj.clone();
+        assert!((adj.delta - cloned.delta).abs() < f64::EPSILON);
+        assert_eq!(adj.explanation, cloned.explanation);
+    }
+
+    #[test]
+    fn score_adjustment_debug() {
+        let adj = ScoreAdjustment::penalty(AdjustmentFactor::LeaseConstraint, 100.0, "conflict");
+        let dbg = format!("{adj:?}");
+        assert!(dbg.contains("LeaseConstraint"));
+        assert!(dbg.contains("conflict"));
+    }
+
+    // ---- PlannerContext ----
+
+    #[test]
+    fn planner_context_excluding_empty() {
+        let ctx = PlannerContext::new(test_connector_id()).excluding(Vec::<String>::new());
+        assert!(ctx.excluded_nodes.is_empty());
+    }
+
+    #[test]
+    fn planner_context_excluding_duplicates() {
+        let ctx = PlannerContext::new(test_connector_id())
+            .excluding(["node-a", "node-a", "node-b"]);
+        assert_eq!(ctx.excluded_nodes.len(), 2);
+    }
+
+    #[test]
+    fn planner_context_clone() {
         let ctx = PlannerContext::new(test_connector_id())
             .with_min_version("2.0.0")
-            .with_min_memory_mb(4096)
+            .with_min_memory_mb(1024)
             .with_gpu()
-            .with_tpu()
             .with_singleton_writer()
-            .excluding(vec!["excluded-node"]);
-
-        assert!(ctx.requires_gpu);
-        assert!(ctx.requires_tpu);
-        assert!(ctx.singleton_writer);
-        assert_eq!(ctx.min_memory_mb, Some(4096));
-        assert_eq!(ctx.min_connector_version.as_deref(), Some("2.0.0"));
-        assert!(ctx.excluded_nodes.contains("excluded-node"));
+            .excluding(["x"]);
+        let cloned = ctx.clone();
+        assert_eq!(
+            ctx.min_connector_version.as_deref(),
+            Some("2.0.0")
+        );
+        assert_eq!(cloned.min_memory_mb, Some(1024));
+        assert!(cloned.requires_gpu);
+        assert!(cloned.singleton_writer);
+        assert_eq!(ctx.excluded_nodes.len(), 1);
     }
 
     #[test]
-    fn planner_input_singleton_holder_set() {
-        let input = PlannerInput::new(vec![], 1000).with_singleton_holder("node-a");
+    fn planner_context_debug() {
+        let ctx = PlannerContext::new(test_connector_id());
+        let dbg = format!("{ctx:?}");
+        assert!(dbg.contains("connector_id"));
+    }
+
+    // ---- PlannerInput ----
+
+    #[test]
+    fn planner_input_clone() {
+        let nodes = vec![make_node_info("a", 2048, true, "1.0.0", vec![])];
+        let input = PlannerInput::new(nodes, 500).with_singleton_holder("node-a");
+        let cloned = input.clone();
+        assert_eq!(input.nodes.len(), 1);
+        assert_eq!(cloned.current_time, 500);
         assert_eq!(input.singleton_lease_holder.as_deref(), Some("node-a"));
     }
 
     #[test]
-    fn execution_planner_plan_empty_input() {
+    fn planner_input_debug() {
+        let input = PlannerInput::new(vec![], 0);
+        let dbg = format!("{input:?}");
+        assert!(dbg.contains("current_time"));
+    }
+
+    // ---- NodeInfo ----
+
+    #[test]
+    fn node_info_clone() {
+        let info = make_node_info("x", 4096, true, "1.0.0", vec![test_object_id(1)]);
+        let cloned = info.clone();
+        assert_eq!(info.node_id().as_str(), cloned.node_id().as_str());
+        assert_eq!(cloned.local_symbols.len(), 1);
+    }
+
+    #[test]
+    fn node_info_empty_symbols() {
+        let info = make_node_info("empty", 1024, true, "1.0.0", vec![]);
+        assert!(info.local_symbols.is_empty());
+    }
+
+    #[test]
+    fn node_info_many_symbols() {
+        let syms: Vec<ObjectId> = (0..20).map(test_object_id).collect();
+        let info = make_node_info("many", 2048, true, "1.0.0", syms);
+        assert_eq!(info.local_symbols.len(), 20);
+    }
+
+    // ---- HeldLease ----
+
+    #[test]
+    fn held_lease_clone() {
+        let lease = HeldLease {
+            subject_id: test_object_id(5),
+            purpose: LeasePurpose::SingletonWriter,
+            expires_at: 12345,
+        };
+        let cloned = lease.clone();
+        assert_eq!(lease.purpose, LeasePurpose::SingletonWriter);
+        assert_eq!(cloned.expires_at, 12345);
+    }
+
+    #[test]
+    fn held_lease_debug() {
+        let lease = HeldLease {
+            subject_id: test_object_id(1),
+            purpose: LeasePurpose::Other,
+            expires_at: 0,
+        };
+        let dbg = format!("{lease:?}");
+        assert!(dbg.contains("Other"));
+    }
+
+    // ---- ExecutionPlan ----
+
+    #[test]
+    fn execution_plan_multiple_candidates() {
+        let c1 = CandidateNode::new(test_node_id("a"), 100.0);
+        let c2 = CandidateNode::new(test_node_id("b"), 90.0);
+        let c3 = CandidateNode::new(test_node_id("c"), 80.0);
+        let plan = ExecutionPlan::from_candidates(&[c1, c2, c3], 5, 999);
+        assert!(plan.has_target());
+        assert_eq!(plan.target_node().unwrap().as_str(), "node-a");
+        assert_eq!(plan.alternatives.len(), 2);
+        assert_eq!(plan.nodes_excluded, 2);
+        assert_eq!(plan.planned_at, 999);
+    }
+
+    #[test]
+    fn execution_plan_clone() {
+        let c = CandidateNode::new(test_node_id("x"), 50.0);
+        let plan = ExecutionPlan::from_candidates(&[c], 1, 100);
+        let cloned = plan.clone();
+        assert!(cloned.has_target());
+        assert_eq!(
+            cloned.target_node().unwrap().as_str(),
+            plan.target_node().unwrap().as_str()
+        );
+    }
+
+    #[test]
+    fn execution_plan_debug() {
+        let plan = ExecutionPlan::from_candidates(&[], 0, 0);
+        let dbg = format!("{plan:?}");
+        assert!(dbg.contains("selected"));
+    }
+
+    #[test]
+    fn execution_plan_nodes_excluded_saturates() {
+        // total_nodes < candidates.len() shouldn't underflow (saturating_sub)
+        let c1 = CandidateNode::new(test_node_id("a"), 100.0);
+        let c2 = CandidateNode::new(test_node_id("b"), 90.0);
+        let plan = ExecutionPlan::from_candidates(&[c1, c2], 1, 0);
+        // 1 - 2 saturates to 0
+        assert_eq!(plan.nodes_excluded, 0);
+    }
+
+    // ---- DelegationRequest ----
+
+    #[test]
+    fn delegation_request_clone() {
+        let plan = ExecutionPlan::from_candidates(&[], 0, 0);
+        let req = DelegationRequest::new(
+            test_node_id("t"),
+            test_node_id("r"),
+            test_connector_id(),
+            "op-x".to_string(),
+            plan,
+        );
+        let cloned = req.clone();
+        assert_eq!(req.target_node.as_str(), "node-t");
+        assert_eq!(req.requester_node.as_str(), "node-r");
+        assert_eq!(cloned.operation_id, "op-x");
+    }
+
+    #[test]
+    fn delegation_request_debug() {
+        let plan = ExecutionPlan::from_candidates(&[], 0, 0);
+        let req = DelegationRequest::new(
+            test_node_id("t"),
+            test_node_id("r"),
+            test_connector_id(),
+            "op-z".to_string(),
+            plan,
+        );
+        let dbg = format!("{req:?}");
+        assert!(dbg.contains("op-z"));
+    }
+
+    // ---- Planner integration: combined constraints ----
+
+    #[test]
+    fn planner_version_and_symbols_combined() {
         let planner = ExecutionPlanner::new();
-        let input = PlannerInput::new(vec![], 1000);
-        let context = PlannerContext::new(test_connector_id());
+        let sym = test_object_id(10);
+        let nodes = vec![
+            make_node_info("old_no_sym", 2048, true, "1.0.0", vec![]),
+            make_node_info("new_has_sym", 2048, true, "2.0.0", vec![sym]),
+            make_node_info("new_no_sym", 2048, true, "2.0.0", vec![]),
+        ];
+        let input = PlannerInput::new(nodes, 1000);
+        let context = PlannerContext::new(test_connector_id())
+            .with_min_version("2.0.0")
+            .with_required_symbols(vec![sym]);
+
+        let candidates = planner.plan(&input, &context);
+        // Only new_has_sym has both version >= 2.0.0 AND required symbol
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].node_id.as_str(), "node-new_has_sym");
+    }
+
+    #[test]
+    fn planner_singleton_and_version_combined() {
+        let planner = ExecutionPlanner::new();
+        let nodes = vec![
+            make_node_info("holder", 2048, true, "1.0.0", vec![]),
+            make_node_info("other", 4096, true, "2.0.0", vec![]),
+        ];
+        let input = PlannerInput::new(nodes, 1000).with_singleton_holder("node-holder");
+        let context = PlannerContext::new(test_connector_id())
+            .with_min_version("2.0.0")
+            .with_singleton_writer();
+
+        let candidates = planner.plan(&input, &context);
+        // holder has old version → ineligible for version
+        // other has new version but not singleton holder → ineligible for lease
+        // Both should be excluded
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn planner_all_excluded() {
+        let planner = ExecutionPlanner::new();
+        let nodes = vec![
+            make_node_info("a", 2048, true, "1.0.0", vec![]),
+            make_node_info("b", 2048, true, "1.0.0", vec![]),
+        ];
+        let input = PlannerInput::new(nodes, 1000);
+        let context =
+            PlannerContext::new(test_connector_id()).excluding(["node-a", "node-b"]);
         let candidates = planner.plan(&input, &context);
         assert!(candidates.is_empty());
     }
 
     #[test]
-    fn candidate_node_ordering_by_score() {
-        let a = CandidateNode {
-            node_id: test_node_id("a"),
-            score: 80.0,
-            base_fitness: 80.0,
-            adjustments: vec![],
-            eligible: true,
-            decision_reasons: vec![],
-        };
-        let b = CandidateNode {
-            node_id: test_node_id("b"),
-            score: 100.0,
-            base_fitness: 100.0,
-            adjustments: vec![],
-            eligible: true,
-            decision_reasons: vec![],
-        };
-        // b has higher score, so b < a in Ord (higher score first)
-        assert!(b < a);
+    fn planner_max_candidates_limit() {
+        let planner = ExecutionPlanner::new();
+        // Create more than MAX_CANDIDATES (10) nodes
+        let nodes: Vec<NodeInfo> = (0_u32..15)
+            .map(|i| {
+                make_node_info(
+                    &format!("n{i:02}"),
+                    1024 + i * 100,
+                    true,
+                    "1.0.0",
+                    vec![],
+                )
+            })
+            .collect();
+        let input = PlannerInput::new(nodes, 1000);
+        let context = PlannerContext::new(test_connector_id());
+        let candidates = planner.plan(&input, &context);
+        assert!(candidates.len() <= 10);
     }
 
     #[test]
-    fn candidate_node_eq_same_node_id_different_score() {
-        let a = CandidateNode {
-            node_id: test_node_id("same"),
-            score: 50.0,
-            base_fitness: 50.0,
-            adjustments: vec![],
-            eligible: true,
-            decision_reasons: vec![],
-        };
-        let b = CandidateNode {
-            node_id: test_node_id("same"),
-            score: 100.0,
-            base_fitness: 100.0,
-            adjustments: vec![],
-            eligible: true,
-            decision_reasons: vec![],
-        };
-        assert_eq!(a, b);
+    fn planner_preferred_but_not_required_symbols() {
+        let planner = ExecutionPlanner::new();
+        let sym = test_object_id(20);
+        let nodes = vec![
+            make_node_info("has", 2048, true, "1.0.0", vec![sym]),
+            make_node_info("no", 2048, true, "1.0.0", vec![]),
+        ];
+        let input = PlannerInput::new(nodes, 1000);
+        // preferred but NOT required => both eligible, but "has" scores higher
+        let context =
+            PlannerContext::new(test_connector_id()).with_preferred_symbols(vec![sym]);
+        let candidates = planner.plan(&input, &context);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].node_id.as_str(), "node-has");
     }
 
     #[test]
-    fn node_info_node_id_accessor() {
-        let profile = make_profile("test-node", 1024, false, "1.0.0");
-        let info = NodeInfo {
-            profile,
-            local_symbols: HashSet::new(),
-            held_leases: vec![],
-        };
-        assert_eq!(info.node_id().as_str(), "node-test-node");
+    fn planner_no_preferred_no_required_symbols() {
+        let planner = ExecutionPlanner::new();
+        let nodes = vec![
+            make_node_info("a", 2048, true, "1.0.0", vec![test_object_id(1)]),
+            make_node_info("b", 2048, true, "1.0.0", vec![]),
+        ];
+        let input = PlannerInput::new(nodes, 1000);
+        let context = PlannerContext::new(test_connector_id());
+        // No preferred symbols => no locality bonus applied
+        let candidates = planner.plan(&input, &context);
+        assert_eq!(candidates.len(), 2);
     }
 
     #[test]
-    fn planner_context_target_zone_set() {
-        let zone: ZoneId = "z:work".parse().unwrap();
-        let ctx = PlannerContext::new(test_connector_id()).with_target_zone(zone.clone());
-        assert_eq!(ctx.target_zone.unwrap(), zone);
+    fn planner_multiple_required_symbols_all_needed() {
+        let planner = ExecutionPlanner::new();
+        let s1 = test_object_id(1);
+        let s2 = test_object_id(2);
+        let s3 = test_object_id(3);
+
+        let nodes = vec![
+            make_node_info("has_all", 2048, true, "1.0.0", vec![s1, s2, s3]),
+            make_node_info("has_some", 2048, true, "1.0.0", vec![s1, s2]),
+            make_node_info("has_none", 2048, true, "1.0.0", vec![]),
+        ];
+        let input = PlannerInput::new(nodes, 1000);
+        let context =
+            PlannerContext::new(test_connector_id()).with_required_symbols(vec![s1, s2, s3]);
+        let candidates = planner.plan(&input, &context);
+        // Only has_all has all 3 required symbols
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].node_id.as_str(), "node-has_all");
     }
 
     #[test]
-    fn planner_context_with_preferred_symbols() {
-        let symbols = vec![test_object_id(1), test_object_id(2)];
-        let ctx = PlannerContext::new(test_connector_id()).with_preferred_symbols(symbols);
-        assert_eq!(ctx.preferred_symbols.len(), 2);
+    fn planner_singleton_writer_no_context_flag() {
+        let planner = ExecutionPlanner::new();
+        let nodes = vec![
+            make_node_info("a", 2048, true, "1.0.0", vec![]),
+            make_node_info("b", 4096, true, "1.0.0", vec![]),
+        ];
+        // Singleton holder set on input but context does NOT have singleton_writer
+        let input = PlannerInput::new(nodes, 1000).with_singleton_holder("node-a");
+        let context = PlannerContext::new(test_connector_id());
+        let candidates = planner.plan(&input, &context);
+        // Both should be eligible since singleton_writer is false in context
+        assert_eq!(candidates.len(), 2);
     }
 
+    // ---- DecisionReason Clone ----
+
     #[test]
-    fn planner_context_with_required_symbols() {
-        let symbols = vec![test_object_id(3)];
-        let ctx = PlannerContext::new(test_connector_id()).with_required_symbols(symbols);
-        assert_eq!(ctx.required_symbols.len(), 1);
+    fn decision_reason_clone_all_variants() {
+        let reasons = vec![
+            DecisionReason::SelectedAsBest { rank: 1 },
+            DecisionReason::EligibleNotSelected {
+                rank: 3,
+                better_count: 2,
+            },
+            DecisionReason::MissingConnector {
+                connector_id: "fcp.test".to_string(),
+            },
+            DecisionReason::IncompatibleVersion {
+                connector_id: "c".to_string(),
+                required: "2.0".to_string(),
+                installed: "1.0".to_string(),
+            },
+            DecisionReason::LeaseConflict {
+                holder: test_node_id("h"),
+                lease_purpose: "op".to_string(),
+            },
+            DecisionReason::ZoneRestriction {
+                zone: "z:prod".to_string(),
+                reason: "no access".to_string(),
+            },
+            DecisionReason::HasLocalData { symbol_count: 10 },
+            DecisionReason::MissingRequiredSymbol {
+                symbol_prefix: "0a1b".to_string(),
+            },
+            DecisionReason::Custom("custom reason".to_string()),
+        ];
+        for r in &reasons {
+            let cloned = r.clone();
+            let dbg_orig = format!("{r:?}");
+            let dbg_clone = format!("{cloned:?}");
+            assert_eq!(dbg_orig, dbg_clone);
+        }
+    }
+
+    // ---- ExecutionPlanner Debug ----
+
+    #[test]
+    fn execution_planner_debug() {
+        let planner = ExecutionPlanner::new();
+        let dbg = format!("{planner:?}");
+        assert!(dbg.contains("ExecutionPlanner"));
+    }
+
+    // ---- select_best with multiple eligible ----
+
+    #[test]
+    fn select_best_picks_highest_memory() {
+        let planner = ExecutionPlanner::new();
+        let nodes = vec![
+            make_node_info("small", 1024, true, "1.0.0", vec![]),
+            make_node_info("medium", 4096, true, "1.0.0", vec![]),
+            make_node_info("large", 16384, true, "1.0.0", vec![]),
+        ];
+        let input = PlannerInput::new(nodes, 1000);
+        let context = PlannerContext::new(test_connector_id());
+        let best = planner.select_best(&input, &context).unwrap();
+        assert_eq!(best.node_id.as_str(), "node-large");
+    }
+
+    // ---- Planner plan ranking correctness ----
+
+    #[test]
+    fn plan_ranks_are_sequential() {
+        let planner = ExecutionPlanner::new();
+        let nodes = vec![
+            make_node_info("x", 8192, true, "1.0.0", vec![]),
+            make_node_info("y", 4096, true, "1.0.0", vec![]),
+            make_node_info("z", 2048, true, "1.0.0", vec![]),
+        ];
+        let input = PlannerInput::new(nodes, 1000);
+        let context = PlannerContext::new(test_connector_id());
+        let candidates = planner.plan(&input, &context);
+        assert_eq!(candidates.len(), 3);
+
+        // First should have SelectedAsBest { rank: 1 }
+        assert!(candidates[0]
+            .decision_reasons
+            .iter()
+            .any(|r| matches!(r, DecisionReason::SelectedAsBest { rank: 1 })));
+
+        // Second should have rank 2
+        assert!(candidates[1].decision_reasons.iter().any(|r| matches!(
+            r,
+            DecisionReason::EligibleNotSelected {
+                rank: 2,
+                better_count: 1
+            }
+        )));
+
+        // Third should have rank 3
+        assert!(candidates[2].decision_reasons.iter().any(|r| matches!(
+            r,
+            DecisionReason::EligibleNotSelected {
+                rank: 3,
+                better_count: 2
+            }
+        )));
     }
 }

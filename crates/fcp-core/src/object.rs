@@ -1157,4 +1157,711 @@ mod tests {
             RetentionClass::Lease { expires_at: 42_000 }
         ));
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ObjectId copy/clone semantics
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn object_id_copy_semantics() {
+        let id = ObjectId::from_bytes([5_u8; 32]);
+        let copied = id;
+        assert_eq!(id, copied);
+    }
+
+    #[test]
+    fn object_id_clone_equals_copy() {
+        let id = ObjectId::from_bytes([9_u8; 32]);
+        let cloned = Clone::clone(&id);
+        assert_eq!(id, cloned);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ObjectId additional hashing
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn object_id_different_bytes_not_equal() {
+        let a = ObjectId::from_bytes([0_u8; 32]);
+        let b = ObjectId::from_bytes([1_u8; 32]);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn object_id_hashset_dedup() {
+        use std::collections::HashSet;
+        let id = ObjectId::from_bytes([42_u8; 32]);
+        let mut set = HashSet::new();
+        set.insert(id);
+        set.insert(id);
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn object_id_hashmap_lookup() {
+        use std::collections::HashMap;
+        let id = ObjectId::from_bytes([77_u8; 32]);
+        let mut map = HashMap::new();
+        map.insert(id, "found");
+        assert_eq!(map.get(&id), Some(&"found"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ObjectId ordering additional tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn object_id_ordering_equal() {
+        let a = ObjectId::from_bytes([10_u8; 32]);
+        let b = ObjectId::from_bytes([10_u8; 32]);
+        assert!(a >= b);
+        assert!(b >= a);
+    }
+
+    #[test]
+    fn object_id_ordering_last_byte_differs() {
+        let mut bytes_a = [0_u8; 32];
+        bytes_a[31] = 5;
+        let mut bytes_b = [0_u8; 32];
+        bytes_b[31] = 6;
+        let a = ObjectId::from_bytes(bytes_a);
+        let b = ObjectId::from_bytes(bytes_b);
+        assert!(a < b);
+    }
+
+    #[test]
+    fn object_id_ordering_first_byte_dominates() {
+        let mut bytes_a = [0_u8; 32];
+        bytes_a[0] = 1;
+        bytes_a[31] = 255;
+        let mut bytes_b = [0_u8; 32];
+        bytes_b[0] = 2;
+        bytes_b[31] = 0;
+        let a = ObjectId::from_bytes(bytes_a);
+        let b = ObjectId::from_bytes(bytes_b);
+        assert!(a < b);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ObjectId display and debug edge cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn object_id_display_all_zeros() {
+        let id = ObjectId::from_bytes([0_u8; 32]);
+        assert_eq!(id.to_string(), "00".repeat(32));
+    }
+
+    #[test]
+    fn object_id_display_length() {
+        let id = ObjectId::from_bytes([0xAB_u8; 32]);
+        assert_eq!(id.to_string().len(), 64);
+    }
+
+    #[test]
+    fn object_id_debug_contains_display() {
+        let id = ObjectId::from_bytes([0x12_u8; 32]);
+        let debug = format!("{id:?}");
+        let display = id.to_string();
+        assert!(debug.contains(&display));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ObjectId keyed constructor edge cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn object_id_keyed_empty_content() {
+        let key = ObjectIdKey::from_bytes([0_u8; 32]);
+        let zone: ZoneId = "z:work".parse().unwrap();
+        let schema = SchemaId::new("fcp.test", "Test", Version::new(1, 0, 0));
+        let id = ObjectId::new(b"", &zone, &schema, &key);
+        assert_ne!(id, ObjectId::from_bytes([0_u8; 32]));
+    }
+
+    #[test]
+    fn object_id_keyed_large_content() {
+        let key = ObjectIdKey::from_bytes([0_u8; 32]);
+        let zone: ZoneId = "z:work".parse().unwrap();
+        let schema = SchemaId::new("fcp.test", "Test", Version::new(1, 0, 0));
+        let large = vec![0xAB_u8; 10_000];
+        let id = ObjectId::new(&large, &zone, &schema, &key);
+        assert_ne!(id, ObjectId::from_bytes([0_u8; 32]));
+    }
+
+    #[test]
+    fn object_id_keyed_same_content_same_result() {
+        let key = ObjectIdKey::from_bytes([7_u8; 32]);
+        let zone: ZoneId = "z:private".parse().unwrap();
+        let schema = SchemaId::new("fcp.test", "Dup", Version::new(2, 0, 0));
+        let id1 = ObjectId::new(b"dup", &zone, &schema, &key);
+        let id2 = ObjectId::new(b"dup", &zone, &schema, &key);
+        assert_eq!(id1, id2);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ObjectId unscoped edge cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn object_id_unscoped_single_byte() {
+        let id = ObjectId::from_unscoped_bytes(&[42]);
+        assert_ne!(id, ObjectId::from_bytes([0_u8; 32]));
+    }
+
+    #[test]
+    fn object_id_unscoped_large_content() {
+        let large = vec![0xFF_u8; 100_000];
+        let id = ObjectId::from_unscoped_bytes(&large);
+        assert_ne!(id, ObjectId::from_bytes([0_u8; 32]));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ObjectId serde additional tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn object_id_json_serde_mixed_bytes() {
+        let mut bytes = [0_u8; 32];
+        for (i, b) in bytes.iter_mut().enumerate() {
+            *b = u8::try_from(i).unwrap();
+        }
+        let id = ObjectId::from_bytes(bytes);
+        let json = serde_json::to_string(&id).unwrap();
+        let back: ObjectId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn object_id_cbor_serde_roundtrip() {
+        let id = ObjectId::from_bytes([0xBE_u8; 32]);
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&id, &mut buf).unwrap();
+        let back: ObjectId = ciborium::de::from_reader(&buf[..]).unwrap();
+        assert_eq!(id, back);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ObjectIdKey additional tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn object_id_key_copy_semantics() {
+        let key = ObjectIdKey::from_bytes([0xAA_u8; 32]);
+        let copied = key;
+        assert_eq!(key, copied);
+    }
+
+    #[test]
+    fn object_id_key_zero_bytes() {
+        let key = ObjectIdKey::from_bytes([0_u8; 32]);
+        assert_eq!(key.as_bytes(), &[0_u8; 32]);
+    }
+
+    #[test]
+    fn object_id_key_max_bytes() {
+        let key = ObjectIdKey::from_bytes([0xFF_u8; 32]);
+        assert_eq!(key.as_bytes(), &[0xFF_u8; 32]);
+    }
+
+    #[test]
+    fn object_id_key_debug_format_consistent() {
+        let key1 = ObjectIdKey::from_bytes([1_u8; 32]);
+        let key2 = ObjectIdKey::from_bytes([2_u8; 32]);
+        let debug1 = format!("{key1:?}");
+        let debug2 = format!("{key2:?}");
+        // Both should have the same redacted format regardless of content
+        assert_eq!(debug1, debug2);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // DeviceSelector additional tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn device_selector_tag_empty_string() {
+        let sel = DeviceSelector::Tag(String::new());
+        let json = serde_json::to_string(&sel).unwrap();
+        let back: DeviceSelector = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, DeviceSelector::Tag(ref s) if s.is_empty()));
+    }
+
+    #[test]
+    fn device_selector_class_with_special_chars() {
+        let sel = DeviceSelector::Class("high-mem-v2.1".into());
+        let json = serde_json::to_string(&sel).unwrap();
+        let back: DeviceSelector = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, DeviceSelector::Class(ref s) if s == "high-mem-v2.1"));
+    }
+
+    #[test]
+    fn device_selector_has_capability_with_dots() {
+        let sel = DeviceSelector::HasCapability("gpu.compute.v3".into());
+        let json = serde_json::to_string(&sel).unwrap();
+        let back: DeviceSelector = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, DeviceSelector::HasCapability(ref s) if s == "gpu.compute.v3"));
+    }
+
+    #[test]
+    fn device_selector_zone_different_zones() {
+        for zone in [ZoneId::work(), ZoneId::private(), ZoneId::public()] {
+            let sel = DeviceSelector::Zone(zone.clone());
+            let json = serde_json::to_string(&sel).unwrap();
+            let back: DeviceSelector = serde_json::from_str(&json).unwrap();
+            let json2 = serde_json::to_string(&back).unwrap();
+            assert_eq!(json, json2);
+        }
+    }
+
+    #[test]
+    fn device_selector_debug_format() {
+        let sel = DeviceSelector::Tag("test".into());
+        let debug = format!("{sel:?}");
+        assert!(debug.contains("Tag"));
+        assert!(debug.contains("test"));
+    }
+
+    #[test]
+    fn device_selector_clone() {
+        let sel = DeviceSelector::Class("high-mem".into());
+        let cloned = sel.clone();
+        let json_orig = serde_json::to_string(&sel).unwrap();
+        let json_clone = serde_json::to_string(&cloned).unwrap();
+        assert_eq!(json_orig, json_clone);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ObjectPlacementPolicy additional tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn placement_policy_boundary_min_nodes_max() {
+        let policy = ObjectPlacementPolicy {
+            min_nodes: u8::MAX,
+            max_node_fraction_bps: 10000,
+            preferred_devices: vec![],
+            excluded_devices: vec![],
+            target_coverage_bps: 10000,
+            min_source_diversity: u8::MAX,
+        };
+        let json = serde_json::to_string(&policy).unwrap();
+        let back: ObjectPlacementPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.min_nodes, u8::MAX);
+        assert_eq!(back.min_source_diversity, u8::MAX);
+    }
+
+    #[test]
+    fn placement_policy_max_node_fraction_boundary() {
+        let policy = ObjectPlacementPolicy {
+            min_nodes: 1,
+            max_node_fraction_bps: u16::MAX,
+            preferred_devices: vec![],
+            excluded_devices: vec![],
+            target_coverage_bps: u32::MAX,
+            min_source_diversity: 0,
+        };
+        let json = serde_json::to_string(&policy).unwrap();
+        let back: ObjectPlacementPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.max_node_fraction_bps, u16::MAX);
+        assert_eq!(back.target_coverage_bps, u32::MAX);
+    }
+
+    #[test]
+    fn placement_policy_many_preferred_devices() {
+        let policy = ObjectPlacementPolicy {
+            min_nodes: 2,
+            max_node_fraction_bps: 5000,
+            preferred_devices: (0..10)
+                .map(|i| DeviceSelector::Tag(format!("tag-{i}")))
+                .collect(),
+            excluded_devices: (0..5)
+                .map(DeviceSelector::NodeId)
+                .collect(),
+            target_coverage_bps: 8000,
+            min_source_diversity: 1,
+        };
+        let json = serde_json::to_string(&policy).unwrap();
+        let back: ObjectPlacementPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.preferred_devices.len(), 10);
+        assert_eq!(back.excluded_devices.len(), 5);
+    }
+
+    #[test]
+    fn placement_policy_clone() {
+        let policy = ObjectPlacementPolicy {
+            min_nodes: 3,
+            max_node_fraction_bps: 5000,
+            preferred_devices: vec![DeviceSelector::Tag("ssd".into())],
+            excluded_devices: vec![],
+            target_coverage_bps: 10000,
+            min_source_diversity: 2,
+        };
+        let cloned = Clone::clone(&policy);
+        assert_eq!(cloned.min_nodes, 3);
+        assert_eq!(cloned.preferred_devices.len(), 1);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ObjectHeader additional edge cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn object_header_large_refs_list() {
+        let header = ObjectHeader {
+            schema: SchemaId::new("fcp.test", "BigRefs", Version::new(1, 0, 0)),
+            zone_id: ZoneId::work(),
+            created_at: 1_000,
+            provenance: Provenance::new(ZoneId::work()),
+            refs: (0..50)
+                .map(|i| {
+                    let mut bytes = [0_u8; 32];
+                    bytes[0] = i;
+                    ObjectId::from_bytes(bytes)
+                })
+                .collect(),
+            foreign_refs: vec![],
+            ttl_secs: None,
+            placement: None,
+        };
+        let json = serde_json::to_string(&header).unwrap();
+        let back: ObjectHeader = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.refs.len(), 50);
+    }
+
+    #[test]
+    fn object_header_ttl_zero() {
+        let header = ObjectHeader {
+            schema: SchemaId::new("fcp.test", "TTL0", Version::new(1, 0, 0)),
+            zone_id: ZoneId::work(),
+            created_at: 0,
+            provenance: Provenance::new(ZoneId::work()),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: Some(0),
+            placement: None,
+        };
+        let json = serde_json::to_string(&header).unwrap();
+        let back: ObjectHeader = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.ttl_secs, Some(0));
+    }
+
+    #[test]
+    fn object_header_ttl_max() {
+        let header = ObjectHeader {
+            schema: SchemaId::new("fcp.test", "TTLMax", Version::new(1, 0, 0)),
+            zone_id: ZoneId::work(),
+            created_at: 0,
+            provenance: Provenance::new(ZoneId::work()),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: Some(u64::MAX),
+            placement: None,
+        };
+        let json = serde_json::to_string(&header).unwrap();
+        let back: ObjectHeader = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.ttl_secs, Some(u64::MAX));
+    }
+
+    #[test]
+    fn object_header_clone() {
+        let header = ObjectHeader {
+            schema: SchemaId::new("fcp.test", "Clonable", Version::new(1, 0, 0)),
+            zone_id: ZoneId::work(),
+            created_at: 42,
+            provenance: Provenance::new(ZoneId::work()),
+            refs: vec![ObjectId::from_bytes([1_u8; 32])],
+            foreign_refs: vec![ObjectId::from_bytes([2_u8; 32])],
+            ttl_secs: Some(100),
+            placement: None,
+        };
+        let cloned = Clone::clone(&header);
+        assert_eq!(cloned.created_at, 42);
+        assert_eq!(cloned.refs.len(), 1);
+        assert_eq!(cloned.foreign_refs.len(), 1);
+        assert_eq!(cloned.ttl_secs, Some(100));
+    }
+
+    #[test]
+    fn object_header_different_zones() {
+        for zone in [ZoneId::work(), ZoneId::private(), ZoneId::public(), ZoneId::community()] {
+            let header = ObjectHeader {
+                schema: SchemaId::new("fcp.test", "Zone", Version::new(1, 0, 0)),
+                zone_id: zone.clone(),
+                created_at: 0,
+                provenance: Provenance::new(zone.clone()),
+                refs: vec![],
+                foreign_refs: vec![],
+                ttl_secs: None,
+                placement: None,
+            };
+            let json = serde_json::to_string(&header).unwrap();
+            let back: ObjectHeader = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.zone_id, zone);
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // RetentionClass additional tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn retention_class_copy_semantics() {
+        let r = RetentionClass::Pinned;
+        let copied = r;
+        assert_eq!(r, copied);
+    }
+
+    #[test]
+    fn retention_class_clone_lease() {
+        let r = RetentionClass::Lease { expires_at: 500 };
+        let cloned = r;
+        assert_eq!(r, cloned);
+    }
+
+    #[test]
+    fn retention_class_debug_format() {
+        let pinned = RetentionClass::Pinned;
+        assert_eq!(format!("{pinned:?}"), "Pinned");
+
+        let eph = RetentionClass::Ephemeral;
+        assert_eq!(format!("{eph:?}"), "Ephemeral");
+
+        let lease = RetentionClass::Lease { expires_at: 100 };
+        let debug = format!("{lease:?}");
+        assert!(debug.contains("Lease"));
+        assert!(debug.contains("100"));
+    }
+
+    #[test]
+    fn retention_class_cbor_roundtrip() {
+        for r in [
+            RetentionClass::Pinned,
+            RetentionClass::Ephemeral,
+            RetentionClass::Lease { expires_at: 42 },
+        ] {
+            let mut buf = Vec::new();
+            ciborium::ser::into_writer(&r, &mut buf).unwrap();
+            let back: RetentionClass = ciborium::de::from_reader(&buf[..]).unwrap();
+            assert_eq!(r, back);
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // StoredObject additional tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn stored_object_canonical_bytes_includes_header_cbor() {
+        let header = ObjectHeader {
+            schema: SchemaId::new("fcp.test", "CborCheck", Version::new(1, 0, 0)),
+            zone_id: ZoneId::work(),
+            created_at: 42,
+            provenance: Provenance::new(ZoneId::work()),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: None,
+            placement: None,
+        };
+        let body = b"body";
+        let canonical = StoredObject::canonical_bytes(&header, body).unwrap();
+        let header_cbor = fcp_cbor::to_canonical_cbor(&header).unwrap();
+        // The canonical bytes should contain the header CBOR after the prefix
+        let prefix_len = b"FCP2-OBJECT-V1".len();
+        let header_section = &canonical[prefix_len..prefix_len + header_cbor.len()];
+        assert_eq!(header_section, &header_cbor[..]);
+    }
+
+    #[test]
+    fn stored_object_derive_id_differs_by_zone() {
+        let key = ObjectIdKey::from_bytes([0_u8; 32]);
+        let body = b"same body";
+
+        let header1 = ObjectHeader {
+            schema: SchemaId::new("fcp.test", "Zone", Version::new(1, 0, 0)),
+            zone_id: ZoneId::work(),
+            created_at: 0,
+            provenance: Provenance::new(ZoneId::work()),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: None,
+            placement: None,
+        };
+        let header2 = ObjectHeader {
+            zone_id: ZoneId::private(),
+            provenance: Provenance::new(ZoneId::private()),
+            ..header1.clone()
+        };
+
+        let id1 = StoredObject::derive_id(&header1, body, &key).unwrap();
+        let id2 = StoredObject::derive_id(&header2, body, &key).unwrap();
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn stored_object_clone() {
+        let key = ObjectIdKey::from_bytes([0_u8; 32]);
+        let header = ObjectHeader {
+            schema: SchemaId::new("fcp.test", "Clone", Version::new(1, 0, 0)),
+            zone_id: ZoneId::work(),
+            created_at: 0,
+            provenance: Provenance::new(ZoneId::work()),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: None,
+            placement: None,
+        };
+        let body = b"body".to_vec();
+        let object_id = StoredObject::derive_id(&header, &body, &key).unwrap();
+        let stored = StoredObject {
+            object_id,
+            header,
+            body: body.clone(),
+            storage: StorageMeta {
+                retention: RetentionClass::Ephemeral,
+            },
+        };
+        let cloned = Clone::clone(&stored);
+        assert_eq!(cloned.object_id, object_id);
+        assert_eq!(cloned.body, body);
+        assert_eq!(cloned.storage.retention, RetentionClass::Ephemeral);
+    }
+
+    #[test]
+    fn stored_object_empty_body_derive_id() {
+        let key = ObjectIdKey::from_bytes([0_u8; 32]);
+        let header = ObjectHeader {
+            schema: SchemaId::new("fcp.test", "Empty", Version::new(1, 0, 0)),
+            zone_id: ZoneId::work(),
+            created_at: 0,
+            provenance: Provenance::new(ZoneId::work()),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: None,
+            placement: None,
+        };
+        let id = StoredObject::derive_id(&header, b"", &key);
+        assert!(id.is_ok());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // StorageMeta additional tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn storage_meta_clone() {
+        let meta = StorageMeta {
+            retention: RetentionClass::Pinned,
+        };
+        let cloned = Clone::clone(&meta);
+        assert_eq!(cloned.retention, RetentionClass::Pinned);
+    }
+
+    #[test]
+    fn storage_meta_debug_format() {
+        let meta = StorageMeta {
+            retention: RetentionClass::Ephemeral,
+        };
+        let debug = format!("{meta:?}");
+        assert!(debug.contains("StorageMeta"));
+        assert!(debug.contains("Ephemeral"));
+    }
+
+    #[test]
+    fn storage_meta_with_lease_retention() {
+        let meta = StorageMeta {
+            retention: RetentionClass::Lease {
+                expires_at: 1_700_000_000,
+            },
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        assert!(json.contains("1700000000"));
+        let back: StorageMeta = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            back.retention,
+            RetentionClass::Lease { expires_at: 1_700_000_000 }
+        ));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ObjectId as_ref identity
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn object_id_as_ref_length() {
+        let id = ObjectId::from_bytes([0_u8; 32]);
+        let slice: &[u8] = id.as_ref();
+        assert_eq!(slice.len(), 32);
+    }
+
+    #[test]
+    fn object_id_as_ref_matches_as_bytes() {
+        let bytes = [0xCD_u8; 32];
+        let id = ObjectId::from_bytes(bytes);
+        let as_ref: &[u8] = id.as_ref();
+        let as_bytes: &[u8; 32] = id.as_bytes();
+        assert_eq!(as_ref, as_bytes.as_slice());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ObjectId test_id edge cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn object_id_test_id_empty_name() {
+        let id = ObjectId::test_id("");
+        assert_ne!(id, ObjectId::from_bytes([0_u8; 32]));
+    }
+
+    #[test]
+    fn object_id_test_id_long_name() {
+        let long_name = "a".repeat(1000);
+        let id = ObjectId::test_id(&long_name);
+        assert_ne!(id, ObjectId::from_bytes([0_u8; 32]));
+    }
+
+    #[test]
+    fn object_id_test_id_unicode_name() {
+        let id = ObjectId::test_id("hello-world");
+        assert_ne!(id, ObjectId::from_bytes([0_u8; 32]));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ObjectId golden vector with different schema versions
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn object_id_differs_by_schema_version() {
+        let key = ObjectIdKey::from_bytes([0_u8; 32]);
+        let zone: ZoneId = "z:work".parse().unwrap();
+        let schema_v1 = SchemaId::new("fcp.test", "Test", Version::new(1, 0, 0));
+        let schema_v2 = SchemaId::new("fcp.test", "Test", Version::new(2, 0, 0));
+        let content = b"same";
+
+        let id_v1 = ObjectId::new(content, &zone, &schema_v1, &key);
+        let id_v2 = ObjectId::new(content, &zone, &schema_v2, &key);
+        assert_ne!(id_v1, id_v2);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ObjectHeader with cbor roundtrip
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn object_header_cbor_roundtrip() {
+        let header = ObjectHeader {
+            schema: SchemaId::new("fcp.test", "Cbor", Version::new(1, 0, 0)),
+            zone_id: ZoneId::work(),
+            created_at: 555,
+            provenance: Provenance::new(ZoneId::work()),
+            refs: vec![ObjectId::from_bytes([1_u8; 32])],
+            foreign_refs: vec![],
+            ttl_secs: Some(300),
+            placement: None,
+        };
+        let cbor = fcp_cbor::to_canonical_cbor(&header).unwrap();
+        let back: ObjectHeader = ciborium::de::from_reader(&cbor[..]).unwrap();
+        assert_eq!(back.created_at, 555);
+        assert_eq!(back.refs.len(), 1);
+        assert_eq!(back.ttl_secs, Some(300));
+    }
 }

@@ -1976,4 +1976,697 @@ mod tests {
         assert!(debug.contains("NodeKeyAttestation"));
         assert!(debug.contains("node-debug"));
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Additional DeviceId tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn device_id_long_string() {
+        let long_id = "x".repeat(1000);
+        let id = DeviceId::new(long_id.clone());
+        assert_eq!(id.as_str(), long_id);
+    }
+
+    #[test]
+    fn device_id_unicode() {
+        let id = DeviceId::new("device-\u{1F600}-emoji");
+        assert_eq!(id.as_str(), "device-\u{1F600}-emoji");
+        assert_eq!(format!("{id}"), "device-\u{1F600}-emoji");
+    }
+
+    #[test]
+    fn device_id_special_chars() {
+        let id = DeviceId::new("device:with/special@chars#123");
+        assert_eq!(id.as_str(), "device:with/special@chars#123");
+    }
+
+    #[test]
+    fn device_id_serde_json_roundtrip_preserves_content() {
+        let id = DeviceId::new("roundtrip-test-\u{00E9}");
+        let json = serde_json::to_string(&id).unwrap();
+        let decoded: DeviceId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id.as_str(), decoded.as_str());
+    }
+
+    #[test]
+    fn device_id_cbor_roundtrip() {
+        let id = DeviceId::new("cbor-device-42");
+        let mut cbor_bytes = Vec::new();
+        ciborium::into_writer(&id, &mut cbor_bytes).unwrap();
+        let decoded: DeviceId = ciborium::from_reader(&cbor_bytes[..]).unwrap();
+        assert_eq!(id, decoded);
+    }
+
+    #[test]
+    fn device_id_from_string_owned() {
+        let s = String::from("owned-device");
+        let id = DeviceId::from(s);
+        assert_eq!(id.as_str(), "owned-device");
+    }
+
+    #[test]
+    fn device_id_from_str_ref() {
+        let id = DeviceId::from("ref-device");
+        assert_eq!(id.as_str(), "ref-device");
+    }
+
+    #[test]
+    fn device_id_debug_format() {
+        let id = DeviceId::new("debug-test");
+        let debug = format!("{id:?}");
+        assert!(debug.contains("debug-test"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Additional DeviceMetadata tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn device_metadata_new_equals_default() {
+        let from_new = DeviceMetadata::new();
+        let from_default = DeviceMetadata::default();
+        assert_eq!(from_new, from_default);
+    }
+
+    #[test]
+    fn device_metadata_cbor_roundtrip() {
+        let meta = DeviceMetadata::new()
+            .with_display_name("CBOR Test")
+            .with_hostname("cbor.local")
+            .with_os("Linux 6.1")
+            .with_arch("aarch64")
+            .with_device_class("server")
+            .with_tag("tag1");
+        let mut cbor_bytes = Vec::new();
+        ciborium::into_writer(&meta, &mut cbor_bytes).unwrap();
+        let decoded: DeviceMetadata = ciborium::from_reader(&cbor_bytes[..]).unwrap();
+        assert_eq!(meta, decoded);
+    }
+
+    #[test]
+    fn device_metadata_chained_tags_order_preserved() {
+        let meta = DeviceMetadata::new()
+            .with_tag("alpha")
+            .with_tag("beta")
+            .with_tag("gamma");
+        assert_eq!(meta.requested_tags, vec!["alpha", "beta", "gamma"]);
+    }
+
+    #[test]
+    fn device_metadata_clone_independence() {
+        let meta = DeviceMetadata::new().with_hostname("original");
+        let cloned = Clone::clone(&meta);
+        assert_eq!(meta, cloned);
+        // Cloned is a separate allocation
+        assert_eq!(cloned.hostname.as_deref(), Some("original"));
+    }
+
+    #[test]
+    fn device_metadata_debug_format() {
+        let meta = DeviceMetadata::new().with_display_name("Debug Dev");
+        let debug = format!("{meta:?}");
+        assert!(debug.contains("DeviceMetadata"));
+        assert!(debug.contains("Debug Dev"));
+    }
+
+    #[test]
+    fn device_metadata_with_display_name_replaces() {
+        let meta = DeviceMetadata::new()
+            .with_display_name("first")
+            .with_display_name("second");
+        assert_eq!(meta.display_name.as_deref(), Some("second"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Additional EnrollmentStatus tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn enrollment_status_debug_format() {
+        for status in [
+            EnrollmentStatus::Pending,
+            EnrollmentStatus::Approved,
+            EnrollmentStatus::Rejected,
+            EnrollmentStatus::Revoked,
+            EnrollmentStatus::Expired,
+        ] {
+            let debug = format!("{status:?}");
+            assert!(!debug.is_empty());
+        }
+    }
+
+    #[test]
+    fn enrollment_status_cbor_roundtrip() {
+        for status in [
+            EnrollmentStatus::Pending,
+            EnrollmentStatus::Approved,
+            EnrollmentStatus::Rejected,
+            EnrollmentStatus::Revoked,
+            EnrollmentStatus::Expired,
+        ] {
+            let mut cbor_bytes = Vec::new();
+            ciborium::into_writer(&status, &mut cbor_bytes).unwrap();
+            let decoded: EnrollmentStatus = ciborium::from_reader(&cbor_bytes[..]).unwrap();
+            assert_eq!(status, decoded);
+        }
+    }
+
+    #[test]
+    fn enrollment_status_deserialization_rejects_invalid() {
+        let result = serde_json::from_str::<EnrollmentStatus>("\"unknown\"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn enrollment_status_deserialization_rejects_uppercase() {
+        let result = serde_json::from_str::<EnrollmentStatus>("\"Pending\"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn enrollment_status_display_matches_serde() {
+        for status in [
+            EnrollmentStatus::Pending,
+            EnrollmentStatus::Approved,
+            EnrollmentStatus::Rejected,
+            EnrollmentStatus::Revoked,
+            EnrollmentStatus::Expired,
+        ] {
+            let display = format!("{status}");
+            let serde_val = serde_json::to_string(&status).unwrap();
+            // serde value is quoted, e.g. "\"pending\""
+            assert_eq!(format!("\"{display}\""), serde_val);
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Additional KeyType tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn key_type_cbor_roundtrip() {
+        for kt in [KeyType::Signing, KeyType::Encryption, KeyType::Issuance] {
+            let mut cbor_bytes = Vec::new();
+            ciborium::into_writer(&kt, &mut cbor_bytes).unwrap();
+            let decoded: KeyType = ciborium::from_reader(&cbor_bytes[..]).unwrap();
+            assert_eq!(kt, decoded);
+        }
+    }
+
+    #[test]
+    fn key_type_debug_format() {
+        assert_eq!(format!("{:?}", KeyType::Signing), "Signing");
+        assert_eq!(format!("{:?}", KeyType::Encryption), "Encryption");
+        assert_eq!(format!("{:?}", KeyType::Issuance), "Issuance");
+    }
+
+    #[test]
+    fn key_type_clone_preserves() {
+        let kt = KeyType::Encryption;
+        let cloned = Clone::clone(&kt);
+        assert_eq!(kt, cloned);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Additional KeyRotationSchedule tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn key_rotation_schedule_very_large_values() {
+        let schedule = KeyRotationSchedule::new()
+            .with_signing_rotation(u32::MAX)
+            .with_encryption_rotation(u32::MAX)
+            .with_issuance_rotation(u32::MAX)
+            .with_max_age(u32::MAX);
+        assert_eq!(schedule.signing_key_rotation_hours, u32::MAX);
+        assert_eq!(schedule.encryption_key_rotation_hours, u32::MAX);
+        // Very large rotation means key never needs rotation
+        let old = Utc::now() - chrono::Duration::hours(100_000);
+        assert!(!schedule.needs_rotation(KeyType::Signing, old));
+    }
+
+    #[test]
+    fn key_rotation_schedule_overlap_then_no_overlap() {
+        let schedule = KeyRotationSchedule::new()
+            .with_overlap(5)
+            .without_overlap();
+        assert!(!schedule.allow_overlap);
+        assert_eq!(schedule.overlap_hours, 0);
+    }
+
+    #[test]
+    fn key_rotation_schedule_no_overlap_then_overlap() {
+        let schedule = KeyRotationSchedule::new()
+            .without_overlap()
+            .with_overlap(3);
+        assert!(schedule.allow_overlap);
+        assert_eq!(schedule.overlap_hours, 3);
+    }
+
+    #[test]
+    fn key_rotation_schedule_new_matches_default() {
+        let from_new = KeyRotationSchedule::new();
+        let from_default = KeyRotationSchedule::default();
+        assert_eq!(from_new, from_default);
+    }
+
+    #[test]
+    fn key_rotation_must_rotate_boundary() {
+        let schedule = KeyRotationSchedule::new().with_max_age(10);
+        // Exactly at boundary
+        let exactly_10h = Utc::now() - chrono::Duration::hours(10);
+        assert!(schedule.must_rotate(exactly_10h));
+
+        // Just under boundary
+        let just_under = Utc::now() - chrono::Duration::hours(9);
+        assert!(!schedule.must_rotate(just_under));
+    }
+
+    #[test]
+    fn key_rotation_needs_rotation_each_type_independently() {
+        let schedule = KeyRotationSchedule::new()
+            .with_signing_rotation(10)
+            .with_encryption_rotation(20)
+            .with_issuance_rotation(30);
+
+        let age_15h = Utc::now() - chrono::Duration::hours(15);
+
+        assert!(schedule.needs_rotation(KeyType::Signing, age_15h));
+        assert!(!schedule.needs_rotation(KeyType::Encryption, age_15h));
+        assert!(!schedule.needs_rotation(KeyType::Issuance, age_15h));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Additional DeviceEnrollmentRequest tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn enrollment_request_with_metadata() {
+        let (signing_secret, signing_key, encryption_key, issuance_key) = create_test_keys();
+        let meta = DeviceMetadata::new()
+            .with_display_name("Test MacBook")
+            .with_hostname("macbook.local")
+            .with_os("macOS 15.0")
+            .with_arch("aarch64")
+            .with_device_class("desktop")
+            .with_tag("fcp:zone:work");
+
+        let request = DeviceEnrollmentRequest::new(
+            "meta-device",
+            signing_key,
+            encryption_key,
+            issuance_key,
+            meta,
+            &signing_secret,
+        )
+        .unwrap();
+
+        assert_eq!(request.metadata.display_name.as_deref(), Some("Test MacBook"));
+        assert_eq!(request.metadata.hostname.as_deref(), Some("macbook.local"));
+        assert_eq!(request.metadata.requested_tags.len(), 1);
+        assert!(request.verify_proof().is_ok());
+    }
+
+    #[test]
+    fn enrollment_request_tampered_signing_key_fails() {
+        let (signing_secret, signing_key, encryption_key, issuance_key) = create_test_keys();
+
+        let mut request = DeviceEnrollmentRequest::new(
+            "test-device",
+            signing_key,
+            encryption_key,
+            issuance_key,
+            DeviceMetadata::default(),
+            &signing_secret,
+        )
+        .unwrap();
+
+        // Replace signing key with a different one
+        let other_key = Ed25519SigningKey::generate();
+        request.signing_key = other_key.verifying_key();
+        assert!(request.verify_proof().is_err());
+    }
+
+    #[test]
+    fn enrollment_request_created_at_recent() {
+        let (signing_secret, signing_key, encryption_key, issuance_key) = create_test_keys();
+
+        let request = DeviceEnrollmentRequest::new(
+            "time-test",
+            signing_key,
+            encryption_key,
+            issuance_key,
+            DeviceMetadata::default(),
+            &signing_secret,
+        )
+        .unwrap();
+
+        let diff = Utc::now() - request.created_at;
+        assert!(diff.num_seconds() < 5);
+    }
+
+    #[test]
+    fn enrollment_request_debug_format() {
+        let (signing_secret, signing_key, encryption_key, issuance_key) = create_test_keys();
+        let request = DeviceEnrollmentRequest::new(
+            "debug-device",
+            signing_key,
+            encryption_key,
+            issuance_key,
+            DeviceMetadata::default(),
+            &signing_secret,
+        )
+        .unwrap();
+        let debug = format!("{request:?}");
+        assert!(debug.contains("DeviceEnrollmentRequest"));
+        assert!(debug.contains("debug-device"));
+    }
+
+    #[test]
+    fn enrollment_request_clone() {
+        let (signing_secret, signing_key, encryption_key, issuance_key) = create_test_keys();
+        let request = DeviceEnrollmentRequest::new(
+            "clone-device",
+            signing_key,
+            encryption_key,
+            issuance_key,
+            DeviceMetadata::default(),
+            &signing_secret,
+        )
+        .unwrap();
+
+        let cloned = Clone::clone(&request);
+        assert_eq!(cloned.device_id, request.device_id);
+        assert_eq!(cloned.signing_key, request.signing_key);
+        assert!(cloned.verify_proof().is_ok());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Additional DeviceEnrollmentApproval tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn enrollment_approval_device_id_preserved() {
+        let (signing_secret, signing_key, encryption_key, issuance_key) = create_test_keys();
+        let owner_key = Ed25519SigningKey::generate();
+
+        let request = DeviceEnrollmentRequest::new(
+            "preserved-device",
+            signing_key,
+            encryption_key,
+            issuance_key,
+            DeviceMetadata::default(),
+            &signing_secret,
+        )
+        .unwrap();
+
+        let approval = DeviceEnrollmentApproval::sign(
+            &owner_key,
+            &request,
+            ZoneId::work(),
+            vec![],
+            create_test_manifest(),
+            168,
+        )
+        .unwrap();
+
+        assert_eq!(approval.device_id.as_str(), "preserved-device");
+    }
+
+    #[test]
+    fn enrollment_approval_zone_id_preserved() {
+        let (signing_secret, signing_key, encryption_key, issuance_key) = create_test_keys();
+        let owner_key = Ed25519SigningKey::generate();
+
+        let request = DeviceEnrollmentRequest::new(
+            "zone-test",
+            signing_key,
+            encryption_key,
+            issuance_key,
+            DeviceMetadata::default(),
+            &signing_secret,
+        )
+        .unwrap();
+
+        let approval = DeviceEnrollmentApproval::sign(
+            &owner_key,
+            &request,
+            ZoneId::work(),
+            vec![],
+            create_test_manifest(),
+            168,
+        )
+        .unwrap();
+
+        assert_eq!(approval.zone_id.as_str(), "z:work");
+    }
+
+    #[test]
+    fn enrollment_approval_signer_kid_matches() {
+        let (signing_secret, signing_key, encryption_key, issuance_key) = create_test_keys();
+        let owner_key = Ed25519SigningKey::generate();
+
+        let request = DeviceEnrollmentRequest::new(
+            "kid-test",
+            signing_key,
+            encryption_key,
+            issuance_key,
+            DeviceMetadata::default(),
+            &signing_secret,
+        )
+        .unwrap();
+
+        let approval = DeviceEnrollmentApproval::sign(
+            &owner_key,
+            &request,
+            ZoneId::work(),
+            vec![],
+            create_test_manifest(),
+            168,
+        )
+        .unwrap();
+
+        assert_eq!(approval.signer_kid, owner_key.key_id());
+    }
+
+    #[test]
+    fn enrollment_approval_expiry_in_future() {
+        let (signing_secret, signing_key, encryption_key, issuance_key) = create_test_keys();
+        let owner_key = Ed25519SigningKey::generate();
+
+        let request = DeviceEnrollmentRequest::new(
+            "expiry-test",
+            signing_key,
+            encryption_key,
+            issuance_key,
+            DeviceMetadata::default(),
+            &signing_secret,
+        )
+        .unwrap();
+
+        let approval = DeviceEnrollmentApproval::sign(
+            &owner_key,
+            &request,
+            ZoneId::work(),
+            vec![],
+            create_test_manifest(),
+            24, // 24 hours
+        )
+        .unwrap();
+
+        assert!(approval.expires_at > approval.issued_at);
+        let diff = approval.expires_at - approval.issued_at;
+        // Should be approximately 24 hours
+        assert!(diff.num_hours() >= 23 && diff.num_hours() <= 25);
+    }
+
+    #[test]
+    fn enrollment_approval_debug_format() {
+        let (owner_key, approval) = create_test_approval();
+        let _ = owner_key;
+        let debug = format!("{approval:?}");
+        assert!(debug.contains("DeviceEnrollmentApproval"));
+    }
+
+    #[test]
+    fn enrollment_approval_clone() {
+        let (owner_key, approval) = create_test_approval();
+        let cloned = Clone::clone(&approval);
+        assert_eq!(cloned.device_id, approval.device_id);
+        assert_eq!(cloned.zone_id, approval.zone_id);
+        assert_eq!(cloned.approved_tags, approval.approved_tags);
+        assert!(cloned.verify(&owner_key.verifying_key()).is_ok());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Additional NodeKeyAttestation tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn node_key_attestation_sign_with_tags_empty_subset() {
+        let (owner_key, approval) = create_test_approval();
+
+        let attestation = NodeKeyAttestation::sign_with_tags(
+            &owner_key,
+            "node-empty-sub",
+            &approval,
+            vec![], // Empty subset is valid
+            168,
+        )
+        .unwrap();
+
+        assert!(attestation.tags.is_empty());
+        assert!(attestation.verify(&owner_key.verifying_key()).is_ok());
+    }
+
+    #[test]
+    fn node_key_attestation_sign_with_tags_full_set() {
+        let (owner_key, approval) = create_test_approval();
+        let all_tags = approval.approved_tags.clone();
+
+        let attestation = NodeKeyAttestation::sign_with_tags(
+            &owner_key,
+            "node-full-tags",
+            &approval,
+            all_tags.clone(),
+            168,
+        )
+        .unwrap();
+
+        assert_eq!(attestation.tags, all_tags);
+        assert!(attestation.verify(&owner_key.verifying_key()).is_ok());
+    }
+
+    #[test]
+    fn node_key_attestation_sign_with_multiple_invalid_tags() {
+        let (owner_key, approval) = create_test_approval();
+
+        let result = NodeKeyAttestation::sign_with_tags(
+            &owner_key,
+            "node-multi-invalid",
+            &approval,
+            vec!["fcp:zone:admin".into(), "fcp:zone:secret".into()],
+            168,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn node_key_attestation_zone_preserved() {
+        let (owner_key, approval) = create_test_approval();
+        let attestation =
+            NodeKeyAttestation::sign(&owner_key, "node-zone", &approval, 168).unwrap();
+        assert_eq!(attestation.zone_id.as_str(), "z:work");
+    }
+
+    #[test]
+    fn node_key_attestation_node_id_various_formats() {
+        let (owner_key, approval) = create_test_approval();
+
+        for node_id in ["simple", "with-dashes-123", "ts:node:abc", "n/1234"] {
+            let attestation =
+                NodeKeyAttestation::sign(&owner_key, node_id, &approval, 168).unwrap();
+            assert_eq!(attestation.node_id, node_id);
+        }
+    }
+
+    #[test]
+    fn node_key_attestation_signer_kid_matches_owner() {
+        let (owner_key, approval) = create_test_approval();
+        let attestation =
+            NodeKeyAttestation::sign(&owner_key, "node-kid", &approval, 168).unwrap();
+        assert_eq!(attestation.signer_kid, owner_key.key_id());
+    }
+
+    #[test]
+    fn node_key_attestation_validity_hours_respected() {
+        let (owner_key, approval) = create_test_approval();
+
+        let attestation =
+            NodeKeyAttestation::sign(&owner_key, "node-validity", &approval, 48).unwrap();
+
+        let diff = attestation.expires_at - attestation.issued_at;
+        assert!(diff.num_hours() >= 47 && diff.num_hours() <= 49);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Constants tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn enrollment_validity_hours_is_one_week() {
+        assert_eq!(DEFAULT_ENROLLMENT_VALIDITY_HOURS, 7 * 24);
+    }
+
+    #[test]
+    fn key_rotation_hours_is_one_day() {
+        assert_eq!(DEFAULT_KEY_ROTATION_HOURS, 24);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Cross-type consistency tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn enrollment_request_kids_are_deterministic() {
+        let signing_secret = Ed25519SigningKey::from_bytes(&[10u8; 32]).unwrap();
+        let encryption_secret = X25519SecretKey::from_bytes([20u8; 32]);
+        let issuance_secret = Ed25519SigningKey::from_bytes(&[30u8; 32]).unwrap();
+
+        let request = DeviceEnrollmentRequest::new(
+            "deterministic-device",
+            signing_secret.verifying_key(),
+            encryption_secret.public_key(),
+            issuance_secret.verifying_key(),
+            DeviceMetadata::default(),
+            &signing_secret,
+        )
+        .unwrap();
+
+        // KIDs should be stable across calls
+        let kid1 = request.signing_kid();
+        let kid2 = request.signing_kid();
+        assert_eq!(kid1, kid2);
+
+        let enc_kid1 = request.encryption_kid();
+        let enc_kid2 = request.encryption_kid();
+        assert_eq!(enc_kid1, enc_kid2);
+
+        let iss_kid1 = request.issuance_kid();
+        let iss_kid2 = request.issuance_kid();
+        assert_eq!(iss_kid1, iss_kid2);
+    }
+
+    #[test]
+    fn enrollment_request_different_keys_different_kids() {
+        let (signing_secret, signing_key, encryption_key, issuance_key) = create_test_keys();
+
+        let request = DeviceEnrollmentRequest::new(
+            "kid-diff-test",
+            signing_key,
+            encryption_key,
+            issuance_key,
+            DeviceMetadata::default(),
+            &signing_secret,
+        )
+        .unwrap();
+
+        // Different key types should have different KIDs
+        assert_ne!(request.signing_kid(), request.issuance_kid());
+    }
+
+    #[test]
+    fn approval_to_attestation_key_consistency() {
+        let (owner_key, approval) = create_test_approval();
+
+        let attestation =
+            NodeKeyAttestation::sign(&owner_key, "node-consistency", &approval, 168).unwrap();
+
+        // Keys in attestation should match approval
+        assert_eq!(attestation.signing_kid(), approval.signing_key.key_id());
+        assert_eq!(attestation.encryption_kid(), approval.encryption_key.key_id());
+        assert_eq!(attestation.issuance_kid(), approval.issuance_key.key_id());
+    }
 }

@@ -1759,36 +1759,6 @@ mod tests {
     // ── Log schema validation ──
 
     #[test]
-    fn harness_error_eq_same_variant() {
-        assert_eq!(HarnessError::NodeAlreadyRunning, HarnessError::NodeAlreadyRunning);
-        assert_eq!(HarnessError::NodeNotRunning, HarnessError::NodeNotRunning);
-    }
-
-    #[test]
-    fn harness_error_ne_different_variants() {
-        assert_ne!(HarnessError::NodeAlreadyRunning, HarnessError::NodeNotRunning);
-    }
-
-    #[test]
-    fn harness_error_clone_preserves_variant() {
-        let err = HarnessError::NodeAlreadyRunning;
-        let cloned = err.clone();
-        assert_eq!(err, cloned);
-    }
-
-    #[test]
-    fn harness_timeout_clone_and_eq() {
-        let t = HarnessTimeout {
-            waited_ms: 123,
-            timeout_ms: 456,
-        };
-        let cloned = t.clone();
-        assert_eq!(t, cloned);
-        assert_eq!(t.waited_ms, cloned.waited_ms);
-        assert_eq!(t.timeout_ms, cloned.timeout_ms);
-    }
-
-    #[test]
     fn log_collector_validate_jsonl_passes_for_valid_entries() {
         let clock = Arc::new(Mutex::new(MockClock::new(1_000_000)));
         let collector = LogCollector::new();
@@ -1813,5 +1783,978 @@ mod tests {
                 eprintln!("validate_jsonl error (may be expected): {e:?}");
             }
         }
+    }
+
+    // ── MockClock additional tests ──
+
+    #[test]
+    fn clock_new_at_zero() {
+        let clock = MockClock::new(0);
+        assert_eq!(clock.now_ms(), 0);
+    }
+
+    #[test]
+    fn clock_new_at_max() {
+        let clock = MockClock::new(u64::MAX);
+        assert_eq!(clock.now_ms(), u64::MAX);
+    }
+
+    #[test]
+    fn clock_advance_by_zero_is_noop() {
+        let mut clock = MockClock::new(500);
+        clock.advance(Duration::from_millis(0));
+        assert_eq!(clock.now_ms(), 500);
+    }
+
+    #[test]
+    fn clock_advance_multiple_small_steps() {
+        let mut clock = MockClock::new(0);
+        for _ in 0..100 {
+            clock.advance(Duration::from_millis(1));
+        }
+        assert_eq!(clock.now_ms(), 100);
+    }
+
+    #[test]
+    fn clock_advance_large_duration() {
+        let mut clock = MockClock::new(0);
+        clock.advance(Duration::from_secs(86_400)); // one day
+        assert_eq!(clock.now_ms(), 86_400_000);
+    }
+
+    #[test]
+    fn clock_timestamp_at_epoch() {
+        let clock = MockClock::new(0);
+        let ts = clock.now_timestamp();
+        assert_eq!(ts.timestamp(), 0);
+    }
+
+    #[test]
+    fn clock_timestamp_from_ms_helper() {
+        let ts = MockClock::timestamp_from_ms(60_000); // 1 minute
+        assert_eq!(ts.timestamp(), 60);
+    }
+
+    #[test]
+    fn clock_schedule_no_timers_returns_none() {
+        let mut clock = MockClock::new(0);
+        assert!(clock.advance_to_next_timer().is_none());
+    }
+
+    #[test]
+    fn clock_schedule_single_timer() {
+        let mut clock = MockClock::new(0);
+        clock.schedule_timer(42);
+        let delta = clock.advance_to_next_timer().unwrap();
+        assert_eq!(delta, Duration::from_millis(42));
+        assert_eq!(clock.now_ms(), 42);
+    }
+
+    #[test]
+    fn clock_duplicate_timers() {
+        let mut clock = MockClock::new(0);
+        clock.schedule_timer(100);
+        clock.schedule_timer(100);
+        let d1 = clock.advance_to_next_timer().unwrap();
+        assert_eq!(d1, Duration::from_millis(100));
+        let d2 = clock.advance_to_next_timer().unwrap();
+        assert_eq!(d2, Duration::from_millis(0)); // already at 100
+        assert!(clock.advance_to_next_timer().is_none());
+    }
+
+    #[test]
+    fn clock_timer_at_current_time_zero_delta() {
+        let mut clock = MockClock::new(200);
+        clock.schedule_timer(200);
+        let delta = clock.advance_to_next_timer().unwrap();
+        assert_eq!(delta, Duration::from_millis(0));
+        assert_eq!(clock.now_ms(), 200);
+    }
+
+    #[test]
+    fn clock_clone_independence() {
+        let mut clock = MockClock::new(0);
+        clock.schedule_timer(100);
+        let mut cloned = clock.clone();
+        clock.advance(Duration::from_millis(50));
+        assert_eq!(clock.now_ms(), 50);
+        assert_eq!(cloned.now_ms(), 0);
+        let delta = cloned.advance_to_next_timer().unwrap();
+        assert_eq!(delta, Duration::from_millis(100));
+    }
+
+    #[test]
+    fn clock_debug_format() {
+        let clock = MockClock::new(42);
+        let dbg = format!("{clock:?}");
+        assert!(dbg.contains("MockClock"));
+        assert!(dbg.contains("42"));
+    }
+
+    // ── HarnessError additional tests ──
+
+    #[test]
+    fn harness_error_clone() {
+        let err = HarnessError::NodeAlreadyRunning;
+        let cloned = err.clone();
+        assert_eq!(err, cloned);
+    }
+
+    #[test]
+    fn harness_error_eq_same_variant() {
+        assert_eq!(HarnessError::NodeNotRunning, HarnessError::NodeNotRunning);
+    }
+
+    #[test]
+    fn harness_error_ne_different_variant() {
+        assert_ne!(
+            HarnessError::NodeAlreadyRunning,
+            HarnessError::NodeNotRunning
+        );
+    }
+
+    #[test]
+    fn harness_error_debug_format() {
+        let err = HarnessError::NodeAlreadyRunning;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("NodeAlreadyRunning"));
+    }
+
+    #[test]
+    fn harness_error_is_std_error() {
+        let err = HarnessError::NodeNotRunning;
+        let _: &dyn std::error::Error = &err;
+    }
+
+    #[test]
+    fn harness_error_source_is_none() {
+        let err = HarnessError::NodeAlreadyRunning;
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    #[test]
+    fn harness_error_display_not_empty() {
+        let variants = [HarnessError::NodeAlreadyRunning, HarnessError::NodeNotRunning];
+        for err in &variants {
+            assert!(!err.to_string().is_empty());
+        }
+    }
+
+    // ── HarnessTimeout additional tests ──
+
+    #[test]
+    fn harness_timeout_clone() {
+        let t = HarnessTimeout {
+            waited_ms: 10,
+            timeout_ms: 20,
+        };
+        let cloned = t.clone();
+        assert_eq!(t, cloned);
+    }
+
+    #[test]
+    fn harness_timeout_eq() {
+        let t1 = HarnessTimeout {
+            waited_ms: 10,
+            timeout_ms: 20,
+        };
+        let t2 = HarnessTimeout {
+            waited_ms: 10,
+            timeout_ms: 20,
+        };
+        assert_eq!(t1, t2);
+    }
+
+    #[test]
+    fn harness_timeout_ne_different_waited() {
+        let t1 = HarnessTimeout {
+            waited_ms: 10,
+            timeout_ms: 20,
+        };
+        let t2 = HarnessTimeout {
+            waited_ms: 15,
+            timeout_ms: 20,
+        };
+        assert_ne!(t1, t2);
+    }
+
+    #[test]
+    fn harness_timeout_ne_different_timeout() {
+        let t1 = HarnessTimeout {
+            waited_ms: 10,
+            timeout_ms: 20,
+        };
+        let t2 = HarnessTimeout {
+            waited_ms: 10,
+            timeout_ms: 30,
+        };
+        assert_ne!(t1, t2);
+    }
+
+    #[test]
+    fn harness_timeout_debug_format() {
+        let t = HarnessTimeout {
+            waited_ms: 5,
+            timeout_ms: 100,
+        };
+        let dbg = format!("{t:?}");
+        assert!(dbg.contains("HarnessTimeout"));
+        assert!(dbg.contains("100"));
+    }
+
+    #[test]
+    fn harness_timeout_is_std_error() {
+        let t = HarnessTimeout {
+            waited_ms: 0,
+            timeout_ms: 0,
+        };
+        let _: &dyn std::error::Error = &t;
+    }
+
+    #[test]
+    fn harness_timeout_source_is_none() {
+        let t = HarnessTimeout {
+            waited_ms: 0,
+            timeout_ms: 0,
+        };
+        assert!(std::error::Error::source(&t).is_none());
+    }
+
+    #[test]
+    fn harness_timeout_display_contains_both_values() {
+        let t = HarnessTimeout {
+            waited_ms: 999,
+            timeout_ms: 5000,
+        };
+        let msg = t.to_string();
+        assert!(msg.contains("999"));
+        assert!(msg.contains("5000"));
+    }
+
+    #[test]
+    fn harness_timeout_zero_values() {
+        let t = HarnessTimeout {
+            waited_ms: 0,
+            timeout_ms: 0,
+        };
+        let msg = t.to_string();
+        assert!(msg.contains("0ms"));
+    }
+
+    // ── LogEntry additional tests ──
+
+    #[test]
+    fn log_entry_serde_roundtrip() {
+        let entry = LogEntry::new(
+            "node-42",
+            "roundtrip_test",
+            "execute",
+            "corr-xyz",
+            "session_established",
+            serde_json::json!({"count": 7}),
+        );
+        let json = serde_json::to_string(&entry).unwrap();
+        let deserialized: LogEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.node_id, "node-42");
+        assert_eq!(deserialized.test_name, "roundtrip_test");
+        assert_eq!(deserialized.phase, "execute");
+        assert_eq!(deserialized.correlation_id, "corr-xyz");
+        assert_eq!(deserialized.event_type, "session_established");
+        assert_eq!(deserialized.details["count"], 7);
+    }
+
+    #[test]
+    fn log_entry_details_default_to_null() {
+        let json = r#"{
+            "timestamp": "2024-01-01T00:00:00Z",
+            "real_time": "2024-01-01T00:00:00Z",
+            "node_id": "n",
+            "test_name": "t",
+            "phase": "p",
+            "correlation_id": "c",
+            "event_type": "e"
+        }"#;
+        let entry: LogEntry = serde_json::from_str(json).unwrap();
+        assert!(entry.details.is_null());
+    }
+
+    #[test]
+    fn log_entry_debug_format() {
+        let entry = LogEntry::new("n", "t", "p", "c", "e", serde_json::json!({}));
+        let dbg = format!("{entry:?}");
+        assert!(dbg.contains("LogEntry"));
+    }
+
+    #[test]
+    fn log_entry_clone() {
+        let entry = LogEntry::new("n", "t", "p", "c", "e", serde_json::json!({"k": 1}));
+        let cloned = entry.clone();
+        assert_eq!(cloned.node_id, entry.node_id);
+        assert_eq!(cloned.details, entry.details);
+    }
+
+    #[test]
+    fn log_entry_with_nested_details() {
+        let entry = LogEntry::new(
+            "n",
+            "t",
+            "p",
+            "c",
+            "e",
+            serde_json::json!({"a": {"b": {"c": [1, 2, 3]}}}),
+        );
+        assert_eq!(entry.details["a"]["b"]["c"][1], 2);
+    }
+
+    #[test]
+    fn log_entry_with_empty_string_fields() {
+        let entry = LogEntry::new("", "", "", "", "", serde_json::json!(null));
+        assert_eq!(entry.node_id, "");
+        assert_eq!(entry.test_name, "");
+        assert!(entry.details.is_null());
+    }
+
+    #[test]
+    fn log_entry_with_clock_advances_time() {
+        let clock: SharedMockClock = Arc::new(Mutex::new(MockClock::new(0)));
+        let e1 = LogEntry::new_with_clock(
+            &clock, "n", "t", "p", "c", "e", serde_json::json!({}),
+        );
+        clock.lock().unwrap().advance(Duration::from_secs(10));
+        let e2 = LogEntry::new_with_clock(
+            &clock, "n", "t", "p", "c", "e", serde_json::json!({}),
+        );
+        assert!(e2.timestamp > e1.timestamp);
+    }
+
+    // ── LogCollector additional tests ──
+
+    #[test]
+    fn log_collector_default_is_empty() {
+        let c = LogCollector::default();
+        assert!(c.entries().is_empty());
+    }
+
+    #[test]
+    fn log_collector_clone_shares_entries() {
+        let c1 = LogCollector::new();
+        let c2 = c1.clone();
+        c1.push(LogEntry::new("n", "t", "p", "c", "e", serde_json::json!({})));
+        // Both clones share the same Arc<Mutex<Vec<...>>>
+        assert_eq!(c2.entries().len(), 1);
+    }
+
+    #[test]
+    fn log_collector_for_node_no_match() {
+        let c = LogCollector::new();
+        c.push(LogEntry::new("node-1", "t", "p", "c", "e", serde_json::json!({})));
+        let node = NodeId::new("node-999");
+        assert!(c.for_node(&node).is_empty());
+    }
+
+    #[test]
+    fn log_collector_for_correlation_no_match() {
+        let c = LogCollector::new();
+        c.push(LogEntry::new("n", "t", "p", "corr-1", "e", serde_json::json!({})));
+        assert!(c.for_correlation("corr-nonexistent").is_empty());
+    }
+
+    #[test]
+    fn log_collector_denials_none() {
+        let c = LogCollector::new();
+        c.push(LogEntry::new("n", "t", "p", "c", "node_started", serde_json::json!({})));
+        assert!(c.denials().is_empty());
+    }
+
+    #[test]
+    fn log_collector_to_jsonl_empty() {
+        let c = LogCollector::new();
+        assert!(c.to_jsonl().is_empty());
+    }
+
+    #[test]
+    fn log_collector_multiple_nodes_filter() {
+        let c = LogCollector::new();
+        for i in 0..5 {
+            c.push(LogEntry::new(
+                format!("node-{i}"),
+                "t", "p", "c", "e", serde_json::json!({}),
+            ));
+        }
+        let node = NodeId::new("node-3");
+        let filtered = c.for_node(&node);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].node_id, "node-3");
+    }
+
+    #[test]
+    fn log_collector_multiple_correlations() {
+        let c = LogCollector::new();
+        for i in 0..3 {
+            c.push(LogEntry::new(
+                "n", "t", "p", format!("corr-{i}"), "e", serde_json::json!({}),
+            ));
+        }
+        c.push(LogEntry::new("n", "t", "p", "corr-1", "e", serde_json::json!({})));
+        let filtered = c.for_correlation("corr-1");
+        assert_eq!(filtered.len(), 2);
+    }
+
+    #[test]
+    fn log_collector_debug_format() {
+        let c = LogCollector::new();
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("LogCollector"));
+    }
+
+    // ── NetworkMessage tests ──
+
+    #[test]
+    fn network_message_clone() {
+        let msg = NetworkMessage {
+            from: NodeId::new("a"),
+            to: NodeId::new("b"),
+            payload: vec![1, 2, 3],
+        };
+        let cloned = msg.clone();
+        assert_eq!(msg, cloned);
+    }
+
+    #[test]
+    fn network_message_eq() {
+        let m1 = NetworkMessage {
+            from: NodeId::new("a"),
+            to: NodeId::new("b"),
+            payload: vec![1],
+        };
+        let m2 = NetworkMessage {
+            from: NodeId::new("a"),
+            to: NodeId::new("b"),
+            payload: vec![1],
+        };
+        assert_eq!(m1, m2);
+    }
+
+    #[test]
+    fn network_message_ne_different_payload() {
+        let m1 = NetworkMessage {
+            from: NodeId::new("a"),
+            to: NodeId::new("b"),
+            payload: vec![1],
+        };
+        let m2 = NetworkMessage {
+            from: NodeId::new("a"),
+            to: NodeId::new("b"),
+            payload: vec![2],
+        };
+        assert_ne!(m1, m2);
+    }
+
+    #[test]
+    fn network_message_ne_different_from() {
+        let m1 = NetworkMessage {
+            from: NodeId::new("a"),
+            to: NodeId::new("b"),
+            payload: vec![1],
+        };
+        let m2 = NetworkMessage {
+            from: NodeId::new("x"),
+            to: NodeId::new("b"),
+            payload: vec![1],
+        };
+        assert_ne!(m1, m2);
+    }
+
+    #[test]
+    fn network_message_empty_payload() {
+        let msg = NetworkMessage {
+            from: NodeId::new("a"),
+            to: NodeId::new("b"),
+            payload: vec![],
+        };
+        assert!(msg.payload.is_empty());
+    }
+
+    #[test]
+    fn network_message_debug_format() {
+        let msg = NetworkMessage {
+            from: NodeId::new("a"),
+            to: NodeId::new("b"),
+            payload: vec![42],
+        };
+        let dbg = format!("{msg:?}");
+        assert!(dbg.contains("NetworkMessage"));
+    }
+
+    // ── SimulatedNetwork additional tests ──
+
+    #[test]
+    fn network_empty_initially() {
+        let net = SimulatedNetwork::new(1);
+        assert_eq!(net.pending_len(), 0);
+        assert_eq!(net.next_delivery_ms(), None);
+    }
+
+    #[test]
+    fn network_drain_ready_empty() {
+        let mut net = SimulatedNetwork::new(1);
+        assert!(net.drain_ready(0).is_empty());
+        assert!(net.drain_ready(u64::MAX).is_empty());
+    }
+
+    #[test]
+    fn network_is_partitioned_no_partitions() {
+        let net = SimulatedNetwork::new(1);
+        let a = NodeId::new("a");
+        let b = NodeId::new("b");
+        assert!(!net.is_partitioned(&a, &b));
+    }
+
+    #[test]
+    fn network_is_partitioned_same_side() {
+        let mut net = SimulatedNetwork::new(1);
+        let a = NodeId::new("a");
+        let b = NodeId::new("b");
+        let c = NodeId::new("c");
+        // Isolate c only
+        net.partition(&[c]);
+        assert!(!net.is_partitioned(&a, &b));
+    }
+
+    #[test]
+    fn network_is_partitioned_opposite_sides() {
+        let mut net = SimulatedNetwork::new(1);
+        let a = NodeId::new("a");
+        let b = NodeId::new("b");
+        net.partition(std::slice::from_ref(&a));
+        assert!(net.is_partitioned(&a, &b));
+    }
+
+    #[test]
+    fn network_is_partitioned_both_inside() {
+        let mut net = SimulatedNetwork::new(1);
+        let a = NodeId::new("a");
+        let b = NodeId::new("b");
+        // Both in same partition set
+        net.partition(&[a.clone(), b.clone()]);
+        assert!(!net.is_partitioned(&a, &b));
+    }
+
+    #[test]
+    fn network_multiple_partitions() {
+        let mut net = SimulatedNetwork::new(1);
+        let a = NodeId::new("a");
+        let b = NodeId::new("b");
+        let c = NodeId::new("c");
+        // First partition isolates a
+        net.partition(std::slice::from_ref(&a));
+        // Second partition isolates c
+        net.partition(std::slice::from_ref(&c));
+        assert!(net.is_partitioned(&a, &b));
+        assert!(net.is_partitioned(&c, &b));
+        // a and c are both isolated, but from different partition sets
+        // a is in partition set 1, c is in partition set 2
+        // XOR: a is in partition 1, c is not -> different sides for partition 1
+        assert!(net.is_partitioned(&a, &c));
+    }
+
+    #[test]
+    fn network_heal_clears_all_partitions() {
+        let mut net = SimulatedNetwork::new(1);
+        let a = NodeId::new("a");
+        let b = NodeId::new("b");
+        net.partition(std::slice::from_ref(&a));
+        net.partition(std::slice::from_ref(&b));
+        net.heal_partitions();
+        assert!(!net.is_partitioned(&a, &b));
+    }
+
+    #[test]
+    fn network_set_packet_loss_clamps_above_one() {
+        let mut net = SimulatedNetwork::new(1);
+        let a = NodeId::new("a");
+        let b = NodeId::new("b");
+        net.set_packet_loss(&a, &b, 2.0); // clamped to 1.0
+        let msg = NetworkMessage {
+            from: a,
+            to: b,
+            payload: vec![1],
+        };
+        assert!(!net.send(0, msg)); // 100% loss
+    }
+
+    #[test]
+    fn network_set_packet_loss_clamps_below_zero() {
+        let mut net = SimulatedNetwork::new(1);
+        let a = NodeId::new("a");
+        let b = NodeId::new("b");
+        net.set_packet_loss(&a, &b, -1.0); // clamped to 0.0
+        let msg = NetworkMessage {
+            from: a,
+            to: b,
+            payload: vec![1],
+        };
+        assert!(net.send(0, msg)); // 0% loss
+    }
+
+    #[test]
+    fn network_latency_unidirectional() {
+        let mut net = SimulatedNetwork::new(1);
+        let a = NodeId::new("a");
+        let b = NodeId::new("b");
+        net.set_latency(&a, &b, Duration::from_millis(100));
+        // a->b has latency
+        net.send(
+            0,
+            NetworkMessage {
+                from: a.clone(),
+                to: b.clone(),
+                payload: vec![1],
+            },
+        );
+        assert!(net.drain_ready(50).is_empty());
+        // b->a has no explicit latency (default 0)
+        net.send(
+            0,
+            NetworkMessage {
+                from: b,
+                to: a,
+                payload: vec![2],
+            },
+        );
+        // Should be immediately ready
+        let ready = net.drain_ready(0);
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].payload, vec![2]);
+    }
+
+    #[test]
+    fn network_send_at_nonzero_time() {
+        let mut net = SimulatedNetwork::new(1);
+        let a = NodeId::new("a");
+        let b = NodeId::new("b");
+        net.set_latency(&a, &b, Duration::from_millis(50));
+        net.send(
+            100,
+            NetworkMessage {
+                from: a,
+                to: b,
+                payload: vec![1],
+            },
+        );
+        assert_eq!(net.next_delivery_ms(), Some(150));
+        assert!(net.drain_ready(120).is_empty());
+        assert_eq!(net.drain_ready(150).len(), 1);
+    }
+
+    #[test]
+    fn network_pending_len_tracks_queue() {
+        let mut net = SimulatedNetwork::new(1);
+        let a = NodeId::new("a");
+        let b = NodeId::new("b");
+        assert_eq!(net.pending_len(), 0);
+        for i in 0..5 {
+            net.send(
+                0,
+                NetworkMessage {
+                    from: a.clone(),
+                    to: b.clone(),
+                    payload: vec![i],
+                },
+            );
+        }
+        assert_eq!(net.pending_len(), 5);
+        let _ = net.drain_ready(0);
+        assert_eq!(net.pending_len(), 0);
+    }
+
+    #[test]
+    fn network_determinism_with_different_seeds() {
+        let a = NodeId::new("a");
+        let b = NodeId::new("b");
+        let mut net1 = SimulatedNetwork::new(1);
+        let mut net2 = SimulatedNetwork::new(999);
+        net1.set_packet_loss(&a, &b, 0.5);
+        net2.set_packet_loss(&a, &b, 0.5);
+
+        let mut r1 = Vec::new();
+        let mut r2 = Vec::new();
+        for i in 0u8..20 {
+            r1.push(net1.send(
+                0,
+                NetworkMessage {
+                    from: a.clone(),
+                    to: b.clone(),
+                    payload: vec![i],
+                },
+            ));
+            r2.push(net2.send(
+                0,
+                NetworkMessage {
+                    from: a.clone(),
+                    to: b.clone(),
+                    payload: vec![i],
+                },
+            ));
+        }
+        // Different seeds should (almost certainly) produce different patterns
+        // With 20 samples at 50% loss, probability of identical results is ~2^-20
+        assert_ne!(r1, r2, "Different seeds should produce different loss patterns");
+    }
+
+    // ── TestMeshNode additional tests ──
+
+    #[test]
+    fn test_node_different_indices_different_ids() {
+        let clock = Arc::new(Mutex::new(MockClock::new(0)));
+        let logs = LogCollector::new();
+        let n1 = TestMeshNode::new(42, 0, clock.clone(), logs.clone());
+        let n2 = TestMeshNode::new(42, 1, clock, logs);
+        assert_ne!(n1.node_id, n2.node_id);
+    }
+
+    #[test]
+    fn test_node_different_seeds_different_ids() {
+        let clock = Arc::new(Mutex::new(MockClock::new(0)));
+        let logs = LogCollector::new();
+        let n1 = TestMeshNode::new(1, 0, clock.clone(), logs.clone());
+        let n2 = TestMeshNode::new(2, 0, clock, logs);
+        assert_ne!(n1.node_id, n2.node_id);
+    }
+
+    #[test]
+    fn test_node_crash_then_stop_fails() {
+        let clock = Arc::new(Mutex::new(MockClock::new(0)));
+        let logs = LogCollector::new();
+        let mut node = TestMeshNode::new(42, 0, clock, logs);
+        node.start().unwrap();
+        node.crash();
+        // After crash, node is not running, so stop should fail
+        let err = node.stop().unwrap_err();
+        assert_eq!(err, HarnessError::NodeNotRunning);
+    }
+
+    #[test]
+    fn test_node_crash_without_start() {
+        let clock = Arc::new(Mutex::new(MockClock::new(0)));
+        let logs = LogCollector::new();
+        let mut node = TestMeshNode::new(42, 0, clock, logs.clone());
+        // Crash when not running should still work (just sets running=false, mesh=None)
+        node.crash();
+        assert!(!node.is_running());
+        assert!(node.mesh().is_none());
+        assert_eq!(logs.entries().len(), 1); // crash log entry
+    }
+
+    #[test]
+    fn test_node_object_store_accessible() {
+        let clock = Arc::new(Mutex::new(MockClock::new(0)));
+        let logs = LogCollector::new();
+        let node = TestMeshNode::new(42, 0, clock, logs);
+        let _store = node.object_store();
+    }
+
+    #[test]
+    fn test_node_symbol_store_accessible() {
+        let clock = Arc::new(Mutex::new(MockClock::new(0)));
+        let logs = LogCollector::new();
+        let node = TestMeshNode::new(42, 0, clock, logs);
+        let _store = node.symbol_store();
+    }
+
+    #[test]
+    fn test_node_debug_format() {
+        let clock = Arc::new(Mutex::new(MockClock::new(0)));
+        let logs = LogCollector::new();
+        let node = TestMeshNode::new(42, 0, clock, logs);
+        let dbg = format!("{node:?}");
+        assert!(dbg.contains("TestMeshNode"));
+        assert!(dbg.contains("test-node-"));
+    }
+
+    #[test]
+    fn test_node_mesh_mut_when_available() {
+        let clock = Arc::new(Mutex::new(MockClock::new(0)));
+        let logs = LogCollector::new();
+        let mut node = TestMeshNode::new(42, 0, clock, logs);
+        assert!(node.mesh_mut().is_some());
+    }
+
+    #[test]
+    fn test_node_mesh_mut_after_crash_is_none() {
+        let clock = Arc::new(Mutex::new(MockClock::new(0)));
+        let logs = LogCollector::new();
+        let mut node = TestMeshNode::new(42, 0, clock, logs);
+        node.crash();
+        assert!(node.mesh_mut().is_none());
+    }
+
+    // ── TestHarness additional tests ──
+
+    #[test]
+    fn harness_zero_nodes() {
+        let harness = TestHarness::new(0, 42);
+        assert!(harness.nodes.is_empty());
+        assert_eq!(harness.now_ms(), 0);
+        assert_eq!(harness.running_count(), 0);
+    }
+
+    #[test]
+    fn harness_single_node() {
+        let mut harness = TestHarness::new(1, 42);
+        harness.start_all().unwrap();
+        assert_eq!(harness.running_count(), 1);
+        harness.stop_all().unwrap();
+        assert_eq!(harness.running_count(), 0);
+    }
+
+    #[test]
+    fn harness_running_count() {
+        let mut harness = TestHarness::new(3, 42);
+        assert_eq!(harness.running_count(), 0);
+        harness.start_all().unwrap();
+        assert_eq!(harness.running_count(), 3);
+        harness.nodes[1].crash();
+        assert_eq!(harness.running_count(), 2);
+    }
+
+    #[test]
+    fn harness_start_all_twice_fails() {
+        let mut harness = TestHarness::new(2, 42);
+        harness.start_all().unwrap();
+        let err = harness.start_all().unwrap_err();
+        assert_eq!(err, HarnessError::NodeAlreadyRunning);
+    }
+
+    #[test]
+    fn harness_stop_all_when_none_running_is_ok() {
+        let mut harness = TestHarness::new(2, 42);
+        // None running, stop_all should be no-op
+        harness.stop_all().unwrap();
+    }
+
+    #[test]
+    fn harness_advance_time_then_check() {
+        let harness = TestHarness::new(2, 42);
+        assert_eq!(harness.now_ms(), 0);
+        harness.advance_time(Duration::from_secs(1));
+        assert_eq!(harness.now_ms(), 1000);
+        harness.advance_time(Duration::from_secs(1));
+        assert_eq!(harness.now_ms(), 2000);
+    }
+
+    #[test]
+    fn harness_logs_returns_same_as_log_entries() {
+        let mut harness = TestHarness::new(1, 42);
+        harness.start_all().unwrap();
+        let a = harness.logs();
+        let b = harness.log_entries();
+        assert_eq!(a.len(), b.len());
+    }
+
+    #[test]
+    fn harness_debug_format() {
+        let harness = TestHarness::new(2, 42);
+        let dbg = format!("{harness:?}");
+        assert!(dbg.contains("TestHarness"));
+    }
+
+    #[test]
+    fn harness_network_debug_format() {
+        let net = SimulatedNetwork::new(42);
+        let dbg = format!("{net:?}");
+        assert!(dbg.contains("SimulatedNetwork"));
+    }
+
+    // ── SharedMockClock tests ──
+
+    #[test]
+    fn shared_mock_clock_type_alias() {
+        let clock: SharedMockClock = Arc::new(Mutex::new(MockClock::new(0)));
+        assert_eq!(clock.lock().unwrap().now_ms(), 0);
+    }
+
+    #[test]
+    fn shared_mock_clock_multiple_references() {
+        let clock: SharedMockClock = Arc::new(Mutex::new(MockClock::new(0)));
+        let c2 = clock.clone();
+        clock.lock().unwrap().advance(Duration::from_millis(50));
+        assert_eq!(c2.lock().unwrap().now_ms(), 50);
+    }
+
+    // ── Timer ordering tests ──
+
+    #[test]
+    fn timer_ordering_is_min_heap() {
+        // The Ord impl on Timer reverses ordering for min-heap behavior
+        let t1 = Timer { when_ms: 10 };
+        let t2 = Timer { when_ms: 20 };
+        // In a BinaryHeap (max-heap), the "greater" element is popped first.
+        // Timer's Ord reverses this so t1 (when_ms=10) > t2 (when_ms=20).
+        let mut heap = BinaryHeap::new();
+        heap.push(t2);
+        heap.push(t1);
+        let first = heap.pop().unwrap();
+        assert_eq!(first.when_ms, 10); // min-heap: smallest first
+    }
+
+    #[test]
+    fn timer_partial_ord_consistent_with_ord() {
+        let t1 = Timer { when_ms: 5 };
+        let t2 = Timer { when_ms: 10 };
+        assert_eq!(t1.partial_cmp(&t2), Some(t1.cmp(&t2)));
+    }
+
+    #[test]
+    fn timer_eq() {
+        let t1 = Timer { when_ms: 42 };
+        let t2 = Timer { when_ms: 42 };
+        assert_eq!(t1, t2);
+    }
+
+    #[test]
+    fn queued_message_ordering_is_min_heap() {
+        let m1 = QueuedMessage {
+            deliver_at_ms: 10,
+            message: NetworkMessage {
+                from: NodeId::new("a"),
+                to: NodeId::new("b"),
+                payload: vec![],
+            },
+        };
+        let m2 = QueuedMessage {
+            deliver_at_ms: 20,
+            message: NetworkMessage {
+                from: NodeId::new("a"),
+                to: NodeId::new("b"),
+                payload: vec![],
+            },
+        };
+        let mut heap = BinaryHeap::new();
+        heap.push(m2);
+        heap.push(m1);
+        let first = heap.pop().unwrap();
+        assert_eq!(first.deliver_at_ms, 10);
+    }
+
+    #[test]
+    fn queued_message_partial_ord() {
+        let m1 = QueuedMessage {
+            deliver_at_ms: 5,
+            message: NetworkMessage {
+                from: NodeId::new("a"),
+                to: NodeId::new("b"),
+                payload: vec![],
+            },
+        };
+        let m2 = QueuedMessage {
+            deliver_at_ms: 10,
+            message: NetworkMessage {
+                from: NodeId::new("a"),
+                to: NodeId::new("b"),
+                payload: vec![],
+            },
+        };
+        assert_eq!(m1.partial_cmp(&m2), Some(m1.cmp(&m2)));
     }
 }

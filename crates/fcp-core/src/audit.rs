@@ -1630,4 +1630,587 @@ mod tests {
         };
         assert!(head.coverage.abs() < f64::EPSILON);
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Additional AuditEvent tests — edge cases and boundaries
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn audit_event_is_genesis_true_for_seq_zero_no_prev() {
+        let event = create_audit_event(0, None, EVENT_SECRET_ACCESS);
+        assert!(event.is_genesis());
+    }
+
+    #[test]
+    fn audit_event_is_genesis_false_for_seq_zero_with_prev() {
+        let event = AuditEvent {
+            prev: Some(test_object_id("some-prev")),
+            seq: 0,
+            ..create_audit_event(0, None, EVENT_SECRET_ACCESS)
+        };
+        assert!(!event.is_genesis());
+    }
+
+    #[test]
+    fn audit_event_is_genesis_false_for_nonzero_seq_no_prev() {
+        let event = create_audit_event(1, None, EVENT_SECRET_ACCESS);
+        assert!(!event.is_genesis());
+    }
+
+    #[test]
+    fn audit_event_is_genesis_false_for_nonzero_seq_with_prev() {
+        let event = create_audit_event(5, Some(test_object_id("prev")), EVENT_SECRET_ACCESS);
+        assert!(!event.is_genesis());
+    }
+
+    #[test]
+    fn audit_event_follows_self_never_true() {
+        let event = create_audit_event(5, Some(test_object_id("prev")), EVENT_CAPABILITY_INVOKE);
+        let self_id = test_object_id("self-id");
+        // An event cannot follow itself: seq + 1 != seq
+        assert!(!event.follows(&event, &self_id));
+    }
+
+    #[test]
+    fn audit_event_follows_seq_zero_to_one() {
+        let prev_id = test_object_id("genesis-id");
+        let genesis = create_audit_event(0, None, EVENT_SECRET_ACCESS);
+        let event1 = AuditEvent {
+            prev: Some(prev_id),
+            seq: 1,
+            ..create_audit_event(1, None, EVENT_SECRET_ACCESS)
+        };
+        assert!(event1.follows(&genesis, &prev_id));
+    }
+
+    #[test]
+    fn audit_event_follows_requires_both_conditions() {
+        let prev_id = test_object_id("prev-id");
+        let event1 = create_audit_event(5, None, EVENT_CAPABILITY_INVOKE);
+
+        // Correct seq but no prev pointer
+        let event_no_prev = AuditEvent {
+            prev: None,
+            seq: 6,
+            ..create_audit_event(6, None, EVENT_CAPABILITY_INVOKE)
+        };
+        assert!(!event_no_prev.follows(&event1, &prev_id));
+
+        // Correct prev but wrong seq
+        let event_wrong_seq = AuditEvent {
+            prev: Some(prev_id),
+            seq: 7,
+            ..create_audit_event(7, None, EVENT_CAPABILITY_INVOKE)
+        };
+        assert!(!event_wrong_seq.follows(&event1, &prev_id));
+    }
+
+    #[test]
+    fn audit_event_zone_id_method_returns_ref() {
+        let event = create_audit_event(0, None, EVENT_ZONE_TRANSITION);
+        let zone_ref = event.zone_id();
+        assert_eq!(zone_ref.as_str(), event.zone_id.as_str());
+    }
+
+    #[test]
+    fn audit_event_correlation_id_16_bytes() {
+        let event = create_audit_event(1, None, EVENT_CAPABILITY_INVOKE);
+        assert_eq!(event.correlation_id.0.as_bytes().len(), 16);
+    }
+
+    #[test]
+    fn audit_event_occurred_at_monotonic_in_chain() {
+        let event1 = create_audit_event(1, None, EVENT_CAPABILITY_INVOKE);
+        let event2 = create_audit_event(2, Some(test_object_id("e1")), EVENT_CAPABILITY_INVOKE);
+        assert!(event2.occurred_at >= event1.occurred_at);
+    }
+
+    #[test]
+    fn audit_event_different_event_types_different_content() {
+        let event_a = create_audit_event(1, None, EVENT_SECRET_ACCESS);
+        let event_b = create_audit_event(1, None, EVENT_SECURITY_VIOLATION);
+        assert_ne!(event_a.event_type, event_b.event_type);
+    }
+
+    #[test]
+    fn audit_event_json_roundtrip_with_prev() {
+        let event = create_audit_event(
+            10,
+            Some(test_object_id("prev-event")),
+            EVENT_REVOCATION_ISSUED,
+        );
+        let json = serde_json::to_string(&event).unwrap();
+        let decoded: AuditEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.seq, 10);
+        assert_eq!(decoded.event_type, EVENT_REVOCATION_ISSUED);
+        assert!(decoded.prev.is_some());
+    }
+
+    #[test]
+    fn audit_event_cbor_roundtrip() {
+        let event = create_audit_event(3, Some(test_object_id("prev")), EVENT_ELEVATION_GRANTED);
+        let mut cbor_bytes = Vec::new();
+        ciborium::into_writer(&event, &mut cbor_bytes).unwrap();
+        let decoded: AuditEvent = ciborium::from_reader(&cbor_bytes[..]).unwrap();
+        assert_eq!(decoded.seq, 3);
+        assert_eq!(decoded.event_type, EVENT_ELEVATION_GRANTED);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Additional AuditHead tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn audit_head_json_roundtrip() {
+        let head = create_audit_head(test_object_id("tip"), 99, 5);
+        let json = serde_json::to_string(&head).unwrap();
+        let decoded: AuditHead = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.head_seq, 99);
+        assert!((decoded.coverage - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn audit_head_cbor_roundtrip() {
+        let head = create_audit_head(test_object_id("tip-cbor"), 42, 3);
+        let mut cbor_bytes = Vec::new();
+        ciborium::into_writer(&head, &mut cbor_bytes).unwrap();
+        let decoded: AuditHead = ciborium::from_reader(&cbor_bytes[..]).unwrap();
+        assert_eq!(decoded.head_seq, 42);
+    }
+
+    #[test]
+    fn audit_head_epoch_preserved() {
+        let head = create_audit_head(test_object_id("event"), 10, 3);
+        assert_eq!(head.epoch_id.as_str(), "epoch-1");
+    }
+
+    #[test]
+    fn audit_head_zero_seq() {
+        let head = create_audit_head(test_object_id("genesis"), 0, 1);
+        assert_eq!(head.head_seq, 0);
+    }
+
+    #[test]
+    fn audit_head_coverage_full_range() {
+        for &coverage in &[0.0, 0.25, 0.5, 0.75, 1.0] {
+            let head = AuditHead {
+                coverage,
+                ..create_audit_head(test_object_id("event"), 1, 1)
+            };
+            assert!((head.coverage - coverage).abs() < f64::EPSILON);
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Additional ZoneCheckpoint tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn zone_checkpoint_json_roundtrip() {
+        let cp = create_zone_checkpoint(
+            test_object_id("rev-rt"),
+            15,
+            test_object_id("audit-rt"),
+            30,
+            3,
+            4,
+        );
+        let json = serde_json::to_string(&cp).unwrap();
+        let decoded: ZoneCheckpoint = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.rev_seq, 15);
+        assert_eq!(decoded.audit_seq, 30);
+        assert_eq!(decoded.checkpoint_seq, 3);
+    }
+
+    #[test]
+    fn zone_checkpoint_cbor_roundtrip() {
+        let cp = create_zone_checkpoint(
+            test_object_id("rev-cb"),
+            20,
+            test_object_id("audit-cb"),
+            40,
+            2,
+            3,
+        );
+        let mut cbor_bytes = Vec::new();
+        ciborium::into_writer(&cp, &mut cbor_bytes).unwrap();
+        let decoded: ZoneCheckpoint = ciborium::from_reader(&cbor_bytes[..]).unwrap();
+        assert_eq!(decoded.rev_seq, 20);
+        assert_eq!(decoded.audit_seq, 40);
+        assert_eq!(decoded.checkpoint_seq, 2);
+    }
+
+    #[test]
+    fn zone_checkpoint_epoch_preserved() {
+        let cp = create_zone_checkpoint(
+            test_object_id("rev"),
+            10,
+            test_object_id("audit"),
+            20,
+            1,
+            4,
+        );
+        assert_eq!(cp.as_of_epoch.as_str(), "epoch-1");
+    }
+
+    #[test]
+    fn zone_checkpoint_zero_seqs() {
+        let cp = create_zone_checkpoint(
+            test_object_id("rev"),
+            0,
+            test_object_id("audit"),
+            0,
+            0,
+            1,
+        );
+        assert_eq!(cp.rev_seq, 0);
+        assert_eq!(cp.audit_seq, 0);
+        assert_eq!(cp.checkpoint_seq, 0);
+    }
+
+    #[test]
+    fn zone_checkpoint_large_seqs() {
+        let cp = create_zone_checkpoint(
+            test_object_id("rev"),
+            u64::MAX,
+            test_object_id("audit"),
+            u64::MAX,
+            u64::MAX,
+            1,
+        );
+        assert_eq!(cp.rev_seq, u64::MAX);
+        assert_eq!(cp.audit_seq, u64::MAX);
+        assert_eq!(cp.checkpoint_seq, u64::MAX);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Additional DecisionReceipt tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn decision_receipt_cbor_roundtrip() {
+        let receipt = create_decision_receipt(
+            test_object_id("req-cbor"),
+            Decision::Deny,
+            "FCP-4010",
+            vec![test_object_id("ev1")],
+        );
+        let mut cbor_bytes = Vec::new();
+        ciborium::into_writer(&receipt, &mut cbor_bytes).unwrap();
+        let decoded: DecisionReceipt = ciborium::from_reader(&cbor_bytes[..]).unwrap();
+        assert_eq!(decoded.reason_code, "FCP-4010");
+        assert!(decoded.is_deny());
+    }
+
+    #[test]
+    fn decision_receipt_many_evidence_objects() {
+        let evidence: Vec<ObjectId> = (0..100)
+            .map(|i| test_object_id(&format!("ev-{i}")))
+            .collect();
+        let receipt = create_decision_receipt(
+            test_object_id("req-many"),
+            Decision::Deny,
+            "FCP-5000",
+            evidence,
+        );
+        assert_eq!(receipt.evidence.len(), 100);
+    }
+
+    #[test]
+    fn decision_receipt_reason_code_various() {
+        for code in ["FCP-0000", "FCP-4010", "FCP-4020", "FCP-4030", "FCP-5010"] {
+            let receipt = create_decision_receipt(
+                test_object_id("req"),
+                Decision::Deny,
+                code,
+                vec![],
+            );
+            assert_eq!(receipt.reason_code, code);
+        }
+    }
+
+    #[test]
+    fn decision_receipt_explanation_long_text() {
+        let long_text = "x".repeat(10000);
+        let receipt = DecisionReceipt {
+            explanation: Some(long_text),
+            ..create_decision_receipt(
+                test_object_id("req"),
+                Decision::Deny,
+                "FCP-4010",
+                vec![],
+            )
+        };
+        assert_eq!(receipt.explanation.as_ref().unwrap().len(), 10000);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Additional Decision enum tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn decision_debug_format() {
+        let allow_debug = format!("{:?}", Decision::Allow);
+        let deny_debug = format!("{:?}", Decision::Deny);
+        assert_eq!(allow_debug, "Allow");
+        assert_eq!(deny_debug, "Deny");
+    }
+
+    #[test]
+    fn decision_clone_preserves_value() {
+        let d = Decision::Deny;
+        let cloned = Clone::clone(&d);
+        assert_eq!(d, cloned);
+    }
+
+    #[test]
+    fn decision_cbor_roundtrip() {
+        for decision in [Decision::Allow, Decision::Deny] {
+            let mut cbor_bytes = Vec::new();
+            ciborium::into_writer(&decision, &mut cbor_bytes).unwrap();
+            let decoded: Decision = ciborium::from_reader(&cbor_bytes[..]).unwrap();
+            assert_eq!(decision, decoded);
+        }
+    }
+
+    #[test]
+    fn decision_deserialization_rejects_invalid() {
+        let result = serde_json::from_str::<Decision>("\"invalid\"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn decision_deserialization_rejects_uppercase() {
+        let result = serde_json::from_str::<Decision>("\"Allow\"");
+        assert!(result.is_err());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Additional TraceContext tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn trace_context_all_zeros() {
+        let trace = TraceContext {
+            trace_id: [0u8; 16],
+            span_id: [0u8; 8],
+            flags: 0,
+        };
+        let json = serde_json::to_string(&trace).unwrap();
+        let decoded: TraceContext = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.trace_id, [0u8; 16]);
+        assert_eq!(decoded.span_id, [0u8; 8]);
+        assert_eq!(decoded.flags, 0);
+    }
+
+    #[test]
+    fn trace_context_all_max_bytes() {
+        let trace = TraceContext {
+            trace_id: [0xFF; 16],
+            span_id: [0xFF; 8],
+            flags: 0xFF,
+        };
+        let json = serde_json::to_string(&trace).unwrap();
+        let decoded: TraceContext = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.trace_id, [0xFF; 16]);
+        assert_eq!(decoded.span_id, [0xFF; 8]);
+        assert_eq!(decoded.flags, 0xFF);
+    }
+
+    #[test]
+    fn trace_context_cbor_roundtrip() {
+        let trace = TraceContext {
+            trace_id: [0xDE, 0xAD, 0xBE, 0xEF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            span_id: [0x12, 0x34, 0x56, 0x78, 0, 0, 0, 0],
+            flags: 0x01,
+        };
+        let mut cbor_bytes = Vec::new();
+        ciborium::into_writer(&trace, &mut cbor_bytes).unwrap();
+        let decoded: TraceContext = ciborium::from_reader(&cbor_bytes[..]).unwrap();
+        assert_eq!(decoded.trace_id, trace.trace_id);
+        assert_eq!(decoded.span_id, trace.span_id);
+        assert_eq!(decoded.flags, trace.flags);
+    }
+
+    #[test]
+    fn trace_context_debug_format() {
+        let trace = TraceContext {
+            trace_id: [0xAB; 16],
+            span_id: [0xCD; 8],
+            flags: 0x01,
+        };
+        let debug = format!("{trace:?}");
+        assert!(debug.contains("TraceContext"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Fork detection edge cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn fork_detection_identical_events_no_fork() {
+        let event_a = create_audit_event(10, None, EVENT_CAPABILITY_INVOKE);
+        // Same correlation_id means same content — not a fork
+        assert!(!is_fork_detected(&event_a, &event_a));
+    }
+
+    #[test]
+    fn can_advance_checkpoint_rejects_same_seq() {
+        assert!(!can_advance_checkpoint(50, 50, false));
+    }
+
+    #[test]
+    fn can_advance_checkpoint_rejects_lower_seq() {
+        assert!(!can_advance_checkpoint(50, 30, false));
+    }
+
+    #[test]
+    fn can_advance_checkpoint_rejects_zero_to_zero() {
+        assert!(!can_advance_checkpoint(0, 0, false));
+    }
+
+    #[test]
+    fn can_advance_checkpoint_allows_zero_to_one() {
+        assert!(can_advance_checkpoint(0, 1, false));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Event type constant format tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn event_type_constants_contain_dot() {
+        let all_types = [
+            EVENT_SECRET_ACCESS,
+            EVENT_CAPABILITY_INVOKE,
+            EVENT_ELEVATION_GRANTED,
+            EVENT_DECLASSIFICATION_GRANTED,
+            EVENT_ZONE_TRANSITION,
+            EVENT_REVOCATION_ISSUED,
+            EVENT_SECURITY_VIOLATION,
+            EVENT_AUDIT_FORK_DETECTED,
+        ];
+        for t in all_types {
+            assert!(t.contains('.'), "Event type '{t}' should contain a dot separator");
+        }
+    }
+
+    #[test]
+    fn event_type_constants_no_uppercase() {
+        let all_types = [
+            EVENT_SECRET_ACCESS,
+            EVENT_CAPABILITY_INVOKE,
+            EVENT_ELEVATION_GRANTED,
+            EVENT_DECLASSIFICATION_GRANTED,
+            EVENT_ZONE_TRANSITION,
+            EVENT_REVOCATION_ISSUED,
+            EVENT_SECURITY_VIOLATION,
+            EVENT_AUDIT_FORK_DETECTED,
+        ];
+        for t in all_types {
+            assert_eq!(t, t.to_lowercase(), "Event type '{t}' should be lowercase");
+        }
+    }
+
+    #[test]
+    fn event_type_constants_are_unique() {
+        let all_types = [
+            EVENT_SECRET_ACCESS,
+            EVENT_CAPABILITY_INVOKE,
+            EVENT_ELEVATION_GRANTED,
+            EVENT_DECLASSIFICATION_GRANTED,
+            EVENT_ZONE_TRANSITION,
+            EVENT_REVOCATION_ISSUED,
+            EVENT_SECURITY_VIOLATION,
+            EVENT_AUDIT_FORK_DETECTED,
+        ];
+        let mut seen = std::collections::HashSet::new();
+        for t in all_types {
+            assert!(seen.insert(t), "Duplicate event type: {t}");
+        }
+        assert_eq!(seen.len(), 8);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Quorum / signature set edge cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn quorum_signature_set_empty() {
+        let set = create_quorum_signature_set(0);
+        assert_eq!(set.len(), 0);
+    }
+
+    #[test]
+    fn quorum_signature_set_single() {
+        let set = create_quorum_signature_set(1);
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn quorum_signature_set_large() {
+        let set = create_quorum_signature_set(20);
+        assert_eq!(set.len(), 20);
+    }
+
+    #[test]
+    fn audit_head_quorum_read_vs_write_thresholds() {
+        let policy = QuorumPolicy::new(test_zone(), 5, 1);
+        // Read requires fewer signatures than CriticalWrite
+        let head_2sigs = create_audit_head(test_object_id("event"), 1, 2);
+        // 2 sigs: enough for Read (threshold = ceil(n/2) = 3? or 1?)
+        // We just verify CriticalWrite is stricter
+        let head_4sigs = create_audit_head(test_object_id("event"), 1, 4);
+        assert!(
+            head_4sigs
+                .quorum_signatures
+                .satisfies_quorum(&policy, RiskTier::CriticalWrite)
+        );
+        // 2 sigs shouldn't satisfy CriticalWrite (n-f = 4 required)
+        assert!(
+            !head_2sigs
+                .quorum_signatures
+                .satisfies_quorum(&policy, RiskTier::CriticalWrite)
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Serialization skip_serializing_if coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn audit_event_optional_fields_skipped_independently() {
+        // Only connector_id set, rest None
+        let event = AuditEvent {
+            connector_id: Some(ConnectorId::from_static("fcp.test:base:v1")),
+            ..create_audit_event(1, None, EVENT_CAPABILITY_INVOKE)
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("connector_id"));
+        assert!(!json.contains("capability_token_jti"));
+        assert!(!json.contains("request_object_id"));
+        assert!(!json.contains("result_object_id"));
+    }
+
+    #[test]
+    fn audit_event_only_capability_token_jti_set() {
+        let event = AuditEvent {
+            capability_token_jti: Some(Uuid::from_bytes([0xCC; 16])),
+            ..create_audit_event(1, None, EVENT_CAPABILITY_INVOKE)
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(!json.contains("connector_id"));
+        assert!(json.contains("capability_token_jti"));
+    }
+
+    #[test]
+    fn audit_event_only_operation_set() {
+        let event = AuditEvent {
+            operation: Some(OperationId::from_static("op-test-only")),
+            ..create_audit_event(1, None, EVENT_CAPABILITY_INVOKE)
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("operation"));
+        assert!(!json.contains("connector_id"));
+    }
 }

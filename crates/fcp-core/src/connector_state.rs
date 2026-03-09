@@ -2535,4 +2535,905 @@ mod tests {
         let cloned = Clone::clone(&root);
         assert_eq!(cloned.model, ConnectorStateModel::SingletonWriter);
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Additional CrdtType tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn crdt_type_copy_semantics() {
+        let ct = CrdtType::OrSet;
+        let copied = ct;
+        assert_eq!(ct, copied);
+    }
+
+    #[test]
+    fn crdt_type_hash_consistency() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(CrdtType::LwwMap);
+        set.insert(CrdtType::OrSet);
+        set.insert(CrdtType::GCounter);
+        set.insert(CrdtType::PnCounter);
+        assert_eq!(set.len(), 4);
+        assert!(set.contains(&CrdtType::LwwMap));
+    }
+
+    #[test]
+    fn crdt_type_serde_snake_case_values() {
+        let json = serde_json::to_string(&CrdtType::LwwMap).unwrap();
+        assert_eq!(json, "\"lww_map\"");
+        let json = serde_json::to_string(&CrdtType::OrSet).unwrap();
+        assert_eq!(json, "\"or_set\"");
+        let json = serde_json::to_string(&CrdtType::GCounter).unwrap();
+        assert_eq!(json, "\"g_counter\"");
+        let json = serde_json::to_string(&CrdtType::PnCounter).unwrap();
+        assert_eq!(json, "\"pn_counter\"");
+    }
+
+    #[test]
+    fn crdt_type_debug_format() {
+        let debug = format!("{:?}", CrdtType::LwwMap);
+        assert_eq!(debug, "LwwMap");
+        let debug = format!("{:?}", CrdtType::PnCounter);
+        assert_eq!(debug, "PnCounter");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Additional ConnectorStateModel tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn connector_state_model_crdt_all_types() {
+        for crdt_type in [
+            CrdtType::LwwMap,
+            CrdtType::OrSet,
+            CrdtType::GCounter,
+            CrdtType::PnCounter,
+        ] {
+            let model = ConnectorStateModel::Crdt { crdt_type };
+            assert!(model.is_crdt());
+            assert_eq!(model.crdt_type(), Some(crdt_type));
+            let display = model.to_string();
+            assert!(display.starts_with("crdt("));
+            assert!(display.ends_with(')'));
+        }
+    }
+
+    #[test]
+    fn connector_state_model_display_crdt_or_set() {
+        let model = ConnectorStateModel::Crdt {
+            crdt_type: CrdtType::OrSet,
+        };
+        assert_eq!(model.to_string(), "crdt(or_set)");
+    }
+
+    #[test]
+    fn connector_state_model_display_crdt_pn_counter() {
+        let model = ConnectorStateModel::Crdt {
+            crdt_type: CrdtType::PnCounter,
+        };
+        assert_eq!(model.to_string(), "crdt(pn_counter)");
+    }
+
+    #[test]
+    fn connector_state_model_equality() {
+        let a = ConnectorStateModel::Stateless;
+        let b = ConnectorStateModel::Stateless;
+        assert_eq!(a, b);
+        let c = ConnectorStateModel::SingletonWriter;
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn connector_state_model_crdt_equality_same() {
+        let a = ConnectorStateModel::Crdt {
+            crdt_type: CrdtType::GCounter,
+        };
+        let b = ConnectorStateModel::Crdt {
+            crdt_type: CrdtType::GCounter,
+        };
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn connector_state_model_crdt_equality_different() {
+        let a = ConnectorStateModel::Crdt {
+            crdt_type: CrdtType::GCounter,
+        };
+        let b = ConnectorStateModel::Crdt {
+            crdt_type: CrdtType::PnCounter,
+        };
+        assert_ne!(a, b);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Additional Signature tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn signature_equality() {
+        let a = Signature::from_bytes([1u8; 64]);
+        let b = Signature::from_bytes([1u8; 64]);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn signature_inequality() {
+        let a = Signature::from_bytes([1u8; 64]);
+        let b = Signature::from_bytes([2u8; 64]);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn signature_copy_semantics() {
+        let sig = Signature::from_bytes([0xAA; 64]);
+        let copied = sig;
+        assert_eq!(sig, copied);
+    }
+
+    #[test]
+    fn signature_display_shows_first_8_bytes() {
+        let mut bytes = [0u8; 64];
+        bytes[0] = 0xDE;
+        bytes[1] = 0xAD;
+        bytes[2] = 0xBE;
+        bytes[3] = 0xEF;
+        bytes[4] = 0xCA;
+        bytes[5] = 0xFE;
+        bytes[6] = 0xBA;
+        bytes[7] = 0xBE;
+        let sig = Signature::from_bytes(bytes);
+        assert_eq!(sig.to_string(), "deadbeefcafebabe...");
+    }
+
+    #[test]
+    fn signature_debug_truncated_format() {
+        let sig = Signature::from_bytes([0xFF; 64]);
+        let debug = format!("{sig:?}");
+        assert!(debug.starts_with("Signature("));
+        assert!(debug.contains("..."));
+    }
+
+    #[test]
+    fn signature_json_roundtrip_all_zeros() {
+        let sig = Signature::zero();
+        let json = serde_json::to_string(&sig).unwrap();
+        let back: Signature = serde_json::from_str(&json).unwrap();
+        assert_eq!(sig, back);
+        assert_eq!(back.as_bytes(), &[0u8; 64]);
+    }
+
+    #[test]
+    fn signature_json_roundtrip_all_ones() {
+        let sig = Signature::from_bytes([0xFF; 64]);
+        let json = serde_json::to_string(&sig).unwrap();
+        let back: Signature = serde_json::from_str(&json).unwrap();
+        assert_eq!(sig, back);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Additional CursorState tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn cursor_state_all_none() {
+        let state = CursorState {
+            offset: None,
+            last_seen_id: None,
+            watermark: None,
+        };
+        let cbor = state.to_cbor().unwrap();
+        let back = CursorState::from_cbor(&cbor).unwrap();
+        assert_eq!(state, back);
+    }
+
+    #[test]
+    fn cursor_state_only_offset() {
+        let state = CursorState {
+            offset: Some(999),
+            last_seen_id: None,
+            watermark: None,
+        };
+        let cbor = state.to_cbor().unwrap();
+        let back = CursorState::from_cbor(&cbor).unwrap();
+        assert_eq!(back.offset, Some(999));
+        assert!(back.last_seen_id.is_none());
+    }
+
+    #[test]
+    fn cursor_state_only_last_seen_id() {
+        let state = CursorState {
+            offset: None,
+            last_seen_id: Some("msg_abc".to_string()),
+            watermark: None,
+        };
+        let cbor = state.to_cbor().unwrap();
+        let back = CursorState::from_cbor(&cbor).unwrap();
+        assert_eq!(back.last_seen_id.as_deref(), Some("msg_abc"));
+    }
+
+    #[test]
+    fn cursor_state_only_watermark() {
+        let state = CursorState {
+            offset: None,
+            last_seen_id: None,
+            watermark: Some(1_700_000_555),
+        };
+        let cbor = state.to_cbor().unwrap();
+        let back = CursorState::from_cbor(&cbor).unwrap();
+        assert_eq!(back.watermark, Some(1_700_000_555));
+    }
+
+    #[test]
+    fn cursor_state_negative_offset() {
+        let state = CursorState {
+            offset: Some(-42),
+            last_seen_id: None,
+            watermark: None,
+        };
+        let cbor = state.to_cbor().unwrap();
+        let back = CursorState::from_cbor(&cbor).unwrap();
+        assert_eq!(back.offset, Some(-42));
+    }
+
+    #[test]
+    fn cursor_state_zero_offset() {
+        let state = CursorState {
+            offset: Some(0),
+            last_seen_id: None,
+            watermark: None,
+        };
+        let cbor = state.to_cbor().unwrap();
+        let back = CursorState::from_cbor(&cbor).unwrap();
+        assert_eq!(back.offset, Some(0));
+    }
+
+    #[test]
+    fn cursor_state_large_offset() {
+        let state = CursorState {
+            offset: Some(i64::MAX),
+            last_seen_id: None,
+            watermark: None,
+        };
+        let cbor = state.to_cbor().unwrap();
+        let back = CursorState::from_cbor(&cbor).unwrap();
+        assert_eq!(back.offset, Some(i64::MAX));
+    }
+
+    #[test]
+    fn cursor_state_empty_last_seen_id() {
+        let state = CursorState {
+            offset: None,
+            last_seen_id: Some(String::new()),
+            watermark: None,
+        };
+        let cbor = state.to_cbor().unwrap();
+        let back = CursorState::from_cbor(&cbor).unwrap();
+        assert_eq!(back.last_seen_id.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn cursor_state_json_serde_roundtrip() {
+        let state = CursorState {
+            offset: Some(77),
+            last_seen_id: Some("last-77".to_string()),
+            watermark: Some(1_234_567),
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        let back: CursorState = serde_json::from_str(&json).unwrap();
+        assert_eq!(state, back);
+    }
+
+    #[test]
+    fn cursor_state_json_omits_none_fields() {
+        let state = CursorState {
+            offset: None,
+            last_seen_id: None,
+            watermark: None,
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(!json.contains("offset"));
+        assert!(!json.contains("last_seen_id"));
+        assert!(!json.contains("watermark"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Additional SnapshotConfig tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn snapshot_config_below_both_thresholds() {
+        let config = SnapshotConfig {
+            snapshot_every_updates: 100,
+            snapshot_every_bytes: 1000,
+        };
+        assert!(!config.should_snapshot(99, 999));
+    }
+
+    #[test]
+    fn snapshot_config_zero_thresholds() {
+        let config = SnapshotConfig {
+            snapshot_every_updates: 0,
+            snapshot_every_bytes: 0,
+        };
+        assert!(config.should_snapshot(0, 0));
+    }
+
+    #[test]
+    fn snapshot_config_serde_roundtrip() {
+        let config = SnapshotConfig {
+            snapshot_every_updates: 2500,
+            snapshot_every_bytes: 512_000,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let back: SnapshotConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.snapshot_every_updates, 2500);
+        assert_eq!(back.snapshot_every_bytes, 512_000);
+    }
+
+    #[test]
+    fn snapshot_config_serde_defaults_applied() {
+        let json = "{}";
+        let config: SnapshotConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.snapshot_every_updates, 5000);
+        assert_eq!(config.snapshot_every_bytes, 1_048_576);
+    }
+
+    #[test]
+    fn snapshot_config_clone() {
+        let config = SnapshotConfig {
+            snapshot_every_updates: 42,
+            snapshot_every_bytes: 9999,
+        };
+        let cloned = Clone::clone(&config);
+        assert_eq!(cloned.snapshot_every_updates, 42);
+        assert_eq!(cloned.snapshot_every_bytes, 9999);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Additional FencingError Display coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn fencing_error_display_subject_mismatch() {
+        let err = FencingError::SubjectMismatch {
+            expected: test_object_id("expected"),
+            got: test_object_id("got"),
+        };
+        let display = err.to_string();
+        assert!(display.contains("subject mismatch"));
+    }
+
+    #[test]
+    fn fencing_error_display_lease_not_found() {
+        let err = FencingError::LeaseNotFound {
+            lease_id: test_object_id("missing"),
+        };
+        let display = err.to_string();
+        assert!(display.contains("not found"));
+    }
+
+    #[test]
+    fn fencing_error_display_lease_expired_values() {
+        let err = FencingError::LeaseExpired {
+            expired_at: 500,
+            now: 700,
+        };
+        let display = err.to_string();
+        assert!(display.contains("500"));
+        assert!(display.contains("700"));
+    }
+
+    #[test]
+    fn fencing_error_display_stale_lease_seq_values() {
+        let err = FencingError::StaleLeaseSeq {
+            held_seq: 3,
+            current_seq: 10,
+        };
+        let display = err.to_string();
+        assert!(display.contains('3'));
+        assert!(display.contains("10"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // validate_singleton_writer_fencing tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn fencing_valid_passes() {
+        let lease_id = test_object_id("lease-fence");
+        let mut header = test_header();
+        header.refs.push(lease_id);
+        let obj = ConnectorStateObject {
+            header,
+            connector_id: test_connector_id(),
+            instance_id: None,
+            zone_id: ZoneId::work(),
+            prev: None,
+            seq: 0,
+            state_cbor: vec![],
+            updated_at: 1_000,
+            lease_seq: 10,
+            lease_object_id: lease_id,
+            signature: Signature::zero(),
+        };
+        assert!(validate_singleton_writer_fencing(&obj, 10, 500, 1000).is_ok());
+    }
+
+    #[test]
+    fn fencing_rejects_expired_lease() {
+        let lease_id = test_object_id("lease-fence");
+        let mut header = test_header();
+        header.refs.push(lease_id);
+        let obj = ConnectorStateObject {
+            header,
+            connector_id: test_connector_id(),
+            instance_id: None,
+            zone_id: ZoneId::work(),
+            prev: None,
+            seq: 0,
+            state_cbor: vec![],
+            updated_at: 1_000,
+            lease_seq: 10,
+            lease_object_id: lease_id,
+            signature: Signature::zero(),
+        };
+        let err = validate_singleton_writer_fencing(&obj, 10, 2000, 1000).unwrap_err();
+        assert!(matches!(err, FencingError::LeaseExpired { .. }));
+    }
+
+    #[test]
+    fn fencing_rejects_stale_seq() {
+        let lease_id = test_object_id("lease-fence");
+        let mut header = test_header();
+        header.refs.push(lease_id);
+        let obj = ConnectorStateObject {
+            header,
+            connector_id: test_connector_id(),
+            instance_id: None,
+            zone_id: ZoneId::work(),
+            prev: None,
+            seq: 0,
+            state_cbor: vec![],
+            updated_at: 1_000,
+            lease_seq: 5,
+            lease_object_id: lease_id,
+            signature: Signature::zero(),
+        };
+        let err = validate_singleton_writer_fencing(&obj, 10, 500, 1000).unwrap_err();
+        assert!(matches!(err, FencingError::StaleLeaseSeq { .. }));
+    }
+
+    #[test]
+    fn fencing_rejects_missing_lease_ref() {
+        let lease_id = test_object_id("lease-fence");
+        let header = test_header(); // refs is empty - lease_id not included
+        let obj = ConnectorStateObject {
+            header,
+            connector_id: test_connector_id(),
+            instance_id: None,
+            zone_id: ZoneId::work(),
+            prev: None,
+            seq: 0,
+            state_cbor: vec![],
+            updated_at: 1_000,
+            lease_seq: 10,
+            lease_object_id: lease_id,
+            signature: Signature::zero(),
+        };
+        let err = validate_singleton_writer_fencing(&obj, 10, 500, 1000).unwrap_err();
+        assert!(matches!(err, FencingError::LeaseNotFound { .. }));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Additional ForkDetector tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn fork_detector_empty() {
+        let detector = StateForkDetector::new();
+        let result = detector.detect_fork(ZoneId::work(), test_connector_id(), 1_700_000_000);
+        assert!(!result.is_fork());
+    }
+
+    #[test]
+    fn fork_detector_single_genesis() {
+        let mut detector = StateForkDetector::new();
+        let genesis = test_object_id("gen");
+        detector.register(genesis, None, 0, 50);
+        let result = detector.detect_fork(ZoneId::work(), test_connector_id(), 1_700_000_000);
+        assert!(!result.is_fork());
+        if let StateForkDetectionResult::NoFork { head, seq } = result {
+            assert_eq!(head, genesis);
+            assert_eq!(seq, 0);
+        } else {
+            panic!("expected NoFork");
+        }
+    }
+
+    #[test]
+    fn fork_detector_lease_seq_lookup() {
+        let mut detector = StateForkDetector::new();
+        let obj = test_object_id("obj");
+        detector.register(obj, None, 0, 42);
+        assert_eq!(detector.lease_seq(&obj), Some(42));
+    }
+
+    #[test]
+    fn fork_detector_lease_seq_unknown() {
+        let detector = StateForkDetector::new();
+        assert!(detector.lease_seq(&test_object_id("unknown")).is_none());
+    }
+
+    #[test]
+    fn fork_resolve_crdt_strategy_for_singleton_fails() {
+        let mut detector = StateForkDetector::new();
+        let genesis = test_object_id("gen");
+        let a = test_object_id("a");
+        let b = test_object_id("b");
+        detector.register(genesis, None, 0, 100);
+        detector.register(a, Some(genesis), 1, 101);
+        detector.register(b, Some(genesis), 1, 102);
+        let result = detector.detect_fork(ZoneId::work(), test_connector_id(), 1_700_000_000);
+        let fork = result.fork_event().unwrap();
+        let outcome = detector.resolve(
+            fork,
+            ForkResolution::CrdtMerge,
+            &ConnectorStateModel::SingletonWriter,
+            1_700_000_001,
+        );
+        assert!(!outcome.resolved);
+        assert!(outcome.failure_reason.unwrap().contains("not valid"));
+    }
+
+    #[test]
+    fn fork_resolve_manual_always_fails_without_selection() {
+        let mut detector = StateForkDetector::new();
+        let genesis = test_object_id("gen");
+        let a = test_object_id("a");
+        let b = test_object_id("b");
+        detector.register(genesis, None, 0, 100);
+        detector.register(a, Some(genesis), 1, 100);
+        detector.register(b, Some(genesis), 1, 100);
+        let result = detector.detect_fork(ZoneId::work(), test_connector_id(), 1_700_000_000);
+        let fork = result.fork_event().unwrap();
+        let outcome = detector.resolve(
+            fork,
+            ForkResolution::ManualResolution,
+            &ConnectorStateModel::SingletonWriter,
+            1_700_000_001,
+        );
+        assert!(!outcome.resolved);
+        assert!(outcome.failure_reason.unwrap().contains("manual resolution"));
+    }
+
+    #[test]
+    fn fork_resolve_manual_select_branch_a() {
+        let mut detector = StateForkDetector::new();
+        let genesis = test_object_id("gen");
+        let a = test_object_id("a");
+        let b = test_object_id("b");
+        detector.register(genesis, None, 0, 100);
+        detector.register(a, Some(genesis), 1, 100);
+        detector.register(b, Some(genesis), 1, 100);
+        let result = detector.detect_fork(ZoneId::work(), test_connector_id(), 1_700_000_000);
+        let fork = result.fork_event().unwrap();
+        let outcome = detector.resolve_manual(fork, a, 1_700_000_001);
+        assert!(outcome.resolved);
+        assert_eq!(outcome.winning_head, Some(a));
+    }
+
+    #[test]
+    fn fork_resolve_manual_select_branch_b() {
+        let mut detector = StateForkDetector::new();
+        let genesis = test_object_id("gen");
+        let a = test_object_id("a");
+        let b = test_object_id("b");
+        detector.register(genesis, None, 0, 100);
+        detector.register(a, Some(genesis), 1, 100);
+        detector.register(b, Some(genesis), 1, 100);
+        let result = detector.detect_fork(ZoneId::work(), test_connector_id(), 1_700_000_000);
+        let fork = result.fork_event().unwrap();
+        let outcome = detector.resolve_manual(fork, b, 1_700_000_001);
+        assert!(outcome.resolved);
+        assert_eq!(outcome.winning_head, Some(b));
+    }
+
+    #[test]
+    fn fork_resolve_by_lease_tie() {
+        let mut detector = StateForkDetector::new();
+        let genesis = test_object_id("gen");
+        let a = test_object_id("a");
+        let b = test_object_id("b");
+        detector.register(genesis, None, 0, 100);
+        detector.register(a, Some(genesis), 1, 50);
+        detector.register(b, Some(genesis), 1, 50);
+        let result = detector.detect_fork(ZoneId::work(), test_connector_id(), 1_700_000_000);
+        let fork = result.fork_event().unwrap();
+        let outcome = detector.resolve(
+            fork,
+            ForkResolution::ChooseByLease,
+            &ConnectorStateModel::SingletonWriter,
+            1_700_000_001,
+        );
+        assert!(!outcome.resolved);
+        assert!(outcome.failure_reason.unwrap().contains("tie"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Additional ForkEvent tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn fork_event_serde_roundtrip() {
+        let event = create_test_fork_event();
+        let json = serde_json::to_string(&event).unwrap();
+        let back: ForkEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(event, back);
+    }
+
+    #[test]
+    fn fork_event_fields() {
+        let prev = test_object_id("prev");
+        let a = test_object_id("a");
+        let b = test_object_id("b");
+        let event = ForkEvent::new(prev, a, b, 5, 999, ZoneId::work(), test_connector_id());
+        assert_eq!(event.common_prev, prev);
+        assert_eq!(event.branch_a, a);
+        assert_eq!(event.branch_b, b);
+        assert_eq!(event.fork_seq, 5);
+        assert_eq!(event.detected_at, 999);
+    }
+
+    #[test]
+    fn fork_event_resolve_by_lease_zero_vs_zero() {
+        let event = create_test_fork_event();
+        assert!(event.resolve_by_lease(0, 0).is_none());
+    }
+
+    #[test]
+    fn fork_event_resolve_by_lease_max_values() {
+        let event = create_test_fork_event();
+        let winner = event.resolve_by_lease(u64::MAX, u64::MAX - 1);
+        assert_eq!(winner, Some(event.branch_a));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // StateForkDetectionResult tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn state_fork_detection_result_no_fork() {
+        let result = StateForkDetectionResult::NoFork {
+            head: test_object_id("head"),
+            seq: 5,
+        };
+        assert!(!result.is_fork());
+        assert!(result.fork_event().is_none());
+    }
+
+    #[test]
+    fn state_fork_detection_result_serde_no_fork() {
+        let result = StateForkDetectionResult::NoFork {
+            head: test_object_id("head"),
+            seq: 10,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let back: StateForkDetectionResult = serde_json::from_str(&json).unwrap();
+        assert!(!back.is_fork());
+    }
+
+    #[test]
+    fn state_fork_detection_result_serde_fork_detected() {
+        let event = create_test_fork_event();
+        let result = StateForkDetectionResult::ForkDetected(event.clone());
+        let json = serde_json::to_string(&result).unwrap();
+        let back: StateForkDetectionResult = serde_json::from_str(&json).unwrap();
+        assert!(back.is_fork());
+        let back_event = back.fork_event().unwrap();
+        assert_eq!(back_event, &event);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // MigratableComputationState tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn migratable_computation_state_terminal() {
+        assert!(MigratableComputationState::Completed.is_terminal());
+        assert!(MigratableComputationState::Failed.is_terminal());
+        assert!(!MigratableComputationState::Running.is_terminal());
+        assert!(!MigratableComputationState::Suspended.is_terminal());
+    }
+
+    #[test]
+    fn migratable_computation_state_transferring_not_terminal() {
+        let state = MigratableComputationState::Transferring {
+            target_holder: test_node_id("node-x"),
+            next_lease_id: test_object_id("lease-x"),
+            next_fencing_token: 99,
+        };
+        assert!(!state.is_terminal());
+    }
+
+    #[test]
+    fn migratable_computation_state_serde_roundtrip_all() {
+        let states = vec![
+            MigratableComputationState::Running,
+            MigratableComputationState::Suspended,
+            MigratableComputationState::Completed,
+            MigratableComputationState::Failed,
+            MigratableComputationState::Transferring {
+                target_holder: test_node_id("n"),
+                next_lease_id: test_object_id("l"),
+                next_fencing_token: 7,
+            },
+        ];
+        for state in &states {
+            let json = serde_json::to_string(state).unwrap();
+            let back: MigratableComputationState = serde_json::from_str(&json).unwrap();
+            assert_eq!(state, &back);
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // MigratableComputation invalid state transition tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn migratable_computation_suspend_rejects_suspended_state() {
+        let lease_id = test_object_id("lease");
+        let checkpoint = test_computation_checkpoint("holder", lease_id, 7, 1);
+        let checkpoint_object_id = checkpoint.object_id().unwrap();
+        let mut comp = MigratableComputation::new(
+            test_object_id("computation"),
+            ZoneId::work(),
+            test_node_id("holder"),
+            lease_id,
+            7,
+            test_migration_context(0),
+        );
+        comp.suspend(&checkpoint, checkpoint_object_id).unwrap();
+        let err = comp
+            .suspend(&checkpoint, checkpoint_object_id)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ComputationMigrationError::InvalidStateTransition { action: "suspend", .. }
+        ));
+    }
+
+    #[test]
+    fn migratable_computation_begin_transfer_rejects_running() {
+        let lease_id = test_object_id("lease");
+        let target_lease_id = test_object_id("lease-target");
+        let mut comp = MigratableComputation::new(
+            test_object_id("computation"),
+            ZoneId::work(),
+            test_node_id("holder"),
+            lease_id,
+            7,
+            test_migration_context(0),
+        );
+        let active_lease = test_migration_lease("holder", 7, 2_000);
+        let handoff =
+            test_migration_handoff(lease_id, target_lease_id, "holder", "target", 7, 8);
+        let err = comp
+            .begin_transfer(&active_lease, &handoff, 1_500)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ComputationMigrationError::InvalidStateTransition {
+                action: "begin_transfer",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn migratable_computation_resume_rejects_completed() {
+        let lease_id = test_object_id("lease");
+        let checkpoint = test_computation_checkpoint("holder", lease_id, 7, 1);
+        let checkpoint_object_id = checkpoint.object_id().unwrap();
+        let mut comp = MigratableComputation::new(
+            test_object_id("computation"),
+            ZoneId::work(),
+            test_node_id("holder"),
+            lease_id,
+            7,
+            test_migration_context(0),
+        );
+        comp.state = MigratableComputationState::Completed;
+        let resume_lease = test_migration_lease("holder", 7, 2_000);
+        let err = comp
+            .resume(&checkpoint, checkpoint_object_id, lease_id, &resume_lease, 1_500)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ComputationMigrationError::InvalidStateTransition {
+                action: "resume",
+                ..
+            }
+        ));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ConnectorStateRoot serde + builder
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn connector_state_root_serde_roundtrip_stateless() {
+        let root =
+            ConnectorStateRoot::stateless(test_header(), test_connector_id(), ZoneId::work());
+        let json = serde_json::to_string(&root).unwrap();
+        let back: ConnectorStateRoot = serde_json::from_str(&json).unwrap();
+        assert!(back.model.is_stateless());
+        assert!(back.head.is_none());
+        assert_eq!(back.state_schema_version, 1);
+    }
+
+    #[test]
+    fn connector_state_root_serde_roundtrip_with_head() {
+        let head = test_object_id("head-obj");
+        let root =
+            ConnectorStateRoot::singleton_writer(test_header(), test_connector_id(), ZoneId::work())
+                .with_head(head);
+        let json = serde_json::to_string(&root).unwrap();
+        let back: ConnectorStateRoot = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.head, Some(head));
+        assert!(back.model.is_singleton_writer());
+    }
+
+    #[test]
+    fn connector_state_root_default_schema_version() {
+        let json = r#"{
+            "header": {
+                "schema": {"namespace":"fcp.test","name":"T","version":"1.0.0"},
+                "zone_id": "z:work",
+                "created_at": 0,
+                "provenance": {"origin_zone":"z:work"}
+            },
+            "connector_id": "fcp.test:fork:v1",
+            "zone_id": "z:work",
+            "model": {"type":"stateless"}
+        }"#;
+        let root: ConnectorStateRoot = serde_json::from_str(json).unwrap();
+        assert_eq!(root.state_schema_version, 1);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ComputationMigrationError Display coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn computation_migration_error_display_invalid_transition() {
+        let err = ComputationMigrationError::InvalidStateTransition {
+            state: MigratableComputationState::Completed,
+            action: "suspend",
+        };
+        let display = err.to_string();
+        assert!(display.contains("suspend"));
+        assert!(display.contains("Completed"));
+    }
+
+    #[test]
+    fn computation_migration_error_display_checkpoint_computation_mismatch() {
+        let err = ComputationMigrationError::CheckpointComputationMismatch {
+            expected: test_object_id("expected"),
+            got: test_object_id("got"),
+        };
+        let display = err.to_string();
+        assert!(display.contains("computation mismatch"));
+    }
+
+    #[test]
+    fn computation_migration_error_display_checkpoint_zone_mismatch() {
+        let err = ComputationMigrationError::CheckpointZoneMismatch {
+            expected: ZoneId::work(),
+            got: ZoneId::private(),
+        };
+        let display = err.to_string();
+        assert!(display.contains("zone mismatch"));
+    }
 }

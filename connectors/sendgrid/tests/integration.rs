@@ -64,7 +64,20 @@ async fn lifecycle_self_check() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     let check = c.handle_self_check().await.unwrap();
-    assert_eq!(check["status"], "ready");
+    assert_eq!(check["status"], "ok");
+    assert!(check.get("details").is_some());
+    let prov = &check["details"]["provisioning"];
+    assert_eq!(prov["auth_mode"], "api_key");
+    assert_eq!(prov["api_key_configured"], true);
+    assert!(prov["network_ok"].as_bool().unwrap());
+}
+
+#[fcp_async_core::runtime::test]
+async fn lifecycle_self_check_unconfigured() {
+    let c = SendGridConnector::new();
+    let check = c.handle_self_check().await.unwrap();
+    assert_eq!(check["status"], "degraded");
+    assert_eq!(check["reason_code"], "not_configured");
 }
 
 #[fcp_async_core::runtime::test]

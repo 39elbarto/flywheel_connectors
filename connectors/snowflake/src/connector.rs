@@ -4,9 +4,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_core::{
-    AgentHint, BaseConnector, CapabilityId, ConnectorId, FcpError, FcpResult, IdempotencyClass,
-    Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
+    IdempotencyClass, Introspection, OperationId, OperationInfo, ProvisioningRecipe,
+    ProvisioningStep, ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, SelfCheckReport,
+    StepId,
 };
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -16,11 +19,50 @@ use crate::{
     error::SnowflakeError,
 };
 
+/// Authentication mode for the `Snowflake` connector.
+#[derive(Debug, Clone)]
+enum SnowflakeAuthMode {
+    /// Direct token authentication.
+    Token(SnowflakeAuth),
+    /// Secretless credential reference (egress proxy injection).
+    CredentialId {
+        credential_id: CredentialId,
+        account_identifier: String,
+    },
+}
+
+impl SnowflakeAuthMode {
+    #[must_use]
+    fn redacted_label(&self) -> String {
+        match self {
+            Self::Token(auth) => auth.redacted_label(),
+            Self::CredentialId {
+                credential_id,
+                account_identifier,
+            } => format!("account:{account_identifier},credential_id:{credential_id}"),
+        }
+    }
+
+    #[must_use]
+    const fn is_secretless(&self) -> bool {
+        matches!(self, Self::CredentialId { .. })
+    }
+
+    fn account_identifier(&self) -> &str {
+        match self {
+            Self::Token(auth) => &auth.account_identifier,
+            Self::CredentialId {
+                account_identifier, ..
+            } => account_identifier,
+        }
+    }
+}
+
 /// Parsed and validated `Snowflake` connector configuration.
 #[derive(Debug, Clone)]
 struct SnowflakeConfig {
-    auth: SnowflakeAuth,
-    base_url: Option<String>,
+    auth: SnowflakeAuthMode,
+    base_url: String,
     warehouse: Option<String>,
     database: Option<String>,
     schema: Option<String>,
@@ -33,11 +75,23 @@ impl SnowflakeConfig {
             .and_then(serde_json::Value::as_str)
             .map(str::trim)
             .filter(|v| !v.is_empty())
-            .ok_or_else(|| FcpError::InvalidRequest {
-                code: 1003,
-                message: "Missing or empty access_token in configuration".into(),
-            })?
-            .to_string();
+            .map(str::to_string);
+
+        let credential_id = match params.get("credential_id") {
+            Some(value) => {
+                let raw = value.as_str().ok_or_else(|| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "credential_id must be a string".into(),
+                })?;
+                Some(
+                    CredentialId::parse(raw).map_err(|_| FcpError::InvalidRequest {
+                        code: 1003,
+                        message: "credential_id must be a valid UUID".into(),
+                    })?,
+                )
+            }
+            None => None,
+        };
 
         let account_identifier = params
             .get("account_identifier")
@@ -50,10 +104,36 @@ impl SnowflakeConfig {
             })?
             .to_string();
 
+        let auth = match (access_token, credential_id) {
+            (Some(token), None) => SnowflakeAuthMode::Token(SnowflakeAuth {
+                access_token: token,
+                account_identifier: account_identifier.clone(),
+            }),
+            (None, Some(cred_id)) => SnowflakeAuthMode::CredentialId {
+                credential_id: cred_id,
+                account_identifier: account_identifier.clone(),
+            },
+            (Some(_), Some(_)) => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Provide exactly one of access_token or credential_id".into(),
+                });
+            }
+            (None, None) => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing access_token or credential_id in configuration".into(),
+                });
+            }
+        };
+
         let base_url = params
             .get("base_url")
             .and_then(serde_json::Value::as_str)
-            .map(str::to_string);
+            .map_or_else(
+                || format!("https://{account_identifier}.snowflakecomputing.com"),
+                str::to_string,
+            );
 
         let warehouse = params
             .get("warehouse")
@@ -71,16 +151,44 @@ impl SnowflakeConfig {
             .map(str::to_string);
 
         Ok(Self {
-            auth: SnowflakeAuth {
-                access_token,
-                account_identifier,
-            },
+            auth,
             base_url,
             warehouse,
             database,
             schema,
         })
     }
+
+    fn provisioning_readiness(&self) -> ProvisioningReadiness {
+        let (network_ok, network_message) = base_url_policy(&self.base_url);
+
+        ProvisioningReadiness {
+            auth_mode: match &self.auth {
+                SnowflakeAuthMode::Token(_) => "access_token",
+                SnowflakeAuthMode::CredentialId { .. } => "credential_id",
+            },
+            token_configured: matches!(&self.auth, SnowflakeAuthMode::Token(_)),
+            credential_id_configured: self.auth.is_secretless(),
+            requires_credential_injection: self.auth.is_secretless(),
+            account_identifier: self.auth.account_identifier().to_string(),
+            network_ok,
+            network_message,
+            base_url: self.base_url.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[allow(clippy::struct_excessive_bools)]
+struct ProvisioningReadiness {
+    auth_mode: &'static str,
+    token_configured: bool,
+    credential_id_configured: bool,
+    requires_credential_injection: bool,
+    account_identifier: String,
+    network_ok: bool,
+    network_message: String,
+    base_url: String,
 }
 
 /// Doctor check result.
@@ -160,18 +268,41 @@ impl SnowflakeConnector {
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         let config = SnowflakeConfig::from_params(&params)?;
-        info!(auth = %config.auth.redacted_label(), "Configuring Snowflake connector");
+        info!(auth = %config.auth.redacted_label(), base_url = %config.base_url, "Configuring Snowflake connector");
 
-        let client = SnowflakeClient::new(
-            config.auth.clone(),
-            config.base_url.as_deref(),
-            config.warehouse.clone(),
-            config.database.clone(),
-            config.schema.clone(),
-        )
-        .map_err(|e| e.to_fcp_error())?;
+        // Only build the client for token-based auth; credential_id mode
+        // defers secret injection to the egress proxy at request time.
+        match &config.auth {
+            SnowflakeAuthMode::Token(auth) => {
+                let client = SnowflakeClient::new(
+                    auth.clone(),
+                    Some(&config.base_url),
+                    config.warehouse.clone(),
+                    config.database.clone(),
+                    config.schema.clone(),
+                )
+                .map_err(|e| e.to_fcp_error())?;
+                self.client = Some(Arc::new(client));
+            }
+            SnowflakeAuthMode::CredentialId { .. } => {
+                // In credential_id mode we create a client with a placeholder
+                // token; the egress proxy injects the real credentials.
+                let placeholder_auth = SnowflakeAuth {
+                    access_token: "credential-injection-pending".into(),
+                    account_identifier: config.auth.account_identifier().to_string(),
+                };
+                let client = SnowflakeClient::new(
+                    placeholder_auth,
+                    Some(&config.base_url),
+                    config.warehouse.clone(),
+                    config.database.clone(),
+                    config.schema.clone(),
+                )
+                .map_err(|e| e.to_fcp_error())?;
+                self.client = Some(Arc::new(client));
+            }
+        }
 
-        self.client = Some(Arc::new(client));
         self.config = Some(config);
         self.base.set_configured(true);
         Ok(json!({}))
@@ -276,11 +407,56 @@ impl SnowflakeConnector {
 
     /// Handle the `self_check` method.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
-        Ok(json!({
-            "connector_id": "fcp.snowflake",
-            "version": "0.1.0",
-            "status": if self.config.is_some() { "ready" } else { "unconfigured" },
-        }))
+        let Some(config) = &self.config else {
+            let report =
+                SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            return Self::serialize_self_check_report(report);
+        };
+
+        let readiness = config.provisioning_readiness();
+        if !readiness.network_ok {
+            let mut report = SelfCheckReport::failed(
+                "network_constraints_invalid",
+                readiness.network_message.clone(),
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        }
+
+        let Some(_client) = &self.client else {
+            let mut report = SelfCheckReport::failed(
+                "client_missing",
+                "API client not initialized; re-run configure",
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        };
+
+        if readiness.requires_credential_injection {
+            let mut report = SelfCheckReport::degraded(
+                "credential_injection_required",
+                "credential_id mode requires egress proxy injection; skipping live probe",
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        }
+
+        let mut report = SelfCheckReport::ok();
+        report.details = Some(json!({ "provisioning": readiness }));
+        Self::serialize_self_check_report(report)
+    }
+
+    fn serialize_self_check_report(report: SelfCheckReport) -> FcpResult<serde_json::Value> {
+        info!(
+            event = "snowflake.provisioning.self_check",
+            status = ?report.status,
+            reason_code = ?report.reason_code,
+            "Snowflake self-check completed"
+        );
+
+        serde_json::to_value(report).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize self-check report: {e}"),
+        })
     }
 
     /// Handle the `introspect` method.
@@ -593,6 +769,89 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
         })
 }
 
+/// Build the provisioning recipe for the Snowflake connector.
+pub fn provisioning_recipe() -> ProvisioningRecipe {
+    ProvisioningRecipe::new(
+        RecipeId::new("snowflake.password_auth"),
+        "1",
+        "Provision Snowflake connector with account identifier and password/token",
+    )
+    .with_step(ProvisioningStep::new(
+        StepId::new("enter_account_identifier"),
+        ProvisioningStepType::PromptUser {
+            message: "Enter your Snowflake account identifier (e.g. xy12345.us-east-1)".into(),
+        },
+    ))
+    .with_step(
+        ProvisioningStep::new(
+            StepId::new("enter_password"),
+            ProvisioningStepType::PromptSecret {
+                message: "Paste your Snowflake access token or password".into(),
+            },
+        )
+        .depends_on(StepId::new("enter_account_identifier")),
+    )
+    .with_step(
+        ProvisioningStep::new(
+            StepId::new("store_password"),
+            ProvisioningStepType::StoreSecret {
+                key: "access_token".into(),
+                value_from: StepId::new("enter_password"),
+                scope: "connector:fcp.snowflake".into(),
+            },
+        )
+        .depends_on(StepId::new("enter_password")),
+    )
+    .with_step(
+        ProvisioningStep::new(
+            StepId::new("enter_context"),
+            ProvisioningStepType::PromptUser {
+                message: "Enter default warehouse, database, and schema (optional, comma-separated)"
+                    .into(),
+            },
+        )
+        .depends_on(StepId::new("enter_account_identifier")),
+    )
+}
+
+fn base_url_policy(base_url: &str) -> (bool, String) {
+    let parsed = match Url::parse(base_url) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return (false, format!("base_url could not be parsed: {error}"));
+        }
+    };
+
+    let Some(host) = parsed.host_str() else {
+        return (false, "base_url must include a host".into());
+    };
+
+    let local = is_local_test_host(host);
+    let allowed_host = host
+        .to_ascii_lowercase()
+        .ends_with(".snowflakecomputing.com")
+        || local;
+    let secure_or_local = parsed.scheme() == "https" || local;
+
+    if allowed_host && secure_or_local {
+        (
+            true,
+            format!("Endpoint accepted by policy checks: {base_url}"),
+        )
+    } else {
+        (
+            false,
+            format!(
+                "Endpoint must use https and *.snowflakecomputing.com (localhost/127.0.0.1/::1 allowed for tests): {base_url}"
+            ),
+        )
+    }
+}
+
+fn is_local_test_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
+}
+
 /// Build the operations info for introspection.
 fn operations_info() -> serde_json::Value {
     json!([
@@ -650,9 +909,17 @@ mod tests {
             "account_identifier": "myaccount",
         }))
         .unwrap();
-        assert_eq!(config.auth.access_token, "token123");
-        assert_eq!(config.auth.account_identifier, "myaccount");
-        assert!(config.base_url.is_none());
+        match &config.auth {
+            SnowflakeAuthMode::Token(auth) => {
+                assert_eq!(auth.access_token, "token123");
+                assert_eq!(auth.account_identifier, "myaccount");
+            }
+            SnowflakeAuthMode::CredentialId { .. } => panic!("expected Token mode"),
+        }
+        assert_eq!(
+            config.base_url,
+            "https://myaccount.snowflakecomputing.com"
+        );
         assert!(config.warehouse.is_none());
     }
 
@@ -669,7 +936,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             config.base_url,
-            Some("https://test.snowflakecomputing.com/api/v2".into())
+            "https://test.snowflakecomputing.com/api/v2"
         );
         assert_eq!(config.warehouse, Some("COMPUTE_WH".into()));
         assert_eq!(config.database, Some("ANALYTICS".into()));
@@ -677,7 +944,28 @@ mod tests {
     }
 
     #[test]
-    fn config_rejects_missing_access_token() {
+    fn config_from_credential_id() {
+        let config = SnowflakeConfig::from_params(&json!({
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+            "account_identifier": "myaccount",
+        }))
+        .unwrap();
+        assert!(config.auth.is_secretless());
+        assert_eq!(config.auth.account_identifier(), "myaccount");
+    }
+
+    #[test]
+    fn config_rejects_both_auth_methods() {
+        let result = SnowflakeConfig::from_params(&json!({
+            "access_token": "tok",
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+            "account_identifier": "acc",
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_rejects_no_auth() {
         let result = SnowflakeConfig::from_params(&json!({
             "account_identifier": "myaccount",
         }));
@@ -759,7 +1047,10 @@ mod tests {
             "account_identifier": "acc",
         }))
         .unwrap();
-        assert_eq!(config.auth.access_token, "token");
+        match &config.auth {
+            SnowflakeAuthMode::Token(auth) => assert_eq!(auth.access_token, "token"),
+            SnowflakeAuthMode::CredentialId { .. } => panic!("expected Token mode"),
+        }
     }
 
     #[test]
@@ -769,7 +1060,7 @@ mod tests {
             "account_identifier": "  acc  ",
         }))
         .unwrap();
-        assert_eq!(config.auth.account_identifier, "acc");
+        assert_eq!(config.auth.account_identifier(), "acc");
     }
 
     #[test]
@@ -1247,5 +1538,295 @@ mod tests {
         };
         let v = serde_json::to_value(&check).unwrap();
         assert_eq!(v["message"], "failed");
+    }
+
+    // ── Provisioning tests ────────────────────────────────────────
+
+    #[test]
+    fn provisioning_readiness_token_mode() {
+        let config = SnowflakeConfig::from_params(&json!({
+            "access_token": "test-token",
+            "account_identifier": "myaccount",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert_eq!(readiness.auth_mode, "access_token");
+        assert!(readiness.token_configured);
+        assert!(!readiness.credential_id_configured);
+        assert!(!readiness.requires_credential_injection);
+        assert!(readiness.network_ok);
+        assert_eq!(readiness.account_identifier, "myaccount");
+        assert!(readiness.base_url.contains("myaccount.snowflakecomputing.com"));
+    }
+
+    #[test]
+    fn provisioning_readiness_credential_id_mode() {
+        let config = SnowflakeConfig::from_params(&json!({
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+            "account_identifier": "myaccount",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert_eq!(readiness.auth_mode, "credential_id");
+        assert!(!readiness.token_configured);
+        assert!(readiness.credential_id_configured);
+        assert!(readiness.requires_credential_injection);
+        assert!(readiness.network_ok);
+    }
+
+    #[test]
+    fn provisioning_readiness_serializes() {
+        let config = SnowflakeConfig::from_params(&json!({
+            "access_token": "tok",
+            "account_identifier": "acc",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        let v = serde_json::to_value(&readiness).unwrap();
+        assert_eq!(v["auth_mode"], "access_token");
+        assert_eq!(v["token_configured"], true);
+        assert_eq!(v["network_ok"], true);
+        assert_eq!(v["account_identifier"], "acc");
+    }
+
+    #[test]
+    fn provisioning_recipe_has_4_steps() {
+        let recipe = provisioning_recipe();
+        assert_eq!(recipe.id.as_str(), "snowflake.password_auth");
+        assert_eq!(recipe.version, "1");
+        assert_eq!(recipe.steps.len(), 4);
+    }
+
+    #[test]
+    fn provisioning_recipe_step_order() {
+        let recipe = provisioning_recipe();
+        assert_eq!(recipe.steps[0].id.as_str(), "enter_account_identifier");
+        assert_eq!(recipe.steps[1].id.as_str(), "enter_password");
+        assert_eq!(recipe.steps[2].id.as_str(), "store_password");
+        assert_eq!(recipe.steps[3].id.as_str(), "enter_context");
+    }
+
+    #[test]
+    fn provisioning_recipe_step_dependencies() {
+        let recipe = provisioning_recipe();
+        assert!(recipe.steps[0].depends_on.is_empty());
+        assert_eq!(recipe.steps[1].depends_on.len(), 1);
+        assert_eq!(
+            recipe.steps[1].depends_on[0].as_str(),
+            "enter_account_identifier"
+        );
+        assert_eq!(recipe.steps[2].depends_on.len(), 1);
+        assert_eq!(recipe.steps[2].depends_on[0].as_str(), "enter_password");
+        assert_eq!(recipe.steps[3].depends_on.len(), 1);
+        assert_eq!(
+            recipe.steps[3].depends_on[0].as_str(),
+            "enter_account_identifier"
+        );
+    }
+
+    #[test]
+    fn provisioning_recipe_serializes() {
+        let recipe = provisioning_recipe();
+        let v = serde_json::to_value(&recipe).unwrap();
+        assert_eq!(v["id"], "snowflake.password_auth");
+        assert_eq!(v["steps"].as_array().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn base_url_policy_accepts_snowflake_https() {
+        let (ok, message) = base_url_policy("https://myaccount.snowflakecomputing.com");
+        assert!(ok);
+        assert!(message.contains("accepted"));
+    }
+
+    #[test]
+    fn base_url_policy_accepts_snowflake_with_path() {
+        let (ok, _) =
+            base_url_policy("https://myaccount.snowflakecomputing.com/api/v2/statements");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_accepts_localhost() {
+        let (ok, _) = base_url_policy("http://localhost:8080");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_accepts_127_0_0_1() {
+        let (ok, _) = base_url_policy("http://127.0.0.1:9090");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_rejects_http_non_local() {
+        let (ok, message) = base_url_policy("http://myaccount.snowflakecomputing.com");
+        assert!(!ok);
+        assert!(message.contains("must use https"));
+    }
+
+    #[test]
+    fn base_url_policy_rejects_unknown_host() {
+        let (ok, message) = base_url_policy("https://evil.example.com");
+        assert!(!ok);
+        assert!(message.contains("snowflakecomputing.com"));
+    }
+
+    #[test]
+    fn base_url_policy_rejects_invalid_url() {
+        let (ok, message) = base_url_policy("not a url");
+        assert!(!ok);
+        assert!(message.contains("could not be parsed"));
+    }
+
+    #[test]
+    fn provisioning_readiness_custom_base_url_rejected() {
+        let config = SnowflakeConfig::from_params(&json!({
+            "access_token": "tok",
+            "account_identifier": "acc",
+            "base_url": "https://evil.example.com",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert!(!readiness.network_ok);
+        assert!(readiness.network_message.contains("snowflakecomputing.com"));
+    }
+
+    #[test]
+    fn auth_mode_redacted_label_token() {
+        let mode = SnowflakeAuthMode::Token(SnowflakeAuth {
+            access_token: "secret".into(),
+            account_identifier: "myaccount".into(),
+        });
+        let label = mode.redacted_label();
+        assert!(label.contains("myaccount"));
+        assert!(label.contains("redacted"));
+        assert!(!label.contains("secret"));
+    }
+
+    #[test]
+    fn auth_mode_redacted_label_credential_id() {
+        let cred_id = CredentialId::parse("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let mode = SnowflakeAuthMode::CredentialId {
+            credential_id: cred_id,
+            account_identifier: "myaccount".into(),
+        };
+        let label = mode.redacted_label();
+        assert!(label.contains("myaccount"));
+        assert!(label.contains("credential_id"));
+    }
+
+    #[test]
+    fn auth_mode_is_secretless() {
+        let token_mode = SnowflakeAuthMode::Token(SnowflakeAuth {
+            access_token: "tok".into(),
+            account_identifier: "acc".into(),
+        });
+        assert!(!token_mode.is_secretless());
+
+        let cred_id = CredentialId::parse("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let cred_mode = SnowflakeAuthMode::CredentialId {
+            credential_id: cred_id,
+            account_identifier: "acc".into(),
+        };
+        assert!(cred_mode.is_secretless());
+    }
+
+    #[test]
+    fn config_rejects_non_string_credential_id() {
+        let result = SnowflakeConfig::from_params(&json!({
+            "credential_id": 12345,
+            "account_identifier": "acc",
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_rejects_invalid_uuid_credential_id() {
+        let result = SnowflakeConfig::from_params(&json!({
+            "credential_id": "not-a-uuid",
+            "account_identifier": "acc",
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_default_base_url_from_account_identifier() {
+        let config = SnowflakeConfig::from_params(&json!({
+            "access_token": "tok",
+            "account_identifier": "xy12345.us-east-1",
+        }))
+        .unwrap();
+        assert_eq!(
+            config.base_url,
+            "https://xy12345.us-east-1.snowflakecomputing.com"
+        );
+    }
+
+    #[test]
+    fn base_url_policy_accepts_subdomain_snowflake() {
+        let (ok, _) = base_url_policy("https://xy12345.us-east-1.snowflakecomputing.com");
+        assert!(ok);
+    }
+
+    #[test]
+    fn provisioning_recipe_store_step_scope() {
+        let recipe = provisioning_recipe();
+        let store_step = &recipe.steps[2];
+        match &store_step.kind {
+            ProvisioningStepType::StoreSecret { key, scope, .. } => {
+                assert_eq!(key, "access_token");
+                assert_eq!(scope, "connector:fcp.snowflake");
+            }
+            other => panic!("expected StoreSecret, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn provisioning_recipe_prompt_secret_step() {
+        let recipe = provisioning_recipe();
+        let secret_step = &recipe.steps[1];
+        match &secret_step.kind {
+            ProvisioningStepType::PromptSecret { message } => {
+                assert!(message.contains("token") || message.contains("password"));
+            }
+            other => panic!("expected PromptSecret, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn auth_mode_account_identifier() {
+        let token_mode = SnowflakeAuthMode::Token(SnowflakeAuth {
+            access_token: "tok".into(),
+            account_identifier: "acc1".into(),
+        });
+        assert_eq!(token_mode.account_identifier(), "acc1");
+
+        let cred_id = CredentialId::parse("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let cred_mode = SnowflakeAuthMode::CredentialId {
+            credential_id: cred_id,
+            account_identifier: "acc2".into(),
+        };
+        assert_eq!(cred_mode.account_identifier(), "acc2");
+    }
+
+    #[test]
+    fn auth_mode_debug_format() {
+        let token_mode = SnowflakeAuthMode::Token(SnowflakeAuth {
+            access_token: "tok".into(),
+            account_identifier: "acc".into(),
+        });
+        let dbg = format!("{token_mode:?}");
+        assert!(dbg.contains("Token"));
+    }
+
+    #[test]
+    fn auth_mode_clone() {
+        let token_mode = SnowflakeAuthMode::Token(SnowflakeAuth {
+            access_token: "tok".into(),
+            account_identifier: "acc".into(),
+        });
+        let cloned = SnowflakeAuthMode::clone(&token_mode);
+        assert_eq!(cloned.account_identifier(), "acc");
     }
 }

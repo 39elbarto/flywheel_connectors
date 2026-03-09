@@ -7,14 +7,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    IdempotencyClass, Introspection, OperationId, OperationInfo, ProvisioningRecipe,
+    ProvisioningStep, ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, SelfCheckReport,
+    StepId,
 };
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
 
 use crate::{
-    client::{MailchimpAuth, MailchimpClient},
+    client::{MailchimpAuth, MailchimpClient, base_url_for_dc, extract_dc},
     error::MailchimpError,
 };
 
@@ -74,6 +77,50 @@ impl MailchimpConfig {
 
         Ok(Self { auth, base_url })
     }
+
+    /// Compute the effective base URL that the client would use.
+    fn effective_base_url(&self) -> String {
+        match &self.base_url {
+            Some(url) => url.trim_end_matches('/').to_string(),
+            None => match &self.auth {
+                MailchimpAuth::ApiKey(key) => {
+                    let dc = extract_dc(key).unwrap_or("us1");
+                    base_url_for_dc(dc)
+                }
+                MailchimpAuth::CredentialId(_) => base_url_for_dc("us1"),
+            },
+        }
+    }
+
+    fn provisioning_readiness(&self) -> ProvisioningReadiness {
+        let effective_url = self.effective_base_url();
+        let (network_ok, network_message) = base_url_policy(&effective_url);
+
+        ProvisioningReadiness {
+            auth_mode: match &self.auth {
+                MailchimpAuth::ApiKey(_) => "api_key",
+                MailchimpAuth::CredentialId(_) => "credential_id",
+            },
+            api_key_configured: matches!(&self.auth, MailchimpAuth::ApiKey(_)),
+            credential_id_configured: self.auth.is_secretless(),
+            requires_credential_injection: self.auth.is_secretless(),
+            network_ok,
+            network_message,
+            base_url: effective_url,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[allow(clippy::struct_excessive_bools)]
+struct ProvisioningReadiness {
+    auth_mode: &'static str,
+    api_key_configured: bool,
+    credential_id_configured: bool,
+    requires_credential_injection: bool,
+    network_ok: bool,
+    network_message: String,
+    base_url: String,
 }
 
 /// Doctor check result.
@@ -264,11 +311,43 @@ impl MailchimpConnector {
 
     /// Handle the `self_check` method.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
-        Ok(json!({
-            "connector_id": "fcp.mailchimp",
-            "version": "0.1.0",
-            "status": if self.config.is_some() { "ready" } else { "unconfigured" },
-        }))
+        let Some(config) = &self.config else {
+            let report =
+                SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            return Self::serialize_self_check_report(report);
+        };
+
+        let readiness = config.provisioning_readiness();
+        if !readiness.network_ok {
+            let mut report = SelfCheckReport::failed(
+                "network_constraints_invalid",
+                readiness.network_message.clone(),
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        }
+
+        let Some(_client) = &self.client else {
+            let mut report = SelfCheckReport::failed(
+                "client_missing",
+                "API client not initialized; re-run configure",
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        };
+
+        if readiness.requires_credential_injection {
+            let mut report = SelfCheckReport::degraded(
+                "credential_injection_required",
+                "credential_id mode requires egress proxy injection; skipping live probe",
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        }
+
+        let mut report = SelfCheckReport::ok();
+        report.details = Some(json!({ "provisioning": readiness }));
+        Self::serialize_self_check_report(report)
     }
 
     /// Handle the `introspect` method.
@@ -499,6 +578,19 @@ impl MailchimpConnector {
         Ok(json!({}))
     }
 
+    fn serialize_self_check_report(report: SelfCheckReport) -> FcpResult<serde_json::Value> {
+        info!(
+            event = "mailchimp.provisioning.self_check",
+            status = ?report.status,
+            reason_code = ?report.reason_code,
+            "Mailchimp self-check completed"
+        );
+
+        serde_json::to_value(report).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize self-check report: {e}"),
+        })
+    }
+
     // -- Operation implementations --
 
     async fn invoke_lists_list(
@@ -623,6 +715,72 @@ fn operations_info() -> serde_json::Value {
             "idempotency": "none",
         },
     ])
+}
+
+/// Build the provisioning recipe for the Mailchimp connector.
+pub fn provisioning_recipe() -> ProvisioningRecipe {
+    ProvisioningRecipe::new(
+        RecipeId::new("mailchimp.api_key"),
+        "1",
+        "Provision Mailchimp connector with an API key (keys end with -usXX datacenter suffix)",
+    )
+    .with_step(ProvisioningStep::new(
+        StepId::new("enter_api_key"),
+        ProvisioningStepType::PromptSecret {
+            message: "Paste your Mailchimp API key (format: <key>-<dc>, e.g. abc123def-us21)"
+                .into(),
+        },
+    ))
+    .with_step(
+        ProvisioningStep::new(
+            StepId::new("store_api_key"),
+            ProvisioningStepType::StoreSecret {
+                key: "api_key".into(),
+                value_from: StepId::new("enter_api_key"),
+                scope: "connector:fcp.mailchimp".into(),
+            },
+        )
+        .depends_on(StepId::new("enter_api_key")),
+    )
+}
+
+fn base_url_policy(base_url: &str) -> (bool, String) {
+    let parsed = match Url::parse(base_url) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return (false, format!("base_url could not be parsed: {error}"));
+        }
+    };
+
+    let Some(host) = parsed.host_str() else {
+        return (false, "base_url must include a host".into());
+    };
+
+    let local = is_local_test_host(host);
+    // Mailchimp uses datacenter-specific URLs: usX.api.mailchimp.com
+    let allowed_host = host
+        .to_ascii_lowercase()
+        .ends_with(".api.mailchimp.com")
+        || local;
+    let secure_or_local = parsed.scheme() == "https" || local;
+
+    if allowed_host && secure_or_local {
+        (
+            true,
+            format!("Endpoint accepted by policy checks: {base_url}"),
+        )
+    } else {
+        (
+            false,
+            format!(
+                "Endpoint must use https and *.api.mailchimp.com (localhost/127.0.0.1/::1 allowed for tests): {base_url}"
+            ),
+        )
+    }
+}
+
+fn is_local_test_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]")
 }
 
 #[cfg(test)]
@@ -1288,5 +1446,234 @@ mod tests {
     fn require_str_array_value_fails() {
         let input = json!({"list_id": [1, 2, 3]});
         assert!(require_str(&input, "list_id").is_err());
+    }
+
+    // ── Provisioning tests ────────────────────────────────────────
+
+    #[test]
+    fn provisioning_readiness_api_key_mode() {
+        let config = MailchimpConfig::from_params(&json!({
+            "api_key": "testkey-us21",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert_eq!(readiness.auth_mode, "api_key");
+        assert!(readiness.api_key_configured);
+        assert!(!readiness.credential_id_configured);
+        assert!(!readiness.requires_credential_injection);
+        assert!(readiness.network_ok);
+        assert!(readiness.base_url.contains("us21"));
+    }
+
+    #[test]
+    fn provisioning_readiness_credential_id_mode() {
+        let config = MailchimpConfig::from_params(&json!({
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert_eq!(readiness.auth_mode, "credential_id");
+        assert!(!readiness.api_key_configured);
+        assert!(readiness.credential_id_configured);
+        assert!(readiness.requires_credential_injection);
+        assert!(readiness.network_ok);
+    }
+
+    #[test]
+    fn provisioning_readiness_serializes() {
+        let config = MailchimpConfig::from_params(&json!({
+            "api_key": "key-us1",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        let v = serde_json::to_value(&readiness).unwrap();
+        assert_eq!(v["auth_mode"], "api_key");
+        assert_eq!(v["api_key_configured"], true);
+        assert_eq!(v["network_ok"], true);
+    }
+
+    #[test]
+    fn provisioning_readiness_custom_base_url_rejected() {
+        let config = MailchimpConfig::from_params(&json!({
+            "api_key": "key-us1",
+            "base_url": "https://evil.example.com",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert!(!readiness.network_ok);
+        assert!(readiness.network_message.contains("*.api.mailchimp.com"));
+    }
+
+    #[test]
+    fn provisioning_recipe_has_2_steps() {
+        let recipe = provisioning_recipe();
+        assert_eq!(recipe.id.as_str(), "mailchimp.api_key");
+        assert_eq!(recipe.version, "1");
+        assert_eq!(recipe.steps.len(), 2);
+    }
+
+    #[test]
+    fn provisioning_recipe_step_order() {
+        let recipe = provisioning_recipe();
+        assert_eq!(recipe.steps[0].id.as_str(), "enter_api_key");
+        assert_eq!(recipe.steps[1].id.as_str(), "store_api_key");
+    }
+
+    #[test]
+    fn provisioning_recipe_step_dependencies() {
+        let recipe = provisioning_recipe();
+        assert!(recipe.steps[0].depends_on.is_empty());
+        assert_eq!(recipe.steps[1].depends_on.len(), 1);
+        assert_eq!(recipe.steps[1].depends_on[0].as_str(), "enter_api_key");
+    }
+
+    #[test]
+    fn provisioning_recipe_serializes() {
+        let recipe = provisioning_recipe();
+        let v = serde_json::to_value(&recipe).unwrap();
+        assert_eq!(v["id"], "mailchimp.api_key");
+        assert!(v["steps"].as_array().unwrap().len() == 2);
+    }
+
+    #[test]
+    fn provisioning_recipe_description_mentions_datacenter() {
+        let recipe = provisioning_recipe();
+        assert!(recipe.description.to_ascii_lowercase().contains("datacenter")
+            || recipe.description.contains("-usXX"));
+    }
+
+    #[test]
+    fn base_url_policy_accepts_mailchimp_https() {
+        let (ok, message) = base_url_policy("https://us1.api.mailchimp.com/3.0");
+        assert!(ok);
+        assert!(message.contains("accepted"));
+    }
+
+    #[test]
+    fn base_url_policy_accepts_different_datacenters() {
+        for dc in &["us1", "us21", "eu1", "us7"] {
+            let url = format!("https://{dc}.api.mailchimp.com/3.0");
+            let (ok, _) = base_url_policy(&url);
+            assert!(ok, "should accept {url}");
+        }
+    }
+
+    #[test]
+    fn base_url_policy_accepts_localhost() {
+        let (ok, _) = base_url_policy("http://localhost:8080");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_accepts_127_0_0_1() {
+        let (ok, _) = base_url_policy("http://127.0.0.1:9090");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_accepts_ipv6_loopback() {
+        let (ok, _) = base_url_policy("http://[::1]:8080");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_rejects_http_non_local() {
+        let (ok, message) = base_url_policy("http://us1.api.mailchimp.com/3.0");
+        assert!(!ok);
+        assert!(message.contains("must use https"));
+    }
+
+    #[test]
+    fn base_url_policy_rejects_unknown_host() {
+        let (ok, message) = base_url_policy("https://evil.example.com");
+        assert!(!ok);
+        assert!(message.contains("*.api.mailchimp.com"));
+    }
+
+    #[test]
+    fn base_url_policy_rejects_invalid_url() {
+        let (ok, message) = base_url_policy("not a url");
+        assert!(!ok);
+        assert!(message.contains("could not be parsed"));
+    }
+
+    #[test]
+    fn base_url_policy_rejects_bare_api_mailchimp_com() {
+        // "api.mailchimp.com" without a datacenter prefix should be rejected
+        // because it doesn't end with ".api.mailchimp.com"
+        let (ok, _) = base_url_policy("https://api.mailchimp.com/3.0");
+        assert!(!ok);
+    }
+
+    #[test]
+    fn effective_base_url_from_api_key() {
+        let config = MailchimpConfig::from_params(&json!({
+            "api_key": "abc123-us7",
+        }))
+        .unwrap();
+        assert_eq!(
+            config.effective_base_url(),
+            "https://us7.api.mailchimp.com/3.0"
+        );
+    }
+
+    #[test]
+    fn effective_base_url_custom_override() {
+        let config = MailchimpConfig::from_params(&json!({
+            "api_key": "key-us1",
+            "base_url": "https://us5.api.mailchimp.com/3.0/",
+        }))
+        .unwrap();
+        // trailing slash should be trimmed
+        assert_eq!(
+            config.effective_base_url(),
+            "https://us5.api.mailchimp.com/3.0"
+        );
+    }
+
+    #[test]
+    fn effective_base_url_credential_id_defaults() {
+        let config = MailchimpConfig::from_params(&json!({
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+        }))
+        .unwrap();
+        assert_eq!(
+            config.effective_base_url(),
+            "https://us1.api.mailchimp.com/3.0"
+        );
+    }
+
+    #[test]
+    fn is_local_test_host_matches() {
+        assert!(is_local_test_host("localhost"));
+        assert!(is_local_test_host("127.0.0.1"));
+        assert!(is_local_test_host("::1"));
+        assert!(!is_local_test_host("example.com"));
+        assert!(!is_local_test_host("us1.api.mailchimp.com"));
+    }
+
+    #[test]
+    fn provisioning_readiness_debug_format() {
+        let config = MailchimpConfig::from_params(&json!({
+            "api_key": "key-us1",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        let dbg = format!("{readiness:?}");
+        assert!(dbg.contains("ProvisioningReadiness"));
+        assert!(dbg.contains("api_key"));
+    }
+
+    #[test]
+    fn provisioning_readiness_clone() {
+        let config = MailchimpConfig::from_params(&json!({
+            "api_key": "key-us1",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        let cloned = readiness.clone();
+        assert_eq!(readiness.auth_mode, cloned.auth_mode);
+        assert_eq!(readiness.network_ok, cloned.network_ok);
+        assert_eq!(readiness.base_url, cloned.base_url);
     }
 }

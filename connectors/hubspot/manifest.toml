@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:1075effc7792e5a17b1e69a715787f1180e1f260ff2fa2ad5f76a0d3e474b7ba"
+interface_hash = "blake3-256:fcp.interface.v2:2c9fed2dacdfd55b228a6779da03e1916ec2d262854b941e7911d607ff7eb468"
 
 [connector]
 id = "fcp.hubspot"
@@ -962,6 +962,333 @@ related = [
     "hubspot.pipelines.list",
 ]
 
+[provides.operations."hubspot.deals.get"]
+description = "Get a single deal by ID"
+capability = "hubspot.deals.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."hubspot.deals.get".input_schema]
+required = ["deal_id"]
+type = "object"
+
+[provides.operations."hubspot.deals.get".input_schema.properties.deal_id]
+description = "HubSpot deal ID"
+type = "string"
+
+[provides.operations."hubspot.deals.get".input_schema.properties.properties]
+description = "List of properties to include"
+type = "array"
+
+[provides.operations."hubspot.deals.get".output_schema]
+required = ["deal"]
+type = "object"
+
+[provides.operations."hubspot.deals.get".output_schema.properties.deal]
+type = "object"
+
+[provides.operations."hubspot.deals.get".network_constraints]
+host_allow = [
+    "api.hubapi.com",
+    "api.hubspot.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."hubspot.deals.get".ai_hints]
+when_to_use = "Retrieve a specific deal by its HubSpot ID."
+common_mistakes = ["Not requesting specific properties — only default properties are returned without the properties parameter."]
+examples = ['{"deal_id": "12345", "properties": ["dealname", "amount", "dealstage"]}']
+related = [
+    "hubspot.deals.list",
+    "hubspot.deals.update",
+]
+
+[provides.operations."hubspot.deals.update"]
+description = "Update an existing deal's properties"
+capability = "hubspot.deals.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."hubspot.deals.update".input_schema]
+required = [
+    "deal_id",
+    "properties",
+]
+type = "object"
+
+[provides.operations."hubspot.deals.update".input_schema.properties.deal_id]
+description = "HubSpot deal ID"
+type = "string"
+
+[provides.operations."hubspot.deals.update".input_schema.properties.properties]
+description = "Deal properties to update"
+type = "object"
+
+[provides.operations."hubspot.deals.update".output_schema]
+required = ["deal"]
+type = "object"
+
+[provides.operations."hubspot.deals.update".output_schema.properties.deal]
+type = "object"
+
+[provides.operations."hubspot.deals.update".network_constraints]
+host_allow = [
+    "api.hubapi.com",
+    "api.hubspot.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."hubspot.deals.update".ai_hints]
+when_to_use = "Update properties on an existing deal."
+common_mistakes = ["Using display labels instead of internal property names."]
+examples = ['{"deal_id": "12345", "properties": {"amount": "75000"}}']
+related = [
+    "hubspot.deals.get",
+    "hubspot.deals.create",
+]
+
+[provides.operations."hubspot.deals.search"]
+description = "Search deals using HubSpot filter groups"
+capability = "hubspot.deals.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."hubspot.deals.search".input_schema]
+required = []
+type = "object"
+
+[provides.operations."hubspot.deals.search".input_schema.properties.after]
+description = "Pagination cursor"
+type = "string"
+
+[provides.operations."hubspot.deals.search".input_schema.properties.filter_groups]
+description = "Filter groups for search (HubSpot filter syntax)"
+type = "array"
+
+[provides.operations."hubspot.deals.search".input_schema.properties.limit]
+description = "Page size (max 100)"
+maximum = 100
+minimum = 1
+type = "integer"
+
+[provides.operations."hubspot.deals.search".input_schema.properties.properties]
+description = "List of properties to include in results"
+type = "array"
+
+[provides.operations."hubspot.deals.search".input_schema.properties.query]
+description = "Full-text search query"
+type = "string"
+
+[provides.operations."hubspot.deals.search".output_schema]
+required = ["results"]
+type = "object"
+
+[provides.operations."hubspot.deals.search".output_schema.properties.paging]
+type = "object"
+
+[provides.operations."hubspot.deals.search".output_schema.properties.results]
+type = "array"
+
+[provides.operations."hubspot.deals.search".output_schema.properties.total]
+type = "integer"
+
+[provides.operations."hubspot.deals.search".network_constraints]
+host_allow = [
+    "api.hubapi.com",
+    "api.hubspot.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."hubspot.deals.search".ai_hints]
+when_to_use = "Search deals using filter groups or full-text query."
+common_mistakes = ["Not specifying properties — only default properties are returned."]
+examples = ['{"filter_groups": [{"filters": [{"propertyName": "dealstage", "operator": "EQ", "value": "closedwon"}]}], "properties": ["dealname", "amount"]}']
+related = [
+    "hubspot.deals.list",
+    "hubspot.deals.get",
+]
+
+[provides.operations."hubspot.deals.set_stage"]
+description = "Move a deal to a specific pipeline stage"
+capability = "hubspot.deals.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."hubspot.deals.set_stage".input_schema]
+required = [
+    "deal_id",
+    "dealstage",
+]
+type = "object"
+
+[provides.operations."hubspot.deals.set_stage".input_schema.properties.deal_id]
+description = "HubSpot deal ID"
+type = "string"
+
+[provides.operations."hubspot.deals.set_stage".input_schema.properties.dealstage]
+description = "Target pipeline stage ID"
+type = "string"
+
+[provides.operations."hubspot.deals.set_stage".input_schema.properties.pipeline]
+description = "Pipeline ID (optional, defaults to current pipeline)"
+type = "string"
+
+[provides.operations."hubspot.deals.set_stage".output_schema]
+required = ["deal"]
+type = "object"
+
+[provides.operations."hubspot.deals.set_stage".output_schema.properties.deal]
+type = "object"
+
+[provides.operations."hubspot.deals.set_stage".network_constraints]
+host_allow = [
+    "api.hubapi.com",
+    "api.hubspot.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."hubspot.deals.set_stage".ai_hints]
+when_to_use = "Move a deal to a specific pipeline stage (e.g. qualified, closed-won)."
+common_mistakes = ["Using stage labels instead of stage IDs — use pipelines.list to find stage IDs."]
+examples = ['{"deal_id": "12345", "dealstage": "closedwon"}']
+related = [
+    "hubspot.deals.get",
+    "hubspot.pipelines.list",
+]
+
+[provides.operations."hubspot.deals.associate"]
+description = "Create an association between a deal and another CRM object"
+capability = "hubspot.associations.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."hubspot.deals.associate".input_schema]
+required = [
+    "deal_id",
+    "to_object_type",
+    "to_object_id",
+    "association_type",
+]
+type = "object"
+
+[provides.operations."hubspot.deals.associate".input_schema.properties.association_type]
+description = "HubSpot association type ID (e.g. deal_to_contact)"
+type = "string"
+
+[provides.operations."hubspot.deals.associate".input_schema.properties.deal_id]
+description = "HubSpot deal ID"
+type = "string"
+
+[provides.operations."hubspot.deals.associate".input_schema.properties.to_object_id]
+description = "Target object ID"
+type = "string"
+
+[provides.operations."hubspot.deals.associate".input_schema.properties.to_object_type]
+description = "Target object type (contacts, companies, tickets)"
+type = "string"
+
+[provides.operations."hubspot.deals.associate".output_schema]
+type = "object"
+
+[provides.operations."hubspot.deals.associate".output_schema.properties.result]
+type = "object"
+
+[provides.operations."hubspot.deals.associate".network_constraints]
+host_allow = [
+    "api.hubapi.com",
+    "api.hubspot.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."hubspot.deals.associate".ai_hints]
+when_to_use = "Create an association between a deal and another CRM object (contact, company, ticket)."
+common_mistakes = ["Using wrong association_type — check HubSpot docs for valid association type IDs."]
+examples = ['{"deal_id": "12345", "to_object_type": "contacts", "to_object_id": "67890", "association_type": "deal_to_contact"}']
+related = [
+    "hubspot.deals.get",
+    "hubspot.association.get",
+]
+
 [provides.operations."hubspot.events.stream"]
 description = "Stream CRM webhook events (contact/deal/company changes)"
 capability = "hubspot.events.read"
@@ -1143,6 +1470,13 @@ burst = 50
 scope = "instance"
 
 [[rate_limits.pools]]
+id = "hubspot.associations.write"
+requests = 100
+window_ms = 60000
+burst = 15
+scope = "instance"
+
+[[rate_limits.pools]]
 id = "hubspot.pipelines.read"
 requests = 100
 window_ms = 60000
@@ -1181,3 +1515,8 @@ scope = "instance"
 "hubspot.contacts.search" = ["hubspot.contacts.read"]
 "hubspot.companies.search" = ["hubspot.companies.read"]
 "hubspot.association.get" = ["hubspot.associations.read"]
+"hubspot.deals.get" = ["hubspot.deals.read"]
+"hubspot.deals.update" = ["hubspot.deals.write"]
+"hubspot.deals.search" = ["hubspot.deals.read"]
+"hubspot.deals.set_stage" = ["hubspot.deals.write"]
+"hubspot.deals.associate" = ["hubspot.associations.write"]

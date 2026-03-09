@@ -229,7 +229,8 @@ impl HubSpotConnector {
                 "hubspot.pipelines.read",
                 "hubspot.analytics.read",
                 "hubspot.events.read",
-                "hubspot.associations.read"
+                "hubspot.associations.read",
+                "hubspot.associations.write"
             ]
         }))
     }
@@ -866,6 +867,200 @@ impl HubSpotConnector {
                     },
                 },
                 OperationInfo {
+                    id: OperationId::from_static("hubspot.deals.get"),
+                    summary: "Get a single deal by ID".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["deal_id"],
+                        "properties": {
+                            "deal_id": { "type": "string", "description": "HubSpot deal ID" },
+                            "properties": { "type": "array", "description": "List of properties to include" }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["deal"],
+                        "properties": { "deal": { "type": "object" } }
+                    }),
+                    capability: CapabilityId::from_static("hubspot.deals.read"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "Retrieve a specific deal by its HubSpot ID.".into(),
+                        common_mistakes: vec![
+                            "Not requesting specific properties — only default properties are returned without the properties parameter.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"deal_id": "12345", "properties": ["dealname", "amount", "dealstage"]}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("hubspot.deals.list"),
+                            CapabilityId::from_static("hubspot.deals.update"),
+                        ],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("hubspot.deals.update"),
+                    summary: "Update an existing deal's properties".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["deal_id", "properties"],
+                        "properties": {
+                            "deal_id": { "type": "string", "description": "HubSpot deal ID" },
+                            "properties": { "type": "object", "description": "Deal properties to update" }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["deal"],
+                        "properties": { "deal": { "type": "object" } }
+                    }),
+                    capability: CapabilityId::from_static("hubspot.deals.write"),
+                    risk_level: RiskLevel::Medium,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Risky,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "Update properties on an existing deal.".into(),
+                        common_mistakes: vec![
+                            "Using display labels instead of internal property names.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"deal_id": "12345", "properties": {"amount": "75000"}}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("hubspot.deals.get"),
+                            CapabilityId::from_static("hubspot.deals.create"),
+                        ],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("hubspot.deals.search"),
+                    summary: "Search deals using HubSpot filter groups".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": [],
+                        "properties": {
+                            "filter_groups": { "type": "array", "description": "Filter groups for search (HubSpot filter syntax)" },
+                            "query": { "type": "string", "description": "Full-text search query" },
+                            "properties": { "type": "array", "description": "List of properties to include in results" },
+                            "limit": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Page size (max 100)" },
+                            "after": { "type": "string", "description": "Pagination cursor" }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["results"],
+                        "properties": {
+                            "results": { "type": "array" },
+                            "paging": { "type": "object" },
+                            "total": { "type": "integer" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("hubspot.deals.read"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "Search deals using filter groups or full-text query.".into(),
+                        common_mistakes: vec![
+                            "Not specifying properties — only default properties are returned.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"filter_groups": [{"filters": [{"propertyName": "dealstage", "operator": "EQ", "value": "closedwon"}]}], "properties": ["dealname", "amount"]}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("hubspot.deals.list"),
+                            CapabilityId::from_static("hubspot.deals.get"),
+                        ],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("hubspot.deals.set_stage"),
+                    summary: "Move a deal to a specific pipeline stage".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["deal_id", "dealstage"],
+                        "properties": {
+                            "deal_id": { "type": "string", "description": "HubSpot deal ID" },
+                            "dealstage": { "type": "string", "description": "Target pipeline stage ID" },
+                            "pipeline": { "type": "string", "description": "Pipeline ID (optional, defaults to current pipeline)" }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["deal"],
+                        "properties": { "deal": { "type": "object" } }
+                    }),
+                    capability: CapabilityId::from_static("hubspot.deals.write"),
+                    risk_level: RiskLevel::Medium,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Risky,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "Move a deal to a specific pipeline stage (e.g. qualified, closed-won).".into(),
+                        common_mistakes: vec![
+                            "Using stage labels instead of stage IDs — use pipelines.list to find stage IDs.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"deal_id": "12345", "dealstage": "closedwon"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("hubspot.deals.get"),
+                            CapabilityId::from_static("hubspot.pipelines.list"),
+                        ],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("hubspot.deals.associate"),
+                    summary: "Create an association between a deal and another CRM object".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["deal_id", "to_object_type", "to_object_id", "association_type"],
+                        "properties": {
+                            "deal_id": { "type": "string", "description": "HubSpot deal ID" },
+                            "to_object_type": { "type": "string", "description": "Target object type (contacts, companies, tickets)" },
+                            "to_object_id": { "type": "string", "description": "Target object ID" },
+                            "association_type": { "type": "string", "description": "HubSpot association type ID (e.g. deal_to_contact)" }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "properties": { "result": { "type": "object" } }
+                    }),
+                    capability: CapabilityId::from_static("hubspot.associations.write"),
+                    risk_level: RiskLevel::Medium,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Risky,
+                    idempotency: IdempotencyClass::None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Create an association between a deal and another CRM object (contact, company, ticket).".into(),
+                        common_mistakes: vec![
+                            "Using wrong association_type — check HubSpot docs for valid association type IDs.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"deal_id": "12345", "to_object_type": "contacts", "to_object_id": "67890", "association_type": "deal_to_contact"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("hubspot.deals.get"),
+                            CapabilityId::from_static("hubspot.association.get"),
+                        ],
+                    },
+                },
+                OperationInfo {
                     id: OperationId::from_static("hubspot.pipelines.list"),
                     summary: "List pipelines and their stages".into(),
                     input_schema: json!({
@@ -1020,6 +1215,11 @@ impl HubSpotConnector {
             "hubspot.association.get" => self.invoke_association_get(client, &input).await,
             "hubspot.deals.list" => self.invoke_deals_list(client, &input).await,
             "hubspot.deals.create" => self.invoke_deals_create(client, &input).await,
+            "hubspot.deals.get" => self.invoke_deals_get(client, &input).await,
+            "hubspot.deals.update" => self.invoke_deals_update(client, &input).await,
+            "hubspot.deals.search" => self.invoke_deals_search(client, &input).await,
+            "hubspot.deals.set_stage" => self.invoke_deals_set_stage(client, &input).await,
+            "hubspot.deals.associate" => self.invoke_deals_associate(client, &input).await,
             "hubspot.pipelines.list" => self.invoke_pipelines_list(client, &input).await,
             "hubspot.analytics.report" => self.invoke_analytics_report(client, &input).await,
             "hubspot.events.stream" => self.invoke_events_stream(client, &input).await,
@@ -1288,6 +1488,86 @@ impl HubSpotConnector {
         }
         let data = client.create_deal(&body).await?;
         Ok(json!({ "deal": data }))
+    }
+
+    async fn invoke_deals_get(
+        &self,
+        client: &HubSpotClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, HubSpotError> {
+        let deal_id = require_str(input, "deal_id")?;
+        let properties = extract_string_array(input, "properties");
+        let data = client.get_deal(deal_id, properties.as_deref()).await?;
+        Ok(json!({ "deal": data }))
+    }
+
+    async fn invoke_deals_update(
+        &self,
+        client: &HubSpotClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, HubSpotError> {
+        let deal_id = require_str(input, "deal_id")?;
+        let properties = input.get("properties").ok_or(HubSpotError::Api {
+            status_code: 400,
+            message: "Missing required field: properties".into(),
+        })?;
+        let body = json!({ "properties": properties });
+        let data = client.update_deal(deal_id, &body).await?;
+        Ok(json!({ "deal": data }))
+    }
+
+    async fn invoke_deals_search(
+        &self,
+        client: &HubSpotClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, HubSpotError> {
+        let mut body = json!({});
+        if let Some(filter_groups) = input.get("filter_groups") {
+            body["filterGroups"] = filter_groups.clone();
+        }
+        if let Some(properties) = input.get("properties") {
+            body["properties"] = properties.clone();
+        }
+        if let Some(limit) = input.get("limit") {
+            body["limit"] = limit.clone();
+        }
+        if let Some(after) = input.get("after") {
+            body["after"] = after.clone();
+        }
+        if let Some(query) = input.get("query") {
+            body["query"] = query.clone();
+        }
+        client.search_deals(&body).await
+    }
+
+    async fn invoke_deals_set_stage(
+        &self,
+        client: &HubSpotClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, HubSpotError> {
+        let deal_id = require_str(input, "deal_id")?;
+        let dealstage = require_str(input, "dealstage")?;
+        let mut props = json!({ "dealstage": dealstage });
+        if let Some(pipeline) = input.get("pipeline").and_then(|v| v.as_str()) {
+            props["pipeline"] = json!(pipeline);
+        }
+        let body = json!({ "properties": props });
+        let data = client.update_deal(deal_id, &body).await?;
+        Ok(json!({ "deal": data }))
+    }
+
+    async fn invoke_deals_associate(
+        &self,
+        client: &HubSpotClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, HubSpotError> {
+        let deal_id = require_str(input, "deal_id")?;
+        let to_object_type = require_str(input, "to_object_type")?;
+        let to_object_id = require_str(input, "to_object_id")?;
+        let association_type = require_str(input, "association_type")?;
+        client
+            .create_association("deals", deal_id, to_object_type, to_object_id, association_type)
+            .await
     }
 
     async fn invoke_pipelines_list(
@@ -1571,6 +1851,46 @@ fn operations_info() -> serde_json::Value {
             "idempotency": "none",
         },
         {
+            "id": "hubspot.deals.get",
+            "summary": "Get a single deal by ID",
+            "capability": "hubspot.deals.read",
+            "risk_level": "low",
+            "safety_tier": "safe",
+            "idempotency": "strict",
+        },
+        {
+            "id": "hubspot.deals.update",
+            "summary": "Update an existing deal's properties",
+            "capability": "hubspot.deals.write",
+            "risk_level": "medium",
+            "safety_tier": "risky",
+            "idempotency": "strict",
+        },
+        {
+            "id": "hubspot.deals.search",
+            "summary": "Search deals using HubSpot filter groups",
+            "capability": "hubspot.deals.read",
+            "risk_level": "low",
+            "safety_tier": "safe",
+            "idempotency": "strict",
+        },
+        {
+            "id": "hubspot.deals.set_stage",
+            "summary": "Move a deal to a specific pipeline stage",
+            "capability": "hubspot.deals.write",
+            "risk_level": "medium",
+            "safety_tier": "risky",
+            "idempotency": "strict",
+        },
+        {
+            "id": "hubspot.deals.associate",
+            "summary": "Create an association between a deal and another CRM object",
+            "capability": "hubspot.associations.write",
+            "risk_level": "medium",
+            "safety_tier": "risky",
+            "idempotency": "none",
+        },
+        {
             "id": "hubspot.pipelines.list",
             "summary": "List pipelines and their stages",
             "capability": "hubspot.pipelines.read",
@@ -1683,9 +2003,9 @@ mod tests {
     }
 
     #[test]
-    fn operations_info_has_17_operations() {
+    fn operations_info_has_22_operations() {
         let ops = operations_info();
-        assert_eq!(ops.as_array().unwrap().len(), 17);
+        assert_eq!(ops.as_array().unwrap().len(), 22);
     }
 
     #[test]

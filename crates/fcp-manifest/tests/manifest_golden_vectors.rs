@@ -4205,8 +4205,13 @@ fn hubspot_full_manifest_parses_with_all_operations() {
         "hubspot.contacts.list",
         "hubspot.contacts.search",
         "hubspot.contacts.update",
+        "hubspot.deals.associate",
         "hubspot.deals.create",
+        "hubspot.deals.get",
         "hubspot.deals.list",
+        "hubspot.deals.search",
+        "hubspot.deals.set_stage",
+        "hubspot.deals.update",
         "hubspot.events.stream",
         "hubspot.pipelines.list",
     ];
@@ -4216,7 +4221,7 @@ fn hubspot_full_manifest_parses_with_all_operations() {
     assert_eq!(ops.len(), expected_ops.len());
 
     let pools = parsed.rate_limits.as_ref().expect("rate_limits");
-    assert_eq!(pools.pools.len(), 10);
+    assert_eq!(pools.pools.len(), 11);
 }
 
 // =============================================================================

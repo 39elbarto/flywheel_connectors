@@ -182,6 +182,17 @@ impl HubSpotClient {
         self.handle_response(resp).await
     }
 
+    #[instrument(skip(self, body), fields(url))]
+    async fn put(&self, path: &str, body: &serde_json::Value) -> HubSpotResult<serde_json::Value> {
+        let url = format!("{}{path}", self.base_url);
+        debug!(url = %url, "PUT request");
+
+        let req = self.client.put(&url).json(body);
+        let req = self.add_auth(req);
+        let resp = req.send().await?;
+        self.handle_response(resp).await
+    }
+
     #[instrument(skip(self), fields(url))]
     async fn delete(&self, path: &str) -> HubSpotResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
@@ -400,6 +411,67 @@ impl HubSpotClient {
     /// Create a deal.
     pub async fn create_deal(&self, body: &serde_json::Value) -> HubSpotResult<serde_json::Value> {
         self.post("/crm/v3/objects/deals", body).await
+    }
+
+    /// Get a deal by ID.
+    pub async fn get_deal(
+        &self,
+        deal_id: &str,
+        properties: Option<&[String]>,
+    ) -> HubSpotResult<serde_json::Value> {
+        let mut params = Vec::new();
+        if let Some(props) = properties {
+            for p in props {
+                params.push(format!("properties={p}"));
+            }
+        }
+        let qs = if params.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", params.join("&"))
+        };
+        self.get(&format!("/crm/v3/objects/deals/{deal_id}{qs}"))
+            .await
+    }
+
+    /// Update a deal.
+    pub async fn update_deal(
+        &self,
+        deal_id: &str,
+        body: &serde_json::Value,
+    ) -> HubSpotResult<serde_json::Value> {
+        self.patch(&format!("/crm/v3/objects/deals/{deal_id}"), body)
+            .await
+    }
+
+    /// Search deals using filter groups.
+    pub async fn search_deals(
+        &self,
+        body: &serde_json::Value,
+    ) -> HubSpotResult<serde_json::Value> {
+        self.post("/crm/v3/objects/deals/search", body).await
+    }
+
+    /// Create an association between two CRM objects.
+    pub async fn create_association(
+        &self,
+        from_object_type: &str,
+        from_object_id: &str,
+        to_object_type: &str,
+        to_object_id: &str,
+        association_type: &str,
+    ) -> HubSpotResult<serde_json::Value> {
+        let body = serde_json::json!([{
+            "associationCategory": "HUBSPOT_DEFINED",
+            "associationTypeId": association_type
+        }]);
+        self.put(
+            &format!(
+                "/crm/v4/objects/{from_object_type}/{from_object_id}/associations/{to_object_type}/{to_object_id}"
+            ),
+            &body,
+        )
+        .await
     }
 
     // -- Pipelines --

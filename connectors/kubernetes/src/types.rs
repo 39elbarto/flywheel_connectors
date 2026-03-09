@@ -80,6 +80,25 @@ pub struct ScaleStatus {
     pub replicas: Option<u32>,
 }
 
+/// A Kubernetes service.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Service {
+    pub name: Option<String>,
+    pub namespace: Option<String>,
+    pub spec: Option<ServiceSpec>,
+    pub labels: Option<serde_json::Value>,
+    pub creation_timestamp: Option<String>,
+}
+
+/// Service spec subset.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceSpec {
+    pub r#type: Option<String>,
+    pub cluster_ip: Option<String>,
+    pub ports: Option<Vec<serde_json::Value>>,
+    pub selector: Option<serde_json::Value>,
+}
+
 /// Kubernetes API error response body (Status object).
 ///
 /// Kubernetes returns `{"kind": "Status", "message": "...", "reason": "NotFound", "code": 404}` on errors.
@@ -461,6 +480,119 @@ mod tests {
         let e: ApiErrorResponse = serde_json::from_value(json!({"message": "err"})).unwrap();
         let dbg = format!("{e:?}");
         assert!(dbg.contains("ApiErrorResponse"));
+    }
+
+    // ── Service ────────────────────────────────────────────────────
+
+    #[test]
+    fn service_roundtrip() {
+        let s: Service = serde_json::from_value(json!({
+            "name": "api-server",
+            "namespace": "production",
+            "spec": {
+                "type": "ClusterIP",
+                "cluster_ip": "10.96.0.1",
+                "ports": [{"port": 80, "targetPort": 8080}],
+                "selector": {"app": "api"}
+            },
+            "labels": {"app": "api"},
+            "creation_timestamp": "2024-06-01T00:00:00Z",
+        }))
+        .unwrap();
+        assert_eq!(s.name, Some("api-server".into()));
+        assert_eq!(s.namespace, Some("production".into()));
+        assert!(s.spec.is_some());
+        let spec = s.spec.as_ref().unwrap();
+        assert_eq!(spec.r#type, Some("ClusterIP".into()));
+        assert_eq!(spec.cluster_ip, Some("10.96.0.1".into()));
+        assert_eq!(spec.ports.as_ref().unwrap().len(), 1);
+        let re = serde_json::to_value(&s).unwrap();
+        assert_eq!(re["name"], "api-server");
+    }
+
+    #[test]
+    fn service_minimal() {
+        let s: Service = serde_json::from_value(json!({})).unwrap();
+        assert!(s.name.is_none());
+        assert!(s.namespace.is_none());
+        assert!(s.spec.is_none());
+        assert!(s.labels.is_none());
+        assert!(s.creation_timestamp.is_none());
+    }
+
+    #[test]
+    fn service_clone() {
+        let s: Service = serde_json::from_value(json!({"name": "svc"})).unwrap();
+        let s2 = s.clone();
+        assert_eq!(s.name, s2.name);
+    }
+
+    #[test]
+    fn service_debug() {
+        let s: Service = serde_json::from_value(json!({"name": "svc"})).unwrap();
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("Service"));
+    }
+
+    #[test]
+    fn service_extra_fields_ignored() {
+        let s: Service = serde_json::from_value(json!({
+            "name": "test",
+            "unknown_field": 42,
+        }))
+        .unwrap();
+        assert_eq!(s.name, Some("test".into()));
+    }
+
+    #[test]
+    fn service_spec_minimal() {
+        let s: ServiceSpec = serde_json::from_value(json!({})).unwrap();
+        assert!(s.r#type.is_none());
+        assert!(s.cluster_ip.is_none());
+        assert!(s.ports.is_none());
+        assert!(s.selector.is_none());
+    }
+
+    #[test]
+    fn service_spec_roundtrip() {
+        let s: ServiceSpec = serde_json::from_value(json!({
+            "type": "NodePort",
+            "cluster_ip": "10.96.0.5",
+            "ports": [{"port": 443}],
+            "selector": {"app": "web"},
+        }))
+        .unwrap();
+        assert_eq!(s.r#type, Some("NodePort".into()));
+        assert_eq!(s.cluster_ip, Some("10.96.0.5".into()));
+        assert_eq!(s.ports.as_ref().unwrap().len(), 1);
+        let re = serde_json::to_value(&s).unwrap();
+        assert_eq!(re["type"], "NodePort");
+    }
+
+    #[test]
+    fn service_spec_clone() {
+        let s: ServiceSpec = serde_json::from_value(json!({"type": "ClusterIP"})).unwrap();
+        let s2 = s.clone();
+        assert_eq!(s.r#type, s2.r#type);
+    }
+
+    #[test]
+    fn service_serialize_roundtrip() {
+        let s = Service {
+            name: Some("my-svc".into()),
+            namespace: Some("default".into()),
+            spec: Some(ServiceSpec {
+                r#type: Some("ClusterIP".into()),
+                cluster_ip: Some("10.96.0.1".into()),
+                ports: None,
+                selector: None,
+            }),
+            labels: None,
+            creation_timestamp: None,
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["name"], "my-svc");
+        assert_eq!(v["spec"]["type"], "ClusterIP");
     }
 
     #[test]

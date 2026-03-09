@@ -77,7 +77,7 @@ async fn lifecycle_introspect() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     let intro = c.handle_introspect().await.unwrap();
-    assert_eq!(intro["operations"].as_array().unwrap().len(), 14);
+    assert_eq!(intro["operations"].as_array().unwrap().len(), 18);
 }
 
 // -- list_pods --
@@ -512,6 +512,309 @@ async fn watch_events_missing_namespace() {
         c.handle_invoke(json!({"operation_id": "kubernetes.watch_events", "input": {}}))
             .await
             .is_err()
+    );
+}
+
+// -- create_pod --
+
+#[fcp_async_core::runtime::test]
+async fn create_pod() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/namespaces/default/pods"))
+        .and(header("Content-Type", "application/json"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "kind": "Pod",
+            "metadata": {"name": "debug-pod", "namespace": "default"},
+            "spec": {"containers": [{"name": "debug", "image": "busybox"}]}
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c.handle_invoke(json!({
+        "operation_id": "kubernetes.create_pod",
+        "input": {
+            "namespace": "default",
+            "name": "debug-pod",
+            "spec": {"containers": [{"name": "debug", "image": "busybox"}]}
+        }
+    })).await.unwrap();
+    assert_eq!(result["pod"]["metadata"]["name"], "debug-pod");
+}
+
+#[fcp_async_core::runtime::test]
+async fn create_pod_with_labels() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/namespaces/default/pods"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "kind": "Pod",
+            "metadata": {"name": "labeled-pod", "namespace": "default", "labels": {"app": "test"}},
+            "spec": {"containers": [{"name": "app", "image": "nginx"}]}
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c.handle_invoke(json!({
+        "operation_id": "kubernetes.create_pod",
+        "input": {
+            "namespace": "default",
+            "name": "labeled-pod",
+            "spec": {"containers": [{"name": "app", "image": "nginx"}]},
+            "labels": {"app": "test"}
+        }
+    })).await.unwrap();
+    assert_eq!(result["pod"]["metadata"]["name"], "labeled-pod");
+}
+
+#[fcp_async_core::runtime::test]
+async fn create_pod_missing_spec() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(c.handle_invoke(json!({
+        "operation_id": "kubernetes.create_pod",
+        "input": {"namespace": "default", "name": "test-pod"}
+    })).await.is_err());
+}
+
+#[fcp_async_core::runtime::test]
+async fn create_pod_missing_namespace() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(c.handle_invoke(json!({
+        "operation_id": "kubernetes.create_pod",
+        "input": {"name": "test-pod", "spec": {"containers": []}}
+    })).await.is_err());
+}
+
+// -- apply_deployment --
+
+#[fcp_async_core::runtime::test]
+async fn apply_deployment_create() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/apis/apps/v1/namespaces/default/deployments"))
+        .and(header("Content-Type", "application/json"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "kind": "Deployment",
+            "metadata": {"name": "web-app", "namespace": "default"},
+            "spec": {"replicas": 3}
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c.handle_invoke(json!({
+        "operation_id": "kubernetes.apply_deployment",
+        "input": {
+            "namespace": "default",
+            "name": "web-app",
+            "spec": {"replicas": 3, "selector": {"matchLabels": {"app": "web"}}, "template": {"metadata": {"labels": {"app": "web"}}, "spec": {"containers": [{"name": "web", "image": "nginx"}]}}}
+        }
+    })).await.unwrap();
+    assert_eq!(result["deployment"]["metadata"]["name"], "web-app");
+}
+
+#[fcp_async_core::runtime::test]
+async fn apply_deployment_update() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path(
+            "/apis/apps/v1/namespaces/default/deployments/web-app",
+        ))
+        .and(header("Content-Type", "application/json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "kind": "Deployment",
+            "metadata": {"name": "web-app", "namespace": "default"},
+            "spec": {"replicas": 5}
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c.handle_invoke(json!({
+        "operation_id": "kubernetes.apply_deployment",
+        "input": {
+            "namespace": "default",
+            "name": "web-app",
+            "update": true,
+            "spec": {"replicas": 5, "selector": {"matchLabels": {"app": "web"}}, "template": {"metadata": {"labels": {"app": "web"}}, "spec": {"containers": [{"name": "web", "image": "nginx:1.26"}]}}}
+        }
+    })).await.unwrap();
+    assert_eq!(result["deployment"]["spec"]["replicas"], 5);
+}
+
+#[fcp_async_core::runtime::test]
+async fn apply_deployment_missing_spec() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(c.handle_invoke(json!({
+        "operation_id": "kubernetes.apply_deployment",
+        "input": {"namespace": "default", "name": "web-app"}
+    })).await.is_err());
+}
+
+#[fcp_async_core::runtime::test]
+async fn apply_deployment_missing_name() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(c.handle_invoke(json!({
+        "operation_id": "kubernetes.apply_deployment",
+        "input": {"namespace": "default", "spec": {"replicas": 1}}
+    })).await.is_err());
+}
+
+// -- delete_deployment --
+
+#[fcp_async_core::runtime::test]
+async fn delete_deployment() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path(
+            "/apis/apps/v1/namespaces/default/deployments/old-app",
+        ))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"kind": "Status", "status": "Success"})),
+        )
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c.handle_invoke(json!({
+        "operation_id": "kubernetes.delete_deployment",
+        "input": {"namespace": "default", "name": "old-app"}
+    })).await.unwrap();
+    assert_eq!(result["deleted"], true);
+}
+
+#[fcp_async_core::runtime::test]
+async fn delete_deployment_missing_name() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(c.handle_invoke(json!({
+        "operation_id": "kubernetes.delete_deployment",
+        "input": {"namespace": "default"}
+    })).await.is_err());
+}
+
+#[fcp_async_core::runtime::test]
+async fn delete_deployment_missing_namespace() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(c.handle_invoke(json!({
+        "operation_id": "kubernetes.delete_deployment",
+        "input": {"name": "old-app"}
+    })).await.is_err());
+}
+
+// -- list_services --
+
+#[fcp_async_core::runtime::test]
+async fn list_services() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/namespaces/default/services"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "kind": "ServiceList",
+            "items": [
+                {"metadata": {"name": "api-server"}, "spec": {"type": "ClusterIP"}},
+                {"metadata": {"name": "frontend"}, "spec": {"type": "NodePort"}},
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c.handle_invoke(json!({
+        "operation_id": "kubernetes.list_services",
+        "input": {"namespace": "default"}
+    })).await.unwrap();
+    assert_eq!(result["services"].as_array().unwrap().len(), 2);
+}
+
+#[fcp_async_core::runtime::test]
+async fn list_services_empty() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/namespaces/production/services"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "kind": "ServiceList", "items": []
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c.handle_invoke(json!({
+        "operation_id": "kubernetes.list_services",
+        "input": {"namespace": "production"}
+    })).await.unwrap();
+    assert!(result["services"].as_array().unwrap().is_empty());
+}
+
+#[fcp_async_core::runtime::test]
+async fn list_services_missing_namespace() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(c.handle_invoke(json!({
+        "operation_id": "kubernetes.list_services",
+        "input": {}
+    })).await.is_err());
+}
+
+// -- simulate new ops --
+
+#[fcp_async_core::runtime::test]
+async fn simulate_create_pod() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_simulate(json!({"operation_id": "kubernetes.create_pod"}))
+            .await
+            .unwrap()["allowed"]
+            .as_bool()
+            .unwrap()
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn simulate_apply_deployment() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_simulate(json!({"operation_id": "kubernetes.apply_deployment"}))
+            .await
+            .unwrap()["allowed"]
+            .as_bool()
+            .unwrap()
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn simulate_delete_deployment() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_simulate(json!({"operation_id": "kubernetes.delete_deployment"}))
+            .await
+            .unwrap()["allowed"]
+            .as_bool()
+            .unwrap()
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn simulate_list_services() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_simulate(json!({"operation_id": "kubernetes.list_services"}))
+            .await
+            .unwrap()["allowed"]
+            .as_bool()
+            .unwrap()
     );
 }
 

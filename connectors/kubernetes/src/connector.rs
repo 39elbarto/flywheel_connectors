@@ -397,14 +397,18 @@ impl KubernetesConnector {
         let result = match operation {
             "kubernetes.list_pods" => self.op_list_pods(client, &input).await,
             "kubernetes.get_pod" => self.op_get_pod(client, &input).await,
+            "kubernetes.create_pod" => self.op_create_pod(client, &input).await,
             "kubernetes.delete_pod" => self.op_delete_pod(client, &input).await,
             "kubernetes.get_pod_logs" => self.op_get_pod_logs(client, &input).await,
             "kubernetes.stream_pod_logs" => self.op_stream_pod_logs(client, &input).await,
             "kubernetes.list_deployments" => self.op_list_deployments(client, &input).await,
             "kubernetes.get_deployment" => self.op_get_deployment(client, &input).await,
+            "kubernetes.apply_deployment" => self.op_apply_deployment(client, &input).await,
             "kubernetes.scale_deployment" => self.op_scale_deployment(client, &input).await,
+            "kubernetes.delete_deployment" => self.op_delete_deployment(client, &input).await,
             "kubernetes.rollout_restart" => self.op_rollout_restart(client, &input).await,
             "kubernetes.get_service" => self.op_get_service(client, &input).await,
+            "kubernetes.list_services" => self.op_list_services(client, &input).await,
             "kubernetes.get_configmap" => self.op_get_configmap(client, &input).await,
             "kubernetes.update_configmap" => self.op_update_configmap(client, &input).await,
             "kubernetes.get_secret" => self.op_get_secret(client, &input).await,
@@ -493,6 +497,38 @@ impl KubernetesConnector {
         Ok(json!({ "deleted": true }))
     }
 
+    async fn op_create_pod(
+        &self,
+        client: &KubernetesClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, KubernetesError> {
+        let namespace = require_str(input, "namespace")?;
+        let spec = input.get("spec").ok_or_else(|| KubernetesError::Api {
+            status_code: 400,
+            message: "Missing required field: spec".into(),
+        })?;
+        let name = input
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unnamed");
+        let labels = input.get("labels").cloned().unwrap_or(serde_json::Value::Null);
+
+        let mut body = json!({
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+                "name": name,
+                "namespace": namespace,
+            },
+            "spec": spec,
+        });
+        if !labels.is_null() {
+            body["metadata"]["labels"] = labels;
+        }
+        let resp = client.create_pod(namespace, &body).await?;
+        Ok(json!({ "pod": resp }))
+    }
+
     async fn op_get_pod_logs(
         &self,
         client: &KubernetesClient,
@@ -551,6 +587,52 @@ impl KubernetesConnector {
         Ok(json!({ "deployment": resp }))
     }
 
+    async fn op_apply_deployment(
+        &self,
+        client: &KubernetesClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, KubernetesError> {
+        let namespace = require_str(input, "namespace")?;
+        let name = require_str(input, "name")?;
+        let spec = input.get("spec").ok_or_else(|| KubernetesError::Api {
+            status_code: 400,
+            message: "Missing required field: spec".into(),
+        })?;
+        let labels = input.get("labels").cloned().unwrap_or(serde_json::Value::Null);
+        let update = input
+            .get("update")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+
+        let mut body = json!({
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "metadata": {
+                "name": name,
+                "namespace": namespace,
+            },
+            "spec": spec,
+        });
+        if !labels.is_null() {
+            body["metadata"]["labels"] = labels;
+        }
+        let resp = client
+            .apply_deployment(namespace, Some(name), &body, update)
+            .await?;
+        Ok(json!({ "deployment": resp }))
+    }
+
+    async fn op_delete_deployment(
+        &self,
+        client: &KubernetesClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, KubernetesError> {
+        let namespace = require_str(input, "namespace")?;
+        let name = require_str(input, "name")?;
+        let _resp = client.delete_deployment(namespace, name).await?;
+        Ok(json!({ "deleted": true }))
+    }
+
     async fn op_scale_deployment(
         &self,
         client: &KubernetesClient,
@@ -593,6 +675,20 @@ impl KubernetesConnector {
         let name = require_str(input, "name")?;
         let resp = client.get_service(namespace, name).await?;
         Ok(json!({ "service": resp }))
+    }
+
+    async fn op_list_services(
+        &self,
+        client: &KubernetesClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, KubernetesError> {
+        let namespace = require_str(input, "namespace")?;
+        let label_selector = input
+            .get("label_selector")
+            .and_then(serde_json::Value::as_str);
+        let resp = client.list_services(namespace, label_selector).await?;
+        let items = resp.get("items").cloned().unwrap_or(json!([]));
+        Ok(json!({ "services": items }))
     }
 
     async fn op_get_configmap(
@@ -842,6 +938,43 @@ fn operations_info() -> Vec<OperationInfo> {
             },
         ),
         op_info(
+            "kubernetes.create_pod",
+            "Create a pod",
+            json!({
+                "type": "object",
+                "required": ["namespace", "name", "spec"],
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "name": { "type": "string" },
+                    "spec": { "type": "object" },
+                    "labels": { "type": "object" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["pod"],
+                "properties": { "pod": { "type": "object" } }
+            }),
+            "kubernetes.admin",
+            RiskLevel::High,
+            SafetyTier::Dangerous,
+            IdempotencyClass::None,
+            AgentHint {
+                when_to_use: "Create a new pod in a namespace.".into(),
+                common_mistakes: vec![
+                    "Creating standalone pods instead of using Deployments".into(),
+                    "Not specifying resource requests/limits".into(),
+                ],
+                examples: vec![
+                    r#"{"namespace": "default", "name": "debug-pod", "spec": {"containers": [{"name": "debug", "image": "busybox"}]}}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("kubernetes.get_pod"),
+                    CapabilityId::from_static("kubernetes.delete_pod"),
+                ],
+            },
+        ),
+        op_info(
             "kubernetes.get_pod_logs",
             "Retrieve logs from a pod",
             json!({
@@ -978,6 +1111,79 @@ fn operations_info() -> Vec<OperationInfo> {
             },
         ),
         op_info(
+            "kubernetes.apply_deployment",
+            "Create or update a deployment",
+            json!({
+                "type": "object",
+                "required": ["namespace", "name", "spec"],
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "name": { "type": "string" },
+                    "spec": { "type": "object" },
+                    "labels": { "type": "object" },
+                    "update": { "type": "boolean" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["deployment"],
+                "properties": { "deployment": { "type": "object" } }
+            }),
+            "kubernetes.admin",
+            RiskLevel::High,
+            SafetyTier::Dangerous,
+            IdempotencyClass::BestEffort,
+            AgentHint {
+                when_to_use: "Create a new deployment or update an existing one.".into(),
+                common_mistakes: vec![
+                    "Forgetting to include selector.matchLabels matching pod template labels".into(),
+                    "Setting update=true for a non-existent deployment (use update=false for creation)".into(),
+                ],
+                examples: vec![
+                    r#"{"namespace": "default", "name": "web-app", "spec": {"replicas": 3, "selector": {"matchLabels": {"app": "web"}}, "template": {"metadata": {"labels": {"app": "web"}}, "spec": {"containers": [{"name": "web", "image": "nginx:1.25"}]}}}}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("kubernetes.get_deployment"),
+                    CapabilityId::from_static("kubernetes.delete_deployment"),
+                ],
+            },
+        ),
+        op_info(
+            "kubernetes.delete_deployment",
+            "Delete a deployment",
+            json!({
+                "type": "object",
+                "required": ["namespace", "name"],
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "name": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["deleted"],
+                "properties": { "deleted": { "type": "boolean" } }
+            }),
+            "kubernetes.admin",
+            RiskLevel::High,
+            SafetyTier::Dangerous,
+            IdempotencyClass::BestEffort,
+            AgentHint {
+                when_to_use: "Delete a deployment and its associated ReplicaSets and pods.".into(),
+                common_mistakes: vec![
+                    "Deleting a deployment without confirming it can be safely removed".into(),
+                    "Not cleaning up associated PVCs or ConfigMaps".into(),
+                ],
+                examples: vec![
+                    r#"{"namespace": "default", "name": "old-web-app"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("kubernetes.get_deployment"),
+                    CapabilityId::from_static("kubernetes.apply_deployment"),
+                ],
+            },
+        ),
+        op_info(
             "kubernetes.scale_deployment",
             "Scale a deployment",
             json!({
@@ -1071,7 +1277,40 @@ fn operations_info() -> Vec<OperationInfo> {
                 examples: vec![
                     r#"{"namespace": "production", "name": "api-server"}"#.into(),
                 ],
-                related: vec![CapabilityId::from_static("kubernetes.list_pods")],
+                related: vec![
+                    CapabilityId::from_static("kubernetes.list_services"),
+                    CapabilityId::from_static("kubernetes.list_pods"),
+                ],
+            },
+        ),
+        op_info(
+            "kubernetes.list_services",
+            "List services in a namespace",
+            json!({
+                "type": "object",
+                "required": ["namespace"],
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "label_selector": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["services"],
+                "properties": { "services": { "type": "array" } }
+            }),
+            "kubernetes.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List all services in a namespace.".into(),
+                common_mistakes: vec![],
+                examples: vec![r#"{"namespace": "production"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("kubernetes.get_service"),
+                    CapabilityId::from_static("kubernetes.list_pods"),
+                ],
             },
         ),
         op_info(
@@ -1341,8 +1580,8 @@ mod tests {
     }
 
     #[test]
-    fn operations_info_has_14_operations() {
-        assert_eq!(operations_info().len(), 14);
+    fn operations_info_has_18_operations() {
+        assert_eq!(operations_info().len(), 18);
     }
 
     #[test]
@@ -1411,14 +1650,18 @@ mod tests {
         for expected in &[
             "kubernetes.list_pods",
             "kubernetes.get_pod",
+            "kubernetes.create_pod",
             "kubernetes.delete_pod",
             "kubernetes.get_pod_logs",
             "kubernetes.stream_pod_logs",
             "kubernetes.list_deployments",
             "kubernetes.get_deployment",
+            "kubernetes.apply_deployment",
+            "kubernetes.delete_deployment",
             "kubernetes.scale_deployment",
             "kubernetes.rollout_restart",
             "kubernetes.get_service",
+            "kubernetes.list_services",
             "kubernetes.get_configmap",
             "kubernetes.update_configmap",
             "kubernetes.get_secret",
@@ -1972,5 +2215,146 @@ mod tests {
         let (ok, message) = base_url_policy("https://api.kube-system.svc.cluster.local");
         assert!(ok);
         assert!(message.contains("accepted"));
+    }
+
+    // ── new operations: create_pod, apply_deployment, delete_deployment, list_services ──
+
+    #[test]
+    fn create_pod_is_dangerous() {
+        let ops = operations_info_json();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "kubernetes.create_pod")
+            .unwrap();
+        assert_eq!(op["risk_level"], "high");
+        assert_eq!(op["safety_tier"], "dangerous");
+        assert_eq!(op["capability"], "kubernetes.admin");
+        assert_eq!(op["idempotency"], "none");
+    }
+
+    #[test]
+    fn apply_deployment_is_dangerous() {
+        let ops = operations_info_json();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "kubernetes.apply_deployment")
+            .unwrap();
+        assert_eq!(op["risk_level"], "high");
+        assert_eq!(op["safety_tier"], "dangerous");
+        assert_eq!(op["capability"], "kubernetes.admin");
+        assert_eq!(op["idempotency"], "best_effort");
+    }
+
+    #[test]
+    fn delete_deployment_is_dangerous() {
+        let ops = operations_info_json();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "kubernetes.delete_deployment")
+            .unwrap();
+        assert_eq!(op["risk_level"], "high");
+        assert_eq!(op["safety_tier"], "dangerous");
+        assert_eq!(op["capability"], "kubernetes.admin");
+        assert_eq!(op["idempotency"], "best_effort");
+    }
+
+    #[test]
+    fn list_services_is_safe() {
+        let ops = operations_info_json();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "kubernetes.list_services")
+            .unwrap();
+        assert_eq!(op["risk_level"], "low");
+        assert_eq!(op["safety_tier"], "safe");
+        assert_eq!(op["capability"], "kubernetes.read");
+        assert_eq!(op["idempotency"], "strict");
+    }
+
+    fn has_required_field(op: &serde_json::Value, field: &str) -> bool {
+        op["input_schema"]["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v.as_str() == Some(field))
+    }
+
+    #[test]
+    fn operations_create_pod_has_input_schema() {
+        let ops = operations_info_json();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "kubernetes.create_pod")
+            .unwrap();
+        assert!(has_required_field(op, "namespace"));
+        assert!(has_required_field(op, "name"));
+        assert!(has_required_field(op, "spec"));
+    }
+
+    #[test]
+    fn operations_apply_deployment_has_input_schema() {
+        let ops = operations_info_json();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "kubernetes.apply_deployment")
+            .unwrap();
+        assert!(has_required_field(op, "namespace"));
+        assert!(has_required_field(op, "name"));
+        assert!(has_required_field(op, "spec"));
+    }
+
+    #[test]
+    fn operations_delete_deployment_has_input_schema() {
+        let ops = operations_info_json();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "kubernetes.delete_deployment")
+            .unwrap();
+        assert!(has_required_field(op, "namespace"));
+        assert!(has_required_field(op, "name"));
+    }
+
+    #[test]
+    fn operations_list_services_has_input_schema() {
+        let ops = operations_info_json();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "kubernetes.list_services")
+            .unwrap();
+        assert!(has_required_field(op, "namespace"));
+    }
+
+    #[test]
+    fn operations_admin_ops_have_correct_capability() {
+        for op in operations_info_json().as_array().unwrap() {
+            let id = op["id"].as_str().unwrap();
+            let cap = op["capability"].as_str().unwrap();
+            if id == "kubernetes.create_pod"
+                || id == "kubernetes.apply_deployment"
+                || id == "kubernetes.delete_deployment"
+                || id == "kubernetes.delete_pod"
+            {
+                assert_eq!(
+                    cap, "kubernetes.admin",
+                    "op {id} should use kubernetes.admin"
+                );
+            }
+        }
     }
 }

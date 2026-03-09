@@ -76,7 +76,7 @@
         {"id": "homeassistant",   "ops": 15, "cohort": "Automation"},
         {"id": "hubspot",         "ops": 11, "cohort": "Workspace"},
         {"id": "intercom",        "ops": 6,  "cohort": "Messaging"},
-        {"id": "kubernetes",      "ops": 14, "cohort": "Infra"},
+        {"id": "kubernetes",      "ops": 18, "cohort": "Infra"},
         {"id": "linkedin",        "ops": 4,  "cohort": "Social"},
         {"id": "logseq",          "ops": 4,  "cohort": "Knowledge"},
         {"id": "mailchimp",       "ops": 5,  "cohort": "Messaging"},

@@ -118,6 +118,263 @@ related = [
     "kubernetes.scale_deployment",
 ]
 
+[provides.operations."kubernetes.create_pod"]
+description = "Create a pod in a namespace"
+capability = "kubernetes.admin"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "none"
+
+[provides.operations."kubernetes.create_pod".input_schema]
+required = [
+    "namespace",
+    "name",
+    "spec",
+]
+type = "object"
+
+[provides.operations."kubernetes.create_pod".input_schema.properties.labels]
+type = "object"
+
+[provides.operations."kubernetes.create_pod".input_schema.properties.name]
+type = "string"
+
+[provides.operations."kubernetes.create_pod".input_schema.properties.namespace]
+type = "string"
+
+[provides.operations."kubernetes.create_pod".input_schema.properties.spec]
+type = "object"
+
+[provides.operations."kubernetes.create_pod".output_schema]
+required = ["pod"]
+type = "object"
+
+[provides.operations."kubernetes.create_pod".output_schema.properties.pod]
+type = "object"
+
+[provides.operations."kubernetes.create_pod".network_constraints]
+host_allow = ["$KUBE_API_HOST"]
+port_allow = [
+    443,
+    6443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = false
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 5242880
+
+[provides.operations."kubernetes.create_pod".ai_hints]
+when_to_use = "Create a new pod in a namespace."
+common_mistakes = [
+    "Creating standalone pods instead of using Deployments",
+    "Not specifying resource requests/limits",
+]
+examples = ['{"namespace": "default", "name": "debug-pod", "spec": {"containers": [{"name": "debug", "image": "busybox"}]}}']
+related = [
+    "kubernetes.get_pod",
+    "kubernetes.delete_pod",
+]
+
+[provides.operations."kubernetes.apply_deployment"]
+description = "Create or update a deployment"
+capability = "kubernetes.admin"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "best_effort"
+
+[provides.operations."kubernetes.apply_deployment".input_schema]
+required = [
+    "namespace",
+    "name",
+    "spec",
+]
+type = "object"
+
+[provides.operations."kubernetes.apply_deployment".input_schema.properties.labels]
+type = "object"
+
+[provides.operations."kubernetes.apply_deployment".input_schema.properties.name]
+type = "string"
+
+[provides.operations."kubernetes.apply_deployment".input_schema.properties.namespace]
+type = "string"
+
+[provides.operations."kubernetes.apply_deployment".input_schema.properties.spec]
+type = "object"
+
+[provides.operations."kubernetes.apply_deployment".input_schema.properties.update]
+type = "boolean"
+
+[provides.operations."kubernetes.apply_deployment".output_schema]
+required = ["deployment"]
+type = "object"
+
+[provides.operations."kubernetes.apply_deployment".output_schema.properties.deployment]
+type = "object"
+
+[provides.operations."kubernetes.apply_deployment".network_constraints]
+host_allow = ["$KUBE_API_HOST"]
+port_allow = [
+    443,
+    6443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = false
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 5242880
+
+[provides.operations."kubernetes.apply_deployment".ai_hints]
+when_to_use = "Create a new deployment or update an existing one."
+common_mistakes = [
+    "Forgetting to include selector.matchLabels matching pod template labels",
+    "Setting update=true for a non-existent deployment (use update=false for creation)",
+]
+examples = ['{"namespace": "default", "name": "web-app", "spec": {"replicas": 3, "selector": {"matchLabels": {"app": "web"}}, "template": {"metadata": {"labels": {"app": "web"}}, "spec": {"containers": [{"name": "web", "image": "nginx:1.25"}]}}}}']
+related = [
+    "kubernetes.get_deployment",
+    "kubernetes.delete_deployment",
+]
+
+[provides.operations."kubernetes.delete_deployment"]
+description = "Delete a deployment"
+capability = "kubernetes.admin"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "best_effort"
+
+[provides.operations."kubernetes.delete_deployment".input_schema]
+required = [
+    "namespace",
+    "name",
+]
+type = "object"
+
+[provides.operations."kubernetes.delete_deployment".input_schema.properties.name]
+type = "string"
+
+[provides.operations."kubernetes.delete_deployment".input_schema.properties.namespace]
+type = "string"
+
+[provides.operations."kubernetes.delete_deployment".output_schema]
+required = ["deleted"]
+type = "object"
+
+[provides.operations."kubernetes.delete_deployment".output_schema.properties.deleted]
+type = "boolean"
+
+[provides.operations."kubernetes.delete_deployment".network_constraints]
+host_allow = ["$KUBE_API_HOST"]
+port_allow = [
+    443,
+    6443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = false
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 1048576
+
+[provides.operations."kubernetes.delete_deployment".ai_hints]
+when_to_use = "Delete a deployment and its associated ReplicaSets and pods."
+common_mistakes = [
+    "Deleting a deployment without confirming it can be safely removed",
+    "Not cleaning up associated PVCs or ConfigMaps",
+]
+examples = ['{"namespace": "default", "name": "old-web-app"}']
+related = [
+    "kubernetes.get_deployment",
+    "kubernetes.apply_deployment",
+]
+
+[provides.operations."kubernetes.list_services"]
+description = "List services in a namespace"
+capability = "kubernetes.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."kubernetes.list_services".input_schema]
+required = ["namespace"]
+type = "object"
+
+[provides.operations."kubernetes.list_services".input_schema.properties.label_selector]
+type = "string"
+
+[provides.operations."kubernetes.list_services".input_schema.properties.namespace]
+type = "string"
+
+[provides.operations."kubernetes.list_services".output_schema]
+required = ["services"]
+type = "object"
+
+[provides.operations."kubernetes.list_services".output_schema.properties.services]
+type = "array"
+
+[provides.operations."kubernetes.list_services".network_constraints]
+host_allow = ["$KUBE_API_HOST"]
+port_allow = [
+    443,
+    6443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = false
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 52428800
+
+[provides.operations."kubernetes.list_services".ai_hints]
+when_to_use = "List all services in a namespace."
+common_mistakes = [
+    "Not using label selectors on large namespaces — listing all services can return excessive data.",
+]
+examples = ['{"namespace": "production"}']
+related = [
+    "kubernetes.get_service",
+    "kubernetes.list_pods",
+]
+
 [provides.operations."kubernetes.get_configmap"]
 description = "Get a ConfigMap by name in a namespace"
 capability = "kubernetes.read"
@@ -962,7 +1219,11 @@ scope = "instance"
 "kubernetes.get_pod_logs" = ["kubernetes.read"]
 "kubernetes.list_deployments" = ["kubernetes.read"]
 "kubernetes.list_pods" = ["kubernetes.read"]
+"kubernetes.create_pod" = ["kubernetes.admin"]
 "kubernetes.delete_pod" = ["kubernetes.admin"]
+"kubernetes.apply_deployment" = ["kubernetes.admin"]
+"kubernetes.delete_deployment" = ["kubernetes.admin"]
+"kubernetes.list_services" = ["kubernetes.read"]
 "kubernetes.get_service" = ["kubernetes.read"]
 "kubernetes.scale_deployment" = ["kubernetes.write"]
 "kubernetes.get_deployment" = ["kubernetes.read"]

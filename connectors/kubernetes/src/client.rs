@@ -216,6 +216,40 @@ impl KubernetesClient {
         self.handle_response(resp).await
     }
 
+    #[instrument(skip(self, body), fields(url))]
+    async fn post(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> KubernetesResult<serde_json::Value> {
+        let url = format!("{}{path}", self.base_url);
+        debug!(url = %url, "POST request");
+        let req = self
+            .add_auth(self.client.post(&url))
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json")
+            .json(body);
+        let resp = req.send().await?;
+        self.handle_response(resp).await
+    }
+
+    #[instrument(skip(self, body), fields(url))]
+    async fn put(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> KubernetesResult<serde_json::Value> {
+        let url = format!("{}{path}", self.base_url);
+        debug!(url = %url, "PUT request");
+        let req = self
+            .add_auth(self.client.put(&url))
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json")
+            .json(body);
+        let resp = req.send().await?;
+        self.handle_response(resp).await
+    }
+
     #[instrument(skip(self), fields(url))]
     async fn delete(&self, path: &str) -> KubernetesResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
@@ -393,6 +427,72 @@ impl KubernetesClient {
             &body,
         )
         .await
+    }
+
+    /// Create a pod in a namespace.
+    pub async fn create_pod(
+        &self,
+        namespace: &str,
+        body: &serde_json::Value,
+    ) -> KubernetesResult<serde_json::Value> {
+        self.post(
+            &format!("/api/v1/namespaces/{namespace}/pods"),
+            body,
+        )
+        .await
+    }
+
+    /// Apply (create or update) a deployment.
+    ///
+    /// If the deployment already exists, a PUT replaces it.
+    /// If it does not exist, a POST creates it.
+    /// Callers should set `update` to `true` for an existing deployment.
+    pub async fn apply_deployment(
+        &self,
+        namespace: &str,
+        name: Option<&str>,
+        body: &serde_json::Value,
+        update: bool,
+    ) -> KubernetesResult<serde_json::Value> {
+        if update {
+            let name = name.unwrap_or_default();
+            self.put(
+                &format!("/apis/apps/v1/namespaces/{namespace}/deployments/{name}"),
+                body,
+            )
+            .await
+        } else {
+            self.post(
+                &format!("/apis/apps/v1/namespaces/{namespace}/deployments"),
+                body,
+            )
+            .await
+        }
+    }
+
+    /// Delete a deployment.
+    pub async fn delete_deployment(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> KubernetesResult<serde_json::Value> {
+        self.delete(&format!(
+            "/apis/apps/v1/namespaces/{namespace}/deployments/{name}"
+        ))
+        .await
+    }
+
+    /// List services in a namespace.
+    pub async fn list_services(
+        &self,
+        namespace: &str,
+        label_selector: Option<&str>,
+    ) -> KubernetesResult<serde_json::Value> {
+        let mut path = format!("/api/v1/namespaces/{namespace}/services");
+        if let Some(ls) = label_selector {
+            let _ = write!(path, "?labelSelector={ls}");
+        }
+        self.get(&path).await
     }
 
     /// Get a service by name.

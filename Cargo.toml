@@ -213,6 +213,7 @@ criterion = { version = "0.8", features = ["html_reports"] }
 
 # CLI
 clap = { version = "4.5", features = ["derive"] }
+handlebars = "6.4.0"
 
 # Supply-chain hardening
 tough = { version = "0.21.0", features = ["http"] }

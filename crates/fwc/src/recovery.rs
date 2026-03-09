@@ -57,6 +57,7 @@ pub fn command_alias(token: &str) -> Option<&'static str> {
         "call" | "exec" | "send" | "request" | "fire" => Some("invoke"),
         "preview" | "dry-run" | "dryrun" | "dry_run" | "preflight" | "test-run" => Some("simulate"),
         "log" | "tail" | "events" | "stream" => Some("logs"),
+        "pipelines" | "flow" | "flows" => Some("pipeline"),
 
         _ => None,
     }
@@ -126,6 +127,9 @@ pub fn typo_correction(token: &str) -> Option<&'static str> {
 
         // logs typos
         "lgs" | "lgo" | "lgos" | "losg" => Some("logs"),
+
+        // pipeline typos
+        "pipleine" | "pipline" | "pipeine" | "pieline" => Some("pipeline"),
 
         // pin/unpin typos
         "pni" | "pinn" => Some("pin"),

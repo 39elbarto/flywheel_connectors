@@ -643,7 +643,10 @@ mod tests {
 
     #[test]
     fn auth_display_expired() {
-        assert_eq!(AuthCheckResult::Expired { days_ago: 5 }.to_string(), "EXPIRED");
+        assert_eq!(
+            AuthCheckResult::Expired { days_ago: 5 }.to_string(),
+            "EXPIRED"
+        );
     }
 
     #[test]
@@ -738,10 +741,11 @@ mod tests {
         detect_issues(&mut h);
 
         assert_eq!(h.status, HealthStatus::Degraded);
-        assert!(h
-            .issues
-            .iter()
-            .any(|i| i.message.contains("Very high latency")));
+        assert!(
+            h.issues
+                .iter()
+                .any(|i| i.message.contains("Very high latency"))
+        );
     }
 
     #[test]
@@ -805,10 +809,11 @@ mod tests {
         detect_issues(&mut h);
 
         assert_eq!(h.status, HealthStatus::Error);
-        assert!(h
-            .issues
-            .iter()
-            .any(|i| i.message.contains("expired") && i.severity == IssueSeverity::Critical));
+        assert!(
+            h.issues
+                .iter()
+                .any(|i| i.message.contains("expired") && i.severity == IssueSeverity::Critical)
+        );
     }
 
     #[test]
@@ -819,10 +824,11 @@ mod tests {
         detect_issues(&mut h);
 
         assert_eq!(h.status, HealthStatus::Error);
-        assert!(h
-            .issues
-            .iter()
-            .any(|i| i.message.contains("invalid") && i.severity == IssueSeverity::Critical));
+        assert!(
+            h.issues
+                .iter()
+                .any(|i| i.message.contains("invalid") && i.severity == IssueSeverity::Critical)
+        );
     }
 
     #[test]
@@ -834,23 +840,21 @@ mod tests {
 
         // Status should remain healthy, but a warning is added.
         assert_eq!(h.status, HealthStatus::Healthy);
-        assert!(h
-            .issues
-            .iter()
-            .any(|i| i.severity == IssueSeverity::Warning));
+        assert!(
+            h.issues
+                .iter()
+                .any(|i| i.severity == IssueSeverity::Warning)
+        );
     }
 
     #[test]
     fn detect_issues_error_state_without_explanation() {
         let t = fixed_time();
-        let mut h = ConnectorHealth::new("test", HealthStatus::Error, t)
-            .with_auth(AuthCheckResult::Valid);
+        let mut h =
+            ConnectorHealth::new("test", HealthStatus::Error, t).with_auth(AuthCheckResult::Valid);
         detect_issues(&mut h);
 
-        assert!(h
-            .issues
-            .iter()
-            .any(|i| i.message.contains("error state")));
+        assert!(h.issues.iter().any(|i| i.message.contains("error state")));
     }
 
     #[test]
@@ -911,8 +915,9 @@ mod tests {
     #[test]
     fn summary_counts_auth_invalid_as_issue() {
         let t = fixed_time();
-        let connectors = vec![ConnectorHealth::new("x", HealthStatus::Error, t)
-            .with_auth(AuthCheckResult::Invalid)];
+        let connectors = vec![
+            ConnectorHealth::new("x", HealthStatus::Error, t).with_auth(AuthCheckResult::Invalid),
+        ];
         let summary = DashboardSummary::from_connectors(&connectors);
         assert_eq!(summary.auth_issues, 1);
     }
@@ -956,10 +961,12 @@ mod tests {
         };
         let filtered = dashboard.filter(&filter);
         assert_eq!(filtered.connectors.len(), 2);
-        assert!(filtered
-            .connectors
-            .iter()
-            .all(|c| c.status != HealthStatus::Healthy));
+        assert!(
+            filtered
+                .connectors
+                .iter()
+                .all(|c| c.status != HealthStatus::Healthy)
+        );
     }
 
     #[test]
@@ -981,8 +988,7 @@ mod tests {
     #[test]
     fn filter_by_nonexistent_connector() {
         let t = fixed_time();
-        let dashboard =
-            HealthDashboard::from_connectors_at(vec![make_healthy("github", t)], t);
+        let dashboard = HealthDashboard::from_connectors_at(vec![make_healthy("github", t)], t);
         let filter = HealthFilter {
             unhealthy_only: false,
             connector_id: Some("nonexistent".to_owned()),
@@ -1045,8 +1051,7 @@ mod tests {
     #[test]
     fn toon_format_single_healthy() {
         let t = fixed_time();
-        let dashboard =
-            HealthDashboard::from_connectors_at(vec![make_healthy("github", t)], t);
+        let dashboard = HealthDashboard::from_connectors_at(vec![make_healthy("github", t)], t);
         let output = format_dashboard_toon(&dashboard);
         assert!(output.contains("github"));
         assert!(output.contains("healthy"));
@@ -1139,8 +1144,7 @@ mod tests {
     #[test]
     fn json_format_contains_fields() {
         let t = fixed_time();
-        let dashboard =
-            HealthDashboard::from_connectors_at(vec![make_healthy("github", t)], t);
+        let dashboard = HealthDashboard::from_connectors_at(vec![make_healthy("github", t)], t);
         let json = format_dashboard_json(&dashboard).unwrap();
         let obj = json.as_object().unwrap();
         assert!(obj.contains_key("connectors"));
@@ -1331,10 +1335,8 @@ mod tests {
     #[test]
     fn dashboard_from_connectors_computes_summary() {
         let t = fixed_time();
-        let dashboard = HealthDashboard::from_connectors(vec![
-            make_healthy("a", t),
-            make_healthy("b", t),
-        ]);
+        let dashboard =
+            HealthDashboard::from_connectors(vec![make_healthy("a", t), make_healthy("b", t)]);
         assert_eq!(dashboard.summary.total, 2);
         assert_eq!(dashboard.summary.healthy, 2);
     }

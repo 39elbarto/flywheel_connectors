@@ -190,10 +190,7 @@ impl UndoRegistry {
         add(
             "github.create_repo",
             "github.delete_repo",
-            &[
-                ("owner", "$.output.owner.login"),
-                ("repo", "$.output.name"),
-            ],
+            &[("owner", "$.output.owner.login"), ("repo", "$.output.name")],
         );
         add(
             "github.add_label",
@@ -210,10 +207,7 @@ impl UndoRegistry {
         add(
             "slack.send_message",
             "slack.delete_message",
-            &[
-                ("channel", "$.input.channel"),
-                ("ts", "$.output.ts"),
-            ],
+            &[("channel", "$.input.channel"), ("ts", "$.output.ts")],
         );
 
         // Discord
@@ -275,10 +269,7 @@ impl UndoRegistry {
         add(
             "kubernetes.create_pod",
             "kubernetes.delete_pod",
-            &[
-                ("namespace", "$.input.namespace"),
-                ("name", "$.input.name"),
-            ],
+            &[("namespace", "$.input.namespace"), ("name", "$.input.name")],
         );
 
         // Terraform
@@ -295,10 +286,7 @@ impl UndoRegistry {
         add(
             "s3.upload_object",
             "s3.delete_object",
-            &[
-                ("bucket", "$.input.bucket"),
-                ("key", "$.input.key"),
-            ],
+            &[("bucket", "$.input.bucket"), ("key", "$.input.key")],
         );
 
         // Stripe
@@ -316,26 +304,10 @@ impl UndoRegistry {
         );
 
         // Generic create/delete, enable/disable, add/remove
-        add(
-            "generic.create",
-            "generic.delete",
-            &[("id", "$.output.id")],
-        );
-        add(
-            "generic.enable",
-            "generic.disable",
-            &[("id", "$.input.id")],
-        );
-        add(
-            "generic.add",
-            "generic.remove",
-            &[("id", "$.input.id")],
-        );
-        add(
-            "generic.start",
-            "generic.stop",
-            &[("id", "$.input.id")],
-        );
+        add("generic.create", "generic.delete", &[("id", "$.output.id")]);
+        add("generic.enable", "generic.disable", &[("id", "$.input.id")]);
+        add("generic.add", "generic.remove", &[("id", "$.input.id")]);
+        add("generic.start", "generic.stop", &[("id", "$.input.id")]);
         add(
             "generic.subscribe",
             "generic.unsubscribe",
@@ -401,7 +373,11 @@ pub fn evaluate_path(
     let root = match root_name {
         "input" => input,
         "output" => output,
-        other => return Err(format!("unknown root '{other}' — expected 'input' or 'output'")),
+        other => {
+            return Err(format!(
+                "unknown root '{other}' — expected 'input' or 'output'"
+            ));
+        }
     };
 
     if remainder.is_empty() {
@@ -412,7 +388,10 @@ pub fn evaluate_path(
 }
 
 /// Walk dot-separated segments, handling `field[N]` array indexing.
-fn resolve_segments(mut current: &serde_json::Value, path: &str) -> Result<serde_json::Value, String> {
+fn resolve_segments(
+    mut current: &serde_json::Value,
+    path: &str,
+) -> Result<serde_json::Value, String> {
     for segment in path.split('.') {
         // Check for array index syntax: field[N]
         if let Some(bracket_pos) = segment.find('[') {
@@ -457,9 +436,7 @@ pub fn plan_undo(
     original_input: &serde_json::Value,
     original_output: &serde_json::Value,
 ) -> Result<UndoPlan, UndoError> {
-    let mapping = registry
-        .lookup(operation_id)
-        .ok_or(UndoError::NoInverse)?;
+    let mapping = registry.lookup(operation_id).ok_or(UndoError::NoInverse)?;
 
     let mut inverse_input = serde_json::Map::new();
     let mut warnings: Vec<String> = Vec::new();
@@ -528,12 +505,10 @@ fn classify_risk(operation: &str) -> String {
 pub fn check_reversibility(registry: &UndoRegistry, operation_id: &str) -> ReversibilityCheck {
     registry.lookup(operation_id).map_or_else(
         || {
-            let guidance = registry
-                .guidance(operation_id)
-                .map_or_else(
-                    || "No known inverse. Manual intervention may be required.".to_owned(),
-                    ToOwned::to_owned,
-                );
+            let guidance = registry.guidance(operation_id).map_or_else(
+                || "No known inverse. Manual intervention may be required.".to_owned(),
+                ToOwned::to_owned,
+            );
             ReversibilityCheck {
                 operation_id: operation_id.to_owned(),
                 reversible: false,
@@ -706,7 +681,11 @@ mod tests {
     #[test]
     fn registry_has_at_least_20_builtins() {
         let reg = UndoRegistry::new();
-        assert!(reg.len() >= 20, "expected >= 20 builtins, got {}", reg.len());
+        assert!(
+            reg.len() >= 20,
+            "expected >= 20 builtins, got {}",
+            reg.len()
+        );
     }
 
     #[test]
@@ -723,9 +702,10 @@ mod tests {
             "custom.lock",
             InverseMapping {
                 inverse_operation: "custom.unlock".to_owned(),
-                input_mapping: BTreeMap::from([
-                    ("resource_id".to_owned(), "$.output.id".to_owned()),
-                ]),
+                input_mapping: BTreeMap::from([(
+                    "resource_id".to_owned(),
+                    "$.output.id".to_owned(),
+                )]),
             },
         );
         assert_eq!(reg.len(), before + 1);
@@ -982,9 +962,7 @@ mod tests {
             "test.op",
             InverseMapping {
                 inverse_operation: "test.inv".to_owned(),
-                input_mapping: BTreeMap::from([
-                    ("f".to_owned(), "$.input.f".to_owned()),
-                ]),
+                input_mapping: BTreeMap::from([("f".to_owned(), "$.input.f".to_owned())]),
             },
         );
         let plan = plan_undo(&reg, "test.op", &json!({"f": null}), &json!({})).unwrap();
@@ -1015,7 +993,10 @@ mod tests {
                 inverse_operation: "ci.rollback".to_owned(),
                 input_mapping: BTreeMap::from([
                     ("environment".to_owned(), "$.input.environment".to_owned()),
-                    ("previous_version".to_owned(), "$.output.deployment.previous_version".to_owned()),
+                    (
+                        "previous_version".to_owned(),
+                        "$.output.deployment.previous_version".to_owned(),
+                    ),
                     ("service".to_owned(), "$.input.service".to_owned()),
                 ]),
             },
@@ -1045,7 +1026,10 @@ mod tests {
         let reg = UndoRegistry::new();
         let check = check_reversibility(&reg, "github.create_issue");
         assert!(check.reversible);
-        assert_eq!(check.inverse_operation, Some("github.close_issue".to_owned()));
+        assert_eq!(
+            check.inverse_operation,
+            Some("github.close_issue".to_owned())
+        );
         assert!(check.guidance.contains("close_issue"));
     }
 
@@ -1099,7 +1083,10 @@ mod tests {
             inverse_operation: "github.close_issue".to_owned(),
             input_mapping: BTreeMap::from([
                 ("owner".to_owned(), "$.input.owner".to_owned()),
-                ("issue_number".to_owned(), "$.output.issue.number".to_owned()),
+                (
+                    "issue_number".to_owned(),
+                    "$.output.issue.number".to_owned(),
+                ),
             ]),
         };
         let json_str = serde_json::to_string(&mapping).unwrap();
@@ -1170,9 +1157,10 @@ mod tests {
             "test.batch",
             InverseMapping {
                 inverse_operation: "test.unbatch".to_owned(),
-                input_mapping: BTreeMap::from([
-                    ("first_id".to_owned(), "$.output.created[0]".to_owned()),
-                ]),
+                input_mapping: BTreeMap::from([(
+                    "first_id".to_owned(),
+                    "$.output.created[0]".to_owned(),
+                )]),
             },
         );
         let output = json!({"created": ["id-a", "id-b"]});

@@ -197,9 +197,7 @@ impl fmt::Display for ThrottleDecision {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Proceed => write!(f, "proceed"),
-            Self::Delay {
-                delay_ms, pool, ..
-            } => write!(f, "delay {delay_ms}ms (pool: {pool})"),
+            Self::Delay { delay_ms, pool, .. } => write!(f, "delay {delay_ms}ms (pool: {pool})"),
             Self::WaitForReset {
                 countdown, pool, ..
             } => write!(f, "wait for reset: {countdown} (pool: {pool})"),
@@ -237,7 +235,11 @@ impl OperationSchedule {
             let wait = format_duration_ms(self.mid_batch_wait_ms);
             format!(
                 "{} ops, ~{} delay between each, {} total (includes {} reset wait after {} ops)",
-                self.total_ops, format_duration_ms(self.inter_op_delay_ms), dur, wait, self.ops_before_wait
+                self.total_ops,
+                format_duration_ms(self.inter_op_delay_ms),
+                dur,
+                wait,
+                self.ops_before_wait
             )
         } else {
             format!(
@@ -371,10 +373,7 @@ pub fn check_pool_throttle(pool: &PoolSnapshot, config: &ThrottleConfig) -> Thro
 }
 
 /// Check all pools for a connector and return the most restrictive decision.
-pub fn check_throttle(
-    limits: &ConnectorRateLimits,
-    config: &ThrottleConfig,
-) -> ThrottleDecision {
+pub fn check_throttle(limits: &ConnectorRateLimits, config: &ThrottleConfig) -> ThrottleDecision {
     if config.no_throttle {
         return ThrottleDecision::Proceed;
     }
@@ -408,7 +407,11 @@ fn most_restrictive(a: ThrottleDecision, b: ThrottleDecision) -> ThrottleDecisio
         std::cmp::Ordering::Less => b,
         // Same rank — pick the one with longer wait
         std::cmp::Ordering::Equal => {
-            if a.wait_ms() >= b.wait_ms() { a } else { b }
+            if a.wait_ms() >= b.wait_ms() {
+                a
+            } else {
+                b
+            }
         }
     }
 }
@@ -512,7 +515,8 @@ pub fn estimate_pipeline_cost(
             fits = false;
             let limit = pool_snap.map_or(1, |p| p.limit);
             let resets = if limit > 0 {
-                u32::try_from(ops_needed.saturating_sub(remaining).div_ceil(limit)).unwrap_or(u32::MAX)
+                u32::try_from(ops_needed.saturating_sub(remaining).div_ceil(limit))
+                    .unwrap_or(u32::MAX)
             } else {
                 u32::MAX
             };
@@ -882,12 +886,7 @@ mod tests {
 
     #[test]
     fn pool_throttle_delays_at_warning() {
-        let pool = PoolSnapshot::new(
-            "core",
-            4200,
-            5000,
-            Some(Utc::now() + Duration::minutes(10)),
-        );
+        let pool = PoolSnapshot::new("core", 4200, 5000, Some(Utc::now() + Duration::minutes(10)));
         let config = ThrottleConfig::balanced();
         let decision = check_pool_throttle(&pool, &config);
         assert!(matches!(decision, ThrottleDecision::Delay { .. }));
@@ -908,12 +907,7 @@ mod tests {
 
     #[test]
     fn pool_throttle_rejects_when_wait_too_long() {
-        let pool = PoolSnapshot::new(
-            "core",
-            4900,
-            5000,
-            Some(Utc::now() + Duration::hours(2)),
-        );
+        let pool = PoolSnapshot::new("core", 4900, 5000, Some(Utc::now() + Duration::hours(2)));
         let config = ThrottleConfig::balanced().with_max_wait(Duration::seconds(30));
         let decision = check_pool_throttle(&pool, &config);
         assert!(matches!(decision, ThrottleDecision::Reject { .. }));
@@ -929,12 +923,7 @@ mod tests {
 
     #[test]
     fn pool_throttle_aggressive_permits_more() {
-        let pool = PoolSnapshot::new(
-            "core",
-            4600,
-            5000,
-            Some(Utc::now() + Duration::minutes(10)),
-        );
+        let pool = PoolSnapshot::new("core", 4600, 5000, Some(Utc::now() + Duration::minutes(10)));
         let aggressive = ThrottleConfig::balanced().with_strategy(ThrottleStrategy::Aggressive);
         let balanced = ThrottleConfig::balanced();
 
@@ -948,14 +937,8 @@ mod tests {
 
     #[test]
     fn pool_throttle_conservative_more_cautious() {
-        let pool = PoolSnapshot::new(
-            "core",
-            3500,
-            5000,
-            Some(Utc::now() + Duration::minutes(10)),
-        );
-        let conservative =
-            ThrottleConfig::balanced().with_strategy(ThrottleStrategy::Conservative);
+        let pool = PoolSnapshot::new("core", 3500, 5000, Some(Utc::now() + Duration::minutes(10)));
+        let conservative = ThrottleConfig::balanced().with_strategy(ThrottleStrategy::Conservative);
         let balanced = ThrottleConfig::balanced();
 
         let d_cons = check_pool_throttle(&pool, &conservative);
@@ -1006,10 +989,8 @@ mod tests {
 
     #[test]
     fn multi_pool_disabled() {
-        let limits = ConnectorRateLimits::new(
-            "github",
-            vec![PoolSnapshot::new("core", 4999, 5000, None)],
-        );
+        let limits =
+            ConnectorRateLimits::new("github", vec![PoolSnapshot::new("core", 4999, 5000, None)]);
         let config = ThrottleConfig::disabled();
         assert_eq!(check_throttle(&limits, &config), ThrottleDecision::Proceed);
     }
@@ -1064,10 +1045,8 @@ mod tests {
 
     #[test]
     fn schedule_zero_ops() {
-        let limits = ConnectorRateLimits::new(
-            "github",
-            vec![PoolSnapshot::new("core", 0, 5000, None)],
-        );
+        let limits =
+            ConnectorRateLimits::new("github", vec![PoolSnapshot::new("core", 0, 5000, None)]);
         let config = ThrottleConfig::balanced();
         let sched = schedule_operations(&limits, 0, &config);
         assert_eq!(sched.total_ops, 0);
@@ -1114,10 +1093,8 @@ mod tests {
 
     #[test]
     fn schedule_no_throttle() {
-        let limits = ConnectorRateLimits::new(
-            "github",
-            vec![PoolSnapshot::new("core", 4999, 5000, None)],
-        );
+        let limits =
+            ConnectorRateLimits::new("github", vec![PoolSnapshot::new("core", 4999, 5000, None)]);
         let config = ThrottleConfig::disabled();
         let sched = schedule_operations(&limits, 100, &config);
         assert_eq!(sched.inter_op_delay_ms, 0);
@@ -1175,10 +1152,10 @@ mod tests {
                 PoolSnapshot::new("search", 0, 30, None),
             ],
         );
-        let costs = estimate_pipeline_cost(&limits, &[
-            ("core".to_string(), 100),
-            ("search".to_string(), 10),
-        ]);
+        let costs = estimate_pipeline_cost(
+            &limits,
+            &[("core".to_string(), 100), ("search".to_string(), 10)],
+        );
         assert!(costs.fits_in_quota);
         assert_eq!(costs.resets_needed, 0);
     }
@@ -1194,18 +1171,15 @@ mod tests {
                 Some(Utc::now() + Duration::minutes(1)),
             )],
         );
-        let costs =
-            estimate_pipeline_cost(&limits, &[("search".to_string(), 20)]);
+        let costs = estimate_pipeline_cost(&limits, &[("search".to_string(), 20)]);
         assert!(!costs.fits_in_quota);
         assert!(costs.resets_needed > 0);
     }
 
     #[test]
     fn pipeline_cost_summary_fits() {
-        let limits = ConnectorRateLimits::new(
-            "github",
-            vec![PoolSnapshot::new("core", 0, 5000, None)],
-        );
+        let limits =
+            ConnectorRateLimits::new("github", vec![PoolSnapshot::new("core", 0, 5000, None)]);
         let costs = estimate_pipeline_cost(&limits, &[("core".to_string(), 10)]);
         let summary = costs.summary();
         assert!(summary.contains("fits"));
@@ -1229,14 +1203,9 @@ mod tests {
 
     #[test]
     fn pipeline_cost_unknown_pool() {
-        let limits = ConnectorRateLimits::new(
-            "github",
-            vec![PoolSnapshot::new("core", 0, 5000, None)],
-        );
-        let costs = estimate_pipeline_cost(
-            &limits,
-            &[("unknown_pool".to_string(), 50)],
-        );
+        let limits =
+            ConnectorRateLimits::new("github", vec![PoolSnapshot::new("core", 0, 5000, None)]);
+        let costs = estimate_pipeline_cost(&limits, &[("unknown_pool".to_string(), 50)]);
         // Unknown pool has MAX remaining, should fit
         assert!(costs.fits_in_quota);
     }
@@ -1250,10 +1219,10 @@ mod tests {
                 PoolSnapshot::new("search", 29, 30, None),
             ],
         );
-        let costs = estimate_pipeline_cost(&limits, &[
-            ("core".to_string(), 100),
-            ("search".to_string(), 10),
-        ]);
+        let costs = estimate_pipeline_cost(
+            &limits,
+            &[("core".to_string(), 100), ("search".to_string(), 10)],
+        );
         let bottleneck = costs.pool_costs.iter().find(|p| p.is_bottleneck);
         assert!(bottleneck.is_some());
         assert_eq!(bottleneck.unwrap().pool, "search");
@@ -1390,10 +1359,7 @@ mod tests {
             parse_strategy("aggressive"),
             Some(ThrottleStrategy::Aggressive)
         );
-        assert_eq!(
-            parse_strategy("BALANCED"),
-            Some(ThrottleStrategy::Balanced)
-        );
+        assert_eq!(parse_strategy("BALANCED"), Some(ThrottleStrategy::Balanced));
         assert_eq!(
             parse_strategy("Conservative"),
             Some(ThrottleStrategy::Conservative)

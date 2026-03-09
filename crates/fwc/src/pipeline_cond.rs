@@ -85,10 +85,7 @@ pub enum ConditionExpr {
         value: usize,
     },
     /// Contains check: `{{haystack}} contains 'needle'`.
-    Contains {
-        haystack: String,
-        needle: String,
-    },
+    Contains { haystack: String, needle: String },
     /// Always true – useful for testing.
     Always,
     /// Always false – useful for testing.
@@ -376,9 +373,7 @@ fn parse_atom(s: &str) -> Result<ConditionExpr, ConditionParseError> {
 }
 
 /// Try to parse a length check expression.
-fn try_parse_length(
-    s: &str,
-) -> Result<Option<ConditionExpr>, ConditionParseError> {
+fn try_parse_length(s: &str) -> Result<Option<ConditionExpr>, ConditionParseError> {
     // Pattern: "{{<path> | length}} <op> <n>"
     let Some(rest) = s.strip_prefix("{{") else {
         return Ok(None);
@@ -390,18 +385,15 @@ fn try_parse_length(
     let after = rest[pipe_pos + "| length}}".len()..].trim();
 
     let (op, value_str) = parse_op_and_rest(after)?;
-    let value: usize = value_str
-        .trim()
-        .parse()
-        .map_err(|_| ConditionParseError::InvalidSyntax(format!("bad length value: {value_str}")))?;
+    let value: usize = value_str.trim().parse().map_err(|_| {
+        ConditionParseError::InvalidSyntax(format!("bad length value: {value_str}"))
+    })?;
 
     Ok(Some(ConditionExpr::LengthCheck { path, op, value }))
 }
 
 /// Try to parse a `contains` expression.
-fn try_parse_contains(
-    s: &str,
-) -> Result<Option<ConditionExpr>, ConditionParseError> {
+fn try_parse_contains(s: &str) -> Result<Option<ConditionExpr>, ConditionParseError> {
     // Pattern: "{{haystack}} contains 'needle'"
     let Some(template_end) = s.find("}}") else {
         return Ok(None);
@@ -410,9 +402,8 @@ fn try_parse_contains(
     if !after.starts_with("contains ") {
         return Ok(None);
     }
-    let haystack = extract_template_path(&s[..template_end + 2]).ok_or_else(|| {
-        ConditionParseError::InvalidSyntax("bad template in contains".to_owned())
-    })?;
+    let haystack = extract_template_path(&s[..template_end + 2])
+        .ok_or_else(|| ConditionParseError::InvalidSyntax("bad template in contains".to_owned()))?;
     let needle_raw = after["contains ".len()..].trim();
     let needle = parse_string_literal(needle_raw).ok_or_else(|| {
         ConditionParseError::InvalidSyntax(format!("bad needle in contains: {needle_raw}"))
@@ -421,9 +412,7 @@ fn try_parse_contains(
 }
 
 /// Try to parse a comparison expression.
-fn try_parse_comparison(
-    s: &str,
-) -> Result<Option<ConditionExpr>, ConditionParseError> {
+fn try_parse_comparison(s: &str) -> Result<Option<ConditionExpr>, ConditionParseError> {
     let Some(template_end) = s.find("}}") else {
         return Ok(None);
     };
@@ -556,10 +545,8 @@ pub fn evaluate_condition(
             Ok(is_truthy(val.as_ref()))
         }
         ConditionExpr::Comparison { left, op, right } => {
-            let val =
-                resolve_template_path(left, context).ok_or_else(|| ConditionEvalError::MissingStep {
-                    path: left.clone(),
-                })?;
+            let val = resolve_template_path(left, context)
+                .ok_or_else(|| ConditionEvalError::MissingStep { path: left.clone() })?;
             Ok(compare_value(&val, op, right))
         }
         ConditionExpr::LogicalAnd(l, r) => {
@@ -577,10 +564,8 @@ pub fn evaluate_condition(
             Ok(!v)
         }
         ConditionExpr::LengthCheck { path, op, value } => {
-            let val =
-                resolve_template_path(path, context).ok_or_else(|| ConditionEvalError::MissingStep {
-                    path: path.clone(),
-                })?;
+            let val = resolve_template_path(path, context)
+                .ok_or_else(|| ConditionEvalError::MissingStep { path: path.clone() })?;
             let len = value_length(&val);
             Ok(compare_usize(len, op, *value))
         }
@@ -828,7 +813,10 @@ mod tests {
     #[test]
     fn pipeline_cond_parse_truthy() {
         let c = parse_condition("{{steps.fetch.output}}").unwrap();
-        assert_eq!(c.parsed, ConditionExpr::Truthy("steps.fetch.output".to_owned()));
+        assert_eq!(
+            c.parsed,
+            ConditionExpr::Truthy("steps.fetch.output".to_owned())
+        );
     }
 
     #[test]
@@ -858,71 +846,92 @@ mod tests {
     #[test]
     fn pipeline_cond_parse_comparison_ne() {
         let c = parse_condition("{{steps.a.output.x}} != 'bad'").unwrap();
-        assert_eq!(c.parsed, ConditionExpr::Comparison {
-            left: "steps.a.output.x".to_owned(),
-            op: CompareOp::Ne,
-            right: ConditionValue::String("bad".to_owned()),
-        });
+        assert_eq!(
+            c.parsed,
+            ConditionExpr::Comparison {
+                left: "steps.a.output.x".to_owned(),
+                op: CompareOp::Ne,
+                right: ConditionValue::String("bad".to_owned()),
+            }
+        );
     }
 
     #[test]
     fn pipeline_cond_parse_comparison_gt() {
         let c = parse_condition("{{steps.data.output.count}} > 5").unwrap();
-        assert_eq!(c.parsed, ConditionExpr::Comparison {
-            left: "steps.data.output.count".to_owned(),
-            op: CompareOp::Gt,
-            right: ConditionValue::Number(5.0),
-        });
+        assert_eq!(
+            c.parsed,
+            ConditionExpr::Comparison {
+                left: "steps.data.output.count".to_owned(),
+                op: CompareOp::Gt,
+                right: ConditionValue::Number(5.0),
+            }
+        );
     }
 
     #[test]
     fn pipeline_cond_parse_comparison_gte() {
         let c = parse_condition("{{steps.data.output.count}} >= 10").unwrap();
-        assert_eq!(c.parsed, ConditionExpr::Comparison {
-            left: "steps.data.output.count".to_owned(),
-            op: CompareOp::Gte,
-            right: ConditionValue::Number(10.0),
-        });
+        assert_eq!(
+            c.parsed,
+            ConditionExpr::Comparison {
+                left: "steps.data.output.count".to_owned(),
+                op: CompareOp::Gte,
+                right: ConditionValue::Number(10.0),
+            }
+        );
     }
 
     #[test]
     fn pipeline_cond_parse_comparison_lt() {
         let c = parse_condition("{{steps.data.output.count}} < 3").unwrap();
-        assert_eq!(c.parsed, ConditionExpr::Comparison {
-            left: "steps.data.output.count".to_owned(),
-            op: CompareOp::Lt,
-            right: ConditionValue::Number(3.0),
-        });
+        assert_eq!(
+            c.parsed,
+            ConditionExpr::Comparison {
+                left: "steps.data.output.count".to_owned(),
+                op: CompareOp::Lt,
+                right: ConditionValue::Number(3.0),
+            }
+        );
     }
 
     #[test]
     fn pipeline_cond_parse_comparison_lte() {
         let c = parse_condition("{{steps.data.output.count}} <= 100").unwrap();
-        assert_eq!(c.parsed, ConditionExpr::Comparison {
-            left: "steps.data.output.count".to_owned(),
-            op: CompareOp::Lte,
-            right: ConditionValue::Number(100.0),
-        });
+        assert_eq!(
+            c.parsed,
+            ConditionExpr::Comparison {
+                left: "steps.data.output.count".to_owned(),
+                op: CompareOp::Lte,
+                right: ConditionValue::Number(100.0),
+            }
+        );
     }
 
     #[test]
     fn pipeline_cond_parse_comparison_bool_true() {
         let c = parse_condition("{{steps.x.output.flag}} == true").unwrap();
-        assert_eq!(c.parsed, ConditionExpr::Comparison {
-            left: "steps.x.output.flag".to_owned(),
-            op: CompareOp::Eq,
-            right: ConditionValue::Bool(true),
-        });
+        assert_eq!(
+            c.parsed,
+            ConditionExpr::Comparison {
+                left: "steps.x.output.flag".to_owned(),
+                op: CompareOp::Eq,
+                right: ConditionValue::Bool(true),
+            }
+        );
     }
 
     #[test]
     fn pipeline_cond_parse_comparison_null() {
         let c = parse_condition("{{steps.x.output.val}} == null").unwrap();
-        assert_eq!(c.parsed, ConditionExpr::Comparison {
-            left: "steps.x.output.val".to_owned(),
-            op: CompareOp::Eq,
-            right: ConditionValue::Null,
-        });
+        assert_eq!(
+            c.parsed,
+            ConditionExpr::Comparison {
+                left: "steps.x.output.val".to_owned(),
+                op: CompareOp::Eq,
+                right: ConditionValue::Null,
+            }
+        );
     }
 
     // ── Condition parsing: logical operators ────────────────────────────
@@ -935,8 +944,20 @@ mod tests {
         .unwrap();
         match &c.parsed {
             ConditionExpr::LogicalAnd(l, r) => {
-                assert!(matches!(l.as_ref(), ConditionExpr::Comparison { op: CompareOp::Gte, .. }));
-                assert!(matches!(r.as_ref(), ConditionExpr::Comparison { op: CompareOp::Eq, .. }));
+                assert!(matches!(
+                    l.as_ref(),
+                    ConditionExpr::Comparison {
+                        op: CompareOp::Gte,
+                        ..
+                    }
+                ));
+                assert!(matches!(
+                    r.as_ref(),
+                    ConditionExpr::Comparison {
+                        op: CompareOp::Eq,
+                        ..
+                    }
+                ));
             }
             other => panic!("expected LogicalAnd, got {other:?}"),
         }
@@ -944,10 +965,8 @@ mod tests {
 
     #[test]
     fn pipeline_cond_parse_logical_or() {
-        let c = parse_condition(
-            "{{steps.a.output.x}} == 'yes' || {{steps.b.output.y}} == 'yes'",
-        )
-        .unwrap();
+        let c = parse_condition("{{steps.a.output.x}} == 'yes' || {{steps.b.output.y}} == 'yes'")
+            .unwrap();
         assert!(matches!(c.parsed, ConditionExpr::LogicalOr(_, _)));
     }
 
@@ -966,46 +985,54 @@ mod tests {
 
     #[test]
     fn pipeline_cond_parse_length_gt() {
-        let c =
-            parse_condition("{{steps.fetch.output.issues | length}} > 0").unwrap();
-        assert_eq!(c.parsed, ConditionExpr::LengthCheck {
-            path: "steps.fetch.output.issues".to_owned(),
-            op: CompareOp::Gt,
-            value: 0,
-        });
+        let c = parse_condition("{{steps.fetch.output.issues | length}} > 0").unwrap();
+        assert_eq!(
+            c.parsed,
+            ConditionExpr::LengthCheck {
+                path: "steps.fetch.output.issues".to_owned(),
+                op: CompareOp::Gt,
+                value: 0,
+            }
+        );
     }
 
     #[test]
     fn pipeline_cond_parse_length_eq() {
-        let c =
-            parse_condition("{{steps.fetch.output.items | length}} == 5").unwrap();
-        assert_eq!(c.parsed, ConditionExpr::LengthCheck {
-            path: "steps.fetch.output.items".to_owned(),
-            op: CompareOp::Eq,
-            value: 5,
-        });
+        let c = parse_condition("{{steps.fetch.output.items | length}} == 5").unwrap();
+        assert_eq!(
+            c.parsed,
+            ConditionExpr::LengthCheck {
+                path: "steps.fetch.output.items".to_owned(),
+                op: CompareOp::Eq,
+                value: 5,
+            }
+        );
     }
 
     // ── Condition parsing: contains ─────────────────────────────────────
 
     #[test]
     fn pipeline_cond_parse_contains() {
-        let c =
-            parse_condition("{{steps.fetch.output.message}} contains 'good'").unwrap();
-        assert_eq!(c.parsed, ConditionExpr::Contains {
-            haystack: "steps.fetch.output.message".to_owned(),
-            needle: "good".to_owned(),
-        });
+        let c = parse_condition("{{steps.fetch.output.message}} contains 'good'").unwrap();
+        assert_eq!(
+            c.parsed,
+            ConditionExpr::Contains {
+                haystack: "steps.fetch.output.message".to_owned(),
+                needle: "good".to_owned(),
+            }
+        );
     }
 
     #[test]
     fn pipeline_cond_parse_contains_double_quotes() {
-        let c =
-            parse_condition("{{steps.a.output.text}} contains \"hello\"").unwrap();
-        assert_eq!(c.parsed, ConditionExpr::Contains {
-            haystack: "steps.a.output.text".to_owned(),
-            needle: "hello".to_owned(),
-        });
+        let c = parse_condition("{{steps.a.output.text}} contains \"hello\"").unwrap();
+        assert_eq!(
+            c.parsed,
+            ConditionExpr::Contains {
+                haystack: "steps.a.output.text".to_owned(),
+                needle: "hello".to_owned(),
+            }
+        );
     }
 
     // ── Condition parsing: always / never ───────────────────────────────
@@ -1128,9 +1155,12 @@ mod tests {
             right: ConditionValue::Number(0.0),
         };
         let err = evaluate_condition(&expr, &ctx).unwrap_err();
-        assert_eq!(err, ConditionEvalError::MissingStep {
-            path: "steps.nope.output.x".to_owned(),
-        });
+        assert_eq!(
+            err,
+            ConditionEvalError::MissingStep {
+                path: "steps.nope.output.x".to_owned(),
+            }
+        );
     }
 
     #[test]
@@ -1347,13 +1377,19 @@ mod tests {
     #[test]
     fn pipeline_cond_decision_skip() {
         let err = step_error("a", 1);
-        assert_eq!(apply_error_mode(&ErrorMode::Skip, &err, 1), ErrorDecision::Skip);
+        assert_eq!(
+            apply_error_mode(&ErrorMode::Skip, &err, 1),
+            ErrorDecision::Skip
+        );
     }
 
     #[test]
     fn pipeline_cond_decision_abort() {
         let err = step_error("a", 1);
-        assert_eq!(apply_error_mode(&ErrorMode::Abort, &err, 1), ErrorDecision::Abort);
+        assert_eq!(
+            apply_error_mode(&ErrorMode::Abort, &err, 1),
+            ErrorDecision::Abort
+        );
     }
 
     #[test]
@@ -1418,16 +1454,14 @@ mod tests {
     #[test]
     fn pipeline_cond_resolve_nested() {
         let ctx = ctx_with_fetch();
-        let v =
-            resolve_template_path("steps.fetch.output.issues[0].title", &ctx).unwrap();
+        let v = resolve_template_path("steps.fetch.output.issues[0].title", &ctx).unwrap();
         assert_eq!(v, json!("Bug A"));
     }
 
     #[test]
     fn pipeline_cond_resolve_array_index() {
         let ctx = ctx_with_fetch();
-        let v =
-            resolve_template_path("steps.fetch.output.issues[1].status", &ctx).unwrap();
+        let v = resolve_template_path("steps.fetch.output.issues[1].status", &ctx).unwrap();
         assert_eq!(v, json!("closed"));
     }
 
@@ -1460,9 +1494,7 @@ mod tests {
     #[test]
     fn pipeline_cond_resolve_array_out_of_bounds() {
         let ctx = ctx_with_fetch();
-        assert!(
-            resolve_template_path("steps.fetch.output.issues[99].title", &ctx).is_none()
-        );
+        assert!(resolve_template_path("steps.fetch.output.issues[99].title", &ctx).is_none());
     }
 
     // ── ExecutionTrace ──────────────────────────────────────────────────
@@ -1604,7 +1636,10 @@ mod tests {
 
     #[test]
     fn pipeline_cond_parse_error_display() {
-        assert_eq!(ConditionParseError::Empty.to_string(), "empty condition expression");
+        assert_eq!(
+            ConditionParseError::Empty.to_string(),
+            "empty condition expression"
+        );
         let e = ConditionParseError::InvalidSyntax("bad".to_owned());
         assert!(e.to_string().contains("bad"));
     }

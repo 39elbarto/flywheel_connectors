@@ -99,10 +99,7 @@ pub enum ResolvedReplay {
     /// Start from the latest position (no replay).
     StartFromLatest,
     /// The requested mode is unsupported; a fallback is provided.
-    Unsupported {
-        reason: String,
-        fallback: Box<Self>,
-    },
+    Unsupported { reason: String, fallback: Box<Self> },
 }
 
 impl fmt::Display for ResolvedReplay {
@@ -228,8 +225,7 @@ impl CheckpointStore {
         let final_path = self.path_for(&checkpoint.connector_id);
         let tmp_path = self.tmp_path_for(&checkpoint.connector_id);
 
-        let json = serde_json::to_string_pretty(checkpoint)
-            .context("serializing checkpoint")?;
+        let json = serde_json::to_string_pretty(checkpoint).context("serializing checkpoint")?;
         fs::write(&tmp_path, json.as_bytes())
             .with_context(|| format!("writing temp checkpoint {}", tmp_path.display()))?;
         fs::rename(&tmp_path, &final_path)
@@ -254,8 +250,9 @@ impl CheckpointStore {
                 Ok(Some(cp))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(anyhow::Error::new(e)
-                .context(format!("reading checkpoint {}", path.display()))),
+            Err(e) => {
+                Err(anyhow::Error::new(e).context(format!("reading checkpoint {}", path.display())))
+            }
         }
     }
 
@@ -272,8 +269,10 @@ impl CheckpointStore {
         match fs::remove_file(&path) {
             Ok(()) => Ok(true),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-            Err(e) => Err(anyhow::Error::new(e)
-                .context(format!("removing checkpoint {}", path.display()))),
+            Err(e) => {
+                Err(anyhow::Error::new(e)
+                    .context(format!("removing checkpoint {}", path.display())))
+            }
         }
     }
 
@@ -690,13 +689,12 @@ mod tests {
         let entries: Vec<_> = fs::read_dir(&dir)
             .unwrap()
             .filter_map(std::result::Result::ok)
-            .filter(|e| {
-                e.path()
-                    .to_string_lossy()
-                    .contains(".tmp.")
-            })
+            .filter(|e| e.path().to_string_lossy().contains(".tmp."))
             .collect();
-        assert!(entries.is_empty(), "temp files should not remain after save");
+        assert!(
+            entries.is_empty(),
+            "temp files should not remain after save"
+        );
     }
 
     #[test]
@@ -915,10 +913,7 @@ mod tests {
         };
         let cap = full_capability("fcp.test");
         let resolved = resolve_replay_mode(&req, &store, &cap).unwrap();
-        assert_eq!(
-            resolved,
-            ResolvedReplay::StartFromTime { from, to: None }
-        );
+        assert_eq!(resolved, ResolvedReplay::StartFromTime { from, to: None });
     }
 
     #[test]
@@ -948,10 +943,7 @@ mod tests {
         let to = "2026-02-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
         let req = ReplayRequest {
             connector_id: "fcp.test".to_owned(),
-            mode: ReplayMode::TimeRange {
-                from,
-                to: Some(to),
-            },
+            mode: ReplayMode::TimeRange { from, to: Some(to) },
         };
         let cap = ReplayCapability {
             connector_id: "fcp.test".to_owned(),
@@ -1180,10 +1172,7 @@ mod tests {
     fn resolved_replay_display_time_range_closed() {
         let from = "2026-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
         let to = "2026-01-02T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
-        let r = ResolvedReplay::StartFromTime {
-            from,
-            to: Some(to),
-        };
+        let r = ResolvedReplay::StartFromTime { from, to: Some(to) };
         let s = r.to_string();
         assert!(s.contains("start from time"));
         assert!(s.contains(" to "));
@@ -1326,10 +1315,7 @@ mod tests {
         let to = "2026-12-31T23:59:59Z".parse::<DateTime<Utc>>().unwrap();
         let req = ReplayRequest {
             connector_id: "fcp.unlimited".to_owned(),
-            mode: ReplayMode::TimeRange {
-                from,
-                to: Some(to),
-            },
+            mode: ReplayMode::TimeRange { from, to: Some(to) },
         };
         let resolved = resolve_replay_mode(&req, &store, &cap).unwrap();
         assert!(matches!(resolved, ResolvedReplay::StartFromTime { .. }));

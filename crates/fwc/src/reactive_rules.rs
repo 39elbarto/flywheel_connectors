@@ -136,11 +136,7 @@ const fn default_true() -> bool {
 
 impl Rule {
     /// Create a new rule.
-    pub fn new(
-        name: impl Into<String>,
-        trigger: EventTrigger,
-        action: RuleAction,
-    ) -> Self {
+    pub fn new(name: impl Into<String>, trigger: EventTrigger, action: RuleAction) -> Self {
         Self {
             name: name.into(),
             description: String::new(),
@@ -293,7 +289,9 @@ impl ThrottleState {
 
     /// Whether throttle limit has been reached.
     pub fn is_throttled(&self, throttle: &RuleThrottle) -> bool {
-        let window = throttle.window_duration().unwrap_or_else(|| Duration::hours(1));
+        let window = throttle
+            .window_duration()
+            .unwrap_or_else(|| Duration::hours(1));
         let count = self.count_in_window(window);
         count >= throttle.max as usize
     }
@@ -490,10 +488,7 @@ pub fn render_template(template: &str, event: &IncomingEvent) -> String {
         let full = &result[start..start + end + 2];
 
         // Check for truncate filter
-        if let Some(inner) = full
-            .strip_prefix("{{")
-            .and_then(|s| s.strip_suffix("}}"))
-        {
+        if let Some(inner) = full.strip_prefix("{{").and_then(|s| s.strip_suffix("}}")) {
             if let Some((field_part, filter_part)) = inner.split_once('|') {
                 let trimmed = field_part.trim();
                 let field = trimmed.strip_prefix("event.data.").unwrap_or(trimmed);
@@ -705,7 +700,12 @@ pub fn format_rule_summary(rule: &Rule) -> String {
     };
     format!(
         "{} [{}] {} → {}.{}{}",
-        rule.name, status, rule.trigger.event_type, rule.action.connector, rule.action.operation, desc
+        rule.name,
+        status,
+        rule.trigger.event_type,
+        rule.action.connector,
+        rule.action.operation,
+        desc
     )
 }
 
@@ -789,7 +789,10 @@ pub fn validate_rule(rule: &Rule) -> Vec<String> {
         errors.push("throttle max must be > 0".to_string());
     }
     if rule.throttle.window_duration().is_none() {
-        errors.push(format!("invalid throttle window: '{}'", rule.throttle.window));
+        errors.push(format!(
+            "invalid throttle window: '{}'",
+            rule.throttle.window
+        ));
     }
 
     errors
@@ -834,8 +837,7 @@ mod tests {
 
     #[test]
     fn trigger_with_match() {
-        let t = EventTrigger::new("slack", "message.new")
-            .with_match("data.text~bug|Bug");
+        let t = EventTrigger::new("slack", "message.new").with_match("data.text~bug|Bug");
         assert_eq!(t.match_expr.as_deref(), Some("data.text~bug|Bug"));
     }
 
@@ -957,7 +959,10 @@ mod tests {
     fn outcome_display() {
         assert_eq!(ExecutionOutcome::Executed.to_string(), "executed");
         assert_eq!(ExecutionOutcome::Throttled.to_string(), "throttled");
-        assert_eq!(ExecutionOutcome::CircuitBroken.to_string(), "circuit_broken");
+        assert_eq!(
+            ExecutionOutcome::CircuitBroken.to_string(),
+            "circuit_broken"
+        );
         assert_eq!(ExecutionOutcome::DryRun.to_string(), "dry_run");
         assert_eq!(ExecutionOutcome::NoMatch.to_string(), "no_match");
         assert_eq!(ExecutionOutcome::Disabled.to_string(), "disabled");
@@ -995,8 +1000,7 @@ mod tests {
     #[test]
     fn trigger_matches_with_expr() {
         let event = sample_event();
-        let trigger =
-            EventTrigger::new("slack", "message.new").with_match("data.text~bug|Bug");
+        let trigger = EventTrigger::new("slack", "message.new").with_match("data.text~bug|Bug");
         assert!(matches_trigger(&event, &trigger));
     }
 
@@ -1011,16 +1015,14 @@ mod tests {
     #[test]
     fn trigger_match_expr_missing_field() {
         let event = sample_event();
-        let trigger =
-            EventTrigger::new("slack", "message.new").with_match("data.missing~test");
+        let trigger = EventTrigger::new("slack", "message.new").with_match("data.missing~test");
         assert!(!matches_trigger(&event, &trigger));
     }
 
     #[test]
     fn trigger_match_expr_invalid_format() {
         let event = sample_event();
-        let trigger =
-            EventTrigger::new("slack", "message.new").with_match("no-tilde-here");
+        let trigger = EventTrigger::new("slack", "message.new").with_match("no-tilde-here");
         assert!(!matches_trigger(&event, &trigger));
     }
 

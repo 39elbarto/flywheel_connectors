@@ -7,12 +7,12 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 // ── Resource URIs ─────────────────────────────────────────────────
 
 /// A registered MCP resource.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct McpResource {
     /// Resource URI (e.g., `"resource://connector/github/health"`).
     pub uri: String,
@@ -47,7 +47,7 @@ impl McpResource {
 }
 
 /// Resource URI pattern for parameterized resources.
-#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResourcePattern {
     /// Per-connector health snapshot.
@@ -129,7 +129,7 @@ impl fmt::Display for ResourcePattern {
 // ── Prompt URIs ───────────────────────────────────────────────────
 
 /// An MCP prompt template.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct McpPrompt {
     /// Prompt URI (e.g., `"prompt://connector/github/how-to-use"`).
     pub uri: String,
@@ -166,7 +166,7 @@ impl McpPrompt {
 }
 
 /// An argument for a prompt.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PromptArgument {
     /// Argument name.
     pub name: String,
@@ -197,7 +197,7 @@ impl PromptArgument {
 }
 
 /// Prompt pattern for parameterized prompts.
-#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PromptPattern {
     /// Usage guide for a connector.
@@ -279,7 +279,7 @@ impl fmt::Display for PromptPattern {
 // ── Resource Content ──────────────────────────────────────────────
 
 /// Content of a resolved resource.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ResourceContent {
     /// The resource URI that was resolved.
     pub uri: String,
@@ -301,7 +301,7 @@ impl ResourceContent {
 }
 
 /// Content of a resolved prompt.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PromptContent {
     /// The prompt URI that was resolved.
     pub uri: String,
@@ -310,7 +310,7 @@ pub struct PromptContent {
 }
 
 /// A single message in a prompt response.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PromptMessage {
     /// Role (user/assistant).
     pub role: String,
@@ -923,5 +923,449 @@ mod tests {
             vec![McpPrompt::new("prompt://test", "Test").with_description("A test prompt")];
         let s = format_prompt_list(&prompts);
         assert!(!s.contains("args"));
+    }
+
+    // ── McpResource serde roundtrip ──────────────────────────────
+
+    #[test]
+    fn resource_serde_roundtrip() {
+        let r = McpResource::new(
+            "resource://connector/github/health",
+            "Health",
+            "application/json",
+        )
+        .with_description("Health check");
+        let json = serde_json::to_string(&r).unwrap();
+        let r2: McpResource = serde_json::from_str(&json).unwrap();
+        assert_eq!(r2.uri, "resource://connector/github/health");
+        assert_eq!(r2.name, "Health");
+        assert_eq!(r2.description, "Health check");
+    }
+
+    #[test]
+    fn resource_empty_description() {
+        let r = McpResource::new("resource://test", "T", "text/plain");
+        assert!(r.description.is_empty());
+    }
+
+    #[test]
+    fn resource_clone() {
+        let r =
+            McpResource::new("resource://test", "T", "application/json").with_description("desc");
+        let r2 = r.clone();
+        assert_eq!(r.uri, r2.uri);
+        assert_eq!(r.description, r2.description);
+    }
+
+    // ── ResourcePattern exhaustive ───────────────────────────────
+
+    #[test]
+    fn resource_pattern_all_descriptions_non_empty() {
+        for p in &[
+            ResourcePattern::ConnectorHealth,
+            ResourcePattern::ConnectorRateLimits,
+            ResourcePattern::ConnectorOperations,
+            ResourcePattern::ConnectorHistory,
+            ResourcePattern::ConnectorsStatus,
+        ] {
+            assert!(!p.description().is_empty());
+            assert!(!p.name().is_empty());
+        }
+    }
+
+    #[test]
+    fn resource_pattern_all_uris_with_connector() {
+        let patterns = [
+            ResourcePattern::ConnectorHealth,
+            ResourcePattern::ConnectorRateLimits,
+            ResourcePattern::ConnectorOperations,
+            ResourcePattern::ConnectorHistory,
+        ];
+        for p in &patterns {
+            let uri = p.uri(Some("slack"));
+            assert!(uri.starts_with("resource://connector/slack/"));
+        }
+    }
+
+    #[test]
+    fn resource_pattern_mime_type() {
+        assert_eq!(ResourcePattern::mime_type(), "application/json");
+    }
+
+    #[test]
+    fn resource_pattern_serde_roundtrip() {
+        for p in &[
+            ResourcePattern::ConnectorHealth,
+            ResourcePattern::ConnectorRateLimits,
+            ResourcePattern::ConnectorOperations,
+            ResourcePattern::ConnectorHistory,
+            ResourcePattern::ConnectorsStatus,
+        ] {
+            let json = serde_json::to_string(p).unwrap();
+            let p2: ResourcePattern = serde_json::from_str(&json).unwrap();
+            assert_eq!(*p, p2);
+        }
+    }
+
+    #[test]
+    fn resource_pattern_display_all() {
+        assert_eq!(
+            ResourcePattern::ConnectorRateLimits.to_string(),
+            "Rate Limit Status"
+        );
+        assert_eq!(
+            ResourcePattern::ConnectorOperations.to_string(),
+            "Operations List"
+        );
+        assert_eq!(
+            ResourcePattern::ConnectorHistory.to_string(),
+            "Operation History"
+        );
+    }
+
+    #[test]
+    fn resource_pattern_connectors_status_ignores_id() {
+        let uri1 = ResourcePattern::ConnectorsStatus.uri(None);
+        let uri2 = ResourcePattern::ConnectorsStatus.uri(Some("github"));
+        assert_eq!(uri1, uri2);
+    }
+
+    // ── McpPrompt additional ─────────────────────────────────────
+
+    #[test]
+    fn prompt_serde_roundtrip() {
+        let p = McpPrompt::new("prompt://test", "Test")
+            .with_description("A prompt")
+            .with_argument(PromptArgument::required("x", "X arg"));
+        let json = serde_json::to_string(&p).unwrap();
+        let p2: McpPrompt = serde_json::from_str(&json).unwrap();
+        assert_eq!(p2.uri, "prompt://test");
+        assert_eq!(p2.arguments.len(), 1);
+        assert!(p2.arguments[0].required);
+    }
+
+    #[test]
+    fn prompt_empty_description() {
+        let p = McpPrompt::new("prompt://test", "T");
+        assert!(p.description.is_empty());
+    }
+
+    #[test]
+    fn prompt_multiple_arguments() {
+        let p = McpPrompt::new("prompt://test", "T")
+            .with_argument(PromptArgument::required("a", "A"))
+            .with_argument(PromptArgument::required("b", "B"))
+            .with_argument(PromptArgument::optional("c", "C"));
+        assert_eq!(p.arguments.len(), 3);
+        assert!(p.arguments[0].required);
+        assert!(!p.arguments[2].required);
+    }
+
+    // ── PromptPattern additional ─────────────────────────────────
+
+    #[test]
+    fn prompt_pattern_operation_example_template() {
+        let uri = PromptPattern::OperationExample.uri("github", None);
+        assert!(uri.contains("{op}"));
+    }
+
+    #[test]
+    fn prompt_pattern_all_descriptions_non_empty() {
+        for p in &[
+            PromptPattern::HowToUse,
+            PromptPattern::OperationExample,
+            PromptPattern::Troubleshoot,
+        ] {
+            assert!(!p.description().is_empty());
+            assert!(!p.name().is_empty());
+        }
+    }
+
+    #[test]
+    fn prompt_pattern_to_prompt_operation_example() {
+        let p = PromptPattern::OperationExample.to_prompt("github", Some("create_issue"));
+        assert!(p.uri.contains("create_issue"));
+        assert!(!p.arguments.is_empty());
+    }
+
+    #[test]
+    fn prompt_pattern_to_prompt_troubleshoot() {
+        let p = PromptPattern::Troubleshoot.to_prompt("slack", None);
+        assert!(p.uri.contains("slack/troubleshoot"));
+        assert!(!p.arguments.is_empty());
+    }
+
+    #[test]
+    fn prompt_pattern_display_all() {
+        assert_eq!(
+            PromptPattern::OperationExample.to_string(),
+            "Operation Example"
+        );
+        assert_eq!(
+            PromptPattern::Troubleshoot.to_string(),
+            "Troubleshooting Guide"
+        );
+    }
+
+    #[test]
+    fn prompt_pattern_serde_roundtrip() {
+        for p in &[
+            PromptPattern::HowToUse,
+            PromptPattern::OperationExample,
+            PromptPattern::Troubleshoot,
+        ] {
+            let json = serde_json::to_string(p).unwrap();
+            let p2: PromptPattern = serde_json::from_str(&json).unwrap();
+            assert_eq!(*p, p2);
+        }
+    }
+
+    // ── PromptArgument ───────────────────────────────────────────
+
+    #[test]
+    fn prompt_argument_serde() {
+        let arg = PromptArgument::required("focus", "Focus area");
+        let json = serde_json::to_value(&arg).unwrap();
+        assert_eq!(json["name"], "focus");
+        assert!(json["required"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn prompt_argument_optional_serde() {
+        let arg = PromptArgument::optional("format", "Output format");
+        let json = serde_json::to_value(&arg).unwrap();
+        assert!(!json["required"].as_bool().unwrap());
+    }
+
+    // ── ResourceContent additional ───────────────────────────────
+
+    #[test]
+    fn resource_content_serde_roundtrip() {
+        let c = ResourceContent::new("resource://test", serde_json::json!({"data": [1, 2, 3]}));
+        let json = serde_json::to_string(&c).unwrap();
+        let c2: ResourceContent = serde_json::from_str(&json).unwrap();
+        assert_eq!(c2.uri, "resource://test");
+        assert_eq!(c2.mime_type, "application/json");
+        assert_eq!(c2.content["data"][0], 1);
+    }
+
+    #[test]
+    fn resource_content_null_value() {
+        let c = ResourceContent::new("resource://empty", serde_json::Value::Null);
+        assert!(c.content.is_null());
+    }
+
+    // ── PromptContent additional ─────────────────────────────────
+
+    #[test]
+    fn prompt_content_serde_roundtrip() {
+        let c = PromptContent::new("prompt://test")
+            .with_message(PromptMessage::user("Q"))
+            .with_message(PromptMessage::assistant("A"));
+        let json = serde_json::to_string(&c).unwrap();
+        let c2: PromptContent = serde_json::from_str(&json).unwrap();
+        assert_eq!(c2.uri, "prompt://test");
+        assert_eq!(c2.messages.len(), 2);
+    }
+
+    #[test]
+    fn prompt_content_empty() {
+        let c = PromptContent::new("prompt://empty");
+        assert!(c.messages.is_empty());
+    }
+
+    // ── McpResourceRegistry additional ───────────────────────────
+
+    #[test]
+    fn registry_list_resources() {
+        let mut reg = McpResourceRegistry::new();
+        reg.register_connector("github");
+        let list = reg.list_resources();
+        assert_eq!(list.len(), 4);
+    }
+
+    #[test]
+    fn registry_list_prompts() {
+        let mut reg = McpResourceRegistry::new();
+        reg.register_connector("github");
+        let list = reg.list_prompts();
+        assert_eq!(list.len(), 2);
+    }
+
+    #[test]
+    fn registry_find_resource_not_found() {
+        let reg = McpResourceRegistry::new();
+        assert!(reg.find_resource("resource://nonexistent").is_none());
+    }
+
+    #[test]
+    fn registry_find_prompt_not_found() {
+        let reg = McpResourceRegistry::new();
+        assert!(reg.find_prompt("prompt://nonexistent").is_none());
+    }
+
+    #[test]
+    fn registry_register_many_connectors() {
+        let mut reg = McpResourceRegistry::new();
+        for name in &["github", "slack", "jira", "linear", "notion"] {
+            reg.register_connector(name);
+        }
+        assert_eq!(reg.resource_count(), 20); // 4 per connector * 5
+        assert_eq!(reg.prompt_count(), 10); // 2 per connector * 5
+    }
+
+    #[test]
+    fn registry_global_plus_connector() {
+        let mut reg = McpResourceRegistry::new();
+        reg.register_global_resources();
+        reg.register_connector("github");
+        assert_eq!(reg.resource_count(), 5); // 1 global + 4 connector
+    }
+
+    #[test]
+    fn registry_multiple_operation_prompts() {
+        let mut reg = McpResourceRegistry::new();
+        reg.register_operation_prompt("github", "create_issue");
+        reg.register_operation_prompt("github", "list_repos");
+        assert_eq!(reg.prompt_count(), 2);
+        assert!(
+            reg.find_prompt("prompt://connector/github/op/list_repos/example")
+                .is_some()
+        );
+    }
+
+    // ── parse_uri edge cases ─────────────────────────────────────
+
+    #[test]
+    fn parse_resource_only_connector_no_type() {
+        let parsed = parse_uri("resource://connector/github");
+        assert!(matches!(parsed, ParsedUri::Unknown(_)));
+    }
+
+    #[test]
+    fn parse_prompt_only_connector() {
+        let parsed = parse_uri("prompt://connector/github");
+        assert!(matches!(parsed, ParsedUri::Unknown(_)));
+    }
+
+    #[test]
+    fn parse_empty_string() {
+        let parsed = parse_uri("");
+        assert!(matches!(parsed, ParsedUri::Unknown(_)));
+    }
+
+    #[test]
+    fn parse_resource_with_nested_path() {
+        let parsed = parse_uri("resource://connector/github/nested/path");
+        // splitn(2, '/') → ["github", "nested/path"]
+        assert_eq!(
+            parsed,
+            ParsedUri::ConnectorResource {
+                connector_id: "github".to_string(),
+                resource_type: "nested/path".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_prompt_three_segments() {
+        // 3 segments but not matching op/X/example
+        let parsed = parse_uri("prompt://connector/github/extra/segment");
+        assert!(matches!(parsed, ParsedUri::Unknown(_)));
+    }
+
+    #[test]
+    fn parse_prompt_four_segments_wrong_pattern() {
+        let parsed = parse_uri("prompt://connector/github/notop/create_issue/example");
+        // parts[1] != "op" → doesn't match
+        assert!(matches!(parsed, ParsedUri::Unknown(_)));
+    }
+
+    #[test]
+    fn parse_prompt_four_segments_wrong_suffix() {
+        let parsed = parse_uri("prompt://connector/github/op/create_issue/notexample");
+        // parts[3] != "example" → doesn't match
+        assert!(matches!(parsed, ParsedUri::Unknown(_)));
+    }
+
+    #[test]
+    fn parse_uri_special_chars_in_connector() {
+        let parsed = parse_uri("resource://connector/my-connector_v2/health");
+        assert_eq!(
+            parsed,
+            ParsedUri::ConnectorResource {
+                connector_id: "my-connector_v2".to_string(),
+                resource_type: "health".to_string(),
+            }
+        );
+    }
+
+    // ── generate helpers additional ──────────────────────────────
+
+    #[test]
+    fn usage_guide_empty_ops() {
+        let ops: Vec<String> = vec![];
+        let args = BTreeMap::new();
+        let content = generate_usage_guide("test", &ops, &args);
+        assert_eq!(content.messages.len(), 2);
+        assert!(content.messages[1].content.contains("test"));
+    }
+
+    #[test]
+    fn usage_guide_many_ops() {
+        let ops: Vec<String> = (0..20).map(|i| format!("op_{i}")).collect();
+        let args = BTreeMap::new();
+        let content = generate_usage_guide("connector", &ops, &args);
+        assert!(content.messages[1].content.contains("op_0"));
+        assert!(content.messages[1].content.contains("op_19"));
+    }
+
+    #[test]
+    fn troubleshoot_guide_contains_all_steps() {
+        let args = BTreeMap::new();
+        let content = generate_troubleshoot_guide("slack", &args);
+        let text = &content.messages[1].content;
+        assert!(text.contains("auth status slack"));
+        assert!(text.contains("doctor slack"));
+        assert!(text.contains("rate-limit slack"));
+        assert!(text.contains("logs slack"));
+    }
+
+    // ── format helpers additional ────────────────────────────────
+
+    #[test]
+    fn format_resources_empty() {
+        let s = format_resource_list(&[]);
+        assert!(s.contains("Resources (0)"));
+    }
+
+    #[test]
+    fn format_prompts_empty() {
+        let s = format_prompt_list(&[]);
+        assert!(s.contains("Prompts (0)"));
+    }
+
+    #[test]
+    fn format_prompts_multiple_args() {
+        let prompts = vec![
+            McpPrompt::new("prompt://test", "Test")
+                .with_description("desc")
+                .with_argument(PromptArgument::required("a", "A"))
+                .with_argument(PromptArgument::optional("b", "B")),
+        ];
+        let s = format_prompt_list(&prompts);
+        assert!(s.contains("[args: a, b]"));
+    }
+
+    #[test]
+    fn format_resources_multiple() {
+        let resources = vec![
+            McpResource::new("resource://a", "A", "application/json").with_description("First"),
+            McpResource::new("resource://b", "B", "application/json").with_description("Second"),
+        ];
+        let s = format_resource_list(&resources);
+        assert!(s.contains("Resources (2)"));
+        assert!(s.contains("resource://a"));
+        assert!(s.contains("resource://b"));
     }
 }

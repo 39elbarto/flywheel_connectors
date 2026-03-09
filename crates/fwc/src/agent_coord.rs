@@ -584,7 +584,7 @@ mod tests {
 
     #[test]
     fn hub_announce_and_list() {
-        let hub = CoordinationHub::new();
+        let mut hub = CoordinationHub::new();
         hub.announce(UsageAnnouncement::new(agent("A"), "github", "reading"));
         hub.announce(UsageAnnouncement::new(agent("B"), "slack", "posting"));
         assert_eq!(hub.active_announcements().len(), 2);
@@ -892,5 +892,471 @@ mod tests {
         let purged = hub.purge_reservations();
         assert_eq!(purged, 1);
         assert_eq!(hub.reservation_count(), 1);
+    }
+
+    // ── AgentId serde roundtrips ─────────────────────────────────
+
+    #[test]
+    fn agent_id_serde_roundtrip() {
+        let a = agent("GreenBasin");
+        let json = serde_json::to_string(&a).unwrap();
+        let a2: AgentId = serde_json::from_str(&json).unwrap();
+        assert_eq!(a, a2);
+    }
+
+    #[test]
+    fn agent_id_serde_json_value() {
+        let a = agent("NavyDeer");
+        let val = serde_json::to_value(&a).unwrap();
+        assert_eq!(val, json!("NavyDeer"));
+    }
+
+    #[test]
+    fn agent_id_hash() {
+        let mut set = std::collections::HashSet::new();
+        set.insert(agent("A"));
+        set.insert(agent("A"));
+        set.insert(agent("B"));
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn agent_id_clone() {
+        let a = agent("X");
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn agent_id_empty_name() {
+        let a = agent("");
+        assert_eq!(a.as_str(), "");
+        assert_eq!(a.to_string(), "");
+    }
+
+    // ── UsageAnnouncement edge cases ─────────────────────────────
+
+    #[test]
+    fn announcement_serde_roundtrip_with_operation() {
+        let ann = UsageAnnouncement::new(agent("A"), "github", "test")
+            .with_operation("list_issues")
+            .with_duration(600);
+        let json = serde_json::to_string(&ann).unwrap();
+        let ann2: UsageAnnouncement = serde_json::from_str(&json).unwrap();
+        assert_eq!(ann2.operation.as_deref(), Some("list_issues"));
+        assert_eq!(ann2.expected_duration, 600);
+        assert_eq!(ann2.connector, "github");
+        assert_eq!(ann2.agent, agent("A"));
+    }
+
+    #[test]
+    fn announcement_builder_chaining() {
+        let ann = UsageAnnouncement::new(agent("A"), "slack", "posting")
+            .with_operation("send_message")
+            .with_duration(120);
+        assert_eq!(ann.connector, "slack");
+        assert_eq!(ann.operation.as_deref(), Some("send_message"));
+        assert_eq!(ann.expected_duration, 120);
+    }
+
+    #[test]
+    fn announcement_expired_far_past() {
+        let mut ann = UsageAnnouncement::new(agent("A"), "github", "test");
+        ann.announced_at = 0;
+        ann.expected_duration = 1;
+        assert!(ann.is_expired());
+    }
+
+    #[test]
+    fn announcement_indefinite_never_expires() {
+        let mut ann = UsageAnnouncement::new(agent("A"), "github", "test");
+        ann.announced_at = 0;
+        ann.expected_duration = 0;
+        assert!(!ann.is_expired());
+    }
+
+    // ── ResourceReservation edge cases ───────────────────────────
+
+    #[test]
+    fn reservation_serde_roundtrip_full() {
+        let res = ResourceReservation {
+            id: "res_42".into(),
+            agent: agent("SunnyMoose"),
+            connector: "slack".into(),
+            resource: "channel:general".into(),
+            reserved_at: 1_000_000,
+            ttl_seconds: 7200,
+            exclusive: false,
+        };
+        let json = serde_json::to_string(&res).unwrap();
+        let res2: ResourceReservation = serde_json::from_str(&json).unwrap();
+        assert_eq!(res2.id, "res_42");
+        assert_eq!(res2.agent, agent("SunnyMoose"));
+        assert!(!res2.exclusive);
+        assert_eq!(res2.ttl_seconds, 7200);
+    }
+
+    #[test]
+    fn reservation_expired_far_past() {
+        let res = ResourceReservation {
+            id: "res_1".into(),
+            agent: agent("A"),
+            connector: "github".into(),
+            resource: "repo:x".into(),
+            reserved_at: 0,
+            ttl_seconds: 1,
+            exclusive: true,
+        };
+        assert!(res.is_expired());
+        assert_eq!(res.remaining_seconds(), 0);
+    }
+
+    #[test]
+    fn reservation_remaining_saturates_to_zero() {
+        let res = ResourceReservation {
+            id: "res_1".into(),
+            agent: agent("A"),
+            connector: "github".into(),
+            resource: "repo:x".into(),
+            reserved_at: 1,
+            ttl_seconds: 10,
+            exclusive: true,
+        };
+        // Far in the past — remaining should saturate to 0.
+        assert_eq!(res.remaining_seconds(), 0);
+    }
+
+    // ── MessageKind serde ────────────────────────────────────────
+
+    #[test]
+    fn message_kind_serde_roundtrip() {
+        for kind in &[
+            MessageKind::Request,
+            MessageKind::Response,
+            MessageKind::Info,
+            MessageKind::Warning,
+            MessageKind::Release,
+        ] {
+            let json = serde_json::to_string(kind).unwrap();
+            let kind2: MessageKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(*kind, kind2);
+        }
+    }
+
+    #[test]
+    fn message_kind_snake_case_serialization() {
+        let json = serde_json::to_value(MessageKind::Request).unwrap();
+        assert_eq!(json, json!("request"));
+        let json = serde_json::to_value(MessageKind::Release).unwrap();
+        assert_eq!(json, json!("release"));
+    }
+
+    // ── AgentMessage edge cases ──────────────────────────────────
+
+    #[test]
+    fn message_serde_roundtrip_with_complex_payload() {
+        let msg = AgentMessage {
+            from: agent("A"),
+            to: agent("B"),
+            kind: MessageKind::Info,
+            payload: json!({"nested": {"array": [1, 2, 3]}, "flag": true}),
+            sent_at: 12345,
+            read: true,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let msg2: AgentMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(msg2.to, agent("B"));
+        assert!(msg2.read);
+        assert_eq!(msg2.payload["nested"]["array"][1], 2);
+    }
+
+    #[test]
+    fn message_serde_null_payload() {
+        let msg = AgentMessage {
+            from: agent("X"),
+            to: agent("Y"),
+            kind: MessageKind::Release,
+            payload: serde_json::Value::Null,
+            sent_at: 0,
+            read: false,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let msg2: AgentMessage = serde_json::from_str(&json).unwrap();
+        assert!(msg2.payload.is_null());
+    }
+
+    // ── CoordinationHub advanced ─────────────────────────────────
+
+    #[test]
+    fn hub_default_is_empty() {
+        let hub = CoordinationHub::default();
+        assert_eq!(hub.announcement_count(), 0);
+        assert_eq!(hub.reservation_count(), 0);
+    }
+
+    #[test]
+    fn hub_reservation_id_increments() {
+        let mut hub = CoordinationHub::new();
+        let id1 = hub.reserve(agent("A"), "g", "r1", 300, false).unwrap();
+        let id2 = hub.reserve(agent("A"), "g", "r2", 300, false).unwrap();
+        assert_ne!(id1, id2);
+        assert!(id1.starts_with("res_"));
+        assert!(id2.starts_with("res_"));
+    }
+
+    #[test]
+    fn hub_reservations_for_empty_connector() {
+        let hub = CoordinationHub::new();
+        assert!(hub.reservations_for("nonexistent").is_empty());
+    }
+
+    #[test]
+    fn hub_reservations_for_multiple_connectors() {
+        let mut hub = CoordinationHub::new();
+        hub.reserve(agent("A"), "github", "r1", 300, false).unwrap();
+        hub.reserve(agent("B"), "github", "r2", 300, false).unwrap();
+        hub.reserve(agent("C"), "slack", "r3", 300, false).unwrap();
+        assert_eq!(hub.reservations_for("github").len(), 2);
+        assert_eq!(hub.reservations_for("slack").len(), 1);
+    }
+
+    #[test]
+    fn hub_exclusive_conflict_same_agent_allowed() {
+        // Same agent can hold exclusive reservations on different resources.
+        let mut hub = CoordinationHub::new();
+        hub.reserve(agent("A"), "github", "r1", 300, true).unwrap();
+        assert!(hub.reserve(agent("A"), "github", "r2", 300, true).is_ok());
+    }
+
+    #[test]
+    fn hub_exclusive_conflict_message_content() {
+        let mut hub = CoordinationHub::new();
+        hub.reserve(agent("Alice"), "github", "repo:x", 300, true)
+            .unwrap();
+        let err = hub
+            .reserve(agent("Bob"), "github", "repo:x", 300, true)
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("repo:x"));
+        assert!(msg.contains("Alice"));
+    }
+
+    #[test]
+    fn hub_extend_reservation_cumulative() {
+        let mut hub = CoordinationHub::new();
+        let id = hub.reserve(agent("A"), "g", "r", 100, true).unwrap();
+        hub.extend_reservation(&id, 50).unwrap();
+        hub.extend_reservation(&id, 50).unwrap();
+        let reservations = hub.reservations_for("g");
+        assert_eq!(reservations[0].ttl_seconds, 200);
+    }
+
+    #[test]
+    fn hub_release_returns_correct_reservation() {
+        let mut hub = CoordinationHub::new();
+        let id1 = hub.reserve(agent("A"), "github", "r1", 300, true).unwrap();
+        let _id2 = hub.reserve(agent("B"), "slack", "r2", 300, true).unwrap();
+        let released = hub.release(&id1).unwrap();
+        assert_eq!(released.connector, "github");
+        assert_eq!(released.resource, "r1");
+        assert_eq!(hub.reservation_count(), 1);
+    }
+
+    // ── Messaging advanced ───────────────────────────────────────
+
+    #[test]
+    fn hub_inbox_returns_all_including_read() {
+        let mut hub = CoordinationHub::new();
+        hub.send(agent("A"), &agent("B"), MessageKind::Info, json!("msg1"));
+        let inbox_view = hub.inbox(&agent("B"));
+        assert_eq!(inbox_view.len(), 1);
+        // inbox() doesn't consume, read_inbox does
+        let inbox_view2 = hub.inbox(&agent("B"));
+        assert_eq!(inbox_view2.len(), 1);
+    }
+
+    #[test]
+    fn hub_read_inbox_for_nonexistent_agent() {
+        let mut hub = CoordinationHub::new();
+        let msgs = hub.read_inbox(&agent("nobody"));
+        assert!(msgs.is_empty());
+    }
+
+    #[test]
+    fn hub_messages_between_multiple_agents() {
+        let mut hub = CoordinationHub::new();
+        hub.send(agent("A"), &agent("B"), MessageKind::Request, json!("1"));
+        hub.send(agent("A"), &agent("C"), MessageKind::Info, json!("2"));
+        hub.send(agent("B"), &agent("C"), MessageKind::Warning, json!("3"));
+        assert_eq!(hub.unread_count(&agent("B")), 1);
+        assert_eq!(hub.unread_count(&agent("C")), 2);
+        assert_eq!(hub.unread_count(&agent("A")), 0);
+    }
+
+    // ── Conflict detection advanced ──────────────────────────────
+
+    #[test]
+    fn conflict_check_warning_multiple_agents() {
+        let mut hub = CoordinationHub::new();
+        hub.announce(UsageAnnouncement::new(agent("B"), "github", "reading"));
+        hub.announce(UsageAnnouncement::new(agent("C"), "github", "writing"));
+        let result = hub.check_conflict(&agent("A"), "github", None);
+        match result {
+            ConflictCheck::Warning { warnings } => assert_eq!(warnings.len(), 2),
+            other => panic!("Expected Warning, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn conflict_check_different_connector_clear() {
+        let mut hub = CoordinationHub::new();
+        hub.announce(UsageAnnouncement::new(agent("B"), "github", "reading"));
+        assert_eq!(
+            hub.check_conflict(&agent("A"), "slack", None),
+            ConflictCheck::Clear
+        );
+    }
+
+    #[test]
+    fn conflict_check_non_exclusive_reservation_not_blocked() {
+        let mut hub = CoordinationHub::new();
+        hub.reserve(agent("B"), "github", "repo:x", 300, false)
+            .unwrap();
+        let result = hub.check_conflict(&agent("A"), "github", Some("repo:x"));
+        // Non-exclusive reservations don't block
+        assert!(matches!(result, ConflictCheck::Clear));
+    }
+
+    #[test]
+    fn conflict_check_expired_announcement_ignored() {
+        let mut hub = CoordinationHub::new();
+        let mut ann = UsageAnnouncement::new(agent("B"), "github", "old work");
+        ann.announced_at = 1;
+        ann.expected_duration = 1;
+        hub.announce(ann);
+        assert_eq!(
+            hub.check_conflict(&agent("A"), "github", None),
+            ConflictCheck::Clear
+        );
+    }
+
+    #[test]
+    fn conflict_check_expired_reservation_not_blocked() {
+        let mut hub = CoordinationHub::new();
+        hub.reservations.insert(
+            "expired_res".into(),
+            ResourceReservation {
+                id: "expired_res".into(),
+                agent: agent("B"),
+                connector: "github".into(),
+                resource: "repo:x".into(),
+                reserved_at: 1,
+                ttl_seconds: 1,
+                exclusive: true,
+            },
+        );
+        let result = hub.check_conflict(&agent("A"), "github", Some("repo:x"));
+        assert_eq!(result, ConflictCheck::Clear);
+    }
+
+    #[test]
+    fn conflict_check_no_resource_not_blocked_by_reservation() {
+        let mut hub = CoordinationHub::new();
+        hub.reserve(agent("B"), "github", "repo:x", 300, true)
+            .unwrap();
+        // Checking without a specific resource should not trigger reservation block.
+        let result = hub.check_conflict(&agent("A"), "github", None);
+        assert!(matches!(result, ConflictCheck::Clear));
+    }
+
+    // ── ConflictCheck display edge cases ─────────────────────────
+
+    #[test]
+    fn conflict_check_warning_display_joins() {
+        let check = ConflictCheck::Warning {
+            warnings: vec!["w1".into(), "w2".into()],
+        };
+        let s = check.to_string();
+        assert!(s.contains("w1; w2"));
+    }
+
+    #[test]
+    fn conflict_check_blocked_display() {
+        let check = ConflictCheck::Blocked {
+            reason: "exclusive lock".into(),
+        };
+        assert_eq!(check.to_string(), "blocked: exclusive lock");
+    }
+
+    // ── CoordError ───────────────────────────────────────────────
+
+    #[test]
+    fn coord_error_is_std_error() {
+        let err: Box<dyn std::error::Error> = Box::new(CoordError::ReservationNotFound("x".into()));
+        assert!(err.to_string().contains("not found"));
+    }
+
+    #[test]
+    fn coord_error_equality() {
+        let e1 = CoordError::ReservationNotFound("x".into());
+        let e2 = CoordError::ReservationNotFound("x".into());
+        assert_eq!(e1, e2);
+        let e3 = CoordError::ReservationNotFound("y".into());
+        assert_ne!(e1, e3);
+    }
+
+    #[test]
+    fn coord_error_resource_conflict_fields() {
+        let e = CoordError::ResourceConflict {
+            resource: "repo:hello".into(),
+            held_by: "AgentZ".into(),
+        };
+        let msg = e.to_string();
+        assert!(msg.contains("repo:hello"));
+        assert!(msg.contains("AgentZ"));
+    }
+
+    // ── Purge edge cases ─────────────────────────────────────────
+
+    #[test]
+    fn hub_purge_announcements_all_active() {
+        let mut hub = CoordinationHub::new();
+        hub.announce(UsageAnnouncement::new(agent("A"), "github", "active"));
+        hub.announce(UsageAnnouncement::new(agent("B"), "slack", "active"));
+        let purged = hub.purge_announcements();
+        assert_eq!(purged, 0);
+        assert_eq!(hub.announcement_count(), 2);
+    }
+
+    #[test]
+    fn hub_purge_reservations_none_expired() {
+        let mut hub = CoordinationHub::new();
+        hub.reserve(agent("A"), "github", "r1", 3600, true).unwrap();
+        let purged = hub.purge_reservations();
+        assert_eq!(purged, 0);
+    }
+
+    #[test]
+    fn hub_purge_announcements_empty() {
+        let mut hub = CoordinationHub::new();
+        assert_eq!(hub.purge_announcements(), 0);
+    }
+
+    #[test]
+    fn hub_purge_reservations_empty() {
+        let mut hub = CoordinationHub::new();
+        assert_eq!(hub.purge_reservations(), 0);
+    }
+
+    // ── Hub clone ────────────────────────────────────────────────
+
+    #[test]
+    fn hub_clone_is_independent() {
+        let mut hub = CoordinationHub::new();
+        hub.announce(UsageAnnouncement::new(agent("A"), "github", "test"));
+        let hub2 = hub.clone();
+        hub.announce(UsageAnnouncement::new(agent("B"), "slack", "test2"));
+        assert_eq!(hub.announcement_count(), 2);
+        assert_eq!(hub2.announcement_count(), 1);
     }
 }

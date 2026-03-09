@@ -117,7 +117,7 @@ impl CapabilityToken {
 // ── Tool Entry ────────────────────────────────────────────────────
 
 /// A tool entry in the MCP server with zone metadata.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ZoneScopedTool {
     /// Tool name (e.g., `"github.create_issue"`).
     pub name: String,
@@ -167,7 +167,7 @@ impl ZoneScopedTool {
 // ── Zone Violation ────────────────────────────────────────────────
 
 /// Reason for a zone access violation.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ViolationReason {
     /// Connector not authorized in this zone.
@@ -195,7 +195,7 @@ impl fmt::Display for ViolationReason {
 }
 
 /// Structured error for zone violations (MCP error response).
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ZoneViolation {
     /// Tool that was requested.
     pub tool: String,
@@ -883,5 +883,410 @@ mod tests {
     fn parse_zone_with_whitespace() {
         let z = parse_zone("  z:work  ");
         assert_eq!(z.as_str(), "z:work");
+    }
+
+    // ── ZoneId edge cases ────────────────────────────────────────
+
+    #[test]
+    fn zone_id_empty() {
+        let z = ZoneId::new("");
+        assert_eq!(z.as_str(), "");
+        assert!(!z.is_public());
+        assert!(!z.is_well_known());
+    }
+
+    #[test]
+    fn zone_id_no_prefix() {
+        let z = ZoneId::new("custom_zone");
+        assert!(!z.is_well_known());
+        assert!(!z.is_public());
+        assert_eq!(z.to_string(), "custom_zone");
+    }
+
+    #[test]
+    fn zone_id_colon_only() {
+        let z = ZoneId::new("z:");
+        assert!(z.is_well_known());
+        assert!(!z.is_public());
+    }
+
+    #[test]
+    fn zone_id_display() {
+        let z = ZoneId::new("z:staging");
+        assert_eq!(format!("{z}"), "z:staging");
+    }
+
+    #[test]
+    fn zone_id_hash_set() {
+        let mut set = BTreeSet::new();
+        set.insert(ZoneId::new("z:a"));
+        set.insert(ZoneId::new("z:a"));
+        set.insert(ZoneId::new("z:b"));
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn zone_id_serde_roundtrip() {
+        let z = ZoneId::new("z:test");
+        let json = serde_json::to_string(&z).unwrap();
+        let z2: ZoneId = serde_json::from_str(&json).unwrap();
+        assert_eq!(z, z2);
+    }
+
+    #[test]
+    fn zone_id_from_str_impl() {
+        let z: ZoneId = "z:derived".into();
+        assert_eq!(z, ZoneId::new("z:derived"));
+    }
+
+    #[test]
+    fn zone_id_clone() {
+        let z = ZoneId::new("z:work");
+        let z2 = z.clone();
+        assert_eq!(z, z2);
+    }
+
+    // ── CapabilityToken edge cases ───────────────────────────────
+
+    #[test]
+    fn token_expiry_exact_boundary() {
+        let t = CapabilityToken::new(zone_work(), "agent").with_expiry(100);
+        assert!(!t.is_expired(100)); // now == expires_at → NOT expired
+        assert!(t.is_expired(101)); // now > expires_at → expired
+    }
+
+    #[test]
+    fn token_expiry_zero_means_no_expiry() {
+        let t = CapabilityToken::new(zone_work(), "agent").with_expiry(0);
+        assert!(!t.is_expired(0));
+        assert!(!t.is_expired(u64::MAX));
+    }
+
+    #[test]
+    fn token_multiple_connectors() {
+        let t = CapabilityToken::new(zone_work(), "agent")
+            .with_connector("github")
+            .with_connector("slack")
+            .with_connector("jira");
+        assert!(t.allows_connector("github"));
+        assert!(t.allows_connector("slack"));
+        assert!(t.allows_connector("jira"));
+        assert!(!t.allows_connector("linear"));
+    }
+
+    #[test]
+    fn token_multiple_denied_operations() {
+        let t = CapabilityToken::new(zone_work(), "agent")
+            .with_denied_operation("delete_repo")
+            .with_denied_operation("delete_org");
+        assert!(t.is_operation_denied("delete_repo"));
+        assert!(t.is_operation_denied("delete_org"));
+        assert!(!t.is_operation_denied("create_issue"));
+    }
+
+    #[test]
+    fn token_serde_roundtrip_full() {
+        let t = CapabilityToken::new(zone_work(), "agent-42")
+            .with_connector("github")
+            .with_denied_operation("delete")
+            .with_expiry(99999);
+        let json = serde_json::to_string(&t).unwrap();
+        let t2: CapabilityToken = serde_json::from_str(&json).unwrap();
+        assert_eq!(t2.zone, zone_work());
+        assert_eq!(t2.principal, "agent-42");
+        assert!(t2.allows_connector("github"));
+        assert!(!t2.allows_connector("slack"));
+        assert!(t2.is_operation_denied("delete"));
+        assert_eq!(t2.expires_at, 99999);
+    }
+
+    #[test]
+    fn token_clone() {
+        let t = CapabilityToken::new(zone_work(), "agent").with_connector("github");
+        let t2 = t.clone();
+        assert_eq!(t.zone, t2.zone);
+        assert!(t2.allows_connector("github"));
+    }
+
+    // ── ZoneScopedTool edge cases ────────────────────────────────
+
+    #[test]
+    fn tool_name_format() {
+        let t = ZoneScopedTool::new("my-connector", "some_operation");
+        assert_eq!(t.name, "my-connector.some_operation");
+    }
+
+    #[test]
+    fn tool_no_zones() {
+        let t = ZoneScopedTool::new("github", "create_issue");
+        assert!(t.zones.is_empty());
+        assert!(!t.available_in(&zone_work()));
+    }
+
+    #[test]
+    fn tool_duplicate_zone_no_effect() {
+        let t = ZoneScopedTool::new("github", "create_issue")
+            .with_zone(zone_work())
+            .with_zone(zone_work());
+        assert_eq!(t.zones.len(), 1);
+    }
+
+    #[test]
+    fn tool_serde_roundtrip() {
+        let t = ZoneScopedTool::new("github", "create_issue")
+            .with_zone(zone_work())
+            .with_description("Create issue");
+        let json = serde_json::to_string(&t).unwrap();
+        let t2: ZoneScopedTool = serde_json::from_str(&json).unwrap();
+        assert_eq!(t2.name, "github.create_issue");
+        assert_eq!(t2.description, "Create issue");
+    }
+
+    // ── ViolationReason additional ───────────────────────────────
+
+    #[test]
+    fn violation_reason_display_unknown_zone() {
+        assert_eq!(
+            ViolationReason::UnknownZone.to_string(),
+            "zone not recognized"
+        );
+    }
+
+    #[test]
+    fn violation_reason_serde_all() {
+        for reason in &[
+            ViolationReason::ConnectorNotInZone,
+            ViolationReason::OperationDenied,
+            ViolationReason::TokenExpired,
+            ViolationReason::NoToken,
+            ViolationReason::UnknownZone,
+        ] {
+            let json = serde_json::to_string(reason).unwrap();
+            let r2: ViolationReason = serde_json::from_str(&json).unwrap();
+            assert_eq!(*reason, r2);
+        }
+    }
+
+    // ── ZoneViolation additional ─────────────────────────────────
+
+    #[test]
+    fn violation_serde_roundtrip() {
+        let v = ZoneViolation::new(
+            "github.create_issue",
+            zone_work(),
+            ViolationReason::OperationDenied,
+        )
+        .with_available_in(vec![zone_public()]);
+        let json = serde_json::to_string(&v).unwrap();
+        let v2: ZoneViolation = serde_json::from_str(&json).unwrap();
+        assert_eq!(v2.tool, "github.create_issue");
+        assert_eq!(v2.reason, ViolationReason::OperationDenied);
+    }
+
+    #[test]
+    fn violation_message_format() {
+        let v = ZoneViolation::new(
+            "vault.get_secret",
+            ZoneId::new("z:public"),
+            ViolationReason::TokenExpired,
+        );
+        assert!(v.message.contains("vault.get_secret"));
+        assert!(v.message.contains("z:public"));
+        assert!(v.message.contains("token expired"));
+    }
+
+    #[test]
+    fn violation_display_matches_message() {
+        let v = ZoneViolation::new("test.op", zone_work(), ViolationReason::NoToken);
+        assert_eq!(v.to_string(), v.message);
+    }
+
+    #[test]
+    fn violation_empty_available_in() {
+        let v = ZoneViolation::new("test", zone_work(), ViolationReason::NoToken);
+        assert!(v.available_in.is_empty());
+    }
+
+    // ── ZoneRegistry additional ──────────────────────────────────
+
+    #[test]
+    fn registry_has_zone_unknown() {
+        let reg = sample_registry();
+        assert!(!reg.has_zone(&ZoneId::new("z:staging")));
+    }
+
+    #[test]
+    fn registry_known_zones() {
+        let reg = sample_registry();
+        let zones = reg.known_zones();
+        assert!(zones.contains(&zone_work()));
+        assert!(zones.contains(&zone_public()));
+        assert!(zones.contains(&zone_private()));
+        assert_eq!(zones.len(), 3);
+    }
+
+    #[test]
+    fn registry_connectors_in_zone_empty() {
+        let reg = sample_registry();
+        let connectors = reg.connectors_in_zone(&ZoneId::new("z:staging"));
+        assert!(connectors.is_empty());
+    }
+
+    #[test]
+    fn registry_connectors_in_zone_public() {
+        let reg = sample_registry();
+        let connectors = reg.connectors_in_zone(&zone_public());
+        assert_eq!(connectors.len(), 1);
+        assert!(connectors.contains("github"));
+    }
+
+    #[test]
+    fn registry_tool_count_in_zone_unknown() {
+        let reg = sample_registry();
+        assert_eq!(reg.tool_count_in_zone(&ZoneId::new("z:staging")), 0);
+    }
+
+    #[test]
+    fn registry_clone() {
+        let reg = sample_registry();
+        let reg2 = reg.clone();
+        assert_eq!(reg.tool_count(), reg2.tool_count());
+        assert_eq!(reg.known_zones().len(), reg2.known_zones().len());
+    }
+
+    // ── validate_tool_call additional ────────────────────────────
+
+    #[test]
+    fn validate_expired_token() {
+        let reg = sample_registry();
+        let token = CapabilityToken::new(zone_work(), "agent").with_expiry(1); // expired
+        let result = validate_tool_call(&reg, "github.create_issue", &zone_work(), Some(&token));
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().reason, ViolationReason::TokenExpired);
+    }
+
+    #[test]
+    fn validate_tool_not_in_zone_has_alternatives() {
+        let reg = sample_registry();
+        let token = sample_token(zone_private());
+        // slack.send_message is in z:work, not z:private
+        let result = validate_tool_call(&reg, "slack.send_message", &zone_private(), Some(&token));
+        let err = result.unwrap_err();
+        assert_eq!(err.reason, ViolationReason::ConnectorNotInZone);
+        assert!(!err.available_in.is_empty());
+        assert!(err.available_in.contains(&zone_work()));
+    }
+
+    #[test]
+    fn validate_multiple_denied_operations() {
+        let reg = sample_registry();
+        let token = sample_token(zone_work())
+            .with_denied_operation("create_issue")
+            .with_denied_operation("list_repos");
+        assert!(
+            validate_tool_call(&reg, "github.create_issue", &zone_work(), Some(&token)).is_err()
+        );
+        assert!(validate_tool_call(&reg, "github.list_repos", &zone_work(), Some(&token)).is_err());
+        // slack.send_message not denied
+        assert!(validate_tool_call(&reg, "slack.send_message", &zone_work(), Some(&token)).is_ok());
+    }
+
+    #[test]
+    fn validate_connector_restricted_by_token() {
+        let reg = sample_registry();
+        let token = sample_token(zone_work()).with_connector("slack");
+        // Only slack allowed, github should fail
+        let result = validate_tool_call(&reg, "github.create_issue", &zone_work(), Some(&token));
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().reason,
+            ViolationReason::ConnectorNotInZone
+        );
+    }
+
+    // ── filter_tools_for_zone additional ─────────────────────────
+
+    #[test]
+    fn filter_tools_empty_zone() {
+        let reg = sample_registry();
+        let token = sample_token(ZoneId::new("z:staging"));
+        let filtered = filter_tools_for_zone(&reg.tools, &ZoneId::new("z:staging"), &token);
+        assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn filter_tools_all_denied() {
+        let reg = sample_registry();
+        let token = sample_token(zone_work())
+            .with_denied_operation("create_issue")
+            .with_denied_operation("list_repos")
+            .with_denied_operation("send_message");
+        let filtered = filter_tools_for_zone(&reg.tools, &zone_work(), &token);
+        assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn filter_tools_multiple_connectors() {
+        let reg = sample_registry();
+        let token = sample_token(zone_work())
+            .with_connector("github")
+            .with_connector("slack");
+        let filtered = filter_tools_for_zone(&reg.tools, &zone_work(), &token);
+        assert_eq!(filtered.len(), 3);
+    }
+
+    // ── format helpers additional ────────────────────────────────
+
+    #[test]
+    fn format_zone_tools_empty() {
+        let tools: Vec<&ZoneScopedTool> = vec![];
+        let s = format_zone_tools(&zone_work(), &tools);
+        assert!(s.contains("z:work (0 tools)"));
+    }
+
+    #[test]
+    fn format_violation_multiple_zones() {
+        let v = ZoneViolation::new(
+            "test.op",
+            zone_public(),
+            ViolationReason::ConnectorNotInZone,
+        )
+        .with_available_in(vec![zone_work(), zone_private()]);
+        let s = format_violation(&v);
+        assert!(s.contains("z:work"));
+        assert!(s.contains("z:private"));
+    }
+
+    // ── parse_zone additional ────────────────────────────────────
+
+    #[test]
+    fn parse_zone_empty_string() {
+        let z = parse_zone("");
+        assert_eq!(z.as_str(), "z:");
+    }
+
+    #[test]
+    fn parse_zone_z_colon_only() {
+        let z = parse_zone("z:");
+        assert_eq!(z.as_str(), "z:");
+    }
+
+    #[test]
+    fn parse_zone_whitespace_only() {
+        let z = parse_zone("   ");
+        assert_eq!(z.as_str(), "z:");
+    }
+
+    #[test]
+    fn parse_zone_double_prefix() {
+        let z = parse_zone("z:z:work");
+        // Already starts with "z:", returned as-is
+        assert_eq!(z.as_str(), "z:z:work");
+    }
+
+    #[test]
+    fn parse_zone_special_chars() {
+        let z = parse_zone("my-zone_1");
+        assert_eq!(z.as_str(), "z:my-zone_1");
     }
 }

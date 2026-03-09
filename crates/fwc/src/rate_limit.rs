@@ -7,12 +7,12 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Duration, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 // ── Types ──────────────────────────────────────────────────────────
 
 /// Usage status of a rate limit pool.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PoolStatus {
     /// Under 80% usage.
@@ -48,7 +48,7 @@ impl std::fmt::Display for PoolStatus {
 }
 
 /// A single rate limit pool's current state.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PoolSnapshot {
     /// Pool identifier (e.g. `"core.read"`, `"search"`, `"sms.send"`).
     pub pool: String,
@@ -96,7 +96,11 @@ impl PoolSnapshot {
     pub fn time_to_reset(&self) -> Duration {
         self.resets_at.map_or_else(Duration::zero, |reset| {
             let now = Utc::now();
-            if reset > now { reset - now } else { Duration::zero() }
+            if reset > now {
+                reset - now
+            } else {
+                Duration::zero()
+            }
         })
     }
 
@@ -657,6 +661,353 @@ mod tests {
     #[test]
     fn delay_zero_time() {
         let delay = recommend_delay(100, 10, Duration::zero());
+        assert!(delay.is_zero());
+    }
+
+    // ── PoolStatus additional ────────────────────────────────────
+
+    #[test]
+    fn pool_status_display_all_variants() {
+        assert_eq!(PoolStatus::Ok.to_string(), "OK");
+        assert_eq!(PoolStatus::Warning.to_string(), "WARNING");
+        assert_eq!(PoolStatus::Critical.to_string(), "CRITICAL");
+        assert_eq!(PoolStatus::Unknown.to_string(), "UNKNOWN");
+    }
+
+    #[test]
+    fn pool_status_serde_roundtrip() {
+        for status in &[
+            PoolStatus::Ok,
+            PoolStatus::Warning,
+            PoolStatus::Critical,
+            PoolStatus::Unknown,
+        ] {
+            let json = serde_json::to_string(status).unwrap();
+            let status2: PoolStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(*status, status2);
+        }
+    }
+
+    #[test]
+    fn pool_status_snake_case_serde() {
+        let json = serde_json::to_value(PoolStatus::Ok).unwrap();
+        assert_eq!(json, "ok");
+        let json = serde_json::to_value(PoolStatus::Unknown).unwrap();
+        assert_eq!(json, "unknown");
+    }
+
+    #[test]
+    fn pool_status_copy() {
+        let s = PoolStatus::Warning;
+        let s2 = s;
+        assert_eq!(s, s2);
+    }
+
+    // ── classify_usage boundary ──────────────────────────────────
+
+    #[test]
+    fn classify_boundary_79_80() {
+        assert_eq!(classify_usage(79), PoolStatus::Ok);
+        assert_eq!(classify_usage(80), PoolStatus::Warning);
+    }
+
+    #[test]
+    fn classify_boundary_94_95() {
+        assert_eq!(classify_usage(94), PoolStatus::Warning);
+        assert_eq!(classify_usage(95), PoolStatus::Critical);
+    }
+
+    #[test]
+    fn classify_max() {
+        assert_eq!(classify_usage(255), PoolStatus::Critical);
+    }
+
+    // ── PoolSnapshot additional ──────────────────────────────────
+
+    #[test]
+    fn snapshot_overused() {
+        // used > limit (shouldn't happen but shouldn't panic)
+        let snap = PoolSnapshot::new("overshoot", 6000, 5000, None);
+        assert_eq!(snap.percent, 120); // 6000*100/5000 = 120, fits in u8
+        assert_eq!(snap.status, PoolStatus::Critical);
+        assert_eq!(snap.remaining(), 0); // saturating_sub
+    }
+
+    #[test]
+    fn snapshot_percent_50() {
+        let snap = PoolSnapshot::new("half", 250, 500, None);
+        assert_eq!(snap.percent, 50);
+        assert_eq!(snap.status, PoolStatus::Ok);
+    }
+
+    #[test]
+    fn snapshot_percent_boundary_80() {
+        let snap = PoolSnapshot::new("warn", 80, 100, None);
+        assert_eq!(snap.percent, 80);
+        assert_eq!(snap.status, PoolStatus::Warning);
+    }
+
+    #[test]
+    fn snapshot_percent_boundary_95() {
+        let snap = PoolSnapshot::new("crit", 95, 100, None);
+        assert_eq!(snap.percent, 95);
+        assert_eq!(snap.status, PoolStatus::Critical);
+    }
+
+    #[test]
+    fn snapshot_serde_roundtrip() {
+        let snap = PoolSnapshot::new("core", 300, 1000, None);
+        let json = serde_json::to_string(&snap).unwrap();
+        let snap2: PoolSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(snap2.pool, "core");
+        assert_eq!(snap2.used, 300);
+        assert_eq!(snap2.limit, 1000);
+        assert_eq!(snap2.percent, 30);
+    }
+
+    #[test]
+    fn snapshot_reset_display_seconds() {
+        let snap = PoolSnapshot::new("test", 0, 100, Some(Utc::now() + Duration::seconds(30)));
+        let display = snap.reset_display();
+        assert!(display.contains('s'));
+        assert!(!display.contains('m'));
+    }
+
+    #[test]
+    fn snapshot_reset_display_hours() {
+        let snap = PoolSnapshot::new(
+            "test",
+            0,
+            100,
+            Some(Utc::now() + Duration::hours(2) + Duration::minutes(15)),
+        );
+        let display = snap.reset_display();
+        assert!(display.contains('h'));
+        assert!(display.contains('m'));
+    }
+
+    #[test]
+    fn snapshot_ratio_display_zero() {
+        let snap = PoolSnapshot::new("test", 0, 100, None);
+        assert_eq!(snap.ratio_display(), "0/100");
+    }
+
+    #[test]
+    fn snapshot_ratio_display_full() {
+        let snap = PoolSnapshot::new("test", 5000, 5000, None);
+        assert_eq!(snap.ratio_display(), "5000/5000");
+    }
+
+    #[test]
+    fn snapshot_large_numbers() {
+        let snap = PoolSnapshot::new("big", 1_000_000, 10_000_000, None);
+        assert_eq!(snap.percent, 10);
+        assert_eq!(snap.remaining(), 9_000_000);
+    }
+
+    #[test]
+    fn snapshot_clone_independence() {
+        let snap = PoolSnapshot::new("core", 100, 500, None);
+        let snap2 = snap.clone();
+        assert_eq!(snap.pool, snap2.pool);
+        assert_eq!(snap.percent, snap2.percent);
+    }
+
+    // ── ConnectorRateLimits additional ───────────────────────────
+
+    #[test]
+    fn connector_limits_worst_status_all_ok() {
+        let limits = ConnectorRateLimits::new(
+            "test",
+            vec![
+                PoolSnapshot::new("a", 10, 100, None),
+                PoolSnapshot::new("b", 20, 100, None),
+            ],
+        );
+        assert_eq!(limits.worst_status(), PoolStatus::Ok);
+    }
+
+    #[test]
+    fn connector_limits_worst_status_critical() {
+        let limits = ConnectorRateLimits::new(
+            "test",
+            vec![
+                PoolSnapshot::new("a", 10, 100, None),
+                PoolSnapshot::new("b", 96, 100, None),
+            ],
+        );
+        assert_eq!(limits.worst_status(), PoolStatus::Critical);
+    }
+
+    #[test]
+    fn connector_limits_total_remaining_empty() {
+        let limits = ConnectorRateLimits::new("empty", vec![]);
+        assert_eq!(limits.total_remaining(), 0);
+    }
+
+    #[test]
+    fn connector_limits_serde() {
+        let limits =
+            ConnectorRateLimits::new("github", vec![PoolSnapshot::new("core", 100, 5000, None)]);
+        let json = serde_json::to_value(&limits).unwrap();
+        assert_eq!(json["connector_id"], "github");
+        assert_eq!(json["pools"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn connector_limits_concerning_pools_none() {
+        let limits = ConnectorRateLimits::new(
+            "test",
+            vec![
+                PoolSnapshot::new("a", 10, 100, None),
+                PoolSnapshot::new("b", 20, 100, None),
+            ],
+        );
+        assert!(limits.concerning_pools().is_empty());
+    }
+
+    // ── RateLimitDashboard additional ────────────────────────────
+
+    #[test]
+    fn dashboard_add_replaces_existing() {
+        let mut dash = RateLimitDashboard::new();
+        dash.add(ConnectorRateLimits::new(
+            "github",
+            vec![PoolSnapshot::new("core", 10, 100, None)],
+        ));
+        dash.add(ConnectorRateLimits::new(
+            "github",
+            vec![PoolSnapshot::new("core", 90, 100, None)],
+        ));
+        // Should replace, not accumulate
+        assert_eq!(dash.pool_count(), 1);
+        assert!(dash.get("github").unwrap().has_concerns());
+    }
+
+    #[test]
+    fn dashboard_multiple_connectors_pool_count() {
+        let mut dash = RateLimitDashboard::new();
+        dash.add(ConnectorRateLimits::new(
+            "github",
+            vec![
+                PoolSnapshot::new("a", 0, 100, None),
+                PoolSnapshot::new("b", 0, 200, None),
+            ],
+        ));
+        dash.add(ConnectorRateLimits::new(
+            "slack",
+            vec![PoolSnapshot::new("c", 0, 50, None)],
+        ));
+        dash.add(ConnectorRateLimits::new(
+            "jira",
+            vec![
+                PoolSnapshot::new("d", 0, 100, None),
+                PoolSnapshot::new("e", 0, 100, None),
+            ],
+        ));
+        assert_eq!(dash.pool_count(), 5);
+    }
+
+    #[test]
+    fn dashboard_concerning_multiple_connectors() {
+        let mut dash = RateLimitDashboard::new();
+        dash.add(ConnectorRateLimits::new(
+            "github",
+            vec![PoolSnapshot::new("core", 90, 100, None)],
+        ));
+        dash.add(ConnectorRateLimits::new(
+            "slack",
+            vec![PoolSnapshot::new("api", 96, 100, None)],
+        ));
+        dash.add(ConnectorRateLimits::new(
+            "jira",
+            vec![PoolSnapshot::new("rest", 10, 100, None)],
+        ));
+        assert_eq!(dash.concerning_connector_count(), 2);
+        assert!(!dash.is_clear());
+    }
+
+    #[test]
+    fn dashboard_serde() {
+        let mut dash = RateLimitDashboard::new();
+        dash.add(ConnectorRateLimits::new(
+            "github",
+            vec![PoolSnapshot::new("core", 100, 5000, None)],
+        ));
+        let json = serde_json::to_value(&dash).unwrap();
+        assert!(json.get("computed_at").is_some());
+        assert!(json["connectors"].get("github").is_some());
+    }
+
+    #[test]
+    fn dashboard_summary_multiple_concerns() {
+        let mut dash = RateLimitDashboard::new();
+        dash.add(ConnectorRateLimits::new(
+            "github",
+            vec![PoolSnapshot::new("core", 96, 100, None)],
+        ));
+        dash.add(ConnectorRateLimits::new(
+            "slack",
+            vec![PoolSnapshot::new("api", 85, 100, None)],
+        ));
+        let summary = dash.summary_line();
+        assert!(summary.contains("need attention"));
+        assert!(summary.contains("2 connector(s)"));
+    }
+
+    #[test]
+    fn dashboard_clone() {
+        let mut dash = RateLimitDashboard::new();
+        dash.add(ConnectorRateLimits::new(
+            "github",
+            vec![PoolSnapshot::new("core", 10, 100, None)],
+        ));
+        let dash2 = dash.clone();
+        assert_eq!(dash.pool_count(), dash2.pool_count());
+    }
+
+    // ── estimate_budget additional ───────────────────────────────
+
+    #[test]
+    fn budget_large_remaining() {
+        assert_eq!(estimate_budget(1_000_000, 100), 10_000);
+    }
+
+    #[test]
+    fn budget_cost_greater_than_remaining() {
+        assert_eq!(estimate_budget(5, 10), 0);
+    }
+
+    #[test]
+    fn budget_exact_division() {
+        assert_eq!(estimate_budget(100, 25), 4);
+    }
+
+    // ── recommend_delay additional ───────────────────────────────
+
+    #[test]
+    fn delay_single_operation() {
+        let delay = recommend_delay(100, 1, Duration::minutes(10));
+        // 1 op across 10 min → 600s delay
+        assert_eq!(delay.num_seconds(), 600);
+    }
+
+    #[test]
+    fn delay_negative_time() {
+        let delay = recommend_delay(100, 10, Duration::seconds(-5));
+        assert!(delay.is_zero());
+    }
+
+    #[test]
+    fn delay_very_large_window() {
+        let delay = recommend_delay(100, 10, Duration::hours(24));
+        // 10 ops in 24 hours = 8640s each
+        assert_eq!(delay.num_seconds(), 8640);
+    }
+
+    #[test]
+    fn delay_both_zero() {
+        let delay = recommend_delay(0, 0, Duration::minutes(10));
         assert!(delay.is_zero());
     }
 }

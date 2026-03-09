@@ -24,6 +24,12 @@
     clippy::assertions_on_constants,
     clippy::struct_field_names,
     clippy::suboptimal_flops,
+    clippy::manual_midpoint,
+    clippy::manual_range_contains,
+    clippy::must_use_candidate,
+    clippy::return_self_not_must_use,
+    clippy::similar_names,
+    clippy::suspicious_operation_groupings,
     clippy::too_many_arguments,
     clippy::too_many_lines,
     clippy::trivially_copy_pass_by_ref,
@@ -31,6 +37,8 @@
     clippy::unused_async
 )]
 
+pub mod analytics;
+pub mod categorize;
 pub mod client;
 pub mod connector;
 pub mod error;

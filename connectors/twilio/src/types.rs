@@ -86,10 +86,29 @@ pub struct PhoneNumberCapabilities {
     pub fax: Option<bool>,
 }
 
+/// A Twilio media resource attached to a message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TwilioMediaResource {
+    pub sid: String,
+    pub account_sid: Option<String>,
+    pub parent_sid: Option<String>,
+    pub content_type: Option<String>,
+    pub date_created: Option<String>,
+    pub date_updated: Option<String>,
+    pub uri: Option<String>,
+}
+
 /// Twilio list response wrapper for messages.
 #[derive(Debug, Clone, Deserialize)]
 pub struct MessageListResponse {
     pub messages: Vec<serde_json::Value>,
+    pub next_page_uri: Option<String>,
+}
+
+/// Twilio list response wrapper for media resources.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MediaListResponse {
+    pub media_list: Vec<serde_json::Value>,
     pub next_page_uri: Option<String>,
 }
 
@@ -1300,5 +1319,147 @@ mod tests {
         let resp: MessageListResponse = serde_json::from_value(json).unwrap();
         assert!(resp.messages.is_empty());
         assert!(resp.next_page_uri.is_none());
+    }
+
+    // ── TwilioMediaResource tests ──────────────────────────────────────
+
+    #[test]
+    fn media_resource_roundtrip_full() {
+        let media = TwilioMediaResource {
+            sid: "ME001".into(),
+            account_sid: Some("ACtest123".into()),
+            parent_sid: Some("SMabc".into()),
+            content_type: Some("image/jpeg".into()),
+            date_created: Some("2026-03-01T00:00:00Z".into()),
+            date_updated: Some("2026-03-01T00:00:01Z".into()),
+            uri: Some("/2010-04-01/Accounts/ACtest/Messages/SMabc/Media/ME001.json".into()),
+        };
+        let json = serde_json::to_value(&media).unwrap();
+        assert_eq!(json["sid"], "ME001");
+        assert_eq!(json["content_type"], "image/jpeg");
+        let deserialized: TwilioMediaResource = serde_json::from_value(json).unwrap();
+        assert_eq!(deserialized.sid, "ME001");
+        assert_eq!(deserialized.parent_sid.as_deref(), Some("SMabc"));
+    }
+
+    #[test]
+    fn media_resource_minimal() {
+        let json = json!({
+            "sid": "ME002"
+        });
+        let media: TwilioMediaResource = serde_json::from_value(json).unwrap();
+        assert_eq!(media.sid, "ME002");
+        assert!(media.account_sid.is_none());
+        assert!(media.content_type.is_none());
+    }
+
+    #[test]
+    fn media_resource_missing_sid_fails() {
+        let json = json!({
+            "content_type": "image/png"
+        });
+        let result = serde_json::from_value::<TwilioMediaResource>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn media_resource_clone_and_debug() {
+        let media = TwilioMediaResource {
+            sid: "ME003".into(),
+            account_sid: None,
+            parent_sid: None,
+            content_type: Some("video/mp4".into()),
+            date_created: None,
+            date_updated: None,
+            uri: None,
+        };
+        let cloned = media.clone();
+        drop(media);
+        assert_eq!(cloned.sid, "ME003");
+        assert_eq!(cloned.content_type.as_deref(), Some("video/mp4"));
+        let debug = format!("{cloned:?}");
+        assert!(debug.contains("ME003"));
+    }
+
+    #[test]
+    fn media_resource_with_all_none_optional_fields_roundtrips() {
+        let media = TwilioMediaResource {
+            sid: "ME004".into(),
+            account_sid: None,
+            parent_sid: None,
+            content_type: None,
+            date_created: None,
+            date_updated: None,
+            uri: None,
+        };
+        let json = serde_json::to_value(&media).unwrap();
+        let deserialized: TwilioMediaResource = serde_json::from_value(json).unwrap();
+        assert_eq!(deserialized.sid, "ME004");
+        assert!(deserialized.content_type.is_none());
+    }
+
+    #[test]
+    fn media_resource_from_api_json_with_extra_fields() {
+        let json = json!({
+            "sid": "ME005",
+            "account_sid": "ACtest",
+            "parent_sid": "SMtest",
+            "content_type": "audio/mpeg",
+            "extra_field": "should be ignored",
+            "nested_extra": { "a": 1 }
+        });
+        let media: TwilioMediaResource = serde_json::from_value(json).unwrap();
+        assert_eq!(media.sid, "ME005");
+        assert_eq!(media.content_type.as_deref(), Some("audio/mpeg"));
+    }
+
+    // ── MediaListResponse tests ────────────────────────────────────────
+
+    #[test]
+    fn media_list_response_empty() {
+        let json = json!({
+            "media_list": [],
+            "next_page_uri": null
+        });
+        let resp: MediaListResponse = serde_json::from_value(json).unwrap();
+        assert!(resp.media_list.is_empty());
+        assert!(resp.next_page_uri.is_none());
+    }
+
+    #[test]
+    fn media_list_response_with_data() {
+        let json = json!({
+            "media_list": [
+                {"sid": "ME001", "content_type": "image/jpeg"},
+                {"sid": "ME002", "content_type": "image/png"}
+            ],
+            "next_page_uri": "/some/next/page"
+        });
+        let resp: MediaListResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.media_list.len(), 2);
+        assert_eq!(resp.next_page_uri.as_deref(), Some("/some/next/page"));
+    }
+
+    #[test]
+    fn media_list_response_clone_and_debug() {
+        let json = json!({
+            "media_list": [{"sid": "ME001"}],
+            "next_page_uri": null
+        });
+        let resp: MediaListResponse = serde_json::from_value(json).unwrap();
+        let cloned = resp.clone();
+        drop(resp);
+        assert_eq!(cloned.media_list.len(), 1);
+        let debug = format!("{cloned:?}");
+        assert!(debug.contains("MediaListResponse"));
+    }
+
+    #[test]
+    fn media_list_response_missing_required_field_fails() {
+        let json = json!({
+            "next_page_uri": null
+        });
+        let result = serde_json::from_value::<MediaListResponse>(json);
+        assert!(result.is_err());
     }
 }

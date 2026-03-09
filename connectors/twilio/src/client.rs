@@ -14,8 +14,8 @@ use tracing::{debug, warn};
 use crate::{
     error::{TwilioError, TwilioResult},
     types::{
-        ApiErrorResponse, MessageListResponse, PhoneNumberListResponse, RecordingListResponse,
-        TwilioAccount, TwilioCall, TwilioMessage,
+        ApiErrorResponse, MediaListResponse, MessageListResponse, PhoneNumberListResponse,
+        RecordingListResponse, TwilioAccount, TwilioCall, TwilioMediaResource, TwilioMessage,
     },
 };
 
@@ -333,6 +333,41 @@ impl TwilioClient {
         let data = self.get_bytes(&url).await?;
         let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
         Ok((b64, "application/octet-stream".to_string()))
+    }
+
+    // ── Media operations ─────────────────────────────────────────
+
+    /// List media resources attached to a message.
+    pub async fn list_media(
+        &self,
+        message_sid: &str,
+        page_size: Option<u32>,
+        page: Option<u32>,
+    ) -> TwilioResult<MediaListResponse> {
+        let base_url = format!("{}/Messages/{message_sid}/Media.json", self.base_url);
+        let mut params: Vec<(&str, String)> = Vec::new();
+        if let Some(v) = page_size {
+            params.push(("PageSize", v.to_string()));
+        }
+        if let Some(v) = page {
+            params.push(("Page", v.to_string()));
+        }
+        let data = self.get_with_params(&base_url, &params).await?;
+        Ok(serde_json::from_value(data)?)
+    }
+
+    /// Get a specific media resource by SID.
+    pub async fn get_media(
+        &self,
+        message_sid: &str,
+        media_sid: &str,
+    ) -> TwilioResult<TwilioMediaResource> {
+        let url = format!(
+            "{}/Messages/{message_sid}/Media/{media_sid}.json",
+            self.base_url
+        );
+        let data = self.get(&url).await?;
+        Ok(serde_json::from_value(data)?)
     }
 
     // ── Account operations ───────────────────────────────────────
@@ -1323,5 +1358,140 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.recordings.len(), 1);
+    }
+
+    // ── Media operations tests ────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_list_media() {
+        let mock_server = MockServer::start().await;
+        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
+
+        Mock::given(method("GET"))
+            .and(path(
+                "/2010-04-01/Accounts/ACtest123/Messages/SMabc/Media.json",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "media_list": [
+                    {
+                        "sid": "ME001",
+                        "account_sid": "ACtest123",
+                        "parent_sid": "SMabc",
+                        "content_type": "image/jpeg",
+                        "date_created": "2026-03-01T00:00:00Z"
+                    },
+                    {
+                        "sid": "ME002",
+                        "account_sid": "ACtest123",
+                        "parent_sid": "SMabc",
+                        "content_type": "image/png",
+                        "date_created": "2026-03-01T00:01:00Z"
+                    }
+                ],
+                "next_page_uri": null
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = test_client(&base);
+        let result = client.list_media("SMabc", None, None).await.unwrap();
+        assert_eq!(result.media_list.len(), 2);
+        assert!(result.next_page_uri.is_none());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_list_media_with_pagination() {
+        let mock_server = MockServer::start().await;
+        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
+
+        Mock::given(method("GET"))
+            .and(path(
+                "/2010-04-01/Accounts/ACtest123/Messages/SMabc/Media.json",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "media_list": [
+                    {"sid": "ME001", "content_type": "image/jpeg"}
+                ],
+                "next_page_uri": "/2010-04-01/Accounts/ACtest123/Messages/SMabc/Media.json?Page=1"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = test_client(&base);
+        let result = client.list_media("SMabc", Some(1), Some(0)).await.unwrap();
+        assert_eq!(result.media_list.len(), 1);
+        assert!(result.next_page_uri.is_some());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_list_media_empty() {
+        let mock_server = MockServer::start().await;
+        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
+
+        Mock::given(method("GET"))
+            .and(path(
+                "/2010-04-01/Accounts/ACtest123/Messages/SMnomedia/Media.json",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "media_list": [],
+                "next_page_uri": null
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = test_client(&base);
+        let result = client.list_media("SMnomedia", None, None).await.unwrap();
+        assert!(result.media_list.is_empty());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_get_media() {
+        let mock_server = MockServer::start().await;
+        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
+
+        Mock::given(method("GET"))
+            .and(path(
+                "/2010-04-01/Accounts/ACtest123/Messages/SMabc/Media/ME001.json",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "sid": "ME001",
+                "account_sid": "ACtest123",
+                "parent_sid": "SMabc",
+                "content_type": "image/jpeg",
+                "date_created": "2026-03-01T00:00:00Z",
+                "date_updated": "2026-03-01T00:00:01Z",
+                "uri": "/2010-04-01/Accounts/ACtest123/Messages/SMabc/Media/ME001.json"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = test_client(&base);
+        let media = client.get_media("SMabc", "ME001").await.unwrap();
+        assert_eq!(media.sid, "ME001");
+        assert_eq!(media.content_type.as_deref(), Some("image/jpeg"));
+        assert_eq!(media.parent_sid.as_deref(), Some("SMabc"));
+        assert_eq!(media.account_sid.as_deref(), Some("ACtest123"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_get_media_not_found() {
+        let mock_server = MockServer::start().await;
+        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
+
+        Mock::given(method("GET"))
+            .and(path(
+                "/2010-04-01/Accounts/ACtest123/Messages/SMabc/Media/MEmissing.json",
+            ))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "code": 20404,
+                "message": "The requested resource was not found"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = test_client(&base);
+        let result = client.get_media("SMabc", "MEmissing").await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), TwilioError::NotFound { .. }));
     }
 }

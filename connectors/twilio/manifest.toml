@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:cad192754bafec58697eb1586b65802c7583067d9ad9661aa7d40e5c310ff4af"
+interface_hash = "blake3-256:fcp.interface.v2:40c0848a4ef092215077b4dbf797e0b625a4a3985442070a569f87fd5cb2fed8"
 
 [connector]
 id = "fcp.twilio"
@@ -317,6 +317,163 @@ examples = [
 related = [
     "twilio.get_message",
     "twilio.send_message",
+]
+
+# ---------------------------------------------------------------------------
+# Operations: SMS Media
+# ---------------------------------------------------------------------------
+
+[provides.operations."twilio.list_media"]
+description = "List media attachments for a message"
+capability = "twilio.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."twilio.list_media".rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations."twilio.list_media".input_schema]
+required = ["message_sid"]
+type = "object"
+
+[provides.operations."twilio.list_media".input_schema.properties.message_sid]
+description = "Message SID that contains the media"
+type = "string"
+
+[provides.operations."twilio.list_media".input_schema.properties.page_size]
+description = "Results per page (default: 50, max: 1000)"
+minimum = 1
+maximum = 1000
+type = "integer"
+
+[provides.operations."twilio.list_media".input_schema.properties.page]
+description = "Page number (0-indexed)"
+minimum = 0
+type = "integer"
+
+[provides.operations."twilio.list_media".output_schema]
+required = ["media_list"]
+type = "object"
+
+[provides.operations."twilio.list_media".output_schema.properties.media_list]
+description = "Media resource entries"
+type = "array"
+[provides.operations."twilio.list_media".output_schema.properties.media_list.items]
+type = "object"
+
+[provides.operations."twilio.list_media".output_schema.properties.next_page_uri]
+description = "URI for next page (null if last page)"
+type = "string"
+
+[provides.operations."twilio.list_media".network_constraints]
+host_allow = ["api.twilio.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
+
+[provides.operations."twilio.list_media".ai_hints]
+when_to_use = "List media attachments (images, video) on an MMS message. Use the returned media SIDs to download or inspect individual media."
+common_mistakes = [
+    "Calling on SMS messages that have no media attachments.",
+    "Not checking num_media on the message first to see if media exists.",
+]
+examples = ['{"message_sid": "SMxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}']
+related = [
+    "twilio.get_media",
+    "twilio.download_media",
+    "twilio.get_message",
+]
+
+[provides.operations."twilio.get_media"]
+description = "Get metadata for a specific media attachment"
+capability = "twilio.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."twilio.get_media".rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations."twilio.get_media".input_schema]
+required = ["message_sid", "media_sid"]
+type = "object"
+
+[provides.operations."twilio.get_media".input_schema.properties.message_sid]
+description = "Message SID that contains the media"
+type = "string"
+
+[provides.operations."twilio.get_media".input_schema.properties.media_sid]
+description = "Media SID (e.g., 'MExxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx')"
+pattern = "^ME[a-f0-9]{32}$"
+type = "string"
+
+[provides.operations."twilio.get_media".output_schema]
+required = ["sid", "content_type"]
+type = "object"
+
+[provides.operations."twilio.get_media".output_schema.properties.sid]
+description = "Media SID"
+type = "string"
+[provides.operations."twilio.get_media".output_schema.properties.account_sid]
+type = "string"
+[provides.operations."twilio.get_media".output_schema.properties.parent_sid]
+description = "Message SID that owns this media"
+type = "string"
+[provides.operations."twilio.get_media".output_schema.properties.content_type]
+description = "MIME type of the media (e.g., image/jpeg)"
+type = "string"
+[provides.operations."twilio.get_media".output_schema.properties.date_created]
+type = "string"
+[provides.operations."twilio.get_media".output_schema.properties.date_updated]
+type = "string"
+[provides.operations."twilio.get_media".output_schema.properties.uri]
+type = "string"
+
+[provides.operations."twilio.get_media".network_constraints]
+host_allow = ["api.twilio.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."twilio.get_media".ai_hints]
+when_to_use = "Get metadata (content type, dates) for a specific media resource. Use download_media to get the actual binary content."
+common_mistakes = [
+    "Confusing get_media (metadata only) with download_media (binary content download).",
+    "Using a Recording SID (RE prefix) instead of a Media SID (ME prefix).",
+]
+examples = ['{"message_sid": "SMxxx", "media_sid": "MExxx"}']
+related = [
+    "twilio.list_media",
+    "twilio.download_media",
 ]
 
 # ---------------------------------------------------------------------------
@@ -915,6 +1072,8 @@ scope = "instance"
 "twilio.send_message" = ["twilio.message"]
 "twilio.get_message" = ["twilio.read"]
 "twilio.list_messages" = ["twilio.read"]
+"twilio.list_media" = ["twilio.read"]
+"twilio.get_media" = ["twilio.read"]
 "twilio.create_call" = ["twilio.voice"]
 "twilio.get_call" = ["twilio.read"]
 "twilio.list_recordings" = ["twilio.read"]

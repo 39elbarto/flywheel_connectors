@@ -855,6 +855,8 @@ async fn lifecycle_introspect_all_operations() {
         "twilio.send_message",
         "twilio.get_message",
         "twilio.list_messages",
+        "twilio.list_media",
+        "twilio.get_media",
         "twilio.create_call",
         "twilio.get_call",
         "twilio.list_recordings",
@@ -867,7 +869,7 @@ async fn lifecycle_introspect_all_operations() {
     for expected in &expected_ops {
         assert!(op_ids.contains(expected), "missing operation: {expected}");
     }
-    assert_eq!(ops.len(), 10);
+    assert_eq!(ops.len(), 12);
 
     for op in ops {
         assert!(
@@ -1026,6 +1028,193 @@ async fn validation_create_call_missing_url() {
             assert!(
                 message.contains("url"),
                 "error should mention url: {message}"
+            );
+        }
+        other => panic!("expected InvalidRequest, got: {other:?}"),
+    }
+}
+
+// ============================================================================
+// SMS Media Tests
+// ============================================================================
+
+/// List media attachments for a message.
+#[fcp_async_core::runtime::test]
+async fn list_media_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("twilio.list_media.happy_path");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path_regex("/Accounts/.*/Messages/SMtest001/Media\\.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "media_list": [
+                {
+                    "sid": "MEtest001",
+                    "account_sid": "ACtest123456789",
+                    "parent_sid": "SMtest001",
+                    "content_type": "image/jpeg",
+                    "date_created": "Wed, 15 Jan 2026 10:00:00 +0000",
+                    "date_updated": "Wed, 15 Jan 2026 10:00:01 +0000",
+                    "uri": "/2010-04-01/Accounts/ACtest/Messages/SMtest001/Media/MEtest001.json"
+                },
+                {
+                    "sid": "MEtest002",
+                    "account_sid": "ACtest123456789",
+                    "parent_sid": "SMtest001",
+                    "content_type": "image/png",
+                    "date_created": "Wed, 15 Jan 2026 10:00:00 +0000",
+                    "date_updated": "Wed, 15 Jan 2026 10:00:01 +0000",
+                    "uri": "/2010-04-01/Accounts/ACtest/Messages/SMtest001/Media/MEtest002.json"
+                }
+            ],
+            "next_page_uri": null
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = TwilioConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["twilio.list_media"]).await;
+    let token = generate_valid_token(&signing_key, "twilio.list_media");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "twilio.list_media",
+            "input": { "message_sid": "SMtest001" },
+            "capability_token": token
+        }))
+        .await
+        .expect("list_media should succeed");
+
+    assert_eq!(result["media_list"].as_array().unwrap().len(), 2);
+    assert!(result["next_page_uri"].is_null());
+}
+
+/// Get a specific media resource.
+#[fcp_async_core::runtime::test]
+async fn get_media_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("twilio.get_media.happy_path");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path_regex(
+            "/Accounts/.*/Messages/SMtest001/Media/MEtest001\\.json",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "sid": "MEtest001",
+            "account_sid": "ACtest123456789",
+            "parent_sid": "SMtest001",
+            "content_type": "image/jpeg",
+            "date_created": "Wed, 15 Jan 2026 10:00:00 +0000",
+            "date_updated": "Wed, 15 Jan 2026 10:00:01 +0000",
+            "uri": "/2010-04-01/Accounts/ACtest/Messages/SMtest001/Media/MEtest001.json"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = TwilioConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["twilio.get_media"]).await;
+    let token = generate_valid_token(&signing_key, "twilio.get_media");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "twilio.get_media",
+            "input": { "message_sid": "SMtest001", "media_sid": "MEtest001" },
+            "capability_token": token
+        }))
+        .await
+        .expect("get_media should succeed");
+
+    assert_eq!(result["sid"], "MEtest001");
+    assert_eq!(result["content_type"], "image/jpeg");
+    assert_eq!(result["parent_sid"], "SMtest001");
+}
+
+/// List media with empty result.
+#[fcp_async_core::runtime::test]
+async fn list_media_empty_result() {
+    let _ctx = AsyncTestContext::for_scenario("twilio.list_media.empty");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path_regex("/Accounts/.*/Messages/.*/Media\\.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "media_list": [],
+            "next_page_uri": null
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = TwilioConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["twilio.list_media"]).await;
+    let token = generate_valid_token(&signing_key, "twilio.list_media");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "twilio.list_media",
+            "input": { "message_sid": "SMtest999" },
+            "capability_token": token
+        }))
+        .await
+        .expect("list_media with empty result should succeed");
+
+    assert_eq!(result["media_list"].as_array().unwrap().len(), 0);
+}
+
+/// Missing `message_sid` in `list_media` fails.
+#[fcp_async_core::runtime::test]
+async fn validation_list_media_missing_message_sid() {
+    let mock_server = MockServer::start().await;
+    let mut connector = TwilioConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["twilio.list_media"]).await;
+    let token = generate_valid_token(&signing_key, "twilio.list_media");
+
+    let err = connector
+        .handle_invoke(json!({
+            "operation": "twilio.list_media",
+            "input": {},
+            "capability_token": token
+        }))
+        .await
+        .expect_err("missing message_sid should fail");
+
+    match &err {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(
+                message.contains("message_sid"),
+                "error should mention message_sid: {message}"
+            );
+        }
+        other => panic!("expected InvalidRequest, got: {other:?}"),
+    }
+}
+
+/// Missing `media_sid` in `get_media` fails.
+#[fcp_async_core::runtime::test]
+async fn validation_get_media_missing_media_sid() {
+    let mock_server = MockServer::start().await;
+    let mut connector = TwilioConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["twilio.get_media"]).await;
+    let token = generate_valid_token(&signing_key, "twilio.get_media");
+
+    let err = connector
+        .handle_invoke(json!({
+            "operation": "twilio.get_media",
+            "input": { "message_sid": "SMtest001" },
+            "capability_token": token
+        }))
+        .await
+        .expect_err("missing media_sid should fail");
+
+    match &err {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(
+                message.contains("media_sid"),
+                "error should mention media_sid: {message}"
             );
         }
         other => panic!("expected InvalidRequest, got: {other:?}"),

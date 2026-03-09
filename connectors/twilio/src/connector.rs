@@ -477,6 +477,86 @@ impl TwilioConnector {
                         ],
                     },
                 ),
+                // ── SMS Media ────────────────────────────────────────
+                op_info(
+                    "twilio.list_media",
+                    "List media attachments for a message",
+                    json!({
+                        "type": "object",
+                        "required": ["message_sid"],
+                        "properties": {
+                            "message_sid": { "type": "string" },
+                            "page_size": { "type": "integer" },
+                            "page": { "type": "integer" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "media_list": { "type": "array" },
+                            "next_page_uri": { "type": "string" }
+                        }
+                    }),
+                    "twilio.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "List media attachments (images, video) on an MMS message. Use the returned media SIDs to download or inspect individual media.".into(),
+                        common_mistakes: vec![
+                            "Calling on SMS messages that have no media attachments.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"message_sid": "SMxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("twilio.get_media"),
+                            CapabilityId::from_static("twilio.download_media"),
+                            CapabilityId::from_static("twilio.get_message"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "twilio.get_media",
+                    "Get metadata for a specific media attachment",
+                    json!({
+                        "type": "object",
+                        "required": ["message_sid", "media_sid"],
+                        "properties": {
+                            "message_sid": { "type": "string" },
+                            "media_sid": { "type": "string" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "sid": { "type": "string" },
+                            "account_sid": { "type": "string" },
+                            "parent_sid": { "type": "string" },
+                            "content_type": { "type": "string" },
+                            "date_created": { "type": "string" },
+                            "date_updated": { "type": "string" },
+                            "uri": { "type": "string" }
+                        }
+                    }),
+                    "twilio.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Get metadata (content type, dates) for a specific media resource. Use download_media to get the actual binary content.".into(),
+                        common_mistakes: vec![
+                            "Confusing get_media (metadata) with download_media (binary content).".into(),
+                        ],
+                        examples: vec![
+                            r#"{"message_sid": "SMxxx", "media_sid": "MExxx"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("twilio.list_media"),
+                            CapabilityId::from_static("twilio.download_media"),
+                        ],
+                    },
+                ),
                 // ── Voice ────────────────────────────────────────────
                 op_info(
                     "twilio.create_call",
@@ -803,6 +883,8 @@ impl TwilioConnector {
             "twilio.send_message" => self.invoke_send_message(input).await,
             "twilio.get_message" => self.invoke_get_message(input).await,
             "twilio.list_messages" => self.invoke_list_messages(input).await,
+            "twilio.list_media" => self.invoke_list_media(input).await,
+            "twilio.get_media" => self.invoke_get_media(input).await,
             "twilio.create_call" => self.invoke_create_call(input).await,
             "twilio.get_call" => self.invoke_get_call(input).await,
             "twilio.list_recordings" => self.invoke_list_recordings(input).await,
@@ -876,6 +958,39 @@ impl TwilioConnector {
             "messages": resp.messages,
             "next_page_uri": resp.next_page_uri,
         }))
+    }
+
+    async fn invoke_list_media(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let message_sid = require_str(&input, "message_sid")?;
+        let page_size = input
+            .get("page_size")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
+        let page = input.get("page").and_then(|v| v.as_u64()).map(|v| v as u32);
+
+        let resp = client
+            .list_media(message_sid, page_size, page)
+            .await
+            .map_err(|e: TwilioError| e.to_fcp_error())?;
+        Ok(json!({
+            "media_list": resp.media_list,
+            "next_page_uri": resp.next_page_uri,
+        }))
+    }
+
+    async fn invoke_get_media(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let message_sid = require_str(&input, "message_sid")?;
+        let media_sid = require_str(&input, "media_sid")?;
+
+        let resp = client
+            .get_media(message_sid, media_sid)
+            .await
+            .map_err(|e: TwilioError| e.to_fcp_error())?;
+        serde_json::to_value(resp).map_err(|e| FcpError::Internal {
+            message: format!("Serialization error: {e}"),
+        })
     }
 
     async fn invoke_create_call(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
@@ -1176,6 +1291,8 @@ mod tests {
         assert!(op_ids.contains(&"twilio.send_message"));
         assert!(op_ids.contains(&"twilio.get_message"));
         assert!(op_ids.contains(&"twilio.list_messages"));
+        assert!(op_ids.contains(&"twilio.list_media"));
+        assert!(op_ids.contains(&"twilio.get_media"));
         assert!(op_ids.contains(&"twilio.create_call"));
         assert!(op_ids.contains(&"twilio.get_call"));
         assert!(op_ids.contains(&"twilio.list_recordings"));
@@ -1183,7 +1300,7 @@ mod tests {
         assert!(op_ids.contains(&"twilio.download_media"));
         assert!(op_ids.contains(&"twilio.get_account"));
         assert!(op_ids.contains(&"twilio.list_phone_numbers"));
-        assert_eq!(ops.len(), 10);
+        assert_eq!(ops.len(), 12);
     }
 
     // ── Provisioning tests ─────────────────────────────────────────
@@ -1520,6 +1637,8 @@ mod tests {
         let read_ops = [
             "twilio.get_message",
             "twilio.list_messages",
+            "twilio.list_media",
+            "twilio.get_media",
             "twilio.get_call",
             "twilio.list_recordings",
             "twilio.download_recording",
@@ -1550,6 +1669,8 @@ mod tests {
         let safe_ops = [
             "twilio.get_message",
             "twilio.list_messages",
+            "twilio.list_media",
+            "twilio.get_media",
             "twilio.get_call",
             "twilio.list_recordings",
             "twilio.download_media",
@@ -1627,6 +1748,8 @@ mod tests {
         let low_risk_ops = [
             "twilio.get_message",
             "twilio.list_messages",
+            "twilio.list_media",
+            "twilio.get_media",
             "twilio.get_call",
             "twilio.list_recordings",
             "twilio.download_media",
@@ -1668,6 +1791,8 @@ mod tests {
         let strict_ops = [
             "twilio.get_message",
             "twilio.list_messages",
+            "twilio.list_media",
+            "twilio.get_media",
             "twilio.get_call",
             "twilio.list_recordings",
             "twilio.download_recording",
@@ -1715,6 +1840,8 @@ mod tests {
         let checks: &[(&str, &[&str])] = &[
             ("twilio.send_message", &["to", "from", "body"]),
             ("twilio.get_message", &["message_sid"]),
+            ("twilio.list_media", &["message_sid"]),
+            ("twilio.get_media", &["message_sid", "media_sid"]),
             ("twilio.create_call", &["to", "from", "url"]),
             ("twilio.get_call", &["call_sid"]),
             ("twilio.download_recording", &["recording_sid"]),

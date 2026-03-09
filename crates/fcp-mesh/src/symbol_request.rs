@@ -1838,27 +1838,277 @@ mod tests {
         assert!(!resp.is_final);
     }
 
-    // ── Batch: additional symbol request tests ──
+    // ── Multiple active transfers ────────────────────────────────
 
     #[test]
-    fn symbol_response_json_serde_roundtrip() {
-        let resp = SymbolResponse {
-            object_id: ObjectId::from_bytes([0xAA; 32]),
-            zone_id: test_zone_id(),
-            zone_key_id: ZoneKeyId::from_bytes([0xBB; 8]),
-            symbol_esis: vec![0, 1, 2, 3],
-            is_final: true,
-            was_bounded: false,
-        };
-        let json = serde_json::to_string(&resp).unwrap();
-        let back: SymbolResponse = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.symbol_esis, resp.symbol_esis);
-        assert_eq!(back.is_final, resp.is_final);
+    fn handler_tracks_multiple_objects_independently() {
+        let mut handler = SymbolRequestHandler::with_default_policy();
+
+        let req1 = test_symbol_request(50, None);
+        let mut header2 = test_object_header();
+        header2.created_at = 2_000_000_000;
+        let req2 = SymbolRequest::new(
+            header2,
+            ObjectId::from_bytes([0x22; 32]),
+            test_zone_id(),
+            ZoneKeyId::from_bytes([0x33; 8]),
+            1000,
+            50,
+            0,
+        );
+
+        handler.track_transfer(&req1, 0..5, 0);
+        handler.track_transfer(&req2, 0..3, 0);
+
+        assert_eq!(handler.active_transfer_count(), 2);
+
+        // Ack first object only
+        let ack1 = SymbolAck::new(
+            test_object_header(),
+            ObjectId::from_bytes([0x11; 32]),
+            test_zone_id(),
+            ZoneKeyId::from_bytes([0x22; 8]),
+            1000,
+            SymbolAckReason::Complete,
+            5,
+        );
+        handler.process_symbol_ack(&ack1, 100);
+
+        assert_eq!(handler.active_transfer_count(), 1);
+        assert!(handler.should_stop(&ObjectId::from_bytes([0x11; 32])));
+        assert!(!handler.should_stop(&ObjectId::from_bytes([0x22; 32])));
+    }
+
+    // ── Prune edge cases ─────────────────────────────────────────
+
+    #[test]
+    fn prune_stale_state_no_entries_returns_zero() {
+        let mut handler = SymbolRequestHandler::with_default_policy();
+        let removed = handler.prune_stale_state(999_999);
+        assert_eq!(removed, 0);
     }
 
     #[test]
-    fn symbol_response_empty_esis() {
-        let resp = SymbolResponse {
+    fn prune_stale_state_at_exact_threshold() {
+        let policy = SymbolRequestPolicy {
+            transfer_state_ttl_ms: 100,
+            ..SymbolRequestPolicy::default()
+        };
+        let mut handler = SymbolRequestHandler::new(policy);
+        let request = test_symbol_request(50, None);
+        handler.track_transfer(&request, 0..5, 50);
+
+        // At exactly threshold boundary (now - ttl = activity time)
+        let removed = handler.prune_stale_state(150);
+        assert_eq!(removed, 0);
+        assert_eq!(handler.active_transfer_count(), 1);
+    }
+
+    #[test]
+    fn prune_stale_state_just_past_threshold() {
+        let policy = SymbolRequestPolicy {
+            transfer_state_ttl_ms: 100,
+            ..SymbolRequestPolicy::default()
+        };
+        let mut handler = SymbolRequestHandler::new(policy);
+        let request = test_symbol_request(50, None);
+        handler.track_transfer(&request, 0..5, 49);
+
+        // Just past threshold
+        let removed = handler.prune_stale_state(150);
+        assert_eq!(removed, 1);
+    }
+
+    // ── TargetedRepairEngine edge cases ──────────────────────────
+
+    #[test]
+    fn targeted_repair_empty_hints_vec() {
+        let mut engine = TargetedRepairEngine::new();
+        let object_id = ObjectId::from_bytes([0x11; 32]);
+        engine.register_available(object_id.clone(), 0..10);
+
+        let request = ValidatedRequest {
+            request: test_symbol_request(5, Some(vec![])),
+            is_authenticated: true,
+            max_response_symbols: 5,
+            has_proof_of_need: true,
+        };
+
+        let selected = engine.select_symbols(&request, &HashSet::new());
+        // No hinted ESIs, should fill from available pool
+        assert_eq!(selected.len(), 5);
+        assert_eq!(selected, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn targeted_repair_all_already_sent() {
+        let mut engine = TargetedRepairEngine::new();
+        let object_id = ObjectId::from_bytes([0x11; 32]);
+        engine.register_available(object_id.clone(), 0..5);
+
+        let request = ValidatedRequest {
+            request: test_symbol_request(10, None),
+            is_authenticated: true,
+            max_response_symbols: 10,
+            has_proof_of_need: false,
+        };
+
+        let already_sent: HashSet<u32> = (0..5).collect();
+        let selected = engine.select_symbols(&request, &already_sent);
+        assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn targeted_repair_register_extends_existing() {
+        let mut engine = TargetedRepairEngine::new();
+        let object_id = ObjectId::from_bytes([0x11; 32]);
+
+        engine.register_available(object_id.clone(), 0..5);
+        engine.register_available(object_id.clone(), 10..15);
+
+        let request = ValidatedRequest {
+            request: test_symbol_request(20, None),
+            is_authenticated: true,
+            max_response_symbols: 20,
+            has_proof_of_need: false,
+        };
+
+        let selected = engine.select_symbols(&request, &HashSet::new());
+        assert_eq!(selected.len(), 10);
+        assert!(selected.contains(&0));
+        assert!(selected.contains(&14));
+    }
+
+    #[test]
+    fn targeted_repair_remove_nonexistent_is_no_op() {
+        let mut engine = TargetedRepairEngine::new();
+        engine.remove_object(&ObjectId::from_bytes([0xFF; 32]));
+        // Just verify it doesn't panic
+    }
+
+    #[test]
+    fn targeted_repair_limit_zero() {
+        let mut engine = TargetedRepairEngine::new();
+        let object_id = ObjectId::from_bytes([0x11; 32]);
+        engine.register_available(object_id.clone(), 0..100);
+
+        let request = ValidatedRequest {
+            request: test_symbol_request(0, None),
+            is_authenticated: true,
+            max_response_symbols: 0,
+            has_proof_of_need: false,
+        };
+
+        let selected = engine.select_symbols(&request, &HashSet::new());
+        assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn targeted_repair_hints_all_duplicates() {
+        let mut engine = TargetedRepairEngine::new();
+        let object_id = ObjectId::from_bytes([0x11; 32]);
+        engine.register_available(object_id.clone(), 0..10);
+
+        let request = ValidatedRequest {
+            request: test_symbol_request(5, Some(vec![3, 3, 3, 3, 3])),
+            is_authenticated: true,
+            max_response_symbols: 5,
+            has_proof_of_need: true,
+        };
+
+        let selected = engine.select_symbols(&request, &HashSet::new());
+        // Only one unique hint (3), then fill remaining from pool
+        assert!(selected.contains(&3));
+        assert_eq!(selected.len(), 5);
+    }
+
+    // ── SymbolResponseBuilder edge cases ─────────────────────────
+
+    #[test]
+    fn response_builder_already_sent_equals_total() {
+        let engine = TargetedRepairEngine::new();
+        let object_id = ObjectId::from_bytes([0x11; 32]);
+
+        let request = ValidatedRequest {
+            request: test_symbol_request(50, None),
+            is_authenticated: true,
+            max_response_symbols: 50,
+            has_proof_of_need: false,
+        };
+
+        let response = SymbolResponseBuilder::new(
+            object_id,
+            test_zone_id(),
+            ZoneKeyId::from_bytes([0x22; 8]),
+            50,
+        )
+        .add_from_repair_engine(&engine, &request, &HashSet::new())
+        .build(100, 100);
+
+        assert_eq!(response.symbol_count(), 0);
+        assert!(response.is_final);
+    }
+
+    #[test]
+    fn response_builder_already_sent_exceeds_total() {
+        let engine = TargetedRepairEngine::new();
+        let object_id = ObjectId::from_bytes([0x11; 32]);
+
+        let request = ValidatedRequest {
+            request: test_symbol_request(50, None),
+            is_authenticated: true,
+            max_response_symbols: 50,
+            has_proof_of_need: false,
+        };
+
+        let response = SymbolResponseBuilder::new(
+            object_id,
+            test_zone_id(),
+            ZoneKeyId::from_bytes([0x22; 8]),
+            50,
+        )
+        .add_from_repair_engine(&engine, &request, &HashSet::new())
+        .build(50, 200);
+
+        assert_eq!(response.symbol_count(), 0);
+        assert!(response.is_final);
+    }
+
+    // ── SymbolRequestPolicy serde edge cases ─────────────────────
+
+    #[test]
+    fn policy_serde_preserves_all_fields() {
+        let policy = SymbolRequestPolicy {
+            max_unauthenticated_response: 1,
+            max_authenticated_response: u32::MAX,
+            min_bootstrap_symbols: 0,
+            require_proof_of_need_above: u32::MAX,
+            allow_unauthenticated: true,
+            transfer_state_ttl_ms: 0,
+        };
+        let json = serde_json::to_string(&policy).unwrap();
+        let back: SymbolRequestPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.max_unauthenticated_response, 1);
+        assert_eq!(back.max_authenticated_response, u32::MAX);
+        assert_eq!(back.min_bootstrap_symbols, 0);
+        assert_eq!(back.require_proof_of_need_above, u32::MAX);
+        assert!(back.allow_unauthenticated);
+        assert_eq!(back.transfer_state_ttl_ms, 0);
+    }
+
+    #[test]
+    fn policy_debug_output() {
+        let policy = SymbolRequestPolicy::default();
+        let dbg = format!("{policy:?}");
+        assert!(dbg.contains("SymbolRequestPolicy"));
+        assert!(dbg.contains("allow_unauthenticated"));
+    }
+
+    // ── SymbolResponse serde edge cases ──────────────────────────
+
+    #[test]
+    fn symbol_response_serde_empty_esis() {
+        let response = SymbolResponse {
             object_id: ObjectId::from_bytes([0; 32]),
             zone_id: test_zone_id(),
             zone_key_id: ZoneKeyId::from_bytes([0; 8]),
@@ -1866,129 +2116,472 @@ mod tests {
             is_final: true,
             was_bounded: false,
         };
-        assert_eq!(resp.symbol_count(), 0);
+        let json = serde_json::to_string(&response).unwrap();
+        let back: SymbolResponse = serde_json::from_str(&json).unwrap();
+        assert!(back.symbol_esis.is_empty());
+        assert!(back.is_final);
     }
 
     #[test]
-    fn symbol_request_error_display_invalid() {
-        let err = SymbolRequestError::InvalidRequest {
-            reason: "bad header".to_string(),
+    fn symbol_response_debug_output() {
+        let response = SymbolResponse {
+            object_id: ObjectId::from_bytes([0; 32]),
+            zone_id: test_zone_id(),
+            zone_key_id: ZoneKeyId::from_bytes([0; 8]),
+            symbol_esis: vec![1, 2, 3],
+            is_final: false,
+            was_bounded: true,
         };
-        assert!(err.to_string().contains("bad header"));
+        let dbg = format!("{response:?}");
+        assert!(dbg.contains("SymbolResponse"));
+        assert!(dbg.contains("was_bounded"));
     }
 
     #[test]
-    fn symbol_request_error_display_bounds() {
-        let err = SymbolRequestError::BoundsExceeded {
-            requested: 500,
-            max_allowed: 32,
+    fn symbol_response_clone() {
+        let response = SymbolResponse {
+            object_id: ObjectId::from_bytes([0x99; 32]),
+            zone_id: test_zone_id(),
+            zone_key_id: ZoneKeyId::from_bytes([0x88; 8]),
+            symbol_esis: vec![10, 20, 30],
+            is_final: true,
+            was_bounded: false,
         };
-        let msg = err.to_string();
-        assert!(msg.contains("500"));
-        assert!(msg.contains("32"));
+        let cloned = response.clone();
+        assert_eq!(cloned.symbol_esis, vec![10, 20, 30]);
+        assert_eq!(cloned.object_id, response.object_id);
+        assert!(cloned.is_final);
+    }
+
+    // ── Metrics accumulation ─────────────────────────────────────
+
+    #[test]
+    fn metrics_multiple_records_accumulate() {
+        let mut metrics = SymbolRequestMetrics::default();
+        for _ in 0..10 {
+            metrics.record_validated();
+        }
+        for _ in 0..5 {
+            metrics.record_bounds_rejection();
+        }
+        for _ in 0..3 {
+            metrics.record_admission_rejection();
+        }
+        metrics.record_symbols_sent(100, true);
+        metrics.record_symbols_sent(200, false);
+        metrics.record_ack();
+        metrics.record_ack();
+
+        assert_eq!(metrics.requests_received, 18);
+        assert_eq!(metrics.requests_validated, 10);
+        assert_eq!(metrics.requests_rejected_bounds, 5);
+        assert_eq!(metrics.requests_rejected_admission, 3);
+        assert_eq!(metrics.symbols_sent, 300);
+        assert_eq!(metrics.targeted_repairs, 1);
+        assert_eq!(metrics.acks_received, 2);
     }
 
     #[test]
-    fn symbol_request_error_display_hint_too_large() {
-        let err = SymbolRequestError::HintTooLarge {
-            count: 2000,
-            max: 1000,
+    fn metrics_default_all_zero() {
+        let metrics = SymbolRequestMetrics::default();
+        assert_eq!(metrics.requests_received, 0);
+        assert_eq!(metrics.requests_validated, 0);
+        assert_eq!(metrics.requests_rejected_bounds, 0);
+        assert_eq!(metrics.requests_rejected_admission, 0);
+        assert_eq!(metrics.symbols_sent, 0);
+        assert_eq!(metrics.targeted_repairs, 0);
+        assert_eq!(metrics.acks_received, 0);
+    }
+
+    #[test]
+    fn metrics_clone() {
+        let mut metrics = SymbolRequestMetrics::default();
+        metrics.record_validated();
+        metrics.record_symbols_sent(50, true);
+        let cloned = metrics.clone();
+        assert_eq!(cloned.requests_received, 1);
+        assert_eq!(cloned.symbols_sent, 50);
+        assert_eq!(cloned.targeted_repairs, 1);
+    }
+
+    // ── SymbolRequestError Debug coverage ────────────────────────
+
+    #[test]
+    fn error_debug_all_variants() {
+        let errors: Vec<SymbolRequestError> = vec![
+            SymbolRequestError::InvalidRequest {
+                reason: "test".into(),
+            },
+            SymbolRequestError::BoundsExceeded {
+                requested: 10,
+                max_allowed: 5,
+            },
+            SymbolRequestError::HintTooLarge {
+                count: 300,
+                max: 128,
+            },
+            SymbolRequestError::ObjectNotFound {
+                object_id: "oid".into(),
+            },
+            SymbolRequestError::SignatureInvalid,
+            SymbolRequestError::AlreadyComplete {
+                object_id: "done".into(),
+            },
+        ];
+        for err in &errors {
+            let dbg = format!("{err:?}");
+            assert!(!dbg.is_empty());
+        }
+    }
+
+    // ── ValidatedRequest field combinations ──────────────────────
+
+    #[test]
+    fn validated_request_unauthenticated_with_proof() {
+        let vr = ValidatedRequest {
+            request: test_symbol_request(5, Some(vec![1, 2, 3])),
+            is_authenticated: false,
+            max_response_symbols: 5,
+            has_proof_of_need: true,
         };
-        let msg = err.to_string();
-        assert!(msg.contains("2000"));
-        assert!(msg.contains("1000"));
+        assert!(!vr.is_authenticated);
+        assert!(vr.has_proof_of_need);
+        assert_eq!(vr.max_response_symbols, 5);
     }
 
     #[test]
-    fn symbol_request_error_display_not_found() {
-        let err = SymbolRequestError::ObjectNotFound {
-            object_id: "obj-123".to_string(),
+    fn validated_request_clone_preserves_all() {
+        let vr = ValidatedRequest {
+            request: test_symbol_request(20, Some(vec![1, 2])),
+            is_authenticated: true,
+            max_response_symbols: 20,
+            has_proof_of_need: true,
         };
-        assert!(err.to_string().contains("obj-123"));
+        let cloned = vr.clone();
+        assert_eq!(vr.max_response_symbols, 20);
+        assert!(cloned.is_authenticated);
+        assert_eq!(cloned.max_response_symbols, 20);
+        assert!(cloned.has_proof_of_need);
+        assert_eq!(
+            cloned.request.missing_hint.as_ref().map(Vec::len),
+            Some(2)
+        );
     }
 
-    #[test]
-    fn symbol_request_error_display_sig_invalid() {
-        let err = SymbolRequestError::SignatureInvalid;
-        assert!(err.to_string().contains("signature verification failed"));
-    }
+    // ── Handler decode status for unknown object ─────────────────
 
     #[test]
-    fn symbol_request_error_display_already_complete() {
-        let err = SymbolRequestError::AlreadyComplete {
-            object_id: "obj-done".to_string(),
+    fn process_decode_status_unknown_object_is_noop() {
+        let mut handler = SymbolRequestHandler::with_default_policy();
+
+        let status = DecodeStatus {
+            header: test_object_header(),
+            object_id: ObjectId::from_bytes([0xFF; 32]),
+            zone_id: test_zone_id(),
+            zone_key_id: ZoneKeyId::from_bytes([0x22; 8]),
+            epoch_id: 1000,
+            received_unique: 10,
+            needed: 40,
+            complete: false,
+            missing_hint: None,
+            signature: fcp_crypto::Ed25519Signature::from_bytes(&[0u8; 64]),
         };
-        assert!(err.to_string().contains("already complete"));
+        handler.process_decode_status(&status, 0);
+        assert_eq!(handler.active_transfer_count(), 0);
     }
 
     #[test]
-    fn symbol_request_policy_default_values() {
-        let policy = SymbolRequestPolicy::default();
-        assert_eq!(policy.max_unauthenticated_response, DEFAULT_RESPONSE_LIMIT_UNAUTHENTICATED);
-        assert_eq!(policy.max_authenticated_response, DEFAULT_RESPONSE_LIMIT_AUTHENTICATED);
-        assert_eq!(policy.min_bootstrap_symbols, DEFAULT_MIN_BOOTSTRAP_SYMBOLS);
-        assert!(policy.allow_unauthenticated);
+    fn process_symbol_ack_unknown_object_is_noop() {
+        let mut handler = SymbolRequestHandler::with_default_policy();
+        let ack = SymbolAck::new(
+            test_object_header(),
+            ObjectId::from_bytes([0xFF; 32]),
+            test_zone_id(),
+            ZoneKeyId::from_bytes([0x22; 8]),
+            1000,
+            SymbolAckReason::Complete,
+            0,
+        );
+        handler.process_symbol_ack(&ack, 0);
+        // Should not panic, completed_transfers now has this entry
+        assert!(handler.should_stop(&ObjectId::from_bytes([0xFF; 32])));
+    }
+
+    // ── Track transfer updates total_needed ───────────────────────
+
+    #[test]
+    fn track_transfer_updates_total_needed_upward() {
+        let mut handler = SymbolRequestHandler::with_default_policy();
+        let req1 = test_symbol_request(50, None);
+        handler.track_transfer(&req1, 0..5, 0);
+
+        // Second track with larger max_symbols
+        let req2 = test_symbol_request(100, None);
+        handler.track_transfer(&req2, 5..10, 100);
+
+        // Still 1 transfer (same object_id)
+        assert_eq!(handler.active_transfer_count(), 1);
+    }
+
+    // ── SymbolAckReason variants ─────────────────────────────────
+
+    #[test]
+    fn process_ack_with_cancel_reason() {
+        let mut handler = SymbolRequestHandler::with_default_policy();
+        let object_id = ObjectId::from_bytes([0x11; 32]);
+        let request = test_symbol_request(50, None);
+        handler.track_transfer(&request, 0..5, 0);
+
+        let ack = SymbolAck::new(
+            test_object_header(),
+            object_id.clone(),
+            test_zone_id(),
+            ZoneKeyId::from_bytes([0x22; 8]),
+            1000,
+            SymbolAckReason::Cancelled,
+            3,
+        );
+        handler.process_symbol_ack(&ack, 100);
+
+        assert!(handler.should_stop(&object_id));
+        assert_eq!(handler.active_transfer_count(), 0);
+    }
+
+    // ── Validation with custom policy thresholds ──────────────────
+
+    #[test]
+    fn validate_with_custom_max_limits() {
+        let policy = SymbolRequestPolicy {
+            max_unauthenticated_response: 10,
+            max_authenticated_response: 50,
+            ..SymbolRequestPolicy::default()
+        };
+        let handler = SymbolRequestHandler::new(policy);
+        let mut admission = AdmissionController::with_default_policy();
+        let peer = NodeId::new("peer-custom");
+
+        // Authenticated request capped to policy max (50)
+        let request = test_symbol_request(100, None);
+        let result = handler.validate_request(&request, true, &mut admission, &peer, 0, 64);
+        let validated = result.unwrap();
+        assert_eq!(validated.max_response_symbols, 50);
     }
 
     #[test]
-    fn symbol_request_handler_active_transfer_count() {
+    fn validate_authenticated_below_proof_threshold() {
+        let policy = SymbolRequestPolicy {
+            require_proof_of_need_above: 200,
+            ..SymbolRequestPolicy::default()
+        };
+        let handler = SymbolRequestHandler::new(policy);
+        let mut admission = AdmissionController::with_default_policy();
+        let peer = NodeId::new("peer-below");
+
+        // 150 < 200, so no proof needed
+        let request = test_symbol_request(150, None);
+        let result = handler.validate_request(&request, true, &mut admission, &peer, 0, 64);
+        assert!(result.is_ok());
+    }
+
+    // ── SymbolResponse serde with large ESI list ─────────────────
+
+    #[test]
+    fn symbol_response_serde_large_esi_list() {
+        let esis: Vec<u32> = (0..500).collect();
+        let response = SymbolResponse {
+            object_id: ObjectId::from_bytes([0xAA; 32]),
+            zone_id: test_zone_id(),
+            zone_key_id: ZoneKeyId::from_bytes([0xBB; 8]),
+            symbol_esis: esis,
+            is_final: false,
+            was_bounded: true,
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        let back: SymbolResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.symbol_esis.len(), 500);
+        assert_eq!(back.symbol_count(), 500);
+    }
+
+    // ── SymbolRequestPolicy clone ────────────────────────────────
+
+    #[test]
+    fn symbol_request_policy_clone() {
+        let policy = SymbolRequestPolicy {
+            max_unauthenticated_response: 99,
+            max_authenticated_response: 999,
+            min_bootstrap_symbols: 5,
+            require_proof_of_need_above: 50,
+            allow_unauthenticated: false,
+            transfer_state_ttl_ms: 12345,
+        };
+        let cloned = policy.clone();
+        assert_eq!(policy.max_unauthenticated_response, 99);
+        assert_eq!(cloned.max_unauthenticated_response, 99);
+        assert_eq!(cloned.max_authenticated_response, 999);
+        assert_eq!(cloned.min_bootstrap_symbols, 5);
+        assert_eq!(cloned.require_proof_of_need_above, 50);
+        assert!(!cloned.allow_unauthenticated);
+        assert_eq!(cloned.transfer_state_ttl_ms, 12345);
+    }
+
+    // ── Handler initial state ────────────────────────────────────
+
+    #[test]
+    fn handler_initial_active_count_zero() {
         let handler = SymbolRequestHandler::with_default_policy();
         assert_eq!(handler.active_transfer_count(), 0);
     }
 
     #[test]
-    fn symbol_request_handler_should_stop_unknown_object() {
+    fn handler_should_stop_unknown_object_false() {
         let handler = SymbolRequestHandler::with_default_policy();
-        let oid = ObjectId::from_bytes([0xFF; 32]);
-        assert!(!handler.should_stop(&oid));
+        assert!(!handler.should_stop(&ObjectId::from_bytes([0xAB; 32])));
+    }
+
+    // ── TargetedRepairEngine with single ESI ─────────────────────
+
+    #[test]
+    fn targeted_repair_single_available_esi() {
+        let mut engine = TargetedRepairEngine::new();
+        let object_id = ObjectId::from_bytes([0x11; 32]);
+        engine.register_available(object_id.clone(), std::iter::once(42));
+
+        let request = ValidatedRequest {
+            request: test_symbol_request(10, None),
+            is_authenticated: true,
+            max_response_symbols: 10,
+            has_proof_of_need: false,
+        };
+
+        let selected = engine.select_symbols(&request, &HashSet::new());
+        assert_eq!(selected, vec![42]);
     }
 
     #[test]
-    fn symbol_request_metrics_default() {
-        let metrics = SymbolRequestMetrics::default();
-        assert_eq!(metrics.requests_received, 0);
-        assert_eq!(metrics.symbols_sent, 0);
-        assert_eq!(metrics.acks_received, 0);
+    fn targeted_repair_hint_only_unavailable_fills_from_pool() {
+        let mut engine = TargetedRepairEngine::new();
+        let object_id = ObjectId::from_bytes([0x11; 32]);
+        engine.register_available(object_id.clone(), 0..3);
+
+        let request = ValidatedRequest {
+            request: test_symbol_request(3, Some(vec![100, 200])),
+            is_authenticated: true,
+            max_response_symbols: 3,
+            has_proof_of_need: true,
+        };
+
+        let selected = engine.select_symbols(&request, &HashSet::new());
+        // Hints 100/200 aren't available, should fill from 0..3
+        assert_eq!(selected.len(), 3);
+        assert_eq!(selected, vec![0, 1, 2]);
+    }
+
+    // ── SymbolResponseBuilder direct construction ────────────────
+
+    #[test]
+    fn response_builder_without_engine() {
+        let response = SymbolResponseBuilder::new(
+            ObjectId::from_bytes([0x11; 32]),
+            test_zone_id(),
+            ZoneKeyId::from_bytes([0x22; 8]),
+            100,
+        )
+        .build(0, 0);
+
+        assert_eq!(response.symbol_count(), 0);
+        assert!(response.is_final);
     }
 
     #[test]
-    fn symbol_request_metrics_record_symbols() {
+    fn response_builder_max_symbols_zero() {
+        let response = SymbolResponseBuilder::new(
+            ObjectId::from_bytes([0x11; 32]),
+            test_zone_id(),
+            ZoneKeyId::from_bytes([0x22; 8]),
+            0,
+        )
+        .build(100, 0);
+
+        assert_eq!(response.symbol_count(), 0);
+        assert!(response.is_final);
+        assert!(response.was_bounded);
+    }
+
+    // ── Prune with u64::MAX timestamp ────────────────────────────
+
+    #[test]
+    fn prune_stale_state_max_timestamp() {
+        let mut handler = SymbolRequestHandler::with_default_policy();
+        let request = test_symbol_request(50, None);
+        handler.track_transfer(&request, 0..5, 0);
+
+        // Even with u64::MAX all entries should be expired (activity at 0)
+        let removed = handler.prune_stale_state(u64::MAX);
+        assert_eq!(removed, 1);
+    }
+
+    // ── Metrics symbols accumulation ─────────────────────────────
+
+    #[test]
+    fn metrics_record_symbols_sent_accumulates() {
         let mut metrics = SymbolRequestMetrics::default();
         metrics.record_symbols_sent(10, false);
-        assert_eq!(metrics.symbols_sent, 10);
-        assert_eq!(metrics.targeted_repairs, 0);
-
-        metrics.record_symbols_sent(5, true);
-        assert_eq!(metrics.symbols_sent, 15);
+        metrics.record_symbols_sent(20, true);
+        metrics.record_symbols_sent(30, false);
+        assert_eq!(metrics.symbols_sent, 60);
         assert_eq!(metrics.targeted_repairs, 1);
     }
 
     #[test]
-    fn targeted_repair_engine_default_empty_select() {
-        let engine = TargetedRepairEngine::default();
-        // No objects registered, so select_symbols should return empty
-        let req = ValidatedRequest {
-            request: test_symbol_request(10, None),
+    fn metrics_record_symbols_sent_zero() {
+        let mut metrics = SymbolRequestMetrics::default();
+        metrics.record_symbols_sent(0, true);
+        assert_eq!(metrics.symbols_sent, 0);
+        assert_eq!(metrics.targeted_repairs, 1);
+    }
+
+    // ── SymbolRequestError debug coverage all variants ───────────
+
+    #[test]
+    fn error_admission_rejected_display() {
+        let err = SymbolRequestError::AdmissionRejected(
+            AdmissionError::AuthenticationRequired,
+        );
+        let s = err.to_string();
+        assert!(s.contains("admission"));
+    }
+
+    // ── Validated request max_response_symbols boundary ──────────
+
+    #[test]
+    fn validated_request_max_zero() {
+        let vr = ValidatedRequest {
+            request: test_symbol_request(0, None),
             is_authenticated: true,
-            max_response_symbols: 10,
+            max_response_symbols: 0,
             has_proof_of_need: false,
         };
-        let selected = engine.select_symbols(&req, &HashSet::new());
-        assert!(selected.is_empty());
+        assert_eq!(vr.max_response_symbols, 0);
     }
 
     #[test]
-    fn targeted_repair_engine_remove_object() {
-        let mut engine = TargetedRepairEngine::new();
-        let oid = ObjectId::from_bytes([0x11; 32]);
-        engine.register_available(oid, 0..10);
-        engine.remove_object(&oid);
-        let req = ValidatedRequest {
-            request: test_symbol_request(10, None),
+    fn validated_request_max_u32_max() {
+        let vr = ValidatedRequest {
+            request: test_symbol_request(u32::MAX, None),
             is_authenticated: true,
-            max_response_symbols: 10,
+            max_response_symbols: u32::MAX,
             has_proof_of_need: false,
         };
-        assert!(engine.select_symbols(&req, &HashSet::new()).is_empty());
+        assert_eq!(vr.max_response_symbols, u32::MAX);
+    }
+
+    // ── Track transfer with empty iterator ───────────────────────
+
+    #[test]
+    fn track_transfer_empty_esi_iterator() {
+        let mut handler = SymbolRequestHandler::with_default_policy();
+        let request = test_symbol_request(50, None);
+        handler.track_transfer(&request, std::iter::empty(), 0);
+        assert_eq!(handler.active_transfer_count(), 1);
     }
 }

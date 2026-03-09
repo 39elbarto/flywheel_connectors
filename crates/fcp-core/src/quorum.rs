@@ -1957,4 +1957,581 @@ mod tests {
             fs::write(vectors_dir.join("degraded_state.cbor"), &bytes).unwrap();
         }
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: Additional quorum tests for 110+ coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn risk_tier_as_str_all_variants() {
+        assert_eq!(RiskTier::Safe.as_str(), "safe");
+        assert_eq!(RiskTier::Risky.as_str(), "risky");
+        assert_eq!(RiskTier::Dangerous.as_str(), "dangerous");
+        assert_eq!(RiskTier::CriticalWrite.as_str(), "critical_write");
+    }
+
+    #[test]
+    fn risk_tier_copy_semantics() {
+        let tier = RiskTier::Dangerous;
+        let copied = tier;
+        assert_eq!(tier, copied);
+    }
+
+    #[test]
+    fn risk_tier_hash_consistent() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(RiskTier::Safe);
+        set.insert(RiskTier::Risky);
+        set.insert(RiskTier::Dangerous);
+        set.insert(RiskTier::CriticalWrite);
+        assert_eq!(set.len(), 4);
+        // Inserting duplicate should not increase size
+        set.insert(RiskTier::Safe);
+        assert_eq!(set.len(), 4);
+    }
+
+    #[test]
+    fn risk_tier_serde_all_variants() {
+        let tiers = [
+            RiskTier::Safe,
+            RiskTier::Risky,
+            RiskTier::Dangerous,
+            RiskTier::CriticalWrite,
+        ];
+        for tier in tiers {
+            let json = serde_json::to_string(&tier).unwrap();
+            let decoded: RiskTier = serde_json::from_str(&json).unwrap();
+            assert_eq!(tier, decoded);
+        }
+    }
+
+    #[test]
+    fn risk_tier_debug_format() {
+        let debug = format!("{:?}", RiskTier::CriticalWrite);
+        assert!(debug.contains("CriticalWrite"));
+    }
+
+    #[test]
+    fn risk_tier_inequality() {
+        assert_ne!(RiskTier::Safe, RiskTier::Risky);
+        assert_ne!(RiskTier::Dangerous, RiskTier::CriticalWrite);
+    }
+
+    #[test]
+    fn quorum_purpose_copy_semantics() {
+        let purpose = QuorumPurpose::AuditHead;
+        let copied = purpose;
+        assert_eq!(purpose, copied);
+    }
+
+    #[test]
+    fn quorum_purpose_hash_consistent() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(QuorumPurpose::AuditHead);
+        set.insert(QuorumPurpose::ZoneCheckpoint);
+        set.insert(QuorumPurpose::RevocationHead);
+        set.insert(QuorumPurpose::DangerousLease);
+        set.insert(QuorumPurpose::RiskyLease);
+        set.insert(QuorumPurpose::SafeLease);
+        set.insert(QuorumPurpose::KeyRotation);
+        set.insert(QuorumPurpose::MembershipChange);
+        assert_eq!(set.len(), 8);
+    }
+
+    #[test]
+    fn quorum_purpose_serde_all_variants() {
+        let purposes = [
+            QuorumPurpose::AuditHead,
+            QuorumPurpose::ZoneCheckpoint,
+            QuorumPurpose::RevocationHead,
+            QuorumPurpose::DangerousLease,
+            QuorumPurpose::RiskyLease,
+            QuorumPurpose::SafeLease,
+            QuorumPurpose::KeyRotation,
+            QuorumPurpose::MembershipChange,
+        ];
+        for purpose in purposes {
+            let json = serde_json::to_string(&purpose).unwrap();
+            let decoded: QuorumPurpose = serde_json::from_str(&json).unwrap();
+            assert_eq!(purpose, decoded);
+        }
+    }
+
+    #[test]
+    fn quorum_purpose_debug_format() {
+        let debug = format!("{:?}", QuorumPurpose::KeyRotation);
+        assert!(debug.contains("KeyRotation"));
+    }
+
+    #[test]
+    fn quorum_policy_new_single_node() {
+        let policy = QuorumPolicy::new(ZoneId::work(), 1, 0);
+        assert_eq!(policy.eligible_nodes, 1);
+        assert_eq!(policy.max_faults, 0);
+        assert_eq!(policy.required_signatures(RiskTier::Safe), 1);
+        assert_eq!(policy.required_signatures(RiskTier::Dangerous), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "eligible_nodes must be > 0")]
+    fn quorum_policy_new_zero_nodes_panics() {
+        let _ = QuorumPolicy::new(ZoneId::work(), 0, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "max_faults must be < eligible_nodes")]
+    fn quorum_policy_new_f_equals_n_panics() {
+        let _ = QuorumPolicy::new(ZoneId::work(), 3, 3);
+    }
+
+    #[test]
+    fn quorum_policy_degraded_mode_defaults() {
+        let policy = QuorumPolicy::new(ZoneId::work(), 5, 2);
+        assert!(!policy.allow_degraded_mode);
+        assert_eq!(policy.degraded_mode_min_nodes, 1);
+    }
+
+    #[test]
+    fn quorum_policy_is_degraded_at_full_capacity() {
+        let policy = QuorumPolicy::new(ZoneId::work(), 5, 2);
+        assert!(!policy.is_degraded(5));
+        assert!(!policy.is_degraded(6)); // more than expected is not degraded
+    }
+
+    #[test]
+    fn quorum_policy_is_degraded_zero_available() {
+        let policy = QuorumPolicy::new(ZoneId::work(), 5, 2);
+        assert!(policy.is_degraded(0));
+    }
+
+    #[test]
+    fn quorum_policy_degraded_mode_disabled_blocks_all() {
+        let policy = QuorumPolicy::new(ZoneId::work(), 5, 2);
+        // Without degraded mode enabled, all degraded ops are blocked
+        assert!(!policy.can_proceed_degraded(4, RiskTier::Safe));
+        assert!(!policy.can_proceed_degraded(4, RiskTier::Risky));
+        assert!(!policy.can_proceed_degraded(4, RiskTier::Dangerous));
+    }
+
+    #[test]
+    fn quorum_policy_degraded_mode_min_nodes_boundary() {
+        let policy = QuorumPolicy::new(ZoneId::work(), 5, 2).with_degraded_mode(3);
+        // At min_nodes: allowed for Safe
+        assert!(policy.can_proceed_degraded(3, RiskTier::Safe));
+        // Below min_nodes: not allowed even for Safe
+        assert!(!policy.can_proceed_degraded(2, RiskTier::Safe));
+    }
+
+    #[test]
+    fn quorum_policy_is_quorum_met_zero_sigs() {
+        let policy = QuorumPolicy::new(ZoneId::work(), 3, 1);
+        assert!(!policy.is_quorum_met(0, RiskTier::Safe));
+    }
+
+    #[test]
+    fn quorum_policy_is_quorum_met_exact_threshold() {
+        let policy = QuorumPolicy::new(ZoneId::work(), 5, 2);
+        // Risky needs f+1 = 3
+        assert!(policy.is_quorum_met(3, RiskTier::Risky));
+        assert!(!policy.is_quorum_met(2, RiskTier::Risky));
+    }
+
+    #[test]
+    fn quorum_policy_is_quorum_met_above_threshold() {
+        let policy = QuorumPolicy::new(ZoneId::work(), 5, 2);
+        // Dangerous needs n-f = 3, having 5 should still pass
+        assert!(policy.is_quorum_met(5, RiskTier::Dangerous));
+    }
+
+    #[test]
+    fn node_id_new_from_string() {
+        let id = NodeId::new("my-node".to_string());
+        assert_eq!(id.as_str(), "my-node");
+    }
+
+    #[test]
+    fn node_id_equality() {
+        let a = NodeId::new("node-1");
+        let b = NodeId::new("node-1");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn node_id_inequality() {
+        let a = NodeId::new("node-1");
+        let b = NodeId::new("node-2");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn node_id_ord_consistent_with_partial_ord() {
+        let a = NodeId::new("aaa");
+        let b = NodeId::new("bbb");
+        assert_eq!(a.partial_cmp(&b), Some(Ordering::Less));
+        assert_eq!(a.cmp(&b), Ordering::Less);
+    }
+
+    #[test]
+    fn node_id_clone() {
+        let id = NodeId::new("cloneable");
+        let cloned = id.clone();
+        assert_eq!(id, cloned);
+    }
+
+    #[test]
+    fn node_id_serde_roundtrip() {
+        let id = NodeId::new("serde-node");
+        let json = serde_json::to_string(&id).unwrap();
+        let decoded: NodeId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, decoded);
+    }
+
+    #[test]
+    fn node_signature_fields() {
+        let sig = NodeSignature::new(NodeId::new("n1"), [0xAB; 64], 999);
+        assert_eq!(sig.node_id.as_str(), "n1");
+        assert_eq!(sig.signature, [0xAB; 64]);
+        assert_eq!(sig.signed_at, 999);
+    }
+
+    #[test]
+    fn node_signature_ord_by_node_id() {
+        let a = NodeSignature::new(NodeId::new("alpha"), [0; 64], 1000);
+        let b = NodeSignature::new(NodeId::new("beta"), [0; 64], 1000);
+        assert!(a < b);
+        assert_eq!(a.partial_cmp(&b), Some(Ordering::Less));
+    }
+
+    #[test]
+    fn node_signature_clone() {
+        let sig = NodeSignature::new(NodeId::new("n"), [42; 64], 100);
+        let cloned = sig.clone();
+        assert_eq!(sig, cloned);
+    }
+
+    #[test]
+    fn node_signature_serde_roundtrip() {
+        let sig = NodeSignature::new(NodeId::new("test"), [0xFF; 64], 1234);
+        let json = serde_json::to_string(&sig).unwrap();
+        let decoded: NodeSignature = serde_json::from_str(&json).unwrap();
+        assert_eq!(sig, decoded);
+    }
+
+    #[test]
+    fn signature_set_default_is_empty() {
+        let set = SignatureSet::default();
+        assert!(set.is_empty());
+        assert_eq!(set.len(), 0);
+    }
+
+    #[test]
+    fn signature_set_as_slice() {
+        let mut set = SignatureSet::new();
+        set.add(NodeSignature::new(NodeId::new("n1"), [1; 64], 100));
+        set.add(NodeSignature::new(NodeId::new("n2"), [2; 64], 200));
+        let slice = set.as_slice();
+        assert_eq!(slice.len(), 2);
+        assert_eq!(slice[0].node_id.as_str(), "n1");
+        assert_eq!(slice[1].node_id.as_str(), "n2");
+    }
+
+    #[test]
+    fn signature_set_canonical_bytes_empty() {
+        let set = SignatureSet::new();
+        let bytes = set.canonical_bytes();
+        assert!(bytes.is_empty());
+    }
+
+    #[test]
+    fn signature_set_canonical_bytes_single() {
+        let mut set = SignatureSet::new();
+        set.add(NodeSignature::new(NodeId::new("n"), [0xAA; 64], 100));
+        let bytes = set.canonical_bytes();
+        // node_id length (4 bytes) + node_id bytes + signature (64 bytes)
+        assert_eq!(bytes.len(), 4 + 1 + 64); // "n" is 1 byte
+    }
+
+    #[test]
+    fn signature_set_eq_ignores_order_of_addition() {
+        let mut set1 = SignatureSet::new();
+        set1.add(NodeSignature::new(NodeId::new("a"), [1; 64], 100));
+        set1.add(NodeSignature::new(NodeId::new("b"), [2; 64], 200));
+
+        let mut set2 = SignatureSet::new();
+        set2.add(NodeSignature::new(NodeId::new("b"), [2; 64], 200));
+        set2.add(NodeSignature::new(NodeId::new("a"), [1; 64], 100));
+
+        assert_eq!(set1, set2);
+    }
+
+    #[test]
+    fn signature_set_ne_different_signatures() {
+        let mut set1 = SignatureSet::new();
+        set1.add(NodeSignature::new(NodeId::new("a"), [1; 64], 100));
+
+        let mut set2 = SignatureSet::new();
+        set2.add(NodeSignature::new(NodeId::new("a"), [2; 64], 100));
+
+        assert_ne!(set1, set2);
+    }
+
+    #[test]
+    fn signature_set_iter_yields_sorted_order() {
+        let mut set = SignatureSet::new();
+        set.add(NodeSignature::new(NodeId::new("z"), [0; 64], 100));
+        set.add(NodeSignature::new(NodeId::new("a"), [1; 64], 100));
+        set.add(NodeSignature::new(NodeId::new("m"), [2; 64], 100));
+
+        let ids: Vec<&str> = set.iter().map(|s| s.node_id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "m", "z"]);
+    }
+
+    #[test]
+    fn degraded_mode_reason_copy_semantics() {
+        let reason = DegradedModeReason::NetworkPartition;
+        let copied = reason;
+        assert_eq!(reason, copied);
+    }
+
+    #[test]
+    fn degraded_mode_reason_hash_consistent() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(DegradedModeReason::NetworkPartition);
+        set.insert(DegradedModeReason::InsufficientNodes);
+        set.insert(DegradedModeReason::NodeFailure);
+        set.insert(DegradedModeReason::QuorumTimeout);
+        set.insert(DegradedModeReason::ManualOverride);
+        assert_eq!(set.len(), 5);
+    }
+
+    #[test]
+    fn degraded_mode_reason_serde_all_variants() {
+        let reasons = [
+            DegradedModeReason::NetworkPartition,
+            DegradedModeReason::InsufficientNodes,
+            DegradedModeReason::NodeFailure,
+            DegradedModeReason::QuorumTimeout,
+            DegradedModeReason::ManualOverride,
+        ];
+        for reason in reasons {
+            let json = serde_json::to_string(&reason).unwrap();
+            let decoded: DegradedModeReason = serde_json::from_str(&json).unwrap();
+            assert_eq!(reason, decoded);
+        }
+    }
+
+    #[test]
+    fn degraded_mode_state_normal_expected_equals_available() {
+        let state = DegradedModeState::normal(7);
+        assert_eq!(state.available_nodes, 7);
+        assert_eq!(state.expected_nodes, 7);
+    }
+
+    #[test]
+    fn degraded_mode_state_serde_roundtrip() {
+        let state =
+            DegradedModeState::degraded(DegradedModeReason::QuorumTimeout, 5000, 2, 5);
+        let json = serde_json::to_string(&state).unwrap();
+        let decoded: DegradedModeState = serde_json::from_str(&json).unwrap();
+        assert_eq!(state, decoded);
+    }
+
+    #[test]
+    fn degraded_mode_state_clone() {
+        let state = DegradedModeState::degraded(
+            DegradedModeReason::ManualOverride,
+            1000,
+            3,
+            5,
+        );
+        let cloned = state.clone();
+        assert_eq!(state, cloned);
+    }
+
+    #[test]
+    fn degraded_mode_state_debug_format() {
+        let state = DegradedModeState::normal(3);
+        let debug = format!("{state:?}");
+        assert!(debug.contains("DegradedModeState"));
+    }
+
+    #[test]
+    fn quorum_failure_reason_copy_semantics() {
+        let reason = QuorumFailureReason::DuplicateNode;
+        let copied = reason;
+        assert_eq!(reason, copied);
+    }
+
+    #[test]
+    fn quorum_failure_reason_hash_consistent() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(QuorumFailureReason::InsufficientSignatures);
+        set.insert(QuorumFailureReason::InvalidSignature);
+        set.insert(QuorumFailureReason::DuplicateNode);
+        set.insert(QuorumFailureReason::NodeNotEligible);
+        set.insert(QuorumFailureReason::DegradedModeNotAllowed);
+        set.insert(QuorumFailureReason::SignatureExpired);
+        assert_eq!(set.len(), 6);
+    }
+
+    #[test]
+    fn quorum_failure_reason_as_str_signature_expired() {
+        assert_eq!(
+            QuorumFailureReason::SignatureExpired.as_str(),
+            "signature_expired"
+        );
+    }
+
+    #[test]
+    fn quorum_failure_reason_display_signature_expired() {
+        assert_eq!(
+            QuorumFailureReason::SignatureExpired.to_string(),
+            "signature_expired"
+        );
+    }
+
+    #[test]
+    fn quorum_failure_reason_serde_all_variants() {
+        let reasons = [
+            QuorumFailureReason::InsufficientSignatures,
+            QuorumFailureReason::InvalidSignature,
+            QuorumFailureReason::DuplicateNode,
+            QuorumFailureReason::NodeNotEligible,
+            QuorumFailureReason::DegradedModeNotAllowed,
+            QuorumFailureReason::SignatureExpired,
+        ];
+        for reason in reasons {
+            let json = serde_json::to_string(&reason).unwrap();
+            let decoded: QuorumFailureReason = serde_json::from_str(&json).unwrap();
+            assert_eq!(reason, decoded);
+        }
+    }
+
+    #[test]
+    fn quorum_verification_result_satisfied() {
+        let result = QuorumVerificationResult {
+            satisfied: true,
+            valid_count: 5,
+            required_count: 3,
+            risk_tier: RiskTier::Risky,
+            degraded_mode: false,
+            failure_reason: None,
+        };
+        assert!(result.satisfied);
+        assert!(result.failure_reason.is_none());
+    }
+
+    #[test]
+    fn quorum_verification_result_serde_roundtrip() {
+        let result = QuorumVerificationResult {
+            satisfied: false,
+            valid_count: 1,
+            required_count: 3,
+            risk_tier: RiskTier::CriticalWrite,
+            degraded_mode: true,
+            failure_reason: Some(QuorumFailureReason::DegradedModeNotAllowed),
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let decoded: QuorumVerificationResult = serde_json::from_str(&json).unwrap();
+        assert!(!decoded.satisfied);
+        assert_eq!(decoded.valid_count, 1);
+        assert_eq!(decoded.required_count, 3);
+        assert_eq!(
+            decoded.failure_reason,
+            Some(QuorumFailureReason::DegradedModeNotAllowed)
+        );
+    }
+
+    #[test]
+    fn quorum_verification_result_clone() {
+        let result = QuorumVerificationResult {
+            satisfied: true,
+            valid_count: 3,
+            required_count: 3,
+            risk_tier: RiskTier::Safe,
+            degraded_mode: false,
+            failure_reason: None,
+        };
+        let cloned = result.clone();
+        assert_eq!(cloned.satisfied, result.satisfied);
+        assert_eq!(cloned.valid_count, result.valid_count);
+    }
+
+    #[test]
+    fn required_quorum_n_equals_2_f_equals_1() {
+        assert_eq!(required_quorum(2, 1, RiskTier::Safe), 1);
+        assert_eq!(required_quorum(2, 1, RiskTier::Risky), 2); // f+1 = 2
+        assert_eq!(required_quorum(2, 1, RiskTier::Dangerous), 1); // n-f = 1
+    }
+
+    #[test]
+    fn required_quorum_large_n() {
+        assert_eq!(required_quorum(1000, 333, RiskTier::CriticalWrite), 667);
+        assert_eq!(required_quorum(1000, 333, RiskTier::Risky), 334);
+        assert_eq!(required_quorum(1000, 333, RiskTier::Safe), 1);
+    }
+
+    #[test]
+    fn signature_set_clone() {
+        let mut set = SignatureSet::new();
+        set.add(NodeSignature::new(NodeId::new("a"), [1; 64], 100));
+        set.add(NodeSignature::new(NodeId::new("b"), [2; 64], 200));
+        let cloned = set.clone();
+        assert_eq!(set, cloned);
+        assert_eq!(cloned.len(), 2);
+    }
+
+    #[test]
+    fn signature_set_satisfies_quorum_safe_with_single() {
+        let policy = QuorumPolicy::new(ZoneId::work(), 10, 3);
+        let mut set = SignatureSet::new();
+        set.add(NodeSignature::new(NodeId::new("n1"), [0; 64], 100));
+        assert!(set.satisfies_quorum(&policy, RiskTier::Safe));
+    }
+
+    #[test]
+    fn signature_set_does_not_satisfy_quorum_empty() {
+        let policy = QuorumPolicy::new(ZoneId::work(), 5, 2);
+        let set = SignatureSet::new();
+        assert!(!set.satisfies_quorum(&policy, RiskTier::Safe));
+    }
+
+    #[test]
+    fn quorum_policy_serialization_with_zone() {
+        let policy = QuorumPolicy::new(ZoneId::owner(), 7, 2).with_degraded_mode(4);
+        let json = serde_json::to_string(&policy).unwrap();
+        let decoded: QuorumPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.eligible_nodes, 7);
+        assert_eq!(decoded.max_faults, 2);
+        assert!(decoded.allow_degraded_mode);
+        assert_eq!(decoded.degraded_mode_min_nodes, 4);
+    }
+
+    #[test]
+    fn degraded_mode_reason_inequality() {
+        assert_ne!(
+            DegradedModeReason::NetworkPartition,
+            DegradedModeReason::NodeFailure
+        );
+    }
+
+    #[test]
+    fn quorum_failure_reason_inequality() {
+        assert_ne!(
+            QuorumFailureReason::InsufficientSignatures,
+            QuorumFailureReason::InvalidSignature
+        );
+    }
+
+    #[test]
+    fn quorum_purpose_membership_change_is_dangerous() {
+        assert_eq!(
+            QuorumPurpose::MembershipChange.default_risk_tier(),
+            RiskTier::Dangerous
+        );
+    }
 }

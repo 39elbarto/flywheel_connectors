@@ -1859,4 +1859,536 @@ mod tests {
             OperationValidationError::IntentNotFound { .. }
         ));
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: Additional operation tests for 110+ coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn intent_signable_bytes_starts_with_domain_separator() {
+        let intent = create_test_intent();
+        let bytes = intent.signable_bytes();
+        assert!(bytes.starts_with(b"FCP2-INTENT-V1"));
+    }
+
+    #[test]
+    fn receipt_signable_bytes_starts_with_domain_separator() {
+        let receipt = create_test_receipt();
+        let bytes = receipt.signable_bytes();
+        assert!(bytes.starts_with(b"FCP2-RECEIPT-V1"));
+    }
+
+    #[test]
+    fn intent_signable_bytes_differ_by_planned_at() {
+        let mut intent1 = create_test_intent();
+        let mut intent2 = create_test_intent();
+        intent1.planned_at = 1000;
+        intent2.planned_at = 2000;
+        assert_ne!(intent1.signable_bytes(), intent2.signable_bytes());
+    }
+
+    #[test]
+    fn intent_signable_bytes_differ_by_planned_by() {
+        let mut intent1 = create_test_intent();
+        let mut intent2 = create_test_intent();
+        intent1.planned_by = test_node("node-a");
+        intent2.planned_by = test_node("node-b");
+        assert_ne!(intent1.signable_bytes(), intent2.signable_bytes());
+    }
+
+    #[test]
+    fn intent_signable_bytes_differ_by_capability_jti() {
+        let mut intent1 = create_test_intent();
+        let mut intent2 = create_test_intent();
+        intent1.capability_token_jti = Uuid::from_bytes([0x01; 16]);
+        intent2.capability_token_jti = Uuid::from_bytes([0x02; 16]);
+        assert_ne!(intent1.signable_bytes(), intent2.signable_bytes());
+    }
+
+    #[test]
+    fn intent_signable_bytes_differ_by_request_object_id() {
+        let mut intent1 = create_test_intent();
+        let mut intent2 = create_test_intent();
+        intent1.request_object_id = test_object_id("req-a");
+        intent2.request_object_id = test_object_id("req-b");
+        assert_ne!(intent1.signable_bytes(), intent2.signable_bytes());
+    }
+
+    #[test]
+    fn intent_no_idempotency_key_signable_bytes_contains_absent_marker() {
+        let mut intent = create_test_intent();
+        intent.idempotency_key = None;
+        intent.lease_seq = None;
+        intent.upstream_idempotency = None;
+        let bytes = intent.signable_bytes();
+        // Should have 3 absent markers [0] for the 3 optional fields
+        // Just verify it's deterministic and non-trivial
+        assert!(bytes.len() > 14); // domain separator is 14 bytes
+    }
+
+    #[test]
+    fn intent_all_optional_fields_present_signable_bytes() {
+        let mut intent = create_test_intent();
+        intent.idempotency_key = Some("key".to_string());
+        intent.lease_seq = Some(99);
+        intent.upstream_idempotency = Some("upstream".to_string());
+        let bytes = intent.signable_bytes();
+        // Should be longer than when fields are absent
+        let mut intent2 = create_test_intent();
+        intent2.idempotency_key = None;
+        intent2.lease_seq = None;
+        intent2.upstream_idempotency = None;
+        let bytes2 = intent2.signable_bytes();
+        assert!(bytes.len() > bytes2.len());
+    }
+
+    #[test]
+    fn receipt_signable_bytes_differ_by_executed_at() {
+        let mut r1 = create_test_receipt();
+        let mut r2 = create_test_receipt();
+        r1.executed_at = 1000;
+        r2.executed_at = 2000;
+        assert_ne!(r1.signable_bytes(), r2.signable_bytes());
+    }
+
+    #[test]
+    fn receipt_signable_bytes_differ_by_executed_by() {
+        let mut r1 = create_test_receipt();
+        let mut r2 = create_test_receipt();
+        r1.executed_by = test_node("node-x");
+        r2.executed_by = test_node("node-y");
+        assert_ne!(r1.signable_bytes(), r2.signable_bytes());
+    }
+
+    #[test]
+    fn receipt_signable_bytes_differ_by_outcome_ids() {
+        let mut r1 = create_test_receipt();
+        let mut r2 = create_test_receipt();
+        r1.outcome_object_ids = vec![test_object_id("o1")];
+        r2.outcome_object_ids = vec![test_object_id("o2")];
+        assert_ne!(r1.signable_bytes(), r2.signable_bytes());
+    }
+
+    #[test]
+    fn receipt_signable_bytes_differ_by_resource_ids() {
+        let mut r1 = create_test_receipt();
+        let mut r2 = create_test_receipt();
+        r1.resource_object_ids = vec![test_object_id("r1")];
+        r2.resource_object_ids = vec![test_object_id("r2")];
+        assert_ne!(r1.signable_bytes(), r2.signable_bytes());
+    }
+
+    #[test]
+    fn receipt_signable_bytes_with_no_metrics() {
+        let mut receipt = create_test_receipt();
+        receipt.usage_metrics = None;
+        let bytes = receipt.signable_bytes();
+        assert!(bytes.starts_with(b"FCP2-RECEIPT-V1"));
+    }
+
+    #[test]
+    fn receipt_signable_bytes_with_metrics_with_unit() {
+        let mut receipt = create_test_receipt();
+        receipt.usage_metrics = Some(vec![UsageMetric {
+            kind: crate::UsageMetricKind::Tokens,
+            amount: 500,
+            unit: Some("token".to_string()),
+            custom_id: None,
+        }]);
+        let bytes = receipt.signable_bytes();
+        assert!(!bytes.is_empty());
+    }
+
+    #[test]
+    fn receipt_signable_bytes_with_metrics_with_custom_id() {
+        let mut receipt = create_test_receipt();
+        receipt.usage_metrics = Some(vec![UsageMetric {
+            kind: crate::UsageMetricKind::Tokens,
+            amount: 100,
+            unit: None,
+            custom_id: Some("custom-meter-1".to_string()),
+        }]);
+        let bytes = receipt.signable_bytes();
+        assert!(!bytes.is_empty());
+    }
+
+    #[test]
+    fn receipt_no_idempotency_key() {
+        let mut receipt = create_test_receipt();
+        receipt.idempotency_key = None;
+        let bytes = receipt.signable_bytes();
+        // Should contain absent marker [0] for idempotency key
+        assert!(bytes.starts_with(b"FCP2-RECEIPT-V1"));
+    }
+
+    #[test]
+    fn receipt_empty_outcomes_and_resources() {
+        let mut receipt = create_test_receipt();
+        receipt.outcome_object_ids.clear();
+        receipt.resource_object_ids.clear();
+        assert_eq!(receipt.total_objects_produced(), 0);
+        let bytes = receipt.signable_bytes();
+        assert!(!bytes.is_empty());
+    }
+
+    #[test]
+    fn intent_status_is_not_copy_of_another_variant() {
+        let pending = IntentStatus::Pending;
+        let completed = IntentStatus::Completed;
+        assert_ne!(pending, completed);
+    }
+
+    #[test]
+    fn intent_status_orphaned_display() {
+        assert_eq!(IntentStatus::Orphaned.to_string(), "orphaned");
+    }
+
+    #[test]
+    fn intent_status_orphaned_is_not_terminal() {
+        // Orphaned is NOT terminal (not success/failure)
+        let entry = IdempotencyEntry {
+            key: "k".to_string(),
+            zone_id: test_zone(),
+            intent_id: test_object_id("i"),
+            receipt_id: None,
+            status: IntentStatus::Orphaned,
+            created_at: 0,
+            expires_at: 1000,
+        };
+        assert!(!entry.is_terminal());
+    }
+
+    #[test]
+    fn idempotency_entry_not_expired_at_creation() {
+        let entry = IdempotencyEntry {
+            key: "k".to_string(),
+            zone_id: test_zone(),
+            intent_id: test_object_id("i"),
+            receipt_id: None,
+            status: IntentStatus::Pending,
+            created_at: 1000,
+            expires_at: 2000,
+        };
+        assert!(!entry.is_expired(1000));
+    }
+
+    #[test]
+    fn idempotency_entry_expired_exactly_at_boundary() {
+        let entry = IdempotencyEntry {
+            key: "k".to_string(),
+            zone_id: test_zone(),
+            intent_id: test_object_id("i"),
+            receipt_id: None,
+            status: IntentStatus::Pending,
+            created_at: 0,
+            expires_at: 100,
+        };
+        assert!(entry.is_expired(100));
+        assert!(!entry.is_expired(99));
+    }
+
+    #[test]
+    fn idempotency_entry_should_return_cached_failed_with_receipt() {
+        let entry = IdempotencyEntry {
+            key: "k".to_string(),
+            zone_id: test_zone(),
+            intent_id: test_object_id("i"),
+            receipt_id: Some(test_object_id("err-receipt")),
+            status: IntentStatus::Failed,
+            created_at: 0,
+            expires_at: 1000,
+        };
+        // Failed is terminal, has receipt, not expired
+        assert!(entry.should_return_cached(500));
+    }
+
+    #[test]
+    fn idempotency_entry_should_not_return_cached_pending() {
+        let entry = IdempotencyEntry {
+            key: "k".to_string(),
+            zone_id: test_zone(),
+            intent_id: test_object_id("i"),
+            receipt_id: Some(test_object_id("r")),
+            status: IntentStatus::Pending,
+            created_at: 0,
+            expires_at: 1000,
+        };
+        assert!(!entry.should_return_cached(500));
+    }
+
+    #[test]
+    fn is_intent_orphaned_now_before_planned_at() {
+        let mut intent = create_test_intent();
+        intent.planned_at = 5000;
+        // now < planned_at, saturating_sub gives 0, which is not > threshold
+        assert!(!is_intent_orphaned(&intent, false, 1000, 100));
+    }
+
+    #[test]
+    fn is_intent_orphaned_zero_threshold() {
+        let mut intent = create_test_intent();
+        intent.planned_at = 100;
+        // any elapsed time > 0 means orphaned with 0 threshold
+        assert!(is_intent_orphaned(&intent, false, 101, 0));
+        // exactly at planned_at, 0 elapsed, not orphaned
+        assert!(!is_intent_orphaned(&intent, false, 100, 0));
+    }
+
+    #[test]
+    fn required_idempotency_both_dangerous_and_risky() {
+        let result = required_idempotency_for_safety_tier(true, true);
+        assert_eq!(result, IdempotencyClass::Strict);
+    }
+
+    #[test]
+    fn validate_binding_both_keys_none_matches() {
+        let mut intent = create_test_intent();
+        intent.idempotency_key = None;
+        let mut receipt = create_test_receipt();
+        receipt.idempotency_key = None;
+        // Should succeed: both None means keys match
+        assert!(validate_receipt_intent_binding(&receipt, &intent).is_ok());
+    }
+
+    #[test]
+    fn validate_binding_one_key_none_other_some_fails() {
+        let mut intent = create_test_intent();
+        intent.idempotency_key = None;
+        let mut receipt = create_test_receipt();
+        receipt.idempotency_key = Some("key".to_string());
+        let err = validate_receipt_intent_binding(&receipt, &intent).unwrap_err();
+        assert!(matches!(
+            err,
+            OperationValidationError::IntentNotFound { .. }
+        ));
+    }
+
+    #[test]
+    fn validation_error_display_lease_seq_mismatch() {
+        let err = OperationValidationError::LeaseSeqMismatch {
+            expected: 100,
+            got: 99,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("100"));
+        assert!(msg.contains("99"));
+    }
+
+    #[test]
+    fn validation_error_display_intent_orphaned() {
+        let err = OperationValidationError::IntentOrphaned {
+            intent_id: test_object_id("orphan"),
+            planned_at: 12345,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("orphaned"));
+        assert!(msg.contains("12345"));
+    }
+
+    #[test]
+    fn validation_error_display_already_completed() {
+        let err = OperationValidationError::AlreadyCompleted {
+            idempotency_key: "my-key".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("my-key"));
+        assert!(msg.contains("already completed"));
+    }
+
+    #[test]
+    fn validation_error_display_intent_reference_missing() {
+        let err = OperationValidationError::IntentReferenceMissing {
+            receipt_id: test_object_id("r"),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("reference"));
+    }
+
+    #[test]
+    fn validation_error_display_signature_invalid() {
+        let err = OperationValidationError::SignatureInvalid {
+            reason: "corrupted key".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("corrupted key"));
+    }
+
+    #[test]
+    fn validation_error_display_request_mismatch() {
+        let err = OperationValidationError::RequestMismatch {
+            expected: test_object_id("a"),
+            got: test_object_id("b"),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("request mismatch"));
+    }
+
+    #[test]
+    fn validation_error_display_zone_mismatch() {
+        let err = OperationValidationError::ZoneMismatch {
+            expected: ZoneId::work(),
+            got: ZoneId::owner(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("zone mismatch"));
+    }
+
+    #[test]
+    fn validation_error_display_intent_not_found() {
+        let err = OperationValidationError::IntentNotFound {
+            idempotency_key: "missing-key".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("missing-key"));
+    }
+
+    #[test]
+    fn validation_error_debug_format() {
+        let err = OperationValidationError::IntentNotFound {
+            idempotency_key: "k".to_string(),
+        };
+        let debug = format!("{err:?}");
+        assert!(debug.contains("IntentNotFound"));
+    }
+
+    #[test]
+    fn intent_serde_with_all_optional_fields() {
+        let mut intent = create_test_intent();
+        intent.upstream_idempotency = Some("stripe-key".to_string());
+        let json = serde_json::to_string(&intent).unwrap();
+        let decoded: OperationIntent = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.upstream_idempotency, Some("stripe-key".to_string()));
+    }
+
+    #[test]
+    fn intent_serde_without_optional_fields() {
+        let mut intent = create_test_intent();
+        intent.idempotency_key = None;
+        intent.lease_seq = None;
+        intent.upstream_idempotency = None;
+        let json = serde_json::to_string(&intent).unwrap();
+        let decoded: OperationIntent = serde_json::from_str(&json).unwrap();
+        assert!(decoded.idempotency_key.is_none());
+        assert!(decoded.lease_seq.is_none());
+        assert!(decoded.upstream_idempotency.is_none());
+    }
+
+    #[test]
+    fn receipt_serde_with_usage_metrics() {
+        let mut receipt = create_test_receipt();
+        receipt.usage_metrics = Some(vec![
+            UsageMetric::tokens(100),
+            UsageMetric::tokens(200),
+        ]);
+        let json = serde_json::to_string(&receipt).unwrap();
+        let decoded: OperationReceipt = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.usage_metrics.as_ref().map_or(0, Vec::len), 2);
+    }
+
+    #[test]
+    fn receipt_serde_without_usage_metrics() {
+        let mut receipt = create_test_receipt();
+        receipt.usage_metrics = None;
+        let json = serde_json::to_string(&receipt).unwrap();
+        // usage_metrics should be skipped in serialization
+        assert!(!json.contains("usage_metrics"));
+        let decoded: OperationReceipt = serde_json::from_str(&json).unwrap();
+        assert!(decoded.usage_metrics.is_none());
+    }
+
+    #[test]
+    fn idempotency_entry_serde_with_receipt() {
+        let entry = IdempotencyEntry {
+            key: "with-receipt".to_string(),
+            zone_id: test_zone(),
+            intent_id: test_object_id("intent"),
+            receipt_id: Some(test_object_id("receipt")),
+            status: IntentStatus::Completed,
+            created_at: 0,
+            expires_at: 86400,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let decoded: IdempotencyEntry = serde_json::from_str(&json).unwrap();
+        assert!(decoded.receipt_id.is_some());
+        assert_eq!(decoded.status, IntentStatus::Completed);
+    }
+
+    #[test]
+    fn idempotency_entry_serde_without_receipt() {
+        let entry = IdempotencyEntry {
+            key: "no-receipt".to_string(),
+            zone_id: test_zone(),
+            intent_id: test_object_id("intent"),
+            receipt_id: None,
+            status: IntentStatus::Pending,
+            created_at: 0,
+            expires_at: 86400,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let decoded: IdempotencyEntry = serde_json::from_str(&json).unwrap();
+        assert!(decoded.receipt_id.is_none());
+    }
+
+    #[test]
+    fn intent_debug_format() {
+        let intent = create_test_intent();
+        let debug = format!("{intent:?}");
+        assert!(debug.contains("OperationIntent"));
+    }
+
+    #[test]
+    fn receipt_debug_format() {
+        let receipt = create_test_receipt();
+        let debug = format!("{receipt:?}");
+        assert!(debug.contains("OperationReceipt"));
+    }
+
+    #[test]
+    fn idempotency_entry_debug_format() {
+        let entry = IdempotencyEntry {
+            key: "dbg".to_string(),
+            zone_id: test_zone(),
+            intent_id: test_object_id("i"),
+            receipt_id: None,
+            status: IntentStatus::Pending,
+            created_at: 0,
+            expires_at: 100,
+        };
+        let debug = format!("{entry:?}");
+        assert!(debug.contains("IdempotencyEntry"));
+    }
+
+    #[test]
+    fn receipt_signable_bytes_with_multiple_metrics() {
+        let mut receipt = create_test_receipt();
+        receipt.usage_metrics = Some(vec![
+            UsageMetric {
+                kind: crate::UsageMetricKind::Tokens,
+                amount: 100,
+                unit: Some("token".to_string()),
+                custom_id: Some("custom-1".to_string()),
+            },
+            UsageMetric {
+                kind: crate::UsageMetricKind::Tokens,
+                amount: 200,
+                unit: None,
+                custom_id: None,
+            },
+        ]);
+        let bytes1 = receipt.signable_bytes();
+        let bytes2 = receipt.signable_bytes();
+        assert_eq!(bytes1, bytes2);
+    }
+
+    #[test]
+    fn receipt_total_objects_both_populated() {
+        let mut receipt = create_test_receipt();
+        receipt.outcome_object_ids = vec![
+            test_object_id("o1"),
+            test_object_id("o2"),
+            test_object_id("o3"),
+        ];
+        receipt.resource_object_ids = vec![test_object_id("r1"), test_object_id("r2")];
+        assert_eq!(receipt.total_objects_produced(), 5);
+    }
 }

@@ -1707,4 +1707,674 @@ mod tests {
         let agg = aggregate_rate_limits([(&c1, &d1), (&c2, &d2)]);
         assert_eq!(agg.limits.len(), 3);
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Additional coverage: edge cases, debug, serde, and boundary values
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn limit_type_debug() {
+        assert_eq!(format!("{:?}", LimitType::Rpm), "Rpm");
+        assert_eq!(format!("{:?}", LimitType::Concurrent), "Concurrent");
+        assert_eq!(format!("{:?}", LimitType::Burst), "Burst");
+        assert_eq!(format!("{:?}", LimitType::Quota), "Quota");
+    }
+
+    #[test]
+    fn backpressure_level_debug() {
+        assert_eq!(format!("{:?}", BackpressureLevel::Normal), "Normal");
+        assert_eq!(format!("{:?}", BackpressureLevel::Warning), "Warning");
+        assert_eq!(format!("{:?}", BackpressureLevel::SoftLimit), "SoftLimit");
+        assert_eq!(format!("{:?}", BackpressureLevel::HardLimit), "HardLimit");
+    }
+
+    #[test]
+    fn rate_limit_unit_debug() {
+        assert_eq!(format!("{:?}", RateLimitUnit::Requests), "Requests");
+        assert_eq!(format!("{:?}", RateLimitUnit::Tokens), "Tokens");
+        assert_eq!(format!("{:?}", RateLimitUnit::Bytes), "Bytes");
+        assert_eq!(format!("{:?}", RateLimitUnit::Custom), "Custom");
+    }
+
+    #[test]
+    fn rate_limit_scope_debug() {
+        assert_eq!(format!("{:?}", RateLimitScope::Instance), "Instance");
+        assert_eq!(format!("{:?}", RateLimitScope::Credential), "Credential");
+        assert_eq!(format!("{:?}", RateLimitScope::Global), "Global");
+    }
+
+    #[test]
+    fn rate_limit_enforcement_debug() {
+        assert_eq!(format!("{:?}", RateLimitEnforcement::Hard), "Hard");
+        assert_eq!(format!("{:?}", RateLimitEnforcement::Soft), "Soft");
+        assert_eq!(format!("{:?}", RateLimitEnforcement::Advisory), "Advisory");
+    }
+
+    #[test]
+    fn rate_limit_config_debug() {
+        let config = RateLimitConfig {
+            requests: 42,
+            window: Duration::from_secs(30),
+            burst: Some(10),
+            unit: RateLimitUnit::Bytes,
+        };
+        let dbg = format!("{config:?}");
+        assert!(dbg.contains("RateLimitConfig"));
+        assert!(dbg.contains("42"));
+    }
+
+    #[test]
+    fn rate_limit_pool_debug() {
+        let pool = RateLimitPool {
+            id: "test_pool".to_string(),
+            description: "A test pool".to_string(),
+            config: RateLimitConfig {
+                requests: 5,
+                window: Duration::from_secs(10),
+                burst: None,
+                unit: RateLimitUnit::Requests,
+            },
+            enforcement: RateLimitEnforcement::Hard,
+            scope: RateLimitScope::Instance,
+        };
+        let dbg = format!("{pool:?}");
+        assert!(dbg.contains("test_pool"));
+        assert!(dbg.contains("RateLimitPool"));
+    }
+
+    #[test]
+    fn rate_limit_pool_serde_roundtrip() {
+        let pool = RateLimitPool {
+            id: "serde_pool".to_string(),
+            description: "roundtrip test".to_string(),
+            config: RateLimitConfig {
+                requests: 100,
+                window: Duration::from_secs(120),
+                burst: Some(25),
+                unit: RateLimitUnit::Tokens,
+            },
+            enforcement: RateLimitEnforcement::Soft,
+            scope: RateLimitScope::Credential,
+        };
+        let json = serde_json::to_string(&pool).unwrap();
+        let decoded: RateLimitPool = serde_json::from_str(&json).unwrap();
+        assert_eq!(pool, decoded);
+    }
+
+    #[test]
+    fn rate_limit_pool_clone() {
+        let pool = RateLimitPool {
+            id: "cp".to_string(),
+            description: "clone pool".to_string(),
+            config: RateLimitConfig {
+                requests: 50,
+                window: Duration::from_secs(300),
+                burst: None,
+                unit: RateLimitUnit::Custom,
+            },
+            enforcement: RateLimitEnforcement::Advisory,
+            scope: RateLimitScope::Global,
+        };
+        let cloned = pool.clone();
+        assert_eq!(pool, cloned);
+    }
+
+    #[test]
+    fn backpressure_signal_debug() {
+        let signal = BackpressureSignal {
+            level: BackpressureLevel::HardLimit,
+            utilization_bps: 10_000,
+            retry_after_ms: Some(3000),
+        };
+        let dbg = format!("{signal:?}");
+        assert!(dbg.contains("BackpressureSignal"));
+        assert!(dbg.contains("HardLimit"));
+    }
+
+    #[test]
+    fn backpressure_signal_zero_utilization() {
+        let signal = BackpressureSignal {
+            level: BackpressureLevel::Normal,
+            utilization_bps: 0,
+            retry_after_ms: None,
+        };
+        let json = serde_json::to_string(&signal).unwrap();
+        let decoded: BackpressureSignal = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.utilization_bps, 0);
+        assert!(decoded.retry_after_ms.is_none());
+    }
+
+    #[test]
+    fn backpressure_signal_max_utilization() {
+        let signal = BackpressureSignal {
+            level: BackpressureLevel::HardLimit,
+            utilization_bps: 10_000,
+            retry_after_ms: Some(u64::MAX),
+        };
+        let json = serde_json::to_string(&signal).unwrap();
+        let decoded: BackpressureSignal = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.utilization_bps, 10_000);
+        assert_eq!(decoded.retry_after_ms, Some(u64::MAX));
+    }
+
+    #[test]
+    fn throttle_violation_input_debug() {
+        let input = ThrottleViolationInput {
+            timestamp_ms: 100,
+            zone_id: "z:work".parse().unwrap(),
+            connector_id: None,
+            operation_id: None,
+            limit_type: LimitType::Rpm,
+            limit_value: 10,
+            current_value: 11,
+            retry_after_ms: 500,
+        };
+        let dbg = format!("{input:?}");
+        assert!(dbg.contains("ThrottleViolationInput"));
+    }
+
+    #[test]
+    fn throttle_violation_debug() {
+        let v = ThrottleViolation::new(ThrottleViolationInput {
+            timestamp_ms: 1234,
+            zone_id: "z:work".parse().unwrap(),
+            connector_id: None,
+            operation_id: None,
+            limit_type: LimitType::Quota,
+            limit_value: 10,
+            current_value: 15,
+            retry_after_ms: 100,
+        });
+        let dbg = format!("{v:?}");
+        assert!(dbg.contains("ThrottleViolation"));
+        assert!(dbg.contains("1234"));
+    }
+
+    #[test]
+    fn rate_limit_config_serde_roundtrip() {
+        let config = RateLimitConfig {
+            requests: 500,
+            window: Duration::from_secs(30),
+            burst: Some(100),
+            unit: RateLimitUnit::Bytes,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let decoded: RateLimitConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(config, decoded);
+    }
+
+    #[test]
+    fn rate_limit_config_no_burst_serde() {
+        let config = RateLimitConfig {
+            requests: 1,
+            window: Duration::from_secs(1),
+            burst: None,
+            unit: RateLimitUnit::Requests,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let decoded: RateLimitConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(config.burst, decoded.burst);
+    }
+
+    #[test]
+    fn rate_limit_config_validate_boundary_requests() {
+        let config = RateLimitConfig {
+            requests: u32::MAX,
+            window: Duration::from_nanos(1),
+            burst: Some(u32::MAX),
+            unit: RateLimitUnit::Tokens,
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn declarations_validate_with_no_pools_and_no_map() {
+        let decls = RateLimitDeclarations::default();
+        assert!(decls.validate().is_ok());
+    }
+
+    #[test]
+    fn declarations_validate_pools_only_no_tool_map() {
+        let decls = RateLimitDeclarations {
+            limits: vec![RateLimitPool {
+                id: "solo".to_string(),
+                description: "standalone pool".to_string(),
+                config: RateLimitConfig {
+                    requests: 10,
+                    window: Duration::from_secs(60),
+                    burst: None,
+                    unit: RateLimitUnit::Requests,
+                },
+                enforcement: RateLimitEnforcement::Hard,
+                scope: RateLimitScope::Instance,
+            }],
+            tool_pool_map: HashMap::new(),
+        };
+        assert!(decls.validate().is_ok());
+    }
+
+    #[test]
+    fn declarations_debug() {
+        let decls = RateLimitDeclarations::default();
+        let dbg = format!("{decls:?}");
+        assert!(dbg.contains("RateLimitDeclarations"));
+    }
+
+    #[test]
+    fn declarations_serde_roundtrip_with_tool_map() {
+        let decls = RateLimitDeclarations {
+            limits: vec![RateLimitPool {
+                id: "pool_x".to_string(),
+                description: "x desc".to_string(),
+                config: RateLimitConfig {
+                    requests: 50,
+                    window: Duration::from_secs(30),
+                    burst: Some(10),
+                    unit: RateLimitUnit::Custom,
+                },
+                enforcement: RateLimitEnforcement::Advisory,
+                scope: RateLimitScope::Global,
+            }],
+            tool_pool_map: HashMap::from([
+                ("tool_a".to_string(), vec!["pool_x".to_string()]),
+                ("tool_b".to_string(), vec!["pool_x".to_string()]),
+            ]),
+        };
+        let json = serde_json::to_string(&decls).unwrap();
+        let decoded: RateLimitDeclarations = serde_json::from_str(&json).unwrap();
+        assert_eq!(decls, decoded);
+    }
+
+    #[test]
+    fn aggregated_rate_limits_debug() {
+        let agg = AggregatedRateLimits::default();
+        let dbg = format!("{agg:?}");
+        assert!(dbg.contains("AggregatedRateLimits"));
+    }
+
+    #[test]
+    fn rate_limit_info_debug() {
+        let info = RateLimitInfo {
+            connector_id: ConnectorId::from_static("dbg_conn"),
+            pool: RateLimitPool {
+                id: "dbg_pool".to_string(),
+                description: "debug test".to_string(),
+                config: RateLimitConfig {
+                    requests: 1,
+                    window: Duration::from_secs(1),
+                    burst: None,
+                    unit: RateLimitUnit::Requests,
+                },
+                enforcement: RateLimitEnforcement::Hard,
+                scope: RateLimitScope::Instance,
+            },
+            tools: vec!["tool1".to_string()],
+        };
+        let dbg = format!("{info:?}");
+        assert!(dbg.contains("RateLimitInfo"));
+        assert!(dbg.contains("dbg_pool"));
+    }
+
+    #[test]
+    fn declaration_error_display_empty_tool_pool_id() {
+        let err = RateLimitDeclarationError::EmptyToolPoolId {
+            tool: "my_tool".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("my_tool"));
+        assert!(msg.contains("pool id"));
+    }
+
+    #[test]
+    fn declaration_error_debug() {
+        let err = RateLimitDeclarationError::ZeroBurst;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("ZeroBurst"));
+    }
+
+    #[test]
+    fn aggregate_rate_limits_deduplicates_tools() {
+        let cid = ConnectorId::from_static("dedup_conn");
+        let decls = RateLimitDeclarations {
+            limits: vec![RateLimitPool {
+                id: "p".to_string(),
+                description: "dedup test".to_string(),
+                config: RateLimitConfig {
+                    requests: 10,
+                    window: Duration::from_secs(60),
+                    burst: None,
+                    unit: RateLimitUnit::Requests,
+                },
+                enforcement: RateLimitEnforcement::Hard,
+                scope: RateLimitScope::Instance,
+            }],
+            tool_pool_map: HashMap::from([("tool1".to_string(), vec!["p".to_string()])]),
+        };
+        let agg = aggregate_rate_limits([(&cid, &decls)]);
+        assert_eq!(agg.limits[0].tools.len(), 1);
+    }
+
+    #[test]
+    fn aggregate_rate_limits_sorts_tools() {
+        let cid = ConnectorId::from_static("sort_conn");
+        let decls = RateLimitDeclarations {
+            limits: vec![RateLimitPool {
+                id: "p".to_string(),
+                description: "sort test".to_string(),
+                config: RateLimitConfig {
+                    requests: 10,
+                    window: Duration::from_secs(60),
+                    burst: None,
+                    unit: RateLimitUnit::Requests,
+                },
+                enforcement: RateLimitEnforcement::Hard,
+                scope: RateLimitScope::Instance,
+            }],
+            tool_pool_map: HashMap::from([
+                ("z_tool".to_string(), vec!["p".to_string()]),
+                ("a_tool".to_string(), vec!["p".to_string()]),
+            ]),
+        };
+        let agg = aggregate_rate_limits([(&cid, &decls)]);
+        let tools = &agg.limits[0].tools;
+        assert_eq!(tools.len(), 2);
+        // Tools should be sorted
+        assert!(tools[0] < tools[1]);
+    }
+
+    #[test]
+    fn violation_different_connector_ids_produce_different_ids() {
+        let v1 = ThrottleViolation::new(ThrottleViolationInput {
+            timestamp_ms: 1000,
+            zone_id: "z:work".parse().unwrap(),
+            connector_id: Some("discord:fcp2:1.0".parse().unwrap()),
+            operation_id: None,
+            limit_type: LimitType::Rpm,
+            limit_value: 100,
+            current_value: 101,
+            retry_after_ms: 500,
+        });
+        let v2 = ThrottleViolation::new(ThrottleViolationInput {
+            timestamp_ms: 1000,
+            zone_id: "z:work".parse().unwrap(),
+            connector_id: Some("slack:fcp2:1.0".parse().unwrap()),
+            operation_id: None,
+            limit_type: LimitType::Rpm,
+            limit_value: 100,
+            current_value: 101,
+            retry_after_ms: 500,
+        });
+        assert_ne!(v1.violation_id, v2.violation_id);
+    }
+
+    #[test]
+    fn violation_different_operation_ids_produce_different_ids() {
+        let v1 = ThrottleViolation::new(ThrottleViolationInput {
+            timestamp_ms: 1000,
+            zone_id: "z:work".parse().unwrap(),
+            connector_id: None,
+            operation_id: Some("op_a".parse().unwrap()),
+            limit_type: LimitType::Rpm,
+            limit_value: 100,
+            current_value: 101,
+            retry_after_ms: 500,
+        });
+        let v2 = ThrottleViolation::new(ThrottleViolationInput {
+            timestamp_ms: 1000,
+            zone_id: "z:work".parse().unwrap(),
+            connector_id: None,
+            operation_id: Some("op_b".parse().unwrap()),
+            limit_type: LimitType::Rpm,
+            limit_value: 100,
+            current_value: 101,
+            retry_after_ms: 500,
+        });
+        assert_ne!(v1.violation_id, v2.violation_id);
+    }
+
+    #[test]
+    fn violation_with_both_optional_fields() {
+        let v = ThrottleViolation::new(ThrottleViolationInput {
+            timestamp_ms: 9999,
+            zone_id: "z:private".parse().unwrap(),
+            connector_id: Some("test:conn:v1".parse().unwrap()),
+            operation_id: Some("test.op".parse().unwrap()),
+            limit_type: LimitType::Burst,
+            limit_value: 50,
+            current_value: 55,
+            retry_after_ms: 1000,
+        });
+        assert!(v.connector_id.is_some());
+        assert!(v.operation_id.is_some());
+        let json = serde_json::to_string(&v).unwrap();
+        assert!(json.contains("connector_id"));
+        assert!(json.contains("operation_id"));
+    }
+
+    #[test]
+    fn rate_limit_config_eq_and_ne() {
+        let c1 = RateLimitConfig {
+            requests: 10,
+            window: Duration::from_secs(60),
+            burst: Some(5),
+            unit: RateLimitUnit::Requests,
+        };
+        let c2 = RateLimitConfig {
+            requests: 20,
+            window: Duration::from_secs(60),
+            burst: Some(5),
+            unit: RateLimitUnit::Requests,
+        };
+        assert_ne!(c1, c2);
+        let c3 = c1.clone();
+        assert_eq!(c1, c3);
+    }
+
+    #[test]
+    fn aggregated_rate_limits_with_populated_limits() {
+        let agg = AggregatedRateLimits {
+            limits: vec![
+                RateLimitInfo {
+                    connector_id: ConnectorId::from_static("a"),
+                    pool: RateLimitPool {
+                        id: "p1".to_string(),
+                        description: "d".to_string(),
+                        config: RateLimitConfig {
+                            requests: 10,
+                            window: Duration::from_secs(60),
+                            burst: None,
+                            unit: RateLimitUnit::Requests,
+                        },
+                        enforcement: RateLimitEnforcement::Hard,
+                        scope: RateLimitScope::Instance,
+                    },
+                    tools: vec!["t1".to_string()],
+                },
+                RateLimitInfo {
+                    connector_id: ConnectorId::from_static("b"),
+                    pool: RateLimitPool {
+                        id: "p2".to_string(),
+                        description: "d".to_string(),
+                        config: RateLimitConfig {
+                            requests: 20,
+                            window: Duration::from_secs(120),
+                            burst: Some(5),
+                            unit: RateLimitUnit::Tokens,
+                        },
+                        enforcement: RateLimitEnforcement::Soft,
+                        scope: RateLimitScope::Global,
+                    },
+                    tools: vec!["t2".to_string(), "t3".to_string()],
+                },
+            ],
+        };
+        let json = serde_json::to_string(&agg).unwrap();
+        let decoded: AggregatedRateLimits = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.limits.len(), 2);
+        assert_eq!(decoded, agg);
+    }
+
+    #[test]
+    fn rate_limit_scope_inequality_all_pairs() {
+        let variants = [
+            RateLimitScope::Instance,
+            RateLimitScope::Credential,
+            RateLimitScope::Global,
+        ];
+        for i in 0..variants.len() {
+            for j in (i + 1)..variants.len() {
+                assert_ne!(variants[i], variants[j]);
+            }
+        }
+    }
+
+    #[test]
+    fn rate_limit_enforcement_inequality_all_pairs() {
+        let variants = [
+            RateLimitEnforcement::Hard,
+            RateLimitEnforcement::Soft,
+            RateLimitEnforcement::Advisory,
+        ];
+        for i in 0..variants.len() {
+            for j in (i + 1)..variants.len() {
+                assert_ne!(variants[i], variants[j]);
+            }
+        }
+    }
+
+    #[test]
+    fn rate_limit_unit_inequality_all_pairs() {
+        let variants = [
+            RateLimitUnit::Requests,
+            RateLimitUnit::Tokens,
+            RateLimitUnit::Bytes,
+            RateLimitUnit::Custom,
+        ];
+        for i in 0..variants.len() {
+            for j in (i + 1)..variants.len() {
+                assert_ne!(variants[i], variants[j]);
+            }
+        }
+    }
+
+    #[test]
+    fn backpressure_level_inequality_all_pairs() {
+        let variants = [
+            BackpressureLevel::Normal,
+            BackpressureLevel::Warning,
+            BackpressureLevel::SoftLimit,
+            BackpressureLevel::HardLimit,
+        ];
+        for i in 0..variants.len() {
+            for j in (i + 1)..variants.len() {
+                assert_ne!(variants[i], variants[j]);
+            }
+        }
+    }
+
+    #[test]
+    fn backpressure_signal_serde_with_retry_after_zero() {
+        let signal = BackpressureSignal {
+            level: BackpressureLevel::Warning,
+            utilization_bps: 5000,
+            retry_after_ms: Some(0),
+        };
+        let json = serde_json::to_string(&signal).unwrap();
+        let decoded: BackpressureSignal = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.retry_after_ms, Some(0));
+    }
+
+    #[test]
+    fn declarations_eq_reflexive() {
+        let d = RateLimitDeclarations::default();
+        assert_eq!(d, d.clone());
+    }
+
+    #[test]
+    fn rate_limit_config_validate_min_valid() {
+        let c = RateLimitConfig {
+            requests: 1,
+            window: Duration::from_nanos(1),
+            burst: Some(1),
+            unit: RateLimitUnit::Custom,
+        };
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn aggregate_empty_declarations() {
+        let cid = ConnectorId::from_static("empty");
+        let decls = RateLimitDeclarations::default();
+        let agg = aggregate_rate_limits([(&cid, &decls)]);
+        assert!(agg.limits.is_empty());
+    }
+
+    #[test]
+    fn aggregate_multiple_tools_same_pool() {
+        let cid = ConnectorId::from_static("multi_tool");
+        let decls = RateLimitDeclarations {
+            limits: vec![RateLimitPool {
+                id: "shared".to_string(),
+                description: "shared pool".to_string(),
+                config: RateLimitConfig {
+                    requests: 100,
+                    window: Duration::from_secs(60),
+                    burst: None,
+                    unit: RateLimitUnit::Requests,
+                },
+                enforcement: RateLimitEnforcement::Soft,
+                scope: RateLimitScope::Credential,
+            }],
+            tool_pool_map: HashMap::from([
+                ("read".to_string(), vec!["shared".to_string()]),
+                ("write".to_string(), vec!["shared".to_string()]),
+                ("delete".to_string(), vec!["shared".to_string()]),
+            ]),
+        };
+        let agg = aggregate_rate_limits([(&cid, &decls)]);
+        assert_eq!(agg.limits.len(), 1);
+        assert_eq!(agg.limits[0].tools.len(), 3);
+    }
+
+    #[test]
+    fn violation_serde_roundtrip_with_all_limit_types() {
+        for lt in [
+            LimitType::Rpm,
+            LimitType::Concurrent,
+            LimitType::Burst,
+            LimitType::Quota,
+        ] {
+            let v = ThrottleViolation::new(ThrottleViolationInput {
+                timestamp_ms: 1000,
+                zone_id: "z:work".parse().unwrap(),
+                connector_id: None,
+                operation_id: None,
+                limit_type: lt,
+                limit_value: 10,
+                current_value: 11,
+                retry_after_ms: 100,
+            });
+            let json = serde_json::to_string(&v).unwrap();
+            let decoded: ThrottleViolation = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded.limit_type, lt);
+            assert_eq!(decoded.violation_id, v.violation_id);
+        }
+    }
+
+    #[test]
+    fn rate_limit_pool_validate_valid_pool() {
+        let pool = RateLimitPool {
+            id: "valid".to_string(),
+            description: "d".to_string(),
+            config: RateLimitConfig {
+                requests: 10,
+                window: Duration::from_secs(60),
+                burst: None,
+                unit: RateLimitUnit::Requests,
+            },
+            enforcement: RateLimitEnforcement::Hard,
+            scope: RateLimitScope::Instance,
+        };
+        assert!(pool.validate().is_ok());
+    }
 }

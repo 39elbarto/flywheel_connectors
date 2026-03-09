@@ -2629,4 +2629,122 @@ mod tests {
         let zone = ZoneId::owner();
         assert!(engine.remove_policy(&zone).await.is_none());
     }
+
+    // ── Additional coverage: edge cases and missing paths ──
+
+    #[test]
+    fn budget_tracker_snapshot_unknown_zone_shows_zero() {
+        let zone = ZoneId::owner();
+        let policy = UsageBudgetPolicy {
+            enforcement: BudgetEnforcement::Warn,
+            budgets: vec![UsageBudgetLimit {
+                metric: UsageMetricKind::Requests,
+                limit: 50,
+                window_seconds: 120,
+            }],
+        };
+        let mut tracker = BudgetTracker::new();
+        let snap = tracker.snapshot(&zone, &policy);
+        assert_eq!(snap.budgets[0].used, 0);
+        assert_eq!(snap.budgets[0].remaining, 50);
+        assert_eq!(snap.zone_id, zone);
+    }
+
+    #[test]
+    fn budget_tracker_record_empty_policy_budgets_with_metrics() {
+        let zone = ZoneId::work();
+        let policy = UsageBudgetPolicy {
+            enforcement: BudgetEnforcement::Warn,
+            budgets: vec![],
+        };
+        let mut tracker = BudgetTracker::new();
+        let eval = tracker.record_usage(
+            &zone,
+            &policy,
+            &[UsageMetric::tokens(100), UsageMetric::requests(10)],
+        );
+        assert_eq!(eval.action, BudgetAction::Allow);
+        assert!(eval.snapshot.budgets.is_empty());
+    }
+
+    #[test]
+    fn metric_window_debug() {
+        let w = MetricWindow::new(60, 1000);
+        let dbg = format!("{w:?}");
+        assert!(dbg.contains("MetricWindow"));
+        assert!(dbg.contains("60"));
+        assert!(dbg.contains("1000"));
+    }
+
+    #[test]
+    fn budget_evaluation_to_error_returns_none_on_allow_action() {
+        let eval = BudgetEvaluation {
+            action: BudgetAction::Allow,
+            snapshot: UsageBudgetSnapshot {
+                zone_id: ZoneId::work(),
+                enforcement: BudgetEnforcement::Deny,
+                budgets: vec![UsageBudgetUsage {
+                    metric: UsageMetricKind::Tokens,
+                    used: 200,
+                    limit: 100,
+                    remaining: 0,
+                    window_started_at: 0,
+                    window_resets_at: 60,
+                    status: BudgetStatus::Exceeded,
+                }],
+                updated_at: 0,
+            },
+        };
+        // Action is Allow, so to_error returns None regardless of budget status
+        assert!(eval.to_error().is_none());
+    }
+
+    #[test]
+    fn budget_tracker_api_credits_metric() {
+        let zone = ZoneId::work();
+        let policy = UsageBudgetPolicy {
+            enforcement: BudgetEnforcement::Deny,
+            budgets: vec![UsageBudgetLimit {
+                metric: UsageMetricKind::ApiCredits,
+                limit: 1000,
+                window_seconds: 3600,
+            }],
+        };
+        let mut tracker = BudgetTracker::new();
+        let eval = tracker.record_usage(&zone, &policy, &[UsageMetric::api_credits(500)]);
+        assert_eq!(eval.action, BudgetAction::Allow);
+        assert_eq!(eval.snapshot.budgets[0].used, 500);
+        assert_eq!(eval.snapshot.budgets[0].remaining, 500);
+
+        let eval2 = tracker.record_usage(&zone, &policy, &[UsageMetric::api_credits(600)]);
+        assert_eq!(eval2.action, BudgetAction::Deny);
+        assert_eq!(eval2.snapshot.budgets[0].used, 1100);
+    }
+
+    #[test]
+    fn budget_tracker_bytes_metric() {
+        let zone = ZoneId::private();
+        let policy = UsageBudgetPolicy {
+            enforcement: BudgetEnforcement::Warn,
+            budgets: vec![UsageBudgetLimit {
+                metric: UsageMetricKind::Bytes,
+                limit: 1_048_576,
+                window_seconds: 60,
+            }],
+        };
+        let mut tracker = BudgetTracker::new();
+        let eval =
+            tracker.record_usage(&zone, &policy, &[UsageMetric::bytes(1_048_576 + 1)]);
+        assert_eq!(eval.action, BudgetAction::Warn);
+        assert_eq!(eval.snapshot.budgets[0].remaining, 0);
+    }
+
+    #[test]
+    fn aggregate_metrics_two_different_kinds() {
+        let metrics = vec![UsageMetric::api_credits(7), UsageMetric::bytes(99)];
+        let result = aggregate_metrics(&metrics);
+        assert_eq!(result.len(), 2);
+        assert_eq!(*result.get(&UsageMetricKind::ApiCredits).unwrap(), 7);
+        assert_eq!(*result.get(&UsageMetricKind::Bytes).unwrap(), 99);
+    }
 }

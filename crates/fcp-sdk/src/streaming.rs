@@ -2210,4 +2210,258 @@ mod tests {
         assert_eq!(config.max_queue_per_key, copied.max_queue_per_key);
         assert_eq!(config.item_timeout, copied.item_timeout);
     }
+
+    // ── Additional coverage: edge cases, boundary values, error paths ──
+
+    #[test]
+    fn buffer_limits_zero_zero() {
+        let limits = BufferLimits::new(0, 0);
+        assert_eq!(limits.min_events, 0);
+        assert_eq!(limits.max_events, 0);
+    }
+
+    #[test]
+    fn buffer_limits_equal_min_max() {
+        let limits = BufferLimits::new(25, 25);
+        assert_eq!(limits.min_events, 25);
+        assert_eq!(limits.max_events, 25);
+    }
+
+    #[test]
+    fn event_stream_manager_debug() {
+        let manager = EventStreamManager::new(caps(true, true, 5));
+        let dbg = format!("{manager:?}");
+        assert!(dbg.contains("EventStreamManager"));
+    }
+
+    #[test]
+    fn event_stream_manager_default() {
+        let manager = EventStreamManager::default();
+        let dbg = format!("{manager:?}");
+        assert!(dbg.contains("EventStreamManager"));
+        assert_eq!(manager.pending_acks("nonexistent"), 0);
+    }
+
+    #[test]
+    fn emit_multiple_topics_seq_independent() {
+        let mut manager = EventStreamManager::new(caps(false, false, 10));
+        let e_a = manager.emit("topic_a", sample_event_data());
+        let e_b = manager.emit("topic_b", sample_event_data());
+        let e_a2 = manager.emit("topic_a", sample_event_data());
+        // Each topic has independent seq
+        assert_eq!(e_a.seq, 0);
+        assert_eq!(e_b.seq, 0);
+        assert_eq!(e_a2.seq, 1);
+    }
+
+    #[test]
+    fn unsubscribe_all_topics() {
+        let mut manager = EventStreamManager::new(caps(true, false, 10));
+        manager.emit("t1", sample_event_data());
+        manager.emit("t2", sample_event_data());
+        manager.emit("t3", sample_event_data());
+        let removed = manager.unsubscribe(&[
+            "t1".to_string(),
+            "t2".to_string(),
+            "t3".to_string(),
+        ]);
+        assert_eq!(removed, 3);
+    }
+
+    #[test]
+    fn unsubscribe_partial_overlap() {
+        let mut manager = EventStreamManager::new(caps(true, false, 10));
+        manager.emit("t1", sample_event_data());
+        manager.emit("t2", sample_event_data());
+        let removed =
+            manager.unsubscribe(&["t1".to_string(), "nonexistent".to_string()]);
+        assert_eq!(removed, 1);
+    }
+
+    #[test]
+    fn sequential_processor_enqueue_multiple_keys_track_depth() {
+        let mut processor = SequentialEventProcessor::new(SequentialEventProcessorConfig {
+            max_queue_per_key: 8,
+            max_total_queued: 32,
+            overflow_policy: SequentialOverflowPolicy::RejectNewest,
+            item_timeout: None,
+        });
+        processor.enqueue("a", 1_u32).unwrap();
+        processor.enqueue("b", 2_u32).unwrap();
+        processor.enqueue("c", 3_u32).unwrap();
+        processor.enqueue("a", 4_u32).unwrap();
+        assert_eq!(processor.queue_depth(), 4);
+        assert_eq!(processor.queue_depth_for("a"), 2);
+        assert_eq!(processor.queue_depth_for("b"), 1);
+        assert_eq!(processor.queue_depth_for("c"), 1);
+    }
+
+    #[test]
+    fn sequential_processor_next_ready_dequeues_all() {
+        let mut processor = SequentialEventProcessor::new(SequentialEventProcessorConfig {
+            max_queue_per_key: 4,
+            max_total_queued: 16,
+            overflow_policy: SequentialOverflowPolicy::RejectNewest,
+            item_timeout: None,
+        });
+        processor.enqueue("x", 10_u32).unwrap();
+        processor.enqueue("y", 20_u32).unwrap();
+
+        let e1 = processor.next_ready().unwrap();
+        processor.finish_key(&e1.stream_key);
+        let e2 = processor.next_ready().unwrap();
+        processor.finish_key(&e2.stream_key);
+
+        assert!(processor.next_ready().is_none());
+        assert!(processor.is_idle());
+    }
+
+    #[test]
+    fn sequential_overflow_policy_copy() {
+        let a = SequentialOverflowPolicy::RejectNewest;
+        let b = a;
+        assert_eq!(a, b);
+        let c = SequentialOverflowPolicy::DropOldest;
+        let d = c;
+        assert_eq!(c, d);
+    }
+
+    #[test]
+    fn sequential_event_clone() {
+        let event = SequentialEvent {
+            stream_key: "k1".to_string(),
+            item: 77_u32,
+        };
+        let cloned = event.clone();
+        assert_eq!(event, cloned);
+    }
+
+    #[test]
+    fn sequential_enqueue_outcome_accepted_has_no_dropped() {
+        let outcome = SequentialEnqueueOutcome::<u32>::accepted();
+        assert!(outcome.dropped.is_none());
+    }
+
+    #[test]
+    fn sequential_processor_config_eq() {
+        let c1 = SequentialEventProcessorConfig {
+            max_queue_per_key: 4,
+            max_total_queued: 8,
+            overflow_policy: SequentialOverflowPolicy::RejectNewest,
+            item_timeout: None,
+        };
+        let c2 = c1;
+        assert_eq!(c1, c2);
+
+        let c3 = SequentialEventProcessorConfig {
+            max_queue_per_key: 4,
+            max_total_queued: 16,
+            overflow_policy: SequentialOverflowPolicy::RejectNewest,
+            item_timeout: None,
+        };
+        assert_ne!(c1, c3);
+    }
+
+    #[test]
+    fn replay_error_all_variants_display_non_empty() {
+        let errors: Vec<ReplayError> = vec![
+            ReplayError::UnknownTopic {
+                topic: "t".to_string(),
+            },
+            ReplayError::InvalidCursor {
+                topic: "t".to_string(),
+                cursor: "bad".to_string(),
+            },
+            ReplayError::CursorStale {
+                topic: "t".to_string(),
+                cursor_seq: 0,
+                oldest_seq: 5,
+            },
+        ];
+        for err in &errors {
+            assert!(!err.to_string().is_empty());
+        }
+    }
+
+    #[test]
+    fn ack_empty_seqs() {
+        let mut manager = EventStreamManager::new(caps(true, true, 10));
+        manager.emit("t", sample_event_data());
+        let ack = EventAck::new("t", vec![]).with_cursors(vec![]);
+        let result = manager.handle_ack(&ack);
+        assert!(result.acked.is_empty());
+        assert!(result.missing.is_empty());
+    }
+
+    #[test]
+    fn nack_empty_seqs() {
+        let mut manager = EventStreamManager::new(caps(true, true, 10));
+        manager.emit("t", sample_event_data());
+        let nack = EventNack::new("t", vec![], "retry");
+        let result = manager.handle_nack(&nack);
+        assert!(result.redeliver.is_empty());
+        assert!(result.missing.is_empty());
+    }
+
+    #[test]
+    fn emit_with_seq_zero_gets_auto_assigned() {
+        let mut manager = EventStreamManager::new(caps(false, false, 10));
+        // EventEnvelope::new sets seq=0 by default; record should assign next_seq=0
+        let e = manager.emit("t", sample_event_data());
+        assert_eq!(e.seq, 0);
+        assert_eq!(e.cursor, "0");
+    }
+
+    #[test]
+    fn sequential_processor_debug() {
+        let processor = SequentialEventProcessor::<u8>::default();
+        let dbg = format!("{processor:?}");
+        assert!(dbg.contains("SequentialEventProcessor"));
+    }
+
+    #[test]
+    fn sequential_enqueue_error_debug() {
+        let err = SequentialEnqueueError::QueueFull {
+            stream_key: "k".to_string(),
+            item: 1_u32,
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("QueueFull"));
+    }
+
+    #[test]
+    fn subscribe_with_since_none_no_replay_events() {
+        let mut manager = EventStreamManager::new(caps(true, false, 10));
+        manager.emit("t", sample_event_data());
+        let req = SubscribeRequest {
+            r#type: "subscribe".to_string(),
+            id: RequestId::new("r"),
+            topics: vec!["t".to_string()],
+            since: None,
+            max_events_per_sec: None,
+            batch_ms: None,
+            window_size: None,
+            capability_token: None,
+        };
+        let outcome = manager.handle_subscribe(&req).unwrap();
+        assert!(outcome.replay_events.is_empty());
+    }
+
+    #[test]
+    fn subscribe_empty_topics_list() {
+        let mut manager = EventStreamManager::new(caps(true, false, 10));
+        let req = SubscribeRequest {
+            r#type: "subscribe".to_string(),
+            id: RequestId::new("r"),
+            topics: vec![],
+            since: None,
+            max_events_per_sec: None,
+            batch_ms: None,
+            window_size: None,
+            capability_token: None,
+        };
+        let outcome = manager.handle_subscribe(&req).unwrap();
+        assert!(outcome.response.result.confirmed_topics.is_empty());
+        assert!(outcome.replay_events.is_empty());
+    }
 }

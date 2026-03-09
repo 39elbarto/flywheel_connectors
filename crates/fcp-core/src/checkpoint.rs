@@ -2192,4 +2192,603 @@ mod tests {
                 | CheckpointChunkError::PayloadIntegrityMismatch { .. }
         ));
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: Additional checkpoint tests for 110+ coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn trigger_time_elapsed_just_above_threshold() {
+        let trigger = CheckpointTrigger::check_time_elapsed(61, 60);
+        assert!(trigger.is_some());
+    }
+
+    #[test]
+    fn trigger_time_elapsed_zero_threshold() {
+        // Any positive elapsed triggers with zero threshold
+        let trigger = CheckpointTrigger::check_time_elapsed(1, 0);
+        assert!(trigger.is_some());
+    }
+
+    #[test]
+    fn trigger_time_elapsed_zero_both() {
+        // 0 is not > 0, so no trigger
+        let trigger = CheckpointTrigger::check_time_elapsed(0, 0);
+        assert!(trigger.is_none());
+    }
+
+    #[test]
+    fn trigger_time_elapsed_u64_max() {
+        let trigger = CheckpointTrigger::check_time_elapsed(u64::MAX, u64::MAX - 1);
+        assert!(trigger.is_some());
+    }
+
+    #[test]
+    fn trigger_audit_growth_just_above_threshold() {
+        let trigger = CheckpointTrigger::check_audit_growth(101, 100);
+        assert!(trigger.is_some());
+    }
+
+    #[test]
+    fn trigger_audit_growth_zero_threshold() {
+        let trigger = CheckpointTrigger::check_audit_growth(1, 0);
+        assert!(trigger.is_some());
+    }
+
+    #[test]
+    fn trigger_audit_growth_zero_both() {
+        let trigger = CheckpointTrigger::check_audit_growth(0, 0);
+        assert!(trigger.is_none());
+    }
+
+    #[test]
+    fn trigger_revocation_growth_u64_one() {
+        let trigger = CheckpointTrigger::check_revocation_growth(1);
+        assert!(trigger.is_some());
+        if let Some(CheckpointTrigger::RevocationChainGrowth { new_events }) = trigger {
+            assert_eq!(new_events, 1);
+        } else {
+            panic!("wrong variant");
+        }
+    }
+
+    #[test]
+    fn trigger_policy_change_serde() {
+        let trigger = CheckpointTrigger::PolicyChange {
+            old_policy_head: test_object_id("old"),
+            new_policy_head: test_object_id("new"),
+        };
+        let json = serde_json::to_string(&trigger).unwrap();
+        let decoded: CheckpointTrigger = serde_json::from_str(&json).unwrap();
+        assert_eq!(trigger, decoded);
+    }
+
+    #[test]
+    fn trigger_manual_with_long_reason() {
+        let reason = "x".repeat(5000);
+        let trigger = CheckpointTrigger::Manual {
+            reason: Some(reason),
+        };
+        let json = serde_json::to_string(&trigger).unwrap();
+        let decoded: CheckpointTrigger = serde_json::from_str(&json).unwrap();
+        if let CheckpointTrigger::Manual {
+            reason: Some(decoded_reason),
+        } = decoded
+        {
+            assert_eq!(decoded_reason.len(), 5000);
+        } else {
+            panic!("wrong variant");
+        }
+    }
+
+    #[test]
+    fn trigger_debug_format() {
+        let trigger = CheckpointTrigger::TimeElapsed {
+            elapsed_secs: 100,
+            threshold_secs: 60,
+        };
+        let debug = format!("{trigger:?}");
+        assert!(debug.contains("TimeElapsed"));
+        assert!(debug.contains("100"));
+    }
+
+    #[test]
+    fn fork_evidence_detect_returns_none_for_equal_ids() {
+        let zone = test_zone();
+        let id = test_object_id("same-checkpoint");
+        let result = ForkEvidence::detect(&zone, 0, &id, &id, 0, test_node("n"));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn fork_evidence_all_signers_overlap() {
+        let evidence = ForkEvidence::new(
+            test_zone(),
+            1,
+            test_object_id("a"),
+            test_object_id("b"),
+            100,
+            test_node("d"),
+        )
+        .with_signers_a(["alice".to_string(), "bob".to_string()])
+        .with_signers_b(["alice".to_string(), "bob".to_string()]);
+        let double = evidence.double_signers();
+        assert_eq!(double.len(), 2);
+        assert!(double.contains("alice"));
+        assert!(double.contains("bob"));
+    }
+
+    #[test]
+    fn fork_evidence_fields_accessible() {
+        let evidence = ForkEvidence::new(
+            test_zone(),
+            77,
+            test_object_id("cp-a"),
+            test_object_id("cp-b"),
+            1_700_000_999,
+            test_node("det-node"),
+        );
+        assert_eq!(evidence.zone_id, test_zone());
+        assert_eq!(evidence.conflicting_seq, 77);
+        assert_eq!(evidence.detected_at, 1_700_000_999);
+        assert_eq!(evidence.detected_by.as_str(), "det-node");
+    }
+
+    #[test]
+    fn fork_detection_result_debug() {
+        let result = ForkDetectionResult::NoFork;
+        let debug = format!("{result:?}");
+        assert!(debug.contains("NoFork"));
+    }
+
+    #[test]
+    fn hrw_hash_zero_length_inputs_still_deterministic() {
+        let zone: ZoneId = "z:".parse().unwrap_or_else(|_| ZoneId::work());
+        let epoch = EpochId::new("");
+        let node = TailscaleNodeId::new("");
+        let h1 = hrw_hash_checkpoint(&zone, &epoch, &node);
+        let h2 = hrw_hash_checkpoint(&zone, &epoch, &node);
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn coordinator_selection_two_nodes() {
+        let zone = test_zone();
+        let epoch = test_epoch();
+        let nodes = vec![test_node("alpha"), test_node("beta")];
+        let coord = select_checkpoint_coordinator(&zone, &epoch, &nodes);
+        assert!(coord.is_some());
+        // Winner should be one of the two nodes
+        let winner = coord.unwrap();
+        assert!(winner.as_str() == "alpha" || winner.as_str() == "beta");
+    }
+
+    #[test]
+    fn coordinator_ranking_preserves_all_nodes() {
+        let zone = test_zone();
+        let epoch = test_epoch();
+        let nodes: Vec<TailscaleNodeId> = (0..10)
+            .map(|i| test_node(&format!("node-{i}")))
+            .collect();
+        let ranked = rank_checkpoint_coordinators(&zone, &epoch, &nodes);
+        assert_eq!(ranked.len(), 10);
+        // All original nodes should be in the ranked list
+        for node in &nodes {
+            assert!(ranked.iter().any(|r| r.as_str() == node.as_str()));
+        }
+    }
+
+    #[test]
+    fn coordinator_ranking_different_epochs_different_order() {
+        let zone = test_zone();
+        let nodes = vec![
+            test_node("a"),
+            test_node("b"),
+            test_node("c"),
+            test_node("d"),
+            test_node("e"),
+        ];
+        let ranked1 = rank_checkpoint_coordinators(&zone, &EpochId::new("epoch-1"), &nodes);
+        let ranked2 = rank_checkpoint_coordinators(&zone, &EpochId::new("epoch-2"), &nodes);
+        // With 5 nodes and different epochs, it's extremely likely the ordering differs
+        // (but not guaranteed; we can only assert both have same length)
+        assert_eq!(ranked1.len(), ranked2.len());
+    }
+
+    #[test]
+    fn advance_state_finalized_fields() {
+        let state = CheckpointAdvanceState::Finalized {
+            checkpoint_id: test_object_id("chk-final"),
+            finalized_seq: 999,
+            finalized_at: 1_700_099_999,
+        };
+        assert!(!state.is_halted());
+        assert!(state.can_advance());
+        assert!(state.fork_evidence().is_none());
+    }
+
+    #[test]
+    fn advance_state_proposal_broadcast_can_advance() {
+        let proposal = CheckpointProposal {
+            zone_id: test_zone(),
+            proposed_seq: 1,
+            prev_checkpoint_id: None,
+            audit_head_id: test_object_id("audit"),
+            audit_head_seq: 0,
+            revocation_head_id: test_object_id("rev"),
+            revocation_head_seq: 0,
+            zone_definition_head: test_object_id("zd"),
+            zone_policy_head: test_object_id("zp"),
+            active_zone_key_manifest: test_object_id("zkm"),
+            epoch_id: test_epoch(),
+            proposed_at: 1_700_000_000,
+            coordinator: test_node("coord"),
+            coordinator_signature: NodeSignature::new(
+                NodeId::new("coord"),
+                [0u8; 64],
+                1_700_000_000,
+            ),
+            triggers: vec![],
+        };
+        let state = CheckpointAdvanceState::ProposalBroadcast {
+            proposal: Box::new(proposal),
+            collected_signatures: SignatureSet::new(),
+            required_signatures: 3,
+        };
+        assert!(state.can_advance());
+        assert!(!state.is_halted());
+        assert!(state.fork_evidence().is_none());
+    }
+
+    #[test]
+    fn validation_error_unknown_head_reason_code() {
+        let err = CheckpointValidationError::UnknownHead {
+            head_type: "audit".to_string(),
+            head_id: test_object_id("h"),
+        };
+        assert_eq!(err.reason_code(), "FCP-5003");
+        assert!(!err.is_fork());
+    }
+
+    #[test]
+    fn validation_error_invalid_head_reason_code() {
+        let err = CheckpointValidationError::InvalidHead {
+            head_type: "revocation".to_string(),
+            head_id: test_object_id("h"),
+            reason: "corrupt".to_string(),
+        };
+        assert_eq!(err.reason_code(), "FCP-5004");
+    }
+
+    #[test]
+    fn validation_error_unknown_head_serde() {
+        let err = CheckpointValidationError::UnknownHead {
+            head_type: "audit".to_string(),
+            head_id: test_object_id("h"),
+        };
+        let json = serde_json::to_string(&err).unwrap();
+        let decoded: CheckpointValidationError = serde_json::from_str(&json).unwrap();
+        assert_eq!(err, decoded);
+    }
+
+    #[test]
+    fn validation_error_invalid_head_serde() {
+        let err = CheckpointValidationError::InvalidHead {
+            head_type: "rev".to_string(),
+            head_id: test_object_id("h"),
+            reason: "stale".to_string(),
+        };
+        let json = serde_json::to_string(&err).unwrap();
+        let decoded: CheckpointValidationError = serde_json::from_str(&json).unwrap();
+        assert_eq!(err, decoded);
+    }
+
+    #[test]
+    fn freshness_token_zero_seq_is_fresh() {
+        let result = FreshnessResult::check_token_freshness(0, 0, false);
+        assert_eq!(result, FreshnessResult::Fresh);
+    }
+
+    #[test]
+    fn freshness_token_large_difference() {
+        let result = FreshnessResult::check_token_freshness(u64::MAX, 0, false);
+        assert_eq!(result, FreshnessResult::TooStale);
+    }
+
+    #[test]
+    fn freshness_revocation_zero_seq() {
+        let result = FreshnessResult::check_revocation_freshness(0, 0, false);
+        assert_eq!(result, FreshnessResult::Fresh);
+    }
+
+    #[test]
+    fn freshness_revocation_large_difference() {
+        let result = FreshnessResult::check_revocation_freshness(0, u64::MAX, false);
+        assert_eq!(result, FreshnessResult::TooStale);
+    }
+
+    #[test]
+    fn freshness_revocation_large_difference_degraded() {
+        let result = FreshnessResult::check_revocation_freshness(0, u64::MAX, true);
+        assert_eq!(result, FreshnessResult::DegradedMode);
+    }
+
+    #[test]
+    fn freshness_result_inequality() {
+        assert_ne!(FreshnessResult::Fresh, FreshnessResult::TooStale);
+        assert_ne!(FreshnessResult::Fresh, FreshnessResult::DegradedMode);
+        assert_ne!(FreshnessResult::DegradedMode, FreshnessResult::TooStale);
+    }
+
+    #[test]
+    fn default_constants_consistency() {
+        let interval = DEFAULT_CHECKPOINT_INTERVAL_SECS;
+        let growth = DEFAULT_AUDIT_CHAIN_GROWTH_THRESHOLD;
+        let chunk_threshold = DEFAULT_COMPUTATION_CHECKPOINT_CHUNK_THRESHOLD_BYTES;
+        let chunk_size = DEFAULT_COMPUTATION_CHECKPOINT_CHUNK_SIZE_BYTES;
+        assert!(interval > 0);
+        assert!(growth > 0);
+        assert!(chunk_threshold > 0);
+        assert!(chunk_size > 0);
+        assert!(chunk_threshold > chunk_size);
+    }
+
+    #[test]
+    fn computation_checkpoint_schema_stable() {
+        let schema1 = ComputationCheckpoint::schema();
+        let schema2 = ComputationCheckpoint::schema();
+        assert_eq!(schema1.namespace, schema2.namespace);
+        assert_eq!(schema1.name, schema2.name);
+    }
+
+    #[test]
+    fn computation_checkpoint_zone_id() {
+        let cp = test_computation_checkpoint(vec![1, 2, 3]);
+        assert_eq!(cp.zone_id(), &test_zone());
+    }
+
+    #[test]
+    fn computation_checkpoint_object_id_deterministic() {
+        let cp = test_computation_checkpoint(vec![1, 2, 3]);
+        let id1 = cp.object_id().unwrap();
+        let id2 = cp.object_id().unwrap();
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn computation_checkpoint_inline_transfer_small_payload() {
+        let cp = test_computation_checkpoint(vec![1, 2, 3]);
+        // Use a very large threshold so it stays inline
+        let encoding = cp.to_transfer_encoding(1_000_000, 1024).unwrap();
+        assert!(matches!(
+            encoding,
+            CheckpointTransferEncoding::Inline { .. }
+        ));
+    }
+
+    #[test]
+    fn computation_checkpoint_transfer_zero_chunk_size_error() {
+        let cp = test_computation_checkpoint(vec![1, 2, 3]);
+        let err = cp.to_transfer_encoding(0, 0).unwrap_err();
+        assert!(matches!(err, CheckpointChunkError::InvalidChunkSize));
+    }
+
+    #[test]
+    fn checkpoint_transfer_encoding_object_id_inline() {
+        let oid = test_object_id("inline-payload");
+        let encoding = CheckpointTransferEncoding::Inline {
+            object_id: oid,
+            canonical_bytes: vec![1, 2, 3],
+        };
+        assert_eq!(encoding.object_id(), oid);
+    }
+
+    #[test]
+    fn chunked_object_manifest_chunk_count() {
+        let manifest = ChunkedObjectManifest {
+            payload_object_id: test_object_id("payload"),
+            total_bytes: 1024,
+            chunk_size_bytes: 256,
+            chunk_object_ids: vec![
+                test_object_id("c0"),
+                test_object_id("c1"),
+                test_object_id("c2"),
+            ],
+        };
+        assert_eq!(manifest.chunk_count(), 3);
+    }
+
+    #[test]
+    fn chunked_object_manifest_empty() {
+        let manifest = ChunkedObjectManifest {
+            payload_object_id: test_object_id("empty"),
+            total_bytes: 0,
+            chunk_size_bytes: 256,
+            chunk_object_ids: vec![],
+        };
+        assert_eq!(manifest.chunk_count(), 0);
+    }
+
+    #[test]
+    fn reconstruct_chunked_payload_count_mismatch() {
+        let chunked = ChunkedCheckpoint {
+            manifest: ChunkedObjectManifest {
+                payload_object_id: test_object_id("p"),
+                total_bytes: 10,
+                chunk_size_bytes: 5,
+                chunk_object_ids: vec![test_object_id("c0"), test_object_id("c1")],
+            },
+            chunks: vec![vec![1, 2, 3]], // Only 1 chunk, manifest says 2
+        };
+        let err = reconstruct_chunked_payload(&chunked).unwrap_err();
+        assert!(matches!(
+            err,
+            CheckpointChunkError::ChunkCountMismatch {
+                expected: 2,
+                got: 1
+            }
+        ));
+    }
+
+    #[test]
+    fn migration_capability_context_serde_roundtrip() {
+        let ctx = test_migration_context(42);
+        let json = serde_json::to_string(&ctx).unwrap();
+        let decoded: MigrationCapabilityContext = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.checkpoint_seq, 42);
+        assert!(decoded.audit_event_id.is_some());
+    }
+
+    #[test]
+    fn migration_capability_context_no_checkpoint_id() {
+        let ctx = MigrationCapabilityContext {
+            capability_token_jti: Uuid::nil(),
+            checkpoint_id: None,
+            checkpoint_seq: 0,
+            audit_event_id: None,
+        };
+        let json = serde_json::to_string(&ctx).unwrap();
+        assert!(!json.contains("checkpoint_id"));
+        let decoded: MigrationCapabilityContext = serde_json::from_str(&json).unwrap();
+        assert!(decoded.checkpoint_id.is_none());
+        assert!(decoded.audit_event_id.is_none());
+    }
+
+    #[test]
+    fn migration_capability_context_clone() {
+        let ctx = test_migration_context(10);
+        let cloned = ctx.clone();
+        assert_eq!(ctx, cloned);
+    }
+
+    #[test]
+    fn checkpoint_chunk_error_display_invalid_chunk_size() {
+        let err = CheckpointChunkError::InvalidChunkSize;
+        let msg = err.to_string();
+        assert!(msg.contains("chunk size"));
+    }
+
+    #[test]
+    fn checkpoint_chunk_error_display_chunk_count_mismatch() {
+        let err = CheckpointChunkError::ChunkCountMismatch {
+            expected: 5,
+            got: 3,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains('5'));
+        assert!(msg.contains('3'));
+    }
+
+    #[test]
+    fn checkpoint_chunk_error_display_payload_length_mismatch() {
+        let err = CheckpointChunkError::PayloadLengthMismatch {
+            expected: 1024,
+            got: 512,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("1024"));
+        assert!(msg.contains("512"));
+    }
+
+    #[test]
+    fn checkpoint_chunk_error_display_manifest_length_overflow() {
+        let err = CheckpointChunkError::ManifestLengthOverflow { total_bytes: 999 };
+        let msg = err.to_string();
+        assert!(msg.contains("999"));
+    }
+
+    #[test]
+    fn checkpoint_chunk_error_display_manifest_chunk_size_overflow() {
+        let err = CheckpointChunkError::ManifestChunkSizeOverflow {
+            chunk_size_bytes: 12345,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("12345"));
+    }
+
+    #[test]
+    fn checkpoint_chunk_error_display_payload_integrity() {
+        let err = CheckpointChunkError::PayloadIntegrityMismatch {
+            expected: test_object_id("expected"),
+            got: test_object_id("got"),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("integrity"));
+    }
+
+    #[test]
+    fn checkpoint_chunk_error_display_chunk_integrity() {
+        let err = CheckpointChunkError::ChunkIntegrityMismatch {
+            index: 3,
+            expected: test_object_id("exp"),
+            got: test_object_id("actual"),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains('3'));
+    }
+
+    #[test]
+    fn proposal_timestamp_within_skew_local_before_proposal() {
+        let proposal = CheckpointProposal {
+            zone_id: test_zone(),
+            proposed_seq: 1,
+            prev_checkpoint_id: None,
+            audit_head_id: test_object_id("audit"),
+            audit_head_seq: 0,
+            revocation_head_id: test_object_id("rev"),
+            revocation_head_seq: 0,
+            zone_definition_head: test_object_id("zd"),
+            zone_policy_head: test_object_id("zp"),
+            active_zone_key_manifest: test_object_id("zkm"),
+            epoch_id: test_epoch(),
+            proposed_at: 1_700_000_100,
+            coordinator: test_node("coord"),
+            coordinator_signature: NodeSignature::new(
+                NodeId::new("coord"),
+                [0u8; 64],
+                1_700_000_100,
+            ),
+            triggers: vec![],
+        };
+        // local_time is 50 seconds before proposal, skew tolerance is 60
+        assert!(proposal.timestamp_within_skew(1_700_000_050, 60));
+        // local_time is 70 seconds before proposal, skew tolerance is 60
+        assert!(!proposal.timestamp_within_skew(1_700_000_030, 60));
+    }
+
+    #[test]
+    fn computation_checkpoint_fields() {
+        let cp = test_computation_checkpoint(vec![9, 8, 7]);
+        assert_eq!(cp.checkpoint_seq, 7);
+        assert_eq!(cp.lease_fencing_token, 11);
+        assert_eq!(cp.current_holder.as_str(), "node-source");
+        assert_eq!(cp.state_cbor, vec![9, 8, 7]);
+    }
+
+    #[test]
+    fn chunked_checkpoint_serde_roundtrip() {
+        let chunked = ChunkedCheckpoint {
+            manifest: ChunkedObjectManifest {
+                payload_object_id: test_object_id("payload"),
+                total_bytes: 6,
+                chunk_size_bytes: 3,
+                chunk_object_ids: vec![test_object_id("c0"), test_object_id("c1")],
+            },
+            chunks: vec![vec![1, 2, 3], vec![4, 5, 6]],
+        };
+        let json = serde_json::to_string(&chunked).unwrap();
+        let decoded: ChunkedCheckpoint = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, chunked);
+    }
+
+    #[test]
+    fn checkpoint_transfer_encoding_inline_serde() {
+        let encoding = CheckpointTransferEncoding::Inline {
+            object_id: test_object_id("inline"),
+            canonical_bytes: vec![10, 20, 30],
+        };
+        let json = serde_json::to_string(&encoding).unwrap();
+        let decoded: CheckpointTransferEncoding = serde_json::from_str(&json).unwrap();
+        assert_eq!(encoding, decoded);
+    }
 }

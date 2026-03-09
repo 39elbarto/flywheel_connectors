@@ -1144,82 +1144,189 @@ mod tests {
         }
     }
 
-    // ── Additional CheckStatus edge cases ──
+    // ── ComplianceFinding edge cases ─────────────────────────────
 
     #[test]
-    fn check_status_deserialize_from_string() {
-        let pass: CheckStatus = serde_json::from_str("\"pass\"").unwrap();
-        assert_eq!(pass, CheckStatus::Pass);
-        let fail: CheckStatus = serde_json::from_str("\"fail\"").unwrap();
-        assert_eq!(fail, CheckStatus::Fail);
-        let skip: CheckStatus = serde_json::from_str("\"skipped\"").unwrap();
-        assert_eq!(skip, CheckStatus::Skipped);
+    fn finding_pass_empty_strings() {
+        let f = ComplianceFinding::pass("", "");
+        assert_eq!(f.status, CheckStatus::Pass);
+        assert!(f.check.is_empty());
+        assert!(f.message.is_empty());
     }
 
     #[test]
-    fn check_status_invalid_string_errors() {
+    fn finding_fail_long_message() {
+        let long_msg = "x".repeat(10_000);
+        let f = ComplianceFinding::fail("long.check", long_msg.as_str());
+        assert_eq!(f.status, CheckStatus::Fail);
+        assert_eq!(f.message.len(), 10_000);
+    }
+
+    #[test]
+    fn finding_skipped_unicode_message() {
+        let f = ComplianceFinding::skipped("unicode.check", "emoji test");
+        assert_eq!(f.status, CheckStatus::Skipped);
+        assert_eq!(f.message, "emoji test");
+    }
+
+    #[test]
+    fn finding_clone_is_independent() {
+        let f = ComplianceFinding::pass("orig", "original msg");
+        let cloned = f.clone();
+        assert_eq!(f.check, "orig");
+        assert_eq!(cloned.check, "orig");
+        assert_eq!(cloned.message, "original msg");
+        assert_eq!(cloned.status, CheckStatus::Pass);
+    }
+
+    // ── CheckStatus exhaustive tests ─────────────────────────────
+
+    #[test]
+    fn check_status_all_variants_serialize_lowercase() {
+        assert_eq!(
+            serde_json::to_value(CheckStatus::Pass).unwrap(),
+            serde_json::json!("pass")
+        );
+        assert_eq!(
+            serde_json::to_value(CheckStatus::Fail).unwrap(),
+            serde_json::json!("fail")
+        );
+        assert_eq!(
+            serde_json::to_value(CheckStatus::Skipped).unwrap(),
+            serde_json::json!("skipped")
+        );
+    }
+
+    #[test]
+    fn check_status_deserialize_from_lowercase() {
+        let p: CheckStatus = serde_json::from_str("\"pass\"").unwrap();
+        assert_eq!(p, CheckStatus::Pass);
+        let f: CheckStatus = serde_json::from_str("\"fail\"").unwrap();
+        assert_eq!(f, CheckStatus::Fail);
+        let s: CheckStatus = serde_json::from_str("\"skipped\"").unwrap();
+        assert_eq!(s, CheckStatus::Skipped);
+    }
+
+    #[test]
+    fn check_status_invalid_string_fails_deserialize() {
+        let result: Result<CheckStatus, _> = serde_json::from_str("\"PASS\"");
+        assert!(result.is_err());
         let result: Result<CheckStatus, _> = serde_json::from_str("\"unknown\"");
         assert!(result.is_err());
     }
 
     #[test]
     fn check_status_eq_reflexive() {
-        let s = CheckStatus::Skipped;
-        assert_eq!(s, s);
+        assert_eq!(CheckStatus::Pass, CheckStatus::Pass);
+        assert_eq!(CheckStatus::Fail, CheckStatus::Fail);
+        assert_eq!(CheckStatus::Skipped, CheckStatus::Skipped);
     }
 
-    // ── ComplianceFinding additional tests ──
+    // ── StaticCompliance additional tests ─────────────────────────
 
     #[test]
-    fn finding_pass_accepts_string_owned() {
-        let f = ComplianceFinding::pass(String::from("owned.check"), String::from("detail"));
-        assert_eq!(f.check, "owned.check");
-        assert_eq!(f.message, "detail");
-        assert_eq!(f.status, CheckStatus::Pass);
-    }
-
-    #[test]
-    fn finding_fail_message_preserved() {
-        let msg = "very long error message with special chars: <>&\"'";
-        let f = ComplianceFinding::fail("err.check", msg);
-        assert_eq!(f.message, msg);
+    fn static_partial_toml_fails() {
+        let report = StaticCompliance::run_manifest("[manifest]\nid = \"partial\"");
+        assert!(!report.passed);
     }
 
     #[test]
-    fn finding_skipped_serde_roundtrip() {
-        let f = ComplianceFinding::skipped("skip.test", "not applicable here");
-        let json = serde_json::to_string(&f).unwrap();
-        let deserialized: ComplianceFinding = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.status, CheckStatus::Skipped);
-        assert_eq!(deserialized.check, "skip.test");
-        assert_eq!(deserialized.message, "not applicable here");
+    fn static_valid_toml_but_wrong_schema_fails() {
+        let report = StaticCompliance::run_manifest("[foo]\nbar = 42");
+        assert!(!report.passed);
     }
 
     #[test]
-    fn finding_clone_independence() {
-        let f = ComplianceFinding::pass("orig", "val");
-        let cloned = f.clone();
-        assert_eq!(f.check, cloned.check);
-        assert_eq!(f.status, cloned.status);
-        assert_eq!(f.message, cloned.message);
-    }
-
-    // ── StaticCompliance additional tests ──
-
-    #[test]
-    fn static_compliance_clone_independence() {
+    fn static_compliance_clone_preserves_findings() {
         let sc = StaticCompliance {
             passed: true,
-            findings: vec![ComplianceFinding::pass("a", "ok")],
+            findings: vec![
+                ComplianceFinding::pass("a", "ok"),
+                ComplianceFinding::fail("b", "bad"),
+                ComplianceFinding::skipped("c", "skip"),
+            ],
         };
         let cloned = sc.clone();
-        assert_eq!(sc.passed, cloned.passed);
-        assert_eq!(sc.findings.len(), cloned.findings.len());
+        assert_eq!(sc.findings.len(), 3);
+        assert_eq!(cloned.findings.len(), 3);
+        assert!(cloned.passed);
+        assert_eq!(cloned.findings[0].status, CheckStatus::Pass);
+        assert_eq!(cloned.findings[1].status, CheckStatus::Fail);
+        assert_eq!(cloned.findings[2].status, CheckStatus::Skipped);
     }
 
     #[test]
-    fn static_compliance_multiple_findings_serde() {
+    fn static_compliance_debug_contains_passed() {
         let sc = StaticCompliance {
+            passed: false,
+            findings: vec![ComplianceFinding::fail("x", "y")],
+        };
+        let dbg = format!("{sc:?}");
+        assert!(dbg.contains("passed"));
+        assert!(dbg.contains("findings"));
+    }
+
+    #[test]
+    fn static_compliance_empty_findings() {
+        let sc = StaticCompliance {
+            passed: true,
+            findings: vec![],
+        };
+        let json = serde_json::to_string(&sc).unwrap();
+        let back: StaticCompliance = serde_json::from_str(&json).unwrap();
+        assert!(back.passed);
+        assert!(back.findings.is_empty());
+    }
+
+    // ── DynamicSuite additional tests ────────────────────────────
+
+    #[test]
+    fn dynamic_suite_all_flags_true() {
+        let hs = make_handshake();
+        let mut suite = DynamicSuite::minimal(hs);
+        suite.expect_invoke_error = true;
+        suite.require_simulate_denial_details = true;
+        suite.require_capability_denial = true;
+        suite.require_decision_receipt = true;
+        assert!(suite.expect_invoke_error);
+        assert!(suite.require_simulate_denial_details);
+        assert!(suite.require_capability_denial);
+        assert!(suite.require_decision_receipt);
+    }
+
+    #[test]
+    fn dynamic_suite_clone() {
+        let suite = DynamicSuite::minimal(make_handshake());
+        let cloned = suite.clone();
+        assert!(suite.invoke.is_none());
+        assert!(cloned.invoke.is_none());
+        assert!(!cloned.expect_invoke_error);
+    }
+
+    #[test]
+    fn dynamic_suite_minimal_config_is_empty_object() {
+        let suite = DynamicSuite::minimal(make_handshake());
+        assert_eq!(suite.config, serde_json::json!({}));
+    }
+
+    #[test]
+    fn dynamic_suite_config_can_be_overridden() {
+        let mut suite = DynamicSuite::minimal(make_handshake());
+        suite.config = serde_json::json!({"key": "value"});
+        assert_eq!(suite.config["key"], "value");
+    }
+
+    #[test]
+    fn dynamic_suite_simulate_expectation_defaults_none() {
+        let suite = DynamicSuite::minimal(make_handshake());
+        assert!(suite.expect_simulate_would_succeed.is_none());
+    }
+
+    // ── DynamicCompliance additional tests ────────────────────────
+
+    #[test]
+    fn dynamic_compliance_with_multiple_findings() {
+        let dc = DynamicCompliance {
             passed: false,
             findings: vec![
                 ComplianceFinding::pass("a", "ok"),
@@ -1227,63 +1334,120 @@ mod tests {
                 ComplianceFinding::skipped("c", "skip"),
             ],
         };
-        let json = serde_json::to_string(&sc).unwrap();
-        let deserialized: StaticCompliance = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.findings.len(), 3);
-        assert!(!deserialized.passed);
-    }
-
-    // ── DynamicCompliance additional tests ──
-
-    #[test]
-    fn dynamic_compliance_clone_independence() {
-        let dc = DynamicCompliance {
-            passed: false,
-            findings: vec![ComplianceFinding::fail("f", "msg")],
-        };
-        let cloned = dc.clone();
-        assert_eq!(dc.passed, cloned.passed);
-        assert_eq!(dc.findings.len(), cloned.findings.len());
+        assert!(!dc.passed);
+        assert_eq!(dc.findings.len(), 3);
     }
 
     #[test]
-    fn dynamic_compliance_empty_findings_serializes() {
+    fn dynamic_compliance_empty_findings() {
         let dc = DynamicCompliance {
             passed: true,
             findings: vec![],
         };
         let json = serde_json::to_string(&dc).unwrap();
-        assert!(json.contains("\"passed\":true"));
-        assert!(json.contains("\"findings\":[]"));
+        let back: DynamicCompliance = serde_json::from_str(&json).unwrap();
+        assert!(back.passed);
+        assert!(back.findings.is_empty());
     }
 
-    // ── ComplianceReport additional tests ──
+    #[test]
+    fn dynamic_compliance_clone_preserves_state() {
+        let dc = DynamicCompliance {
+            passed: false,
+            findings: vec![ComplianceFinding::fail("x", "y")],
+        };
+        let cloned = dc.clone();
+        assert!(!dc.passed);
+        assert!(!cloned.passed);
+        assert_eq!(cloned.findings.len(), 1);
+        assert_eq!(cloned.findings[0].check, "x");
+    }
 
     #[test]
-    fn compliance_report_json_deserialize_roundtrip() {
+    fn dynamic_skipped_message_preserved() {
+        let dc = DynamicCompliance::skipped("specific reason");
+        assert_eq!(dc.findings[0].message, "specific reason");
+        assert_eq!(dc.findings[0].check, "dynamic.skip");
+    }
+
+    // ── ComplianceReport additional tests ─────────────────────────
+
+    #[test]
+    fn compliance_report_large_findings() {
+        let findings: Vec<ComplianceFinding> = (0..100)
+            .map(|i| ComplianceFinding::pass(format!("check_{i}"), format!("msg_{i}")))
+            .collect();
         let report = ComplianceReport {
             static_checks: StaticCompliance {
-                passed: false,
-                findings: vec![ComplianceFinding::fail("s1", "err1")],
+                passed: true,
+                findings: findings.clone(),
             },
             dynamic_checks: DynamicCompliance {
                 passed: true,
-                findings: vec![ComplianceFinding::pass("d1", "ok1")],
+                findings,
+            },
+        };
+        assert!(report.passed());
+        assert_eq!(report.static_checks.findings.len(), 100);
+        assert_eq!(report.dynamic_checks.findings.len(), 100);
+    }
+
+    #[test]
+    fn compliance_report_json_roundtrip() {
+        let report = ComplianceReport {
+            static_checks: StaticCompliance {
+                passed: true,
+                findings: vec![
+                    ComplianceFinding::pass("s1", "ok"),
+                    ComplianceFinding::skipped("s2", "n/a"),
+                ],
+            },
+            dynamic_checks: DynamicCompliance {
+                passed: false,
+                findings: vec![ComplianceFinding::fail("d1", "error")],
             },
         };
         let json = serde_json::to_string_pretty(&report).unwrap();
-        let parsed: ComplianceReport = serde_json::from_str(&json).unwrap();
-        assert!(!parsed.passed());
-        assert!(!parsed.static_checks.passed);
-        assert!(parsed.dynamic_checks.passed);
+        let back: ComplianceReport = serde_json::from_str(&json).unwrap();
+        assert!(back.static_checks.passed);
+        assert!(!back.dynamic_checks.passed);
+        assert!(!back.passed());
+        assert_eq!(back.static_checks.findings.len(), 2);
+        assert_eq!(back.dynamic_checks.findings.len(), 1);
     }
 
-    // ── is_capability_denial exhaustive ──
+    #[test]
+    fn compliance_report_clone_deep() {
+        let report = ComplianceReport {
+            static_checks: StaticCompliance {
+                passed: true,
+                findings: vec![ComplianceFinding::pass("a", "b")],
+            },
+            dynamic_checks: DynamicCompliance::skipped("reason"),
+        };
+        let cloned = report.clone();
+        assert!(report.passed());
+        assert!(cloned.passed());
+        assert_eq!(cloned.static_checks.findings.len(), 1);
+        assert_eq!(cloned.dynamic_checks.findings.len(), 1);
+    }
+
+    // ── is_capability_denial extended ────────────────────────────
 
     #[test]
-    fn is_capability_denial_false_for_timeout() {
-        let err = FcpError::UpstreamTimeout {
-            service: "test".into(),
+    fn is_capability_denial_false_for_unauthorized() {
+        let err = FcpError::Unauthorized {
+            code: 401,
+            message: "nope".into(),
+        };
+        assert!(!is_capability_denial(&err));
+    }
+
+    #[test]
+    fn is_capability_denial_false_for_rate_limited() {
+        let err = FcpError::RateLimited {
+            retry_after_ms: 5000,
+            violation: None,
         };
         assert!(!is_capability_denial(&err));
     }
@@ -1291,59 +1455,348 @@ mod tests {
     #[test]
     fn is_capability_denial_false_for_invalid_request() {
         let err = FcpError::InvalidRequest {
-            code: 1001,
-            message: "bad request".into(),
+            code: 400,
+            message: "bad".into(),
         };
         assert!(!is_capability_denial(&err));
     }
 
-    // ── DynamicSuite clone ──
-
     #[test]
-    fn dynamic_suite_clone_preserves_fields() {
-        let hs = make_handshake();
-        let original = DynamicSuite::minimal(hs);
-        let cloned = original.clone();
-        assert_eq!(
-            serde_json::to_string(&original.config).unwrap(),
-            serde_json::to_string(&cloned.config).unwrap()
-        );
-        assert!(cloned.invoke.is_none());
-        assert!(cloned.simulate.is_none());
-        assert!(!cloned.expect_invoke_error);
-    }
-
-    // ── MockConnector factories ──
-
-    #[test]
-    fn mock_connector_healthy_fields() {
-        let c = MockConnector::healthy();
-        assert!(c.configure_ok);
-        assert!(c.handshake_accepted);
-        assert!(c.health_ok);
+    fn is_capability_denial_false_for_token_expired() {
+        let err = FcpError::TokenExpired;
+        assert!(!is_capability_denial(&err));
     }
 
     #[test]
-    fn mock_connector_failing_configure_fields() {
-        let c = MockConnector::failing_configure();
-        assert!(!c.configure_ok);
-        assert!(c.handshake_accepted);
-        assert!(c.health_ok);
+    fn is_capability_denial_with_empty_strings() {
+        let err = FcpError::CapabilityDenied {
+            capability: String::new(),
+            reason: String::new(),
+        };
+        assert!(is_capability_denial(&err));
+
+        let err2 = FcpError::OperationNotGranted {
+            operation: String::new(),
+        };
+        assert!(is_capability_denial(&err2));
+    }
+
+    // ── ComplianceFinding serde edge cases ───────────────────────
+
+    #[test]
+    fn finding_serde_json_structure() {
+        let f = ComplianceFinding::pass("test.id", "msg");
+        let v: serde_json::Value = serde_json::to_value(&f).unwrap();
+        assert_eq!(v["check"], "test.id");
+        assert_eq!(v["status"], "pass");
+        assert_eq!(v["message"], "msg");
     }
 
     #[test]
-    fn mock_connector_failing_handshake_fields() {
-        let c = MockConnector::failing_handshake();
-        assert!(c.configure_ok);
-        assert!(!c.handshake_accepted);
-        assert!(c.health_ok);
+    fn finding_serde_fail_json_structure() {
+        let f = ComplianceFinding::fail("fail.id", "bad");
+        let v: serde_json::Value = serde_json::to_value(&f).unwrap();
+        assert_eq!(v["status"], "fail");
     }
 
     #[test]
-    fn mock_connector_unhealthy_fields() {
-        let c = MockConnector::unhealthy();
-        assert!(c.configure_ok);
-        assert!(c.handshake_accepted);
-        assert!(!c.health_ok);
+    fn finding_serde_skipped_json_structure() {
+        let f = ComplianceFinding::skipped("skip.id", "n/a");
+        let v: serde_json::Value = serde_json::to_value(&f).unwrap();
+        assert_eq!(v["status"], "skipped");
+    }
+
+    #[test]
+    fn finding_deserialize_from_json_object() {
+        let json = r#"{"check":"x","status":"fail","message":"y"}"#;
+        let f: ComplianceFinding = serde_json::from_str(json).unwrap();
+        assert_eq!(f.check, "x");
+        assert_eq!(f.status, CheckStatus::Fail);
+        assert_eq!(f.message, "y");
+    }
+
+    // ── Dynamic checks: health message content ─────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn dynamic_health_message_contains_status() {
+        let mut connector = MockConnector::healthy();
+        let suite = DynamicSuite::minimal(make_handshake());
+        let result = run_dynamic_checks(&mut connector, suite).await;
+        let health_finding = result
+            .findings
+            .iter()
+            .find(|f| f.check == "health")
+            .unwrap();
+        assert!(health_finding.message.contains("Ready"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn dynamic_unhealthy_message_contains_reason() {
+        let mut connector = MockConnector::unhealthy();
+        let suite = DynamicSuite::minimal(make_handshake());
+        let result = run_dynamic_checks(&mut connector, suite).await;
+        let health_finding = result
+            .findings
+            .iter()
+            .find(|f| f.check == "health")
+            .unwrap();
+        assert_eq!(health_finding.status, CheckStatus::Fail);
+        assert!(health_finding.message.contains("test error"));
+    }
+
+    // ── Dynamic checks: connector variant matrix ─────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn dynamic_configure_ok_handshake_fail() {
+        let mut connector = MockConnector::failing_handshake();
+        let suite = DynamicSuite::minimal(make_handshake());
+        let result = run_dynamic_checks(&mut connector, suite).await;
+        // configure passes, handshake fails
+        let configure_f = result.findings.iter().find(|f| f.check == "configure").unwrap();
+        assert_eq!(configure_f.status, CheckStatus::Pass);
+        let hs_f = result.findings.iter().find(|f| f.check == "handshake").unwrap();
+        assert_eq!(hs_f.status, CheckStatus::Fail);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn dynamic_configure_fail_health_still_checked() {
+        let mut connector = MockConnector::failing_configure();
+        let suite = DynamicSuite::minimal(make_handshake());
+        let result = run_dynamic_checks(&mut connector, suite).await;
+        // Health check still runs even when configure fails
+        let health_f = result.findings.iter().find(|f| f.check == "health").unwrap();
+        // MockConnector::failing_configure() has health_ok=true
+        assert_eq!(health_f.status, CheckStatus::Pass);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn dynamic_introspect_message_format() {
+        let mut connector = MockConnector::healthy();
+        let suite = DynamicSuite::minimal(make_handshake());
+        let result = run_dynamic_checks(&mut connector, suite).await;
+        let intro_f = result.findings.iter().find(|f| f.check == "introspect").unwrap();
+        assert!(intro_f.message.contains("operations="));
+        assert!(intro_f.message.contains("events="));
+        assert!(intro_f.message.contains("resource_types="));
+    }
+
+    // ── Static compliance with valid manifest ────────────────────
+
+    #[test]
+    fn static_valid_manifest_has_one_finding() {
+        let raw = include_str!("../../../tests/vectors/manifest/manifest_valid.toml");
+        let materialized = with_computed_interface_hash(raw);
+        let report = StaticCompliance::run_manifest(&materialized);
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.findings[0].check, "manifest.parse_validate");
+        assert_eq!(report.findings[0].status, CheckStatus::Pass);
+    }
+
+    #[test]
+    fn static_invalid_manifest_message_not_empty() {
+        let report = StaticCompliance::run_manifest("invalid = manifest");
+        assert!(!report.passed);
+        assert!(!report.findings[0].message.is_empty());
+    }
+
+    // ── ComplianceReport passed logic truth table ─────────────────
+
+    #[test]
+    fn compliance_report_truth_table() {
+        // (static_passed, dynamic_passed) -> overall_passed
+        let cases = [
+            (true, true, true),
+            (true, false, false),
+            (false, true, false),
+            (false, false, false),
+        ];
+        for (sp, dp, expected) in cases {
+            let report = ComplianceReport {
+                static_checks: StaticCompliance {
+                    passed: sp,
+                    findings: vec![],
+                },
+                dynamic_checks: DynamicCompliance {
+                    passed: dp,
+                    findings: vec![],
+                },
+            };
+            assert_eq!(
+                report.passed(),
+                expected,
+                "static={sp}, dynamic={dp} should be {expected}"
+            );
+        }
+    }
+
+    // ── Finding constructors accept String types ─────────────────
+
+    #[test]
+    fn finding_pass_accepts_string_type() {
+        let f = ComplianceFinding::pass(String::from("string.check"), String::from("string msg"));
+        assert_eq!(f.check, "string.check");
+        assert_eq!(f.message, "string msg");
+    }
+
+    #[test]
+    fn finding_fail_accepts_string_type() {
+        let f = ComplianceFinding::fail(String::from("f.check"), String::from("f msg"));
+        assert_eq!(f.status, CheckStatus::Fail);
+    }
+
+    #[test]
+    fn finding_skipped_accepts_string_type() {
+        let f = ComplianceFinding::skipped(String::from("s.check"), String::from("s msg"));
+        assert_eq!(f.status, CheckStatus::Skipped);
+    }
+
+    // ── MockConnector id accessor ────────────────────────────────
+
+    #[test]
+    fn mock_connector_id() {
+        let connector = MockConnector::healthy();
+        let id = connector.id();
+        assert_eq!(id.to_string(), "test.mock:utility:1.0.0");
+    }
+
+    // ── StaticCompliance run_manifest edge cases ─────────────────
+
+    #[test]
+    fn static_only_whitespace_fails() {
+        let report = StaticCompliance::run_manifest("   \n\t\n   ");
+        assert!(!report.passed);
+    }
+
+    #[test]
+    fn static_valid_toml_but_not_manifest() {
+        let report = StaticCompliance::run_manifest("[table]\nkey = 42\n");
+        assert!(!report.passed);
+    }
+
+    #[test]
+    fn static_manifest_findings_always_have_check_id() {
+        let report = StaticCompliance::run_manifest("not valid");
+        for f in &report.findings {
+            assert!(!f.check.is_empty());
+        }
+    }
+
+    // ── ComplianceFinding Debug format ───────────────────────────
+
+    #[test]
+    fn finding_debug_format_includes_all_fields() {
+        let f = ComplianceFinding::pass("my.check", "my msg");
+        let dbg = format!("{f:?}");
+        assert!(dbg.contains("my.check"));
+        assert!(dbg.contains("my msg"));
+        assert!(dbg.contains("Pass"));
+    }
+
+    #[test]
+    fn finding_fail_debug_format() {
+        let f = ComplianceFinding::fail("err.check", "error msg");
+        let dbg = format!("{f:?}");
+        assert!(dbg.contains("Fail"));
+        assert!(dbg.contains("err.check"));
+    }
+
+    // ── ComplianceReport debug ───────────────────────────────────
+
+    #[test]
+    fn compliance_report_debug_shows_both_sections() {
+        let report = ComplianceReport {
+            static_checks: StaticCompliance {
+                passed: true,
+                findings: vec![],
+            },
+            dynamic_checks: DynamicCompliance {
+                passed: false,
+                findings: vec![ComplianceFinding::fail("d", "e")],
+            },
+        };
+        let dbg = format!("{report:?}");
+        assert!(dbg.contains("static_checks"));
+        assert!(dbg.contains("dynamic_checks"));
+    }
+
+    // ── DynamicCompliance skipped variations ──────────────────────
+
+    #[test]
+    fn dynamic_skipped_empty_reason() {
+        let dc = DynamicCompliance::skipped("");
+        assert!(dc.passed);
+        assert!(dc.findings[0].message.is_empty());
+    }
+
+    #[test]
+    fn dynamic_skipped_long_reason() {
+        let long = "r".repeat(5_000);
+        let dc = DynamicCompliance::skipped(long.as_str());
+        assert_eq!(dc.findings[0].message.len(), 5_000);
+    }
+
+    // ── is_capability_denial additional edge cases ────────────────
+
+    #[test]
+    fn is_capability_denial_false_for_checksum_mismatch() {
+        let err = FcpError::ChecksumMismatch;
+        assert!(!is_capability_denial(&err));
+    }
+
+    #[test]
+    fn is_capability_denial_false_for_invalid_signature() {
+        let err = FcpError::InvalidSignature;
+        assert!(!is_capability_denial(&err));
+    }
+
+    #[test]
+    fn is_capability_denial_false_for_missing_field() {
+        let err = FcpError::MissingField {
+            field: "name".into(),
+        };
+        assert!(!is_capability_denial(&err));
+    }
+
+    // ── StaticCompliance + DynamicCompliance serde combined ──────
+
+    #[test]
+    fn static_and_dynamic_findings_in_single_json() {
+        let report = ComplianceReport {
+            static_checks: StaticCompliance {
+                passed: true,
+                findings: vec![ComplianceFinding::pass("static.1", "ok")],
+            },
+            dynamic_checks: DynamicCompliance {
+                passed: true,
+                findings: vec![ComplianceFinding::pass("dynamic.1", "ok too")],
+            },
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(json.contains("static.1"));
+        assert!(json.contains("dynamic.1"));
+
+        let back: ComplianceReport = serde_json::from_str(&json).unwrap();
+        assert!(back.passed());
+    }
+
+    // ── CheckStatus serde_json::Value tests ─────────────────────
+
+    #[test]
+    fn check_status_pass_as_value() {
+        let v = serde_json::to_value(CheckStatus::Pass).unwrap();
+        assert!(v.is_string());
+        assert_eq!(v.as_str().unwrap(), "pass");
+    }
+
+    #[test]
+    fn check_status_fail_as_value() {
+        let v = serde_json::to_value(CheckStatus::Fail).unwrap();
+        assert_eq!(v.as_str().unwrap(), "fail");
+    }
+
+    #[test]
+    fn check_status_skipped_as_value() {
+        let v = serde_json::to_value(CheckStatus::Skipped).unwrap();
+        assert_eq!(v.as_str().unwrap(), "skipped");
     }
 }

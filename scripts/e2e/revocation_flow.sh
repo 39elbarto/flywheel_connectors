@@ -147,7 +147,7 @@ run_exact_lib_test() {
   mkdir -p "$(dirname "${log_path}")"
   (
     cd "${REPO_ROOT}"
-    run_cargo test --target-dir "${TARGET_DIR}" -p "${package}" "${test_name}" --lib -- --exact --nocapture
+    run_cargo test --target-dir "${TARGET_DIR}" -p "${package}" "${test_name}" --lib -- --nocapture
   ) > "${log_path}" 2>&1
 }
 
@@ -173,7 +173,7 @@ run_exact_bin_test() {
   mkdir -p "$(dirname "${log_path}")"
   (
     cd "${REPO_ROOT}"
-    run_cargo test --target-dir "${TARGET_DIR}" -p "${package}" --bin "${bin_name}" "${test_name}" -- --exact --nocapture
+    run_cargo test --target-dir "${TARGET_DIR}" -p "${package}" --bin "${bin_name}" "${test_name}" -- --nocapture
   ) > "${log_path}" 2>&1
 }
 

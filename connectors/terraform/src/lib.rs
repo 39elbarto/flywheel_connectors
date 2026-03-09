@@ -28,8 +28,10 @@
 
 pub mod client;
 pub mod connector;
+pub mod drift;
 pub mod error;
 pub mod modules;
 pub mod plan;
+pub mod safety;
 pub mod state;
 pub mod types;

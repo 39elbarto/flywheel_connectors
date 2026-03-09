@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:b1ba3bd47e7fadc44b4bc5f7a3bcc41c396058b56b0b19edd498cdd888ca9633"
+interface_hash = "blake3-256:fcp.interface.v2:5d19c61ad1d45485400198dc8d484f1c65d9d510e4da4e1ce22270322c71cccb"
 
 [connector]
 id = "fcp.figma"
@@ -1238,6 +1238,170 @@ examples = ['{"webhook_id": "67890"}']
 related = ["figma.list_webhooks"]
 
 # ---------------------------------------------------------------------------
+# Operations: Macro Operations (composed from primitives)
+# ---------------------------------------------------------------------------
+
+[provides.operations."figma.macro.export_component_bundle"]
+description = "Export components from a file as a bounded, structured bundle with metadata"
+capability = "figma.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."figma.macro.export_component_bundle".rate_limit]
+max = 10
+per_ms = 60000
+
+[provides.operations."figma.macro.export_component_bundle".input_schema]
+required = ["file_key"]
+type = "object"
+
+[provides.operations."figma.macro.export_component_bundle".input_schema.properties.file_key]
+description = "Figma file key"
+type = "string"
+
+[provides.operations."figma.macro.export_component_bundle".input_schema.properties.node_ids]
+description = "Filter to specific component node IDs"
+type = "array"
+
+[provides.operations."figma.macro.export_component_bundle".input_schema.properties.include_tokens]
+description = "Include design tokens from file styles (default false)"
+type = "boolean"
+
+[provides.operations."figma.macro.export_component_bundle".input_schema.properties.max_nodes]
+description = "Maximum components to include (default 100, max 500)"
+minimum = 1
+maximum = 500
+type = "integer"
+
+[provides.operations."figma.macro.export_component_bundle".output_schema]
+required = ["file_key", "components", "total_found", "included", "truncated"]
+type = "object"
+
+[provides.operations."figma.macro.export_component_bundle".output_schema.properties.file_key]
+type = "string"
+
+[provides.operations."figma.macro.export_component_bundle".output_schema.properties.components]
+description = "Array of bundled component entries"
+type = "array"
+
+[provides.operations."figma.macro.export_component_bundle".output_schema.properties.total_found]
+description = "Total components found before filtering"
+type = "integer"
+
+[provides.operations."figma.macro.export_component_bundle".output_schema.properties.included]
+description = "Number of components included"
+type = "integer"
+
+[provides.operations."figma.macro.export_component_bundle".output_schema.properties.truncated]
+description = "Whether the bundle was truncated"
+type = "boolean"
+
+[provides.operations."figma.macro.export_component_bundle".output_schema.properties.tokens]
+description = "Optional design tokens from the file"
+type = "array"
+
+[provides.operations."figma.macro.export_component_bundle".output_schema.properties.provenance]
+description = "Data provenance metadata"
+type = "object"
+
+[provides.operations."figma.macro.export_component_bundle".output_schema.properties.taint]
+description = "Taint flags for data classification"
+type = "array"
+
+[provides.operations."figma.macro.export_component_bundle".network_constraints]
+host_allow = ["api.figma.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 52428800
+
+[provides.operations."figma.macro.export_component_bundle".ai_hints]
+when_to_use = "Export all components from a Figma file as a structured bundle. Uses get_file_components internally. Bounded by max_nodes."
+common_mistakes = ["Not setting max_nodes for large component libraries.", "Using node_ids filter with IDs from a different file."]
+examples = ['{"file_key": "abc123DEF456"}', '{"file_key": "abc123DEF456", "node_ids": ["1:2", "3:4"], "include_tokens": true}']
+related = ["figma.get_file_components", "figma.styles.list"]
+
+[provides.operations."figma.macro.design_audit"]
+description = "Audit a design file for style inconsistencies, naming issues, and structural problems"
+capability = "figma.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."figma.macro.design_audit".rate_limit]
+max = 10
+per_ms = 60000
+
+[provides.operations."figma.macro.design_audit".input_schema]
+required = ["file_key"]
+type = "object"
+
+[provides.operations."figma.macro.design_audit".input_schema.properties.file_key]
+description = "Figma file key"
+type = "string"
+
+[provides.operations."figma.macro.design_audit".input_schema.properties.checks]
+description = "Checks to run: naming, styles, structure, tokens (default: all)"
+type = "array"
+
+[provides.operations."figma.macro.design_audit".input_schema.properties.max_findings]
+description = "Maximum findings to return (default 50, max 200)"
+minimum = 1
+maximum = 200
+type = "integer"
+
+[provides.operations."figma.macro.design_audit".output_schema]
+required = ["file_key", "findings", "summary", "checks_run"]
+type = "object"
+
+[provides.operations."figma.macro.design_audit".output_schema.properties.file_key]
+type = "string"
+
+[provides.operations."figma.macro.design_audit".output_schema.properties.findings]
+description = "Structured audit findings"
+type = "array"
+
+[provides.operations."figma.macro.design_audit".output_schema.properties.summary]
+description = "Finding counts by severity"
+type = "object"
+
+[provides.operations."figma.macro.design_audit".output_schema.properties.checks_run]
+description = "Which checks were executed"
+type = "array"
+
+[provides.operations."figma.macro.design_audit".output_schema.properties.provenance]
+description = "Data provenance metadata"
+type = "object"
+
+[provides.operations."figma.macro.design_audit".output_schema.properties.taint]
+description = "Taint flags for data classification"
+type = "array"
+
+[provides.operations."figma.macro.design_audit".network_constraints]
+host_allow = ["api.figma.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."figma.macro.design_audit".ai_hints]
+when_to_use = "Audit a Figma file for design consistency issues. Runs naming, styles, structure, and token checks."
+common_mistakes = ["Running all checks on very large files without limiting max_findings."]
+examples = ['{"file_key": "abc123DEF456"}', '{"file_key": "abc123DEF456", "checks": ["naming", "styles"], "max_findings": 20}']
+related = ["figma.get_file", "figma.styles.list", "figma.get_file_components"]
+
+# ---------------------------------------------------------------------------
 # Streaming / Event Capabilities
 # ---------------------------------------------------------------------------
 
@@ -1325,3 +1489,5 @@ scope = "instance"
 "figma.create_webhook" = ["figma.webhook"]
 "figma.list_webhooks" = ["figma.read"]
 "figma.delete_webhook" = ["figma.delete"]
+"figma.macro.export_component_bundle" = ["figma.read"]
+"figma.macro.design_audit" = ["figma.read"]

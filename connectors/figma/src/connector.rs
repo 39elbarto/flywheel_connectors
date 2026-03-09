@@ -14,7 +14,10 @@ use tracing::{info, instrument};
 
 use crate::client::{DEFAULT_BASE_URL, FigmaAuth, FigmaClient};
 use crate::error::FigmaError;
-use crate::types::{DesignToken, TokenValue};
+use crate::types::{
+    AuditSeverity, AuditSummary, BundledComponent, ComponentBundle, DesignAuditFinding,
+    DesignAuditResult, DesignToken, TokenValue,
+};
 
 /// Parsed configuration for the Figma connector.
 struct FigmaConfig {
@@ -990,6 +993,122 @@ impl FigmaConnector {
                         ],
                     },
                 ),
+                // ── Macro Operations ──────────────────────────────────────
+                op_info(
+                    "figma.macro.export_component_bundle",
+                    "Export components from a file as a bounded, structured bundle",
+                    json!({
+                        "type": "object",
+                        "required": ["file_key"],
+                        "properties": {
+                            "file_key": { "type": "string", "description": "Figma file key" },
+                            "node_ids": { "type": "array", "items": { "type": "string" }, "description": "Filter to specific component node IDs" },
+                            "include_tokens": { "type": "boolean", "description": "Include design tokens from file styles (default false)" },
+                            "max_nodes": { "type": "integer", "description": "Maximum components to include (default 100, max 500)", "minimum": 1, "maximum": 500 }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "required": ["file_key", "components", "total_found", "included", "truncated"],
+                        "properties": {
+                            "file_key": { "type": "string" },
+                            "components": { "type": "array", "items": { "type": "object" } },
+                            "total_found": { "type": "integer" },
+                            "included": { "type": "integer" },
+                            "truncated": { "type": "boolean" },
+                            "tokens": { "type": "array" },
+                            "provenance": { "type": "object" },
+                            "taint": { "type": "array" }
+                        }
+                    }),
+                    "figma.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Export all components from a Figma file as a structured bundle with metadata. Bounded by max_nodes.".into(),
+                        common_mistakes: vec![
+                            "Not setting max_nodes for large component libraries.".into(),
+                            "Using node_ids filter with IDs from a different file.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"file_key": "abc123DEF456"}"#.into(),
+                            r#"{"file_key": "abc123DEF456", "node_ids": ["1:2", "3:4"], "include_tokens": true}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("figma.get_file_components"),
+                            CapabilityId::from_static("figma.styles.list"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "figma.macro.design_audit",
+                    "Audit a design file for style inconsistencies, naming issues, and structural problems",
+                    json!({
+                        "type": "object",
+                        "required": ["file_key"],
+                        "properties": {
+                            "file_key": { "type": "string", "description": "Figma file key" },
+                            "checks": {
+                                "type": "array",
+                                "items": { "type": "string", "enum": ["naming", "styles", "structure", "tokens"] },
+                                "description": "Checks to run (default: all)"
+                            },
+                            "max_findings": { "type": "integer", "description": "Maximum findings to return (default 50, max 200)", "minimum": 1, "maximum": 200 }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "required": ["file_key", "findings", "summary", "checks_run"],
+                        "properties": {
+                            "file_key": { "type": "string" },
+                            "findings": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "required": ["severity", "check_type", "message"],
+                                    "properties": {
+                                        "severity": { "type": "string", "enum": ["error", "warning", "info"] },
+                                        "check_type": { "type": "string" },
+                                        "node_id": { "type": "string" },
+                                        "message": { "type": "string" },
+                                        "details": { "type": "object" }
+                                    }
+                                }
+                            },
+                            "summary": {
+                                "type": "object",
+                                "properties": {
+                                    "errors": { "type": "integer" },
+                                    "warnings": { "type": "integer" },
+                                    "infos": { "type": "integer" },
+                                    "total": { "type": "integer" }
+                                }
+                            },
+                            "checks_run": { "type": "array", "items": { "type": "string" } },
+                            "provenance": { "type": "object" },
+                            "taint": { "type": "array" }
+                        }
+                    }),
+                    "figma.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Audit a Figma file for design consistency issues. Returns structured findings with severity levels.".into(),
+                        common_mistakes: vec![
+                            "Running all checks on very large files without limiting max_findings.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"file_key": "abc123DEF456"}"#.into(),
+                            r#"{"file_key": "abc123DEF456", "checks": ["naming", "styles"], "max_findings": 20}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("figma.get_file"),
+                            CapabilityId::from_static("figma.styles.list"),
+                        ],
+                    },
+                ),
             ],
             events: vec![],
             resource_types: vec![],
@@ -1090,6 +1209,10 @@ impl FigmaConnector {
             "figma.delete_webhook" => self.invoke_delete_webhook(input).await,
             "figma.styles.list" => self.invoke_styles_list(input).await,
             "figma.tokens.export" => self.invoke_tokens_export(input).await,
+            "figma.macro.export_component_bundle" => {
+                self.invoke_macro_export_component_bundle(input).await
+            }
+            "figma.macro.design_audit" => self.invoke_macro_design_audit(input).await,
             _ => Err(FcpError::OperationNotGranted {
                 operation: operation.into(),
             }),
@@ -1474,6 +1597,175 @@ impl FigmaConnector {
         }))
     }
 
+    // ── Macro operation implementations ─────────────────────────
+
+    async fn invoke_macro_export_component_bundle(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let file_key = require_str(&input, "file_key")?;
+        let max_nodes = input
+            .get("max_nodes")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(100)
+            .min(500) as usize;
+        let include_tokens = input
+            .get("include_tokens")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let node_id_filter: Option<Vec<&str>> = input.get("node_ids").and_then(|v| {
+            v.as_array()
+                .map(|arr| arr.iter().filter_map(|s| s.as_str()).collect())
+        });
+
+        // Fetch components from the file
+        let components_resp = client
+            .get_file_components(file_key)
+            .await
+            .map_err(|e| e.to_fcp_error())?;
+
+        let all_components = extract_bundled_components(&components_resp.meta);
+        let total_found = all_components.len();
+
+        // Filter by node_ids if provided
+        let filtered: Vec<BundledComponent> = if let Some(ref ids) = node_id_filter {
+            all_components
+                .into_iter()
+                .filter(|c| {
+                    c.node_id
+                        .as_deref()
+                        .is_some_and(|nid| ids.contains(&nid))
+                })
+                .collect()
+        } else {
+            all_components
+        };
+
+        // Apply max_nodes limit
+        let truncated = filtered.len() > max_nodes;
+        let components: Vec<BundledComponent> = filtered.into_iter().take(max_nodes).collect();
+        let included = components.len();
+
+        // Optionally extract tokens
+        let tokens = if include_tokens {
+            let styles = client
+                .get_file_styles(file_key)
+                .await
+                .map_err(|e| e.to_fcp_error())?;
+            Some(extract_tokens_from_styles(&styles.meta))
+        } else {
+            None
+        };
+
+        let bundle = ComponentBundle {
+            file_key: file_key.to_string(),
+            components,
+            total_found,
+            included,
+            truncated,
+            tokens,
+        };
+
+        serde_json::to_value(bundle).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize component bundle: {e}"),
+        })
+    }
+
+    async fn invoke_macro_design_audit(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let file_key = require_str(&input, "file_key")?;
+        let max_findings = input
+            .get("max_findings")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(50)
+            .min(200) as usize;
+        let checks_filter: Option<Vec<&str>> = input.get("checks").and_then(|v| {
+            v.as_array()
+                .map(|arr| arr.iter().filter_map(|s| s.as_str()).collect())
+        });
+
+        let all_checks = ["naming", "styles", "structure", "tokens"];
+        let checks_to_run: Vec<&str> = if let Some(ref filter) = checks_filter {
+            all_checks
+                .iter()
+                .copied()
+                .filter(|c| filter.contains(c))
+                .collect()
+        } else {
+            all_checks.to_vec()
+        };
+
+        let mut findings: Vec<DesignAuditFinding> = Vec::new();
+
+        // Fetch file data for structural checks
+        let file = client
+            .get_file(file_key, None, Some(3), None, None)
+            .await
+            .map_err(|e| e.to_fcp_error())?;
+
+        // Fetch components for naming/structure checks
+        let components_resp = client
+            .get_file_components(file_key)
+            .await
+            .map_err(|e| e.to_fcp_error())?;
+
+        // Fetch styles for token/style checks
+        let styles_resp = client
+            .get_file_styles(file_key)
+            .await
+            .map_err(|e| e.to_fcp_error())?;
+
+        if checks_to_run.contains(&"naming") {
+            audit_naming(&components_resp.meta, &mut findings);
+        }
+
+        if checks_to_run.contains(&"styles") {
+            audit_styles(&styles_resp.meta, &mut findings);
+        }
+
+        if checks_to_run.contains(&"structure") {
+            audit_structure(&file.document, &mut findings);
+        }
+
+        if checks_to_run.contains(&"tokens") {
+            audit_tokens(&styles_resp.meta, &mut findings);
+        }
+
+        // Truncate to max_findings
+        findings.truncate(max_findings);
+
+        let summary = AuditSummary {
+            errors: findings
+                .iter()
+                .filter(|f| f.severity == AuditSeverity::Error)
+                .count(),
+            warnings: findings
+                .iter()
+                .filter(|f| f.severity == AuditSeverity::Warning)
+                .count(),
+            infos: findings
+                .iter()
+                .filter(|f| f.severity == AuditSeverity::Info)
+                .count(),
+            total: findings.len(),
+        };
+
+        let result = DesignAuditResult {
+            file_key: file_key.to_string(),
+            findings,
+            summary,
+            checks_run: checks_to_run.iter().map(|s| (*s).to_string()).collect(),
+        };
+
+        serde_json::to_value(result).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize audit result: {e}"),
+        })
+    }
+
     /// Handle shutdown.
     ///
     /// # Errors
@@ -1763,6 +2055,348 @@ fn tokens_to_css(tokens: &[DesignToken], prefix: &str) -> String {
     css
 }
 
+// ── Component bundle extraction ──────────────────────────────
+
+/// Extract bundled components from the Figma components API meta response.
+///
+/// The `meta` field can be:
+/// - `{ "components": [...] }` — standard components endpoint
+/// - Directly an array of component entries
+fn extract_bundled_components(meta: &serde_json::Value) -> Vec<BundledComponent> {
+    let components = meta
+        .get("components")
+        .and_then(|v| v.as_array())
+        .or_else(|| meta.as_array());
+
+    let Some(components) = components else {
+        return Vec::new();
+    };
+
+    let mut bundled: Vec<BundledComponent> = components
+        .iter()
+        .filter_map(|comp| {
+            let name = comp.get("name")?.as_str()?;
+            let key = comp
+                .get("key")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let description = comp
+                .get("description")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from);
+            let node_id = comp
+                .get("node_id")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let containing_frame = comp
+                .get("containing_frame")
+                .and_then(|v| v.get("name"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
+
+            Some(BundledComponent {
+                key,
+                name: name.to_string(),
+                description,
+                node_id,
+                containing_frame,
+            })
+        })
+        .collect();
+
+    // Stable sort by name for deterministic output
+    bundled.sort_by(|a, b| a.name.cmp(&b.name));
+    bundled
+}
+
+// ── Design audit check implementations ───────────────────────
+
+/// Audit component naming conventions.
+fn audit_naming(meta: &serde_json::Value, findings: &mut Vec<DesignAuditFinding>) {
+    let components = meta
+        .get("components")
+        .and_then(|v| v.as_array())
+        .or_else(|| meta.as_array());
+
+    let Some(components) = components else {
+        return;
+    };
+
+    for comp in components {
+        let Some(name) = comp.get("name").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let node_id = comp
+            .get("node_id")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        // Check for unnamed components (default Figma names)
+        if name.starts_with("Component ")
+            || name.starts_with("Frame ")
+            || name.starts_with("Group ")
+        {
+            findings.push(DesignAuditFinding {
+                severity: AuditSeverity::Warning,
+                check_type: "naming".into(),
+                node_id: node_id.clone(),
+                message: format!("Component has default name: {name}"),
+                details: None,
+            });
+        }
+
+        // Check for inconsistent separators (mixing / and .)
+        let has_slash = name.contains('/');
+        let has_dot = name.contains('.');
+        if has_slash && has_dot {
+            findings.push(DesignAuditFinding {
+                severity: AuditSeverity::Info,
+                check_type: "naming".into(),
+                node_id: node_id.clone(),
+                message: format!(
+                    "Component uses mixed separators (/ and .): {name}"
+                ),
+                details: None,
+            });
+        }
+
+        // Check for very long names
+        if name.len() > 80 {
+            findings.push(DesignAuditFinding {
+                severity: AuditSeverity::Info,
+                check_type: "naming".into(),
+                node_id,
+                message: format!(
+                    "Component name exceeds 80 characters ({} chars): {}...",
+                    name.len(),
+                    &name.chars().take(60).collect::<String>()
+                ),
+                details: None,
+            });
+        }
+    }
+}
+
+/// Audit style consistency.
+fn audit_styles(meta: &serde_json::Value, findings: &mut Vec<DesignAuditFinding>) {
+    let styles = meta
+        .get("styles")
+        .and_then(|v| v.as_array())
+        .or_else(|| meta.as_array());
+
+    let Some(styles) = styles else {
+        findings.push(DesignAuditFinding {
+            severity: AuditSeverity::Warning,
+            check_type: "styles".into(),
+            node_id: None,
+            message: "No published styles found in file".into(),
+            details: None,
+        });
+        return;
+    };
+
+    if styles.is_empty() {
+        findings.push(DesignAuditFinding {
+            severity: AuditSeverity::Warning,
+            check_type: "styles".into(),
+            node_id: None,
+            message: "No published styles found in file".into(),
+            details: None,
+        });
+        return;
+    }
+
+    // Check for styles without descriptions
+    let undescribed: Vec<&str> = styles
+        .iter()
+        .filter_map(|s| {
+            let name = s.get("name")?.as_str()?;
+            let desc = s
+                .get("description")
+                .and_then(|v| v.as_str())
+                .filter(|d| !d.is_empty());
+            if desc.is_none() {
+                Some(name)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if !undescribed.is_empty() {
+        findings.push(DesignAuditFinding {
+            severity: AuditSeverity::Info,
+            check_type: "styles".into(),
+            node_id: None,
+            message: format!(
+                "{} style(s) have no description",
+                undescribed.len()
+            ),
+            details: Some(json!({
+                "styles": undescribed.into_iter().take(10).collect::<Vec<_>>()
+            })),
+        });
+    }
+
+    // Check for duplicate style names
+    let mut seen_names: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for style in styles {
+        if let Some(name) = style.get("name").and_then(|v| v.as_str()) {
+            *seen_names.entry(name.to_lowercase()).or_insert(0) += 1;
+        }
+    }
+
+    for (name, count) in &seen_names {
+        if *count > 1 {
+            findings.push(DesignAuditFinding {
+                severity: AuditSeverity::Warning,
+                check_type: "styles".into(),
+                node_id: None,
+                message: format!(
+                    "Duplicate style name '{name}' appears {count} times"
+                ),
+                details: None,
+            });
+        }
+    }
+}
+
+/// Audit document structure.
+fn audit_structure(document: &serde_json::Value, findings: &mut Vec<DesignAuditFinding>) {
+    // Count top-level pages
+    let pages = document
+        .get("children")
+        .and_then(|v| v.as_array())
+        .map_or(0, Vec::len);
+
+    if pages == 0 {
+        findings.push(DesignAuditFinding {
+            severity: AuditSeverity::Error,
+            check_type: "structure".into(),
+            node_id: None,
+            message: "Document has no pages".into(),
+            details: None,
+        });
+    } else if pages > 20 {
+        findings.push(DesignAuditFinding {
+            severity: AuditSeverity::Warning,
+            check_type: "structure".into(),
+            node_id: None,
+            message: format!("Document has {pages} pages (consider organizing)"),
+            details: None,
+        });
+    }
+
+    // Check for deeply nested structures (up to the depth we fetched)
+    if let Some(children) = document.get("children").and_then(|v| v.as_array()) {
+        for page in children {
+            check_nesting_depth(page, 0, 8, findings);
+        }
+    }
+}
+
+/// Recursively check nesting depth.
+fn check_nesting_depth(
+    node: &serde_json::Value,
+    current_depth: usize,
+    max_depth: usize,
+    findings: &mut Vec<DesignAuditFinding>,
+) {
+    if current_depth >= max_depth {
+        let node_id = node.get("id").and_then(|v| v.as_str()).map(String::from);
+        let name = node
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unnamed");
+        findings.push(DesignAuditFinding {
+            severity: AuditSeverity::Warning,
+            check_type: "structure".into(),
+            node_id,
+            message: format!(
+                "Node '{name}' at depth {current_depth} (deeply nested)"
+            ),
+            details: Some(json!({ "depth": current_depth })),
+        });
+        return;
+    }
+
+    if let Some(children) = node.get("children").and_then(|v| v.as_array()) {
+        for child in children {
+            check_nesting_depth(child, current_depth + 1, max_depth, findings);
+        }
+    }
+}
+
+/// Audit design token completeness.
+fn audit_tokens(meta: &serde_json::Value, findings: &mut Vec<DesignAuditFinding>) {
+    let tokens = extract_tokens_from_styles(meta);
+
+    if tokens.is_empty() {
+        findings.push(DesignAuditFinding {
+            severity: AuditSeverity::Warning,
+            check_type: "tokens".into(),
+            node_id: None,
+            message: "No design tokens could be extracted from styles".into(),
+            details: None,
+        });
+        return;
+    }
+
+    // Check for category coverage
+    let has_colors = tokens.iter().any(|t| t.category == "color");
+    let has_typography = tokens.iter().any(|t| t.category == "typography");
+
+    if !has_colors {
+        findings.push(DesignAuditFinding {
+            severity: AuditSeverity::Info,
+            check_type: "tokens".into(),
+            node_id: None,
+            message: "No color tokens found in published styles".into(),
+            details: None,
+        });
+    }
+
+    if !has_typography {
+        findings.push(DesignAuditFinding {
+            severity: AuditSeverity::Info,
+            check_type: "tokens".into(),
+            node_id: None,
+            message: "No typography tokens found in published styles".into(),
+            details: None,
+        });
+    }
+
+    // Report token summary
+    let color_count = tokens.iter().filter(|t| t.category == "color").count();
+    let typo_count = tokens.iter().filter(|t| t.category == "typography").count();
+    let effect_count = tokens.iter().filter(|t| t.category == "effect").count();
+    let grid_count = tokens.iter().filter(|t| t.category == "grid").count();
+
+    findings.push(DesignAuditFinding {
+        severity: AuditSeverity::Info,
+        check_type: "tokens".into(),
+        node_id: None,
+        message: format!(
+            "Token coverage: {} color, {} typography, {} effect, {} grid ({} total)",
+            color_count,
+            typo_count,
+            effect_count,
+            grid_count,
+            tokens.len()
+        ),
+        details: Some(json!({
+            "color": color_count,
+            "typography": typo_count,
+            "effect": effect_count,
+            "grid": grid_count,
+            "total": tokens.len()
+        })),
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1924,7 +2558,9 @@ mod tests {
         assert!(op_ids.contains(&"figma.delete_webhook"));
         assert!(op_ids.contains(&"figma.styles.list"));
         assert!(op_ids.contains(&"figma.tokens.export"));
-        assert_eq!(ops.len(), 17);
+        assert!(op_ids.contains(&"figma.macro.export_component_bundle"));
+        assert!(op_ids.contains(&"figma.macro.design_audit"));
+        assert_eq!(ops.len(), 19);
     }
 
     #[fcp_async_core::runtime::test]
@@ -2451,5 +3087,535 @@ mod tests {
             }
             other => panic!("Expected Grid, got: {other:?}"),
         }
+    }
+
+    // ── Component Bundle extraction tests ─────────────────────────
+
+    #[test]
+    fn test_extract_bundled_components_from_meta() {
+        let meta = json!({
+            "components": [
+                {
+                    "key": "c1",
+                    "name": "Button / Primary",
+                    "description": "Primary action button",
+                    "node_id": "1:2",
+                    "containing_frame": { "name": "Buttons" }
+                },
+                {
+                    "key": "c2",
+                    "name": "Avatar",
+                    "description": "",
+                    "node_id": "3:4"
+                }
+            ]
+        });
+
+        let components = extract_bundled_components(&meta);
+        assert_eq!(components.len(), 2);
+        // Sorted by name: Avatar < Button / Primary
+        assert_eq!(components[0].name, "Avatar");
+        assert_eq!(components[0].key, "c2");
+        assert!(components[0].description.is_none()); // empty string filtered
+        assert_eq!(components[0].node_id.as_deref(), Some("3:4"));
+        assert!(components[0].containing_frame.is_none());
+
+        assert_eq!(components[1].name, "Button / Primary");
+        assert_eq!(components[1].key, "c1");
+        assert_eq!(
+            components[1].description.as_deref(),
+            Some("Primary action button")
+        );
+        assert_eq!(
+            components[1].containing_frame.as_deref(),
+            Some("Buttons")
+        );
+    }
+
+    #[test]
+    fn test_extract_bundled_components_empty() {
+        assert!(extract_bundled_components(&json!({})).is_empty());
+        assert!(extract_bundled_components(&json!(null)).is_empty());
+        assert!(extract_bundled_components(&json!({ "components": [] })).is_empty());
+    }
+
+    #[test]
+    fn test_extract_bundled_components_direct_array() {
+        let meta = json!([
+            { "key": "k1", "name": "Comp A", "node_id": "1:1" },
+            { "key": "k2", "name": "Comp B", "node_id": "2:2" }
+        ]);
+
+        let components = extract_bundled_components(&meta);
+        assert_eq!(components.len(), 2);
+        assert_eq!(components[0].name, "Comp A");
+        assert_eq!(components[1].name, "Comp B");
+    }
+
+    #[test]
+    fn test_extract_bundled_components_stable_sort() {
+        let meta = json!({
+            "components": [
+                { "key": "k3", "name": "Zebra", "node_id": "3:3" },
+                { "key": "k1", "name": "Apple", "node_id": "1:1" },
+                { "key": "k2", "name": "Mango", "node_id": "2:2" }
+            ]
+        });
+
+        let components = extract_bundled_components(&meta);
+        assert_eq!(components[0].name, "Apple");
+        assert_eq!(components[1].name, "Mango");
+        assert_eq!(components[2].name, "Zebra");
+    }
+
+    #[test]
+    fn test_component_bundle_serde_roundtrip() {
+        let bundle = ComponentBundle {
+            file_key: "abc123".into(),
+            components: vec![BundledComponent {
+                key: "k1".into(),
+                name: "Button".into(),
+                description: Some("A button".into()),
+                node_id: Some("1:2".into()),
+                containing_frame: Some("UI".into()),
+            }],
+            total_found: 5,
+            included: 1,
+            truncated: true,
+            tokens: None,
+        };
+
+        let json = serde_json::to_value(&bundle).unwrap();
+        assert_eq!(json["file_key"], "abc123");
+        assert_eq!(json["total_found"], 5);
+        assert_eq!(json["included"], 1);
+        assert_eq!(json["truncated"], true);
+        assert!(json.get("tokens").is_none()); // skip_serializing_if None
+
+        let roundtrip: ComponentBundle = serde_json::from_value(json).unwrap();
+        assert_eq!(roundtrip.file_key, "abc123");
+        assert_eq!(roundtrip.components.len(), 1);
+        assert_eq!(roundtrip.components[0].name, "Button");
+    }
+
+    #[test]
+    fn test_component_bundle_with_tokens() {
+        let bundle = ComponentBundle {
+            file_key: "xyz".into(),
+            components: vec![],
+            total_found: 0,
+            included: 0,
+            truncated: false,
+            tokens: Some(vec![DesignToken {
+                name: "color-primary".into(),
+                original_name: "Primary".into(),
+                category: "color".into(),
+                style_type: "FILL".into(),
+                value: TokenValue::Color {
+                    r: 1.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                    hex: "#ff0000ff".into(),
+                },
+                node_id: None,
+                description: None,
+            }]),
+        };
+
+        let json = serde_json::to_value(&bundle).unwrap();
+        let tokens = json["tokens"].as_array().unwrap();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0]["name"], "color-primary");
+    }
+
+    // ── Design Audit tests ───────────────────────────────────────
+
+    #[test]
+    fn test_audit_naming_default_names() {
+        let meta = json!({
+            "components": [
+                { "name": "Component 1", "node_id": "1:1" },
+                { "name": "Frame 42", "node_id": "2:2" },
+                { "name": "Group 99", "node_id": "3:3" },
+                { "name": "Button", "node_id": "4:4" }
+            ]
+        });
+
+        let mut findings = Vec::new();
+        audit_naming(&meta, &mut findings);
+        assert_eq!(findings.len(), 3); // 3 default names
+        assert!(findings.iter().all(|f| f.check_type == "naming"));
+        assert!(findings
+            .iter()
+            .all(|f| f.severity == AuditSeverity::Warning));
+    }
+
+    #[test]
+    fn test_audit_naming_mixed_separators() {
+        let meta = json!({
+            "components": [
+                { "name": "Icons / Arrows.Right", "node_id": "1:1" }
+            ]
+        });
+
+        let mut findings = Vec::new();
+        audit_naming(&meta, &mut findings);
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].message.contains("mixed separators"));
+        assert_eq!(findings[0].severity, AuditSeverity::Info);
+    }
+
+    #[test]
+    fn test_audit_naming_long_name() {
+        let long_name = "A".repeat(100);
+        let meta = json!({
+            "components": [
+                { "name": long_name, "node_id": "1:1" }
+            ]
+        });
+
+        let mut findings = Vec::new();
+        audit_naming(&meta, &mut findings);
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].message.contains("80 characters"));
+    }
+
+    #[test]
+    fn test_audit_naming_clean_file() {
+        let meta = json!({
+            "components": [
+                { "name": "Button / Primary", "node_id": "1:1" },
+                { "name": "Card / Hero", "node_id": "2:2" }
+            ]
+        });
+
+        let mut findings = Vec::new();
+        audit_naming(&meta, &mut findings);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_naming_empty_components() {
+        let meta = json!({});
+        let mut findings = Vec::new();
+        audit_naming(&meta, &mut findings);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_styles_no_styles() {
+        let meta = json!({});
+        let mut findings = Vec::new();
+        audit_styles(&meta, &mut findings);
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].message.contains("No published styles"));
+        assert_eq!(findings[0].severity, AuditSeverity::Warning);
+    }
+
+    #[test]
+    fn test_audit_styles_empty_styles() {
+        let meta = json!({ "styles": [] });
+        let mut findings = Vec::new();
+        audit_styles(&meta, &mut findings);
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].message.contains("No published styles"));
+    }
+
+    #[test]
+    fn test_audit_styles_no_descriptions() {
+        let meta = json!({
+            "styles": [
+                { "name": "Color A", "style_type": "FILL", "description": "" },
+                { "name": "Color B", "style_type": "FILL" }
+            ]
+        });
+
+        let mut findings = Vec::new();
+        audit_styles(&meta, &mut findings);
+        assert!(findings.iter().any(|f| f.message.contains("no description")));
+    }
+
+    #[test]
+    fn test_audit_styles_duplicate_names() {
+        let meta = json!({
+            "styles": [
+                { "name": "Primary", "style_type": "FILL", "description": "x" },
+                { "name": "primary", "style_type": "FILL", "description": "y" }
+            ]
+        });
+
+        let mut findings = Vec::new();
+        audit_styles(&meta, &mut findings);
+        assert!(findings
+            .iter()
+            .any(|f| f.message.contains("Duplicate style name")));
+    }
+
+    #[test]
+    fn test_audit_styles_clean() {
+        let meta = json!({
+            "styles": [
+                { "name": "Color Primary", "style_type": "FILL", "description": "Main color" },
+                { "name": "Heading H1", "style_type": "TEXT", "description": "Page heading" }
+            ]
+        });
+
+        let mut findings = Vec::new();
+        audit_styles(&meta, &mut findings);
+        // No warnings (all have descriptions, no duplicates)
+        assert!(findings.iter().all(|f| f.severity != AuditSeverity::Error));
+    }
+
+    #[test]
+    fn test_audit_structure_empty_document() {
+        let doc = json!({ "children": [] });
+        let mut findings = Vec::new();
+        audit_structure(&doc, &mut findings);
+        assert!(findings.iter().any(|f| f.message.contains("no pages")));
+        assert_eq!(findings[0].severity, AuditSeverity::Error);
+    }
+
+    #[test]
+    fn test_audit_structure_many_pages() {
+        let pages: Vec<serde_json::Value> = (0..25)
+            .map(|i| json!({ "id": format!("{i}:0"), "name": format!("Page {i}") }))
+            .collect();
+        let doc = json!({ "children": pages });
+        let mut findings = Vec::new();
+        audit_structure(&doc, &mut findings);
+        assert!(findings.iter().any(|f| f.message.contains("25 pages")));
+    }
+
+    #[test]
+    fn test_audit_structure_normal() {
+        let doc = json!({
+            "children": [
+                { "id": "0:1", "name": "Page 1", "children": [
+                    { "id": "1:1", "name": "Frame", "children": [] }
+                ]}
+            ]
+        });
+
+        let mut findings = Vec::new();
+        audit_structure(&doc, &mut findings);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_tokens_no_tokens() {
+        let meta = json!({});
+        let mut findings = Vec::new();
+        audit_tokens(&meta, &mut findings);
+        assert!(findings
+            .iter()
+            .any(|f| f.message.contains("No design tokens")));
+    }
+
+    #[test]
+    fn test_audit_tokens_coverage_summary() {
+        let meta = json!({
+            "styles": [
+                { "name": "Red", "style_type": "FILL", "color": { "r": 1.0, "g": 0.0, "b": 0.0, "a": 1.0 } },
+                { "name": "Blue", "style_type": "FILL", "color": { "r": 0.0, "g": 0.0, "b": 1.0, "a": 1.0 } },
+                { "name": "Heading", "style_type": "TEXT" }
+            ]
+        });
+
+        let mut findings = Vec::new();
+        audit_tokens(&meta, &mut findings);
+
+        let summary = findings
+            .iter()
+            .find(|f| f.message.contains("Token coverage"))
+            .unwrap();
+        assert_eq!(summary.severity, AuditSeverity::Info);
+        assert!(summary.message.contains("2 color"));
+        assert!(summary.message.contains("1 typography"));
+        assert!(summary.details.is_some());
+    }
+
+    #[test]
+    fn test_audit_tokens_missing_colors() {
+        let meta = json!({
+            "styles": [
+                { "name": "Heading", "style_type": "TEXT" }
+            ]
+        });
+
+        let mut findings = Vec::new();
+        audit_tokens(&meta, &mut findings);
+        assert!(findings
+            .iter()
+            .any(|f| f.message.contains("No color tokens")));
+    }
+
+    #[test]
+    fn test_audit_tokens_missing_typography() {
+        let meta = json!({
+            "styles": [
+                { "name": "Red", "style_type": "FILL", "color": { "r": 1.0, "g": 0.0, "b": 0.0, "a": 1.0 } }
+            ]
+        });
+
+        let mut findings = Vec::new();
+        audit_tokens(&meta, &mut findings);
+        assert!(findings
+            .iter()
+            .any(|f| f.message.contains("No typography tokens")));
+    }
+
+    #[test]
+    fn test_check_nesting_depth() {
+        // Build a deeply nested structure
+        let deep = json!({
+            "id": "d:0", "name": "root",
+            "children": [{
+                "id": "d:1", "name": "level1",
+                "children": [{
+                    "id": "d:2", "name": "level2",
+                    "children": [{
+                        "id": "d:3", "name": "level3",
+                        "children": []
+                    }]
+                }]
+            }]
+        });
+
+        let mut findings = Vec::new();
+        check_nesting_depth(&deep, 0, 3, &mut findings);
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].message.contains("level3"));
+        assert!(findings[0].message.contains("depth 3"));
+    }
+
+    #[test]
+    fn test_check_nesting_depth_shallow_ok() {
+        let shallow = json!({
+            "id": "s:0", "name": "root",
+            "children": [{ "id": "s:1", "name": "child" }]
+        });
+
+        let mut findings = Vec::new();
+        check_nesting_depth(&shallow, 0, 8, &mut findings);
+        assert!(findings.is_empty());
+    }
+
+    // ── Design Audit result serde ────────────────────────────────
+
+    #[test]
+    fn test_design_audit_result_serde() {
+        let result = DesignAuditResult {
+            file_key: "abc".into(),
+            findings: vec![
+                DesignAuditFinding {
+                    severity: AuditSeverity::Error,
+                    check_type: "naming".into(),
+                    node_id: Some("1:1".into()),
+                    message: "Bad name".into(),
+                    details: None,
+                },
+                DesignAuditFinding {
+                    severity: AuditSeverity::Warning,
+                    check_type: "styles".into(),
+                    node_id: None,
+                    message: "Missing description".into(),
+                    details: Some(json!({ "count": 3 })),
+                },
+                DesignAuditFinding {
+                    severity: AuditSeverity::Info,
+                    check_type: "tokens".into(),
+                    node_id: None,
+                    message: "Token summary".into(),
+                    details: None,
+                },
+            ],
+            summary: AuditSummary {
+                errors: 1,
+                warnings: 1,
+                infos: 1,
+                total: 3,
+            },
+            checks_run: vec!["naming".into(), "styles".into(), "tokens".into()],
+        };
+
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["file_key"], "abc");
+        assert_eq!(json["findings"].as_array().unwrap().len(), 3);
+        assert_eq!(json["summary"]["errors"], 1);
+        assert_eq!(json["summary"]["warnings"], 1);
+        assert_eq!(json["summary"]["infos"], 1);
+        assert_eq!(json["summary"]["total"], 3);
+        assert_eq!(json["checks_run"].as_array().unwrap().len(), 3);
+
+        // Roundtrip
+        let roundtrip: DesignAuditResult = serde_json::from_value(json).unwrap();
+        assert_eq!(roundtrip.findings.len(), 3);
+        assert_eq!(roundtrip.findings[0].severity, AuditSeverity::Error);
+        assert_eq!(roundtrip.findings[1].severity, AuditSeverity::Warning);
+        assert_eq!(roundtrip.findings[2].severity, AuditSeverity::Info);
+    }
+
+    #[test]
+    fn test_audit_severity_serde() {
+        let s = serde_json::to_value(AuditSeverity::Error).unwrap();
+        assert_eq!(s, "error");
+        let s = serde_json::to_value(AuditSeverity::Warning).unwrap();
+        assert_eq!(s, "warning");
+        let s = serde_json::to_value(AuditSeverity::Info).unwrap();
+        assert_eq!(s, "info");
+
+        let v: AuditSeverity = serde_json::from_str("\"error\"").unwrap();
+        assert_eq!(v, AuditSeverity::Error);
+        let v: AuditSeverity = serde_json::from_str("\"warning\"").unwrap();
+        assert_eq!(v, AuditSeverity::Warning);
+        let v: AuditSeverity = serde_json::from_str("\"info\"").unwrap();
+        assert_eq!(v, AuditSeverity::Info);
+    }
+
+    #[test]
+    fn test_bundled_component_debug() {
+        let comp = BundledComponent {
+            key: "k1".into(),
+            name: "Test".into(),
+            description: None,
+            node_id: Some("1:1".into()),
+            containing_frame: None,
+        };
+        let dbg = format!("{comp:?}");
+        assert!(dbg.contains("BundledComponent"));
+        assert!(dbg.contains("Test"));
+    }
+
+    #[test]
+    fn test_audit_finding_debug() {
+        let finding = DesignAuditFinding {
+            severity: AuditSeverity::Warning,
+            check_type: "styles".into(),
+            node_id: None,
+            message: "test".into(),
+            details: None,
+        };
+        let dbg = format!("{finding:?}");
+        assert!(dbg.contains("DesignAuditFinding"));
+        assert!(dbg.contains("Warning"));
+    }
+
+    #[test]
+    fn test_audit_summary_serde() {
+        let summary = AuditSummary {
+            errors: 2,
+            warnings: 3,
+            infos: 5,
+            total: 10,
+        };
+        let json = serde_json::to_value(&summary).unwrap();
+        assert_eq!(json["errors"], 2);
+        assert_eq!(json["warnings"], 3);
+        assert_eq!(json["infos"], 5);
+        assert_eq!(json["total"], 10);
+
+        let roundtrip: AuditSummary = serde_json::from_value(json).unwrap();
+        assert_eq!(roundtrip.total, 10);
     }
 }

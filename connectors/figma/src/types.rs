@@ -290,6 +290,104 @@ pub struct CreateWebhookRequest {
     pub description: Option<String>,
 }
 
+// ---------------------------------------------------------------------------
+// Macro Operations: Component Bundle
+// ---------------------------------------------------------------------------
+
+/// A bundled export of components from a Figma file.
+///
+/// Contains component metadata, node sub-trees, and optional extracted tokens.
+/// Output is bounded by `max_nodes` to prevent unbounded responses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComponentBundle {
+    /// File key this bundle was extracted from.
+    pub file_key: String,
+    /// Components included in the bundle.
+    pub components: Vec<BundledComponent>,
+    /// Total components found in the file (before filtering/capping).
+    pub total_found: usize,
+    /// Number of components included (after filtering/capping).
+    pub included: usize,
+    /// Whether the bundle was truncated due to `max_nodes` limit.
+    pub truncated: bool,
+    /// Optional design tokens extracted from the file's styles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<Vec<DesignToken>>,
+}
+
+/// A single component within a bundle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BundledComponent {
+    /// Component key from Figma.
+    pub key: String,
+    /// Component name.
+    pub name: String,
+    /// Component description (if any).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Node ID in the Figma file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
+    /// Containing frame name (if available).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub containing_frame: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Macro Operations: Design Audit
+// ---------------------------------------------------------------------------
+
+/// A single finding from a design audit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DesignAuditFinding {
+    /// Finding severity: "error", "warning", "info".
+    pub severity: AuditSeverity,
+    /// Type of check that produced this finding.
+    pub check_type: String,
+    /// Node ID where the issue was found (if applicable).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
+    /// Human-readable message describing the finding.
+    pub message: String,
+    /// Additional structured details.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
+}
+
+/// Severity levels for design audit findings.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditSeverity {
+    /// Blocking issue.
+    Error,
+    /// Potential issue that should be reviewed.
+    Warning,
+    /// Informational observation.
+    Info,
+}
+
+/// Result of a design audit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DesignAuditResult {
+    /// File key audited.
+    pub file_key: String,
+    /// All findings from the audit.
+    pub findings: Vec<DesignAuditFinding>,
+    /// Number of findings by severity.
+    pub summary: AuditSummary,
+    /// Which checks were run.
+    pub checks_run: Vec<String>,
+}
+
+/// Summary counts for an audit result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditSummary {
+    pub errors: usize,
+    pub warnings: usize,
+    pub infos: usize,
+    pub total: usize,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

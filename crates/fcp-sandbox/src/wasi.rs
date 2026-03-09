@@ -52,7 +52,9 @@
 //! ```
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -63,7 +65,11 @@ use wasmtime::{
     Config, Engine, Store,
     component::{Component, Linker, ResourceTable},
 };
-use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
+use wasmtime_wasi::{
+    Deterministic, DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView,
+    clocks::{HostMonotonicClock, HostWallClock},
+    sockets::SocketAddrUse,
+};
 
 use crate::egress::{EgressGuard, EgressHttpRequest, EgressRequest, EgressTcpConnectRequest};
 use crate::sandbox::{CompiledPolicy, SandboxError};
@@ -662,6 +668,81 @@ impl DeterministicRng {
     }
 }
 
+fn deterministic_seed_bytes(seed: u64) -> Vec<u8> {
+    let mut rng = DeterministicRng::new(seed);
+    (0..32).map(|_| rng.next_byte()).collect()
+}
+
+#[derive(Debug)]
+struct FixedWallClock {
+    timestamp: Duration,
+    resolution: Duration,
+}
+
+impl FixedWallClock {
+    const fn new(timestamp_secs: u64) -> Self {
+        Self {
+            timestamp: Duration::from_secs(timestamp_secs),
+            resolution: Duration::from_nanos(1),
+        }
+    }
+}
+
+impl HostWallClock for FixedWallClock {
+    fn resolution(&self) -> Duration {
+        self.resolution
+    }
+
+    fn now(&self) -> Duration {
+        self.timestamp
+    }
+}
+
+#[derive(Debug)]
+struct FixedMonotonicClock {
+    next: AtomicU64,
+    resolution_ns: u64,
+    step_ns: u64,
+}
+
+impl FixedMonotonicClock {
+    const fn new(step_ns: u64) -> Self {
+        Self {
+            next: AtomicU64::new(0),
+            resolution_ns: 1,
+            step_ns,
+        }
+    }
+}
+
+impl HostMonotonicClock for FixedMonotonicClock {
+    fn resolution(&self) -> u64 {
+        self.resolution_ns
+    }
+
+    fn now(&self) -> u64 {
+        self.next.fetch_add(self.step_ns, Ordering::Relaxed)
+    }
+}
+
+fn socket_addr_allowed(
+    constraints: &NetworkConstraints,
+    addr: SocketAddr,
+    reason: SocketAddrUse,
+) -> bool {
+    if !matches!(reason, SocketAddrUse::TcpConnect) {
+        return false;
+    }
+
+    if !constraints.port_allow.contains(&addr.port()) {
+        return false;
+    }
+
+    EgressGuard::new()
+        .check_ip_constraints(addr.ip(), constraints)
+        .is_ok()
+}
+
 // ============================================================================
 // WASI Runtime
 // ============================================================================
@@ -740,6 +821,52 @@ impl WasiRuntime {
             .map_err(|e| WasiError::ComponentLoad(e.to_string()))
     }
 
+    fn configure_determinism(&self, wasi_builder: &mut WasiCtxBuilder) {
+        if !self.config.deterministic_mode {
+            return;
+        }
+
+        let seed_bytes = deterministic_seed_bytes(self.config.deterministic_seed);
+        let seed = (u128::from(self.config.deterministic_seed) << 64)
+            | u128::from(self.config.deterministic_seed);
+
+        wasi_builder
+            .wall_clock(FixedWallClock::new(self.config.deterministic_timestamp))
+            .monotonic_clock(FixedMonotonicClock::new(1_000_000))
+            .secure_random(Deterministic::new(seed_bytes.clone()))
+            .insecure_random(Deterministic::new(seed_bytes))
+            .insecure_random_seed(seed);
+    }
+
+    fn configure_network_policy(&self, wasi_builder: &mut WasiCtxBuilder) {
+        match (
+            &self.config.network_constraints,
+            self.config.block_direct_network,
+        ) {
+            (Some(constraints), _) => {
+                let constraints = Arc::new(constraints.clone());
+                wasi_builder.allow_ip_name_lookup(true);
+                wasi_builder.allow_tcp(true);
+                wasi_builder.allow_udp(false);
+                wasi_builder.socket_addr_check(move |addr, reason| {
+                    let constraints = Arc::clone(&constraints);
+                    Box::pin(async move { socket_addr_allowed(constraints.as_ref(), addr, reason) })
+                });
+            }
+            (None, true) => {
+                wasi_builder.allow_ip_name_lookup(false);
+                wasi_builder.allow_tcp(false);
+                wasi_builder.allow_udp(false);
+            }
+            (None, false) => {
+                wasi_builder.inherit_network();
+                wasi_builder.allow_ip_name_lookup(true);
+                wasi_builder.allow_tcp(true);
+                wasi_builder.allow_udp(true);
+            }
+        }
+    }
+
     /// Create a new execution store with the configured WASI context.
     ///
     /// # Errors
@@ -772,6 +899,9 @@ impl WasiRuntime {
         if self.config.inherit_stderr {
             wasi_builder.inherit_stderr();
         }
+
+        self.configure_determinism(&mut wasi_builder);
+        self.configure_network_policy(&mut wasi_builder);
 
         // Mount filesystem directories
         for path in &self.config.readonly_paths {
@@ -1055,7 +1185,7 @@ pub struct ExecutionResult {
 mod tests {
     use super::*;
 
-    fn minimal_command_component() -> &'static [u8] {
+    const fn minimal_command_component() -> &'static [u8] {
         br#"
         (component
             (core module $m

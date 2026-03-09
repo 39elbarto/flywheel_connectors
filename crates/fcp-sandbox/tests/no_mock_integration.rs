@@ -85,7 +85,7 @@ fn strict_sandbox_section() -> SandboxSection {
     }
 }
 
-fn minimal_command_component() -> &'static [u8] {
+const fn minimal_command_component() -> &'static [u8] {
     br#"
     (component
         (core module $m

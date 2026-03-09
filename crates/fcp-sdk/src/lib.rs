@@ -970,4 +970,312 @@ mod tests {
         assert!(msg.contains("50"));
         assert!(msg.contains("32"));
     }
+
+    // ── NEW: SchemaValidator edge cases ────────────────────────────────
+
+    #[test]
+    fn schema_validator_validates_array_type() {
+        let schema = json!({"type": "array", "items": {"type": "integer"}});
+        let v = SchemaValidator::compile(&schema).unwrap();
+        assert!(v.validate(&json!([1, 2, 3])).is_ok());
+        assert!(v.validate(&json!([1, "two", 3])).is_err());
+    }
+
+    #[test]
+    fn schema_validator_validates_boolean_type() {
+        let schema = json!({"type": "boolean"});
+        let v = SchemaValidator::compile(&schema).unwrap();
+        assert!(v.validate(&json!(true)).is_ok());
+        assert!(v.validate(&json!(false)).is_ok());
+        assert!(v.validate(&json!(0)).is_err());
+    }
+
+    #[test]
+    fn schema_validator_validates_null_type() {
+        let schema = json!({"type": "null"});
+        let v = SchemaValidator::compile(&schema).unwrap();
+        assert!(v.validate(&json!(null)).is_ok());
+        assert!(v.validate(&json!("")).is_err());
+    }
+
+    #[test]
+    fn schema_validator_enum_constraint() {
+        let schema = json!({"enum": ["red", "green", "blue"]});
+        let v = SchemaValidator::compile(&schema).unwrap();
+        assert!(v.validate(&json!("red")).is_ok());
+        assert!(v.validate(&json!("yellow")).is_err());
+    }
+
+    #[test]
+    fn schema_validator_min_max_length_string() {
+        let schema = json!({"type": "string", "minLength": 2, "maxLength": 5});
+        let v = SchemaValidator::compile(&schema).unwrap();
+        assert!(v.validate(&json!("ab")).is_ok());
+        assert!(v.validate(&json!("abcde")).is_ok());
+        assert!(v.validate(&json!("a")).is_err());
+        assert!(v.validate(&json!("abcdef")).is_err());
+    }
+
+    #[test]
+    fn schema_validation_error_clone() {
+        let err = SchemaValidationError::InvalidSchema {
+            message: "clone test".to_string(),
+        };
+        let cloned = err.clone();
+        assert_eq!(err.to_string(), cloned.to_string());
+    }
+
+    #[test]
+    fn schema_validation_error_validation_failed_clone() {
+        let err = SchemaValidationError::ValidationFailed {
+            message: "failed".to_string(),
+            errors: vec!["e1".to_string(), "e2".to_string()],
+        };
+        let cloned = err.clone();
+        assert_eq!(err.to_string(), cloned.to_string());
+    }
+
+    // ── NEW: validate_json_schema edge cases ──────────────────────────
+
+    #[test]
+    fn validate_json_schema_accepts_any_for_empty_schema() {
+        let schema = json!({});
+        assert!(validate_json_schema(&schema, &json!(42)).is_ok());
+        assert!(validate_json_schema(&schema, &json!("hello")).is_ok());
+        assert!(validate_json_schema(&schema, &json!(null)).is_ok());
+    }
+
+    #[test]
+    fn validate_json_schema_multiple_errors() {
+        let schema = json!({
+            "type": "object",
+            "required": ["a", "b", "c"],
+            "properties": {
+                "a": {"type": "string"},
+                "b": {"type": "string"},
+                "c": {"type": "string"}
+            }
+        });
+        match validate_json_schema(&schema, &json!({})) {
+            Err(SchemaValidationError::ValidationFailed { errors, .. }) => {
+                assert!(errors.len() >= 3);
+            }
+            other => panic!("expected ValidationFailed, got {other:?}"),
+        }
+    }
+
+    // ── NEW: format_schema_errors edge cases ──────────────────────────
+
+    #[test]
+    fn format_schema_errors_six_shows_plus_one() {
+        let errors: Vec<String> = (0..6).map(|i| format!("err{i}")).collect();
+        let result = format_schema_errors(&errors);
+        assert!(result.contains("+1 more"));
+    }
+
+    #[test]
+    fn format_schema_errors_two_joined_with_semicolon() {
+        let errors = vec!["first".to_string(), "second".to_string()];
+        let result = format_schema_errors(&errors);
+        assert_eq!(result, "first; second");
+    }
+
+    // ── NEW: Limits constants ─────────────────────────────────────────
+
+    #[test]
+    fn limits_default_constants_values() {
+        assert_eq!(Limits::DEFAULT_MAX_BYTES, 256 * 1024);
+        assert_eq!(Limits::DEFAULT_MAX_ARRAY_LEN, 1_000);
+        assert_eq!(Limits::DEFAULT_MAX_DEPTH, 32);
+    }
+
+    // ── NEW: enforce_limits nested array ──────────────────────────────
+
+    #[test]
+    fn enforce_limits_nested_array_in_object() {
+        let limits = Limits::new(1_000_000, 2, 32);
+        let value = json!({"items": [1, 2, 3]});
+        let err = enforce_limits(&value, &limits).unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("array length"));
+                assert!(message.contains("$/items"));
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enforce_limits_depth_at_boundary() {
+        let limits = Limits::new(1_000_000, 1000, 3);
+        // depth 1: root, depth 2: "a", depth 3: "b" — at boundary
+        let value = json!({"a": {"b": 1}});
+        assert!(enforce_limits(&value, &limits).is_ok());
+    }
+
+    #[test]
+    fn enforce_limits_array_at_boundary() {
+        let limits = Limits::new(1_000_000, 3, 32);
+        let value = json!([1, 2, 3]);
+        assert!(enforce_limits(&value, &limits).is_ok());
+    }
+
+    #[test]
+    fn enforce_limits_scalar_values_always_pass_depth() {
+        let limits = Limits::new(1_000_000, 1000, 1);
+        assert!(enforce_limits(&json!(42), &limits).is_ok());
+        assert!(enforce_limits(&json!("hello"), &limits).is_ok());
+        assert!(enforce_limits(&json!(true), &limits).is_ok());
+        assert!(enforce_limits(&json!(null), &limits).is_ok());
+    }
+
+    #[test]
+    fn enforce_limits_only_bytes_check() {
+        let limits = Limits {
+            max_bytes: Some(10),
+            max_array_len: None,
+            max_depth: None,
+        };
+        let value = json!({"key": "value_that_is_too_long"});
+        assert!(enforce_limits(&value, &limits).is_err());
+    }
+
+    #[test]
+    fn enforce_limits_only_depth_check() {
+        let limits = Limits {
+            max_bytes: None,
+            max_array_len: None,
+            max_depth: Some(1),
+        };
+        // depth 1 is root, depth 2 is "a" — exceeds
+        let value = json!({"a": {"b": 1}});
+        assert!(enforce_limits(&value, &limits).is_err());
+    }
+
+    #[test]
+    fn enforce_limits_only_array_len_check() {
+        let limits = Limits {
+            max_bytes: None,
+            max_array_len: Some(2),
+            max_depth: None,
+        };
+        let value = json!([1, 2, 3]);
+        assert!(enforce_limits(&value, &limits).is_err());
+    }
+
+    // ── NEW: validate_input / validate_output with limits edge cases ──
+
+    #[test]
+    fn validate_input_with_limits_array_too_long() {
+        let schema = json!({"type": "array"});
+        let limits = Limits::new(1_000_000, 2, 32);
+        let value = json!([1, 2, 3]);
+        let err = validate_input_with_limits(&schema, &value, &limits).unwrap_err();
+        match err {
+            FcpError::InvalidRequest { code, .. } => {
+                assert_eq!(code, INVALID_REQUEST_LIMITS_CODE);
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_output_with_limits_depth_exceeded() {
+        let schema = json!({"type": "object"});
+        let limits = Limits::new(1_000_000, 1000, 1);
+        let value = json!({"a": {"b": 1}});
+        let err = validate_output_with_limits(&schema, &value, &limits).unwrap_err();
+        match err {
+            FcpError::Internal { message } => {
+                assert!(message.contains("output payload exceeds limits"));
+            }
+            other => panic!("expected Internal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_input_with_limits_passes_then_schema_fails() {
+        let schema = json!({"type": "string"});
+        let limits = Limits::default();
+        let value = json!(42);
+        let err = validate_input_with_limits(&schema, &value, &limits).unwrap_err();
+        match err {
+            FcpError::InvalidRequest { code, .. } => {
+                assert_eq!(code, INVALID_REQUEST_SCHEMA_CODE);
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_output_with_limits_passes_then_schema_fails() {
+        let schema = json!({"type": "integer"});
+        let limits = Limits::default();
+        let value = json!("not an integer");
+        let err = validate_output_with_limits(&schema, &value, &limits).unwrap_err();
+        match err {
+            FcpError::Internal { message } => {
+                assert!(message.contains("output schema validation failed"));
+            }
+            other => panic!("expected Internal, got {other:?}"),
+        }
+    }
+
+    // ── NEW: format_path with special characters ─────────────────────
+
+    #[test]
+    fn format_path_with_escaped_key() {
+        let segments = vec![PathSegment::Key("a/b~c".to_string())];
+        assert_eq!(format_path(&segments), "$/a~1b~0c");
+    }
+
+    #[test]
+    fn format_path_only_indices() {
+        let segments = vec![
+            PathSegment::Index(0),
+            PathSegment::Index(5),
+            PathSegment::Index(99),
+        ];
+        assert_eq!(format_path(&segments), "$/0/5/99");
+    }
+
+    // ── NEW: LimitViolation clone and debug ──────────────────────────
+
+    #[test]
+    fn limit_violation_clone() {
+        let v = LimitViolation::PayloadTooLarge {
+            actual: 42,
+            max: 10,
+        };
+        let cloned = v.clone();
+        assert_eq!(v.message(), cloned.message());
+    }
+
+    #[test]
+    fn limit_check_error_clone() {
+        let e = LimitCheckError::Serialization("test error".to_string());
+        let cloned = e.clone();
+        match (e, cloned) {
+            (LimitCheckError::Serialization(a), LimitCheckError::Serialization(b)) => {
+                assert_eq!(a, b);
+            }
+            _ => panic!("expected same variant"),
+        }
+    }
+
+    #[test]
+    fn limit_check_error_violation_clone() {
+        let e = LimitCheckError::Violation(LimitViolation::DepthTooDeep {
+            path: "$/x".to_string(),
+            depth: 5,
+            max: 3,
+        });
+        let cloned = e.clone();
+        match (e, cloned) {
+            (LimitCheckError::Violation(a), LimitCheckError::Violation(b)) => {
+                assert_eq!(a.message(), b.message());
+            }
+            _ => panic!("expected same variant"),
+        }
+    }
 }

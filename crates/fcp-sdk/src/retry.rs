@@ -720,4 +720,237 @@ mod tests {
             deduped.len()
         );
     }
+
+    // ── NEW: RetryDecision edge cases ─────────────────────────────────
+
+    #[test]
+    fn retry_decision_after_zero_duration() {
+        let d = RetryDecision::After(Duration::ZERO);
+        assert!(d.is_retryable());
+        assert_eq!(d.retry_after(), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn retry_decision_after_large_duration() {
+        let d = RetryDecision::After(Duration::from_secs(86400));
+        assert!(d.is_retryable());
+        assert_eq!(d.retry_after(), Some(Duration::from_secs(86400)));
+    }
+
+    // ── NEW: RetryPolicy compute_backoff edge cases ──────────────────
+
+    #[test]
+    fn compute_backoff_attempt_one() {
+        let p = RetryPolicy::new().with_jitter_enabled(false);
+        assert_eq!(p.compute_backoff_ms(1), 2_000);
+    }
+
+    #[test]
+    fn compute_backoff_large_base() {
+        let p = RetryPolicy::new()
+            .with_base_backoff_ms(10_000)
+            .with_max_backoff_ms(100_000)
+            .with_jitter_enabled(false);
+        assert_eq!(p.compute_backoff_ms(0), 10_000);
+        assert_eq!(p.compute_backoff_ms(1), 20_000);
+        assert_eq!(p.compute_backoff_ms(2), 40_000);
+        assert_eq!(p.compute_backoff_ms(3), 80_000);
+        assert_eq!(p.compute_backoff_ms(4), 100_000); // capped
+    }
+
+    #[test]
+    fn compute_backoff_max_equals_base() {
+        let p = RetryPolicy::new()
+            .with_base_backoff_ms(1_000)
+            .with_max_backoff_ms(1_000)
+            .with_jitter_enabled(false);
+        assert_eq!(p.compute_backoff_ms(0), 1_000);
+        assert_eq!(p.compute_backoff_ms(5), 1_000);
+    }
+
+    // ── NEW: compute_backoff_with_jitter_ms edge cases ───────────────
+
+    #[test]
+    fn jitter_factor_half_gives_75_percent() {
+        let p = RetryPolicy::new()
+            .with_base_backoff_ms(1_000)
+            .with_jitter_enabled(true);
+        // factor=0.5 -> 0.5*0.5+0.5=0.75 -> base*0.75
+        let result = p.compute_backoff_with_jitter_ms(0, 0.5);
+        assert_eq!(result, 750);
+    }
+
+    // ── NEW: next_delay edge cases ───────────────────────────────────
+
+    #[test]
+    fn next_delay_backoff_with_jitter_is_bounded() {
+        let p = RetryPolicy::new()
+            .with_base_backoff_ms(1_000)
+            .with_max_backoff_ms(60_000)
+            .with_jitter_enabled(true);
+        for attempt in 0..5 {
+            let delay = p.next_delay(attempt, RetryDecision::Backoff, None).unwrap();
+            // With jitter factor [0.5, 1.0], delay should be in [base*0.5, max_backoff]
+            assert!(delay.as_millis() <= 60_000);
+        }
+    }
+
+    #[test]
+    fn next_delay_after_ignores_retry_after_hint() {
+        let p = RetryPolicy::new();
+        let d = Duration::from_secs(42);
+        let hint = Duration::from_secs(100);
+        // After variant uses its own duration, not the hint
+        let delay = p.next_delay(0, RetryDecision::After(d), Some(hint));
+        assert_eq!(delay, Some(d));
+    }
+
+    #[test]
+    fn next_delay_immediate_ignores_hint() {
+        let p = RetryPolicy::new();
+        let hint = Duration::from_secs(100);
+        let delay = p.next_delay(0, RetryDecision::Immediate, Some(hint));
+        assert_eq!(delay, Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn next_delay_at_exact_max_attempts_returns_none() {
+        let p = RetryPolicy::new().with_max_attempts(Some(5));
+        assert!(p.next_delay(5, RetryDecision::Immediate, None).is_none());
+    }
+
+    #[test]
+    fn next_delay_one_before_max_attempts_returns_some() {
+        let p = RetryPolicy::new().with_max_attempts(Some(5));
+        assert!(p.next_delay(4, RetryDecision::Immediate, None).is_some());
+    }
+
+    // ── NEW: decision_from_http_status edge cases ────────────────────
+
+    #[test]
+    fn http_100_returns_terminal() {
+        assert_eq!(
+            decision_from_http_status(100, None),
+            RetryDecision::Terminal
+        );
+    }
+
+    #[test]
+    fn http_301_returns_terminal() {
+        assert_eq!(
+            decision_from_http_status(301, None),
+            RetryDecision::Terminal
+        );
+    }
+
+    #[test]
+    fn http_501_returns_backoff() {
+        assert_eq!(decision_from_http_status(501, None), RetryDecision::Backoff);
+    }
+
+    // ── NEW: decision_from_error_message edge cases ──────────────────
+
+    #[test]
+    fn error_message_unavailable_returns_backoff() {
+        assert_eq!(
+            decision_from_error_message("service unavailable"),
+            RetryDecision::Backoff
+        );
+    }
+
+    #[test]
+    fn error_message_network_error_returns_backoff() {
+        assert_eq!(
+            decision_from_error_message("network error"),
+            RetryDecision::Backoff
+        );
+    }
+
+    #[test]
+    fn error_message_too_many_requests_returns_backoff() {
+        assert_eq!(
+            decision_from_error_message("too many requests"),
+            RetryDecision::Backoff
+        );
+    }
+
+    // ── NEW: map_external_error edge cases ───────────────────────────
+
+    #[test]
+    fn map_external_error_500_retryable_true() {
+        let (decision, error) =
+            map_external_error("service", Some(500), "Internal Server Error", None);
+        assert_eq!(decision, RetryDecision::Backoff);
+        match error {
+            FcpError::External {
+                service,
+                retryable,
+                ..
+            } => {
+                assert_eq!(service, "service");
+                assert!(retryable);
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_external_error_404_not_retryable() {
+        let (decision, error) = map_external_error("api", Some(404), "Not Found", None);
+        assert_eq!(decision, RetryDecision::Terminal);
+        match error {
+            FcpError::External {
+                retryable,
+                status_code,
+                ..
+            } => {
+                assert!(!retryable);
+                assert_eq!(status_code, Some(404));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_external_error_no_status_transient_message() {
+        let (decision, error) =
+            map_external_error("api", None, "connection refused", None);
+        assert_eq!(decision, RetryDecision::Backoff);
+        match error {
+            FcpError::External {
+                retryable,
+                status_code,
+                ..
+            } => {
+                assert!(retryable);
+                assert!(status_code.is_none());
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_external_error_with_retry_after_non_429() {
+        let hint = Duration::from_secs(10);
+        let (_decision, error) =
+            map_external_error("api", Some(503), "unavailable", Some(hint));
+        match error {
+            FcpError::External { retry_after, .. } => {
+                assert_eq!(retry_after, Some(hint));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    // ── NEW: duration_to_ms edge cases ───────────────────────────────
+
+    #[test]
+    fn duration_to_ms_sub_millisecond() {
+        assert_eq!(duration_to_ms(Duration::from_micros(500)), 0);
+    }
+
+    #[test]
+    fn duration_to_ms_exact_millisecond() {
+        assert_eq!(duration_to_ms(Duration::from_millis(1)), 1);
+    }
 }

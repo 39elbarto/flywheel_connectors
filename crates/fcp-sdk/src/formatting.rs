@@ -904,4 +904,292 @@ mod tests {
     fn escape_control_chars_only_allowed() {
         assert_eq!(escape_control_chars("\n\r\t"), "\n\r\t");
     }
+
+    // ── NEW: FormatMode ───────────────────────────────────────────────
+
+    #[test]
+    fn format_mode_debug() {
+        let debug = format!("{:?}", FormatMode::Plain);
+        assert!(debug.contains("Plain"));
+        let debug = format!("{:?}", FormatMode::Html);
+        assert!(debug.contains("Html"));
+        let debug = format!("{:?}", FormatMode::MarkdownV2);
+        assert!(debug.contains("MarkdownV2"));
+    }
+
+    #[test]
+    fn format_mode_copy() {
+        let mode = FormatMode::Html;
+        let copied = mode;
+        assert_eq!(mode, copied);
+    }
+
+    // ── NEW: validate_html edge cases ─────────────────────────────────
+
+    #[test]
+    fn validate_html_empty_string() {
+        assert!(validate_html("").is_ok());
+    }
+
+    #[test]
+    fn validate_html_nested_tags() {
+        assert!(validate_html("<b><i>bold italic</i></b>").is_ok());
+    }
+
+    #[test]
+    fn validate_html_self_closing_tag() {
+        assert!(validate_html("<br/>").is_ok());
+    }
+
+    #[test]
+    fn validate_html_mixed_entities_and_tags() {
+        assert!(validate_html("<b>&amp;</b>").is_ok());
+    }
+
+    #[test]
+    fn validate_html_entity_at_end_of_string() {
+        // Ampersand at end without semicolon
+        assert!(matches!(
+            validate_html("hello &"),
+            Err(FormatError::InvalidHtml)
+        ));
+    }
+
+    // ── NEW: validate_markdown edge cases ─────────────────────────────
+
+    #[test]
+    fn validate_markdown_empty_string() {
+        assert!(validate_markdown("").is_ok());
+    }
+
+    #[test]
+    fn validate_markdown_double_escape() {
+        // Two escapes: \\ followed by nothing special
+        assert!(validate_markdown("escaped backslash \\\\").is_ok());
+    }
+
+    #[test]
+    fn validate_markdown_escape_at_end_of_long_string() {
+        let mut input = "a".repeat(1000);
+        input.push('\\');
+        assert!(matches!(
+            validate_markdown(&input),
+            Err(FormatError::InvalidMarkdown)
+        ));
+    }
+
+    // ── NEW: Formatter render edge cases ──────────────────────────────
+
+    #[test]
+    fn render_with_fallback_html_control_chars_falls_back() {
+        let result = Formatter::render_with_fallback("<b>hello\x00world</b>", FormatMode::Html);
+        assert!(result.parse_mode_used.is_none());
+    }
+
+    #[test]
+    fn render_with_fallback_markdown_control_chars_falls_back() {
+        let result =
+            Formatter::render_with_fallback("hello\x01world", FormatMode::MarkdownV2);
+        assert!(result.parse_mode_used.is_none());
+    }
+
+    #[test]
+    fn render_with_fallback_plain_preserves_newlines() {
+        let result = Formatter::render_with_fallback("line1\nline2\nline3", FormatMode::Plain);
+        assert_eq!(result.rendered, "line1\nline2\nline3");
+    }
+
+    #[test]
+    fn render_plaintext_fallback_strips_complex_html() {
+        let result = Formatter::render_plaintext_fallback(
+            "<a href=\"http://example.com\">link</a>",
+            FormatMode::Html,
+        );
+        assert_eq!(result.rendered, "link");
+    }
+
+    // ── NEW: strip_html edge cases ────────────────────────────────────
+
+    #[test]
+    fn strip_html_empty_string() {
+        assert_eq!(strip_html(""), "");
+    }
+
+    #[test]
+    fn strip_html_multiple_entities() {
+        assert_eq!(strip_html("&amp;&lt;&gt;"), "&<>");
+    }
+
+    #[test]
+    fn strip_html_unclosed_tag_at_end() {
+        // Tag never closes — strip_html just skips content inside the "tag"
+        let result = strip_html("before<unclosed");
+        assert_eq!(result, "before");
+    }
+
+    #[test]
+    fn strip_html_numeric_hex_entity() {
+        assert_eq!(strip_html("&#x48;&#x69;"), "Hi");
+    }
+
+    // ── NEW: strip_markdown edge cases ────────────────────────────────
+
+    #[test]
+    fn strip_markdown_empty_string() {
+        assert_eq!(strip_markdown(""), "");
+    }
+
+    #[test]
+    fn strip_markdown_plain_text_unchanged() {
+        assert_eq!(strip_markdown("hello world 123"), "hello world 123");
+    }
+
+    #[test]
+    fn strip_markdown_mixed_escapes_and_controls() {
+        assert_eq!(strip_markdown("\\*bold* \\~strike~"), "*bold ~strike");
+    }
+
+    // ── NEW: classify_error_message edge cases ────────────────────────
+
+    #[test]
+    fn classify_empty_string() {
+        assert_eq!(classify_error_message(""), ErrorClass::Terminal);
+    }
+
+    #[test]
+    fn classify_parse_entities_partial_match() {
+        assert_eq!(
+            classify_error_message("error: parse entities failed"),
+            ErrorClass::ParseError
+        );
+    }
+
+    #[test]
+    fn classify_mixed_case_parse_error() {
+        assert_eq!(
+            classify_error_message("INVALID MARKDOWN detected"),
+            ErrorClass::ParseError
+        );
+    }
+
+    // ── NEW: is_parse_error_message edge cases ────────────────────────
+
+    #[test]
+    fn is_parse_error_message_empty() {
+        assert!(!is_parse_error_message(""));
+    }
+
+    #[test]
+    fn is_parse_error_combined_markdown_parse() {
+        assert!(is_parse_error_message("Markdown parse error occurred"));
+    }
+
+    // ── NEW: decode_numeric_entity edge cases ─────────────────────────
+
+    #[test]
+    fn decode_numeric_entity_space() {
+        assert_eq!(decode_numeric_entity("#32"), Some(' '));
+    }
+
+    #[test]
+    fn decode_numeric_entity_invalid_hex() {
+        assert!(decode_numeric_entity("#xZZZZ").is_none());
+    }
+
+    #[test]
+    fn decode_numeric_entity_emoji_codepoint() {
+        // U+1F600 is a grinning face emoji
+        assert!(decode_numeric_entity("#x1F600").is_some());
+    }
+
+    #[test]
+    fn decode_numeric_entity_plain_text() {
+        assert!(decode_numeric_entity("hello").is_none());
+    }
+
+    // ── NEW: RenderResult ─────────────────────────────────────────────
+
+    #[test]
+    fn render_result_ne() {
+        let a = RenderResult {
+            rendered: "hello".into(),
+            parse_mode_used: None,
+        };
+        let b = RenderResult {
+            rendered: "world".into(),
+            parse_mode_used: None,
+        };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn render_result_clone() {
+        let a = RenderResult {
+            rendered: "test".into(),
+            parse_mode_used: Some(FormatMode::Html),
+        };
+        let b = a.clone();
+        assert_eq!(a.rendered, b.rendered);
+        assert_eq!(a.parse_mode_used, b.parse_mode_used);
+    }
+
+    #[test]
+    fn render_result_debug() {
+        let r = RenderResult {
+            rendered: "hello".into(),
+            parse_mode_used: None,
+        };
+        let debug = format!("{r:?}");
+        assert!(debug.contains("RenderResult"));
+    }
+
+    // ── NEW: FormatError ──────────────────────────────────────────────
+
+    #[test]
+    fn format_error_debug() {
+        let e = FormatError::InvalidHtml;
+        let debug = format!("{e:?}");
+        assert!(debug.contains("InvalidHtml"));
+    }
+
+    #[test]
+    fn format_error_clone() {
+        let e = FormatError::ControlChars;
+        let cloned = e.clone();
+        assert_eq!(e, cloned);
+    }
+
+    // ── NEW: ErrorClass ───────────────────────────────────────────────
+
+    #[test]
+    fn error_class_debug() {
+        let e = ErrorClass::RateLimit;
+        let debug = format!("{e:?}");
+        assert!(debug.contains("RateLimit"));
+    }
+
+    #[test]
+    fn error_class_copy() {
+        let e = ErrorClass::Transient;
+        let copied = e;
+        assert_eq!(e, copied);
+    }
+
+    // ── NEW: is_numeric_entity ────────────────────────────────────────
+
+    #[test]
+    fn is_numeric_entity_empty_prefix() {
+        assert!(!is_numeric_entity("#"));
+        assert!(!is_numeric_entity("#x"));
+    }
+
+    #[test]
+    fn is_numeric_entity_valid_decimal() {
+        assert!(is_numeric_entity("#123"));
+    }
+
+    #[test]
+    fn is_numeric_entity_valid_hex() {
+        assert!(is_numeric_entity("#xFF"));
+    }
 }

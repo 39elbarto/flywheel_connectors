@@ -126,7 +126,7 @@ async fn lifecycle_introspect() {
     let c = setup_connector(&server.uri()).await;
     let intro = c.handle_introspect().await.unwrap();
     let ops = intro["operations"].as_array().unwrap();
-    assert_eq!(ops.len(), 22);
+    assert_eq!(ops.len(), 24);
 }
 
 // ── Contacts List ────────────────────────────────────────────────────

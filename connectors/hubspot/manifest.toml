@@ -112,6 +112,165 @@ related = [
     "hubspot.deals.list",
 ]
 
+[provides.operations."hubspot.pipeline.metrics"]
+description = "Get aggregate pipeline metrics (deal counts, total value, stage breakdown)"
+capability = "hubspot.analytics.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."hubspot.pipeline.metrics".input_schema]
+required = ["pipeline_id"]
+type = "object"
+
+[provides.operations."hubspot.pipeline.metrics".input_schema.properties.limit]
+description = "Max deals to aggregate (default 100)"
+maximum = 100
+minimum = 1
+type = "integer"
+
+[provides.operations."hubspot.pipeline.metrics".input_schema.properties.pipeline_id]
+description = "Pipeline ID to get metrics for"
+type = "string"
+
+[provides.operations."hubspot.pipeline.metrics".output_schema]
+required = [
+    "pipeline_id",
+    "deal_count",
+    "total_value",
+    "stages",
+]
+type = "object"
+
+[provides.operations."hubspot.pipeline.metrics".output_schema.properties.deal_count]
+type = "integer"
+
+[provides.operations."hubspot.pipeline.metrics".output_schema.properties.has_more]
+type = "boolean"
+
+[provides.operations."hubspot.pipeline.metrics".output_schema.properties.pipeline_id]
+type = "string"
+
+[provides.operations."hubspot.pipeline.metrics".output_schema.properties.stages]
+type = "array"
+
+[provides.operations."hubspot.pipeline.metrics".output_schema.properties.total_value]
+type = "number"
+
+[provides.operations."hubspot.pipeline.metrics".network_constraints]
+host_allow = [
+    "api.hubapi.com",
+    "api.hubspot.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."hubspot.pipeline.metrics".ai_hints]
+when_to_use = "Get aggregate metrics for a pipeline: deal counts by stage, total value."
+common_mistakes = ["Using pipeline name instead of pipeline ID — use pipelines.list to find IDs."]
+examples = ['{"pipeline_id": "default"}']
+related = [
+    "hubspot.pipelines.list",
+    "hubspot.pipeline.stage_metrics",
+]
+
+[provides.operations."hubspot.pipeline.stage_metrics"]
+description = "Get metrics for a specific pipeline stage"
+capability = "hubspot.analytics.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."hubspot.pipeline.stage_metrics".input_schema]
+required = [
+    "pipeline_id",
+    "stage_id",
+]
+type = "object"
+
+[provides.operations."hubspot.pipeline.stage_metrics".input_schema.properties.limit]
+description = "Max deals to aggregate (default 100)"
+maximum = 100
+minimum = 1
+type = "integer"
+
+[provides.operations."hubspot.pipeline.stage_metrics".input_schema.properties.pipeline_id]
+description = "Pipeline ID"
+type = "string"
+
+[provides.operations."hubspot.pipeline.stage_metrics".input_schema.properties.stage_id]
+description = "Stage ID to get metrics for"
+type = "string"
+
+[provides.operations."hubspot.pipeline.stage_metrics".output_schema]
+required = [
+    "pipeline_id",
+    "stage_id",
+    "deal_count",
+    "total_value",
+]
+type = "object"
+
+[provides.operations."hubspot.pipeline.stage_metrics".output_schema.properties.deal_count]
+type = "integer"
+
+[provides.operations."hubspot.pipeline.stage_metrics".output_schema.properties.has_more]
+type = "boolean"
+
+[provides.operations."hubspot.pipeline.stage_metrics".output_schema.properties.pipeline_id]
+type = "string"
+
+[provides.operations."hubspot.pipeline.stage_metrics".output_schema.properties.stage_id]
+type = "string"
+
+[provides.operations."hubspot.pipeline.stage_metrics".output_schema.properties.total_value]
+type = "number"
+
+[provides.operations."hubspot.pipeline.stage_metrics".network_constraints]
+host_allow = [
+    "api.hubapi.com",
+    "api.hubspot.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."hubspot.pipeline.stage_metrics".ai_hints]
+when_to_use = "Get detailed metrics for a specific pipeline stage: deal count, total value."
+common_mistakes = ["Using stage name instead of stage ID — use pipelines.list to find stage IDs."]
+examples = ['{"pipeline_id": "default", "stage_id": "qualifiedtobuy"}']
+related = [
+    "hubspot.pipelines.list",
+    "hubspot.pipeline.metrics",
+]
+
 [provides.operations."hubspot.companies.list"]
 description = "List companies"
 capability = "hubspot.companies.read"
@@ -1520,3 +1679,5 @@ scope = "instance"
 "hubspot.deals.search" = ["hubspot.deals.read"]
 "hubspot.deals.set_stage" = ["hubspot.deals.write"]
 "hubspot.deals.associate" = ["hubspot.associations.write"]
+"hubspot.pipeline.metrics" = ["hubspot.analytics.read"]
+"hubspot.pipeline.stage_metrics" = ["hubspot.analytics.read"]

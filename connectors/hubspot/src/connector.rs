@@ -1131,6 +1131,93 @@ impl HubSpotConnector {
                     },
                 },
                 OperationInfo {
+                    id: OperationId::from_static("hubspot.pipeline.metrics"),
+                    summary: "Get aggregate pipeline metrics (deal counts, total value, stage breakdown)".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["pipeline_id"],
+                        "properties": {
+                            "pipeline_id": { "type": "string", "description": "Pipeline ID to get metrics for" },
+                            "limit": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Max deals to aggregate (default 100)" }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["pipeline_id", "deal_count", "total_value", "stages"],
+                        "properties": {
+                            "pipeline_id": { "type": "string" },
+                            "deal_count": { "type": "integer" },
+                            "total_value": { "type": "number" },
+                            "stages": { "type": "array" },
+                            "has_more": { "type": "boolean" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("hubspot.analytics.read"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "Get aggregate metrics for a pipeline: deal counts by stage, total value.".into(),
+                        common_mistakes: vec![
+                            "Using pipeline name instead of pipeline ID — use pipelines.list to find IDs.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"pipeline_id": "default"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("hubspot.pipelines.list"),
+                            CapabilityId::from_static("hubspot.pipeline.stage_metrics"),
+                        ],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("hubspot.pipeline.stage_metrics"),
+                    summary: "Get metrics for a specific pipeline stage".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["pipeline_id", "stage_id"],
+                        "properties": {
+                            "pipeline_id": { "type": "string", "description": "Pipeline ID" },
+                            "stage_id": { "type": "string", "description": "Stage ID to get metrics for" },
+                            "limit": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Max deals to aggregate (default 100)" }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["pipeline_id", "stage_id", "deal_count", "total_value"],
+                        "properties": {
+                            "pipeline_id": { "type": "string" },
+                            "stage_id": { "type": "string" },
+                            "deal_count": { "type": "integer" },
+                            "total_value": { "type": "number" },
+                            "has_more": { "type": "boolean" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("hubspot.analytics.read"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "Get detailed metrics for a specific pipeline stage: deal count, total value.".into(),
+                        common_mistakes: vec![
+                            "Using stage name instead of stage ID — use pipelines.list to find stage IDs.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"pipeline_id": "default", "stage_id": "qualifiedtobuy"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("hubspot.pipelines.list"),
+                            CapabilityId::from_static("hubspot.pipeline.metrics"),
+                        ],
+                    },
+                },
+                OperationInfo {
                     id: OperationId::from_static("hubspot.events.stream"),
                     summary: "Stream CRM webhook events".into(),
                     input_schema: json!({
@@ -1222,6 +1309,8 @@ impl HubSpotConnector {
             "hubspot.deals.associate" => self.invoke_deals_associate(client, &input).await,
             "hubspot.pipelines.list" => self.invoke_pipelines_list(client, &input).await,
             "hubspot.analytics.report" => self.invoke_analytics_report(client, &input).await,
+            "hubspot.pipeline.metrics" => self.invoke_pipeline_metrics(client, &input).await,
+            "hubspot.pipeline.stage_metrics" => self.invoke_pipeline_stage_metrics(client, &input).await,
             "hubspot.events.stream" => self.invoke_events_stream(client, &input).await,
             _ => {
                 return Err(FcpError::InvalidRequest {
@@ -1596,6 +1685,107 @@ impl HubSpotConnector {
         Ok(json!({ "report": data }))
     }
 
+    async fn invoke_pipeline_metrics(
+        &self,
+        client: &HubSpotClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, HubSpotError> {
+        let pipeline_id = require_str(input, "pipeline_id")?;
+        let limit = input.get("limit").and_then(|v| v.as_i64());
+        let data = client
+            .get_pipeline_deals(
+                pipeline_id,
+                &["dealname", "amount", "dealstage", "pipeline"],
+                limit,
+                None,
+            )
+            .await?;
+
+        // Aggregate metrics from search results
+        let results = data.get("results").and_then(|v| v.as_array());
+        let deal_count = results.map_or(0, |r| r.len());
+        let mut total_value: f64 = 0.0;
+        let mut stage_counts: std::collections::HashMap<String, u64> =
+            std::collections::HashMap::new();
+
+        if let Some(deals) = results {
+            for deal in deals {
+                if let Some(amount) = deal
+                    .get("properties")
+                    .and_then(|p| p.get("amount"))
+                    .and_then(|a| a.as_str())
+                    .and_then(|s| s.parse::<f64>().ok())
+                {
+                    total_value += amount;
+                }
+                if let Some(stage) = deal
+                    .get("properties")
+                    .and_then(|p| p.get("dealstage"))
+                    .and_then(|s| s.as_str())
+                {
+                    *stage_counts.entry(stage.to_string()).or_insert(0) += 1;
+                }
+            }
+        }
+
+        let stages: Vec<serde_json::Value> = stage_counts
+            .into_iter()
+            .map(|(stage, count)| json!({ "stage_id": stage, "deal_count": count }))
+            .collect();
+
+        Ok(json!({
+            "pipeline_id": pipeline_id,
+            "deal_count": deal_count,
+            "total_value": total_value,
+            "stages": stages,
+            "has_more": data.get("paging").and_then(|p| p.get("next")).is_some()
+        }))
+    }
+
+    async fn invoke_pipeline_stage_metrics(
+        &self,
+        client: &HubSpotClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, HubSpotError> {
+        let pipeline_id = require_str(input, "pipeline_id")?;
+        let stage_id = require_str(input, "stage_id")?;
+        let limit = input.get("limit").and_then(|v| v.as_i64());
+        let data = client
+            .get_stage_deals(
+                pipeline_id,
+                stage_id,
+                &["dealname", "amount", "dealstage", "createdate"],
+                limit,
+                None,
+            )
+            .await?;
+
+        let results = data.get("results").and_then(|v| v.as_array());
+        let deal_count = results.map_or(0, |r| r.len());
+        let mut total_value: f64 = 0.0;
+
+        if let Some(deals) = results {
+            for deal in deals {
+                if let Some(amount) = deal
+                    .get("properties")
+                    .and_then(|p| p.get("amount"))
+                    .and_then(|a| a.as_str())
+                    .and_then(|s| s.parse::<f64>().ok())
+                {
+                    total_value += amount;
+                }
+            }
+        }
+
+        Ok(json!({
+            "pipeline_id": pipeline_id,
+            "stage_id": stage_id,
+            "deal_count": deal_count,
+            "total_value": total_value,
+            "has_more": data.get("paging").and_then(|p| p.get("next")).is_some()
+        }))
+    }
+
     async fn invoke_events_stream(
         &self,
         client: &HubSpotClient,
@@ -1907,6 +2097,22 @@ fn operations_info() -> serde_json::Value {
             "idempotency": "strict",
         },
         {
+            "id": "hubspot.pipeline.metrics",
+            "summary": "Get aggregate pipeline metrics (deal counts, total value, stage breakdown)",
+            "capability": "hubspot.analytics.read",
+            "risk_level": "low",
+            "safety_tier": "safe",
+            "idempotency": "strict",
+        },
+        {
+            "id": "hubspot.pipeline.stage_metrics",
+            "summary": "Get metrics for a specific pipeline stage",
+            "capability": "hubspot.analytics.read",
+            "risk_level": "low",
+            "safety_tier": "safe",
+            "idempotency": "strict",
+        },
+        {
             "id": "hubspot.events.stream",
             "summary": "Stream CRM webhook events",
             "capability": "hubspot.events.read",
@@ -2003,9 +2209,9 @@ mod tests {
     }
 
     #[test]
-    fn operations_info_has_22_operations() {
+    fn operations_info_has_24_operations() {
         let ops = operations_info();
-        assert_eq!(ops.as_array().unwrap().len(), 22);
+        assert_eq!(ops.as_array().unwrap().len(), 24);
     }
 
     #[test]

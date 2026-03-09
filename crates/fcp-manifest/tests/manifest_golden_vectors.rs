@@ -4220,6 +4220,8 @@ fn hubspot_full_manifest_parses_with_all_operations() {
         "hubspot.deals.set_stage",
         "hubspot.deals.update",
         "hubspot.events.stream",
+        "hubspot.pipeline.metrics",
+        "hubspot.pipeline.stage_metrics",
         "hubspot.pipelines.list",
     ];
     for op_name in &expected_ops {

@@ -491,6 +491,66 @@ impl HubSpotClient {
         self.post("/analytics/v2/reports", body).await
     }
 
+    // -- Pipeline Analytics --
+
+    /// Get deals for a pipeline (used for pipeline metrics aggregation).
+    pub async fn get_pipeline_deals(
+        &self,
+        pipeline_id: &str,
+        properties: &[&str],
+        limit: Option<i64>,
+        after: Option<&str>,
+    ) -> HubSpotResult<serde_json::Value> {
+        let mut body = serde_json::json!({
+            "filterGroups": [{
+                "filters": [{
+                    "propertyName": "pipeline",
+                    "operator": "EQ",
+                    "value": pipeline_id
+                }]
+            }],
+            "properties": properties,
+            "limit": limit.unwrap_or(100)
+        });
+        if let Some(cursor) = after {
+            body["after"] = serde_json::json!(cursor);
+        }
+        self.post("/crm/v3/objects/deals/search", &body).await
+    }
+
+    /// Get deals for a specific pipeline stage (used for stage metrics).
+    pub async fn get_stage_deals(
+        &self,
+        pipeline_id: &str,
+        stage_id: &str,
+        properties: &[&str],
+        limit: Option<i64>,
+        after: Option<&str>,
+    ) -> HubSpotResult<serde_json::Value> {
+        let mut body = serde_json::json!({
+            "filterGroups": [{
+                "filters": [
+                    {
+                        "propertyName": "pipeline",
+                        "operator": "EQ",
+                        "value": pipeline_id
+                    },
+                    {
+                        "propertyName": "dealstage",
+                        "operator": "EQ",
+                        "value": stage_id
+                    }
+                ]
+            }],
+            "properties": properties,
+            "limit": limit.unwrap_or(100)
+        });
+        if let Some(cursor) = after {
+            body["after"] = serde_json::json!(cursor);
+        }
+        self.post("/crm/v3/objects/deals/search", &body).await
+    }
+
     // -- Events --
 
     /// List webhook events (timeline events).

@@ -796,18 +796,28 @@ Delivers the core safety story ("zones + explicit authority + auditable operatio
 ```
 flywheel_connectors/
 ├── crates/
-│   ├── fcp-core/          # Core types: zones, capabilities, provenance, errors
-│   ├── fcp-protocol/      # Wire protocol: FCPS framing, symbol encoding
-│   ├── fcp-mesh/          # Mesh implementation: MeshNode, gossip, routing
-│   ├── fcp-raptorq/       # RaptorQ integration: encoding, decoding, distribution
-│   ├── fcp-tailscale/     # Tailscale integration: identity, ACLs, routing
-│   ├── fcp-secrets/       # Shamir secret sharing, SecretAccessToken
-│   ├── fcp-audit/         # Audit chain, receipts, quorum signing
-│   ├── fcp-manifest/      # Manifest parsing and validation
-│   ├── fcp-sandbox/       # OS sandbox integration (seccomp, seatbelt, AppContainer)
-│   ├── fcp-sdk/           # SDK for building connectors
-│   ├── fcp-conformance/   # Interop tests, golden vectors, property tests, fuzz harness
-│   └── fcp-cli/           # CLI tools (fcp install, fcp doctor, fcp explain, fcp bench, etc.)
+│   ├── fcp-core/              # Shared domain types: zones, capabilities, provenance, lifecycle
+│   ├── fcp-cbor/              # Deterministic CBOR and schema hashing
+│   ├── fcp-crypto/            # Signing, key exchange, AEAD, HPKE, COSE, Shamir
+│   ├── fcp-protocol/          # FCPC/FCPS framing, sessions, control-plane encoding
+│   ├── fcp-store/             # Object store, symbol store, repair, GC, offline state
+│   ├── fcp-raptorq/           # RaptorQ codec, chunking, symbol envelopes
+│   ├── fcp-tailscale/         # Mesh identity, peer discovery, ACL/tag integration
+│   ├── fcp-mesh/              # MeshNode routing, admission, gossip, placement, leases
+│   ├── fcp-manifest/          # Connector manifest parsing and validation
+│   ├── fcp-sandbox/           # OS/WASI isolation and egress guardrails
+│   ├── fcp-host/              # Node-local host/orchestrator and agent-facing admin surfaces
+│   ├── fcp-sdk/               # Connector authoring SDK
+│   ├── fcp-streaming/         # Shared streaming substrate for connectors
+│   ├── fcp-oauth/             # Shared OAuth flows and token lifecycle support
+│   ├── fcp-graphql/           # Typed GraphQL client infrastructure
+│   ├── fcp-google-discovery/  # Shared Google service metadata/provisioning substrate
+│   ├── fcp-telemetry/         # Metrics, trace capture, structured logging helpers
+│   ├── fcp-conformance/       # Golden vectors, schema checks, interop tooling
+│   ├── fcp-testkit/           # Shared test harnesses, fixtures, and mock infrastructure
+│   ├── fcp-e2e/               # End-to-end compliance and host-backed scenarios
+│   ├── fcp-cli/               # FCP2 developer/operator CLI (`fcp`)
+│   └── fwc/                   # Agent-first standalone connectors CLI (`fwc`)
 │
 ├── connectors/            # Individual connector implementations
 │   ├── twitter/
@@ -824,6 +834,48 @@ flywheel_connectors/
 
 ---
 
+## Current Implementation Topology
+
+The workspace already clusters into a few clear responsibility bands:
+
+| Band | Current Crates | What Lives There |
+|------|----------------|------------------|
+| **Semantic core** | `fcp-core`, `fcp-cbor`, `fcp-crypto`, `fcp-manifest`, `fcp-audit` | Authority model, canonical encoding, cryptographic primitives, manifests, receipts, and shared domain types |
+| **Durable mesh/data plane** | `fcp-protocol`, `fcp-store`, `fcp-raptorq`, `fcp-tailscale`, `fcp-mesh` | FCPC/FCPS framing, symbol/object handling, repair, routing, admission, gossip, leases, and mesh identity |
+| **Host/operator surfaces** | `fcp-host`, `fcp-cli`, `fwc` | Node-local orchestration, admin/doctor/discovery/invoke surfaces, operator UX, and agent-facing CLI flows |
+| **Connector authoring/runtime helpers** | `fcp-sdk`, `fcp-streaming`, `fcp-oauth`, `fcp-graphql`, `fcp-google-discovery`, `fcp-ratelimit`, `fcp-bootstrap`, `fcp-telemetry` | Connector contracts, streaming/polling supervision, provider helpers, retries, provisioning, and observability |
+| **Evidence and test harnesses** | `fcp-conformance`, `fcp-testkit`, `fcp-e2e` | Golden vectors, schema validation, reusable fixtures, and end-to-end compliance coverage |
+
+That split is useful because it shows what is already coherent versus what is still transitional.
+`fcp-core` is carrying much of the long-lived semantic vocabulary. `fcp-host` is already the
+node-local orchestration boundary. `fwc` is growing into the agent-first operational surface.
+The remaining ambiguity is mostly around runtime substrate and where the final FCP3 kernel line
+should be drawn.
+
+## FCP3 Ownership Direction
+
+The FCP3 re-foundation is converging on a stricter "one concept, one home" rule:
+
+| Long-term boundary | Current source material | Intended ownership rule |
+|--------------------|-------------------------|-------------------------|
+| **Kernel / execution semantics** | `fcp-core`, `fcp-cbor`, `fcp-crypto`, parts of `fcp-protocol`, parts of `fcp-store` | Runtime context, budgets, provenance, outcomes, authority narrowing, durable execution records, and transport contracts belong in the kernel boundary, not in CLIs or connector-specific helper layers |
+| **Mesh + object substrate** | `fcp-mesh`, `fcp-store`, `fcp-raptorq`, `fcp-tailscale` | Placement, repair, checkpoint sync, admission, object durability, and symbol transport stay together as the mesh/object plane rather than being re-implemented inside host or SDK code |
+| **Host / supervision** | `fcp-host` | Activation, lifecycle, rollout, health, policy compilation, admin RPC, explain/doctor surfaces, and execution placement belong to the host as a supervised root application |
+| **Connector SDK** | `fcp-sdk`, `fcp-streaming`, `fcp-oauth`, `fcp-graphql`, `fcp-google-discovery` | Connector-facing ergonomics, typed I/O helpers, streaming/polling/webhook utilities, and shared provider tooling belong in the SDK/helper layer, not in the kernel |
+| **Tooling and evidence surfaces** | `fcp-cli`, `fwc`, `fcp-conformance`, `fcp-testkit`, `fcp-e2e`, `fcp-telemetry` | Operator UX, agent UX, conformance, replayable evidence, and harnesses stay outside the kernel and host so they can evolve without smearing core semantics |
+
+The main transitional or quarantine surfaces are:
+
+- `fcp-async-core` and the Tokio compatibility bridge, which exist to keep the current code running while the runtime model is being pulled toward an Asupersync-native kernel.
+- Duplicate operator surfaces across `fcp` and `fwc`, which are useful today but should not become two competing homes for the same lifecycle or invoke semantics.
+- Connector/runtime patterns that still assume newline JSON-RPC over stdio or request-local execution rather than the long-term supervised application model described in `FCP_Specification_V3.md`.
+
+Put differently: FCP3 should keep the strong domain model and mesh/evidence work already present in
+this repository, while collapsing runtime and authority semantics into a single kernel boundary and
+keeping host, SDK, and tooling responsibilities much cleaner than they are today.
+
+---
+
 ## Related Flywheel Components
 
 FCP integrates with the broader Agent Flywheel ecosystem:
@@ -832,7 +884,7 @@ FCP integrates with the broader Agent Flywheel ecosystem:
 |-----------|---------|-------------|
 | **Tailscale** | Mesh networking, identity | Transport and ACL layer |
 | **MCP Agent Mail** | Inter-agent messaging | Coordinate connector operations |
-| **Beads (bd/bv)** | Issue tracking | Track connector development |
+| **Beads (br/bv)** | Issue tracking | Track connector development |
 | **CASS** | Memory/context system | Store connector interaction history |
 | **UBS** | Bug scanning | Validate connector code |
 | **dcg** | Command guard | Protect during development |
@@ -849,18 +901,21 @@ FCP integrates with the broader Agent Flywheel ecosystem:
 
 ### Building
 
+In shared multi-agent sessions, offload CPU-heavy Cargo work through `rch` so local machines do not
+turn into compilation bottlenecks.
+
 ```bash
 # Build all connectors
-cargo build --release
+rch exec -- cargo build --release
 
 # Build specific connector
-cargo build --release -p fcp-telegram
+rch exec -- cargo build --release -p fcp-telegram
 
 # Run tests
-cargo test
+rch exec -- cargo test
 
 # Run clippy
-cargo clippy --all-targets -- -D warnings
+rch exec -- cargo clippy --all-targets -- -D warnings
 
 # ASUPERSYNC Tokio guardrail (local + CI parity)
 bash scripts/ci/asupersync_tokio_guard.sh

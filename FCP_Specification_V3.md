@@ -1919,31 +1919,213 @@ pub enum Decision {
 
 ### 6.3 Audit Chain
 
-Every zone has an append-only audit chain:
+Audit is the normative tamper-evidence system for every zone. It is not an optional observability
+feed. The audit chain is the durable record that closes the loop between decision, execution,
+checkpoint movement, repair, and incident review. Every zone therefore has exactly one accepted
+audit lineage at a given `head_seq`, even if competing candidates were observed and quarantined
+during fork handling.
 
 ```rust
 pub struct AuditEvent {
     pub header: ObjectHeader,
+    pub correlation_id: [u8; 16],
     pub trace: TraceContext,
     pub zone_id: ZoneId,
+    pub actor: PrincipalId,
     pub connector_id: Option<ConnectorId>,
     pub operation_id: Option<OperationId>,
+    pub event_class: AuditEventClass,
     pub event_type: String,
+    pub disposition: AuditDisposition,
+    pub subject_refs: Vec<AuditSubjectRef>,
+    pub decision_receipt_id: Option<ObjectId>,
+    pub operation_receipt_id: Option<ObjectId>,
+    pub checkpoint_id: Option<ObjectId>,
+    pub lease_id: Option<ObjectId>,
+    pub revocation_head_id: Option<ObjectId>,
+    pub summary: AuditSummary,
     pub prev: Option<ObjectId>,
     pub seq: u64,
     pub occurred_at: u64,
+    pub degraded_mode: bool,
     pub signature: Signature,
+}
+
+pub enum AuditEventClass {
+    Decision,
+    Execution,
+    SecretUse,
+    Approval,
+    ZoneTransfer,
+    Lease,
+    Checkpoint,
+    Revocation,
+    SupplyChain,
+    Repair,
+    Incident,
+}
+
+pub enum AuditDisposition {
+    Attempted,
+    Allowed,
+    Denied,
+    Succeeded,
+    Failed,
+    Canceled,
+    Recovered,
+}
+
+pub struct AuditSubjectRef {
+    pub kind: String,
+    pub object_id: ObjectId,
+}
+
+pub struct AuditSummary {
+    pub reason_code: Option<String>,
+    pub coverage_bps: Option<u16>,
+    pub quorum_met: Option<bool>,
+    pub external_target: Option<String>,
 }
 
 pub struct AuditHead {
     pub header: ObjectHeader,
     pub zone_id: ZoneId,
+    pub prev_head: Option<ObjectId>,
     pub head_event: ObjectId,
     pub head_seq: u64,
+    pub tail_seq: u64,
+    pub event_count: u64,
     pub coverage_bps: u16,
+    pub quorum_required: u16,
+    pub quorum_achieved: u16,
+    pub status: AuditHeadStatus,
+    pub as_of_epoch: EpochId,
     pub quorum_signatures: Vec<(NodeId, Signature)>,
 }
+
+pub enum AuditHeadStatus {
+    PendingCoverage,
+    QuorumSatisfied,
+    CoverageSatisfied,
+    Degraded,
+    Forked,
+}
 ```
+
+Normative rules:
+
+1. `AuditEvent.seq` MUST be strictly monotonic per zone and MUST increment by exactly `1` from
+   `prev` unless the event is the zone's genesis audit event.
+2. `AuditEvent.prev` MUST reference the immediately preceding accepted event in the same zone.
+3. `AuditHead.head_event` MUST reference the event whose `seq == head_seq`.
+4. `AuditHead.tail_seq` MUST identify the earliest event still covered by the currently published
+   head material; implementations MAY compact older events only after policy permits and only if
+   retained evidence remains verifiable.
+5. `coverage_bps` MUST be computed over the set of audit-eligible nodes for the zone, not merely
+   the set of nodes currently online.
+6. `quorum_signatures` MUST be sorted lexicographically by signer identity before hashing or
+   verification.
+7. Checkpoints MAY reference only an `AuditHead` whose `status` is acceptable under the zone's
+   degraded-mode policy.
+8. Audit events retained for replay, forensics, or repair MUST preserve the full object, not merely
+   a rendered log projection.
+
+#### 6.3.1 Required Event Families and Emission Coverage
+
+The following event families are normative:
+
+- `decision.*` for allow or deny decisions tied to `DecisionReceipt`
+- `execution.*` for operation start, completion, failure, cancellation, and failover
+- `secret.*` for secret release, reconstruction, or proxy-mediated credential use
+- `approval.*` for approval consumption, rejection, expiry, and supersession
+- `zone.*` for integrity elevation, confidentiality declassification, or cross-zone writes
+- `lease.*` for grant, renew, conflict, expiration takeover, and release
+- `checkpoint.*` for checkpoint acceptance, rejection, rollback refusal, and publication
+- `revocation.*` for stale-frontier denial, degraded-mode entry, and degraded-mode recovery
+- `artifact.*` for manifest or binary activation, rejection, and policy failure
+- `repair.*` for repair start, completion, failure, or policy-mandated rebalance
+- `incident.*` for fork detection, key-role confusion, or audit-chain anomaly
+
+The following emissions are REQUIRED:
+
+1. A deny event MUST be emitted before returning a deny result for:
+   - risky or dangerous operation denials,
+   - revocation freshness denials,
+   - approval or declassification denials,
+   - lease-conflict denials,
+   - placement or policy denials once evaluation is complete.
+2. For risky and dangerous allows, a decision event referencing the `DecisionReceipt` MUST be
+   emitted before the first irreversible external side effect.
+3. A secret-use event MUST be emitted when plaintext secret material is first released to process
+   memory or to a capability-gated proxy boundary, not merely when the request was queued.
+4. An approval event MUST be emitted when an approval is consumed or rejected, not only when the
+   approval object was issued.
+5. A zone-transfer event MUST be emitted when data is elevated, declassified, or written to an
+   external sink whose confidentiality or integrity classification differs from the current zone.
+6. A checkpoint event MUST be emitted on both acceptance and rejection of candidate checkpoints,
+   including rollback or stale-frontier refusal.
+7. A revocation event MUST be emitted whenever the node enters or exits degraded mode because the
+   revocation frontier or checkpoint frontier is stale.
+
+Safe operations MAY be sampled or aggregated, but sampling MUST NOT suppress any event class listed
+above when the action is risky, dangerous, degraded, or incident-related.
+
+#### 6.3.2 Chain Advancement, Head Publication, and Fork Handling
+
+Audit-chain advancement MUST follow one deterministic procedure:
+
+1. Validate the candidate event's signature, zone binding, canonical encoding, and `prev`.
+2. Confirm that `seq` is exactly the current accepted `head_seq + 1`, or `1` for genesis.
+3. Persist the candidate event locally with `RetentionClass::Audit`.
+4. Gossip the candidate and collect coverage and, where required, quorum attestations.
+5. Publish a new `AuditHead` only after the zone policy's required `coverage_bps` and quorum
+   conditions are satisfied, unless degraded-mode policy explicitly permits publication with
+   `status = Degraded`.
+6. Advance `ZoneCheckpoint.audit_head` only to a published `AuditHead`.
+
+Fork handling is normative:
+
+1. If two different events claim the same `(zone_id, seq)`, the node MUST treat this as an audit
+   fork even if one event appears locally preferable.
+2. On fork detection, the node MUST:
+   - stop advancing the accepted `AuditHead`,
+   - emit an `incident.audit_fork_detected` event in local operator evidence,
+   - retain all competing events and heads for inspection,
+   - refuse to checkpoint past the disputed sequence unless explicit degraded-mode policy and
+     operator approval allow continued local execution without head advancement.
+3. Resolution MUST occur by one of:
+   - a quorum-signed canonical `AuditHead`,
+   - a later `ZoneCheckpoint` that explicitly names the winning head,
+   - operator-directed incident resolution recorded as a durable policy or incident object.
+4. Losing branches MUST remain inspectable as incident evidence until retention policy explicitly
+   allows disposal.
+
+#### 6.3.3 Emission Timing, Retention, and Stream Semantics
+
+Emission timing matters:
+
+1. `DecisionReceipt` and the corresponding `decision.*` audit event MUST be durable before a risky
+   or dangerous allow can produce irreversible provider-side effects.
+2. `OperationReceipt` and the corresponding terminal `execution.*` event MUST be durable before a
+   request is reported as committed.
+3. Streamed or long-running operations MUST emit:
+   - a start event,
+   - a terminal event,
+   - a resume or failover event whenever execution site or checkpoint lineage changes.
+4. Lease events MUST be emitted at every grant, renewal, conflict, forced takeover, and release.
+5. Repair events MUST be emitted when repair materially changes availability or concentration
+   relative to object or zone policy.
+
+Retention rules:
+
+1. Audit events and heads MUST use `RetentionClass::Audit`.
+2. An implementation MUST NOT garbage-collect an audit event if it is still referenced by:
+   - an `AuditHead`,
+   - a `ZoneCheckpoint`,
+   - a `DecisionReceipt` or `OperationReceipt`,
+   - an incident bundle or conformance fixture under retention.
+3. Compaction MAY replace older per-event scans with summarized segments, but only if the summary is
+   itself content-addressed, signed, and preserves chain verifiability.
 
 ### 6.4 Revocation
 
@@ -1952,11 +2134,24 @@ Revocations are first-class durable objects:
 ```rust
 pub struct RevocationObject {
     pub header: ObjectHeader,
+    pub zone_id: ZoneId,
     pub revoked: Vec<ObjectId>,
+    pub scope: RevocationScope,
+    pub reason_code: String,
     pub effective_at: u64,
     pub expires_at: Option<u64>,
     pub reason: String,
+    pub issued_by: PrincipalId,
     pub signature: Signature,
+}
+
+pub enum RevocationScope {
+    Capability,
+    IssuerKey,
+    NodeAttestation,
+    ZoneKey,
+    ConnectorArtifact,
+    PolicyObject,
 }
 ```
 
@@ -2004,6 +2199,57 @@ Recommended order:
 
 If multiple revocations apply, the evidence surface SHOULD identify the first decisive revocation plus
 additional corroborating revocation objects.
+
+#### 6.4.3 Revocation Freshness Policy
+
+Revocation freshness is its own doctrine, not a side effect of generic cache invalidation. Every
+implementation MUST evaluate whether its current zone frontier is fresh enough for the safety class
+of the requested action.
+
+```rust
+pub struct RevocationFreshnessPolicy {
+    pub max_head_age_secs: u64,
+    pub max_checkpoint_age_secs: u64,
+    pub max_safe_staleness_secs: u64,
+    pub allow_safe_ops_in_degraded_mode: bool,
+    pub allow_risky_ops_with_interactive_override: bool,
+    pub required_override_scope: String,
+}
+
+pub struct FreshnessFrontier {
+    pub zone_id: ZoneId,
+    pub checkpoint_seq: u64,
+    pub rev_head_seq: u64,
+    pub observed_at: u64,
+}
+```
+
+Normative freshness rules:
+
+1. Dangerous operations MUST require:
+   - a locally known `FreshnessFrontier`,
+   - `rev_head_seq` at least as new as any minimum revocation sequence bound into the token,
+     checkpoint, or request policy,
+   - `observed_at` within both `max_head_age_secs` and `max_checkpoint_age_secs`.
+2. Risky operations MUST follow the dangerous-operation rule by default.
+3. A risky operation MAY proceed with an interactive override only if:
+   - `allow_risky_ops_with_interactive_override` is true,
+   - the override approval is bound to the exact request or idempotency key,
+   - the approval references the stale frontier that is being overridden,
+   - the override is itself fresh and unrevoked.
+4. Safe operations MAY proceed in degraded mode only if
+   `allow_safe_ops_in_degraded_mode == true` and the frontier age does not exceed
+   `max_safe_staleness_secs`.
+5. If freshness is insufficient, the deny reason code MUST distinguish:
+   - `revocation.unknown_frontier`,
+   - `revocation.stale_head`,
+   - `revocation.stale_checkpoint`,
+   - `revocation.override_required`,
+   - `revocation.override_invalid`.
+6. Entering degraded mode MUST emit `revocation.degraded_mode`; leaving degraded mode MUST emit
+   `revocation.recovered`.
+7. Implementations MUST fail closed if policy requires quorum-backed revocation heads and the known
+   head cannot be verified.
 
 ### 6.5 Zone Checkpoints
 
@@ -2130,6 +2376,34 @@ The host MUST support user-facing and developer-facing control surfaces for:
 - repair and recheck initiation.
 
 These surfaces are part of the operational model, not optional CLI sugar.
+
+### 7.4.1 Host Admin-Plane Truth
+
+The host is the source of truth for admin-plane and operator-plane connector state. Tooling such as
+`fcp-cli`, `fwc`, MCP adapters, and dashboards SHOULD project host-backed truth rather than
+recomputing lifecycle or invoke semantics from manifests, local caches, or direct low-level crate
+reads.
+
+The minimum host-admin surface SHOULD include:
+
+- discovery and connector inventory,
+- connector introspection and schema catalog access,
+- preflight evaluation for invoke requests,
+- invoke and bounded batch execution,
+- health and self-check aggregation,
+- lifecycle, pin, rollout, promotion, rollback, and demotion controls,
+- explain, doctor, evidence retrieval, and replay entry points.
+
+Normative rules:
+
+1. Inventory, lifecycle state, rollout state, and active health MUST be reported by the host, not
+   inferred by clients from static artifacts alone.
+2. Host-admin preflight MUST be able to report policy, capability, freshness, approval, placement,
+   and supply-chain blockers before irreversible execution begins.
+3. Batch execution MAY share transport, scheduling, or evidence envelopes, but each member
+   operation MUST still retain individually explainable admission and outcome state.
+4. Tooling layers MUST NOT become competing semantic authorities for connector lifecycle or invoke
+   policy. They are consumers of host truth.
 
 ## 8. Connector Application Model
 
@@ -2417,6 +2691,7 @@ The standard connector surface includes:
 | `capabilities` | Return capability catalog and declared policy assumptions |
 | `configure` | Apply configuration or provisioning results |
 | `simulate` | Perform bounded preflight evaluation without side effects |
+| `self_check` | Run connector-local readiness and dependency diagnostics |
 | `invoke` | Execute one operation under the supplied authority context |
 | `subscribe` | Open a streaming or replayable event surface |
 | `ack` / `nack` | Advance replay state and delivery guarantees |
@@ -2492,20 +2767,29 @@ Representative FCPC message families include:
 
 | Family | Direction | Purpose |
 |--------|-----------|---------|
+| `discovery` | Operator ↔ Host | Enumerate connectors, lifecycle state, health, and cacheable inventory metadata |
+| `introspect` | Operator ↔ Host | Retrieve host-backed connector catalog, schemas, safety tiers, and replay hints |
+| `preflight` | Operator ↔ Host | Evaluate invoke viability before execution and report blockers deterministically |
 | `handshake` | Host ↔ Connector | Establish authenticated live session |
 | `configure` | Host → Connector | Apply configuration or provisioning result |
 | `simulate` | Host → Connector | Bounded preflight without side effects |
+| `self_check` | Host ↔ Connector | Probe connector-local readiness, dependencies, and remediation hints |
 | `invoke` | Host → Connector | Execute operation |
+| `batch` | Operator ↔ Host | Submit bounded multi-operation work under one host scheduling/evidence context |
 | `result` | Connector → Host | Return result or outcome |
 | `subscribe` | Host → Connector | Open event stream |
 | `event` | Connector → Host | Deliver replayable or ephemeral events |
 | `ack` / `nack` | Host → Connector | Advance or reject replay state |
 | `health` | Host ↔ Connector | Health and degradation surface |
 | `checkpoint` | Host ↔ Connector | Externalize or probe resumable state |
+| `lifecycle` / `rollout` | Operator ↔ Host | Pin, promote, demote, rollback, and inspect staged activation state |
 | `explain` / `evidence` | Host ↔ Connector | Retrieve explanation and durable evidence |
 | `doctor` / `replay` | Operator ↔ Host | Diagnostics and replay surfaces |
 
 FCPS message families include object fetch, chunk fetch, symbol request, symbol delivery, and repair coordination.
+
+Transport packaging MAY vary across subprocess stdio, local sockets, or remote links, but the
+semantic message families above remain the stable contract the host and connector must implement.
 
 ### 9.1.3 Symbol Request Bounding (NORMATIVE)
 
@@ -2965,9 +3249,81 @@ FCPS exists for:
 RaptorQ symbolization is RECOMMENDED for large or lossy transfers. Small objects MAY be distributed
 directly without symbolization when policy and transport conditions make that more efficient.
 
-### 9.8.1 FCPS Frame Format
+### 9.8.1 Symbol Envelope
 
-Representative frame fields include:
+The first-class record on the symbol plane is the `SymbolEnvelope`. FCPS datagrams and streams are
+transport packaging; the envelope is the authenticated, replay-aware record for one symbol slot of
+one durable object or chunk object.
+
+```rust
+pub struct SymbolEnvelope {
+    pub object_id: ObjectId,
+    pub esi: u32,
+    pub k: u16,
+    pub symbol_len: u16,
+    pub zone_id: ZoneId,
+    pub zone_key_id: [u8; 8],
+    pub epoch_id: EpochId,
+    pub source_node: NodeId,
+    pub sender_instance_id: u64,
+    pub frame_seq: u64,
+    pub ciphertext: Vec<u8>,
+    pub auth_tag: [u8; 16],
+}
+```
+
+Normative mental model:
+
+1. The canonical durable unit is the object identified by `object_id`.
+2. A `SymbolEnvelope` binds one symbol slot, identified by `esi`, into that object's encoding set.
+3. `(object_id, esi)` identifies a semantic symbol slot. Retransmissions MAY repeat a slot, but they
+   MUST NOT silently change `k`, `zone_id`, or `zone_key_id`.
+4. For chunked objects, symbolization applies to the chunk object's `object_id`, not to the parent
+   chunk manifest's `object_id`.
+5. Any retained symbol store MUST preserve envelope metadata, not merely raw ciphertext bytes.
+
+#### 9.8.1.1 Symbol-Set Identity and Object Binding
+
+Implementations MUST treat the following tuple as the encoding-set identity:
+
+```text
+(object_id, zone_id, zone_key_id)
+```
+
+Within one encoding set:
+
+1. `k` MUST be constant.
+2. `symbol_len` SHOULD be constant except where the final source symbol requires a shorter payload by
+   construction.
+3. A node MUST reject an envelope if its binding conflicts with a previously accepted object
+   descriptor, chunk manifest, or other accepted envelope for the same encoding set.
+4. A node MUST NOT merge envelopes across different `zone_key_id` values, even if `object_id`
+   matches, because key rotation changes the authenticated context.
+
+#### 9.8.1.2 Per-Symbol Authentication and Acceptance Rules
+
+Per-symbol authentication is normative:
+
+1. Key selection MUST be driven by `zone_id` and `zone_key_id`.
+2. Sender-specific subkeys MUST be derived from `(source_node, sender_instance_id)`.
+3. Nonces MUST be derived deterministically from `(frame_seq, esi)` under the selected algorithm.
+4. AEAD associated data MUST bind at minimum:
+   - `object_id`,
+   - `esi`,
+   - `k`,
+   - the canonical zone hash,
+   - `zone_key_id`,
+   - `epoch_id`.
+5. A node MUST reject the envelope if:
+   - the zone binding is unknown,
+   - `zone_key_id` is not present in the relevant keyring,
+   - the AEAD authentication check fails,
+   - the encoding-set identity conflicts with accepted state,
+   - the surrounding session or replay window rejects `frame_seq`.
+
+### 9.8.2 FCPS Frame Format
+
+An FCPS frame carries one or more symbol envelopes plus frame-level replay and authentication state.
 
 ```rust
 pub struct FcpsFrame {
@@ -2976,20 +3332,21 @@ pub struct FcpsFrame {
     pub zone_id_hash: [u8; 32],
     pub session_id: [u8; 16],
     pub seq: u64,
-    pub object_id: ObjectId,
-    pub chunk_or_symbol_index: u32,
-    pub payload: Vec<u8>,
-    pub auth_tag: [u8; 16],
+    pub record_count: u16,
+    pub records: Vec<SymbolEnvelope>,
+    pub session_auth_tag: [u8; 16],
 }
 ```
 
 Normative rules:
 
-1. AEAD associated data MUST bind version, flags, zone binding, session identity, and sequence.
+1. Frame-level authentication data MUST bind `version`, `flags`, `zone_id_hash`, `session_id`,
+   `seq`, and `record_count`.
 2. Replay windows MUST be enforced per authenticated session.
-3. Payload sizes MUST be bounded to stay within negotiated transport limits.
+3. `record_count` MUST match the number of encoded envelopes.
+4. Payload sizes MUST be bounded to stay within negotiated transport limits.
 
-#### 9.8.1.1 MTU Safety and Frame Size Limits
+#### 9.8.2.1 MTU Safety and Frame Size Limits
 
 FCP MUST avoid IP fragmentation in normal operation.
 
@@ -3011,7 +3368,7 @@ Recommended interoperability defaults:
 The sender MUST choose `symbol_size`, `symbol_count`, and envelope overhead such that the fully
 authenticated datagram remains within the negotiated maximum.
 
-#### 9.8.1.2 Decode Status and Symbol Acknowledgement
+#### 9.8.2.2 Decode Status and Symbol Acknowledgement
 
 Receivers SHOULD provide bounded feedback so that senders can stop early, target repairs, and avoid
 unnecessary symbol flood.
@@ -3038,7 +3395,7 @@ Normative rules:
 2. `missing_hint`, if present, MUST NOT exceed the responder's configured bound.
 3. Senders SHOULD stop transmitting once a valid `SymbolAck` or equivalent completion proof is received.
 
-### 9.8.2 Frame Flags
+### 9.8.3 Frame Flags
 
 Representative flags include:
 
@@ -3050,7 +3407,7 @@ Representative flags include:
 
 Unknown critical flags MUST cause rejection.
 
-#### 9.8.2.1 Flag Handling and Parsing Limits
+#### 9.8.3.1 Flag Handling and Parsing Limits
 
 Normative parsing rules:
 
@@ -3059,7 +3416,7 @@ Normative parsing rules:
 3. `CONTROL_PLANE` and `CHECKPOINT_ARTIFACT` MUST NOT be set together unless the encapsulated object is itself a checkpoint-control artifact defined by schema.
 4. `REPAIR_SYMBOL` MUST NOT be used to bypass normal peer-budget accounting.
 
-### 9.8.3 Multipath Delivery
+### 9.8.4 Multipath Delivery and Source Diversity
 
 FCPS delivery MAY aggregate symbols or chunks from multiple peers. Implementations SHOULD:
 
@@ -3068,7 +3425,15 @@ FCPS delivery MAY aggregate symbols or chunks from multiple peers. Implementatio
 - stop delivery when reconstruction or requested budget is satisfied,
 - record repair or rebalance actions when they materially affect availability policy.
 
-### 9.8.4 Symbol-Plane Admission Control
+Convergence guidance:
+
+1. Multipath selection SHOULD prefer symbol sets that improve both coverage and source diversity.
+2. A sender MUST stop sending once a valid completion proof is received or the agreed budget is
+   exhausted.
+3. A repair planner MUST treat diversity and concentration policy as separate from raw
+   reconstructability; an object can be available but still in violation of distribution policy.
+
+### 9.8.5 Symbol-Plane Admission Control
 
 The symbol plane is a major amplification and resource-exhaustion surface. Implementations MUST bound:
 
@@ -3099,7 +3464,7 @@ Normative anti-amplification rule:
 2. Unauthenticated or low-trust requests MUST be subject to lower caps.
 3. Expensive decode work MUST be accounted against the requester's budget or rejected.
 
-### 9.8.5 Connector Artifact Distribution
+### 9.8.6 Connector Artifact Distribution
 
 FCPS SHOULD be usable for durable distribution of connector binaries, WASI modules, manifests, and
 attestation bundles once they are admitted into trusted registry or mirror state.
@@ -3604,6 +3969,61 @@ Implementations SHOULD support predictive pre-staging of:
 Pre-staging MUST remain policy-constrained. It MUST NOT materialize secrets or durable artifacts on
 nodes that are not eligible for the relevant zone or execution policy.
 
+#### 11.5.4 Distributed State Mechanics
+
+Coverage and repair decisions MUST be made against a concrete distributed-state view rather than raw
+byte counts or a single optimistic availability bit.
+
+```rust
+pub struct DistributedState {
+    pub object_id: ObjectId,
+    pub k: u32,
+    pub unique_symbols: u32,
+    pub node_symbols: HashMap<NodeId, BTreeSet<u32>>,
+    pub coverage_bps: u32,
+    pub distinct_nodes: u16,
+    pub max_node_fraction_bps: u16,
+    pub is_available: bool,
+    pub repair_consequence: RepairConsequence,
+}
+
+pub enum RepairConsequence {
+    None,
+    RebalanceRecommended,
+    RepairRequired,
+    PlacementViolation,
+    EmergencyUnavailable,
+}
+```
+
+Normative rules:
+
+1. `coverage_bps` MUST be computed as:
+
+```text
+min(unique_symbols, k) * 10000 / k
+```
+
+2. `is_available` MUST be true only if:
+   - `coverage_bps >= 10000`, and
+   - any required checkpoint or policy metadata needed to use the object is also available.
+3. `max_node_fraction_bps` MUST be computed from the largest single-node contribution divided by the
+   total distinct accepted symbols contributing to the current view.
+4. An object MAY be available while still violating placement policy because concentration or source
+   diversity is too poor. This MUST map to `RebalanceRecommended` or `PlacementViolation`, not to a
+   false claim of health.
+5. If `coverage_bps < 10000`, the result MUST be either `RepairRequired` or `EmergencyUnavailable`
+   depending on whether policy-eligible repair sources remain.
+
+Representative outcomes:
+
+| `coverage_bps` | `max_node_fraction_bps` | Interpretation | Consequence |
+|----------------|-------------------------|----------------|-------------|
+| `9500` | `7000` | not reconstructable | `RepairRequired` |
+| `12000` | `9200` | reconstructable but dangerously concentrated | `RebalanceRecommended` |
+| `16000` | `4200` | reconstructable and well distributed | `None` |
+| `10000` | `10000` after peer revocation | technically reconstructable on one node only | `PlacementViolation` |
+
 ### 11.6 Tailscale Integration
 
 Tailscale is the reference substrate for:
@@ -3865,39 +4285,129 @@ Repair SHOULD trigger when:
 3. diversity falls below zone or object requirements,
 4. offline-availability promises would be violated without intervention.
 
-### 11.6.7 MeshNode Responsibilities
+### 11.6.7 MeshNode Model
 
-The combined host-plus-mesh implementation SHOULD maintain a conceptual `MeshNode` surface even if
-the runtime is split across crates or services.
+The combined host-plus-mesh implementation SHOULD maintain a concrete conceptual `MeshNode` surface
+even if the runtime is split across crates or services.
+
+```rust
+pub struct FrontierRef {
+    pub object_id: ObjectId,
+    pub seq: u64,
+    pub observed_at: u64,
+}
+
+pub struct MeshNode {
+    pub identity: MeshIdentity,
+    pub trust_anchors: TrustAnchors,
+    pub zone_keyrings: HashMap<ZoneId, ZoneKeyRing>,
+    pub checkpoint_frontier: HashMap<ZoneId, FrontierRef>,
+    pub revocation_frontier: HashMap<ZoneId, FrontierRef>,
+    pub audit_frontier: HashMap<ZoneId, FrontierRef>,
+    pub object_store: ObjectStore,
+    pub symbol_store: SymbolStore,
+    pub gossip: MeshGossip,
+    pub lease_coordinator: LeaseCoordinator,
+    pub planner: PlacementPlanner,
+    pub connector_supervisor: ConnectorSupervisor,
+}
+```
+
+Normative responsibilities of the conceptual `MeshNode`:
+
+1. Own the locally enforced trust anchors, zone keyrings, and frontier state for the zones it is
+   eligible to serve.
+2. Verify every token, holder proof, attestation, checkpoint, revocation head, and delegated invoke
+   before local execution or further delegation.
+3. Admit objects and symbols only through bounded, authenticated, policy-aware paths.
+4. Maintain the node-local storage and repair view used to satisfy placement and offline-availability
+   promises.
+5. Execute locally only under an explicit narrowed context; delegated requests MUST be re-verified by
+   the recipient node and MUST NOT inherit ambient trust from the sender.
+
+### 11.6.8 Gossip and Anti-Entropy Mechanics
+
+Gossip is a bounded anti-entropy protocol, not a blind rebroadcast fabric.
+
+```rust
+pub struct PeerSummary {
+    pub from: NodeId,
+    pub as_of_epoch: EpochId,
+    pub checkpoint_heads: HashMap<ZoneId, u64>,
+    pub audit_heads: HashMap<ZoneId, u64>,
+    pub revocation_heads: HashMap<ZoneId, u64>,
+    pub object_filter_digest: [u8; 32],
+    pub symbol_filter_digest: [u8; 32],
+    pub iblt: Vec<u8>,
+    pub coverage_digest: [u8; 32],
+    pub signature: Signature,
+}
+
+pub enum PeerLiveness {
+    Unknown,
+    Warm,
+    Healthy,
+    Suspect,
+    Quarantined,
+}
+```
+
+Normative anti-entropy procedure:
+
+1. Peers MUST exchange signed summaries containing frontier sequences before requesting bulk object or
+   symbol repair.
+2. If frontier sequences differ, nodes MUST reconcile in this order:
+   - checkpoint heads,
+   - revocation heads,
+   - audit heads,
+   - referenced policy objects,
+   - ordinary objects and symbol gaps.
+3. XOR-filter or IBLT output is only a hint. It MUST NOT override signed frontier objects.
+4. Peer state MUST degrade from `Healthy` to `Suspect` or `Quarantined` if summaries are invalid,
+   inconsistent, or budget-abusive.
+5. Reconciliation work MUST be charged against peer budgets and MUST be interruptible.
+
+Convergence expectations:
+
+1. Under eventual authenticated connectivity among honest nodes, accepted frontier sequences SHOULD
+   converge before full symbol coverage converges.
+2. A node MUST prefer frontier convergence over aggressive payload repair when budgets are tight.
+3. Nodes SHOULD back off from peers that repeatedly advertise stale or conflicting summaries until a
+   newer signed summary appears.
+
+### 11.6.9 MeshNode Responsibilities
 
 Representative responsibilities:
 
 - verify incoming token, attestation, and revocation evidence,
 - evaluate provenance and approval requirements,
 - select or confirm execution target,
-- coordinate lease acquisition,
+- coordinate lease acquisition and renewal,
 - manage object admission, repair, and checkpoint interaction,
 - delegate to local or remote connector execution,
-- emit receipts, audit events, and operator-facing evidence.
+- emit receipts, audit events, and operator-facing evidence,
+- surface degraded-mode, fork, and concentration problems to operator tooling.
 
-### 11.6.8 MeshNode Request Flow
+### 11.6.10 MeshNode Request Flow
 
 The following conceptual flow captures the intended order of mesh-side enforcement:
 
 ```text
-1. verify token and holder proof
-2. verify revocation and checkpoint freshness
-3. evaluate provenance, taint, and approval requirements
+1. verify token, holder proof, and caller binding
+2. verify revocation frontier and checkpoint frontier freshness
+3. evaluate provenance, taint, resource-sink classification, and approval requirements
 4. acquire or validate lease if required
 5. run placement logic or confirm current placement
-6. execute locally or delegate to chosen node
-7. persist receipt, checkpoint, and audit evidence as required
+6. emit required pre-effect decision evidence for risky or dangerous work
+7. execute locally or delegate to chosen node
+8. persist operation receipt, checkpoint movement, and terminal audit evidence
 ```
 
 This order matters because:
 
 - expensive provider-side work should not happen before token, freshness, and approval checks,
 - placement should not occur before we know the action is actually authorized,
+- pre-effect evidence must exist before irreversible external effects,
 - receipts and audit artifacts should close the loop immediately after execution.
 
 ### 11.7 Threat Model, Diversity, and Degraded Operation
@@ -4537,7 +5047,19 @@ High-risk bundles SHOULD be retained longer than ordinary success bundles, subje
 
 ### 13.6 Audit Chain Requirements
 
-Audit chains SHOULD capture at minimum:
+Section 6.3 defines the audit object model. This section defines the minimum operator-visible and
+conformance-visible contract around that model.
+
+Audit surfaces MUST expose, per zone:
+
+- current `audit_head` object id and `head_seq`,
+- `AuditHead.status`,
+- `coverage_bps`,
+- quorum required vs achieved,
+- last observed degraded-mode transition,
+- whether an unresolved fork is present.
+
+Audit chains MUST capture at minimum:
 
 - secret access,
 - high-risk capability use,
@@ -4545,10 +5067,29 @@ Audit chains SHOULD capture at minimum:
 - zone crossings,
 - checkpoint acceptance and rejection,
 - lease conflicts,
-- supply-chain policy failures.
+- revocation degraded-mode entry and recovery,
+- supply-chain policy failures,
+- repair or rebalance operations that materially affect availability policy.
+
+Standard event-type prefixes SHOULD be used for interoperability and operator familiarity:
+
+- `decision.*`
+- `execution.*`
+- `secret.*`
+- `approval.*`
+- `zone.*`
+- `lease.*`
+- `checkpoint.*`
+- `revocation.*`
+- `artifact.*`
+- `repair.*`
+- `incident.*`
 
 For zones using quorum-backed audit heads, implementations MUST refuse to advance the head when
 required quorum is absent unless explicit degraded-mode policy says otherwise.
+
+If the head is advanced in degraded mode, operator surfaces MUST say why and MUST name the missing
+coverage or quorum condition.
 
 ### 13.6.1 Decision Receipt Emission Rules
 
@@ -4564,7 +5105,9 @@ Implementations SHOULD emit `DecisionReceipt` for:
 - placement denial,
 - degraded-mode placement acceptance,
 - checkpoint rejection,
-- lease conflict resolution.
+- lease conflict resolution,
+- revocation stale-frontier denial,
+- repair refusal caused by policy ceilings.
 
 ### 13.7 Security Model
 
@@ -4824,12 +5367,22 @@ Harness output SHOULD make it obvious which objects, logs, and reason codes were
 
 ### 14.4 Golden Vectors and Schemas
 
-The project MUST ship:
+The project MUST ship a literal interoperability artifact set. At minimum, that set includes:
 
-- deterministic schemas or CDDL for normative durable objects and FCPC frames,
-- golden byte vectors for canonical object encoding and signature verification,
-- golden decision and receipt vectors for explainability,
-- replay fixtures for checkpoint and failover semantics.
+- deterministic CDDL or equivalent schemas for normative durable objects and FCPC or FCPS frames,
+- JSON Schema inventory for adjunct artifacts such as FZPF and structured log records,
+- golden byte vectors for canonical object encoding, identifier derivation, and signature
+  verification,
+- golden decision, receipt, audit-event, revocation-head, and checkpoint vectors,
+- replay fixtures for checkpoint, failover, and stale-frontier semantics,
+- transcript fixtures for FCPC sessions and FCPS symbol exchange.
+
+Every shipped artifact MUST round-trip through the reference implementation such that:
+
+1. it parses successfully,
+2. canonical re-encoding reproduces identical bytes,
+3. documented object identifiers and signatures verify,
+4. reason-code or explain projections match the golden expectation.
 
 Detailed appendix material MAY define these vectors out-of-line, but the requirement to ship them
 is normative.
@@ -4848,11 +5401,13 @@ Any such profile claims MUST be explicit and test-backed.
 The reference implementation SHOULD ship:
 
 - schema or CDDL files for normative objects,
-- unit-test fixture corpora for identifiers, tokens, checkpoints, and leases,
+- fixture corpora for identifiers, tokens, checkpoints, audit heads, and leases,
+- FCPS `SymbolEnvelope` and decode-status fixtures,
 - replayable FCPC/FCPS transcript fixtures,
-- adversarial fixture sets for malformed or stale objects,
+- adversarial fixture sets for malformed, stale, forked, or quota-abusive objects,
 - end-to-end scripts with expected evidence outputs,
-- structured-log golden samples for key lifecycle and error paths.
+- structured-log golden samples for key lifecycle and error paths,
+- explain-output golden samples for major deny families.
 
 ### 14.4.3 Reference Testkit Expectations
 
@@ -4862,6 +5417,7 @@ The project SHOULD ship shared testkit utilities for:
 - mock capability and approval issuance,
 - fake registry and mirror sources,
 - deterministic FCPC/FCPS transcript builders,
+- deterministic audit-head and revocation-frontier builders,
 - evidence-bundle assertions,
 - structured-log assertions with stable reason codes.
 
@@ -4930,11 +5486,35 @@ pub struct RaptorQConfig {
     pub decode_timeout_ms: u64,
     pub max_chunk_threshold: u32,
     pub chunk_size: u32,
+    pub max_symbols_per_object: u32,
+    pub max_parallel_decodes: u16,
 }
 ```
 
 RaptorQ is not the right default for every control-plane interaction. FCP3 explicitly keeps the live
 FCPC plane for low-latency interaction while reserving symbol and chunk machinery for durable transport.
+
+Recommended interoperability defaults:
+
+| Field | Recommended Default | Meaning |
+|-------|---------------------|---------|
+| `symbol_size` | `1024` | fit within the baseline `1200`-byte datagram budget once envelope overhead is included |
+| `repair_ratio_bps` | `2500` | start with 25% repair overhead before targeted re-requesting |
+| `max_object_size` | `268_435_456` | 256 MiB single-object ceiling before higher-level chunk strategies are required |
+| `decode_timeout_ms` | `30000` | per-object bounded decode budget |
+| `max_chunk_threshold` | `4_194_304` | prefer chunk manifests once payloads exceed 4 MiB |
+| `chunk_size` | `1_048_576` | 1 MiB chunk size for large durable artifacts |
+| `max_symbols_per_object` | `262144` | upper bound for admission and memory planning |
+| `max_parallel_decodes` | `4` | default anti-DoS cap for concurrent decode work |
+
+Operational notes:
+
+1. Small control-plane artifacts SHOULD avoid symbolization unless lossy transport or resumability
+   clearly justify it.
+2. Large artifacts SHOULD be chunked before symbolization so repair can target only the missing
+   chunk objects.
+3. `repair_ratio_bps` SHOULD be treated as a starting point, not as permission to flood the mesh
+   once decode feedback becomes available.
 
 ### Appendix C: Reference Connector Patterns
 
@@ -4960,6 +5540,22 @@ The reference SDK stack SHOULD separate:
 - FCPC/FCPS transport helpers,
 - conformance fixtures and replay harnesses,
 - operator-surface helpers for explain, doctor, and evidence retrieval.
+
+Representative reference-surface inventory:
+
+| Surface | Expected Responsibilities |
+|---------|---------------------------|
+| `fcp-core` | identifiers, zone model, provenance, receipts, checkpoints, revocation, leases |
+| `fcp-crypto` | canonical hashing, Ed25519, X25519, HPKE, COSE, key-id derivation, zeroization helpers |
+| `fcp-cbor` | deterministic CBOR encode or decode and schema binding helpers |
+| `fcp-protocol` | FCPC, FCPS, session negotiation, replay windows, `SymbolEnvelope` encode or decode |
+| `fcp-sdk` | connector app contract, runtime context, state helpers, operation declarations |
+| `fcp-conformance` | schemas, interop harnesses, vectors, transcript fixtures, explain assertions |
+| `fcp-testkit` | deterministic mocks, approval or token builders, replay fixtures, evidence assertions |
+| `fcp-cli` | `explain`, `doctor`, audit views, repair and verification operator workflows |
+
+The SDK surface MUST NOT depend on compatibility shims for legacy runtime models. The reference stack
+should expose the FCP3-native concepts directly.
 
 ### Appendix E: Conformance Checklist
 
@@ -4993,10 +5589,25 @@ At minimum, the project SHOULD ship golden vectors for:
 - object identifier derivation,
 - capability token encoding and verification,
 - HPKE sealed boxes,
+- audit-event and audit-head publication,
+- revocation-head freshness decisions,
+- `SymbolEnvelope` encoding, authentication, and replay rejection,
 - FCPC frame parsing and replay rejection,
 - lease fencing decisions,
 - checkpoint freshness and resume acceptance/rejection,
 - decision receipt rendering.
+
+Representative vector families:
+
+| Family | Required Cases |
+|--------|----------------|
+| Canonical objects | `ObjectHeader`, `DecisionReceipt`, `AuditEvent`, `AuditHead`, `RevocationHead`, `ZoneCheckpoint` |
+| Authority | allow, deny, override-required, stale-frontier, declassification-required |
+| Symbol plane | valid envelope, bad key id, bad auth tag, inconsistent `k`, replayed `frame_seq` |
+| FCPC | valid invoke, malformed frame, replayed frame, wrong session binding |
+| Leases | grant, renewal, stale fence, takeover after expiry |
+| Resume | resume accepted, resume denied because receipt already committed, checkpoint rollback rejection |
+| Explain | stable human-readable projections for the main deny families |
 
 ### Appendix G: Transport Priority and Placement Hints
 
@@ -5153,14 +5764,26 @@ pub struct OperationReceipt {
 
 pub struct AuditEvent {
     pub header: ObjectHeader,
+    pub correlation_id: [u8; 16],
     pub trace: TraceContext,
     pub zone_id: ZoneId,
+    pub actor: PrincipalId,
     pub connector_id: Option<ConnectorId>,
     pub operation_id: Option<OperationId>,
+    pub event_class: AuditEventClass,
     pub event_type: String,
+    pub disposition: AuditDisposition,
+    pub subject_refs: Vec<AuditSubjectRef>,
+    pub decision_receipt_id: Option<ObjectId>,
+    pub operation_receipt_id: Option<ObjectId>,
+    pub checkpoint_id: Option<ObjectId>,
+    pub lease_id: Option<ObjectId>,
+    pub revocation_head_id: Option<ObjectId>,
+    pub summary: AuditSummary,
     pub prev: Option<ObjectId>,
     pub seq: u64,
     pub occurred_at: u64,
+    pub degraded_mode: bool,
     pub signature: Signature,
 }
 
@@ -5609,6 +6232,15 @@ Recommended repair loop:
 4. emit repair evidence when placement policy materially changes,
 5. update planner and offline-availability views after repair.
 
+Suggested threshold interpretation:
+
+| Condition | Meaning | Recommended Action |
+|-----------|---------|--------------------|
+| `coverage_bps < 10000` | object not reconstructable | targeted repair immediately |
+| `coverage_bps >= 10000` and `max_node_fraction_bps` exceeds policy | available but dangerously concentrated | rebalance before next risky placement decision |
+| diversity below zone minimum | availability claim is too fragile | prefer new eligible nodes over additional symbols on existing nodes |
+| repair source set exhausted | no policy-eligible repair path remains | surface `EmergencyUnavailable` and operator intervention |
+
 Suggested operator questions:
 
 - is the object reconstructable now,
@@ -5726,6 +6358,192 @@ Recommended artifact-transfer preference order:
 3. multiple trusted peers contributing chunks or symbols,
 4. upstream registry fetch only if still required by policy.
 
+### Appendix AJ: Reference Crate Graph and Ownership Boundaries
+
+This appendix is not a wire-format contract, but it is the reference architectural boundary for the
+FCP3 workspace. The point is to prevent FCP3 from collapsing back into a convenience-driven
+monolith where the same concept is half-owned by `fcp-core`, half-owned by the host, and partially
+redeclared in the SDK. A concept gets one long-term owner. Re-exports are fine; duplicate authority is not.
+
+#### AJ.1 Dependency Law
+
+The reference workspace SHOULD follow these rules:
+
+1. Production dependencies point inward toward narrower semantic ownership. Outward or sideways convenience dependencies are architecture debt.
+2. Connector crates in `connectors/*` depend on `fcp-sdk`, connector-specific support crates, and leaf utility crates; they MUST NOT depend on `fcp-host`.
+3. `fcp-host` depends on execution, policy, evidence, transport, manifest, storage, mesh, verification, and sandbox crates; it MUST NOT become the place where protocol semantics are redefined.
+4. `fcp-sdk` depends on the same semantic core crates needed to author connectors, but it MUST NOT own host-only lifecycle or admin-plane concepts.
+5. Test and fixture crates (`fcp-conformance`, `fcp-testkit`) may depend outward on the full stack; production crates MUST NOT depend back on test harnesses.
+6. Temporary quarantine crates MAY exist during cutover, but each one MUST have an explicit deletion target and MUST NOT become the new semantic center.
+
+#### AJ.2 Target Reference Graph
+
+The long-term workspace decomposition SHOULD converge toward the following graph:
+
+```text
+fcp-crypto
+    │
+    ├── fcp-kernel      (Cx, Scope, Budget, Outcome, effect staging, drain, supervision contracts)
+    ├── fcp-policy      (zones, provenance, capability narrowing, approvals, decision evaluation)
+    └── fcp-evidence    (receipts, audit chain, revocation, checkpoints, explainable artifacts)
+
+fcp-kernel + fcp-policy + fcp-evidence
+    │
+    ├── fcp-protocol    (FCPC/FCPS framing, session auth, ABI envelopes, replay/rekey rules)
+    ├── fcp-manifest    (connector declarations, interface hash, provisioning recipes, isolation intent)
+    ├── fcp-store       (object store, symbol store, quarantine, repair, retention)
+    ├── fcp-mesh        (node identity, placement planning, leases, failover, repair coordination)
+    ├── fcp-registry    (artifact source selection, verification, mirroring, promotion)
+    └── fcp-sandbox     (execution-form enforcement, WASI/native isolation, egress mediation)
+
+those runtime/service crates
+    │
+    ├── fcp-host        (root application, activation planning, orchestration, admin/control surfaces)
+    ├── fcp-sdk         (connector authoring APIs, archetype helpers, checkpoint/state adapters)
+    ├── fcp-cli         (operator-oriented platform CLI)
+    ├── fwc             (connector/operator UX built on host truth)
+    ├── fcp-conformance (profiles, vectors, property/e2e harnesses)
+    └── fcp-testkit     (fixture and mock support for connectors and host tests)
+
+leaf support and domain crates
+    │
+    ├── fcp-oauth
+    ├── fcp-google-discovery
+    ├── provider-specific helper crates
+    └── connectors/*
+```
+
+This graph is intentionally opinionated:
+
+- execution semantics are not owned by transport code,
+- policy semantics are not owned by the host,
+- evidence semantics are not hidden inside storage or logging crates,
+- manifest semantics are not spread across host and connector implementations,
+- connectors see the SDK surface, not host internals.
+
+#### AJ.3 Ownership Matrix
+
+| Crate | Owns | Must not own | Why |
+|-------|------|--------------|-----|
+| `fcp-crypto` | Key types, signatures, HPKE, canonical crypto helpers | zone policy, manifests, connector runtime state | Crypto should stay reusable and semantically narrow. |
+| `fcp-kernel` | `Cx`, `Scope`, `Budget`, `Outcome`, cancellation, drain, effect staging, supervision vocabulary | FCPC/FCPS codecs, manifest parsing, supply-chain logic | The execution contract is the stable center of FCP3. |
+| `fcp-policy` | zones, provenance, capability narrowing, approval/sanitizer rules, decision evaluation | audit persistence, object storage, host lifecycle | Policy needs one home so allow/deny semantics do not drift. |
+| `fcp-evidence` | decision receipts, operation receipts, audit chain, revocation, checkpoints, evidence-bundle schemas | live transport state, connector business logic | Durable proof artifacts should not be mixed with execution or storage plumbing. |
+| `fcp-protocol` | FCPC/FCPS frames, session handshake/auth, ABI envelopes, replay/rekey mechanics | policy decisions, manifests, connector archetype helpers | Byte-level interoperability belongs here and nowhere else. |
+| `fcp-manifest` | connector declarations, interface hash inputs, provisioning recipe schema, isolation/storage intent | host admin RPCs, transport sessions, connector runtime context | Manifests are compile-time/activation contracts, not runtime orchestration. |
+| `fcp-store` | object store, symbol store, quarantine, retention, repair, coverage accounting | supply-chain trust policy, zone evaluation, connector SDK ergonomics | Storage must stay durable and mechanical rather than policy-aware. |
+| `fcp-mesh` | mesh identity, placement planning, leases, mobility/failover coordination, repair orchestration | connector authoring helpers, host admin UX | Placement and topology logic should not leak into connector code. |
+| `fcp-registry` | registry source model, verification pipeline, mirror promotion, artifact trust reports | host lifecycle transitions, generic object-store semantics | Artifact trust and acquisition are distinct from activation. |
+| `fcp-sandbox` | native/WASI execution-form enforcement, egress mediation, credential injection boundaries | connector business operations, policy evaluation | Isolation is an enforcement mechanism, not a semantics crate. |
+| `fcp-host` | root application, activation planning, supervision, lifecycle orchestration, admin/control surfaces | foundational protocol or policy truth | The host composes lower layers; it must not redefine them. |
+| `fcp-sdk` | connector-facing authoring surface, archetype helpers, checkpoint/state adapters, testable ergonomics | host-only admin workflows, registry policy, mesh placement | Connector authors need a stable, host-independent surface. |
+| `fcp-conformance` / `fcp-testkit` | vectors, fixtures, replay harnesses, property/e2e support | production runtime dependencies | Verification should be powerful but non-invasive. |
+| `fcp-cli` / `fwc` | operator and agent UX over host/platform truth | duplicated host semantics or connector-local hacks | CLIs should project the system, not fork it. |
+
+#### AJ.4 Workspace Evidence Snapshot
+
+The current workspace still exhibits the ownership blur this appendix is trying to eliminate.
+As of the repository state reflected by the current `Cargo.toml` files and crate roots:
+
+- `fcp-host`, `fcp-sdk`, `fcp-protocol`, `fcp-manifest`, `fcp-store`, and `fwc` all depend directly on `fcp-core`.
+- `fcp-host`, `fcp-sdk`, and `fcp-store` still depend on `fcp-async-core`, which is acceptable only as temporary migration scaffolding.
+- `fcp-core` currently re-exports audit, capability, checkpoint, connector, connector state, credential, enrollment, error, event, health, lease, lifecycle, object, operation, policy, posture, protocol, provenance, provisioning, quorum, rate limiting, release, revocation, secret, supply-chain, telemetry, and zone-key surfaces from one bucket.
+- `fwc` currently depends on `fcp-core` and `fcp-manifest` directly instead of projecting host truth through stable host-backed schemas and RPC surfaces.
+
+This is exactly the pattern FCP3 must remove: too many crates reach into one omnibus semantic crate,
+which makes it easy for policy, evidence, execution, and UX concerns to drift back into duplicated
+or convenience-driven ownership.
+
+#### AJ.5 Current Module Migration Map
+
+The crate graph above is only useful if contributors can map today's modules into tomorrow's owners.
+The following table is the reference migration map for the current workspace:
+
+| Current surface | FCP3 owner | Migration note |
+|-----------------|------------|----------------|
+| `fcp-core::{error, health, lifecycle}` | `fcp-kernel` | Failure classes, liveness/readiness vocabulary, and lifecycle state belong with execution semantics rather than a generic core bucket. |
+| `fcp-core::{capability, policy, provenance, credential, secret, zone_keys, provisioning}` | `fcp-policy` | These modules define authority, approval, taint, zone, and secret-access rules. Provisioning recipes may be described by `fcp-manifest`, but allow/deny and secret-use semantics belong in policy. |
+| `fcp-core::{audit, revocation, checkpoint, operation}` | `fcp-evidence` | Audit chain, revocation heads, checkpoints, `OperationIntent`, and `OperationReceipt` are durable proof surfaces and must share one evidence owner. |
+| `fcp-core::{protocol, event}` | `fcp-protocol` | Live ABI envelopes, stream/event message shapes, and transport-facing request/response projections belong with FCPC/FCPS semantics. |
+| `fcp-core::{connector, connector_descriptors, tool_schema}` | split between `fcp-sdk` and `fcp-manifest` | Connector author contracts and runtime-facing helper types belong in `fcp-sdk`; declarative descriptor and schema inputs used for activation/interface hashing belong in `fcp-manifest`. |
+| `fcp-core::{connector_state, crdt}` | split between `fcp-store` and `fcp-sdk` | Durable state object semantics, snapshots, and merge rules belong with storage/state machinery; author ergonomics and adapters belong in the SDK. |
+| `fcp-core::{lease, enrollment, posture, quorum}` | `fcp-mesh` | Device attestation, lease fencing, quorum assumptions, and mesh enrollment are topology and coordination concerns, not generic core helpers. |
+| `fcp-core::{object}` | split between `fcp-store`, `fcp-policy`, and `fcp-evidence` | The current `object.rs` is a mixed abstraction. Object materialization/retention belongs in storage, while typed policy/evidence payload contracts belong to their semantic owners. |
+| `fcp-core::{ratelimit, telemetry}` | leaf helper crates or true semantic owners | Keep these only if they remain sharply scoped. Otherwise move execution-budget semantics into `fcp-kernel` and observability schemas into `fcp-evidence`/`fcp-host`, with export helpers staying leaf-level. |
+| `fcp-core::{release, supply_chain}` | split between `fcp-registry` and `fcp-evidence` | Artifact trust, promotion, and attestation verification belong in registry flow; durable attestation/report object shapes belong in evidence. |
+| `fcp-async-core`, `fcp-async-core-macros` | temporary quarantine on the path to `fcp-kernel` | Treat these as migration shims only. Any semantic contract worth keeping must be re-homed under the FCP3 kernel vocabulary and the compatibility layer then deleted. |
+| `fcp-host::{budget, cancellation}` | `fcp-kernel` if semantics are generic; otherwise `fcp-host` | Budget and cancellation semantics should live below the host only when they define platform-wide execution rules. Host-specific policy application and orchestration stay in `fcp-host`. |
+| `fcp-host::{rollout, resilience, progress, discovery, doctor, supply_chain}` | `fcp-host` | These are root-application orchestration and admin/control-plane surfaces. The host may compose lower-layer semantics here, but it must not become their source of truth. |
+| `fcp-sdk::{runtime, streaming, retry}` | `fcp-sdk` | These are connector-author ergonomics and should remain there, provided they stay host-independent and do not smuggle in admin-plane or mesh-placement ownership. |
+| `fcp-sdk::migration` | temporary quarantine, then delete | Migration helpers are useful only during cutover. They are not part of the steady-state FCP3 SDK contract. |
+| `fwc` direct semantic dependencies on `fcp-core` | replace with host-backed contracts | `fwc` should consume host/admin truth, generated catalogs, and stable RPC/schema projections rather than reaching into low-level semantic crates. |
+
+Two rules follow from this map:
+
+1. If a current module has to be split across two owners, that split must happen explicitly before new features accumulate on top of the old bucket.
+2. Re-export convenience is acceptable only after single-owner semantics are established underneath.
+
+#### AJ.6 Current Workspace Disposition
+
+FCP3 SHOULD treat the current workspace as follows:
+
+| Current crate | FCP3 disposition | Reason |
+|---------------|------------------|--------|
+| `fcp-core` | split, then delete as a top-level semantic bucket | It currently mixes execution, policy, evidence, lifecycle, connector contracts, and support types. That is exactly the ownership blur FCP3 is trying to remove. |
+| `fcp-protocol` | survive, but narrow to wire/session/ABI responsibilities | Frame and session logic are real long-term concepts, but they should not absorb manifest or policy semantics. |
+| `fcp-store` | survive, but stay purely about durability, quarantine, retention, and repair | Storage is a durable substrate, not a control-plane semantics crate. |
+| `fcp-mesh` | survive and become the single owner of placement/mobility/lease coordination, with `fcp-tailscale` as an adapter layer | Mesh topology and placement must have one owner. |
+| `fcp-registry` | survive only if it stays focused on source selection, verification, mirroring, and promotion; otherwise split along that boundary | Registry trust and artifact acquisition are real, but must not become another catch-all utility crate. |
+| `fcp-sandbox` | survive | Execution-form enforcement remains a first-class boundary in FCP3. |
+| `fcp-sdk` | survive | Connector authors still need a stable FCP-facing surface. |
+| `fcp-host` | survive | The root supervised application remains fundamental. |
+| `fcp-conformance`, `fcp-testkit`, `fcp-cli`, `fwc` | survive | These are product/test surfaces, not accidental architecture. |
+| `fcp-oauth`, `fcp-google-discovery`, similar domain crates | survive only as narrow leaf support crates | They are useful when they encode domain specifics rather than generic platform semantics. |
+| `fcp-async-core`, `fcp-async-core-macros` | temporary quarantine, then delete | FCP3 is Asupersync-native; compatibility shims must not become permanent architecture. |
+| `fcp-streaming`, `fcp-ratelimit`, `fcp-webhook`, `fcp-telemetry` | either narrow to leaf helpers or dissolve into the true owners above | These concepts are real, but top-level crates are justified only if they remain sharply scoped and do not duplicate kernel/host/SDK authority. |
+| `fcp-bootstrap`, `fcp-graphql`, other optional surfaces | keep only if they remain clearly outside the semantic core | Optional product surfaces should not dictate the kernel layout. |
+
+#### AJ.7 Litmus Test
+
+A contributor should be able to answer the following without guessing:
+
+- If a concept changes execution semantics, it lives in `fcp-kernel`.
+- If it changes allow/deny, taint, approval, or provenance semantics, it lives in `fcp-policy`.
+- If it changes what durable proof exists after the fact, it lives in `fcp-evidence`.
+- If it changes bytes on the wire, it lives in `fcp-protocol`.
+- If it changes connector declarations or provisioning contracts, it lives in `fcp-manifest`.
+- If it changes durable object/symbol/quarantine/repair behavior, it lives in `fcp-store`.
+- If it changes placement, lease, failover, or mesh topology behavior, it lives in `fcp-mesh`.
+- If it changes artifact trust and promotion, it lives in `fcp-registry`.
+- If it changes connector supervision or admin orchestration, it lives in `fcp-host`.
+- If it changes connector author ergonomics, it lives in `fcp-sdk`.
+
+If the honest answer is "this concept belongs to two crates because it is convenient," the boundary
+is wrong and the design should be corrected before more code is written.
+
+### Appendix AK: Interoperability Artifact Inventory and FZPF Schema Surface
+
+The reference distribution SHOULD publish an explicit artifact inventory rather than forcing
+implementers to infer conformance surfaces from prose.
+
+At minimum, the inventory SHOULD name files equivalent to:
+
+- `FCP_CDDL_V3.cddl` for canonical durable objects and frame-bound structures,
+- `crates/fcp-conformance/src/schemas/FZPF_v0.1.schema.json` for the FZPF schema surface,
+- schema files for structured logs, release manifests, traces, and policy bundles,
+- golden vectors for decisions, checkpoints, audit heads, revocation heads, FCPC sessions, and FCPS
+  symbol envelopes,
+- replay transcripts for failover, repair, and stale-frontier denial.
+
+Round-trip requirements:
+
+1. Every listed artifact MUST parse under the reference implementation.
+2. Canonical artifacts MUST re-encode to byte-for-byte identical output.
+3. Documented object identifiers, signatures, and reason-code projections MUST match the published
+   golden expectation.
+4. The inventory SHOULD make it obvious which artifacts are normative interoperability surfaces and
+   which are informative examples.
+
 ## 16. Summary
 
 FCP is a secure connector operating model built from:
@@ -5735,6 +6553,7 @@ FCP is a secure connector operating model built from:
 - durable receipts, checkpoints, and audit artifacts,
 - a typed live control/data/evidence plane,
 - durable object distribution and repair across an authenticated mesh,
+- a reference crate graph with single-owner boundaries for kernel, policy, evidence, wire, manifest, storage, verification, host, SDK, and connector surfaces,
 - mechanized provisioning, placement, and supply-chain verification,
 - strong conformance requirements that treat failure behavior as first-class.
 

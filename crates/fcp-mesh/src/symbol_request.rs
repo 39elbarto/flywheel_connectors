@@ -2262,10 +2262,7 @@ mod tests {
         assert!(cloned.is_authenticated);
         assert_eq!(cloned.max_response_symbols, 20);
         assert!(cloned.has_proof_of_need);
-        assert_eq!(
-            cloned.request.missing_hint.as_ref().map(Vec::len),
-            Some(2)
-        );
+        assert_eq!(cloned.request.missing_hint.as_ref().map(Vec::len), Some(2));
     }
 
     // ── Handler decode status for unknown object ─────────────────
@@ -2544,9 +2541,7 @@ mod tests {
 
     #[test]
     fn error_admission_rejected_display() {
-        let err = SymbolRequestError::AdmissionRejected(
-            AdmissionError::AuthenticationRequired,
-        );
+        let err = SymbolRequestError::AdmissionRejected(AdmissionError::AuthenticationRequired);
         let s = err.to_string();
         assert!(s.contains("admission"));
     }

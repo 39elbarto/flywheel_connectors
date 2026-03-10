@@ -4438,7 +4438,12 @@ mod tests {
         ];
         for i in 0..levels.len() {
             for j in (i + 1)..levels.len() {
-                assert!(levels[i] < levels[j], "{:?} should be < {:?}", levels[i], levels[j]);
+                assert!(
+                    levels[i] < levels[j],
+                    "{:?} should be < {:?}",
+                    levels[i],
+                    levels[j]
+                );
             }
         }
     }
@@ -4470,10 +4475,7 @@ mod tests {
     #[test]
     fn audit_status_with_reason_chain() {
         let status = AuditStatus::missing().with_reason("no data source configured");
-        assert_eq!(
-            status.reason,
-            Some("no data source configured".to_string())
-        );
+        assert_eq!(status.reason, Some("no data source configured".to_string()));
         assert_eq!(status.freshness, FreshnessLevel::Missing);
     }
 
@@ -4738,10 +4740,7 @@ mod tests {
     fn severity_for_event_type_case_sensitive() {
         // Event types are case-sensitive; "Secret.Access" != "secret.access"
         assert_eq!(Severity::for_event_type("Secret.Access"), Severity::Info);
-        assert_eq!(
-            Severity::for_event_type("secret.access"),
-            Severity::Warning
-        );
+        assert_eq!(Severity::for_event_type("secret.access"), Severity::Warning);
     }
 
     // ── Decision exhaustive ──────────────────────────────────────────────
@@ -4799,18 +4798,14 @@ mod tests {
     #[test]
     fn audit_entry_metadata_number_types() {
         let mut entry = genesis_entry();
-        entry
-            .metadata
-            .insert("int".into(), serde_json::json!(42));
+        entry.metadata.insert("int".into(), serde_json::json!(42));
         entry
             .metadata
             .insert("float".into(), serde_json::json!(1.23));
         entry
             .metadata
             .insert("negative".into(), serde_json::json!(-100));
-        entry
-            .metadata
-            .insert("zero".into(), serde_json::json!(0));
+        entry.metadata.insert("zero".into(), serde_json::json!(0));
 
         let json = serde_json::to_string(&entry).unwrap();
         let parsed: AuditEntry = serde_json::from_str(&json).unwrap();

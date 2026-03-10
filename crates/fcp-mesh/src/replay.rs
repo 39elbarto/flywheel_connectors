@@ -1632,8 +1632,8 @@ mod tests {
         let trace = sample_trace();
         let cbor = trace.to_cbor().expect("to_cbor");
         // CBOR does not start with { or [, so auto tries CBOR first
-        let parsed = decode_trace_bytes(&cbor, TraceReplayInputFormat::Auto)
-            .expect("auto should pick cbor");
+        let parsed =
+            decode_trace_bytes(&cbor, TraceReplayInputFormat::Auto).expect("auto should pick cbor");
         assert_eq!(parsed.events.len(), trace.events.len());
     }
 

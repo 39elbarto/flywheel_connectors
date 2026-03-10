@@ -3305,9 +3305,7 @@ mod tests {
         let allow_evidence = pipeline.verify(&artifact_digest(), Some(&att), Some(&sbom));
         let deny_evidence = pipeline.verify(&artifact_digest(), None, None);
 
-        let h1 = allow_evidence
-            .content_hash(HashAlgorithm::Sha256)
-            .unwrap();
+        let h1 = allow_evidence.content_hash(HashAlgorithm::Sha256).unwrap();
         let h2 = deny_evidence.content_hash(HashAlgorithm::Sha256).unwrap();
         assert_ne!(h1, h2);
     }
@@ -3356,10 +3354,7 @@ mod tests {
         for level in 0..=4u8 {
             let mut att = sample_attestation();
             att.slsa_level = level;
-            assert!(
-                att.validate().is_ok(),
-                "SLSA level {level} should be valid"
-            );
+            assert!(att.validate().is_ok(), "SLSA level {level} should be valid");
         }
     }
 
@@ -3458,8 +3453,7 @@ mod tests {
 
     #[test]
     fn canonicalize_json_deeply_nested() {
-        let input: Value =
-            serde_json::from_str(r#"{"z":{"y":{"x":{"w":1}}}}"#).unwrap();
+        let input: Value = serde_json::from_str(r#"{"z":{"y":{"x":{"w":1}}}}"#).unwrap();
         let canonical = canonicalize_json_value(input);
         // Should still navigate all the way down
         assert_eq!(canonical["z"]["y"]["x"]["w"], 1);
@@ -3467,8 +3461,7 @@ mod tests {
 
     #[test]
     fn canonicalize_json_array_of_objects_sorted_keys() {
-        let input: Value =
-            serde_json::from_str(r#"[{"b":2,"a":1},{"d":4,"c":3}]"#).unwrap();
+        let input: Value = serde_json::from_str(r#"[{"b":2,"a":1},{"d":4,"c":3}]"#).unwrap();
         let canonical = canonicalize_json_value(input);
         let arr = canonical.as_array().unwrap();
         let keys0: Vec<&String> = arr[0].as_object().unwrap().keys().collect();

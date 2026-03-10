@@ -4374,10 +4374,7 @@ mod tests {
         let original = EgressDecision {
             allowed: true,
             canonical_host: "full.example.com".into(),
-            resolved_ips: vec![
-                "1.2.3.4".parse().unwrap(),
-                "5.6.7.8".parse().unwrap(),
-            ],
+            resolved_ips: vec!["1.2.3.4".parse().unwrap(), "5.6.7.8".parse().unwrap()],
             port: 8443,
             tls_required: true,
             expected_sni: Some("full.example.com".into()),

@@ -964,7 +964,11 @@ mod tests {
 
     #[test]
     fn description_genesis_create_contains_genesis() {
-        assert!(BootstrapPhase::GenesisCreate.description().contains("genesis"));
+        assert!(
+            BootstrapPhase::GenesisCreate
+                .description()
+                .contains("genesis")
+        );
     }
 
     #[test]
@@ -1026,7 +1030,10 @@ mod tests {
 
     #[test]
     fn phase_display_genesiscreate() {
-        assert_eq!(format!("{}", BootstrapPhase::GenesisCreate), "GenesisCreate");
+        assert_eq!(
+            format!("{}", BootstrapPhase::GenesisCreate),
+            "GenesisCreate"
+        );
     }
 
     #[test]
@@ -1038,7 +1045,10 @@ mod tests {
 
     #[test]
     fn phase_ne_different_variants() {
-        assert_ne!(BootstrapPhase::Uninitialized, BootstrapPhase::TimeValidation);
+        assert_ne!(
+            BootstrapPhase::Uninitialized,
+            BootstrapPhase::TimeValidation
+        );
         assert_ne!(BootstrapPhase::KeyGeneration, BootstrapPhase::GenesisCreate);
         assert_ne!(BootstrapPhase::Enrollment, BootstrapPhase::Uninitialized);
     }

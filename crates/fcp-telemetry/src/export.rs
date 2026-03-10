@@ -524,8 +524,11 @@ mod tests {
 
     #[test]
     fn test_health_check_message_with_newlines() {
-        let response = HealthResponse::healthy("1.0.0", 100)
-            .with_check("test", false, Some("Line 1\nLine 2\nLine 3"));
+        let response = HealthResponse::healthy("1.0.0", 100).with_check(
+            "test",
+            false,
+            Some("Line 1\nLine 2\nLine 3"),
+        );
         assert_eq!(
             response.checks[0].message,
             Some("Line 1\nLine 2\nLine 3".to_string())
@@ -571,8 +574,8 @@ mod tests {
 
     #[test]
     fn test_health_response_single_failing_check() {
-        let response = HealthResponse::healthy("1.0.0", 100)
-            .with_check("critical", false, Some("Down"));
+        let response =
+            HealthResponse::healthy("1.0.0", 100).with_check("critical", false, Some("Down"));
         assert!(!response.is_healthy());
         assert_eq!(response.checks.len(), 1);
     }

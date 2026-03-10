@@ -1658,9 +1658,11 @@ mod tests {
     #[test]
     fn decoder_get_status_nonexistent() {
         let decoder = DegradedModeDecoder::new(test_config());
-        assert!(decoder
-            .get_status(&ObjectId::from_bytes([0xFF; 32]))
-            .is_none());
+        assert!(
+            decoder
+                .get_status(&ObjectId::from_bytes([0xFF; 32]))
+                .is_none()
+        );
     }
 
     #[test]
@@ -1780,9 +1782,7 @@ mod tests {
     #[test]
     fn handler_get_nonexistent_returns_none() {
         let handler = InMemoryControlPlaneHandler::new();
-        assert!(handler
-            .get(&ObjectId::from_bytes([0xFF; 32]))
-            .is_none());
+        assert!(handler.get(&ObjectId::from_bytes([0xFF; 32])).is_none());
     }
 
     #[test]
@@ -2245,8 +2245,7 @@ mod tests {
 
     #[test]
     fn handler_as_trait_object() {
-        let handler: Box<dyn ControlPlaneHandler> =
-            Box::new(InMemoryControlPlaneHandler::new());
+        let handler: Box<dyn ControlPlaneHandler> = Box::new(InMemoryControlPlaneHandler::new());
         let env = test_envelope();
         handler.handle(env).unwrap();
     }
@@ -2259,10 +2258,7 @@ mod tests {
         let env = test_envelope();
         let frames = encoder.encode(&env, 1).unwrap();
         for frame in &frames {
-            assert_eq!(
-                frame.header.symbol_count,
-                frame.symbols.len() as u32
-            );
+            assert_eq!(frame.header.symbol_count, frame.symbols.len() as u32);
         }
     }
 

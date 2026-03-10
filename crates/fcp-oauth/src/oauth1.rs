@@ -1474,12 +1474,7 @@ mod tests {
         let client = OAuth1Client::new(config);
         let params = BTreeMap::new();
 
-        let result = client.calculate_signature(
-            "GET",
-            "https://api.example.com/",
-            &params,
-            "",
-        );
+        let result = client.calculate_signature("GET", "https://api.example.com/", &params, "");
         assert!(result.is_ok());
     }
 
@@ -1489,12 +1484,8 @@ mod tests {
         let client = OAuth1Client::new(config);
         let params = BTreeMap::new();
 
-        let result = client.calculate_signature(
-            "DELETE",
-            "https://api.example.com/resource",
-            &params,
-            "",
-        );
+        let result =
+            client.calculate_signature("DELETE", "https://api.example.com/resource", &params, "");
         assert!(result.is_ok());
     }
 
@@ -1504,12 +1495,8 @@ mod tests {
         let client = OAuth1Client::new(config);
         let params = BTreeMap::new();
 
-        let result = client.calculate_signature(
-            "PUT",
-            "https://api.example.com/resource",
-            &params,
-            "",
-        );
+        let result =
+            client.calculate_signature("PUT", "https://api.example.com/resource", &params, "");
         assert!(result.is_ok());
     }
 

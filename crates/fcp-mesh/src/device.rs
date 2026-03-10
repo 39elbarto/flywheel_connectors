@@ -2359,8 +2359,8 @@ mod tests {
 
     #[test]
     fn gpu_profile_clone_eq() {
-        let gpu = GpuProfile::new(GpuVendor::Nvidia, "RTX 4090", 24576)
-            .with_compute_capability("8.9");
+        let gpu =
+            GpuProfile::new(GpuVendor::Nvidia, "RTX 4090", 24576).with_compute_capability("8.9");
         let cloned = gpu.clone();
         assert_eq!(gpu, cloned);
     }
@@ -2599,36 +2599,63 @@ mod tests {
 
     #[test]
     fn fitness_score_partial_eq() {
-        let a = FitnessScore { score: 75.0, eligible: true };
-        let b = FitnessScore { score: 75.0, eligible: true };
+        let a = FitnessScore {
+            score: 75.0,
+            eligible: true,
+        };
+        let b = FitnessScore {
+            score: 75.0,
+            eligible: true,
+        };
         assert_eq!(a, b);
     }
 
     #[test]
     fn fitness_score_partial_ord() {
-        let low = FitnessScore { score: 50.0, eligible: true };
-        let high = FitnessScore { score: 80.0, eligible: true };
+        let low = FitnessScore {
+            score: 50.0,
+            eligible: true,
+        };
+        let high = FitnessScore {
+            score: 80.0,
+            eligible: true,
+        };
         assert!(low < high);
         assert!(high > low);
     }
 
     #[test]
     fn fitness_score_eligible_vs_ineligible_ordering() {
-        let eligible = FitnessScore { score: 1.0, eligible: true };
-        let ineligible = FitnessScore { score: 999.0, eligible: false };
+        let eligible = FitnessScore {
+            score: 1.0,
+            eligible: true,
+        };
+        let ineligible = FitnessScore {
+            score: 999.0,
+            eligible: false,
+        };
         assert!(eligible > ineligible);
     }
 
     #[test]
     fn fitness_score_both_ineligible_ordering() {
-        let a = FitnessScore { score: 0.0, eligible: false };
-        let b = FitnessScore { score: 0.0, eligible: false };
+        let a = FitnessScore {
+            score: 0.0,
+            eligible: false,
+        };
+        let b = FitnessScore {
+            score: 0.0,
+            eligible: false,
+        };
         assert_eq!(a.cmp(&b), std::cmp::Ordering::Equal);
     }
 
     #[test]
     fn fitness_score_copy_semantics() {
-        let score = FitnessScore { score: 42.0, eligible: true };
+        let score = FitnessScore {
+            score: 42.0,
+            eligible: true,
+        };
         let copied = score;
         assert!((score.score - copied.score).abs() < f64::EPSILON);
         assert_eq!(score.eligible, copied.eligible);
@@ -2652,7 +2679,10 @@ mod tests {
         let score_gpu_req = p.compute_fitness(&ctx_gpu);
 
         assert!(score_gpu_req.eligible);
-        assert!(score_gpu_req.score > score_no_req.score, "GPU bonus should increase score");
+        assert!(
+            score_gpu_req.score > score_no_req.score,
+            "GPU bonus should increase score"
+        );
     }
 
     #[test]
@@ -2671,7 +2701,10 @@ mod tests {
         let score_tpu_req = p.compute_fitness(&ctx_tpu);
 
         assert!(score_tpu_req.eligible);
-        assert!(score_tpu_req.score > score_no_req.score, "TPU bonus should increase score");
+        assert!(
+            score_tpu_req.score > score_no_req.score,
+            "TPU bonus should increase score"
+        );
     }
 
     // ── Fitness latency penalty scaling ───────────────────────
@@ -2865,8 +2898,8 @@ mod tests {
 
     #[test]
     fn gpu_profile_json_roundtrip() {
-        let gpu = GpuProfile::new(GpuVendor::Intel, "Arc A770", 16384)
-            .with_compute_capability("Xe");
+        let gpu =
+            GpuProfile::new(GpuVendor::Intel, "Arc A770", 16384).with_compute_capability("Xe");
         let json = serde_json::to_string(&gpu).unwrap();
         let decoded: GpuProfile = serde_json::from_str(&json).unwrap();
         assert_eq!(gpu, decoded);

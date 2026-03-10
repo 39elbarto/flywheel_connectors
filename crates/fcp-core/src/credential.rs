@@ -1274,10 +1274,7 @@ mod tests {
         cred.host_allow = vec!["127.0.0.1".into()];
 
         let result = cred.validate_host_policy(true);
-        if let Err(CredentialValidationError::HostNotAllowed {
-            credential_id, ..
-        }) = result
-        {
+        if let Err(CredentialValidationError::HostNotAllowed { credential_id, .. }) = result {
             assert_eq!(credential_id, cred_id);
         } else {
             panic!("Expected HostNotAllowed");

@@ -643,10 +643,7 @@ mod tests {
         ];
         for e in &variants {
             let debug = format!("{e:?}");
-            assert!(
-                !debug.is_empty(),
-                "Debug should not be empty for {e}"
-            );
+            assert!(!debug.is_empty(), "Debug should not be empty for {e}");
         }
     }
 

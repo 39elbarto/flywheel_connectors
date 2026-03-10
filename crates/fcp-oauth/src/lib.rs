@@ -388,8 +388,7 @@ mod tests {
 
     #[test]
     fn grant_type_serde_object_rejected() {
-        let result: Result<GrantType, _> =
-            serde_json::from_str(r#"{"type":"authorization_code"}"#);
+        let result: Result<GrantType, _> = serde_json::from_str(r#"{"type":"authorization_code"}"#);
         assert!(result.is_err());
     }
 
@@ -435,7 +434,10 @@ mod tests {
             GrantType::DeviceCode,
         ] {
             let display = gt.to_string();
-            assert!(!display.contains(' '), "Display should not contain spaces: {display}");
+            assert!(
+                !display.contains(' '),
+                "Display should not contain spaces: {display}"
+            );
         }
     }
 

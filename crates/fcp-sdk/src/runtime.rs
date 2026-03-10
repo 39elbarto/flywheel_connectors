@@ -3964,10 +3964,7 @@ mod tests {
             heartbeat_timeout_multiplier: 3.0,
             ..Default::default()
         };
-        assert_eq!(
-            config.heartbeat_interval(),
-            Some(Duration::from_secs(10))
-        );
+        assert_eq!(config.heartbeat_interval(), Some(Duration::from_secs(10)));
         let timeout = config.heartbeat_timeout().unwrap();
         // 10s * 3.0 = 30s
         assert_eq!(timeout.as_secs(), 30);
@@ -4397,7 +4394,10 @@ mod tests {
         let values: Vec<f64> = (0..50).map(pseudo_random_jitter).collect();
         let first = values[0];
         let all_same = values.iter().all(|v| (*v - first).abs() < f64::EPSILON);
-        assert!(!all_same, "expected at least some variation in jitter values");
+        assert!(
+            !all_same,
+            "expected at least some variation in jitter values"
+        );
     }
 
     // ── NEW: SupervisorConfig compute_backoff edge cases ───────────────
@@ -4462,8 +4462,16 @@ mod tests {
         let errors = config.validate().unwrap_err();
         assert!(errors.len() >= 3);
         assert!(errors.iter().any(|e| e.contains("base_backoff_ms")));
-        assert!(errors.iter().any(|e| e.contains("max_consecutive_failures")));
-        assert!(errors.iter().any(|e| e.contains("heartbeat_timeout_multiplier")));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("max_consecutive_failures"))
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("heartbeat_timeout_multiplier"))
+        );
     }
 
     // ── NEW: SupervisorConfig serde with custom values ──────────────────
@@ -4665,17 +4673,13 @@ mod tests {
         let header1 = test_object_header();
         let lease1 = test_lease(1);
         let sig1 = Signature::from_bytes([0u8; 64]);
-        store
-            .commit_cursor(cursor1, header1, lease1, sig1)
-            .unwrap();
+        store.commit_cursor(cursor1, header1, lease1, sig1).unwrap();
 
         let cursor2 = test_cursor_state(100, 50);
         let header2 = test_object_header();
         let lease2 = test_lease(2);
         let sig2 = Signature::from_bytes([0u8; 64]);
-        store
-            .commit_cursor(cursor2, header2, lease2, sig2)
-            .unwrap();
+        store.commit_cursor(cursor2, header2, lease2, sig2).unwrap();
     }
 
     #[test]
@@ -4687,17 +4691,13 @@ mod tests {
         let header1 = test_object_header();
         let lease1 = test_lease(1);
         let sig1 = Signature::from_bytes([0u8; 64]);
-        store
-            .commit_cursor(cursor1, header1, lease1, sig1)
-            .unwrap();
+        store.commit_cursor(cursor1, header1, lease1, sig1).unwrap();
 
         let cursor2 = test_cursor_state(200, 200);
         let header2 = test_object_header();
         let lease2 = test_lease(2);
         let sig2 = Signature::from_bytes([0u8; 64]);
-        store
-            .commit_cursor(cursor2, header2, lease2, sig2)
-            .unwrap();
+        store.commit_cursor(cursor2, header2, lease2, sig2).unwrap();
     }
 
     #[test]
@@ -4820,13 +4820,8 @@ mod tests {
         let config = SupervisorConfig::default();
         let session = InMemoryStreamingSession::new();
         let mut supervisor = StreamingSupervisor::new(config, session);
-        supervisor
-            .session_mut()
-            .set_resume_token("abc".to_string());
-        assert_eq!(
-            supervisor.session().resume_token(),
-            Some("abc".to_string())
-        );
+        supervisor.session_mut().set_resume_token("abc".to_string());
+        assert_eq!(supervisor.session().resume_token(), Some("abc".to_string()));
     }
 
     // ── NEW: PollingSupervisor accessor coverage ───────────────────────
@@ -5010,8 +5005,7 @@ mod tests {
     #[test]
     fn polling_supervisor_processes_items_and_updates_cursor() {
         let _ = fcp_async_core::runtime::block_on_sync(async {
-            let config = SupervisorConfig::default()
-                .with_base_backoff_ms(1);
+            let config = SupervisorConfig::default().with_base_backoff_ms(1);
             let cursor = InMemoryPollingCursor::new();
             let mut supervisor = PollingSupervisor::new(config, cursor);
 

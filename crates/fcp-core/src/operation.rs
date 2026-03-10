@@ -2276,10 +2276,7 @@ mod tests {
     #[test]
     fn receipt_serde_with_usage_metrics() {
         let mut receipt = create_test_receipt();
-        receipt.usage_metrics = Some(vec![
-            UsageMetric::tokens(100),
-            UsageMetric::tokens(200),
-        ]);
+        receipt.usage_metrics = Some(vec![UsageMetric::tokens(100), UsageMetric::tokens(200)]);
         let json = serde_json::to_string(&receipt).unwrap();
         let decoded: OperationReceipt = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.usage_metrics.as_ref().map_or(0, Vec::len), 2);

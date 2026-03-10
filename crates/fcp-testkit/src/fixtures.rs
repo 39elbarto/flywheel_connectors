@@ -551,7 +551,12 @@ mod tests {
     #[test]
     fn json_not_found_with_empty_resource() {
         let v = json::not_found("");
-        assert!(v["error"]["message"].as_str().unwrap().contains("not found"));
+        assert!(
+            v["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("not found")
+        );
     }
 
     #[test]

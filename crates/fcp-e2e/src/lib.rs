@@ -139,6 +139,12 @@ impl E2eReport {
             .join("\n")
     }
 
+    /// Serialize logs to stable JSON lines with nondeterministic fields normalized.
+    #[must_use]
+    pub fn to_stable_json_lines(&self) -> String {
+        stable_json_lines(&self.logs)
+    }
+
     /// Write logs to a JSONL file.
     ///
     /// # Errors
@@ -151,6 +157,14 @@ impl E2eReport {
             writeln!(file, "{line}")?;
         }
         Ok(())
+    }
+
+    /// Write stable JSONL logs to a file.
+    ///
+    /// # Errors
+    /// Returns an IO error if the file cannot be written.
+    pub fn write_stable_json_lines<P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
+        write_json_lines_payload(path, &self.to_stable_json_lines())
     }
 }
 
@@ -178,6 +192,12 @@ impl E2eBatchReport {
             .join("\n")
     }
 
+    /// Serialize all logs to stable JSON lines with nondeterministic fields normalized.
+    #[must_use]
+    pub fn to_stable_json_lines(&self) -> String {
+        stable_json_lines(&self.logs)
+    }
+
     /// Write JSONL logs to a file.
     ///
     /// # Errors
@@ -191,6 +211,47 @@ impl E2eBatchReport {
         }
         Ok(())
     }
+
+    /// Write stable JSONL logs to a file.
+    ///
+    /// # Errors
+    /// Returns an IO error if the file cannot be written.
+    pub fn write_stable_json_lines<P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
+        write_json_lines_payload(path, &self.to_stable_json_lines())
+    }
+}
+
+fn stable_json_lines(entries: &[E2eLogEntry]) -> String {
+    entries
+        .iter()
+        .filter_map(stable_log_value)
+        .filter_map(|entry| serde_json::to_string(&entry).ok())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn stable_log_value(entry: &E2eLogEntry) -> Option<serde_json::Value> {
+    let mut value = serde_json::to_value(entry).ok()?;
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "timestamp".to_string(),
+            serde_json::Value::String("1970-01-01T00:00:00Z".to_string()),
+        );
+        object.insert(
+            "correlation_id".to_string(),
+            serde_json::Value::String("00000000-0000-4000-8000-000000000000".to_string()),
+        );
+        object.insert("duration_ms".to_string(), serde_json::Value::from(0_u64));
+    }
+    Some(value)
+}
+
+fn write_json_lines_payload<P: AsRef<Path>>(path: P, payload: &str) -> io::Result<()> {
+    let mut file = std::fs::File::create(path)?;
+    if !payload.is_empty() {
+        writeln!(file, "{payload}")?;
+    }
+    Ok(())
 }
 
 /// Scenario configuration for a connector suite run.

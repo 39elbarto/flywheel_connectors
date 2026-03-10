@@ -1316,8 +1316,7 @@ mod tests {
     #[test]
     fn test_check_ip_unicode_ip() {
         let verifier = HmacSha256Verifier::new("secret");
-        let config =
-            WebhookConfig::new().with_ip_allowlist(vec!["h\u{00F6}st".to_string()]);
+        let config = WebhookConfig::new().with_ip_allowlist(vec!["h\u{00F6}st".to_string()]);
         let handler = WebhookHandler::with_config(verifier, "test", config);
         assert!(handler.check_ip("h\u{00F6}st").is_ok());
         assert!(handler.check_ip("other").is_err());

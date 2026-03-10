@@ -2095,8 +2095,7 @@ mod tests {
         let node_id = NodeId::new("mismatch-tags");
         let original_tags = vec![TailscaleTag::fcp_tag("work")];
         let attestation =
-            NodeKeyAttestation::sign(&owner_key, &node_id, &node_keys, &original_tags, 24)
-                .unwrap();
+            NodeKeyAttestation::sign(&owner_key, &node_id, &node_keys, &original_tags, 24).unwrap();
 
         // Create identity with DIFFERENT tags than what was signed
         let identity = MeshIdentity::new(

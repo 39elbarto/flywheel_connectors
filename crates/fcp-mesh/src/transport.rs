@@ -1279,7 +1279,10 @@ mod tests {
     fn path_weight_differs_by_object() {
         let obj_a = ObjectId::from_unscoped_bytes(b"obj-a");
         let obj_b = ObjectId::from_unscoped_bytes(b"obj-b");
-        assert_ne!(path_weight(&obj_a, 0, "path"), path_weight(&obj_b, 0, "path"));
+        assert_ne!(
+            path_weight(&obj_a, 0, "path"),
+            path_weight(&obj_b, 0, "path")
+        );
     }
 
     #[test]

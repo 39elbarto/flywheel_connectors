@@ -1990,12 +1990,8 @@ mod tests {
     #[test]
     fn validate_lease_handoff_rejects_holder_mismatch() {
         let subject = test_object_id("s");
-        let active_lease = create_test_lease_with_purpose(
-            5,
-            2000,
-            subject,
-            LeasePurpose::ComputationMigration,
-        );
+        let active_lease =
+            create_test_lease_with_purpose(5, 2000, subject, LeasePurpose::ComputationMigration);
 
         let handoff = LeaseHandoff {
             previous_lease_id: test_object_id("prev"),
@@ -2021,12 +2017,8 @@ mod tests {
     #[test]
     fn validate_lease_handoff_rejects_subject_mismatch() {
         let subject = test_object_id("s");
-        let active_lease = create_test_lease_with_purpose(
-            5,
-            2000,
-            subject,
-            LeasePurpose::ComputationMigration,
-        );
+        let active_lease =
+            create_test_lease_with_purpose(5, 2000, subject, LeasePurpose::ComputationMigration);
 
         let handoff = LeaseHandoff {
             previous_lease_id: test_object_id("prev"),
@@ -2052,12 +2044,8 @@ mod tests {
     #[test]
     fn validate_lease_handoff_rejects_zone_mismatch() {
         let subject = test_object_id("s");
-        let active_lease = create_test_lease_with_purpose(
-            5,
-            2000,
-            subject,
-            LeasePurpose::ComputationMigration,
-        );
+        let active_lease =
+            create_test_lease_with_purpose(5, 2000, subject, LeasePurpose::ComputationMigration);
 
         let handoff = LeaseHandoff {
             previous_lease_id: test_object_id("prev"),
@@ -2083,12 +2071,8 @@ mod tests {
     #[test]
     fn validate_lease_handoff_rejects_purpose_mismatch() {
         let subject = test_object_id("s");
-        let active_lease = create_test_lease_with_purpose(
-            5,
-            2000,
-            subject,
-            LeasePurpose::ComputationMigration,
-        );
+        let active_lease =
+            create_test_lease_with_purpose(5, 2000, subject, LeasePurpose::ComputationMigration);
 
         let handoff = LeaseHandoff {
             previous_lease_id: test_object_id("prev"),
@@ -2114,12 +2098,8 @@ mod tests {
     #[test]
     fn validate_lease_handoff_rejects_fence_mismatch() {
         let subject = test_object_id("s");
-        let active_lease = create_test_lease_with_purpose(
-            5,
-            2000,
-            subject,
-            LeasePurpose::ComputationMigration,
-        );
+        let active_lease =
+            create_test_lease_with_purpose(5, 2000, subject, LeasePurpose::ComputationMigration);
 
         let handoff = LeaseHandoff {
             previous_lease_id: test_object_id("prev"),
@@ -2437,9 +2417,7 @@ mod tests {
         let response = LeaseResponse::Invalid {
             reason: String::new(),
         };
-        assert!(
-            matches!(&response, LeaseResponse::Invalid { reason } if reason.is_empty())
-        );
+        assert!(matches!(&response, LeaseResponse::Invalid { reason } if reason.is_empty()));
     }
 
     #[test]
@@ -2528,9 +2506,6 @@ mod tests {
             quorum_signatures: SignatureSet::default(),
         };
         let lease = Lease::new(params);
-        assert_eq!(
-            lease.exp,
-            lease.header.created_at + u64::from(u32::MAX)
-        );
+        assert_eq!(lease.exp, lease.header.created_at + u64::from(u32::MAX));
     }
 }

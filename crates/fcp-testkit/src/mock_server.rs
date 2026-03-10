@@ -818,7 +818,10 @@ mod tests {
             headers: vec![],
         };
         let cloned = req.clone();
-        assert_eq!(req.body.as_ref().unwrap().len(), cloned.body.as_ref().unwrap().len());
+        assert_eq!(
+            req.body.as_ref().unwrap().len(),
+            cloned.body.as_ref().unwrap().len()
+        );
     }
 
     // ── MockApiServer: additional HTTP tests ─────────────────────────

@@ -730,11 +730,7 @@ mod tests {
                 .is_ok()
         );
         assert!(cache.validate(&schema, &json!({})).is_err());
-        assert!(
-            cache
-                .validate(&schema, &json!({"first_name": ""}))
-                .is_err()
-        );
+        assert!(cache.validate(&schema, &json!({"first_name": ""})).is_err());
     }
 
     // ---- Schema cache: concurrent-safe usage ----

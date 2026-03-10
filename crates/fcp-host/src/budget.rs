@@ -2733,8 +2733,7 @@ mod tests {
             }],
         };
         let mut tracker = BudgetTracker::new();
-        let eval =
-            tracker.record_usage(&zone, &policy, &[UsageMetric::bytes(1_048_576 + 1)]);
+        let eval = tracker.record_usage(&zone, &policy, &[UsageMetric::bytes(1_048_576 + 1)]);
         assert_eq!(eval.action, BudgetAction::Warn);
         assert_eq!(eval.snapshot.budgets[0].remaining, 0);
     }

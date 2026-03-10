@@ -1606,7 +1606,7 @@ mod tests {
         let zone_key = AeadKey::from_bytes([0xAA; 32]);
         let zone_key_id = ZoneKeyId::from_bytes([0x10; 8]);
         let long_unicode = TailscaleNodeId::new(
-            "node-\u{4E16}\u{754C}\u{1F600}\u{1F601}\u{1F602}-very-long-identifier"
+            "node-\u{4E16}\u{754C}\u{1F600}\u{1F601}\u{1F602}-very-long-identifier",
         );
         let subkey1 = derive_sender_subkey(&zone_key, &zone_key_id, &long_unicode, 42);
         let subkey2 = derive_sender_subkey(&zone_key, &zone_key_id, &long_unicode, 42);

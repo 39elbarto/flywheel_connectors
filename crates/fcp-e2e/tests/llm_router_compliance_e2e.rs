@@ -24,8 +24,8 @@ use fcp_core::{
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
-use fcp_manifest::ConnectorManifest;
 use fcp_llm_router::connector::LlmRouterConnector;
+use fcp_manifest::ConnectorManifest;
 use serde_json::json;
 use std::sync::Arc;
 

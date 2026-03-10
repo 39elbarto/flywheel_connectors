@@ -1516,8 +1516,7 @@ mod tests {
 
     #[test]
     fn render_with_fallback_plain_multiple_control_chars() {
-        let result =
-            Formatter::render_with_fallback("\x00\x01\x02\x03", FormatMode::Plain);
+        let result = Formatter::render_with_fallback("\x00\x01\x02\x03", FormatMode::Plain);
         assert!(result.rendered.contains("\\u{0}"));
         assert!(result.rendered.contains("\\u{1}"));
         assert!(result.rendered.contains("\\u{2}"));
@@ -1695,7 +1694,9 @@ mod tests {
 
     #[test]
     fn is_parse_error_find_end_entity() {
-        assert!(is_parse_error_message("can't find end of the entity at pos 5"));
+        assert!(is_parse_error_message(
+            "can't find end of the entity at pos 5"
+        ));
     }
 
     #[test]
@@ -1799,9 +1800,15 @@ mod tests {
 
     #[test]
     fn is_markdown_control_every_char() {
-        let controls = ['*', '_', '`', '~', '[', ']', '(', ')', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!'];
+        let controls = [
+            '*', '_', '`', '~', '[', ']', '(', ')', '>', '#', '+', '-', '=', '|', '{', '}', '.',
+            '!',
+        ];
         for ch in &controls {
-            assert!(is_markdown_control(*ch), "expected {ch:?} to be markdown control");
+            assert!(
+                is_markdown_control(*ch),
+                "expected {ch:?} to be markdown control"
+            );
         }
     }
 
@@ -1940,8 +1947,7 @@ mod tests {
 
     #[test]
     fn fallback_plaintext_html_complex() {
-        let result =
-            fallback_plaintext("<div><b>&amp;</b> &lt;tag&gt;</div>", FormatMode::Html);
+        let result = fallback_plaintext("<div><b>&amp;</b> &lt;tag&gt;</div>", FormatMode::Html);
         assert_eq!(result, "& <tag>");
     }
 

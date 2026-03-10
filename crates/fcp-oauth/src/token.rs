@@ -1501,7 +1501,10 @@ mod tests {
         assert!(!store.has_valid_token(key));
 
         // Store
-        store.store(key, OAuthTokens::from_response(mock_token_response(Some(3600))));
+        store.store(
+            key,
+            OAuthTokens::from_response(mock_token_response(Some(3600))),
+        );
         assert!(store.get(key).is_some());
         assert!(store.has_valid_token(key));
 

@@ -1943,13 +1943,14 @@ mod tests {
 
     #[test]
     fn recipe_clone_preserves_steps() {
-        let recipe = ProvisioningRecipe::new(RecipeId::new("orig"), "1", "Original")
-            .with_step(ProvisioningStep::new(
+        let recipe = ProvisioningRecipe::new(RecipeId::new("orig"), "1", "Original").with_step(
+            ProvisioningStep::new(
                 StepId::new("s1"),
                 ProvisioningStepType::PromptUser {
                     message: "Hi".to_string(),
                 },
-            ));
+            ),
+        );
         let cloned = recipe.clone();
         assert_eq!(recipe.id, cloned.id);
         assert_eq!(recipe.steps.len(), cloned.steps.len());
@@ -2214,9 +2215,15 @@ mod tests {
 
     #[test]
     fn provisioning_status_inequality() {
-        assert_ne!(ProvisioningStatus::NotStarted, ProvisioningStatus::Completed);
+        assert_ne!(
+            ProvisioningStatus::NotStarted,
+            ProvisioningStatus::Completed
+        );
         assert_ne!(ProvisioningStatus::InProgress, ProvisioningStatus::Failed);
-        assert_ne!(ProvisioningStatus::AwaitingUser, ProvisioningStatus::Aborted);
+        assert_ne!(
+            ProvisioningStatus::AwaitingUser,
+            ProvisioningStatus::Aborted
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -2438,10 +2445,7 @@ mod tests {
         };
         let json = serde_json::to_string(&result).unwrap();
         let decoded: ProvisioningStepResult = serde_json::from_str(&json).unwrap();
-        assert!(matches!(
-            decoded,
-            ProvisioningStepResult::InProgress { .. }
-        ));
+        assert!(matches!(decoded, ProvisioningStepResult::InProgress { .. }));
     }
 
     #[test]
@@ -2535,14 +2539,13 @@ mod tests {
     #[test]
     fn mock_provisioner_prompt_user_flow() {
         fcp_async_core::runtime::block_on_sync(async {
-            let recipe =
-                ProvisioningRecipe::new(RecipeId::new("prompt-test"), "1", "Prompt test")
-                    .with_step(ProvisioningStep::new(
-                        StepId::new("ask_name"),
-                        ProvisioningStepType::PromptUser {
-                            message: "Enter your name".to_string(),
-                        },
-                    ));
+            let recipe = ProvisioningRecipe::new(RecipeId::new("prompt-test"), "1", "Prompt test")
+                .with_step(ProvisioningStep::new(
+                    StepId::new("ask_name"),
+                    ProvisioningStepType::PromptUser {
+                        message: "Enter your name".to_string(),
+                    },
+                ));
             let mut provisioner = MockProvisioner::new(recipe);
             let result = provisioner
                 .execute_step(StepId::new("ask_name"))
@@ -2592,34 +2595,33 @@ mod tests {
 
     #[test]
     fn mock_provisioner_describe_setup_collects_human_prompts() {
-        let recipe =
-            ProvisioningRecipe::new(RecipeId::new("desc-test"), "1", "Descriptor test")
-                .with_step(ProvisioningStep::new(
-                    StepId::new("user"),
-                    ProvisioningStepType::PromptUser {
-                        message: "Name?".to_string(),
-                    },
-                ))
-                .with_step(ProvisioningStep::new(
-                    StepId::new("secret"),
-                    ProvisioningStepType::PromptSecret {
-                        message: "Token?".to_string(),
-                    },
-                ))
-                .with_step(ProvisioningStep::new(
-                    StepId::new("link"),
-                    ProvisioningStepType::OpenUrl {
-                        url: "https://example.com".to_string(),
-                    },
-                ))
-                .with_step(ProvisioningStep::new(
-                    StepId::new("store"),
-                    ProvisioningStepType::StoreSecret {
-                        key: "k".to_string(),
-                        value_from: StepId::new("secret"),
-                        scope: "s".to_string(),
-                    },
-                ));
+        let recipe = ProvisioningRecipe::new(RecipeId::new("desc-test"), "1", "Descriptor test")
+            .with_step(ProvisioningStep::new(
+                StepId::new("user"),
+                ProvisioningStepType::PromptUser {
+                    message: "Name?".to_string(),
+                },
+            ))
+            .with_step(ProvisioningStep::new(
+                StepId::new("secret"),
+                ProvisioningStepType::PromptSecret {
+                    message: "Token?".to_string(),
+                },
+            ))
+            .with_step(ProvisioningStep::new(
+                StepId::new("link"),
+                ProvisioningStepType::OpenUrl {
+                    url: "https://example.com".to_string(),
+                },
+            ))
+            .with_step(ProvisioningStep::new(
+                StepId::new("store"),
+                ProvisioningStepType::StoreSecret {
+                    key: "k".to_string(),
+                    value_from: StepId::new("secret"),
+                    scope: "s".to_string(),
+                },
+            ));
         let provisioner = MockProvisioner::new(recipe);
         let setup = provisioner.describe_setup();
         // StoreSecret does not produce a human prompt; the other 3 do
@@ -2631,14 +2633,13 @@ mod tests {
 
     #[test]
     fn mock_provisioner_validate_pending_steps() {
-        let recipe =
-            ProvisioningRecipe::new(RecipeId::new("val-test"), "1", "Validation test")
-                .with_step(ProvisioningStep::new(
-                    StepId::new("s1"),
-                    ProvisioningStepType::PromptUser {
-                        message: "Hi".to_string(),
-                    },
-                ));
+        let recipe = ProvisioningRecipe::new(RecipeId::new("val-test"), "1", "Validation test")
+            .with_step(ProvisioningStep::new(
+                StepId::new("s1"),
+                ProvisioningStepType::PromptUser {
+                    message: "Hi".to_string(),
+                },
+            ));
         let provisioner = MockProvisioner::new(recipe);
         let validation = provisioner.validate();
         assert!(!validation.valid);
@@ -2649,17 +2650,16 @@ mod tests {
     #[test]
     fn mock_provisioner_step_logs_track_outcomes() {
         fcp_async_core::runtime::block_on_sync(async {
-            let recipe =
-                ProvisioningRecipe::new(RecipeId::new("log-test"), "1", "Log test")
-                    .with_step(ProvisioningStep::new(
-                        StepId::new("oauth"),
-                        ProvisioningStepType::Oauth {
-                            flow: OAuthRecipe::ClientCredentials {
-                                token_url: "https://auth.test/token".to_string(),
-                                scopes: Vec::new(),
-                            },
+            let recipe = ProvisioningRecipe::new(RecipeId::new("log-test"), "1", "Log test")
+                .with_step(ProvisioningStep::new(
+                    StepId::new("oauth"),
+                    ProvisioningStepType::Oauth {
+                        flow: OAuthRecipe::ClientCredentials {
+                            token_url: "https://auth.test/token".to_string(),
+                            scopes: Vec::new(),
                         },
-                    ));
+                    },
+                ));
             let mut provisioner = MockProvisioner::new(recipe);
             provisioner
                 .execute_step(StepId::new("oauth"))
@@ -2676,44 +2676,37 @@ mod tests {
     #[test]
     fn mock_provisioner_webhook_stores_registration_info() {
         fcp_async_core::runtime::block_on_sync(async {
-            let recipe =
-                ProvisioningRecipe::new(RecipeId::new("wh-test"), "1", "Webhook test")
-                    .with_step(ProvisioningStep::new(
-                        StepId::new("wh1"),
-                        ProvisioningStepType::Webhook {
-                            registration: WebhookRecipe {
-                                registration_url: "https://api.test/hooks".to_string(),
-                                events: vec!["push".to_string(), "pr".to_string()],
-                                verification: WebhookVerification::HmacSignature {
-                                    algorithm: "sha256".to_string(),
-                                    header: "X-Sig".to_string(),
-                                },
-                                retry_policy: RetryConfig::default(),
+            let recipe = ProvisioningRecipe::new(RecipeId::new("wh-test"), "1", "Webhook test")
+                .with_step(ProvisioningStep::new(
+                    StepId::new("wh1"),
+                    ProvisioningStepType::Webhook {
+                        registration: WebhookRecipe {
+                            registration_url: "https://api.test/hooks".to_string(),
+                            events: vec!["push".to_string(), "pr".to_string()],
+                            verification: WebhookVerification::HmacSignature {
+                                algorithm: "sha256".to_string(),
+                                header: "X-Sig".to_string(),
                             },
+                            retry_policy: RetryConfig::default(),
                         },
-                    ))
-                    .with_step(ProvisioningStep::new(
-                        StepId::new("wh2"),
-                        ProvisioningStepType::Webhook {
-                            registration: WebhookRecipe {
-                                registration_url: "https://api2.test/hooks".to_string(),
-                                events: vec!["issue".to_string()],
-                                verification: WebhookVerification::ChallengeResponse {
-                                    challenge_param: "c".to_string(),
-                                },
-                                retry_policy: RetryConfig::default(),
+                    },
+                ))
+                .with_step(ProvisioningStep::new(
+                    StepId::new("wh2"),
+                    ProvisioningStepType::Webhook {
+                        registration: WebhookRecipe {
+                            registration_url: "https://api2.test/hooks".to_string(),
+                            events: vec!["issue".to_string()],
+                            verification: WebhookVerification::ChallengeResponse {
+                                challenge_param: "c".to_string(),
                             },
+                            retry_policy: RetryConfig::default(),
                         },
-                    ));
+                    },
+                ));
             let mut provisioner = MockProvisioner::new(recipe);
-            provisioner
-                .execute_step(StepId::new("wh1"))
-                .await
-                .unwrap();
-            provisioner
-                .execute_step(StepId::new("wh2"))
-                .await
-                .unwrap();
+            provisioner.execute_step(StepId::new("wh1")).await.unwrap();
+            provisioner.execute_step(StepId::new("wh2")).await.unwrap();
             assert_eq!(provisioner.webhook_registrations.len(), 2);
             assert_eq!(provisioner.webhook_registrations[0].1.len(), 2);
             assert_eq!(provisioner.webhook_registrations[1].1.len(), 1);

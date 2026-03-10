@@ -1458,9 +1458,7 @@ mod tests {
             reason: "high_latency".to_string(),
         };
         let ch = ConnectorHealth::from(&state);
-        assert!(
-            matches!(&ch, ConnectorHealth::Degraded { reason } if reason == "high_latency")
-        );
+        assert!(matches!(&ch, ConnectorHealth::Degraded { reason } if reason == "high_latency"));
     }
 
     #[test]
@@ -1469,9 +1467,7 @@ mod tests {
             reason: "segfault".to_string(),
         };
         let ch = ConnectorHealth::from(&state);
-        assert!(
-            matches!(&ch, ConnectorHealth::Unavailable { reason, .. } if reason == "segfault")
-        );
+        assert!(matches!(&ch, ConnectorHealth::Unavailable { reason, .. } if reason == "segfault"));
     }
 
     #[test]
@@ -1607,7 +1603,10 @@ mod tests {
     #[test]
     fn self_check_report_unsupported_reason_code() {
         let report = SelfCheckReport::unsupported();
-        assert_eq!(report.reason_code.as_deref(), Some("self_check_unsupported"));
+        assert_eq!(
+            report.reason_code.as_deref(),
+            Some("self_check_unsupported")
+        );
     }
 
     #[test]

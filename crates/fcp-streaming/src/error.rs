@@ -552,8 +552,7 @@ mod tests {
         // Verify StreamResult works with tuple types
         let result: StreamResult<(String, u64)> = Ok(("data".into(), 42));
         assert!(result.is_ok());
-        let err: StreamResult<(String, u64)> =
-            Err(StreamError::ParseError("fail".into()));
+        let err: StreamResult<(String, u64)> = Err(StreamError::ParseError("fail".into()));
         assert!(err.is_err());
     }
 

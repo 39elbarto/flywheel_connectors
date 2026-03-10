@@ -1474,9 +1474,7 @@ mod tests {
             preferred_devices: (0..10)
                 .map(|i| DeviceSelector::Tag(format!("tag-{i}")))
                 .collect(),
-            excluded_devices: (0..5)
-                .map(DeviceSelector::NodeId)
-                .collect(),
+            excluded_devices: (0..5).map(DeviceSelector::NodeId).collect(),
             target_coverage_bps: 8000,
             min_source_diversity: 1,
         };
@@ -1583,7 +1581,12 @@ mod tests {
 
     #[test]
     fn object_header_different_zones() {
-        for zone in [ZoneId::work(), ZoneId::private(), ZoneId::public(), ZoneId::community()] {
+        for zone in [
+            ZoneId::work(),
+            ZoneId::private(),
+            ZoneId::public(),
+            ZoneId::community(),
+        ] {
             let header = ObjectHeader {
                 schema: SchemaId::new("fcp.test", "Zone", Version::new(1, 0, 0)),
                 zone_id: zone.clone(),
@@ -1778,7 +1781,9 @@ mod tests {
         let back: StorageMeta = serde_json::from_str(&json).unwrap();
         assert!(matches!(
             back.retention,
-            RetentionClass::Lease { expires_at: 1_700_000_000 }
+            RetentionClass::Lease {
+                expires_at: 1_700_000_000
+            }
         ));
     }
 

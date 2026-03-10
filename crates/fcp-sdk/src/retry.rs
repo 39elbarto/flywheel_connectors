@@ -1013,10 +1013,11 @@ mod tests {
 
     #[test]
     fn map_external_error_service_name_preserved() {
-        let (_decision, error) =
-            map_external_error("my-service", Some(500), "error msg", None);
+        let (_decision, error) = map_external_error("my-service", Some(500), "error msg", None);
         match error {
-            FcpError::External { service, message, .. } => {
+            FcpError::External {
+                service, message, ..
+            } => {
                 assert_eq!(service, "my-service");
                 assert_eq!(message, "error msg");
             }
@@ -1026,8 +1027,7 @@ mod tests {
 
     #[test]
     fn map_external_error_no_status_parse_error_is_terminal() {
-        let (decision, _error) =
-            map_external_error("svc", None, "can't parse entities", None);
+        let (decision, _error) = map_external_error("svc", None, "can't parse entities", None);
         assert_eq!(decision, RetryDecision::Terminal);
     }
 
@@ -1161,7 +1161,8 @@ mod tests {
         let p = RetryPolicy::new().with_max_attempts(None);
         for attempt in [0, 1, 10, 100, 1000] {
             assert!(
-                p.next_delay(attempt, RetryDecision::Terminal, None).is_none(),
+                p.next_delay(attempt, RetryDecision::Terminal, None)
+                    .is_none(),
                 "attempt {attempt} should be None for Terminal"
             );
         }

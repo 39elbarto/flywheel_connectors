@@ -1204,11 +1204,17 @@ mod tests {
 
     #[test]
     fn storage_used_zero_after_construction() {
-        run_store_test("storage_used_zero_init", "verify", "accounting", 1, || async {
-            let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
-            assert_eq!(store.storage_used().await, 0);
-            StoreLogData::default()
-        });
+        run_store_test(
+            "storage_used_zero_init",
+            "verify",
+            "accounting",
+            1,
+            || async {
+                let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+                assert_eq!(store.storage_used().await, 0);
+                StoreLogData::default()
+            },
+        );
     }
 
     #[test]
@@ -1302,20 +1308,26 @@ mod tests {
 
     #[test]
     fn set_retention_lease_preserves_body() {
-        run_store_test("retention_preserves_body", "verify", "retention", 1, || async {
-            let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
-            let obj = test_stored_object(1, b"important data");
-            let id = obj.object_id;
-            store.put(obj).await.unwrap();
-            store
-                .set_retention(&id, RetentionClass::Lease { expires_at: 9999 })
-                .await
-                .unwrap();
+        run_store_test(
+            "retention_preserves_body",
+            "verify",
+            "retention",
+            1,
+            || async {
+                let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+                let obj = test_stored_object(1, b"important data");
+                let id = obj.object_id;
+                store.put(obj).await.unwrap();
+                store
+                    .set_retention(&id, RetentionClass::Lease { expires_at: 9999 })
+                    .await
+                    .unwrap();
 
-            let retrieved = store.get(&id).await.unwrap();
-            assert_eq!(retrieved.body, b"important data");
+                let retrieved = store.get(&id).await.unwrap();
+                assert_eq!(retrieved.body, b"important data");
 
-            StoreLogData::default()
-        });
+                StoreLogData::default()
+            },
+        );
     }
 }

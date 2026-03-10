@@ -1370,8 +1370,8 @@ mod tests {
 
     #[test]
     fn test_event_clone_independence() {
-        let original = WebhookEvent::new("e1", "push", "gh")
-            .with_payload(serde_json::json!({"key": "val"}));
+        let original =
+            WebhookEvent::new("e1", "push", "gh").with_payload(serde_json::json!({"key": "val"}));
         let mut cloned = original.clone();
         cloned.id = "e2".into();
         cloned.event_type = "release".into();

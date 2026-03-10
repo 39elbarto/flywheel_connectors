@@ -776,10 +776,7 @@ mod tests {
     #[test]
     fn error_display_parse_error_empty() {
         let err = TailscaleError::ParseError(String::new());
-        assert_eq!(
-            err.to_string(),
-            "failed to parse `LocalAPI` response: "
-        );
+        assert_eq!(err.to_string(), "failed to parse `LocalAPI` response: ");
     }
 
     #[test]

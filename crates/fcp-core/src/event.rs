@@ -1576,7 +1576,10 @@ mod tests {
         for channel_type in [10, 11, 12] {
             let result =
                 ThreadInfo::from_discord_channel("ch", channel_type, Some("parent".into()));
-            assert!(result.is_some(), "channel_type {channel_type} should be a thread");
+            assert!(
+                result.is_some(),
+                "channel_type {channel_type} should be a thread"
+            );
         }
     }
 

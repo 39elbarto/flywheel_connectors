@@ -1124,8 +1124,8 @@ mod tests {
 
     #[test]
     fn exponential_backoff_zero_initial() {
-        let mut backoff = ExponentialBackoff::new(Duration::ZERO, Duration::from_secs(60))
-            .with_jitter(None);
+        let mut backoff =
+            ExponentialBackoff::new(Duration::ZERO, Duration::from_secs(60)).with_jitter(None);
         // 0 * 2^n = 0 for any n
         for attempt in 0..10 {
             assert_eq!(backoff.next_backoff(attempt), Duration::ZERO);
@@ -1134,8 +1134,8 @@ mod tests {
 
     #[test]
     fn exponential_backoff_zero_max() {
-        let mut backoff = ExponentialBackoff::new(Duration::from_secs(1), Duration::ZERO)
-            .with_jitter(None);
+        let mut backoff =
+            ExponentialBackoff::new(Duration::from_secs(1), Duration::ZERO).with_jitter(None);
         // Everything is capped to 0
         assert_eq!(backoff.next_backoff(0), Duration::ZERO);
         assert_eq!(backoff.next_backoff(5), Duration::ZERO);
@@ -1143,9 +1143,10 @@ mod tests {
 
     #[test]
     fn exponential_backoff_fractional_multiplier() {
-        let mut backoff = ExponentialBackoff::new(Duration::from_secs(10), Duration::from_secs(100))
-            .with_multiplier(0.5)
-            .with_jitter(None);
+        let mut backoff =
+            ExponentialBackoff::new(Duration::from_secs(10), Duration::from_secs(100))
+                .with_multiplier(0.5)
+                .with_jitter(None);
         // 10 * 0.5^1 = 5, 10 * 0.5^2 = 2.5, etc — decreasing
         let d0 = backoff.next_backoff(0);
         let d1 = backoff.next_backoff(1);

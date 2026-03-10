@@ -1017,7 +1017,10 @@ mod tests {
         let elapsed = start.elapsed();
         assert_eq!(items, vec![1, 2]);
         // With 2 items and 50ms interval, after item 1 we wait 50ms
-        assert!(elapsed >= Duration::from_millis(40), "expected >=40ms, got {elapsed:?}");
+        assert!(
+            elapsed >= Duration::from_millis(40),
+            "expected >=40ms, got {elapsed:?}"
+        );
     }
 
     #[fcp_async_core::runtime::test]

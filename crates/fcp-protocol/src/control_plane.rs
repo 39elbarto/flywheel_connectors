@@ -794,14 +794,12 @@ mod tests {
         use fcp_cbor::to_canonical_cbor;
         let r = ControlPlaneRetention::Required;
         let cbor = to_canonical_cbor(&r).expect("encode");
-        let back: ControlPlaneRetention =
-            ciborium::from_reader(&cbor[..]).expect("decode");
+        let back: ControlPlaneRetention = ciborium::from_reader(&cbor[..]).expect("decode");
         assert_eq!(back, r);
 
         let e = ControlPlaneRetention::Ephemeral;
         let cbor = to_canonical_cbor(&e).expect("encode");
-        let back: ControlPlaneRetention =
-            ciborium::from_reader(&cbor[..]).expect("decode");
+        let back: ControlPlaneRetention = ciborium::from_reader(&cbor[..]).expect("decode");
         assert_eq!(back, e);
     }
 

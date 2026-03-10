@@ -3720,12 +3720,25 @@ fn microsoft365_full_manifest_parses_with_all_operations() {
         "m365.mail.reply_message",
         "m365.mail.search_messages",
         "m365.mail.send_message",
+        "m365.onenote.create_page",
+        "m365.onenote.get_page",
+        "m365.onenote.get_page_content",
+        "m365.onenote.list_notebooks",
+        "m365.onenote.list_pages",
+        "m365.onenote.list_sections",
+        "m365.onenote.update_page",
         "m365.subscriptions.create",
         "m365.subscriptions.delete",
         "m365.subscriptions.renew",
         "m365.tasks.create_task",
         "m365.tasks.list_task_lists",
         "m365.tasks.list_tasks",
+        "m365.word.create_document",
+        "m365.word.export_document",
+        "m365.word.extract_text",
+        "m365.word.get_document",
+        "m365.word.list_documents",
+        "m365.word.update_document",
     ];
     for op_name in &expected_ops {
         assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
@@ -3737,12 +3750,14 @@ fn microsoft365_full_manifest_parses_with_all_operations() {
     println!("MICROSOFT365_INTERFACE_HASH={hash}");
 
     let pools = parsed.rate_limits.as_ref().expect("rate_limits");
-    assert_eq!(pools.pools.len(), 11);
+    assert_eq!(pools.pools.len(), 15);
 
     let op_pools = &pools.operation_pools;
     assert!(op_pools.contains_key("m365.mail.search_messages"));
     assert!(op_pools.contains_key("m365.calendar.create_event"));
     assert!(op_pools.contains_key("m365.files.upload_file"));
+    assert!(op_pools.contains_key("m365.onenote.get_page_content"));
+    assert!(op_pools.contains_key("m365.word.export_document"));
 }
 
 // =============================================================================
@@ -3767,7 +3782,7 @@ fn google_ai_full_manifest_parses_with_all_operations() {
 
     assert_eq!(parsed.connector.id.as_str(), "fcp.google-ai");
 
-    // Verify all 8 operations present
+    // Verify all Google AI operations present
     let ops = &parsed.provides.operations;
     let expected_ops = [
         "google-ai.batch_embed_contents",
@@ -3778,6 +3793,11 @@ fn google_ai_full_manifest_parses_with_all_operations() {
         "google-ai.get_model",
         "google-ai.get_usage",
         "google-ai.list_models",
+        "google-ai.tuning.cancel",
+        "google-ai.tuning.create",
+        "google-ai.tuning.get",
+        "google-ai.tuning.get_operation",
+        "google-ai.tuning.list",
     ];
     for op_name in &expected_ops {
         assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
@@ -3788,9 +3808,9 @@ fn google_ai_full_manifest_parses_with_all_operations() {
     let hash = unchecked.compute_interface_hash().expect("hash");
     println!("GOOGLE_AI_INTERFACE_HASH={hash}");
 
-    // Verify 3 rate limit pools
+    // Verify 4 rate limit pools
     let pools = parsed.rate_limits.as_ref().expect("rate_limits");
-    assert_eq!(pools.pools.len(), 3);
+    assert_eq!(pools.pools.len(), 4);
 
     // Verify operation pool mappings exist for all operations
     let op_pools = &pools.operation_pools;

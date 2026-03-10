@@ -1392,10 +1392,7 @@ mod tests {
         let data = Bytes::from("event: \u{00E9}v\u{00E9}nement\ndata: payload\n\n");
         let events = parser.parse(&data);
         assert_eq!(events.len(), 1);
-        assert_eq!(
-            events[0].event,
-            Some("\u{00E9}v\u{00E9}nement".to_string())
-        );
+        assert_eq!(events[0].event, Some("\u{00E9}v\u{00E9}nement".to_string()));
     }
 
     #[test]
@@ -1438,9 +1435,7 @@ mod tests {
     #[test]
     fn test_parse_alternating_comments_and_events() {
         let mut parser = SseParser::new();
-        let data = Bytes::from(
-            ": ping\ndata: a\n\n: ping\ndata: b\n\n: ping\ndata: c\n\n",
-        );
+        let data = Bytes::from(": ping\ndata: a\n\n: ping\ndata: b\n\n: ping\ndata: c\n\n");
         let events = parser.parse(&data);
         assert_eq!(events.len(), 3);
         assert_eq!(events[0].data, "a");
@@ -1488,10 +1483,7 @@ mod tests {
         assert_eq!(config.auto_reconnect, cloned.auto_reconnect);
         assert_eq!(config.max_reconnect_attempts, cloned.max_reconnect_attempts);
         assert_eq!(config.reconnect_delay, cloned.reconnect_delay);
-        assert_eq!(
-            config.headers.get("Auth"),
-            cloned.headers.get("Auth")
-        );
+        assert_eq!(config.headers.get("Auth"), cloned.headers.get("Auth"));
     }
 
     // ── SseParser: empty buffer initially ──

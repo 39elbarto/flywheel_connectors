@@ -2260,11 +2260,7 @@ mod tests {
         manager.emit("t1", sample_event_data());
         manager.emit("t2", sample_event_data());
         manager.emit("t3", sample_event_data());
-        let removed = manager.unsubscribe(&[
-            "t1".to_string(),
-            "t2".to_string(),
-            "t3".to_string(),
-        ]);
+        let removed = manager.unsubscribe(&["t1".to_string(), "t2".to_string(), "t3".to_string()]);
         assert_eq!(removed, 3);
     }
 
@@ -2273,8 +2269,7 @@ mod tests {
         let mut manager = EventStreamManager::new(caps(true, false, 10));
         manager.emit("t1", sample_event_data());
         manager.emit("t2", sample_event_data());
-        let removed =
-            manager.unsubscribe(&["t1".to_string(), "nonexistent".to_string()]);
+        let removed = manager.unsubscribe(&["t1".to_string(), "nonexistent".to_string()]);
         assert_eq!(removed, 1);
     }
 

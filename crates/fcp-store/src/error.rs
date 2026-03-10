@@ -547,10 +547,7 @@ mod tests {
         let err = QuarantineError::SchemaValidationFailed {
             reason: "field X missing".into(),
         };
-        assert_eq!(
-            err.to_string(),
-            "schema validation failed: field X missing"
-        );
+        assert_eq!(err.to_string(), "schema validation failed: field X missing");
     }
 
     #[test]
@@ -590,10 +587,7 @@ mod tests {
     #[test]
     fn repair_error_symbol_store_quota_source() {
         use std::error::Error;
-        let inner = SymbolStoreError::QuotaExceeded {
-            used: 50,
-            max: 100,
-        };
+        let inner = SymbolStoreError::QuotaExceeded { used: 50, max: 100 };
         let err: RepairError = inner.into();
         let src = err.source().unwrap();
         assert!(src.to_string().contains("50"));

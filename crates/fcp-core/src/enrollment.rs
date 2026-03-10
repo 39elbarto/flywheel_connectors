@@ -2208,18 +2208,14 @@ mod tests {
 
     #[test]
     fn key_rotation_schedule_overlap_then_no_overlap() {
-        let schedule = KeyRotationSchedule::new()
-            .with_overlap(5)
-            .without_overlap();
+        let schedule = KeyRotationSchedule::new().with_overlap(5).without_overlap();
         assert!(!schedule.allow_overlap);
         assert_eq!(schedule.overlap_hours, 0);
     }
 
     #[test]
     fn key_rotation_schedule_no_overlap_then_overlap() {
-        let schedule = KeyRotationSchedule::new()
-            .without_overlap()
-            .with_overlap(3);
+        let schedule = KeyRotationSchedule::new().without_overlap().with_overlap(3);
         assert!(schedule.allow_overlap);
         assert_eq!(schedule.overlap_hours, 3);
     }
@@ -2282,7 +2278,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(request.metadata.display_name.as_deref(), Some("Test MacBook"));
+        assert_eq!(
+            request.metadata.display_name.as_deref(),
+            Some("Test MacBook")
+        );
         assert_eq!(request.metadata.hostname.as_deref(), Some("macbook.local"));
         assert_eq!(request.metadata.requested_tags.len(), 1);
         assert!(request.verify_proof().is_ok());
@@ -2575,8 +2574,7 @@ mod tests {
     #[test]
     fn node_key_attestation_signer_kid_matches_owner() {
         let (owner_key, approval) = create_test_approval();
-        let attestation =
-            NodeKeyAttestation::sign(&owner_key, "node-kid", &approval, 168).unwrap();
+        let attestation = NodeKeyAttestation::sign(&owner_key, "node-kid", &approval, 168).unwrap();
         assert_eq!(attestation.signer_kid, owner_key.key_id());
     }
 
@@ -2666,7 +2664,10 @@ mod tests {
 
         // Keys in attestation should match approval
         assert_eq!(attestation.signing_kid(), approval.signing_key.key_id());
-        assert_eq!(attestation.encryption_kid(), approval.encryption_key.key_id());
+        assert_eq!(
+            attestation.encryption_kid(),
+            approval.encryption_key.key_id()
+        );
         assert_eq!(attestation.issuance_kid(), approval.issuance_key.key_id());
     }
 }

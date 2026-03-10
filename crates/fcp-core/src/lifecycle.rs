@@ -4152,10 +4152,7 @@ mod tests {
             .with_previous_version(semver::Version::new(3, 2, 0));
 
         assert_eq!(record.version, semver::Version::new(3, 2, 1));
-        assert_eq!(
-            record.previous_version,
-            Some(semver::Version::new(3, 2, 0))
-        );
+        assert_eq!(record.previous_version, Some(semver::Version::new(3, 2, 0)));
         assert_eq!(record.canary_policy.promotion_threshold, 98);
         assert_eq!(record.canary_policy.rollback_threshold, 70);
         assert_eq!(record.canary_policy.min_samples, 200);
@@ -4207,10 +4204,7 @@ mod tests {
         let cloned = record.clone();
         assert_eq!(record.transitions.len(), cloned.transitions.len());
         assert_eq!(record.state, cloned.state);
-        assert_eq!(
-            record.connector_id.as_str(),
-            cloned.connector_id.as_str()
-        );
+        assert_eq!(record.connector_id.as_str(), cloned.connector_id.as_str());
     }
 
     #[test]
@@ -4442,8 +4436,7 @@ mod tests {
             .transition(LifecycleState::Canary, TransitionReason::InstallComplete)
             .unwrap();
         // Manually backdate the transition timestamp
-        record.transitions.last_mut().unwrap().timestamp =
-            base - chrono::Duration::seconds(500);
+        record.transitions.last_mut().unwrap().timestamp = base - chrono::Duration::seconds(500);
 
         // Rollback
         record
@@ -4464,8 +4457,7 @@ mod tests {
             )
             .unwrap();
         // Backdate second canary transition to 120 seconds ago
-        record.transitions.last_mut().unwrap().timestamp =
-            base - chrono::Duration::seconds(120);
+        record.transitions.last_mut().unwrap().timestamp = base - chrono::Duration::seconds(120);
 
         record.update_health(true, Some(50));
 
@@ -4489,8 +4481,7 @@ mod tests {
             .transition(LifecycleState::Canary, TransitionReason::InstallComplete)
             .unwrap();
         // Backdate canary transition to 60 seconds ago
-        record.transitions.last_mut().unwrap().timestamp =
-            base - chrono::Duration::seconds(60);
+        record.transitions.last_mut().unwrap().timestamp = base - chrono::Duration::seconds(60);
 
         let remaining = record.canary_expires_in_secs_at(base);
         assert_eq!(remaining, Some(3540)); // 3600 - 60 = 3540
@@ -4521,17 +4512,11 @@ mod tests {
 
     #[test]
     fn lifecycle_error_invalid_policy_eq() {
-        let a = LifecycleError::InvalidPolicy {
-            reason: "x".into(),
-        };
-        let b = LifecycleError::InvalidPolicy {
-            reason: "x".into(),
-        };
+        let a = LifecycleError::InvalidPolicy { reason: "x".into() };
+        let b = LifecycleError::InvalidPolicy { reason: "x".into() };
         assert_eq!(a, b);
 
-        let c = LifecycleError::InvalidPolicy {
-            reason: "y".into(),
-        };
+        let c = LifecycleError::InvalidPolicy { reason: "y".into() };
         assert_ne!(a, c);
     }
 
@@ -4573,16 +4558,12 @@ mod tests {
     fn lifecycle_status_connector_id_matches_record() {
         let record = LifecycleRecord::new(test_connector_id(), test_version());
         let status = LifecycleStatus::from_record(&record, Utc::now(), false);
-        assert_eq!(
-            status.connector_id.as_str(),
-            record.connector_id.as_str()
-        );
+        assert_eq!(status.connector_id.as_str(), record.connector_id.as_str());
     }
 
     #[test]
     fn lifecycle_status_version_matches_record() {
-        let record =
-            LifecycleRecord::new(test_connector_id(), semver::Version::new(5, 6, 7));
+        let record = LifecycleRecord::new(test_connector_id(), semver::Version::new(5, 6, 7));
         let status = LifecycleStatus::from_record(&record, Utc::now(), false);
         assert_eq!(status.version, semver::Version::new(5, 6, 7));
     }
@@ -4805,10 +4786,7 @@ mod tests {
                 TransitionReason::ManualPromotion,
                 TransitionReason::ManualPromotion,
             ),
-            (
-                TransitionReason::Uninstalled,
-                TransitionReason::Uninstalled,
-            ),
+            (TransitionReason::Uninstalled, TransitionReason::Uninstalled),
         ];
         for (a, b) in pairs {
             assert_eq!(a, b);

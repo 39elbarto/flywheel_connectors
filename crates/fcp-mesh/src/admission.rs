@@ -2755,7 +2755,11 @@ mod tests {
 
     #[test]
     fn admission_error_retry_after_none_for_auth() {
-        assert!(AdmissionError::AuthenticationRequired.retry_after().is_none());
+        assert!(
+            AdmissionError::AuthenticationRequired
+                .retry_after()
+                .is_none()
+        );
         assert!(AdmissionError::ProofOfNeedRequired.retry_after().is_none());
     }
 
@@ -2771,35 +2775,43 @@ mod tests {
 
     #[test]
     fn admission_error_is_retryable_budget_errors() {
-        assert!(AdmissionError::ByteBudgetExceeded {
-            current: 0,
-            limit: 0,
-            retry_after: Duration::ZERO,
-        }
-        .is_retryable());
-        assert!(AdmissionError::SymbolBudgetExceeded {
-            current: 0,
-            limit: 0,
-            retry_after: Duration::ZERO,
-        }
-        .is_retryable());
-        assert!(AdmissionError::DecodeCapacityExceeded {
-            current: 0,
-            limit: 0,
-        }
-        .is_retryable());
+        assert!(
+            AdmissionError::ByteBudgetExceeded {
+                current: 0,
+                limit: 0,
+                retry_after: Duration::ZERO,
+            }
+            .is_retryable()
+        );
+        assert!(
+            AdmissionError::SymbolBudgetExceeded {
+                current: 0,
+                limit: 0,
+                retry_after: Duration::ZERO,
+            }
+            .is_retryable()
+        );
+        assert!(
+            AdmissionError::DecodeCapacityExceeded {
+                current: 0,
+                limit: 0,
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn admission_error_not_retryable_non_budget() {
         assert!(!AdmissionError::AuthenticationRequired.is_retryable());
         assert!(!AdmissionError::ProofOfNeedRequired.is_retryable());
-        assert!(!AdmissionError::AmplificationViolation {
-            request_symbols: 1,
-            response_symbols: 100,
-            max_factor: 10,
-        }
-        .is_retryable());
+        assert!(
+            !AdmissionError::AmplificationViolation {
+                request_symbols: 1,
+                response_symbols: 100,
+                max_factor: 10,
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
@@ -2892,7 +2904,10 @@ mod tests {
 
     #[test]
     fn object_admission_class_all_variants_serde() {
-        for class in [ObjectAdmissionClass::Quarantined, ObjectAdmissionClass::Admitted] {
+        for class in [
+            ObjectAdmissionClass::Quarantined,
+            ObjectAdmissionClass::Admitted,
+        ] {
             let json = serde_json::to_string(&class).unwrap();
             let back: ObjectAdmissionClass = serde_json::from_str(&json).unwrap();
             assert_eq!(class, back);

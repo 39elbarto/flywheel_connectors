@@ -1838,17 +1838,26 @@ mod tests {
 
     #[test]
     fn display_not_configured() {
-        assert_eq!(FcpError::NotConfigured.to_string(), "Connector not configured");
+        assert_eq!(
+            FcpError::NotConfigured.to_string(),
+            "Connector not configured"
+        );
     }
 
     #[test]
     fn display_not_handshaken() {
-        assert_eq!(FcpError::NotHandshaken.to_string(), "Connector not handshaken");
+        assert_eq!(
+            FcpError::NotHandshaken.to_string(),
+            "Connector not handshaken"
+        );
     }
 
     #[test]
     fn display_streaming_not_supported() {
-        assert_eq!(FcpError::StreamingNotSupported.to_string(), "Streaming not supported");
+        assert_eq!(
+            FcpError::StreamingNotSupported.to_string(),
+            "Streaming not supported"
+        );
     }
 
     #[test]
@@ -1935,7 +1944,10 @@ mod tests {
             retryable: false,
             retry_after: None,
         };
-        assert_eq!(err.to_string(), "External service error: stripe - payment failed");
+        assert_eq!(
+            err.to_string(),
+            "External service error: stripe - payment failed"
+        );
     }
 
     #[test]
@@ -2322,33 +2334,86 @@ mod tests {
     #[test]
     fn numeric_code_within_category_range_all_variants() {
         let errors: Vec<FcpError> = vec![
-            FcpError::InvalidRequest { code: 1001, message: "x".into() },
-            FcpError::MalformedFrame { code: 1002, message: "x".into() },
+            FcpError::InvalidRequest {
+                code: 1001,
+                message: "x".into(),
+            },
+            FcpError::MalformedFrame {
+                code: 1002,
+                message: "x".into(),
+            },
             FcpError::MissingField { field: "f".into() },
             FcpError::ChecksumMismatch,
-            FcpError::VersionMismatch { expected: "1".into(), actual: "2".into() },
-            FcpError::Unauthorized { code: 2001, message: "x".into() },
+            FcpError::VersionMismatch {
+                expected: "1".into(),
+                actual: "2".into(),
+            },
+            FcpError::Unauthorized {
+                code: 2001,
+                message: "x".into(),
+            },
             FcpError::TokenExpired,
             FcpError::InvalidSignature,
-            FcpError::CapabilityDenied { capability: "c".into(), reason: "r".into() },
-            FcpError::RateLimited { retry_after_ms: 100, violation: None },
-            FcpError::OperationNotGranted { operation: "o".into() },
-            FcpError::ResourceNotAllowed { resource: "r".into() },
-            FcpError::ZoneViolation { source_zone: "z:a".into(), target_zone: "z:b".into(), message: "m".into() },
-            FcpError::TaintViolation { origin_zone: "z:a".into(), target_zone: "z:b".into(), capability: "c".into() },
-            FcpError::ElevationRequired { capability: "c".into(), ttl_seconds: None },
-            FcpError::ConnectorUnavailable { code: 5001, message: "x".into() },
+            FcpError::CapabilityDenied {
+                capability: "c".into(),
+                reason: "r".into(),
+            },
+            FcpError::RateLimited {
+                retry_after_ms: 100,
+                violation: None,
+            },
+            FcpError::OperationNotGranted {
+                operation: "o".into(),
+            },
+            FcpError::ResourceNotAllowed {
+                resource: "r".into(),
+            },
+            FcpError::ZoneViolation {
+                source_zone: "z:a".into(),
+                target_zone: "z:b".into(),
+                message: "m".into(),
+            },
+            FcpError::TaintViolation {
+                origin_zone: "z:a".into(),
+                target_zone: "z:b".into(),
+                capability: "c".into(),
+            },
+            FcpError::ElevationRequired {
+                capability: "c".into(),
+                ttl_seconds: None,
+            },
+            FcpError::ConnectorUnavailable {
+                code: 5001,
+                message: "x".into(),
+            },
             FcpError::NotConfigured,
             FcpError::NotHandshaken,
             FcpError::HealthCheckFailed { reason: "r".into() },
             FcpError::StreamingNotSupported,
-            FcpError::ResourceNotFound { resource: "r".into() },
-            FcpError::ResourceExhausted { resource: "r".into() },
-            FcpError::BudgetExceeded { metric: UsageMetricKind::Tokens, used: 1, limit: 0, window_seconds: 1 },
-            FcpError::Conflict { message: "m".into() },
-            FcpError::UpstreamTimeout { service: "s".into() },
-            FcpError::DependencyUnavailable { service: "s".into() },
-            FcpError::Internal { message: "m".into() },
+            FcpError::ResourceNotFound {
+                resource: "r".into(),
+            },
+            FcpError::ResourceExhausted {
+                resource: "r".into(),
+            },
+            FcpError::BudgetExceeded {
+                metric: UsageMetricKind::Tokens,
+                used: 1,
+                limit: 0,
+                window_seconds: 1,
+            },
+            FcpError::Conflict {
+                message: "m".into(),
+            },
+            FcpError::UpstreamTimeout {
+                service: "s".into(),
+            },
+            FcpError::DependencyUnavailable {
+                service: "s".into(),
+            },
+            FcpError::Internal {
+                message: "m".into(),
+            },
         ];
         for err in errors {
             let code = err.numeric_code();
@@ -2431,21 +2496,112 @@ mod tests {
         assert!(FcpError::NotConfigured.details().is_none());
         assert!(FcpError::NotHandshaken.details().is_none());
         assert!(FcpError::StreamingNotSupported.details().is_none());
-        assert!(FcpError::Internal { message: "x".into() }.details().is_none());
-        assert!(FcpError::UpstreamTimeout { service: "s".into() }.details().is_none());
-        assert!(FcpError::DependencyUnavailable { service: "s".into() }.details().is_none());
-        assert!(FcpError::ResourceNotFound { resource: "r".into() }.details().is_none());
-        assert!(FcpError::ResourceExhausted { resource: "r".into() }.details().is_none());
-        assert!(FcpError::Conflict { message: "m".into() }.details().is_none());
-        assert!(FcpError::InvalidRequest { code: 1001, message: "x".into() }.details().is_none());
-        assert!(FcpError::MalformedFrame { code: 1002, message: "x".into() }.details().is_none());
-        assert!(FcpError::Unauthorized { code: 2001, message: "x".into() }.details().is_none());
-        assert!(FcpError::MissingField { field: "f".into() }.details().is_none());
-        assert!(FcpError::OperationNotGranted { operation: "o".into() }.details().is_none());
-        assert!(FcpError::ResourceNotAllowed { resource: "r".into() }.details().is_none());
-        assert!(FcpError::HealthCheckFailed { reason: "r".into() }.details().is_none());
-        assert!(FcpError::ConnectorUnavailable { code: 5001, message: "x".into() }.details().is_none());
-        assert!(FcpError::VersionMismatch { expected: "1".into(), actual: "2".into() }.details().is_none());
+        assert!(
+            FcpError::Internal {
+                message: "x".into()
+            }
+            .details()
+            .is_none()
+        );
+        assert!(
+            FcpError::UpstreamTimeout {
+                service: "s".into()
+            }
+            .details()
+            .is_none()
+        );
+        assert!(
+            FcpError::DependencyUnavailable {
+                service: "s".into()
+            }
+            .details()
+            .is_none()
+        );
+        assert!(
+            FcpError::ResourceNotFound {
+                resource: "r".into()
+            }
+            .details()
+            .is_none()
+        );
+        assert!(
+            FcpError::ResourceExhausted {
+                resource: "r".into()
+            }
+            .details()
+            .is_none()
+        );
+        assert!(
+            FcpError::Conflict {
+                message: "m".into()
+            }
+            .details()
+            .is_none()
+        );
+        assert!(
+            FcpError::InvalidRequest {
+                code: 1001,
+                message: "x".into()
+            }
+            .details()
+            .is_none()
+        );
+        assert!(
+            FcpError::MalformedFrame {
+                code: 1002,
+                message: "x".into()
+            }
+            .details()
+            .is_none()
+        );
+        assert!(
+            FcpError::Unauthorized {
+                code: 2001,
+                message: "x".into()
+            }
+            .details()
+            .is_none()
+        );
+        assert!(
+            FcpError::MissingField { field: "f".into() }
+                .details()
+                .is_none()
+        );
+        assert!(
+            FcpError::OperationNotGranted {
+                operation: "o".into()
+            }
+            .details()
+            .is_none()
+        );
+        assert!(
+            FcpError::ResourceNotAllowed {
+                resource: "r".into()
+            }
+            .details()
+            .is_none()
+        );
+        assert!(
+            FcpError::HealthCheckFailed { reason: "r".into() }
+                .details()
+                .is_none()
+        );
+        assert!(
+            FcpError::ConnectorUnavailable {
+                code: 5001,
+                message: "x".into()
+            }
+            .details()
+            .is_none()
+        );
+        assert!(
+            FcpError::VersionMismatch {
+                expected: "1".into(),
+                actual: "2".into()
+            }
+            .details()
+            .is_none()
+        );
     }
 
     #[test]
@@ -2754,13 +2910,19 @@ mod tests {
 
     #[test]
     fn empty_string_fields() {
-        let err = FcpError::Internal { message: String::new() };
+        let err = FcpError::Internal {
+            message: String::new(),
+        };
         assert_eq!(err.to_string(), "Internal error: ");
 
-        let err = FcpError::ResourceNotFound { resource: String::new() };
+        let err = FcpError::ResourceNotFound {
+            resource: String::new(),
+        };
         assert_eq!(err.to_string(), "Resource not found: ");
 
-        let err = FcpError::MissingField { field: String::new() };
+        let err = FcpError::MissingField {
+            field: String::new(),
+        };
         assert_eq!(err.to_string(), "Missing required field: ");
     }
 
@@ -2807,27 +2969,63 @@ mod tests {
     #[test]
     fn not_retryable_all_non_retryable_variants() {
         let non_retryable = vec![
-            FcpError::InvalidRequest { code: 1001, message: "x".into() },
-            FcpError::MalformedFrame { code: 1002, message: "x".into() },
+            FcpError::InvalidRequest {
+                code: 1001,
+                message: "x".into(),
+            },
+            FcpError::MalformedFrame {
+                code: 1002,
+                message: "x".into(),
+            },
             FcpError::MissingField { field: "f".into() },
             FcpError::ChecksumMismatch,
-            FcpError::VersionMismatch { expected: "1".into(), actual: "2".into() },
-            FcpError::Unauthorized { code: 2001, message: "x".into() },
+            FcpError::VersionMismatch {
+                expected: "1".into(),
+                actual: "2".into(),
+            },
+            FcpError::Unauthorized {
+                code: 2001,
+                message: "x".into(),
+            },
             FcpError::TokenExpired,
             FcpError::InvalidSignature,
-            FcpError::CapabilityDenied { capability: "c".into(), reason: "r".into() },
-            FcpError::OperationNotGranted { operation: "o".into() },
-            FcpError::ResourceNotAllowed { resource: "r".into() },
-            FcpError::ZoneViolation { source_zone: "z:a".into(), target_zone: "z:b".into(), message: "m".into() },
-            FcpError::TaintViolation { origin_zone: "z:a".into(), target_zone: "z:b".into(), capability: "c".into() },
-            FcpError::ElevationRequired { capability: "c".into(), ttl_seconds: None },
+            FcpError::CapabilityDenied {
+                capability: "c".into(),
+                reason: "r".into(),
+            },
+            FcpError::OperationNotGranted {
+                operation: "o".into(),
+            },
+            FcpError::ResourceNotAllowed {
+                resource: "r".into(),
+            },
+            FcpError::ZoneViolation {
+                source_zone: "z:a".into(),
+                target_zone: "z:b".into(),
+                message: "m".into(),
+            },
+            FcpError::TaintViolation {
+                origin_zone: "z:a".into(),
+                target_zone: "z:b".into(),
+                capability: "c".into(),
+            },
+            FcpError::ElevationRequired {
+                capability: "c".into(),
+                ttl_seconds: None,
+            },
             FcpError::NotConfigured,
             FcpError::NotHandshaken,
             FcpError::HealthCheckFailed { reason: "r".into() },
             FcpError::StreamingNotSupported,
-            FcpError::ResourceNotFound { resource: "r".into() },
-            FcpError::Conflict { message: "m".into() },
-            FcpError::Internal { message: "m".into() },
+            FcpError::ResourceNotFound {
+                resource: "r".into(),
+            },
+            FcpError::Conflict {
+                message: "m".into(),
+            },
+            FcpError::Internal {
+                message: "m".into(),
+            },
         ];
         for err in non_retryable {
             assert!(
@@ -2840,13 +3038,36 @@ mod tests {
     #[test]
     fn retryable_all_retryable_variants() {
         let retryable = vec![
-            FcpError::RateLimited { retry_after_ms: 100, violation: None },
-            FcpError::ResourceExhausted { resource: "mem".into() },
-            FcpError::BudgetExceeded { metric: UsageMetricKind::Tokens, used: 1, limit: 0, window_seconds: 1 },
-            FcpError::UpstreamTimeout { service: "s".into() },
-            FcpError::DependencyUnavailable { service: "s".into() },
-            FcpError::ConnectorUnavailable { code: 5001, message: "x".into() },
-            FcpError::External { service: "s".into(), message: "m".into(), status_code: None, retryable: true, retry_after: None },
+            FcpError::RateLimited {
+                retry_after_ms: 100,
+                violation: None,
+            },
+            FcpError::ResourceExhausted {
+                resource: "mem".into(),
+            },
+            FcpError::BudgetExceeded {
+                metric: UsageMetricKind::Tokens,
+                used: 1,
+                limit: 0,
+                window_seconds: 1,
+            },
+            FcpError::UpstreamTimeout {
+                service: "s".into(),
+            },
+            FcpError::DependencyUnavailable {
+                service: "s".into(),
+            },
+            FcpError::ConnectorUnavailable {
+                code: 5001,
+                message: "x".into(),
+            },
+            FcpError::External {
+                service: "s".into(),
+                message: "m".into(),
+                status_code: None,
+                retryable: true,
+                retry_after: None,
+            },
         ];
         for err in retryable {
             assert!(
@@ -2865,10 +3086,35 @@ mod tests {
         assert!(FcpError::ChecksumMismatch.retry_after().is_none());
         assert!(FcpError::TokenExpired.retry_after().is_none());
         assert!(FcpError::NotConfigured.retry_after().is_none());
-        assert!(FcpError::Internal { message: "x".into() }.retry_after().is_none());
-        assert!(FcpError::UpstreamTimeout { service: "s".into() }.retry_after().is_none());
-        assert!(FcpError::ConnectorUnavailable { code: 5001, message: "x".into() }.retry_after().is_none());
-        assert!(FcpError::ResourceExhausted { resource: "x".into() }.retry_after().is_none());
+        assert!(
+            FcpError::Internal {
+                message: "x".into()
+            }
+            .retry_after()
+            .is_none()
+        );
+        assert!(
+            FcpError::UpstreamTimeout {
+                service: "s".into()
+            }
+            .retry_after()
+            .is_none()
+        );
+        assert!(
+            FcpError::ConnectorUnavailable {
+                code: 5001,
+                message: "x".into()
+            }
+            .retry_after()
+            .is_none()
+        );
+        assert!(
+            FcpError::ResourceExhausted {
+                resource: "x".into()
+            }
+            .retry_after()
+            .is_none()
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -2925,34 +3171,97 @@ mod tests {
     #[test]
     fn to_response_message_matches_display_all_variants() {
         let errors: Vec<FcpError> = vec![
-            FcpError::InvalidRequest { code: 1001, message: "test".into() },
-            FcpError::MalformedFrame { code: 1002, message: "frame".into() },
-            FcpError::MissingField { field: "zone".into() },
+            FcpError::InvalidRequest {
+                code: 1001,
+                message: "test".into(),
+            },
+            FcpError::MalformedFrame {
+                code: 1002,
+                message: "frame".into(),
+            },
+            FcpError::MissingField {
+                field: "zone".into(),
+            },
             FcpError::ChecksumMismatch,
-            FcpError::VersionMismatch { expected: "a".into(), actual: "b".into() },
-            FcpError::Unauthorized { code: 2001, message: "nope".into() },
+            FcpError::VersionMismatch {
+                expected: "a".into(),
+                actual: "b".into(),
+            },
+            FcpError::Unauthorized {
+                code: 2001,
+                message: "nope".into(),
+            },
             FcpError::TokenExpired,
             FcpError::InvalidSignature,
-            FcpError::CapabilityDenied { capability: "c".into(), reason: "r".into() },
-            FcpError::RateLimited { retry_after_ms: 100, violation: None },
-            FcpError::OperationNotGranted { operation: "o".into() },
-            FcpError::ResourceNotAllowed { resource: "r".into() },
-            FcpError::ZoneViolation { source_zone: "z:a".into(), target_zone: "z:b".into(), message: "m".into() },
-            FcpError::TaintViolation { origin_zone: "z:a".into(), target_zone: "z:b".into(), capability: "c".into() },
-            FcpError::ElevationRequired { capability: "c".into(), ttl_seconds: None },
-            FcpError::ConnectorUnavailable { code: 5001, message: "down".into() },
+            FcpError::CapabilityDenied {
+                capability: "c".into(),
+                reason: "r".into(),
+            },
+            FcpError::RateLimited {
+                retry_after_ms: 100,
+                violation: None,
+            },
+            FcpError::OperationNotGranted {
+                operation: "o".into(),
+            },
+            FcpError::ResourceNotAllowed {
+                resource: "r".into(),
+            },
+            FcpError::ZoneViolation {
+                source_zone: "z:a".into(),
+                target_zone: "z:b".into(),
+                message: "m".into(),
+            },
+            FcpError::TaintViolation {
+                origin_zone: "z:a".into(),
+                target_zone: "z:b".into(),
+                capability: "c".into(),
+            },
+            FcpError::ElevationRequired {
+                capability: "c".into(),
+                ttl_seconds: None,
+            },
+            FcpError::ConnectorUnavailable {
+                code: 5001,
+                message: "down".into(),
+            },
             FcpError::NotConfigured,
             FcpError::NotHandshaken,
-            FcpError::HealthCheckFailed { reason: "fail".into() },
+            FcpError::HealthCheckFailed {
+                reason: "fail".into(),
+            },
             FcpError::StreamingNotSupported,
-            FcpError::ResourceNotFound { resource: "r".into() },
-            FcpError::ResourceExhausted { resource: "r".into() },
-            FcpError::BudgetExceeded { metric: UsageMetricKind::Tokens, used: 1, limit: 0, window_seconds: 1 },
-            FcpError::Conflict { message: "conflict".into() },
-            FcpError::External { service: "s".into(), message: "m".into(), status_code: None, retryable: false, retry_after: None },
-            FcpError::UpstreamTimeout { service: "s".into() },
-            FcpError::DependencyUnavailable { service: "s".into() },
-            FcpError::Internal { message: "m".into() },
+            FcpError::ResourceNotFound {
+                resource: "r".into(),
+            },
+            FcpError::ResourceExhausted {
+                resource: "r".into(),
+            },
+            FcpError::BudgetExceeded {
+                metric: UsageMetricKind::Tokens,
+                used: 1,
+                limit: 0,
+                window_seconds: 1,
+            },
+            FcpError::Conflict {
+                message: "conflict".into(),
+            },
+            FcpError::External {
+                service: "s".into(),
+                message: "m".into(),
+                status_code: None,
+                retryable: false,
+                retry_after: None,
+            },
+            FcpError::UpstreamTimeout {
+                service: "s".into(),
+            },
+            FcpError::DependencyUnavailable {
+                service: "s".into(),
+            },
+            FcpError::Internal {
+                message: "m".into(),
+            },
         ];
         for err in errors {
             let resp = err.to_response();

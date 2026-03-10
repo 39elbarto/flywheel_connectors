@@ -18,12 +18,15 @@ use fcp_core::{
     AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
     IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus,
-    OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest,
-    SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
-    ZoneId,
+    ObjectId, OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId,
+    ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
+    UnsubscribeRequest, ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
-use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
+use fcp_e2e::{
+    ComplianceSuite, ConnectorSuite, E2eReport, E2eRunner, InvokeExpectations, scan_log_jsonl,
+    validate_log_entry_value,
+};
 use fcp_manifest::ConnectorManifest;
 use fcp_testkit::MockApiServer;
 use serde_json::json;
@@ -160,14 +163,17 @@ impl FcpConnector for AlgoliaConnectorAdapter {
             message: "Algolia verifier not initialized; handshake required".into(),
         })?;
         let required_capability = required_capability(req.operation.as_str())?;
-        verifier.verify(
+        let request_id = req.id.clone();
+        if let Err(err) = verifier.verify(
             &req.capability_token,
             &required_capability,
             &req.operation,
             &[],
-        )?;
+        ) {
+            return Ok(InvokeResponse::error(request_id, err)
+                .with_decision_receipt_id(stable_object_id("algolia.records.delete.decision")));
+        }
 
-        let request_id = req.id.clone();
         let value = self
             .connector
             .handle_invoke(json!({
@@ -175,7 +181,13 @@ impl FcpConnector for AlgoliaConnectorAdapter {
                 "input": req.input,
             }))
             .await?;
-        Ok(InvokeResponse::ok(request_id, value))
+        let mut response = InvokeResponse::ok(request_id, value);
+        if req.operation.as_str() == "algolia.records.delete" {
+            response = response
+                .with_receipt_id(stable_object_id("algolia.records.delete.receipt"))
+                .with_audit_event_id(stable_object_id("algolia.records.delete.audit"));
+        }
+        Ok(response)
     }
 
     async fn simulate(&self, req: SimulateRequest) -> fcp_core::FcpResult<SimulateResponse> {
@@ -251,6 +263,10 @@ fn required_capability(operation: &str) -> fcp_core::FcpResult<CapabilityId> {
         .map_err(|err| FcpError::Internal {
             message: format!("invalid capability id mapping for {operation}: {err}"),
         })
+}
+
+fn stable_object_id(label: &str) -> ObjectId {
+    ObjectId::from_unscoped_bytes(label.as_bytes())
 }
 
 fn algolia_manifest_with_hash() -> String {
@@ -380,6 +396,44 @@ fn host_allowed(host: &str, host_allow: &[String]) -> bool {
     })
 }
 
+fn assert_report_logs_validate(report: &E2eReport) {
+    let jsonl = report.to_stable_json_lines();
+    assert!(
+        !jsonl.trim().is_empty(),
+        "report should emit stable JSONL evidence"
+    );
+
+    let first_line = jsonl.lines().next().expect("at least one JSONL line");
+    let first_value: serde_json::Value =
+        serde_json::from_str(first_line).expect("first JSONL line should parse");
+    assert_eq!(
+        first_value
+            .get("timestamp")
+            .and_then(serde_json::Value::as_str),
+        Some("1970-01-01T00:00:00Z")
+    );
+    assert_eq!(
+        first_value
+            .get("correlation_id")
+            .and_then(serde_json::Value::as_str),
+        Some("00000000-0000-4000-8000-000000000000")
+    );
+    assert_eq!(
+        first_value
+            .get("duration_ms")
+            .and_then(serde_json::Value::as_u64),
+        Some(0)
+    );
+
+    for line in jsonl.lines() {
+        let value: serde_json::Value = serde_json::from_str(line).expect("jsonl line should parse");
+        validate_log_entry_value(&value).expect("jsonl line should satisfy E2E schema");
+    }
+
+    let scan = scan_log_jsonl(&jsonl);
+    assert_eq!(scan.error_count, 0, "stable evidence should scan cleanly");
+}
+
 #[fcp_async_core::runtime::test]
 async fn algolia_default_deny_compliance_suite_passes() {
     let mock = MockApiServer::start().await;
@@ -406,7 +460,7 @@ async fn algolia_default_deny_compliance_suite_passes() {
         expect_simulate_would_succeed: None,
         require_simulate_denial_details: false,
         require_capability_denial: true,
-        require_decision_receipt: false,
+        require_decision_receipt: true,
     };
     let suite = ComplianceSuite::new(
         "algolia_default_deny",
@@ -424,6 +478,7 @@ async fn algolia_default_deny_compliance_suite_passes() {
         report.passed,
         "default deny compliance should pass: {report:#?}"
     );
+    assert_report_logs_validate(&report);
 }
 
 #[fcp_async_core::runtime::test]
@@ -472,6 +527,7 @@ async fn algolia_happy_path_compliance_suite_passes() {
         .expect("connector suite run");
 
     assert!(report.passed, "happy path should pass: {report:#?}");
+    assert_report_logs_validate(&report);
     let invoke_entry = report
         .logs
         .iter()
@@ -481,6 +537,83 @@ async fn algolia_happy_path_compliance_suite_passes() {
     assert_eq!(
         invoke_entry.context.get("invoke_status"),
         Some(&json!(format!("{:?}", InvokeStatus::Ok)))
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn algolia_delete_emits_receipt_audit_and_stable_evidence() {
+    let mock = MockApiServer::start().await;
+
+    Mock::given(method("DELETE"))
+        .and(path_regex(r"^/indexes/products/abc123$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "deletedAt": "2025-06-15T12:00:00Z",
+            "taskID": 12345
+        })))
+        .mount(mock.inner())
+        .await;
+
+    let mut connector = AlgoliaConnectorAdapter::new();
+    let signing_key = Ed25519SigningKey::generate();
+    let handshake = handshake_request(
+        signing_key.verifying_key().to_bytes(),
+        &["algolia.records.write"],
+    );
+    let token = build_token(
+        &signing_key,
+        "algolia.records.write",
+        &["algolia.records.delete"],
+    );
+    let invoke = invoke_request(
+        "algolia.records.delete",
+        json!({ "index_name": "products", "object_id": "abc123" }),
+        token,
+    );
+
+    let suite = ConnectorSuite {
+        test_name: "algolia_delete_receipts".to_string(),
+        config: algolia_config(&mock.base_url()),
+        handshake,
+        invoke: Some(invoke),
+        invoke_expectations: InvokeExpectations {
+            expect_error: false,
+            expect_decision_receipt: false,
+            expect_audit_event: true,
+            expect_receipt: true,
+            expected_reason_code: None,
+            rate_limit_pool: None,
+        },
+    };
+
+    let mut runner = E2eRunner::new("fcp-e2e-algolia-delete");
+    let report = runner
+        .run_connector_suite(&mut connector, suite)
+        .await
+        .expect("dangerous delete suite run");
+
+    assert!(
+        report.passed,
+        "delete evidence suite should pass: {report:#?}"
+    );
+    assert_report_logs_validate(&report);
+
+    let invoke_entry = report
+        .logs
+        .iter()
+        .find(|entry| entry.context.get("operation") == Some(&json!("invoke")))
+        .expect("invoke entry");
+    assert_eq!(invoke_entry.result, "pass");
+    assert_eq!(
+        invoke_entry.context.get("audit_event_id"),
+        Some(&json!(
+            stable_object_id("algolia.records.delete.audit").to_string()
+        ))
+    );
+    assert_eq!(
+        invoke_entry.context.get("receipt_id"),
+        Some(&json!(
+            stable_object_id("algolia.records.delete.receipt").to_string()
+        ))
     );
 }
 

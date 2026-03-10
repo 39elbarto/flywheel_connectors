@@ -446,6 +446,8 @@ mod tests {
         let zone: ZoneId = "z:test".parse().unwrap();
         let report = simulate_report(&zone);
         assert!(report.placement.current_avg_replicas > 0.0);
-        assert!(report.placement.current_avg_replicas <= f64::from(report.placement.target_replicas));
+        assert!(
+            report.placement.current_avg_replicas <= f64::from(report.placement.target_replicas)
+        );
     }
 }

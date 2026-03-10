@@ -1331,7 +1331,11 @@ mod tests {
         let metrics = ConnectorMetrics::default();
         let value = serde_json::to_value(&metrics).unwrap();
         let obj = value.as_object().unwrap();
-        assert_eq!(obj.len(), 9, "ConnectorMetrics should have exactly 9 fields");
+        assert_eq!(
+            obj.len(),
+            9,
+            "ConnectorMetrics should have exactly 9 fields"
+        );
     }
 
     #[test]
@@ -1441,7 +1445,11 @@ mod tests {
         let a = BaseConnector::new(test_connector_id());
         let b = BaseConnector::new(test_connector_id());
         let c = BaseConnector::new(test_connector_id());
-        let ids = [a.instance_id.as_str(), b.instance_id.as_str(), c.instance_id.as_str()];
+        let ids = [
+            a.instance_id.as_str(),
+            b.instance_id.as_str(),
+            c.instance_id.as_str(),
+        ];
         // All three must be distinct
         assert_ne!(ids[0], ids[1]);
         assert_ne!(ids[1], ids[2]);

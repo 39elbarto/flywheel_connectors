@@ -1934,7 +1934,10 @@ mod tests {
 
     #[test]
     fn harness_error_display_not_empty() {
-        let variants = [HarnessError::NodeAlreadyRunning, HarnessError::NodeNotRunning];
+        let variants = [
+            HarnessError::NodeAlreadyRunning,
+            HarnessError::NodeNotRunning,
+        ];
         for err in &variants {
             assert!(!err.to_string().is_empty());
         }
@@ -2117,13 +2120,9 @@ mod tests {
     #[test]
     fn log_entry_with_clock_advances_time() {
         let clock: SharedMockClock = Arc::new(Mutex::new(MockClock::new(0)));
-        let e1 = LogEntry::new_with_clock(
-            &clock, "n", "t", "p", "c", "e", serde_json::json!({}),
-        );
+        let e1 = LogEntry::new_with_clock(&clock, "n", "t", "p", "c", "e", serde_json::json!({}));
         clock.lock().unwrap().advance(Duration::from_secs(10));
-        let e2 = LogEntry::new_with_clock(
-            &clock, "n", "t", "p", "c", "e", serde_json::json!({}),
-        );
+        let e2 = LogEntry::new_with_clock(&clock, "n", "t", "p", "c", "e", serde_json::json!({}));
         assert!(e2.timestamp > e1.timestamp);
     }
 
@@ -2139,7 +2138,14 @@ mod tests {
     fn log_collector_clone_shares_entries() {
         let c1 = LogCollector::new();
         let c2 = c1.clone();
-        c1.push(LogEntry::new("n", "t", "p", "c", "e", serde_json::json!({})));
+        c1.push(LogEntry::new(
+            "n",
+            "t",
+            "p",
+            "c",
+            "e",
+            serde_json::json!({}),
+        ));
         // Both clones share the same Arc<Mutex<Vec<...>>>
         assert_eq!(c2.entries().len(), 1);
     }
@@ -2147,7 +2153,14 @@ mod tests {
     #[test]
     fn log_collector_for_node_no_match() {
         let c = LogCollector::new();
-        c.push(LogEntry::new("node-1", "t", "p", "c", "e", serde_json::json!({})));
+        c.push(LogEntry::new(
+            "node-1",
+            "t",
+            "p",
+            "c",
+            "e",
+            serde_json::json!({}),
+        ));
         let node = NodeId::new("node-999");
         assert!(c.for_node(&node).is_empty());
     }
@@ -2155,14 +2168,28 @@ mod tests {
     #[test]
     fn log_collector_for_correlation_no_match() {
         let c = LogCollector::new();
-        c.push(LogEntry::new("n", "t", "p", "corr-1", "e", serde_json::json!({})));
+        c.push(LogEntry::new(
+            "n",
+            "t",
+            "p",
+            "corr-1",
+            "e",
+            serde_json::json!({}),
+        ));
         assert!(c.for_correlation("corr-nonexistent").is_empty());
     }
 
     #[test]
     fn log_collector_denials_none() {
         let c = LogCollector::new();
-        c.push(LogEntry::new("n", "t", "p", "c", "node_started", serde_json::json!({})));
+        c.push(LogEntry::new(
+            "n",
+            "t",
+            "p",
+            "c",
+            "node_started",
+            serde_json::json!({}),
+        ));
         assert!(c.denials().is_empty());
     }
 
@@ -2178,7 +2205,11 @@ mod tests {
         for i in 0..5 {
             c.push(LogEntry::new(
                 format!("node-{i}"),
-                "t", "p", "c", "e", serde_json::json!({}),
+                "t",
+                "p",
+                "c",
+                "e",
+                serde_json::json!({}),
             ));
         }
         let node = NodeId::new("node-3");
@@ -2192,10 +2223,22 @@ mod tests {
         let c = LogCollector::new();
         for i in 0..3 {
             c.push(LogEntry::new(
-                "n", "t", "p", format!("corr-{i}"), "e", serde_json::json!({}),
+                "n",
+                "t",
+                "p",
+                format!("corr-{i}"),
+                "e",
+                serde_json::json!({}),
             ));
         }
-        c.push(LogEntry::new("n", "t", "p", "corr-1", "e", serde_json::json!({})));
+        c.push(LogEntry::new(
+            "n",
+            "t",
+            "p",
+            "corr-1",
+            "e",
+            serde_json::json!({}),
+        ));
         let filtered = c.for_correlation("corr-1");
         assert_eq!(filtered.len(), 2);
     }
@@ -2499,7 +2542,10 @@ mod tests {
         }
         // Different seeds should (almost certainly) produce different patterns
         // With 20 samples at 50% loss, probability of identical results is ~2^-20
-        assert_ne!(r1, r2, "Different seeds should produce different loss patterns");
+        assert_ne!(
+            r1, r2,
+            "Different seeds should produce different loss patterns"
+        );
     }
 
     // ── TestMeshNode additional tests ──

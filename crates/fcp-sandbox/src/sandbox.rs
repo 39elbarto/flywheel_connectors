@@ -959,8 +959,7 @@ mod tests {
 
     #[test]
     fn test_sandbox_error_io_permission_denied() {
-        let io_err =
-            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "access denied");
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "access denied");
         let e: SandboxError = io_err.into();
         let msg = e.to_string();
         assert!(msg.contains("access denied"));
@@ -968,8 +967,7 @@ mod tests {
 
     #[test]
     fn test_sandbox_error_io_not_found() {
-        let io_err =
-            std::io::Error::new(std::io::ErrorKind::NotFound, "file missing");
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file missing");
         let e: SandboxError = io_err.into();
         let msg = e.to_string();
         assert!(msg.contains("file missing"));
@@ -1063,10 +1061,7 @@ mod tests {
         let mut section = test_sandbox_section();
         section.memory_mb = 32_768; // 32 GB
         let policy = CompiledPolicy::from_manifest(&section, None).unwrap();
-        assert_eq!(
-            policy.memory_limit_bytes,
-            32_768 * 1024 * 1024
-        );
+        assert_eq!(policy.memory_limit_bytes, 32_768 * 1024 * 1024);
     }
 
     #[test]

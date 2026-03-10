@@ -6309,9 +6309,7 @@ mod tests {
     #[runtime::test]
     async fn task_group_spawn_task_that_returns_error_variant() {
         let mut group = TaskGroup::new();
-        group.spawn("channel-err", async {
-            Err(AsyncError::ChannelClosed)
-        });
+        group.spawn("channel-err", async { Err(AsyncError::ChannelClosed) });
         let err = group
             .shutdown(Duration::from_secs(1))
             .await
@@ -6325,9 +6323,7 @@ mod tests {
     async fn context_run_with_channel_send() {
         let ctx = ExecutionContext::request_scoped(Duration::from_secs(5));
         let (tx, mut rx) = channel::mpsc::channel::<u32>(1);
-        ctx.run(async { tx.send(42).await.unwrap() })
-            .await
-            .unwrap();
+        ctx.run(async { tx.send(42).await.unwrap() }).await.unwrap();
         assert_eq!(rx.recv().await, Some(42));
     }
 
@@ -6356,8 +6352,7 @@ mod tests {
         drop(tx);
         // When sender drops, behavior depends on implementation
         // It should either complete the sleep or return Cancelled
-        let result =
-            super::shutdown::sleep_or_shutdown(Duration::from_millis(10), &mut rx).await;
+        let result = super::shutdown::sleep_or_shutdown(Duration::from_millis(10), &mut rx).await;
         // Either Ok or Err is valid when sender drops
         let _ = result;
     }

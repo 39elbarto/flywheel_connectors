@@ -5712,8 +5712,7 @@ mod tests {
     fn serialize_unit_struct_same_as_null() {
         let schema = SchemaId::new("fcp.test", "UnitNull", Version::new(1, 0, 0));
         let unit_bytes = CanonicalSerializer::serialize(&(), &schema).unwrap();
-        let none_bytes =
-            CanonicalSerializer::serialize(&Option::<u32>::None, &schema).unwrap();
+        let none_bytes = CanonicalSerializer::serialize(&Option::<u32>::None, &schema).unwrap();
         // Both should produce CBOR null.
         assert_eq!(unit_bytes, none_bytes);
     }
@@ -5964,11 +5963,13 @@ mod tests {
         drop(result);
         let nested = Value::Map(vec![(
             Value::Text("k".into()),
-            Value::Map(vec![(Value::Text("inner".into()), Value::Integer(1.into()))]),
+            Value::Map(vec![(
+                Value::Text("inner".into()),
+                Value::Integer(1.into()),
+            )]),
         )]);
         let mut v2 = nested;
-        let result2 =
-            canonicalize_value_in_place(&mut v2, MAX_CANONICALIZATION_DEPTH - 1);
+        let result2 = canonicalize_value_in_place(&mut v2, MAX_CANONICALIZATION_DEPTH - 1);
         // At depth MAX-1, map calls canonicalize_map at depth MAX,
         // which calls canonicalize_value_in_place on children at depth MAX.
         // Inner map calls canonicalize_map at depth MAX+1 which exceeds limit.
@@ -6127,8 +6128,7 @@ mod tests {
     fn serialize_deserialize_preserves_map_entry_count() {
         let schema = SchemaId::new("fcp.test", "EntryCount", Version::new(1, 0, 0));
         for count in [0, 1, 5, 23, 24, 100, 256] {
-            let map: HashMap<String, u32> =
-                (0..count).map(|i| (format!("k{i}"), i)).collect();
+            let map: HashMap<String, u32> = (0..count).map(|i| (format!("k{i}"), i)).collect();
             let bytes = CanonicalSerializer::serialize(&map, &schema).unwrap();
             let decoded: HashMap<String, u32> =
                 CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
@@ -6290,7 +6290,10 @@ mod tests {
         let hash_via_roundtrip = SchemaHash::from_bytes(*hash_via_method.as_bytes());
         assert_eq!(hash_via_method, hash_via_roundtrip);
         assert_eq!(hash_via_method.to_string(), hash_via_roundtrip.to_string());
-        assert_eq!(format!("{hash_via_method:?}"), format!("{hash_via_roundtrip:?}"));
+        assert_eq!(
+            format!("{hash_via_method:?}"),
+            format!("{hash_via_roundtrip:?}")
+        );
     }
 
     #[test]
@@ -6366,7 +6369,10 @@ mod tests {
     fn roundtrip_enum_with_optional_struct_variant() {
         #[derive(Debug, PartialEq, Serialize, Deserialize)]
         enum Cmd {
-            Run { args: Vec<String>, env: Option<HashMap<String, String>> },
+            Run {
+                args: Vec<String>,
+                env: Option<HashMap<String, String>>,
+            },
             Exit,
         }
 
@@ -6386,7 +6392,10 @@ mod tests {
     fn roundtrip_enum_with_optional_struct_variant_none_env() {
         #[derive(Debug, PartialEq, Serialize, Deserialize)]
         enum Cmd2 {
-            Run { args: Vec<String>, env: Option<HashMap<String, String>> },
+            Run {
+                args: Vec<String>,
+                env: Option<HashMap<String, String>>,
+            },
             Exit,
         }
 
@@ -6459,12 +6468,7 @@ mod tests {
     fn canonicalize_map_preserves_entry_count() {
         for count in [0_u32, 1, 2, 5, 10, 50] {
             let mut entries: Vec<(Value, Value)> = (0..count)
-                .map(|i| {
-                    (
-                        Value::Text(format!("k{i:04}")),
-                        Value::Integer(i.into()),
-                    )
-                })
+                .map(|i| (Value::Text(format!("k{i:04}")), Value::Integer(i.into())))
                 .collect();
             canonicalize_map(&mut entries, 0).unwrap();
             assert_eq!(entries.len(), usize::try_from(count).unwrap());
@@ -6507,8 +6511,7 @@ mod tests {
             d: Some(true),
         };
         let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
-        let decoded: FullyPresent =
-            CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+        let decoded: FullyPresent = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
         assert_eq!(decoded, val);
     }
 

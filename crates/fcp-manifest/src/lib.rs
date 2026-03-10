@@ -7931,7 +7931,10 @@ schema_version = "2.1"
 
     #[test]
     fn connector_archetype_ne() {
-        assert_ne!(ConnectorArchetype::Bidirectional, ConnectorArchetype::Storage);
+        assert_ne!(
+            ConnectorArchetype::Bidirectional,
+            ConnectorArchetype::Storage
+        );
         assert_ne!(ConnectorArchetype::Streaming, ConnectorArchetype::Knowledge);
     }
 
@@ -8143,10 +8146,7 @@ schema_version = "2.1"
                 min_slsa_level: Some(level),
                 trusted_builders: vec![],
             };
-            assert!(
-                p.validate().is_ok(),
-                "SLSA level {level} should be valid"
-            );
+            assert!(p.validate().is_ok(), "SLSA level {level} should be valid");
         }
     }
 
@@ -8405,16 +8405,13 @@ schema_version = "2.1"
     #[test]
     fn lint_allows_empty_string() {
         // Empty string should pass lint (validation of the ID itself is separate)
-        assert!(
-            lint_capability_id_no_network_addressing("", "capabilities.required").is_ok()
-        );
+        assert!(lint_capability_id_no_network_addressing("", "capabilities.required").is_ok());
     }
 
     #[test]
     fn lint_port_boundary_two_digits() {
         // 2-digit port like :80 should be flagged
-        let err =
-            lint_capability_id_no_network_addressing("service:80", "capabilities.required");
+        let err = lint_capability_id_no_network_addressing("service:80", "capabilities.required");
         assert!(err.is_err());
     }
 
@@ -8633,24 +8630,18 @@ schema_version = "2.1"
             attestations: vec![
                 SupplyChainAttestationRef {
                     attestation_type: AttestationType::InToto,
-                    object_id: ObjectIdRef::try_from(
-                        "objectid:".to_string() + &"11".repeat(32),
-                    )
-                    .unwrap(),
+                    object_id: ObjectIdRef::try_from("objectid:".to_string() + &"11".repeat(32))
+                        .unwrap(),
                 },
                 SupplyChainAttestationRef {
                     attestation_type: AttestationType::ReproducibleBuild,
-                    object_id: ObjectIdRef::try_from(
-                        "objectid:".to_string() + &"22".repeat(32),
-                    )
-                    .unwrap(),
+                    object_id: ObjectIdRef::try_from("objectid:".to_string() + &"22".repeat(32))
+                        .unwrap(),
                 },
                 SupplyChainAttestationRef {
                     attestation_type: AttestationType::CodeReview,
-                    object_id: ObjectIdRef::try_from(
-                        "objectid:".to_string() + &"33".repeat(32),
-                    )
-                    .unwrap(),
+                    object_id: ObjectIdRef::try_from("objectid:".to_string() + &"33".repeat(32))
+                        .unwrap(),
                 },
             ],
         };
@@ -8668,7 +8659,9 @@ schema_version = "2.1"
     #[test]
     fn manifest_error_toml_variant_source() {
         use std::error::Error;
-        let err: ManifestError = toml::from_str::<ConnectorManifest>("invalid").unwrap_err().into();
+        let err: ManifestError = toml::from_str::<ConnectorManifest>("invalid")
+            .unwrap_err()
+            .into();
         // The Toml variant should have a source
         assert!(err.source().is_some());
     }

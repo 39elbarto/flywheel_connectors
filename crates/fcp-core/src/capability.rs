@@ -2904,10 +2904,7 @@ mod tests {
     #[test]
     fn zone_id_error_display_invalid_tailscale_tag() {
         let err = ZoneIdError::InvalidTailscaleTagPrefix;
-        assert_eq!(
-            err.to_string(),
-            "tailscale tag must start with `tag:fcp-`"
-        );
+        assert_eq!(err.to_string(), "tailscale tag must start with `tag:fcp-`");
     }
 
     #[test]
@@ -2961,10 +2958,7 @@ mod tests {
 
     #[test]
     fn id_validation_error_display_invalid_char() {
-        let err = IdValidationError::InvalidChar {
-            ch: '!',
-            index: 4,
-        };
+        let err = IdValidationError::InvalidChar { ch: '!', index: 4 };
         assert_eq!(
             err.to_string(),
             "identifier has invalid character '!' at byte 4"
@@ -3065,12 +3059,10 @@ mod tests {
     #[test]
     fn capability_object_serde_roundtrip() {
         let obj = CapabilityObject {
-            caps: vec![
-                CapabilityGrant {
-                    capability: CapabilityId::new("cap.read").unwrap(),
-                    operation: None,
-                },
-            ],
+            caps: vec![CapabilityGrant {
+                capability: CapabilityId::new("cap.read").unwrap(),
+                operation: None,
+            }],
             constraints: CapabilityConstraints::default(),
             principal: Some(PrincipalId::new("user:alice").unwrap()),
             valid_from: Some(1000),
@@ -3481,14 +3473,10 @@ mod tests {
 
     #[test]
     fn provenance_highly_tainted_with_elevation_can_access() {
-        let p =
-            Provenance::highly_tainted(ZoneId::public()).elevated_with("high-elev-token");
+        let p = Provenance::highly_tainted(ZoneId::public()).elevated_with("high-elev-token");
         assert!(p.is_tainted());
         assert!(p.can_access_higher_trust());
-        assert_eq!(
-            p.elevation_token.as_deref(),
-            Some("high-elev-token")
-        );
+        assert_eq!(p.elevation_token.as_deref(), Some("high-elev-token"));
     }
 
     // ─────────────────────────────────────────────────────────────────────────

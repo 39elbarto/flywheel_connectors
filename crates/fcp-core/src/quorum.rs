@@ -2332,8 +2332,7 @@ mod tests {
 
     #[test]
     fn degraded_mode_state_serde_roundtrip() {
-        let state =
-            DegradedModeState::degraded(DegradedModeReason::QuorumTimeout, 5000, 2, 5);
+        let state = DegradedModeState::degraded(DegradedModeReason::QuorumTimeout, 5000, 2, 5);
         let json = serde_json::to_string(&state).unwrap();
         let decoded: DegradedModeState = serde_json::from_str(&json).unwrap();
         assert_eq!(state, decoded);
@@ -2341,12 +2340,7 @@ mod tests {
 
     #[test]
     fn degraded_mode_state_clone() {
-        let state = DegradedModeState::degraded(
-            DegradedModeReason::ManualOverride,
-            1000,
-            3,
-            5,
-        );
+        let state = DegradedModeState::degraded(DegradedModeReason::ManualOverride, 1000, 3, 5);
         let cloned = state.clone();
         assert_eq!(state, cloned);
     }

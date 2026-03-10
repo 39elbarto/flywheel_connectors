@@ -1494,9 +1494,15 @@ mod tests {
         f1.check_replay(&mut window).expect("seq 1");
 
         // Skip to seq 100
-        let f100 =
-            FcpcFrame::seal(session_id, 100, dir, FcpcFrameFlags::default(), b"x", &K_CTX)
-                .expect("seal");
+        let f100 = FcpcFrame::seal(
+            session_id,
+            100,
+            dir,
+            FcpcFrameFlags::default(),
+            b"x",
+            &K_CTX,
+        )
+        .expect("seal");
         f100.check_replay(&mut window).expect("seq 100");
 
         // seq 1 is now too old (gap > 128 window)

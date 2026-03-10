@@ -3105,7 +3105,12 @@ mod tests {
             1_700_000_001,
         );
         assert!(!outcome.resolved);
-        assert!(outcome.failure_reason.unwrap().contains("manual resolution"));
+        assert!(
+            outcome
+                .failure_reason
+                .unwrap()
+                .contains("manual resolution")
+        );
     }
 
     #[test]
@@ -3295,12 +3300,13 @@ mod tests {
             test_migration_context(0),
         );
         comp.suspend(&checkpoint, checkpoint_object_id).unwrap();
-        let err = comp
-            .suspend(&checkpoint, checkpoint_object_id)
-            .unwrap_err();
+        let err = comp.suspend(&checkpoint, checkpoint_object_id).unwrap_err();
         assert!(matches!(
             err,
-            ComputationMigrationError::InvalidStateTransition { action: "suspend", .. }
+            ComputationMigrationError::InvalidStateTransition {
+                action: "suspend",
+                ..
+            }
         ));
     }
 
@@ -3317,8 +3323,7 @@ mod tests {
             test_migration_context(0),
         );
         let active_lease = test_migration_lease("holder", 7, 2_000);
-        let handoff =
-            test_migration_handoff(lease_id, target_lease_id, "holder", "target", 7, 8);
+        let handoff = test_migration_handoff(lease_id, target_lease_id, "holder", "target", 7, 8);
         let err = comp
             .begin_transfer(&active_lease, &handoff, 1_500)
             .unwrap_err();
@@ -3347,7 +3352,13 @@ mod tests {
         comp.state = MigratableComputationState::Completed;
         let resume_lease = test_migration_lease("holder", 7, 2_000);
         let err = comp
-            .resume(&checkpoint, checkpoint_object_id, lease_id, &resume_lease, 1_500)
+            .resume(
+                &checkpoint,
+                checkpoint_object_id,
+                lease_id,
+                &resume_lease,
+                1_500,
+            )
             .unwrap_err();
         assert!(matches!(
             err,
@@ -3376,9 +3387,12 @@ mod tests {
     #[test]
     fn connector_state_root_serde_roundtrip_with_head() {
         let head = test_object_id("head-obj");
-        let root =
-            ConnectorStateRoot::singleton_writer(test_header(), test_connector_id(), ZoneId::work())
-                .with_head(head);
+        let root = ConnectorStateRoot::singleton_writer(
+            test_header(),
+            test_connector_id(),
+            ZoneId::work(),
+        )
+        .with_head(head);
         let json = serde_json::to_string(&root).unwrap();
         let back: ConnectorStateRoot = serde_json::from_str(&json).unwrap();
         assert_eq!(back.head, Some(head));

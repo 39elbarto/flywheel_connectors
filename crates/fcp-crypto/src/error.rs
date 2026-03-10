@@ -345,20 +345,50 @@ mod tests {
     #[test]
     fn error_debug_all_variants_contain_variant_name() {
         let variants: Vec<(&str, CryptoError)> = vec![
-            ("InvalidKeyLength", CryptoError::InvalidKeyLength { expected: 1, actual: 2 }),
-            ("InvalidSignatureLength", CryptoError::InvalidSignatureLength { expected: 3, actual: 4 }),
-            ("SignatureVerificationFailed", CryptoError::SignatureVerificationFailed),
+            (
+                "InvalidKeyLength",
+                CryptoError::InvalidKeyLength {
+                    expected: 1,
+                    actual: 2,
+                },
+            ),
+            (
+                "InvalidSignatureLength",
+                CryptoError::InvalidSignatureLength {
+                    expected: 3,
+                    actual: 4,
+                },
+            ),
+            (
+                "SignatureVerificationFailed",
+                CryptoError::SignatureVerificationFailed,
+            ),
             ("InvalidKeyId", CryptoError::InvalidKeyId("x".into())),
             ("AeadEncryptFailed", CryptoError::AeadEncryptFailed),
             ("AeadDecryptFailed", CryptoError::AeadDecryptFailed),
             ("HpkeFailed", CryptoError::HpkeFailed("y".into())),
             ("CoseFailed", CryptoError::CoseFailed("z".into())),
-            ("InvalidNonceLength", CryptoError::InvalidNonceLength { expected: 5, actual: 6 }),
-            ("KeyDerivationFailed", CryptoError::KeyDerivationFailed("w".into())),
+            (
+                "InvalidNonceLength",
+                CryptoError::InvalidNonceLength {
+                    expected: 5,
+                    actual: 6,
+                },
+            ),
+            (
+                "KeyDerivationFailed",
+                CryptoError::KeyDerivationFailed("w".into()),
+            ),
             ("InvalidPublicKey", CryptoError::InvalidPublicKey),
             ("InvalidSecretKey", CryptoError::InvalidSecretKey),
-            ("SerializationError", CryptoError::SerializationError("s".into())),
-            ("TokenValidationError", CryptoError::TokenValidationError("t".into())),
+            (
+                "SerializationError",
+                CryptoError::SerializationError("s".into()),
+            ),
+            (
+                "TokenValidationError",
+                CryptoError::TokenValidationError("t".into()),
+            ),
             ("TokenExpired", CryptoError::TokenExpired),
             ("TokenNotYetValid", CryptoError::TokenNotYetValid),
             ("MissingField", CryptoError::MissingField("f".into())),
@@ -366,7 +396,10 @@ mod tests {
 
         for (name, variant) in &variants {
             let debug = format!("{variant:?}");
-            assert!(debug.contains(name), "Debug for {name} missing variant name: {debug}");
+            assert!(
+                debug.contains(name),
+                "Debug for {name} missing variant name: {debug}"
+            );
         }
     }
 

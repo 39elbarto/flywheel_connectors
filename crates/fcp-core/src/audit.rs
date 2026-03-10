@@ -1842,27 +1842,14 @@ mod tests {
 
     #[test]
     fn zone_checkpoint_epoch_preserved() {
-        let cp = create_zone_checkpoint(
-            test_object_id("rev"),
-            10,
-            test_object_id("audit"),
-            20,
-            1,
-            4,
-        );
+        let cp =
+            create_zone_checkpoint(test_object_id("rev"), 10, test_object_id("audit"), 20, 1, 4);
         assert_eq!(cp.as_of_epoch.as_str(), "epoch-1");
     }
 
     #[test]
     fn zone_checkpoint_zero_seqs() {
-        let cp = create_zone_checkpoint(
-            test_object_id("rev"),
-            0,
-            test_object_id("audit"),
-            0,
-            0,
-            1,
-        );
+        let cp = create_zone_checkpoint(test_object_id("rev"), 0, test_object_id("audit"), 0, 0, 1);
         assert_eq!(cp.rev_seq, 0);
         assert_eq!(cp.audit_seq, 0);
         assert_eq!(cp.checkpoint_seq, 0);
@@ -1919,12 +1906,8 @@ mod tests {
     #[test]
     fn decision_receipt_reason_code_various() {
         for code in ["FCP-0000", "FCP-4010", "FCP-4020", "FCP-4030", "FCP-5010"] {
-            let receipt = create_decision_receipt(
-                test_object_id("req"),
-                Decision::Deny,
-                code,
-                vec![],
-            );
+            let receipt =
+                create_decision_receipt(test_object_id("req"), Decision::Deny, code, vec![]);
             assert_eq!(receipt.reason_code, code);
         }
     }
@@ -1934,12 +1917,7 @@ mod tests {
         let long_text = "x".repeat(10000);
         let receipt = DecisionReceipt {
             explanation: Some(long_text),
-            ..create_decision_receipt(
-                test_object_id("req"),
-                Decision::Deny,
-                "FCP-4010",
-                vec![],
-            )
+            ..create_decision_receipt(test_object_id("req"), Decision::Deny, "FCP-4010", vec![])
         };
         assert_eq!(receipt.explanation.as_ref().unwrap().len(), 10000);
     }
@@ -2091,7 +2069,10 @@ mod tests {
             EVENT_AUDIT_FORK_DETECTED,
         ];
         for t in all_types {
-            assert!(t.contains('.'), "Event type '{t}' should contain a dot separator");
+            assert!(
+                t.contains('.'),
+                "Event type '{t}' should contain a dot separator"
+            );
         }
     }
 

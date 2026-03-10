@@ -8537,7 +8537,10 @@ trusted_builders = ["trusted-ci"]
         };
         let err = enforce_supply_chain_policy(&manifest, Some(&evidence))
             .expect_err("level 2 < required 3");
-        assert!(matches!(err, RegistryError::SlsaLevelInsufficient { required: 3 }));
+        assert!(matches!(
+            err,
+            RegistryError::SlsaLevelInsufficient { required: 3 }
+        ));
     }
 
     #[test]
@@ -8557,8 +8560,7 @@ trusted_builders = ["trusted-ci"]
                 builder_id: None,
             }],
         };
-        enforce_supply_chain_policy(&manifest, Some(&evidence))
-            .expect("level 4 >= required 1");
+        enforce_supply_chain_policy(&manifest, Some(&evidence)).expect("level 4 >= required 1");
     }
 
     #[test]
@@ -8578,8 +8580,7 @@ trusted_builders = ["trusted-ci"]
                 builder_id: None,
             }],
         };
-        enforce_supply_chain_policy(&manifest, Some(&evidence))
-            .expect("level 0 == required 0");
+        enforce_supply_chain_policy(&manifest, Some(&evidence)).expect("level 0 == required 0");
     }
 
     // ── enforce_supply_chain_policy: trusted builders edge cases ────────
@@ -8622,8 +8623,8 @@ trusted_builders = ["trusted-ci"]
                 builder_id: Some("my-ci".to_string()), // lowercase
             }],
         };
-        let err = enforce_supply_chain_policy(&manifest, Some(&evidence))
-            .expect_err("case mismatch");
+        let err =
+            enforce_supply_chain_policy(&manifest, Some(&evidence)).expect_err("case mismatch");
         assert!(matches!(err, RegistryError::UntrustedBuilder { .. }));
     }
 
@@ -8882,7 +8883,11 @@ trusted_builders = ["trusted-ci"]
                     .with_valid_connector("fcp.gamma", "3.0.0");
 
                 // Each connector verifies independently
-                for (id, version) in [("fcp.alpha", "1.0.0"), ("fcp.beta", "2.0.0"), ("fcp.gamma", "3.0.0")] {
+                for (id, version) in [
+                    ("fcp.alpha", "1.0.0"),
+                    ("fcp.beta", "2.0.0"),
+                    ("fcp.gamma", "3.0.0"),
+                ] {
                     let bundle = registry.get_bundle(id).expect("bundle exists");
                     let trust = registry.get_trust_policy(id).expect("trust exists");
                     let verifier = RegistryVerifier::new(trust);
@@ -9223,7 +9228,13 @@ trusted_builders = ["trusted-ci"]
         let json = serde_json::to_string(&bundle).unwrap();
         let parsed: SigstoreBundle = serde_json::from_str(&json).unwrap();
         assert_eq!(
-            parsed.rekor_entry.as_ref().unwrap().inclusion_proof.hashes.len(),
+            parsed
+                .rekor_entry
+                .as_ref()
+                .unwrap()
+                .inclusion_proof
+                .hashes
+                .len(),
             200
         );
     }
@@ -9257,7 +9268,9 @@ trusted_builders = ["trusted-ci"]
                     require_registry_signature: true,
                     ..RegistryTrustPolicy::default()
                 };
-                trust.registry_keys.insert("reg1".into(), reg_key.verifying_key());
+                trust
+                    .registry_keys
+                    .insert("reg1".into(), reg_key.verifying_key());
 
                 let verifier = RegistryVerifier::new(trust);
                 let verified = verifier
@@ -9405,16 +9418,28 @@ trusted_builders = ["trusted-ci"]
             RegistryError::MissingSignatures,
             RegistryError::UnknownKid { kid: "k".into() },
             RegistryError::SignatureInvalid { kid: "k".into() },
-            RegistryError::PublisherThresholdUnmet { required: 1, valid: 0 },
+            RegistryError::PublisherThresholdUnmet {
+                required: 1,
+                valid: 0,
+            },
             RegistryError::RegistrySignatureRequired,
-            RegistryError::TargetMismatch { expected: "a".into(), found: "b".into() },
-            RegistryError::CapabilityCeilingViolation { capability: "c".into() },
+            RegistryError::TargetMismatch {
+                expected: "a".into(),
+                found: "b".into(),
+            },
+            RegistryError::CapabilityCeilingViolation {
+                capability: "c".into(),
+            },
             RegistryError::TransparencyLogMissing,
             RegistryError::TransparencyEvidenceMissing,
-            RegistryError::RequiredAttestationMissing { attestation: "a".into() },
+            RegistryError::RequiredAttestationMissing {
+                attestation: "a".into(),
+            },
             RegistryError::AttestationEvidenceMissing,
             RegistryError::SlsaLevelInsufficient { required: 1 },
-            RegistryError::UntrustedBuilder { builder: "b".into() },
+            RegistryError::UntrustedBuilder {
+                builder: "b".into(),
+            },
             RegistryError::SignatureBytes,
         ];
         for err in &errors {
@@ -9433,14 +9458,20 @@ trusted_builders = ["trusted-ci"]
             SupplyChainVerificationError::TransparencyEntryNotFound,
             SupplyChainVerificationError::TransparencyProofInvalid,
             SupplyChainVerificationError::TransparencySignatureInvalid,
-            SupplyChainVerificationError::TufRootMismatch { expected: "a".into(), actual: "b".into() },
+            SupplyChainVerificationError::TufRootMismatch {
+                expected: "a".into(),
+                actual: "b".into(),
+            },
             SupplyChainVerificationError::TufExpired,
             SupplyChainVerificationError::TufTargetNotFound { target: "t".into() },
             SupplyChainVerificationError::TufRollback { current: 1, got: 0 },
             SupplyChainVerificationError::TufFreeze,
             SupplyChainVerificationError::SigstoreSignatureInvalid,
             SupplyChainVerificationError::SigstoreCertificateInvalid,
-            SupplyChainVerificationError::SigstoreIdentityMismatch { expected: "a".into(), actual: "b".into() },
+            SupplyChainVerificationError::SigstoreIdentityMismatch {
+                expected: "a".into(),
+                actual: "b".into(),
+            },
             SupplyChainVerificationError::SigstoreIssuerUntrusted { issuer: "i".into() },
             SupplyChainVerificationError::Network("n".into()),
             SupplyChainVerificationError::NotConfigured,
@@ -9516,17 +9547,32 @@ trusted_builders = ["trusted-ci"]
 
     #[test]
     fn connector_target_eq_symmetric() {
-        let a = ConnectorTarget { os: "linux".into(), arch: "amd64".into() };
-        let b = ConnectorTarget { os: "linux".into(), arch: "amd64".into() };
+        let a = ConnectorTarget {
+            os: "linux".into(),
+            arch: "amd64".into(),
+        };
+        let b = ConnectorTarget {
+            os: "linux".into(),
+            arch: "amd64".into(),
+        };
         assert_eq!(a, b);
         assert_eq!(b, a);
     }
 
     #[test]
     fn connector_target_eq_transitive() {
-        let a = ConnectorTarget { os: "linux".into(), arch: "amd64".into() };
-        let b = ConnectorTarget { os: "linux".into(), arch: "amd64".into() };
-        let c = ConnectorTarget { os: "linux".into(), arch: "amd64".into() };
+        let a = ConnectorTarget {
+            os: "linux".into(),
+            arch: "amd64".into(),
+        };
+        let b = ConnectorTarget {
+            os: "linux".into(),
+            arch: "amd64".into(),
+        };
+        let c = ConnectorTarget {
+            os: "linux".into(),
+            arch: "amd64".into(),
+        };
         assert_eq!(a, b);
         assert_eq!(b, c);
         assert_eq!(a, c);
@@ -9623,7 +9669,10 @@ trusted_builders = ["trusted-ci"]
             connector_id: "c".into(),
             manifest_hash: "m".into(),
             binary_hash: "b".into(),
-            target: ConnectorTarget { os: "darwin".into(), arch: "arm64".into() },
+            target: ConnectorTarget {
+                os: "darwin".into(),
+                arch: "arm64".into(),
+            },
             verified_at: 1,
             outcome: "o".into(),
         };
@@ -9724,7 +9773,10 @@ trusted_builders = ["trusted-ci"]
 
     #[test]
     fn connector_target_json_value_roundtrip() {
-        let t = ConnectorTarget { os: "linux".into(), arch: "amd64".into() };
+        let t = ConnectorTarget {
+            os: "linux".into(),
+            arch: "amd64".into(),
+        };
         let value = serde_json::to_value(&t).unwrap();
         let back: ConnectorTarget = serde_json::from_value(value).unwrap();
         assert_eq!(back, t);

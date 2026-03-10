@@ -2950,10 +2950,7 @@ mod tests {
 
     #[test]
     fn negotiate_suite_single_overlap() {
-        let result = negotiate_suite(
-            &[SessionCryptoSuite::Suite1],
-            &[SessionCryptoSuite::Suite1],
-        );
+        let result = negotiate_suite(&[SessionCryptoSuite::Suite1], &[SessionCryptoSuite::Suite1]);
         assert_eq!(result, Some(SessionCryptoSuite::Suite1));
     }
 
@@ -3048,10 +3045,7 @@ mod tests {
     fn cookie_try_from_slice_one_too_long() {
         let bytes = [0u8; SESSION_COOKIE_SIZE + 1];
         let err = SessionCookie::try_from_slice(&bytes).expect_err("too long");
-        assert!(matches!(
-            err,
-            SessionError::InvalidCookieLength { len: 33 }
-        ));
+        assert!(matches!(err, SessionError::InvalidCookieLength { len: 33 }));
     }
 
     #[test]

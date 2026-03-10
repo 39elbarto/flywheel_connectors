@@ -1797,8 +1797,8 @@ mod tests {
 
     #[test]
     fn planner_context_excluding_duplicates() {
-        let ctx = PlannerContext::new(test_connector_id())
-            .excluding(["node-a", "node-a", "node-b"]);
+        let ctx =
+            PlannerContext::new(test_connector_id()).excluding(["node-a", "node-a", "node-b"]);
         assert_eq!(ctx.excluded_nodes.len(), 2);
     }
 
@@ -1811,10 +1811,7 @@ mod tests {
             .with_singleton_writer()
             .excluding(["x"]);
         let cloned = ctx.clone();
-        assert_eq!(
-            ctx.min_connector_version.as_deref(),
-            Some("2.0.0")
-        );
+        assert_eq!(ctx.min_connector_version.as_deref(), Some("2.0.0"));
         assert_eq!(cloned.min_memory_mb, Some(1024));
         assert!(cloned.requires_gpu);
         assert!(cloned.singleton_writer);
@@ -2020,8 +2017,7 @@ mod tests {
             make_node_info("b", 2048, true, "1.0.0", vec![]),
         ];
         let input = PlannerInput::new(nodes, 1000);
-        let context =
-            PlannerContext::new(test_connector_id()).excluding(["node-a", "node-b"]);
+        let context = PlannerContext::new(test_connector_id()).excluding(["node-a", "node-b"]);
         let candidates = planner.plan(&input, &context);
         assert!(candidates.is_empty());
     }
@@ -2031,15 +2027,7 @@ mod tests {
         let planner = ExecutionPlanner::new();
         // Create more than MAX_CANDIDATES (10) nodes
         let nodes: Vec<NodeInfo> = (0_u32..15)
-            .map(|i| {
-                make_node_info(
-                    &format!("n{i:02}"),
-                    1024 + i * 100,
-                    true,
-                    "1.0.0",
-                    vec![],
-                )
-            })
+            .map(|i| make_node_info(&format!("n{i:02}"), 1024 + i * 100, true, "1.0.0", vec![]))
             .collect();
         let input = PlannerInput::new(nodes, 1000);
         let context = PlannerContext::new(test_connector_id());
@@ -2057,8 +2045,7 @@ mod tests {
         ];
         let input = PlannerInput::new(nodes, 1000);
         // preferred but NOT required => both eligible, but "has" scores higher
-        let context =
-            PlannerContext::new(test_connector_id()).with_preferred_symbols(vec![sym]);
+        let context = PlannerContext::new(test_connector_id()).with_preferred_symbols(vec![sym]);
         let candidates = planner.plan(&input, &context);
         assert_eq!(candidates.len(), 2);
         assert_eq!(candidates[0].node_id.as_str(), "node-has");
@@ -2195,10 +2182,12 @@ mod tests {
         assert_eq!(candidates.len(), 3);
 
         // First should have SelectedAsBest { rank: 1 }
-        assert!(candidates[0]
-            .decision_reasons
-            .iter()
-            .any(|r| matches!(r, DecisionReason::SelectedAsBest { rank: 1 })));
+        assert!(
+            candidates[0]
+                .decision_reasons
+                .iter()
+                .any(|r| matches!(r, DecisionReason::SelectedAsBest { rank: 1 }))
+        );
 
         // Second should have rank 2
         assert!(candidates[1].decision_reasons.iter().any(|r| matches!(

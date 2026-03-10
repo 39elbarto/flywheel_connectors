@@ -296,10 +296,7 @@ pub fn to_mcp_tools(operations: &[OperationInfo], options: &ExportOptions) -> Ve
 
 /// Convert multiple operations to Claude tools.
 #[must_use]
-pub fn to_claude_tools(
-    operations: &[OperationInfo],
-    options: &ExportOptions,
-) -> Vec<ClaudeTool> {
+pub fn to_claude_tools(operations: &[OperationInfo], options: &ExportOptions) -> Vec<ClaudeTool> {
     operations
         .iter()
         .map(|operation| to_claude_tool(operation, options))
@@ -411,8 +408,12 @@ mod tests {
     #[test]
     fn export_tools_json_emits_requested_format() {
         let operations = vec![sample_operation()];
-        let json = export_tools_json(&operations, ToolSchemaFormat::Mcp, &ExportOptions::default())
-            .expect("serialize mcp tools");
+        let json = export_tools_json(
+            &operations,
+            ToolSchemaFormat::Mcp,
+            &ExportOptions::default(),
+        )
+        .expect("serialize mcp tools");
         assert!(json.is_array());
         assert_eq!(json[0]["name"], "github.list_issues");
         assert!(json[0]["inputSchema"].is_object());

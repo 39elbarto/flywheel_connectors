@@ -1235,9 +1235,8 @@ mod tests {
     #[test]
     fn runtime_custom_timeout_propagates_to_context() {
         let timeout = Duration::from_millis(500);
-        let runtime = ConnectorRuntime::new(
-            ConnectorRuntimeConfig::default().with_request_timeout(timeout),
-        );
+        let runtime =
+            ConnectorRuntime::new(ConnectorRuntimeConfig::default().with_request_timeout(timeout));
         let ctx = runtime.request_context();
         let budget = ctx.remaining_budget().unwrap();
         // Budget should be at most the configured timeout
@@ -1292,9 +1291,8 @@ mod tests {
     #[test]
     fn runtime_with_large_timeout() {
         let timeout = Duration::from_secs(86_400); // 24 hours
-        let runtime = ConnectorRuntime::new(
-            ConnectorRuntimeConfig::default().with_request_timeout(timeout),
-        );
+        let runtime =
+            ConnectorRuntime::new(ConnectorRuntimeConfig::default().with_request_timeout(timeout));
         assert_eq!(runtime.request_timeout(), timeout);
     }
 
@@ -1442,10 +1440,7 @@ mod tests {
     #[test]
     fn classify_429_default_retry_after_is_30s() {
         let decision = classify_http_status(429, None);
-        assert_eq!(
-            decision,
-            RetryDecision::After(Duration::from_secs(30))
-        );
+        assert_eq!(decision, RetryDecision::After(Duration::from_secs(30)));
     }
 
     #[test]
@@ -1743,9 +1738,7 @@ mod tests {
         let fcp = err.to_fcp_error();
         match fcp {
             FcpError::External {
-                message,
-                retryable,
-                ..
+                message, retryable, ..
             } => {
                 assert!(message.contains("cancelled"));
                 assert!(!retryable);
@@ -1780,8 +1773,7 @@ mod tests {
 
     #[test]
     fn attempt_outcome_success_with_complex_type() {
-        let outcome: AttemptOutcome<Vec<u8>, String> =
-            AttemptOutcome::Success(vec![1, 2, 3]);
+        let outcome: AttemptOutcome<Vec<u8>, String> = AttemptOutcome::Success(vec![1, 2, 3]);
         match outcome {
             AttemptOutcome::Success(v) => assert_eq!(v.len(), 3),
             _ => panic!("expected Success"),

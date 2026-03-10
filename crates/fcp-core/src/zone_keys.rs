@@ -2377,8 +2377,7 @@ mod tests {
         let obj_key = random_object_id_key();
 
         let wrapped_zone = wrap_zone_key(&pk, &zone_id, &node_id, issued_at, &zone_key).unwrap();
-        let wrapped_obj =
-            wrap_object_id_key(&pk, &zone_id, &node_id, issued_at, &obj_key).unwrap();
+        let wrapped_obj = wrap_object_id_key(&pk, &zone_id, &node_id, issued_at, &obj_key).unwrap();
 
         let manifest = ZoneKeyManifest {
             header: test_header(&zone_id),
@@ -2435,7 +2434,10 @@ mod tests {
         wrapped.issued_at = 1_700_000_001;
 
         let result = unwrap_zone_key(&sk, &zone_id, &wrapped);
-        assert!(result.is_err(), "tampered issued_at should cause AAD mismatch");
+        assert!(
+            result.is_err(),
+            "tampered issued_at should cause AAD mismatch"
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -2581,8 +2583,7 @@ mod tests {
         let obj_key = random_object_id_key();
 
         let wrapped_zone = wrap_zone_key(&pk, &zone_id, &node_id, issued_at, &zone_key).unwrap();
-        let wrapped_obj =
-            wrap_object_id_key(&pk, &zone_id, &node_id, issued_at, &obj_key).unwrap();
+        let wrapped_obj = wrap_object_id_key(&pk, &zone_id, &node_id, issued_at, &obj_key).unwrap();
 
         let manifest = ZoneKeyManifest {
             header: test_header(&zone_id),
@@ -2653,7 +2654,10 @@ mod tests {
         wrapped.issued_at = 1_700_000_001; // tamper
 
         let result = unwrap_object_id_key(&sk, &zone_id, &wrapped);
-        assert!(result.is_err(), "tampered issued_at should cause AAD mismatch");
+        assert!(
+            result.is_err(),
+            "tampered issued_at should cause AAD mismatch"
+        );
     }
 
     /// Verify `RekeyPolicy` serde with zero overlap window.
@@ -2720,8 +2724,7 @@ mod tests {
         let obj_key = random_object_id_key();
 
         let wrapped_zone = wrap_zone_key(&pk, &zone_id, &node_id, issued_at, &zone_key).unwrap();
-        let wrapped_obj =
-            wrap_object_id_key(&pk, &zone_id, &node_id, issued_at, &obj_key).unwrap();
+        let wrapped_obj = wrap_object_id_key(&pk, &zone_id, &node_id, issued_at, &obj_key).unwrap();
 
         let manifest = ZoneKeyManifest {
             header: test_header(&zone_id),
@@ -2765,8 +2768,7 @@ mod tests {
     fn zone_key_manifest_debug_output() {
         let zone_id = ZoneId::work();
         let signing_key = fcp_crypto::Ed25519SigningKey::generate();
-        let manifest =
-            ZoneKeyManifest::new_empty(zone_id, 1_700_000_000, &signing_key).unwrap();
+        let manifest = ZoneKeyManifest::new_empty(zone_id, 1_700_000_000, &signing_key).unwrap();
         let dbg = format!("{manifest:?}");
         assert!(dbg.contains("ZoneKeyManifest"));
         assert!(dbg.contains("zone_key_id"));

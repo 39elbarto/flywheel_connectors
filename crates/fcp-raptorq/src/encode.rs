@@ -1029,7 +1029,10 @@ mod tests {
         let config = test_config(); // threshold = 1024
         let payload = vec![42u8; 1024];
         let decision = EncodingDecision::for_payload(&payload, &config).unwrap();
-        assert!(decision.is_direct(), "payload at threshold should be direct");
+        assert!(
+            decision.is_direct(),
+            "payload at threshold should be direct"
+        );
     }
 
     #[test]

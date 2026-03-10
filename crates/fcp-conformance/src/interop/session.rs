@@ -715,18 +715,12 @@ mod tests {
     #[test]
     fn negotiate_suite_preserves_offered_order() {
         // First match wins
-        assert_eq!(
-            negotiate_suite(&["C", "A", "B"], &["B", "A"]),
-            Some("A")
-        );
+        assert_eq!(negotiate_suite(&["C", "A", "B"], &["B", "A"]), Some("A"));
     }
 
     #[test]
     fn negotiate_suite_duplicate_in_offered() {
-        assert_eq!(
-            negotiate_suite(&["X", "X", "Y"], &["Y", "X"]),
-            Some("X")
-        );
+        assert_eq!(negotiate_suite(&["X", "X", "Y"], &["Y", "X"]), Some("X"));
     }
 
     // ── negotiate_limits: additional tests ──

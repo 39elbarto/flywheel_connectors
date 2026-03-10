@@ -560,10 +560,8 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn run_with_timeout_returns_string() {
-        let result = run_with_timeout(Duration::from_millis(50), async {
-            String::from("hello")
-        })
-        .await;
+        let result =
+            run_with_timeout(Duration::from_millis(50), async { String::from("hello") }).await;
         assert_eq!(result.unwrap(), "hello");
     }
 

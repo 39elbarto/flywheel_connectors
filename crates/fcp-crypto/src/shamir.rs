@@ -1391,7 +1391,10 @@ mod tests {
         let cloned = sealed.clone();
         assert_eq!(sealed.index(), cloned.index());
         assert_eq!(sealed.sealed_box().enc, cloned.sealed_box().enc);
-        assert_eq!(sealed.sealed_box().ciphertext, cloned.sealed_box().ciphertext);
+        assert_eq!(
+            sealed.sealed_box().ciphertext,
+            cloned.sealed_box().ciphertext
+        );
     }
 
     // ---- SealedShamirShare debug ----

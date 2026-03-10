@@ -896,6 +896,9 @@ mod tests {
         let pk2 = sk2.verifying_key();
         let sig = sk1.sign(b"msg");
         let err = pk2.verify(b"msg", &sig).unwrap_err();
-        assert!(matches!(err, crate::error::CryptoError::SignatureVerificationFailed));
+        assert!(matches!(
+            err,
+            crate::error::CryptoError::SignatureVerificationFailed
+        ));
     }
 }

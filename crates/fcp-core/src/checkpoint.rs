@@ -2367,9 +2367,8 @@ mod tests {
     fn coordinator_ranking_preserves_all_nodes() {
         let zone = test_zone();
         let epoch = test_epoch();
-        let nodes: Vec<TailscaleNodeId> = (0..10)
-            .map(|i| test_node(&format!("node-{i}")))
-            .collect();
+        let nodes: Vec<TailscaleNodeId> =
+            (0..10).map(|i| test_node(&format!("node-{i}"))).collect();
         let ranked = rank_checkpoint_coordinators(&zone, &epoch, &nodes);
         assert_eq!(ranked.len(), 10);
         // All original nodes should be in the ranked list

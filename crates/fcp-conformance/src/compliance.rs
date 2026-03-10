@@ -1552,9 +1552,17 @@ mod tests {
         let suite = DynamicSuite::minimal(make_handshake());
         let result = run_dynamic_checks(&mut connector, suite).await;
         // configure passes, handshake fails
-        let configure_f = result.findings.iter().find(|f| f.check == "configure").unwrap();
+        let configure_f = result
+            .findings
+            .iter()
+            .find(|f| f.check == "configure")
+            .unwrap();
         assert_eq!(configure_f.status, CheckStatus::Pass);
-        let hs_f = result.findings.iter().find(|f| f.check == "handshake").unwrap();
+        let hs_f = result
+            .findings
+            .iter()
+            .find(|f| f.check == "handshake")
+            .unwrap();
         assert_eq!(hs_f.status, CheckStatus::Fail);
     }
 
@@ -1564,7 +1572,11 @@ mod tests {
         let suite = DynamicSuite::minimal(make_handshake());
         let result = run_dynamic_checks(&mut connector, suite).await;
         // Health check still runs even when configure fails
-        let health_f = result.findings.iter().find(|f| f.check == "health").unwrap();
+        let health_f = result
+            .findings
+            .iter()
+            .find(|f| f.check == "health")
+            .unwrap();
         // MockConnector::failing_configure() has health_ok=true
         assert_eq!(health_f.status, CheckStatus::Pass);
     }
@@ -1574,7 +1586,11 @@ mod tests {
         let mut connector = MockConnector::healthy();
         let suite = DynamicSuite::minimal(make_handshake());
         let result = run_dynamic_checks(&mut connector, suite).await;
-        let intro_f = result.findings.iter().find(|f| f.check == "introspect").unwrap();
+        let intro_f = result
+            .findings
+            .iter()
+            .find(|f| f.check == "introspect")
+            .unwrap();
         assert!(intro_f.message.contains("operations="));
         assert!(intro_f.message.contains("events="));
         assert!(intro_f.message.contains("resource_types="));

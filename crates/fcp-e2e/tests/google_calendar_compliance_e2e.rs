@@ -410,10 +410,7 @@ async fn gcal_happy_path_connector_suite_passes() {
 
     let mut connector = GoogleCalendarConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(
-        signing_key.verifying_key().to_bytes(),
-        &["gcal.get_event"],
-    );
+    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["gcal.get_event"]);
     let token = build_token(&signing_key, "gcal.get_event", &["gcal.get_event"]);
     let invoke = invoke_request(
         "gcal.get_event",

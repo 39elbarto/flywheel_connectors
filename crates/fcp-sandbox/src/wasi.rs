@@ -2427,9 +2427,17 @@ mod tests {
         let wasi_ctx = WasiCtxBuilder::new().build();
         let state = WasiHostState::new(&config, wasi_ctx);
         // Allowed host
-        assert!(state.validate_http_access("https://api.example.com/data", "GET").is_ok());
+        assert!(
+            state
+                .validate_http_access("https://api.example.com/data", "GET")
+                .is_ok()
+        );
         // Denied host
-        assert!(state.validate_http_access("https://evil.com/", "GET").is_err());
+        assert!(
+            state
+                .validate_http_access("https://evil.com/", "GET")
+                .is_err()
+        );
     }
 
     #[test]
@@ -2472,7 +2480,11 @@ mod tests {
         };
         let wasi_ctx = WasiCtxBuilder::new().build();
         let state = WasiHostState::new(&config, wasi_ctx);
-        assert!(state.validate_tcp_access("db.internal.com", 5432, true).is_ok());
+        assert!(
+            state
+                .validate_tcp_access("db.internal.com", 5432, true)
+                .is_ok()
+        );
         assert!(state.validate_tcp_access("evil.com", 5432, false).is_err());
     }
 
@@ -2571,7 +2583,12 @@ mod tests {
         let runner = WasiConnectorRunner::new(config).unwrap();
         let result = runner.validate_fs_access(Path::new("/etc"), false);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not in allowed list"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("not in allowed list")
+        );
     }
 
     #[test]
@@ -2613,8 +2630,16 @@ mod tests {
             ..WasiConfig::default()
         };
         let runner = WasiConnectorRunner::new(config).unwrap();
-        assert!(runner.validate_http_access("https://api.service.com/v1", "GET").is_ok());
-        assert!(runner.validate_http_access("https://evil.com/", "POST").is_err());
+        assert!(
+            runner
+                .validate_http_access("https://api.service.com/v1", "GET")
+                .is_ok()
+        );
+        assert!(
+            runner
+                .validate_http_access("https://evil.com/", "POST")
+                .is_err()
+        );
     }
 
     #[test]
@@ -2625,7 +2650,11 @@ mod tests {
             ..WasiConfig::default()
         };
         let runner = WasiConnectorRunner::new(config).unwrap();
-        assert!(runner.validate_tcp_access("db.example.com", 5432, true).is_err());
+        assert!(
+            runner
+                .validate_tcp_access("db.example.com", 5432, true)
+                .is_err()
+        );
     }
 
     #[test]
@@ -2654,8 +2683,16 @@ mod tests {
             ..WasiConfig::default()
         };
         let runner = WasiConnectorRunner::new(config).unwrap();
-        assert!(runner.validate_tcp_access("db.prod.com", 5432, true).is_ok());
-        assert!(runner.validate_tcp_access("db.prod.com", 6379, false).is_ok());
+        assert!(
+            runner
+                .validate_tcp_access("db.prod.com", 5432, true)
+                .is_ok()
+        );
+        assert!(
+            runner
+                .validate_tcp_access("db.prod.com", 6379, false)
+                .is_ok()
+        );
         assert!(runner.validate_tcp_access("evil.com", 5432, true).is_err());
     }
 
@@ -2718,7 +2755,9 @@ mod tests {
             ..WasiConfig::default()
         };
         let runner = WasiConnectorRunner::new(config).unwrap();
-        let validated = runner.load_and_validate(minimal_command_component()).unwrap();
+        let validated = runner
+            .load_and_validate(minimal_command_component())
+            .unwrap();
         let args: Vec<String> = vec!["--test".into()];
         let result = runner.execute(&validated.component, &args).await;
         assert!(result.is_ok());
@@ -2738,7 +2777,11 @@ mod tests {
             ..WasiConfig::default()
         };
         let runner = WasiConnectorRunner::new(config).unwrap();
-        assert!(runner.validate_http_access("https://any.com/", "GET").is_err());
+        assert!(
+            runner
+                .validate_http_access("https://any.com/", "GET")
+                .is_err()
+        );
         assert!(runner.validate_tcp_access("any.com", 443, true).is_err());
     }
 
@@ -2769,11 +2812,23 @@ mod tests {
         };
         let runner = WasiConnectorRunner::new(config).unwrap();
         // Allowed
-        assert!(runner.validate_http_access("https://api.stripe.com/v1/charges", "POST").is_ok());
+        assert!(
+            runner
+                .validate_http_access("https://api.stripe.com/v1/charges", "POST")
+                .is_ok()
+        );
         // Port mismatch
-        assert!(runner.validate_tcp_access("api.stripe.com", 80, false).is_err());
+        assert!(
+            runner
+                .validate_tcp_access("api.stripe.com", 80, false)
+                .is_err()
+        );
         // Host mismatch
-        assert!(runner.validate_http_access("https://api.paypal.com/v1", "GET").is_err());
+        assert!(
+            runner
+                .validate_http_access("https://api.paypal.com/v1", "GET")
+                .is_err()
+        );
     }
 
     #[test]
@@ -2785,9 +2840,17 @@ mod tests {
         };
         let runner = WasiConnectorRunner::new(config).unwrap();
         // Read from readonly - allowed
-        assert!(runner.validate_fs_access(Path::new("/usr/share"), false).is_ok());
+        assert!(
+            runner
+                .validate_fs_access(Path::new("/usr/share"), false)
+                .is_ok()
+        );
         // Write to readonly - denied
-        assert!(runner.validate_fs_access(Path::new("/usr/share"), true).is_err());
+        assert!(
+            runner
+                .validate_fs_access(Path::new("/usr/share"), true)
+                .is_err()
+        );
         // Read from writable - allowed (writable implies readable)
         assert!(runner.validate_fs_access(Path::new("/tmp"), false).is_ok());
         // Write to writable - allowed
@@ -2821,8 +2884,16 @@ mod tests {
             .with_network_constraints(constraints);
         let runner = WasiConnectorRunner::new(config).unwrap();
         // Network gates still work in deterministic mode
-        assert!(runner.validate_http_access("https://api.example.com/", "GET").is_ok());
-        assert!(runner.validate_http_access("https://evil.com/", "GET").is_err());
+        assert!(
+            runner
+                .validate_http_access("https://api.example.com/", "GET")
+                .is_ok()
+        );
+        assert!(
+            runner
+                .validate_http_access("https://evil.com/", "GET")
+                .is_err()
+        );
     }
 
     #[test]
@@ -2847,8 +2918,16 @@ mod tests {
         };
         let addr_allowed: SocketAddr = "1.2.3.4:443".parse().unwrap();
         let addr_denied: SocketAddr = "1.2.3.4:9999".parse().unwrap();
-        assert!(socket_addr_allowed(&constraints, addr_allowed, SocketAddrUse::TcpConnect));
-        assert!(!socket_addr_allowed(&constraints, addr_denied, SocketAddrUse::TcpConnect));
+        assert!(socket_addr_allowed(
+            &constraints,
+            addr_allowed,
+            SocketAddrUse::TcpConnect
+        ));
+        assert!(!socket_addr_allowed(
+            &constraints,
+            addr_denied,
+            SocketAddrUse::TcpConnect
+        ));
     }
 
     #[test]
@@ -2873,14 +2952,20 @@ mod tests {
         };
         let addr: SocketAddr = "1.2.3.4:443".parse().unwrap();
         // TcpBind should be denied even if port matches
-        assert!(!socket_addr_allowed(&constraints, addr, SocketAddrUse::TcpBind));
+        assert!(!socket_addr_allowed(
+            &constraints,
+            addr,
+            SocketAddrUse::TcpBind
+        ));
     }
 
     #[test]
     fn test_validated_component_fields() {
         let config = WasiConfig::default();
         let runner = WasiConnectorRunner::new(config).unwrap();
-        let validated = runner.load_and_validate(minimal_command_component()).unwrap();
+        let validated = runner
+            .load_and_validate(minimal_command_component())
+            .unwrap();
         assert!(!validated.has_manifest);
         // Component is usable
         let _engine = runner.runtime().engine();
@@ -3026,7 +3111,11 @@ mod tests {
             max_response_bytes: 10_485_760,
         };
         let addr: SocketAddr = "127.0.0.1:80".parse().unwrap();
-        assert!(!socket_addr_allowed(&constraints, addr, SocketAddrUse::TcpConnect));
+        assert!(!socket_addr_allowed(
+            &constraints,
+            addr,
+            SocketAddrUse::TcpConnect
+        ));
     }
 
     #[test]
@@ -3050,7 +3139,11 @@ mod tests {
             max_response_bytes: 10_485_760,
         };
         let addr: SocketAddr = "10.0.0.1:443".parse().unwrap();
-        assert!(!socket_addr_allowed(&constraints, addr, SocketAddrUse::TcpConnect));
+        assert!(!socket_addr_allowed(
+            &constraints,
+            addr,
+            SocketAddrUse::TcpConnect
+        ));
     }
 
     #[test]
@@ -3074,7 +3167,11 @@ mod tests {
             max_response_bytes: 10_485_760,
         };
         let addr: SocketAddr = "1.2.3.4:443".parse().unwrap();
-        assert!(!socket_addr_allowed(&constraints, addr, SocketAddrUse::UdpBind));
+        assert!(!socket_addr_allowed(
+            &constraints,
+            addr,
+            SocketAddrUse::UdpBind
+        ));
     }
 
     // ── New batch: WasiConfig from_policy ──

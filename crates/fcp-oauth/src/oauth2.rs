@@ -1975,7 +1975,9 @@ mod tests {
     fn test_authorization_url_with_unicode_scope() {
         let config = test_config();
         let client = OAuth2Client::new(config).unwrap();
-        let (url, _) = client.authorization_url(&["read", "profil\u{00e9}"]).unwrap();
+        let (url, _) = client
+            .authorization_url(&["read", "profil\u{00e9}"])
+            .unwrap();
         assert!(url.contains("scope=read"));
     }
 
@@ -2099,24 +2101,14 @@ mod tests {
 
     #[test]
     fn test_client_rejects_empty_authorization_url() {
-        let config = OAuth2Config::new(
-            "id",
-            "secret",
-            "",
-            "https://auth.example.com/token",
-        );
+        let config = OAuth2Config::new("id", "secret", "", "https://auth.example.com/token");
         let result = OAuth2Client::new(config);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_client_rejects_empty_token_url() {
-        let config = OAuth2Config::new(
-            "id",
-            "secret",
-            "https://auth.example.com/authorize",
-            "",
-        );
+        let config = OAuth2Config::new("id", "secret", "https://auth.example.com/authorize", "");
         let result = OAuth2Client::new(config);
         assert!(result.is_err());
     }

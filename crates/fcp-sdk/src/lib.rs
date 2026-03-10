@@ -1480,7 +1480,11 @@ mod tests {
     fn schema_validation_error_validation_failed_errors_vec() {
         let err = SchemaValidationError::ValidationFailed {
             message: "m".to_string(),
-            errors: vec!["first".to_string(), "second".to_string(), "third".to_string()],
+            errors: vec![
+                "first".to_string(),
+                "second".to_string(),
+                "third".to_string(),
+            ],
         };
         match err {
             SchemaValidationError::ValidationFailed { errors, .. } => {

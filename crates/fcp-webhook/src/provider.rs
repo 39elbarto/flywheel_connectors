@@ -1646,8 +1646,7 @@ mod tests {
 
     #[test]
     fn test_stripe_parse_signature_large_timestamp() {
-        let (ts, sigs) =
-            StripeWebhook::parse_stripe_signature("t=9999999999999,v1=sig").unwrap();
+        let (ts, sigs) = StripeWebhook::parse_stripe_signature("t=9999999999999,v1=sig").unwrap();
         assert_eq!(ts, 9_999_999_999_999);
         assert_eq!(sigs, vec!["sig"]);
     }
@@ -1830,10 +1829,7 @@ mod tests {
             timestamp.to_string(),
         );
         let result_wrong = handler.verify_and_parse(&headers_wrong, body);
-        assert!(matches!(
-            result_wrong,
-            Err(WebhookError::InvalidSignature)
-        ));
+        assert!(matches!(result_wrong, Err(WebhookError::InvalidSignature)));
     }
 
     #[test]

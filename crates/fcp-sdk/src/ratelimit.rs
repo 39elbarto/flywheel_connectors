@@ -1310,8 +1310,7 @@ mod tests {
 
     #[test]
     fn pool_builder_debug() {
-        let builder = RateLimitPoolBuilder::new("dbg_pool")
-            .requests(99);
+        let builder = RateLimitPoolBuilder::new("dbg_pool").requests(99);
         let debug = format!("{builder:?}");
         assert!(debug.contains("RateLimitPoolBuilder"));
         assert!(debug.contains("dbg_pool"));
@@ -1605,17 +1604,13 @@ mod tests {
 
     #[test]
     fn pool_builder_zero_requests() {
-        let pool = RateLimitPoolBuilder::new("zero_pool")
-            .requests(0)
-            .build();
+        let pool = RateLimitPoolBuilder::new("zero_pool").requests(0).build();
         assert_eq!(pool.config.requests, 0);
     }
 
     #[test]
     fn pool_builder_large_requests() {
-        let pool = RateLimitPoolBuilder::new("big")
-            .requests(u32::MAX)
-            .build();
+        let pool = RateLimitPoolBuilder::new("big").requests(u32::MAX).build();
         assert_eq!(pool.config.requests, u32::MAX);
     }
 
@@ -1680,9 +1675,7 @@ mod tests {
             RateLimitScope::Credential,
             RateLimitScope::Global,
         ] {
-            let pool = RateLimitPoolBuilder::new("s")
-                .scope(scope)
-                .build();
+            let pool = RateLimitPoolBuilder::new("s").scope(scope).build();
             assert_eq!(pool.scope, scope);
         }
     }
@@ -1695,9 +1688,7 @@ mod tests {
             RateLimitUnit::Bytes,
             RateLimitUnit::Custom,
         ] {
-            let pool = RateLimitPoolBuilder::new("u")
-                .unit(unit)
-                .build();
+            let pool = RateLimitPoolBuilder::new("u").unit(unit).build();
             assert_eq!(pool.config.unit, unit);
         }
     }
@@ -1842,10 +1833,7 @@ mod tests {
 
     #[test]
     fn tracker_burst_consume_exactly_at_effective_limit() {
-        let pool = RateLimitPoolBuilder::new("bp")
-            .requests(5)
-            .burst(5)
-            .build();
+        let pool = RateLimitPoolBuilder::new("bp").requests(5).burst(5).build();
         let decls = RateLimitDeclarations {
             limits: vec![pool],
             tool_pool_map: HashMap::from([("op".to_string(), vec!["bp".to_string()])]),
@@ -1861,10 +1849,7 @@ mod tests {
 
     #[test]
     fn tracker_burst_consume_one_over_effective_limit() {
-        let pool = RateLimitPoolBuilder::new("bp")
-            .requests(5)
-            .burst(5)
-            .build();
+        let pool = RateLimitPoolBuilder::new("bp").requests(5).burst(5).build();
         let decls = RateLimitDeclarations {
             limits: vec![pool],
             tool_pool_map: HashMap::from([("op".to_string(), vec!["bp".to_string()])]),
@@ -1914,10 +1899,7 @@ mod tests {
     #[test]
     fn tracker_pools_different_windows() {
         let decls = RateLimitDeclarations {
-            limits: vec![
-                test_pool("minute", 60, 60),
-                test_pool("hour", 1000, 3600),
-            ],
+            limits: vec![test_pool("minute", 60, 60), test_pool("hour", 1000, 3600)],
             tool_pool_map: HashMap::from([(
                 "op".to_string(),
                 vec!["minute".to_string(), "hour".to_string()],
@@ -1948,10 +1930,7 @@ mod tests {
 
     #[test]
     fn tracker_is_limited_with_burst_not_limited_at_base() {
-        let pool = RateLimitPoolBuilder::new("bp")
-            .requests(5)
-            .burst(5)
-            .build();
+        let pool = RateLimitPoolBuilder::new("bp").requests(5).burst(5).build();
         let decls = RateLimitDeclarations {
             limits: vec![pool],
             tool_pool_map: HashMap::from([("op".to_string(), vec!["bp".to_string()])]),
@@ -1964,10 +1943,7 @@ mod tests {
 
     #[test]
     fn tracker_is_limited_with_burst_at_effective_limit() {
-        let pool = RateLimitPoolBuilder::new("bp")
-            .requests(5)
-            .burst(5)
-            .build();
+        let pool = RateLimitPoolBuilder::new("bp").requests(5).burst(5).build();
         let decls = RateLimitDeclarations {
             limits: vec![pool],
             tool_pool_map: HashMap::from([("op".to_string(), vec!["bp".to_string()])]),
@@ -1996,7 +1972,11 @@ mod tests {
     #[test]
     fn tracker_all_pool_statuses_after_mixed_ops() {
         let decls = RateLimitDeclarations {
-            limits: vec![test_pool("a", 10, 60), test_pool("b", 20, 60), test_pool("c", 30, 60)],
+            limits: vec![
+                test_pool("a", 10, 60),
+                test_pool("b", 20, 60),
+                test_pool("c", 30, 60),
+            ],
             tool_pool_map: HashMap::from([
                 ("op_a".to_string(), vec!["a".to_string()]),
                 ("op_b".to_string(), vec!["b".to_string()]),

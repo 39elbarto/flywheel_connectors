@@ -2823,7 +2823,10 @@ mod tests {
         });
         let result = node.ingest_trace_event_for_replay(event);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), MeshNodeError::TraceNotEnabled));
+        assert!(matches!(
+            result.unwrap_err(),
+            MeshNodeError::TraceNotEnabled
+        ));
     }
 
     #[test]
@@ -2852,7 +2855,10 @@ mod tests {
         let node = test_node("node-1");
         let result = node.export_trace_to_path("/tmp/test.json", false, TraceExportFormat::Json);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), MeshNodeError::TraceNotEnabled));
+        assert!(matches!(
+            result.unwrap_err(),
+            MeshNodeError::TraceNotEnabled
+        ));
     }
 
     // ---- Planner singleton holder from peer ----
@@ -3010,17 +3016,9 @@ mod tests {
         };
 
         // First add a lease
-        node.update_local_state(
-            test_device_profile("node-1"),
-            HashSet::new(),
-            vec![lease],
-        );
+        node.update_local_state(test_device_profile("node-1"), HashSet::new(), vec![lease]);
         // Then remove it
-        node.update_local_state(
-            test_device_profile("node-1"),
-            HashSet::new(),
-            vec![],
-        );
+        node.update_local_state(test_device_profile("node-1"), HashSet::new(), vec![]);
 
         let snapshot = node.trace_snapshot().expect("trace capture enabled");
         let lease_count = snapshot
@@ -3223,20 +3221,12 @@ mod tests {
         let zone_id = ZoneId::work();
         let object_id = ObjectId::from_bytes([0x77; 32]);
 
-        let first = node.announce_object(
-            &zone_id,
-            &object_id,
-            ObjectAdmissionClass::Admitted,
-            1000,
-        );
+        let first =
+            node.announce_object(&zone_id, &object_id, ObjectAdmissionClass::Admitted, 1000);
         assert!(first);
 
-        let second = node.announce_object(
-            &zone_id,
-            &object_id,
-            ObjectAdmissionClass::Admitted,
-            1001,
-        );
+        let second =
+            node.announce_object(&zone_id, &object_id, ObjectAdmissionClass::Admitted, 1001);
         // Gossip tracks announcements even for previously announced objects
         if second {
             assert_eq!(node.metrics().gossip_announcements, 2);
@@ -3249,10 +3239,16 @@ mod tests {
 
     #[test]
     fn transport_path_kind_label_all_variants() {
-        assert_eq!(transport_path_kind_label(TransportPathKind::Direct), "direct");
+        assert_eq!(
+            transport_path_kind_label(TransportPathKind::Direct),
+            "direct"
+        );
         assert_eq!(transport_path_kind_label(TransportPathKind::Mesh), "mesh");
         assert_eq!(transport_path_kind_label(TransportPathKind::Derp), "derp");
-        assert_eq!(transport_path_kind_label(TransportPathKind::Funnel), "funnel");
+        assert_eq!(
+            transport_path_kind_label(TransportPathKind::Funnel),
+            "funnel"
+        );
     }
 
     // ---- MeshNodeError display ----
@@ -3295,10 +3291,7 @@ mod tests {
 
     #[test]
     fn mesh_node_error_from_quarantine_error() {
-        let inner = fcp_store::QuarantineError::QuotaExceeded {
-            used: 100,
-            max: 50,
-        };
+        let inner = fcp_store::QuarantineError::QuotaExceeded { used: 100, max: 50 };
         let err = MeshNodeError::Quarantine(inner);
         assert!(err.to_string().contains("quarantine error"));
     }
@@ -3345,9 +3338,7 @@ mod tests {
         let mut node = test_node("node-1");
         let peer = NodeId::new("peer-1");
 
-        let profile_v1 = DeviceProfileBuilder::new(peer.clone())
-            .cpu_cores(4)
-            .build();
+        let profile_v1 = DeviceProfileBuilder::new(peer.clone()).cpu_cores(4).build();
         let profile_v2 = DeviceProfileBuilder::new(peer.clone())
             .cpu_cores(32)
             .build();

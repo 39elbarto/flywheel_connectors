@@ -1130,10 +1130,7 @@ mod tests {
 
     #[test]
     fn parse_duration_string_one_ms() {
-        assert_eq!(
-            parse_duration_string("1ms"),
-            Some(Duration::from_millis(1))
-        );
+        assert_eq!(parse_duration_string("1ms"), Some(Duration::from_millis(1)));
     }
 
     // ── Additional header parsing combinations ──────────────────────────
@@ -1142,10 +1139,7 @@ mod tests {
     fn parse_standard_overflow_values_ignored() {
         let mut headers = HashMap::new();
         // u32::MAX + 1 as string should fail to parse as u32
-        headers.insert(
-            "x-ratelimit-limit".to_string(),
-            "4294967296".to_string(),
-        );
+        headers.insert("x-ratelimit-limit".to_string(), "4294967296".to_string());
         let parsed = RateLimitHeaders::parse(&headers);
         assert!(parsed.limit.is_none());
     }
@@ -1179,10 +1173,7 @@ mod tests {
     fn suggested_wait_large_retry_after() {
         let mut headers = RateLimitHeaders::new();
         headers.retry_after = Some(Duration::from_secs(86400));
-        assert_eq!(
-            headers.suggested_wait(),
-            Some(Duration::from_secs(86400))
-        );
+        assert_eq!(headers.suggested_wait(), Some(Duration::from_secs(86400)));
     }
 
     #[test]
@@ -1205,10 +1196,7 @@ mod tests {
         assert_eq!(parsed.limit, Some(5000));
         assert_eq!(parsed.remaining, Some(4900));
         assert_eq!(parsed.retry_after, Some(Duration::from_secs(30)));
-        assert_eq!(
-            parsed.provider_info.get("used"),
-            Some(&"100".to_string())
-        );
+        assert_eq!(parsed.provider_info.get("used"), Some(&"100".to_string()));
         assert_eq!(
             parsed.provider_info.get("resource"),
             Some(&"search".to_string())
@@ -1218,10 +1206,7 @@ mod tests {
     #[test]
     fn parse_openai_reset_requests_minutes() {
         let mut headers = HashMap::new();
-        headers.insert(
-            "x-ratelimit-reset-requests".to_string(),
-            "2m".to_string(),
-        );
+        headers.insert("x-ratelimit-reset-requests".to_string(), "2m".to_string());
         let parsed = RateLimitHeaders::parse_openai(&headers);
         assert_eq!(parsed.reset_seconds, Some(120));
     }
@@ -1250,7 +1235,9 @@ mod tests {
     #[test]
     fn rate_limit_headers_debug_with_provider_info() {
         let mut headers = RateLimitHeaders::new();
-        headers.provider_info.insert("key".to_string(), "val".to_string());
+        headers
+            .provider_info
+            .insert("key".to_string(), "val".to_string());
         let dbg = format!("{headers:?}");
         assert!(dbg.contains("provider_info"));
     }
@@ -1263,7 +1250,9 @@ mod tests {
         original.retry_after = Some(Duration::from_secs(5));
         original.reset_seconds = Some(30);
         original.reset_at = Some(1_000_000);
-        original.provider_info.insert("k".to_string(), "v".to_string());
+        original
+            .provider_info
+            .insert("k".to_string(), "v".to_string());
 
         let cloned = original.clone();
         assert_eq!(cloned.limit, original.limit);
@@ -1271,6 +1260,9 @@ mod tests {
         assert_eq!(cloned.retry_after, original.retry_after);
         assert_eq!(cloned.reset_seconds, original.reset_seconds);
         assert_eq!(cloned.reset_at, original.reset_at);
-        assert_eq!(cloned.provider_info.get("k"), original.provider_info.get("k"));
+        assert_eq!(
+            cloned.provider_info.get("k"),
+            original.provider_info.get("k")
+        );
     }
 }

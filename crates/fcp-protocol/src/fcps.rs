@@ -2923,8 +2923,7 @@ mod tests {
         let mut header = test_header();
         header.symbol_size = 1;
         header.symbol_count = 1;
-        header.total_payload_len =
-            u32::try_from(SYMBOL_RECORD_OVERHEAD + 1).expect("fits");
+        header.total_payload_len = u32::try_from(SYMBOL_RECORD_OVERHEAD + 1).expect("fits");
         let symbols = vec![SymbolRecord {
             esi: 0,
             k: 1,
@@ -3038,7 +3037,11 @@ mod tests {
             );
             transcripts.insert(ack.transcript_bytes());
         }
-        assert_eq!(transcripts.len(), 4, "all reasons should produce distinct transcripts");
+        assert_eq!(
+            transcripts.len(),
+            4,
+            "all reasons should produce distinct transcripts"
+        );
     }
 
     #[test]
@@ -3047,8 +3050,7 @@ mod tests {
         let header = test_header();
         let symbols = vec![test_symbol(0, 64), test_symbol(1, 64)];
         let frame = FcpsFrame { header, symbols };
-        let signed =
-            SignedFcpsFrame::new(frame, TailscaleNodeId::new("zero-ts"), 0, &signing_key);
+        let signed = SignedFcpsFrame::new(frame, TailscaleNodeId::new("zero-ts"), 0, &signing_key);
         signed
             .verify(&signing_key.verifying_key())
             .expect("verify zero ts");

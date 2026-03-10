@@ -94,6 +94,7 @@ mod workflow;
 mod zone_scope;
 
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -767,6 +768,10 @@ struct InvokeArgs {
     /// Read request payload from stdin.
     #[arg(long, default_value_t = false)]
     stdin: bool,
+
+    /// Set or override one payload field as `path=value`.
+    #[arg(long = "set", value_name = "PATH=VALUE")]
+    set: Vec<String>,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -1562,8 +1567,8 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         Commands::Pin(args) => planned("pin", args)?,
         Commands::Unpin(args) => planned("unpin", args)?,
         Commands::Config(args) => planned("config", args)?,
-        Commands::Invoke(args) => planned("invoke", args)?,
-        Commands::Simulate(args) => planned("simulate", args)?,
+        Commands::Invoke(args) => invoke_dispatch("invoke", args)?,
+        Commands::Simulate(args) => invoke_dispatch("simulate", args)?,
         Commands::Logs(args) => planned("logs", args)?,
         Commands::ExportTools(args) => export_tools_dispatch(args)?,
         Commands::Suggest(args) => suggest_dispatch(args)?,
@@ -2547,6 +2552,669 @@ fn validate_dispatch(args: &ValidateArgs) -> Result<DispatchOutcome> {
             }),
             exit_code: CliExitCode::UnknownCommand,
         })
+    }
+}
+
+#[derive(Debug, Clone)]
+enum InvokePathSegment {
+    Field(String),
+    Index(usize),
+}
+
+#[derive(Debug)]
+struct PreparedInvokeInput {
+    payload: Value,
+    primary_source: &'static str,
+    sources: Vec<Value>,
+    binding_count: usize,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug)]
+struct InvokeInputError {
+    error_type: &'static str,
+    message: String,
+    next_actions: Vec<String>,
+    details: Option<Value>,
+}
+
+fn invoke_dispatch(command: &str, args: &InvokeArgs) -> Result<DispatchOutcome> {
+    let catalog = DiscoveryCatalog::load()?;
+    let connector = match catalog.resolve_connector(&args.connector) {
+        Ok(connector) => connector,
+        Err(error) => {
+            return Ok(connector_resolution_dispatch(
+                command,
+                &args.connector,
+                &error,
+            ));
+        }
+    };
+
+    let operation = match connector.resolve_operation(&args.operation) {
+        Ok(operation) => operation,
+        Err(error) => {
+            return Ok(operation_resolution_dispatch(
+                command,
+                connector,
+                &args.operation,
+                &error,
+            ));
+        }
+    };
+
+    let prepared = match prepare_invoke_input(args, &operation.input_schema) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            return Ok(invoke_input_error_dispatch(
+                command, args, connector, operation, error,
+            ));
+        }
+    };
+
+    let validation = validate::validate(&prepared.payload, &operation.input_schema);
+    let valid = validation.is_valid();
+    let validation_errors = validation
+        .errors
+        .iter()
+        .map(|error| {
+            json!({
+                "path": error.path,
+                "message": error.message,
+                "suggestion": error.suggestion,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let scaffold = schema_nav::scaffold_template(&operation.input_schema);
+    let contract = catalog::planned_payload(command, &serde_json::to_value(args)?)["contract"].clone();
+    let captures = serde_json::to_value(args)?;
+    let examples = operation.examples.iter().take(2).cloned().collect::<Vec<_>>();
+    let exit_code = if valid {
+        CliExitCode::Success
+    } else {
+        CliExitCode::Validation
+    };
+
+    let mut payload = json!({
+        "status": if valid { "planned" } else { "error" },
+        "command": command,
+        "phase": "input-authoring",
+        "message": if valid {
+            format!(
+                "Prepared a schema-aware `{command}` payload preview for `{}.{}`. Host-backed execution is still scaffolded, but the payload is locally valid.",
+                connector.slug, operation.preferred_selector
+            )
+        } else {
+            format!(
+                "Prepared a schema-aware `{command}` payload preview for `{}.{}`, but the payload still fails local schema validation.",
+                connector.slug, operation.preferred_selector
+            )
+        },
+        "captures": captures,
+        "contract": contract,
+        "connector": {
+            "slug": &connector.slug,
+            "canonical_id": &connector.detail.summary.id,
+            "name": &connector.detail.summary.name,
+        },
+        "operation": {
+            "requested_selector": &args.operation,
+            "selector": &operation.preferred_selector,
+            "canonical_id": &operation.actual_id,
+            "summary": &operation.summary.summary,
+            "capability": &operation.summary.capability,
+            "risk_level": &operation.summary.risk_level,
+            "safety_tier": &operation.summary.safety_tier,
+            "approval_mode": &operation.approval_mode,
+        },
+        "input_authoring": {
+            "primary_source": prepared.primary_source,
+            "sources": prepared.sources,
+            "binding_count": prepared.binding_count,
+            "warnings": prepared.warnings,
+            "payload": prepared.payload,
+            "payload_preview": invoke_payload_preview(&prepared.payload),
+            "required_template": scaffold,
+            "examples": examples,
+            "validation": {
+                "valid": valid,
+                "error_count": validation_errors.len(),
+                "errors": validation_errors,
+            },
+        },
+        "next_actions": if valid {
+            vec![
+                format!("fwc schema {} {}", connector.slug, operation.preferred_selector),
+                format!("fwc template {} {}", connector.slug, operation.preferred_selector),
+                format!(
+                    "fwc task bind <task-id> payload_json='{}'",
+                    serde_json::to_string(&prepared.payload)?
+                ),
+            ]
+        } else {
+            vec![
+                format!("fwc schema {} {} --required-only", connector.slug, operation.preferred_selector),
+                format!("fwc template {} {}", connector.slug, operation.preferred_selector),
+                format!("fwc validate {} {} --input '{{...}}'", connector.slug, operation.preferred_selector),
+            ]
+        },
+    });
+
+    if !valid {
+        payload["error"] = json!({
+            "type": "invalid-input-payload",
+            "message": format!(
+                "Local schema validation failed for `{}.{}`. Fix the reported field errors before host-backed `{command}` execution is enabled.",
+                connector.slug, operation.preferred_selector
+            ),
+            "recoverable": true,
+        });
+    }
+
+    Ok(DispatchOutcome { payload, exit_code })
+}
+
+fn invoke_input_error_dispatch(
+    command: &str,
+    args: &InvokeArgs,
+    connector: &DiscoveredConnector,
+    operation: &DiscoveredOperation,
+    error: InvokeInputError,
+) -> DispatchOutcome {
+    let contract = catalog::planned_payload(command, &serde_json::to_value(args).unwrap_or(Value::Null))
+        ["contract"]
+        .clone();
+
+    let mut payload = json!({
+        "status": "error",
+        "command": command,
+        "phase": "input-authoring",
+        "message": error.message,
+        "captures": serde_json::to_value(args).unwrap_or(Value::Null),
+        "contract": contract,
+        "connector": {
+            "slug": &connector.slug,
+            "canonical_id": &connector.detail.summary.id,
+            "name": &connector.detail.summary.name,
+        },
+        "operation": {
+            "requested_selector": &args.operation,
+            "selector": &operation.preferred_selector,
+            "canonical_id": &operation.actual_id,
+        },
+        "error": {
+            "type": error.error_type,
+            "message": error.message,
+            "recoverable": true,
+        },
+        "input_authoring": {
+            "required_template": schema_nav::scaffold_template(&operation.input_schema),
+            "examples": operation.examples.iter().take(2).cloned().collect::<Vec<_>>(),
+            "accepted_sources": ["--input", "--file", "--stdin", "--set path=value"],
+        },
+        "next_actions": error.next_actions,
+    });
+
+    if let Some(details) = error.details {
+        payload["error"]["details"] = details;
+    }
+
+    DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Validation,
+    }
+}
+
+fn prepare_invoke_input(
+    args: &InvokeArgs,
+    schema: &Value,
+) -> std::result::Result<PreparedInvokeInput, InvokeInputError> {
+    let mut sources = Vec::new();
+    let mut warnings = Vec::new();
+    let mut primary_source_count = 0_usize;
+    let mut payload = Value::Null;
+    let mut primary_source = "none";
+
+    if let Some(raw_input) = &args.input {
+        primary_source_count += 1;
+        primary_source = "inline-json";
+        payload = serde_json::from_str(raw_input).map_err(|error| InvokeInputError {
+            error_type: "invalid-inline-input",
+            message: format!("The `--input` payload is not valid JSON: {error}"),
+            next_actions: vec![
+                "Fix the inline JSON syntax and retry.".to_owned(),
+                "Use `--set path=value` for small payloads when inline JSON quoting becomes cumbersome.".to_owned(),
+            ],
+            details: None,
+        })?;
+        sources.push(json!({
+            "kind": "inline-json",
+            "bytes": raw_input.len(),
+        }));
+    }
+
+    if let Some(path) = &args.file {
+        primary_source_count += 1;
+        primary_source = "file";
+        let content = std::fs::read_to_string(path).map_err(|error| InvokeInputError {
+            error_type: "unreadable-input-file",
+            message: format!("Could not read `{}`: {error}", path.display()),
+            next_actions: vec![
+                "Check that the file exists and is readable.".to_owned(),
+                "Switch to `--input` or `--set path=value` if you only need a small payload.".to_owned(),
+            ],
+            details: Some(json!({ "path": path.display().to_string() })),
+        })?;
+        payload = serde_json::from_str(&content).map_err(|error| InvokeInputError {
+            error_type: "invalid-input-file",
+            message: format!("`{}` does not contain valid JSON: {error}", path.display()),
+            next_actions: vec![
+                "Fix the JSON file contents and retry.".to_owned(),
+                "Use `fwc validate` first if you want a pure schema check.".to_owned(),
+            ],
+            details: Some(json!({ "path": path.display().to_string() })),
+        })?;
+        sources.push(json!({
+            "kind": "file",
+            "path": path.display().to_string(),
+            "bytes": content.len(),
+        }));
+    }
+
+    if args.stdin {
+        primary_source_count += 1;
+        primary_source = "stdin";
+        let mut content = String::new();
+        std::io::stdin()
+            .read_to_string(&mut content)
+            .map_err(|error| InvokeInputError {
+                error_type: "stdin-read-failed",
+                message: format!("Could not read stdin for `{command}` payload authoring: {error}", command = "invoke"),
+                next_actions: vec![
+                    "Pipe JSON into stdin or remove `--stdin`.".to_owned(),
+                    "Use `--input` or `--file` if the payload already lives elsewhere.".to_owned(),
+                ],
+                details: None,
+            })?;
+        if content.trim().is_empty() {
+            return Err(InvokeInputError {
+                error_type: "empty-stdin-input",
+                message: "Stdin was selected as the payload source, but no JSON bytes were provided.".to_owned(),
+                next_actions: vec![
+                    "Pipe a JSON document into `fwc ... --stdin`.".to_owned(),
+                    "Use `--input`, `--file`, or `--set path=value` instead.".to_owned(),
+                ],
+                details: None,
+            });
+        }
+        payload = serde_json::from_str(&content).map_err(|error| InvokeInputError {
+            error_type: "invalid-stdin-input",
+            message: format!("The stdin payload is not valid JSON: {error}"),
+            next_actions: vec![
+                "Fix the piped JSON and retry.".to_owned(),
+                "Use `--set path=value` for small payloads that do not need full JSON.".to_owned(),
+            ],
+            details: None,
+        })?;
+        sources.push(json!({
+            "kind": "stdin",
+            "bytes": content.len(),
+        }));
+    }
+
+    if primary_source_count > 1 {
+        return Err(InvokeInputError {
+            error_type: "conflicting-input-sources",
+            message: "Choose only one primary payload source among `--input`, `--file`, and `--stdin`.".to_owned(),
+            next_actions: vec![
+                "Keep one primary payload source and retry.".to_owned(),
+                "Use `--set path=value` to patch that payload instead of supplying multiple primaries.".to_owned(),
+            ],
+            details: Some(json!({
+                "input": args.input.is_some(),
+                "file": args.file.as_ref().map(|path| path.display().to_string()),
+                "stdin": args.stdin,
+            })),
+        });
+    }
+
+    if payload.is_null() {
+        payload = Value::Object(serde_json::Map::new());
+    }
+
+    for binding in &args.set {
+        let (raw_path, raw_value) = parse_invoke_binding(binding)?;
+        let path = parse_invoke_path(&raw_path)?;
+        let field_schema = invoke_schema_at_path(schema, &path);
+        if field_schema.is_none() {
+            warnings.push(format!(
+                "`{raw_path}` does not map cleanly to the published input schema; applying it anyway and leaving final validation to catch drift."
+            ));
+        }
+        let value = coerce_invoke_value(&raw_value, field_schema).map_err(|message| {
+            InvokeInputError {
+                error_type: "binding-coercion-failed",
+                message: format!("Could not coerce `{raw_path}={raw_value}` into the schema shape: {message}"),
+                next_actions: vec![
+                    "Adjust the value to match the schema type shown by `fwc schema <connector> <operation>`.".to_owned(),
+                    "For object or array fields, pass valid JSON on the right-hand side.".to_owned(),
+                ],
+                details: Some(json!({
+                    "path": raw_path,
+                    "raw_value": raw_value,
+                })),
+            }
+        })?;
+        apply_invoke_binding(&mut payload, &path, value).map_err(|message| InvokeInputError {
+            error_type: "binding-apply-failed",
+            message,
+            next_actions: vec![
+                "Adjust the binding path so it matches the JSON shape you want to build.".to_owned(),
+                "Use `--input` or `--file` when the root payload is not an object/array that can be patched incrementally.".to_owned(),
+            ],
+            details: Some(json!({
+                "binding": binding,
+            })),
+        })?;
+    }
+
+    if sources.is_empty() && args.set.is_empty() {
+        return Err(InvokeInputError {
+            error_type: "missing-input-source",
+            message: "No payload source was provided. Use `--input`, `--file`, `--stdin`, or one or more `--set path=value` bindings.".to_owned(),
+            next_actions: vec![
+                "Use `fwc template <connector> <operation>` to scaffold a starting payload.".to_owned(),
+                "Use `fwc schema <connector> <operation> --required-only` to see the minimum fields.".to_owned(),
+                "Use `--set path=value` for small requests or `--input/--file` for full JSON.".to_owned(),
+            ],
+            details: None,
+        });
+    }
+
+    if !args.set.is_empty() {
+        sources.push(json!({
+            "kind": "binding-set",
+            "count": args.set.len(),
+            "bindings": args.set,
+        }));
+        if primary_source == "none" {
+            primary_source = "binding-set";
+        }
+    }
+
+    Ok(PreparedInvokeInput {
+        payload,
+        primary_source,
+        sources,
+        binding_count: args.set.len(),
+        warnings,
+    })
+}
+
+fn parse_invoke_binding(
+    binding: &str,
+) -> std::result::Result<(String, String), InvokeInputError> {
+    binding
+        .split_once('=')
+        .map(|(path, value)| (path.trim().to_owned(), value.trim().to_owned()))
+        .filter(|(path, _)| !path.is_empty())
+        .ok_or_else(|| InvokeInputError {
+            error_type: "invalid-input-binding",
+            message: format!("`{binding}` is not a valid `path=value` binding."),
+            next_actions: vec![
+                "Use `--set owner=octocat --set repo=hello-world` style bindings.".to_owned(),
+                "Quote JSON fragments on the right-hand side when setting object or array values."
+                    .to_owned(),
+            ],
+            details: Some(json!({ "binding": binding })),
+        })
+}
+
+fn parse_invoke_path(
+    raw_path: &str,
+) -> std::result::Result<Vec<InvokePathSegment>, InvokeInputError> {
+    let mut segments = Vec::new();
+    for raw_part in raw_path.split('.') {
+        if raw_part.is_empty() {
+            return Err(InvokeInputError {
+                error_type: "invalid-input-binding-path",
+                message: format!("`{raw_path}` is not a valid payload path."),
+                next_actions: vec![
+                    "Use dot paths like `metadata.owner` or indexed paths like `labels[0]`."
+                        .to_owned(),
+                ],
+                details: Some(json!({ "path": raw_path })),
+            });
+        }
+
+        let mut remaining = raw_part;
+        loop {
+            let Some(open_index) = remaining.find('[') else {
+                if !remaining.is_empty() {
+                    segments.push(InvokePathSegment::Field(remaining.to_owned()));
+                }
+                break;
+            };
+
+            if open_index > 0 {
+                segments.push(InvokePathSegment::Field(remaining[..open_index].to_owned()));
+            }
+
+            let after_open = &remaining[open_index + 1..];
+            let Some(close_index) = after_open.find(']') else {
+                return Err(InvokeInputError {
+                    error_type: "invalid-input-binding-path",
+                    message: format!("`{raw_path}` is missing a closing `]`."),
+                    next_actions: vec![
+                        "Use indexed paths like `labels[0]` or `containers[1].image`.".to_owned(),
+                    ],
+                    details: Some(json!({ "path": raw_path })),
+                });
+            };
+
+            let index_str = &after_open[..close_index];
+            let index = index_str.parse::<usize>().map_err(|_| InvokeInputError {
+                error_type: "invalid-input-binding-path",
+                message: format!("`{raw_path}` uses a non-numeric array index `{index_str}`."),
+                next_actions: vec![
+                    "Array indices must be zero-based integers such as `[0]` or `[1]`."
+                        .to_owned(),
+                ],
+                details: Some(json!({ "path": raw_path, "index": index_str })),
+            })?;
+            segments.push(InvokePathSegment::Index(index));
+            remaining = &after_open[close_index + 1..];
+        }
+    }
+
+    Ok(segments)
+}
+
+fn invoke_schema_at_path<'a>(schema: &'a Value, path: &[InvokePathSegment]) -> Option<&'a Value> {
+    let mut current = schema;
+    for segment in path {
+        match segment {
+            InvokePathSegment::Field(name) => {
+                current = current
+                    .get("properties")
+                    .and_then(Value::as_object)
+                    .and_then(|properties| properties.get(name))
+                    .or_else(|| invoke_variant_schema(current, name))?;
+            }
+            InvokePathSegment::Index(_) => {
+                current = current.get("items").or_else(|| invoke_items_from_variant(current))?;
+            }
+        }
+    }
+    Some(current)
+}
+
+fn invoke_variant_schema<'a>(schema: &'a Value, field: &str) -> Option<&'a Value> {
+    for key in ["oneOf", "anyOf", "allOf"] {
+        if let Some(variants) = schema.get(key).and_then(Value::as_array) {
+            for variant in variants {
+                if let Some(match_schema) = variant
+                    .get("properties")
+                    .and_then(Value::as_object)
+                    .and_then(|properties| properties.get(field))
+                {
+                    return Some(match_schema);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn invoke_items_from_variant(schema: &Value) -> Option<&Value> {
+    for key in ["oneOf", "anyOf", "allOf"] {
+        if let Some(variants) = schema.get(key).and_then(Value::as_array) {
+            for variant in variants {
+                if let Some(items) = variant.get("items") {
+                    return Some(items);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn coerce_invoke_value(raw_value: &str, schema: Option<&Value>) -> std::result::Result<Value, String> {
+    let expected_type = schema.and_then(invoke_expected_type);
+    match expected_type {
+        Some("string") => Ok(Value::String(raw_value.to_owned())),
+        Some("integer") => {
+            if let Ok(parsed) = raw_value.parse::<i64>() {
+                Ok(Value::Number(parsed.into()))
+            } else if let Ok(parsed) = raw_value.parse::<u64>() {
+                Ok(Value::Number(parsed.into()))
+            } else {
+                Err("expected an integer".to_owned())
+            }
+        }
+        Some("number") => {
+            let parsed = raw_value
+                .parse::<f64>()
+                .map_err(|_| "expected a number".to_owned())?;
+            serde_json::Number::from_f64(parsed)
+                .map(Value::Number)
+                .ok_or_else(|| "expected a finite number".to_owned())
+        }
+        Some("boolean") => match raw_value {
+            "true" => Ok(Value::Bool(true)),
+            "false" => Ok(Value::Bool(false)),
+            _ => Err("expected `true` or `false`".to_owned()),
+        },
+        Some("object") | Some("array") => serde_json::from_str(raw_value)
+            .map_err(|error| format!("expected valid JSON for a composite value: {error}")),
+        Some("null") => {
+            if raw_value == "null" {
+                Ok(Value::Null)
+            } else {
+                Err("expected the literal `null`".to_owned())
+            }
+        }
+        _ => serde_json::from_str(raw_value).or_else(|_| Ok(Value::String(raw_value.to_owned()))),
+    }
+}
+
+fn invoke_expected_type(schema: &Value) -> Option<&str> {
+    if let Some(type_name) = schema.get("type").and_then(Value::as_str) {
+        return Some(type_name);
+    }
+
+    schema
+        .get("type")
+        .and_then(Value::as_array)
+        .and_then(|types| {
+            types
+                .iter()
+                .filter_map(Value::as_str)
+                .find(|type_name| *type_name != "null")
+        })
+}
+
+fn apply_invoke_binding(
+    target: &mut Value,
+    path: &[InvokePathSegment],
+    value: Value,
+) -> std::result::Result<(), String> {
+    if path.is_empty() {
+        *target = value;
+        return Ok(());
+    }
+
+    match &path[0] {
+        InvokePathSegment::Field(name) => {
+            if target.is_null() {
+                *target = Value::Object(serde_json::Map::new());
+            }
+            let Some(object) = target.as_object_mut() else {
+                return Err(format!(
+                    "Cannot set `{name}` on a non-object payload root. Use `--input`/`--file` for the full JSON body instead."
+                ));
+            };
+            let entry = object.entry(name.clone()).or_insert(Value::Null);
+            apply_invoke_binding(entry, &path[1..], value)
+        }
+        InvokePathSegment::Index(index) => {
+            if target.is_null() {
+                *target = Value::Array(Vec::new());
+            }
+            let Some(array) = target.as_array_mut() else {
+                return Err(format!(
+                    "Cannot set array index [{index}] on a non-array payload. Use a JSON array source or patch a valid array field."
+                ));
+            };
+            while array.len() <= *index {
+                array.push(Value::Null);
+            }
+            apply_invoke_binding(&mut array[*index], &path[1..], value)
+        }
+    }
+}
+
+fn invoke_payload_preview(payload: &Value) -> Value {
+    let bytes = serde_json::to_vec(payload).map_or(0, |encoded| encoded.len());
+    match payload {
+        Value::Object(object) => json!({
+            "shape": "object",
+            "top_level_keys": object.keys().take(8).cloned().collect::<Vec<_>>(),
+            "field_count": invoke_leaf_field_count(payload),
+            "bytes": bytes,
+        }),
+        Value::Array(array) => json!({
+            "shape": "array",
+            "item_count": array.len(),
+            "bytes": bytes,
+        }),
+        Value::String(value) => json!({
+            "shape": "string",
+            "chars": value.chars().count(),
+            "bytes": bytes,
+        }),
+        Value::Bool(_) => json!({
+            "shape": "boolean",
+            "bytes": bytes,
+        }),
+        Value::Number(_) => json!({
+            "shape": "number",
+            "bytes": bytes,
+        }),
+        Value::Null => json!({
+            "shape": "null",
+            "bytes": bytes,
+        }),
+    }
+}
+
+fn invoke_leaf_field_count(value: &Value) -> usize {
+    match value {
+        Value::Object(object) => object.values().map(invoke_leaf_field_count).sum::<usize>(),
+        Value::Array(array) => array.iter().map(invoke_leaf_field_count).sum::<usize>(),
+        Value::Null => 0,
+        _ => 1,
     }
 }
 

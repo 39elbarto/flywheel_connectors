@@ -547,10 +547,7 @@ impl TrackingValidator {
     /// # Errors
     ///
     /// Returns `TrackingValidationError` if the webhook is invalid.
-    pub fn validate_webhook(
-        &self,
-        webhook: &StatusWebhook,
-    ) -> Result<(), TrackingValidationError> {
+    pub fn validate_webhook(&self, webhook: &StatusWebhook) -> Result<(), TrackingValidationError> {
         webhook.validate()
     }
 }
@@ -980,7 +977,10 @@ mod tests {
             RecipientStatusType::AuthenticationFailed.as_str(),
             "authentication_failed"
         );
-        assert_eq!(RecipientStatusType::AutoResponded.as_str(), "auto_responded");
+        assert_eq!(
+            RecipientStatusType::AutoResponded.as_str(),
+            "auto_responded"
+        );
     }
 
     #[test]
@@ -1103,10 +1103,7 @@ mod tests {
     #[test]
     fn query_with_status_single() {
         let q = EnvelopeListQuery::new().with_status("completed");
-        assert_eq!(
-            q.status_filter,
-            Some(vec!["completed".to_string()])
-        );
+        assert_eq!(q.status_filter, Some(vec!["completed".to_string()]));
     }
 
     #[test]
@@ -1236,7 +1233,14 @@ mod tests {
 
     #[test]
     fn query_validate_valid_statuses() {
-        for status in &["created", "sent", "delivered", "completed", "declined", "voided"] {
+        for status in &[
+            "created",
+            "sent",
+            "delivered",
+            "completed",
+            "declined",
+            "voided",
+        ] {
             let q = EnvelopeListQuery::new().with_status(status);
             assert!(q.validate().is_ok(), "status {status} should be valid");
         }
@@ -1244,9 +1248,7 @@ mod tests {
 
     #[test]
     fn query_serde_roundtrip() {
-        let q = EnvelopeListQuery::new()
-            .with_status("sent")
-            .with_limit(10);
+        let q = EnvelopeListQuery::new().with_status("sent").with_limit(10);
         let json = serde_json::to_string(&q).unwrap();
         let back: EnvelopeListQuery = serde_json::from_str(&json).unwrap();
         assert_eq!(back.limit, 10);
@@ -1255,7 +1257,9 @@ mod tests {
 
     #[test]
     fn query_clone() {
-        let q = EnvelopeListQuery::new().with_status("completed").with_limit(50);
+        let q = EnvelopeListQuery::new()
+            .with_status("completed")
+            .with_limit(50);
         let cloned = q.clone();
         drop(q);
         assert_eq!(cloned.limit, 50);
@@ -1399,7 +1403,10 @@ mod tests {
             timestamp: "2026-01-15T10:00:00Z".to_string(),
             recipient_statuses: vec![],
         };
-        assert_eq!(wh.validate().unwrap_err(), TrackingValidationError::EmptyEnvelopeId);
+        assert_eq!(
+            wh.validate().unwrap_err(),
+            TrackingValidationError::EmptyEnvelopeId
+        );
     }
 
     #[test]
@@ -1427,7 +1434,11 @@ mod tests {
                 timestamp: "2026-01-15T10:00:00Z".to_string(),
                 recipient_statuses: vec![],
             };
-            assert!(wh.validate().is_ok(), "event type {} should be valid", evt.as_str());
+            assert!(
+                wh.validate().is_ok(),
+                "event type {} should be valid",
+                evt.as_str()
+            );
         }
     }
 
@@ -1496,31 +1507,76 @@ mod tests {
     #[test]
     fn webhook_event_type_as_str() {
         assert_eq!(WebhookEventType::EnvelopeSent.as_str(), "envelope-sent");
-        assert_eq!(WebhookEventType::EnvelopeDelivered.as_str(), "envelope-delivered");
-        assert_eq!(WebhookEventType::EnvelopeCompleted.as_str(), "envelope-completed");
-        assert_eq!(WebhookEventType::EnvelopeDeclined.as_str(), "envelope-declined");
+        assert_eq!(
+            WebhookEventType::EnvelopeDelivered.as_str(),
+            "envelope-delivered"
+        );
+        assert_eq!(
+            WebhookEventType::EnvelopeCompleted.as_str(),
+            "envelope-completed"
+        );
+        assert_eq!(
+            WebhookEventType::EnvelopeDeclined.as_str(),
+            "envelope-declined"
+        );
         assert_eq!(WebhookEventType::EnvelopeVoided.as_str(), "envelope-voided");
-        assert_eq!(WebhookEventType::RecipientSigned.as_str(), "recipient-signed");
-        assert_eq!(WebhookEventType::RecipientDeclined.as_str(), "recipient-declined");
-        assert_eq!(WebhookEventType::RecipientDelivered.as_str(), "recipient-delivered");
+        assert_eq!(
+            WebhookEventType::RecipientSigned.as_str(),
+            "recipient-signed"
+        );
+        assert_eq!(
+            WebhookEventType::RecipientDeclined.as_str(),
+            "recipient-declined"
+        );
+        assert_eq!(
+            WebhookEventType::RecipientDelivered.as_str(),
+            "recipient-delivered"
+        );
     }
 
     #[test]
     fn webhook_event_type_display() {
         assert_eq!(WebhookEventType::EnvelopeSent.to_string(), "envelope-sent");
-        assert_eq!(WebhookEventType::RecipientSigned.to_string(), "recipient-signed");
+        assert_eq!(
+            WebhookEventType::RecipientSigned.to_string(),
+            "recipient-signed"
+        );
     }
 
     #[test]
     fn webhook_event_type_from_str_all_variants() {
-        assert_eq!("envelope-sent".parse::<WebhookEventType>().unwrap(), WebhookEventType::EnvelopeSent);
-        assert_eq!("envelope-delivered".parse::<WebhookEventType>().unwrap(), WebhookEventType::EnvelopeDelivered);
-        assert_eq!("envelope-completed".parse::<WebhookEventType>().unwrap(), WebhookEventType::EnvelopeCompleted);
-        assert_eq!("envelope-declined".parse::<WebhookEventType>().unwrap(), WebhookEventType::EnvelopeDeclined);
-        assert_eq!("envelope-voided".parse::<WebhookEventType>().unwrap(), WebhookEventType::EnvelopeVoided);
-        assert_eq!("recipient-signed".parse::<WebhookEventType>().unwrap(), WebhookEventType::RecipientSigned);
-        assert_eq!("recipient-declined".parse::<WebhookEventType>().unwrap(), WebhookEventType::RecipientDeclined);
-        assert_eq!("recipient-delivered".parse::<WebhookEventType>().unwrap(), WebhookEventType::RecipientDelivered);
+        assert_eq!(
+            "envelope-sent".parse::<WebhookEventType>().unwrap(),
+            WebhookEventType::EnvelopeSent
+        );
+        assert_eq!(
+            "envelope-delivered".parse::<WebhookEventType>().unwrap(),
+            WebhookEventType::EnvelopeDelivered
+        );
+        assert_eq!(
+            "envelope-completed".parse::<WebhookEventType>().unwrap(),
+            WebhookEventType::EnvelopeCompleted
+        );
+        assert_eq!(
+            "envelope-declined".parse::<WebhookEventType>().unwrap(),
+            WebhookEventType::EnvelopeDeclined
+        );
+        assert_eq!(
+            "envelope-voided".parse::<WebhookEventType>().unwrap(),
+            WebhookEventType::EnvelopeVoided
+        );
+        assert_eq!(
+            "recipient-signed".parse::<WebhookEventType>().unwrap(),
+            WebhookEventType::RecipientSigned
+        );
+        assert_eq!(
+            "recipient-declined".parse::<WebhookEventType>().unwrap(),
+            WebhookEventType::RecipientDeclined
+        );
+        assert_eq!(
+            "recipient-delivered".parse::<WebhookEventType>().unwrap(),
+            WebhookEventType::RecipientDelivered
+        );
     }
 
     #[test]
@@ -1572,8 +1628,14 @@ mod tests {
 
     #[test]
     fn webhook_event_type_eq() {
-        assert_eq!(WebhookEventType::EnvelopeSent, WebhookEventType::EnvelopeSent);
-        assert_ne!(WebhookEventType::EnvelopeSent, WebhookEventType::EnvelopeVoided);
+        assert_eq!(
+            WebhookEventType::EnvelopeSent,
+            WebhookEventType::EnvelopeSent
+        );
+        assert_ne!(
+            WebhookEventType::EnvelopeSent,
+            WebhookEventType::EnvelopeVoided
+        );
     }
 
     #[test]
@@ -1769,7 +1831,10 @@ mod tests {
     #[test]
     fn validation_error_display_invalid_limit() {
         let err = TrackingValidationError::InvalidLimit(200);
-        assert_eq!(err.to_string(), "invalid limit: 200 (must be between 1 and 100)");
+        assert_eq!(
+            err.to_string(),
+            "invalid limit: 200 (must be between 1 and 100)"
+        );
     }
 
     #[test]
@@ -1833,8 +1898,7 @@ mod tests {
 
     #[test]
     fn validation_error_is_std_error() {
-        let err: Box<dyn std::error::Error> =
-            Box::new(TrackingValidationError::EmptyEnvelopeId);
+        let err: Box<dyn std::error::Error> = Box::new(TrackingValidationError::EmptyEnvelopeId);
         assert!(err.to_string().contains("envelope ID"));
     }
 
@@ -1849,7 +1913,10 @@ mod tests {
 
     #[test]
     fn tracking_action_display_webhook_received() {
-        assert_eq!(TrackingAction::WebhookReceived.to_string(), "webhook_received");
+        assert_eq!(
+            TrackingAction::WebhookReceived.to_string(),
+            "webhook_received"
+        );
     }
 
     #[test]

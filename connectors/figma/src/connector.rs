@@ -1632,11 +1632,7 @@ impl FigmaConnector {
         let filtered: Vec<BundledComponent> = if let Some(ref ids) = node_id_filter {
             all_components
                 .into_iter()
-                .filter(|c| {
-                    c.node_id
-                        .as_deref()
-                        .is_some_and(|nid| ids.contains(&nid))
-                })
+                .filter(|c| c.node_id.as_deref().is_some_and(|nid| ids.contains(&nid)))
                 .collect()
         } else {
             all_components
@@ -2155,9 +2151,7 @@ fn audit_naming(meta: &serde_json::Value, findings: &mut Vec<DesignAuditFinding>
                 severity: AuditSeverity::Info,
                 check_type: "naming".into(),
                 node_id: node_id.clone(),
-                message: format!(
-                    "Component uses mixed separators (/ and .): {name}"
-                ),
+                message: format!("Component uses mixed separators (/ and .): {name}"),
                 details: None,
             });
         }
@@ -2217,11 +2211,7 @@ fn audit_styles(meta: &serde_json::Value, findings: &mut Vec<DesignAuditFinding>
                 .get("description")
                 .and_then(|v| v.as_str())
                 .filter(|d| !d.is_empty());
-            if desc.is_none() {
-                Some(name)
-            } else {
-                None
-            }
+            if desc.is_none() { Some(name) } else { None }
         })
         .collect();
 
@@ -2230,10 +2220,7 @@ fn audit_styles(meta: &serde_json::Value, findings: &mut Vec<DesignAuditFinding>
             severity: AuditSeverity::Info,
             check_type: "styles".into(),
             node_id: None,
-            message: format!(
-                "{} style(s) have no description",
-                undescribed.len()
-            ),
+            message: format!("{} style(s) have no description", undescribed.len()),
             details: Some(json!({
                 "styles": undescribed.into_iter().take(10).collect::<Vec<_>>()
             })),
@@ -2241,8 +2228,7 @@ fn audit_styles(meta: &serde_json::Value, findings: &mut Vec<DesignAuditFinding>
     }
 
     // Check for duplicate style names
-    let mut seen_names: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::new();
+    let mut seen_names: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for style in styles {
         if let Some(name) = style.get("name").and_then(|v| v.as_str()) {
             *seen_names.entry(name.to_lowercase()).or_insert(0) += 1;
@@ -2255,9 +2241,7 @@ fn audit_styles(meta: &serde_json::Value, findings: &mut Vec<DesignAuditFinding>
                 severity: AuditSeverity::Warning,
                 check_type: "styles".into(),
                 node_id: None,
-                message: format!(
-                    "Duplicate style name '{name}' appears {count} times"
-                ),
+                message: format!("Duplicate style name '{name}' appears {count} times"),
                 details: None,
             });
         }
@@ -2315,9 +2299,7 @@ fn check_nesting_depth(
             severity: AuditSeverity::Warning,
             check_type: "structure".into(),
             node_id,
-            message: format!(
-                "Node '{name}' at depth {current_depth} (deeply nested)"
-            ),
+            message: format!("Node '{name}' at depth {current_depth} (deeply nested)"),
             details: Some(json!({ "depth": current_depth })),
         });
         return;
@@ -3126,10 +3108,7 @@ mod tests {
             components[1].description.as_deref(),
             Some("Primary action button")
         );
-        assert_eq!(
-            components[1].containing_frame.as_deref(),
-            Some("Buttons")
-        );
+        assert_eq!(components[1].containing_frame.as_deref(), Some("Buttons"));
     }
 
     #[test]
@@ -3246,9 +3225,11 @@ mod tests {
         audit_naming(&meta, &mut findings);
         assert_eq!(findings.len(), 3); // 3 default names
         assert!(findings.iter().all(|f| f.check_type == "naming"));
-        assert!(findings
-            .iter()
-            .all(|f| f.severity == AuditSeverity::Warning));
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.severity == AuditSeverity::Warning)
+        );
     }
 
     #[test]
@@ -3333,7 +3314,11 @@ mod tests {
 
         let mut findings = Vec::new();
         audit_styles(&meta, &mut findings);
-        assert!(findings.iter().any(|f| f.message.contains("no description")));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.message.contains("no description"))
+        );
     }
 
     #[test]
@@ -3347,9 +3332,11 @@ mod tests {
 
         let mut findings = Vec::new();
         audit_styles(&meta, &mut findings);
-        assert!(findings
-            .iter()
-            .any(|f| f.message.contains("Duplicate style name")));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.message.contains("Duplicate style name"))
+        );
     }
 
     #[test]
@@ -3407,9 +3394,11 @@ mod tests {
         let meta = json!({});
         let mut findings = Vec::new();
         audit_tokens(&meta, &mut findings);
-        assert!(findings
-            .iter()
-            .any(|f| f.message.contains("No design tokens")));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.message.contains("No design tokens"))
+        );
     }
 
     #[test]
@@ -3445,9 +3434,11 @@ mod tests {
 
         let mut findings = Vec::new();
         audit_tokens(&meta, &mut findings);
-        assert!(findings
-            .iter()
-            .any(|f| f.message.contains("No color tokens")));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.message.contains("No color tokens"))
+        );
     }
 
     #[test]
@@ -3460,9 +3451,11 @@ mod tests {
 
         let mut findings = Vec::new();
         audit_tokens(&meta, &mut findings);
-        assert!(findings
-            .iter()
-            .any(|f| f.message.contains("No typography tokens")));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.message.contains("No typography tokens"))
+        );
     }
 
     #[test]

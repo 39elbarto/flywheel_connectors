@@ -563,9 +563,11 @@ async fn edit_content_missing_text() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     assert!(
-        c.handle_invoke(json!({"operation_id": "reddit.edit_content", "input": {"thing_fullname": "t3_abc"}}))
-            .await
-            .is_err()
+        c.handle_invoke(
+            json!({"operation_id": "reddit.edit_content", "input": {"thing_fullname": "t3_abc"}})
+        )
+        .await
+        .is_err()
     );
 }
 
@@ -574,9 +576,11 @@ async fn edit_content_missing_fullname() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     assert!(
-        c.handle_invoke(json!({"operation_id": "reddit.edit_content", "input": {"text": "new text"}}))
-            .await
-            .is_err()
+        c.handle_invoke(
+            json!({"operation_id": "reddit.edit_content", "input": {"text": "new text"}})
+        )
+        .await
+        .is_err()
     );
 }
 

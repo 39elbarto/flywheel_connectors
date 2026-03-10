@@ -315,8 +315,7 @@ impl KubernetesConnector {
 
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
         let Some(config) = &self.config else {
-            let report =
-                SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            let report = SelfCheckReport::degraded("not_configured", "Connector is not configured");
             return Self::serialize_self_check_report(report);
         };
 
@@ -524,7 +523,10 @@ impl KubernetesConnector {
             .get("name")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("unnamed");
-        let labels = input.get("labels").cloned().unwrap_or(serde_json::Value::Null);
+        let labels = input
+            .get("labels")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
 
         let mut body = json!({
             "apiVersion": "v1",
@@ -611,7 +613,10 @@ impl KubernetesConnector {
             status_code: 400,
             message: "Missing required field: spec".into(),
         })?;
-        let labels = input.get("labels").cloned().unwrap_or(serde_json::Value::Null);
+        let labels = input
+            .get("labels")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
         let update = input
             .get("update")
             .and_then(serde_json::Value::as_bool)
@@ -853,7 +858,10 @@ impl KubernetesConnector {
             status_code: 400,
             message: "Missing required field: data".into(),
         })?;
-        let labels = input.get("labels").cloned().unwrap_or(serde_json::Value::Null);
+        let labels = input
+            .get("labels")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
 
         let mut body = json!({
             "apiVersion": "v1",
@@ -952,7 +960,10 @@ impl KubernetesConnector {
             .get("type")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("Opaque");
-        let labels = input.get("labels").cloned().unwrap_or(serde_json::Value::Null);
+        let labels = input
+            .get("labels")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
 
         let mut body = json!({
             "apiVersion": "v1",
@@ -994,14 +1005,30 @@ impl KubernetesConnector {
         let deploy = client.get_rollout_status(namespace, name).await?;
         let status = deploy.get("status").cloned().unwrap_or(json!({}));
 
-        let replicas = status.get("replicas").and_then(|v| v.as_u64()).map(|v| v as u32);
-        let updated = status.get("updatedReplicas").and_then(|v| v.as_u64()).map(|v| v as u32);
-        let ready = status.get("readyReplicas").and_then(|v| v.as_u64()).map(|v| v as u32);
-        let available = status.get("availableReplicas").and_then(|v| v.as_u64()).map(|v| v as u32);
-        let unavailable = status.get("unavailableReplicas").and_then(|v| v.as_u64()).map(|v| v as u32);
+        let replicas = status
+            .get("replicas")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
+        let updated = status
+            .get("updatedReplicas")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
+        let ready = status
+            .get("readyReplicas")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
+        let available = status
+            .get("availableReplicas")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
+        let unavailable = status
+            .get("unavailableReplicas")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
         let generation = status.get("observedGeneration").and_then(|v| v.as_u64());
         let conditions = status.get("conditions").cloned();
-        let rollout_complete = replicas == updated && replicas == available && unavailable.unwrap_or(0) == 0;
+        let rollout_complete =
+            replicas == updated && replicas == available && unavailable.unwrap_or(0) == 0;
 
         Ok(json!({
             "rollout_status": {
@@ -1027,37 +1054,54 @@ impl KubernetesConnector {
         let namespace = require_str(input, "namespace")?;
         let name = require_str(input, "name")?;
         let rs_list = client.get_rollout_history(namespace, name).await?;
-        let items = rs_list.get("items").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let items = rs_list
+            .get("items")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
 
-        let revisions: Vec<serde_json::Value> = items.iter().map(|rs| {
-            let revision = rs
-                .get("metadata")
-                .and_then(|m| m.get("annotations"))
-                .and_then(|a| a.get("deployment.kubernetes.io/revision"))
-                .and_then(|v| v.as_str())
-                .and_then(|s| s.parse::<u64>().ok());
-            let rs_name = rs.get("metadata").and_then(|m| m.get("name")).and_then(|v| v.as_str());
-            let created = rs.get("metadata").and_then(|m| m.get("creationTimestamp")).and_then(|v| v.as_str());
-            let replicas = rs.get("spec").and_then(|s| s.get("replicas")).and_then(|v| v.as_u64()).map(|v| v as u32);
-            let image = rs
-                .get("spec")
-                .and_then(|s| s.get("template"))
-                .and_then(|t| t.get("spec"))
-                .and_then(|s| s.get("containers"))
-                .and_then(|c| c.as_array())
-                .and_then(|arr| arr.first())
-                .and_then(|c| c.get("image"))
-                .and_then(|v| v.as_str());
-            let labels = rs.get("metadata").and_then(|m| m.get("labels")).cloned();
-            json!({
-                "revision": revision,
-                "name": rs_name,
-                "creation_timestamp": created,
-                "replicas": replicas,
-                "image": image,
-                "labels": labels,
+        let revisions: Vec<serde_json::Value> = items
+            .iter()
+            .map(|rs| {
+                let revision = rs
+                    .get("metadata")
+                    .and_then(|m| m.get("annotations"))
+                    .and_then(|a| a.get("deployment.kubernetes.io/revision"))
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<u64>().ok());
+                let rs_name = rs
+                    .get("metadata")
+                    .and_then(|m| m.get("name"))
+                    .and_then(|v| v.as_str());
+                let created = rs
+                    .get("metadata")
+                    .and_then(|m| m.get("creationTimestamp"))
+                    .and_then(|v| v.as_str());
+                let replicas = rs
+                    .get("spec")
+                    .and_then(|s| s.get("replicas"))
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u32);
+                let image = rs
+                    .get("spec")
+                    .and_then(|s| s.get("template"))
+                    .and_then(|t| t.get("spec"))
+                    .and_then(|s| s.get("containers"))
+                    .and_then(|c| c.as_array())
+                    .and_then(|arr| arr.first())
+                    .and_then(|c| c.get("image"))
+                    .and_then(|v| v.as_str());
+                let labels = rs.get("metadata").and_then(|m| m.get("labels")).cloned();
+                json!({
+                    "revision": revision,
+                    "name": rs_name,
+                    "creation_timestamp": created,
+                    "replicas": replicas,
+                    "image": image,
+                    "labels": labels,
+                })
             })
-        }).collect();
+            .collect();
 
         Ok(json!({ "revisions": revisions }))
     }
@@ -2917,8 +2961,7 @@ mod tests {
 
     #[test]
     fn provisioning_readiness_bearer_token_mode() {
-        let config =
-            KubernetesConfig::from_params(&json!({"bearer_token": "test-token"})).unwrap();
+        let config = KubernetesConfig::from_params(&json!({"bearer_token": "test-token"})).unwrap();
         let readiness = config.provisioning_readiness();
         assert_eq!(readiness.auth_mode, "bearer_token");
         assert!(readiness.bearer_token_configured);
@@ -2959,8 +3002,7 @@ mod tests {
 
     #[test]
     fn provisioning_readiness_serializes() {
-        let config =
-            KubernetesConfig::from_params(&json!({"bearer_token": "test-token"})).unwrap();
+        let config = KubernetesConfig::from_params(&json!({"bearer_token": "test-token"})).unwrap();
         let readiness = config.provisioning_readiness();
         let v = serde_json::to_value(&readiness).unwrap();
         assert_eq!(v["auth_mode"], "bearer_token");

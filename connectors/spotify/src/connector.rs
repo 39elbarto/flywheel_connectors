@@ -348,8 +348,7 @@ impl SpotifyConnector {
     /// Handle the `self_check` method.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
         let Some(config) = &self.config else {
-            let report =
-                SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            let report = SelfCheckReport::degraded("not_configured", "Connector is not configured");
             return Self::serialize_self_check_report(report);
         };
 
@@ -453,24 +452,16 @@ impl SpotifyConnector {
             "spotify.playback.repeat" => self.invoke_playback_repeat(client, &input).await,
             "spotify.playback.transfer" => self.invoke_playback_transfer(client, &input).await,
             // Library management
-            "spotify.library.tracks.list" => {
-                self.invoke_library_tracks_list(client, &input).await
-            }
-            "spotify.library.tracks.save" => {
-                self.invoke_library_tracks_save(client, &input).await
-            }
+            "spotify.library.tracks.list" => self.invoke_library_tracks_list(client, &input).await,
+            "spotify.library.tracks.save" => self.invoke_library_tracks_save(client, &input).await,
             "spotify.library.tracks.remove" => {
                 self.invoke_library_tracks_remove(client, &input).await
             }
             "spotify.library.tracks.check" => {
                 self.invoke_library_tracks_check(client, &input).await
             }
-            "spotify.library.albums.list" => {
-                self.invoke_library_albums_list(client, &input).await
-            }
-            "spotify.library.albums.save" => {
-                self.invoke_library_albums_save(client, &input).await
-            }
+            "spotify.library.albums.list" => self.invoke_library_albums_list(client, &input).await,
+            "spotify.library.albums.save" => self.invoke_library_albums_save(client, &input).await,
             "spotify.library.albums.remove" => {
                 self.invoke_library_albums_remove(client, &input).await
             }
@@ -480,9 +471,7 @@ impl SpotifyConnector {
             "spotify.playlist.tracks.list" => {
                 self.invoke_playlist_tracks_list(client, &input).await
             }
-            "spotify.playlist.tracks.add" => {
-                self.invoke_playlist_tracks_add(client, &input).await
-            }
+            "spotify.playlist.tracks.add" => self.invoke_playlist_tracks_add(client, &input).await,
             "spotify.playlist.tracks.remove" => {
                 self.invoke_playlist_tracks_remove(client, &input).await
             }
@@ -833,9 +822,7 @@ impl SpotifyConnector {
                     .map(str::to_string)
                     .collect::<Vec<_>>()
             });
-        client
-            .play(device_id, context_uri, uris.as_deref())
-            .await?;
+        client.play(device_id, context_uri, uris.as_deref()).await?;
         Ok(json!({ "started": true }))
     }
 
@@ -1044,9 +1031,7 @@ impl SpotifyConnector {
             .get("public")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
-        let description = input
-            .get("description")
-            .and_then(serde_json::Value::as_str);
+        let description = input.get("description").and_then(serde_json::Value::as_str);
         let resp = client
             .create_playlist(user_id, name, public, description)
             .await?;
@@ -1061,9 +1046,7 @@ impl SpotifyConnector {
         let playlist_id = require_str(input, "playlist_id")?;
         let name = input.get("name").and_then(serde_json::Value::as_str);
         let public = input.get("public").and_then(serde_json::Value::as_bool);
-        let description = input
-            .get("description")
-            .and_then(serde_json::Value::as_str);
+        let description = input.get("description").and_then(serde_json::Value::as_str);
         client
             .update_playlist(playlist_id, name, public, description)
             .await?;
@@ -1107,7 +1090,9 @@ impl SpotifyConnector {
         let resp = client
             .add_tracks_to_playlist(playlist_id, &uris, position)
             .await?;
-        Ok(json!({ "snapshot_id": resp.get("snapshot_id").cloned().unwrap_or(serde_json::Value::Null) }))
+        Ok(
+            json!({ "snapshot_id": resp.get("snapshot_id").cloned().unwrap_or(serde_json::Value::Null) }),
+        )
     }
 
     async fn invoke_playlist_tracks_remove(
@@ -1120,7 +1105,9 @@ impl SpotifyConnector {
         let resp = client
             .remove_tracks_from_playlist(playlist_id, &uris)
             .await?;
-        Ok(json!({ "snapshot_id": resp.get("snapshot_id").cloned().unwrap_or(serde_json::Value::Null) }))
+        Ok(
+            json!({ "snapshot_id": resp.get("snapshot_id").cloned().unwrap_or(serde_json::Value::Null) }),
+        )
     }
 
     fn serialize_self_check_report(report: SelfCheckReport) -> FcpResult<serde_json::Value> {
@@ -3281,10 +3268,7 @@ mod tests {
                     auto_browser,
                     callback_port,
                 } => {
-                    assert_eq!(
-                        authorization_url,
-                        "https://accounts.spotify.com/authorize"
-                    );
+                    assert_eq!(authorization_url, "https://accounts.spotify.com/authorize");
                     assert_eq!(token_url, "https://accounts.spotify.com/api/token");
                     assert!(scopes.contains(&"user-read-playback-state".to_string()));
                     assert!(scopes.contains(&"user-read-currently-playing".to_string()));
@@ -3407,7 +3391,12 @@ mod tests {
         assert_eq!(json["credential_id_configured"], false);
         assert_eq!(json["requires_credential_injection"], false);
         assert_eq!(json["network_ok"], true);
-        assert!(json["network_message"].as_str().unwrap().contains("accepted"));
+        assert!(
+            json["network_message"]
+                .as_str()
+                .unwrap()
+                .contains("accepted")
+        );
         assert_eq!(json["base_url"], DEFAULT_BASE_URL);
     }
 

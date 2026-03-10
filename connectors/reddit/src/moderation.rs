@@ -133,7 +133,11 @@ pub struct ModTarget {
 impl ModTarget {
     /// Creates a new moderation target.
     #[must_use]
-    pub fn new(thing_id: impl Into<String>, subreddit: impl Into<String>, content_type: ContentType) -> Self {
+    pub fn new(
+        thing_id: impl Into<String>,
+        subreddit: impl Into<String>,
+        content_type: ContentType,
+    ) -> Self {
         Self {
             thing_id: thing_id.into(),
             subreddit: subreddit.into(),
@@ -526,7 +530,8 @@ impl ModPolicy {
                     ModDecision::Allow
                 } else {
                     ModDecision::Deny {
-                        reason: "non-destructive actions require at least approve permission".into(),
+                        reason: "non-destructive actions require at least approve permission"
+                            .into(),
                     }
                 }
             }
@@ -550,17 +555,13 @@ impl ModPolicy {
             if let Some(days) = request.duration_days {
                 if days > max_days {
                     return ModDecision::Deny {
-                        reason: format!(
-                            "ban duration {days} days exceeds maximum {max_days} days"
-                        ),
+                        reason: format!("ban duration {days} days exceeds maximum {max_days} days"),
                     };
                 }
             } else {
                 // Permanent ban exceeds any max
                 return ModDecision::Deny {
-                    reason: format!(
-                        "permanent bans not allowed; maximum is {max_days} days"
-                    ),
+                    reason: format!("permanent bans not allowed; maximum is {max_days} days"),
                 };
             }
         }
@@ -1350,7 +1351,10 @@ mod tests {
         r.flair_text = Some("x".repeat(65));
         assert!(matches!(
             r.validate().unwrap_err(),
-            ModValidationError::FlairTooLong { length: 65, max: 64 }
+            ModValidationError::FlairTooLong {
+                length: 65,
+                max: 64
+            }
         ));
     }
 
@@ -1482,19 +1486,12 @@ mod tests {
     #[test]
     fn mod_decision_eq() {
         assert_eq!(ModDecision::Allow, ModDecision::Allow);
-        assert_ne!(
-            ModDecision::Allow,
-            ModDecision::Deny {
-                reason: "x".into()
-            }
-        );
+        assert_ne!(ModDecision::Allow, ModDecision::Deny { reason: "x".into() });
     }
 
     #[test]
     fn mod_decision_clone() {
-        let d = ModDecision::RequireApproval {
-            reason: "r".into(),
-        };
+        let d = ModDecision::RequireApproval { reason: "r".into() };
         #[allow(clippy::redundant_clone)]
         let d2 = d.clone();
         assert!(d2.requires_approval());
@@ -1539,7 +1536,10 @@ mod tests {
     #[test]
     fn policy_full_requires_approval_for_ignore_reports() {
         let p = ModPolicy::new_full();
-        assert!(p.check_action(&ModAction::IgnoreReports).requires_approval());
+        assert!(
+            p.check_action(&ModAction::IgnoreReports)
+                .requires_approval()
+        );
     }
 
     #[test]
@@ -1575,7 +1575,10 @@ mod tests {
     #[test]
     fn policy_full_allows_undistinguish() {
         let p = ModPolicy::new_full();
-        assert_eq!(p.check_action(&ModAction::Undistinguish), ModDecision::Allow);
+        assert_eq!(
+            p.check_action(&ModAction::Undistinguish),
+            ModDecision::Allow
+        );
     }
 
     #[test]
@@ -1857,7 +1860,10 @@ mod tests {
         r.flair_text = Some("x".repeat(65));
         assert!(matches!(
             v.validate_flair(&r).unwrap_err(),
-            ModValidationError::FlairTooLong { length: 65, max: 64 }
+            ModValidationError::FlairTooLong {
+                length: 65,
+                max: 64
+            }
         ));
     }
 
@@ -1888,7 +1894,10 @@ mod tests {
         r.reason = "x".repeat(11);
         assert!(matches!(
             v.validate_ban(&r).unwrap_err(),
-            ModValidationError::ReasonTooLong { length: 11, max: 10 }
+            ModValidationError::ReasonTooLong {
+                length: 11,
+                max: 10
+            }
         ));
     }
 
@@ -1997,10 +2006,7 @@ mod tests {
             days: 0,
             reason: "must be > 0".into(),
         };
-        assert_eq!(
-            e.to_string(),
-            "invalid ban duration (0 days): must be > 0"
-        );
+        assert_eq!(e.to_string(), "invalid ban duration (0 days): must be > 0");
     }
 
     #[test]
@@ -2034,10 +2040,7 @@ mod tests {
 
     #[test]
     fn validation_error_clone() {
-        let e = ModValidationError::ReasonTooLong {
-            length: 10,
-            max: 5,
-        };
+        let e = ModValidationError::ReasonTooLong { length: 10, max: 5 };
         #[allow(clippy::redundant_clone)]
         let e2 = e.clone();
         assert_eq!(e, e2);
@@ -2061,8 +2064,7 @@ mod tests {
 
     #[test]
     fn validation_error_is_std_error() {
-        let e: Box<dyn std::error::Error> =
-            Box::new(ModValidationError::EmptyUsername);
+        let e: Box<dyn std::error::Error> = Box::new(ModValidationError::EmptyUsername);
         assert!(e.to_string().contains("username"));
     }
 
@@ -2114,8 +2116,7 @@ mod tests {
 
     #[test]
     fn audit_event_allowed_no_moderator() {
-        let e =
-            ModAuditEvent::allowed(4000, &ModAction::Approve, "t1_c", "sub", None);
+        let e = ModAuditEvent::allowed(4000, &ModAction::Approve, "t1_c", "sub", None);
         assert!(e.moderator.is_none());
         assert!(e.was_allowed);
     }

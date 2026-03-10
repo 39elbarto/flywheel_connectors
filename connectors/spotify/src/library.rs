@@ -221,9 +221,7 @@ impl LibraryAction {
     #[must_use]
     pub fn ids(&self) -> &[String] {
         match self {
-            Self::Save { ids, .. }
-            | Self::Unsave { ids, .. }
-            | Self::CheckSaved { ids, .. } => ids,
+            Self::Save { ids, .. } | Self::Unsave { ids, .. } | Self::CheckSaved { ids, .. } => ids,
         }
     }
 
@@ -1344,10 +1342,7 @@ mod tests {
         };
         assert_eq!(
             v.validate_action(&a),
-            Err(LibraryValidationError::BatchTooLarge {
-                max: 5,
-                actual: 6
-            })
+            Err(LibraryValidationError::BatchTooLarge { max: 5, actual: 6 })
         );
     }
 

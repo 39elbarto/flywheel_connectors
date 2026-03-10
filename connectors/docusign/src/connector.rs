@@ -294,8 +294,7 @@ impl DocuSignConnector {
     /// Handle the `self_check` method.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
         let Some(config) = &self.config else {
-            let report =
-                SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            let report = SelfCheckReport::degraded("not_configured", "Connector is not configured");
             return Self::serialize_self_check_report(report);
         };
 
@@ -634,10 +633,12 @@ impl DocuSignConnector {
     ) -> Result<serde_json::Value, DocuSignError> {
         let account_id = require_str(input, "account_id")?;
         let template_id = require_str(input, "template_id")?;
-        let roles = input.get("template_roles").ok_or_else(|| DocuSignError::Api {
-            status_code: 400,
-            message: "Missing required field: template_roles".into(),
-        })?;
+        let roles = input
+            .get("template_roles")
+            .ok_or_else(|| DocuSignError::Api {
+                status_code: 400,
+                message: "Missing required field: template_roles".into(),
+            })?;
         let status = input.get("status").and_then(serde_json::Value::as_str);
         client
             .create_from_template(account_id, template_id, roles, status)
@@ -1831,9 +1832,7 @@ mod tests {
         let v = serde_json::to_value(&recipe).unwrap();
         let webhook_step = &v["steps"][3];
         // Flattened: registration is a top-level field on the step
-        let events = webhook_step["registration"]["events"]
-            .as_array()
-            .unwrap();
+        let events = webhook_step["registration"]["events"].as_array().unwrap();
         assert!(events.len() >= 9);
         let event_strs: Vec<&str> = events.iter().filter_map(|e| e.as_str()).collect();
         assert!(event_strs.contains(&"envelope-sent"));
@@ -1843,16 +1842,14 @@ mod tests {
 
     #[test]
     fn base_url_policy_accepts_demo_docusign_net() {
-        let (ok, message) =
-            base_url_policy("https://demo.docusign.net/restapi/v2.1/accounts");
+        let (ok, message) = base_url_policy("https://demo.docusign.net/restapi/v2.1/accounts");
         assert!(ok);
         assert!(message.contains("accepted"));
     }
 
     #[test]
     fn base_url_policy_accepts_na1_docusign_net() {
-        let (ok, message) =
-            base_url_policy("https://na1.docusign.net/restapi/v2.1/accounts");
+        let (ok, message) = base_url_policy("https://na1.docusign.net/restapi/v2.1/accounts");
         assert!(ok);
         assert!(message.contains("accepted"));
     }
@@ -1877,8 +1874,7 @@ mod tests {
 
     #[test]
     fn base_url_policy_rejects_http_non_local() {
-        let (ok, message) =
-            base_url_policy("http://demo.docusign.net/restapi/v2.1/accounts");
+        let (ok, message) = base_url_policy("http://demo.docusign.net/restapi/v2.1/accounts");
         assert!(!ok);
         assert!(message.contains("must use https"));
     }

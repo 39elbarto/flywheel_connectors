@@ -87,7 +87,8 @@ impl JiraAuth {
 }
 
 /// Default Jira Automation API base URL template (append domain).
-pub const DEFAULT_AUTOMATION_BASE: &str = "https://{domain}.atlassian.net/rest/cb-automation/latest";
+pub const DEFAULT_AUTOMATION_BASE: &str =
+    "https://{domain}.atlassian.net/rest/cb-automation/latest";
 
 /// Jira REST API client with retry logic and rate limit awareness.
 pub struct JiraClient {
@@ -167,8 +168,7 @@ impl JiraClient {
         let api_version = deployment.api_version();
         let base_url = format!("https://{domain}.atlassian.net/rest/api/{api_version}");
         let agile_url = format!("https://{domain}.atlassian.net/rest/agile/1.0");
-        let automation_url =
-            format!("https://{domain}.atlassian.net/rest/cb-automation/latest");
+        let automation_url = format!("https://{domain}.atlassian.net/rest/cb-automation/latest");
 
         let client = Client::builder()
             .default_headers(headers)
@@ -256,7 +256,11 @@ impl JiraClient {
     /// available on both Cloud and Server/DC.
     pub async fn server_info(&self) -> JiraResult<JiraServerInfo> {
         // serverInfo is available at /rest/api/2 on all deployments
-        let host = self.base_url.split("/rest/").next().unwrap_or(&self.base_url);
+        let host = self
+            .base_url
+            .split("/rest/")
+            .next()
+            .unwrap_or(&self.base_url);
         let url = format!("{host}/rest/api/2/serverInfo");
         self.get(&url).await
     }
@@ -513,20 +517,13 @@ impl JiraClient {
         worklog_id: &str,
         body: &serde_json::Value,
     ) -> JiraResult<JiraWorklog> {
-        let url = format!(
-            "{}/issue/{issue_key}/worklog/{worklog_id}",
-            self.base_url
-        );
+        let url = format!("{}/issue/{issue_key}/worklog/{worklog_id}", self.base_url);
         self.put(&url, body).await
     }
 
     /// Delete a worklog entry.
     #[instrument(skip(self))]
-    pub async fn delete_worklog(
-        &self,
-        issue_key: &str,
-        worklog_id: &str,
-    ) -> JiraResult<()> {
+    pub async fn delete_worklog(&self, issue_key: &str, worklog_id: &str) -> JiraResult<()> {
         self.delete(&format!(
             "{}/issue/{issue_key}/worklog/{worklog_id}",
             self.base_url
@@ -615,19 +612,13 @@ impl JiraClient {
         &self,
         project_id: &str,
     ) -> JiraResult<AutomationRuleListResponse> {
-        let url = format!(
-            "{}/project/{project_id}/rule",
-            self.automation_url
-        );
+        let url = format!("{}/project/{project_id}/rule", self.automation_url);
         self.get(&url).await
     }
 
     /// Get a single automation rule by ID.
     #[instrument(skip(self))]
-    pub async fn get_automation_rule(
-        &self,
-        rule_id: &str,
-    ) -> JiraResult<JiraAutomationRule> {
+    pub async fn get_automation_rule(&self, rule_id: &str) -> JiraResult<JiraAutomationRule> {
         let url = format!("{}/rule/{rule_id}", self.automation_url);
         self.get(&url).await
     }
@@ -639,10 +630,7 @@ impl JiraClient {
         project_id: &str,
         body: &serde_json::Value,
     ) -> JiraResult<JiraAutomationRule> {
-        let url = format!(
-            "{}/project/{project_id}/rule",
-            self.automation_url
-        );
+        let url = format!("{}/project/{project_id}/rule", self.automation_url);
         self.post(&url, body).await
     }
 
@@ -659,30 +647,21 @@ impl JiraClient {
 
     /// Enable an automation rule.
     #[instrument(skip(self))]
-    pub async fn enable_automation_rule(
-        &self,
-        rule_id: &str,
-    ) -> JiraResult<()> {
+    pub async fn enable_automation_rule(&self, rule_id: &str) -> JiraResult<()> {
         let url = format!("{}/rule/{rule_id}/enable", self.automation_url);
         self.put_no_content(&url, &serde_json::json!({})).await
     }
 
     /// Disable an automation rule.
     #[instrument(skip(self))]
-    pub async fn disable_automation_rule(
-        &self,
-        rule_id: &str,
-    ) -> JiraResult<()> {
+    pub async fn disable_automation_rule(&self, rule_id: &str) -> JiraResult<()> {
         let url = format!("{}/rule/{rule_id}/disable", self.automation_url);
         self.put_no_content(&url, &serde_json::json!({})).await
     }
 
     /// Delete an automation rule.
     #[instrument(skip(self))]
-    pub async fn delete_automation_rule(
-        &self,
-        rule_id: &str,
-    ) -> JiraResult<()> {
+    pub async fn delete_automation_rule(&self, rule_id: &str) -> JiraResult<()> {
         let url = format!("{}/rule/{rule_id}", self.automation_url);
         self.delete(&url).await
     }
@@ -1764,10 +1743,7 @@ mod tests {
             .unwrap()
             .with_automation_url("https://custom.example.com/automation");
         let dbg = format!("{client:?}");
-        assert!(
-            dbg.contains("custom.example.com/automation"),
-            "got: {dbg}"
-        );
+        assert!(dbg.contains("custom.example.com/automation"), "got: {dbg}");
     }
 
     // ════════════════════════════════════════════════════════════════

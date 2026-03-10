@@ -1228,7 +1228,10 @@ mod tests {
 
         let result = client.get_ticket_sla(123).await.unwrap();
         assert_eq!(result["ticket_metric"]["ticket_id"], 123);
-        assert_eq!(result["ticket_metric"]["reply_time_in_minutes"]["calendar"], 15);
+        assert_eq!(
+            result["ticket_metric"]["reply_time_in_minutes"]["calendar"],
+            15
+        );
     }
 
     #[fcp_async_core::runtime::test]

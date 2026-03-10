@@ -1186,7 +1186,8 @@ mod tests {
     #[test]
     fn chunk_text_offsets_are_char_based() {
         // Use multi-byte characters
-        let text = "\u{00e9}\u{00e9}\u{00e9}\u{00e9}\u{00e9}\u{00e9}\u{00e9}\u{00e9}\u{00e9}\u{00e9}"; // 10 chars, each 2 bytes
+        let text =
+            "\u{00e9}\u{00e9}\u{00e9}\u{00e9}\u{00e9}\u{00e9}\u{00e9}\u{00e9}\u{00e9}\u{00e9}"; // 10 chars, each 2 bytes
         let result = chunk_text(text, 5, 0);
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].0, 0);
@@ -1280,7 +1281,11 @@ mod tests {
         );
         let chunks = chunk_paper(&req).unwrap();
         assert_eq!(chunks.len(), 3); // abstract + intro + methods
-        assert!(!chunks.iter().any(|c| c.descriptor.section == "empty_section"));
+        assert!(
+            !chunks
+                .iter()
+                .any(|c| c.descriptor.section == "empty_section")
+        );
     }
 
     #[test]
@@ -1308,7 +1313,10 @@ mod tests {
             ],
         );
         let chunks = chunk_paper(&req).unwrap();
-        let ids: Vec<&str> = chunks.iter().map(|c| c.descriptor.chunk_id.as_str()).collect();
+        let ids: Vec<&str> = chunks
+            .iter()
+            .map(|c| c.descriptor.chunk_id.as_str())
+            .collect();
         let mut sorted = ids.clone();
         sorted.sort_unstable();
         sorted.dedup();
@@ -1348,7 +1356,10 @@ mod tests {
     fn chunk_paper_provenance_abstract() {
         let req = make_request("Abstract text", vec![]);
         let chunks = chunk_paper(&req).unwrap();
-        assert_eq!(chunks[0].descriptor.provenance.extraction_method, "abstract");
+        assert_eq!(
+            chunks[0].descriptor.provenance.extraction_method,
+            "abstract"
+        );
         assert_eq!(chunks[0].descriptor.provenance.arxiv_id, "2301.08745");
         assert_eq!(chunks[0].descriptor.provenance.version, "v1");
     }
@@ -1372,10 +1383,7 @@ mod tests {
 
     #[test]
     fn chunk_paper_all_chunks_have_paper_id() {
-        let req = make_request(
-            &long_text(2000),
-            vec![section("intro", &long_text(2000))],
-        );
+        let req = make_request(&long_text(2000), vec![section("intro", &long_text(2000))]);
         let chunks = chunk_paper(&req).unwrap();
         for chunk in &chunks {
             assert_eq!(chunk.descriptor.paper_id, "2301.08745");
@@ -1474,9 +1482,18 @@ mod tests {
             paper_id: "2301.08745".to_string(),
             abstract_text: "We present a novel approach to attention mechanisms.".to_string(),
             sections: vec![
-                section("introduction", "Attention is all you need introduced the transformer architecture."),
-                section("methods", "We propose a modified multi-head attention mechanism."),
-                section("results", "Our method achieves state-of-the-art performance."),
+                section(
+                    "introduction",
+                    "Attention is all you need introduced the transformer architecture.",
+                ),
+                section(
+                    "methods",
+                    "We propose a modified multi-head attention mechanism.",
+                ),
+                section(
+                    "results",
+                    "Our method achieves state-of-the-art performance.",
+                ),
             ],
             options: ChunkingOptions::default(),
             version: "v1".to_string(),
@@ -1486,12 +1503,7 @@ mod tests {
         let chunks = chunk_paper(&req).unwrap();
         assert_eq!(chunks.len(), 4); // abstract + 3 sections (all short)
 
-        let status = build_index_status(
-            &req.paper_id,
-            &req.extracted_at,
-            chunks.len(),
-            true,
-        );
+        let status = build_index_status(&req.paper_id, &req.extracted_at, chunks.len(), true);
         assert_eq!(status.status, CassIndexStatusKind::Indexed);
         assert_eq!(status.chunk_count, 4);
     }
@@ -1531,7 +1543,10 @@ mod tests {
         }
 
         // All chunk IDs unique
-        let mut ids: Vec<&str> = chunks.iter().map(|c| c.descriptor.chunk_id.as_str()).collect();
+        let mut ids: Vec<&str> = chunks
+            .iter()
+            .map(|c| c.descriptor.chunk_id.as_str())
+            .collect();
         let total = ids.len();
         ids.sort_unstable();
         ids.dedup();
@@ -1619,7 +1634,10 @@ mod tests {
     fn chunk_paper_unicode_content() {
         let req = make_request(
             "\u{00c9}tude sur les r\u{00e9}seaux de neurones",
-            vec![section("r\u{00e9}sum\u{00e9}", "Les r\u{00e9}sultats montrent...")],
+            vec![section(
+                "r\u{00e9}sum\u{00e9}",
+                "Les r\u{00e9}sultats montrent...",
+            )],
         );
         let chunks = chunk_paper(&req).unwrap();
         assert_eq!(chunks.len(), 2);

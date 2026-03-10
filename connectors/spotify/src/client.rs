@@ -179,11 +179,7 @@ impl SpotifyClient {
     }
 
     #[instrument(skip(self, body), fields(url))]
-    async fn post(
-        &self,
-        path: &str,
-        body: &serde_json::Value,
-    ) -> SpotifyResult<serde_json::Value> {
+    async fn post(&self, path: &str, body: &serde_json::Value) -> SpotifyResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
         debug!(url = %url, "POST request");
         let req = self
@@ -486,10 +482,7 @@ impl SpotifyClient {
     }
 
     /// Pause playback.
-    pub async fn pause(
-        &self,
-        device_id: Option<&str>,
-    ) -> SpotifyResult<serde_json::Value> {
+    pub async fn pause(&self, device_id: Option<&str>) -> SpotifyResult<serde_json::Value> {
         let mut path = "/me/player/pause".to_string();
         if let Some(did) = device_id {
             path = format!("{path}?device_id={did}");
@@ -498,10 +491,7 @@ impl SpotifyClient {
     }
 
     /// Skip to next track.
-    pub async fn skip_next(
-        &self,
-        device_id: Option<&str>,
-    ) -> SpotifyResult<serde_json::Value> {
+    pub async fn skip_next(&self, device_id: Option<&str>) -> SpotifyResult<serde_json::Value> {
         let mut path = "/me/player/next".to_string();
         if let Some(did) = device_id {
             path = format!("{path}?device_id={did}");
@@ -510,10 +500,7 @@ impl SpotifyClient {
     }
 
     /// Skip to previous track.
-    pub async fn skip_previous(
-        &self,
-        device_id: Option<&str>,
-    ) -> SpotifyResult<serde_json::Value> {
+    pub async fn skip_previous(&self, device_id: Option<&str>) -> SpotifyResult<serde_json::Value> {
         let mut path = "/me/player/previous".to_string();
         if let Some(did) = device_id {
             path = format!("{path}?device_id={did}");
@@ -702,10 +689,8 @@ impl SpotifyClient {
         playlist_id: &str,
         uris: &[String],
     ) -> SpotifyResult<serde_json::Value> {
-        let tracks: Vec<serde_json::Value> = uris
-            .iter()
-            .map(|u| serde_json::json!({"uri": u}))
-            .collect();
+        let tracks: Vec<serde_json::Value> =
+            uris.iter().map(|u| serde_json::json!({"uri": u})).collect();
         let body = serde_json::json!({ "tracks": tracks });
         self.delete_with_body(&format!("/playlists/{playlist_id}/tracks"), &body)
             .await

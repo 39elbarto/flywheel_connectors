@@ -84,10 +84,16 @@ impl fmt::Display for PostingValidationError {
                 write!(f, "Body too long ({length} chars, max {max})")
             }
             Self::InvalidParentId { id } => {
-                write!(f, "Invalid parent ID format: {id} (expected t1_ or t3_ prefix)")
+                write!(
+                    f,
+                    "Invalid parent ID format: {id} (expected t1_ or t3_ prefix)"
+                )
             }
             Self::InvalidThingId { id } => {
-                write!(f, "Invalid thing ID format: {id} (expected t1_ or t3_ prefix)")
+                write!(
+                    f,
+                    "Invalid thing ID format: {id} (expected t1_ or t3_ prefix)"
+                )
             }
             Self::MissingUrl => write!(f, "URL is required for link posts"),
             Self::BlockedSubreddit { subreddit } => {
@@ -578,12 +584,7 @@ impl PostingAuditEvent {
 
     /// Creates an edit audit event.
     #[must_use]
-    pub fn for_edit(
-        timestamp: u64,
-        thing_id: &str,
-        content_length: usize,
-        allowed: bool,
-    ) -> Self {
+    pub fn for_edit(timestamp: u64, thing_id: &str, content_length: usize, allowed: bool) -> Self {
         Self {
             timestamp,
             action: PostingAction::Edit,
@@ -1510,9 +1511,7 @@ mod tests {
         assert_eq!(PostingDecision::Allow, PostingDecision::Allow);
         assert_ne!(
             PostingDecision::Allow,
-            PostingDecision::Deny {
-                reason: "x".into()
-            }
+            PostingDecision::Deny { reason: "x".into() }
         );
     }
 
@@ -1852,9 +1851,7 @@ mod tests {
 
     #[test]
     fn validation_error_display_invalid_parent_id() {
-        let e = PostingValidationError::InvalidParentId {
-            id: "bad".into(),
-        };
+        let e = PostingValidationError::InvalidParentId { id: "bad".into() };
         let s = e.to_string();
         assert!(s.contains("bad"));
         assert!(s.contains("t1_"));
@@ -1863,9 +1860,7 @@ mod tests {
 
     #[test]
     fn validation_error_display_invalid_thing_id() {
-        let e = PostingValidationError::InvalidThingId {
-            id: "oops".into(),
-        };
+        let e = PostingValidationError::InvalidThingId { id: "oops".into() };
         let s = e.to_string();
         assert!(s.contains("oops"));
     }
@@ -1920,10 +1915,13 @@ mod tests {
         };
         #[allow(clippy::redundant_clone)]
         let e2 = e.clone();
-        assert_eq!(e2, PostingValidationError::TitleTooLong {
-            length: 999,
-            max: 300,
-        });
+        assert_eq!(
+            e2,
+            PostingValidationError::TitleTooLong {
+                length: 999,
+                max: 300,
+            }
+        );
     }
 
     #[test]

@@ -101,7 +101,11 @@ pub struct WebhookRegistration {
     #[serde(rename = "notificationUrl")]
     pub notification_url: String,
     /// Optional expiration time as an ISO 8601 string.
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "expirationTime")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "expirationTime"
+    )]
     pub expiration_time: Option<String>,
 }
 
@@ -156,18 +160,18 @@ impl WebhookPayload {
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
 
-        let payloads = if let Some(arr) = value.get("payloads").and_then(serde_json::Value::as_array)
-        {
-            arr.iter()
-                .enumerate()
-                .map(|(i, v)| {
-                    serde_json::from_value(v.clone())
-                        .map_err(|e| format!("invalid notification at index {i}: {e}"))
-                })
-                .collect::<Result<Vec<_>, _>>()?
-        } else {
-            Vec::new()
-        };
+        let payloads =
+            if let Some(arr) = value.get("payloads").and_then(serde_json::Value::as_array) {
+                arr.iter()
+                    .enumerate()
+                    .map(|(i, v)| {
+                        serde_json::from_value(v.clone())
+                            .map_err(|e| format!("invalid notification at index {i}: {e}"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            } else {
+                Vec::new()
+            };
 
         Ok(Self {
             cursor,
@@ -734,10 +738,7 @@ mod tests {
 
     #[test]
     fn payload_serde_roundtrip() {
-        let p = make_payload(
-            5,
-            vec![sample_notification("app1", "ach1", "t1")],
-        );
+        let p = make_payload(5, vec![sample_notification("app1", "ach1", "t1")]);
         let json = serde_json::to_string(&p).unwrap();
         let parsed: WebhookPayload = serde_json::from_str(&json).unwrap();
         assert_eq!(p, parsed);
@@ -927,7 +928,10 @@ mod tests {
 
     #[test]
     fn cursor_is_behind_zero() {
-        let c = WebhookCursor { cursor: 0, is_initial: true };
+        let c = WebhookCursor {
+            cursor: 0,
+            is_initial: true,
+        };
         assert!(!c.is_behind(0));
         assert!(c.is_behind(1));
     }
@@ -1006,7 +1010,10 @@ mod tests {
     #[test]
     fn verifier_verify_invalid_signature() {
         let verifier = WebhookVerifier::new("dGVzdHNlY3JldA==").unwrap();
-        let result = verifier.verify(b"test body", "0000000000000000000000000000000000000000000000000000000000000000");
+        let result = verifier.verify(
+            b"test body",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        );
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("verification failed"));
     }
@@ -1230,7 +1237,13 @@ mod tests {
     fn lifecycle_process_multiple_payloads() {
         let mut lc = WebhookLifecycle::new(sample_registration());
         let p1 = make_payload(3, vec![sample_notification("a", "b", "t1")]);
-        let p2 = make_payload(7, vec![sample_notification("a", "b", "t2"), sample_notification("a", "b", "t3")]);
+        let p2 = make_payload(
+            7,
+            vec![
+                sample_notification("a", "b", "t2"),
+                sample_notification("a", "b", "t3"),
+            ],
+        );
         lc.process_payload(&p1).unwrap();
         lc.process_payload(&p2).unwrap();
         assert_eq!(lc.cursor().cursor, 7);
@@ -1421,14 +1434,20 @@ mod tests {
 
     #[test]
     fn cursor_overflow_advance() {
-        let c = WebhookCursor { cursor: u64::MAX - 1, is_initial: false };
+        let c = WebhookCursor {
+            cursor: u64::MAX - 1,
+            is_initial: false,
+        };
         let advanced = c.advance(u64::MAX);
         assert_eq!(advanced.cursor, u64::MAX);
     }
 
     #[test]
     fn cursor_is_behind_max() {
-        let c = WebhookCursor { cursor: u64::MAX, is_initial: false };
+        let c = WebhookCursor {
+            cursor: u64::MAX,
+            is_initial: false,
+        };
         assert!(!c.is_behind(u64::MAX));
         assert!(!c.is_behind(0));
     }

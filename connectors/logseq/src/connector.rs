@@ -297,8 +297,7 @@ impl LogseqConnector {
     /// Handle the `self_check` method.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
         let Some(config) = &self.config else {
-            let report =
-                SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            let report = SelfCheckReport::degraded("not_configured", "Connector is not configured");
             return Self::serialize_self_check_report(report);
         };
 
@@ -495,7 +494,9 @@ pub fn provisioning_recipe() -> ProvisioningRecipe {
     .with_step(ProvisioningStep::new(
         StepId::new("enter_token"),
         ProvisioningStepType::PromptSecret {
-            message: "Paste your Logseq API authorization token (from Settings > Features > Developer)".into(),
+            message:
+                "Paste your Logseq API authorization token (from Settings > Features > Developer)"
+                    .into(),
         },
     ))
     .with_step(

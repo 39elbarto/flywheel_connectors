@@ -408,8 +408,7 @@ impl SnowflakeConnector {
     /// Handle the `self_check` method.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
         let Some(config) = &self.config else {
-            let report =
-                SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            let report = SelfCheckReport::degraded("not_configured", "Connector is not configured");
             return Self::serialize_self_check_report(report);
         };
 
@@ -806,8 +805,9 @@ pub fn provisioning_recipe() -> ProvisioningRecipe {
         ProvisioningStep::new(
             StepId::new("enter_context"),
             ProvisioningStepType::PromptUser {
-                message: "Enter default warehouse, database, and schema (optional, comma-separated)"
-                    .into(),
+                message:
+                    "Enter default warehouse, database, and schema (optional, comma-separated)"
+                        .into(),
             },
         )
         .depends_on(StepId::new("enter_account_identifier")),
@@ -916,10 +916,7 @@ mod tests {
             }
             SnowflakeAuthMode::CredentialId { .. } => panic!("expected Token mode"),
         }
-        assert_eq!(
-            config.base_url,
-            "https://myaccount.snowflakecomputing.com"
-        );
+        assert_eq!(config.base_url, "https://myaccount.snowflakecomputing.com");
         assert!(config.warehouse.is_none());
     }
 
@@ -1556,7 +1553,11 @@ mod tests {
         assert!(!readiness.requires_credential_injection);
         assert!(readiness.network_ok);
         assert_eq!(readiness.account_identifier, "myaccount");
-        assert!(readiness.base_url.contains("myaccount.snowflakecomputing.com"));
+        assert!(
+            readiness
+                .base_url
+                .contains("myaccount.snowflakecomputing.com")
+        );
     }
 
     #[test]
@@ -1641,8 +1642,7 @@ mod tests {
 
     #[test]
     fn base_url_policy_accepts_snowflake_with_path() {
-        let (ok, _) =
-            base_url_policy("https://myaccount.snowflakecomputing.com/api/v2/statements");
+        let (ok, _) = base_url_policy("https://myaccount.snowflakecomputing.com/api/v2/statements");
         assert!(ok);
     }
 

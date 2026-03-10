@@ -798,7 +798,10 @@ mod tests {
 
     #[test]
     fn plan_is_read_only() {
-        assert_eq!(OperationSafety::PlanRead.inherent_mode(), SafetyMode::ReadOnly);
+        assert_eq!(
+            OperationSafety::PlanRead.inherent_mode(),
+            SafetyMode::ReadOnly
+        );
     }
 
     #[test]
@@ -887,7 +890,10 @@ mod tests {
     #[test]
     fn approval_scope_display() {
         assert_eq!(ApprovalScope::SingleApply.to_string(), "SingleApply");
-        assert_eq!(ApprovalScope::WorkspaceSession.to_string(), "WorkspaceSession");
+        assert_eq!(
+            ApprovalScope::WorkspaceSession.to_string(),
+            "WorkspaceSession"
+        );
         assert_eq!(ApprovalScope::Emergency.to_string(), "Emergency");
     }
 
@@ -1037,8 +1043,14 @@ mod tests {
 
     #[test]
     fn denial_code_display_all() {
-        assert_eq!(DenialCode::DestroyForbidden.to_string(), "DESTROY_FORBIDDEN");
-        assert_eq!(DenialCode::PlanHashMismatch.to_string(), "PLAN_HASH_MISMATCH");
+        assert_eq!(
+            DenialCode::DestroyForbidden.to_string(),
+            "DESTROY_FORBIDDEN"
+        );
+        assert_eq!(
+            DenialCode::PlanHashMismatch.to_string(),
+            "PLAN_HASH_MISMATCH"
+        );
         assert_eq!(DenialCode::TokenExpired.to_string(), "TOKEN_EXPIRED");
         assert_eq!(DenialCode::TokenMissing.to_string(), "TOKEN_MISSING");
         assert_eq!(
@@ -1049,7 +1061,10 @@ mod tests {
             DenialCode::AutoApproveBlocked.to_string(),
             "AUTO_APPROVE_BLOCKED"
         );
-        assert_eq!(DenialCode::InputNotDisabled.to_string(), "INPUT_NOT_DISABLED");
+        assert_eq!(
+            DenialCode::InputNotDisabled.to_string(),
+            "INPUT_NOT_DISABLED"
+        );
         assert_eq!(DenialCode::NoMatchingPlan.to_string(), "NO_MATCHING_PLAN");
         assert_eq!(DenialCode::PolicyViolation.to_string(), "POLICY_VIOLATION");
     }
@@ -1196,7 +1211,10 @@ mod tests {
     #[test]
     fn read_only_policy() {
         let p = SafetyPolicy::read_only();
-        assert_eq!(p.effective_mode(OperationSafety::PlanRead), SafetyMode::ReadOnly);
+        assert_eq!(
+            p.effective_mode(OperationSafety::PlanRead),
+            SafetyMode::ReadOnly
+        );
         assert_eq!(
             p.effective_mode(OperationSafety::RefreshRead),
             SafetyMode::ReadOnly
@@ -1820,7 +1838,10 @@ mod tests {
     #[test]
     fn plan_never_mutated_by_overrides() {
         // Even if someone adds a policy override, we test the inherent mode stays ReadOnly
-        assert_eq!(OperationSafety::PlanRead.inherent_mode(), SafetyMode::ReadOnly);
+        assert_eq!(
+            OperationSafety::PlanRead.inherent_mode(),
+            SafetyMode::ReadOnly
+        );
     }
 
     #[test]
@@ -1925,7 +1946,11 @@ mod tests {
         ];
         for code in codes {
             let s = code.to_string();
-            assert_eq!(s, s.to_uppercase(), "DenialCode display should be uppercase: {s}");
+            assert_eq!(
+                s,
+                s.to_uppercase(),
+                "DenialCode display should be uppercase: {s}"
+            );
         }
     }
 
@@ -1977,12 +2002,14 @@ mod tests {
         assert!(e.check_operation(OperationSafety::PlanRead).is_allowed());
         assert!(e.check_operation(OperationSafety::RefreshRead).is_allowed());
         assert!(e.check_operation(OperationSafety::StatePull).is_allowed());
-        assert!(e
-            .check_operation(OperationSafety::ApplyWrite)
-            .requires_approval());
-        assert!(e
-            .check_operation(OperationSafety::DestroyForbidden)
-            .is_denied());
+        assert!(
+            e.check_operation(OperationSafety::ApplyWrite)
+                .requires_approval()
+        );
+        assert!(
+            e.check_operation(OperationSafety::DestroyForbidden)
+                .is_denied()
+        );
     }
 
     #[test]

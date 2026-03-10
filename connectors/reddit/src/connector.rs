@@ -5,9 +5,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
-    IdempotencyClass, Introspection, OAuthRecipe, OperationId, OperationInfo,
-    ProvisioningRecipe, ProvisioningStep, ProvisioningStepType, RecipeId, RiskLevel, SafetyTier,
-    SelfCheckReport, StepId,
+    IdempotencyClass, Introspection, OAuthRecipe, OperationId, OperationInfo, ProvisioningRecipe,
+    ProvisioningStep, ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, SelfCheckReport,
+    StepId,
 };
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -271,8 +271,7 @@ impl RedditConnector {
 
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
         let Some(config) = &self.config else {
-            let report =
-                SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            let report = SelfCheckReport::degraded("not_configured", "Connector is not configured");
             return Self::serialize_self_check_report(report);
         };
 
@@ -1612,10 +1611,7 @@ impl RedditConnector {
             status_code: 400,
             message: "fullnames must be an array of strings".into(),
         })?;
-        let fullnames: Vec<&str> = fullnames_arr
-            .iter()
-            .filter_map(|v| v.as_str())
-            .collect();
+        let fullnames: Vec<&str> = fullnames_arr.iter().filter_map(|v| v.as_str()).collect();
         let data = client.mark_messages_read(&fullnames).await?;
         Ok(json!({ "marked_read": true, "raw": data }))
     }

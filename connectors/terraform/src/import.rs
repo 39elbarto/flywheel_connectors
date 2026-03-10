@@ -34,8 +34,8 @@ const fn is_safe_char(c: char) -> bool {
 
 /// Shell metacharacters that must never appear in resource addresses.
 const FORBIDDEN_CHARS: &[char] = &[
-    ';', '|', '&', '$', '`', '\\', '\n', '\r', '\'', '"', '(', ')', '{', '}', '<', '>', '!',
-    '~', '#', '%', '^', '?', '*', '[', ']', '\t', '\0',
+    ';', '|', '&', '$', '`', '\\', '\n', '\r', '\'', '"', '(', ')', '{', '}', '<', '>', '!', '~',
+    '#', '%', '^', '?', '*', '[', ']', '\t', '\0',
 ];
 
 impl ResourceAddress {
@@ -154,9 +154,7 @@ impl ResourceAddress {
                     });
                 }
                 if !seg.chars().all(is_safe_char) {
-                    return Err(ImportValidationError::InvalidCharacters {
-                        value: mp.clone(),
-                    });
+                    return Err(ImportValidationError::InvalidCharacters { value: mp.clone() });
                 }
             }
         }
@@ -406,7 +404,10 @@ impl ImportPolicy {
         {
             return ImportDecision::Deny {
                 code: "WORKSPACE_NOT_ALLOWED".into(),
-                reason: format!("workspace '{}' is not in the allowed list", request.workspace_id),
+                reason: format!(
+                    "workspace '{}' is not in the allowed list",
+                    request.workspace_id
+                ),
             };
         }
 
@@ -636,14 +637,10 @@ mod tests {
 
     #[test]
     fn parse_nested_module_address() {
-        let addr =
-            ResourceAddress::parse("module.vpc.module.subnets.aws_subnet.private").unwrap();
+        let addr = ResourceAddress::parse("module.vpc.module.subnets.aws_subnet.private").unwrap();
         assert_eq!(addr.resource_type, "aws_subnet");
         assert_eq!(addr.resource_name, "private");
-        assert_eq!(
-            addr.module_path,
-            Some("module.vpc.module.subnets".into())
-        );
+        assert_eq!(addr.module_path, Some("module.vpc.module.subnets".into()));
     }
 
     #[test]
@@ -668,10 +665,8 @@ mod tests {
 
     #[test]
     fn parse_triple_nested_module() {
-        let addr = ResourceAddress::parse(
-            "module.env.module.region.module.tier.aws_instance.app",
-        )
-        .unwrap();
+        let addr = ResourceAddress::parse("module.env.module.region.module.tier.aws_instance.app")
+            .unwrap();
         assert_eq!(addr.resource_type, "aws_instance");
         assert_eq!(addr.resource_name, "app");
         assert_eq!(
@@ -686,7 +681,10 @@ mod tests {
 
     #[test]
     fn parse_empty_address() {
-        assert_eq!(ResourceAddress::parse(""), Err(ImportValidationError::EmptyAddress));
+        assert_eq!(
+            ResourceAddress::parse(""),
+            Err(ImportValidationError::EmptyAddress)
+        );
     }
 
     #[test]
@@ -1971,8 +1969,7 @@ mod tests {
 
     #[test]
     fn validation_error_is_std_error() {
-        let err: Box<dyn std::error::Error> =
-            Box::new(ImportValidationError::EmptyAddress);
+        let err: Box<dyn std::error::Error> = Box::new(ImportValidationError::EmptyAddress);
         assert!(!err.to_string().is_empty());
     }
 
@@ -2115,10 +2112,7 @@ mod tests {
     #[test]
     fn provider_id_valid_arn() {
         // ARNs contain colons and slashes — those are not forbidden.
-        let req = make_request(
-            "aws_iam_role.admin",
-            "arn:aws:iam::123456789012:role/admin",
-        );
+        let req = make_request("aws_iam_role.admin", "arn:aws:iam::123456789012:role/admin");
         assert!(req.validate().is_ok());
     }
 

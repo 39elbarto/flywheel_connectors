@@ -502,7 +502,8 @@ impl SentryClient {
             params.push(format!("cursor={c}"));
         }
         let qs = params.join("&");
-        self.get(&format!("/organizations/{org}/events/?{qs}")).await
+        self.get(&format!("/organizations/{org}/events/?{qs}"))
+            .await
     }
 
     /// Get performance summary for a transaction name.
@@ -536,7 +537,8 @@ impl SentryClient {
             params.push(format!("end={e}"));
         }
         let qs = params.join("&");
-        self.get(&format!("/organizations/{org}/events/?{qs}")).await
+        self.get(&format!("/organizations/{org}/events/?{qs}"))
+            .await
     }
 
     /// Get trace summary.

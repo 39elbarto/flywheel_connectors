@@ -832,8 +832,7 @@ mod tests {
 
     #[test]
     fn list_params_with_filter() {
-        let params = ListRecordsParams::new("tbl1")
-            .with_filter("{Status} = 'Done'");
+        let params = ListRecordsParams::new("tbl1").with_filter("{Status} = 'Done'");
         assert_eq!(
             params.filter_by_formula.as_deref(),
             Some("{Status} = 'Done'")
@@ -842,8 +841,7 @@ mod tests {
 
     #[test]
     fn list_params_with_sort_single() {
-        let params =
-            ListRecordsParams::new("tbl1").with_sort("Name", SortDirection::Asc);
+        let params = ListRecordsParams::new("tbl1").with_sort("Name", SortDirection::Asc);
         assert_eq!(params.sort.len(), 1);
         assert_eq!(params.sort[0].field, "Name");
         assert_eq!(params.sort[0].direction, SortDirection::Asc);
@@ -861,8 +859,8 @@ mod tests {
 
     #[test]
     fn list_params_with_fields() {
-        let params = ListRecordsParams::new("tbl1")
-            .with_fields(vec!["Name".into(), "Status".into()]);
+        let params =
+            ListRecordsParams::new("tbl1").with_fields(vec!["Name".into(), "Status".into()]);
         assert_eq!(
             params.fields.as_deref(),
             Some(&["Name".into(), "Status".into()][..])
@@ -964,19 +962,15 @@ mod tests {
 
     #[test]
     fn query_params_with_filter() {
-        let params = ListRecordsParams::new("tbl1")
-            .with_filter("{Done} = TRUE()");
+        let params = ListRecordsParams::new("tbl1").with_filter("{Done} = TRUE()");
         let qp = params.to_query_params();
-        assert!(qp.contains(&(
-            "filterByFormula".to_string(),
-            "{Done} = TRUE()".to_string()
-        )));
+        assert!(qp.contains(&("filterByFormula".to_string(), "{Done} = TRUE()".to_string())));
     }
 
     #[test]
     fn query_params_with_fields() {
-        let params = ListRecordsParams::new("tbl1")
-            .with_fields(vec!["Name".into(), "Email".into()]);
+        let params =
+            ListRecordsParams::new("tbl1").with_fields(vec!["Name".into(), "Email".into()]);
         let qp = params.to_query_params();
         assert!(qp.contains(&("fields[]".to_string(), "Name".to_string())));
         assert!(qp.contains(&("fields[]".to_string(), "Email".to_string())));
@@ -984,14 +978,10 @@ mod tests {
 
     #[test]
     fn query_params_with_sort_single() {
-        let params =
-            ListRecordsParams::new("tbl1").with_sort("Name", SortDirection::Asc);
+        let params = ListRecordsParams::new("tbl1").with_sort("Name", SortDirection::Asc);
         let qp = params.to_query_params();
         assert!(qp.contains(&("sort[0][field]".to_string(), "Name".to_string())));
-        assert!(qp.contains(&(
-            "sort[0][direction]".to_string(),
-            "asc".to_string()
-        )));
+        assert!(qp.contains(&("sort[0][direction]".to_string(), "asc".to_string())));
     }
 
     #[test]
@@ -1000,22 +990,10 @@ mod tests {
             .with_sort("Priority", SortDirection::Desc)
             .with_sort("Created", SortDirection::Asc);
         let qp = params.to_query_params();
-        assert!(qp.contains(&(
-            "sort[0][field]".to_string(),
-            "Priority".to_string()
-        )));
-        assert!(qp.contains(&(
-            "sort[0][direction]".to_string(),
-            "desc".to_string()
-        )));
-        assert!(qp.contains(&(
-            "sort[1][field]".to_string(),
-            "Created".to_string()
-        )));
-        assert!(qp.contains(&(
-            "sort[1][direction]".to_string(),
-            "asc".to_string()
-        )));
+        assert!(qp.contains(&("sort[0][field]".to_string(), "Priority".to_string())));
+        assert!(qp.contains(&("sort[0][direction]".to_string(), "desc".to_string())));
+        assert!(qp.contains(&("sort[1][field]".to_string(), "Created".to_string())));
+        assert!(qp.contains(&("sort[1][direction]".to_string(), "asc".to_string())));
     }
 
     #[test]
@@ -1577,17 +1555,13 @@ mod tests {
 
     #[test]
     fn validate_delete_valid_max_batch() {
-        let ids: Vec<String> = (0..MAX_BATCH_SIZE)
-            .map(|i| format!("rec{i}"))
-            .collect();
+        let ids: Vec<String> = (0..MAX_BATCH_SIZE).map(|i| format!("rec{i}")).collect();
         assert!(RecordValidator::validate_delete(&ids).is_ok());
     }
 
     #[test]
     fn validate_delete_too_many() {
-        let ids: Vec<String> = (0..=MAX_BATCH_SIZE)
-            .map(|i| format!("rec{i}"))
-            .collect();
+        let ids: Vec<String> = (0..=MAX_BATCH_SIZE).map(|i| format!("rec{i}")).collect();
         let err = RecordValidator::validate_delete(&ids).unwrap_err();
         assert!(err.iter().any(|e| e.contains("exceeds maximum")));
     }
@@ -1614,9 +1588,7 @@ mod tests {
 
     #[test]
     fn validate_delete_multiple_errors() {
-        let mut ids: Vec<String> = (0..=MAX_BATCH_SIZE)
-            .map(|i| format!("rec{i}"))
-            .collect();
+        let mut ids: Vec<String> = (0..=MAX_BATCH_SIZE).map(|i| format!("rec{i}")).collect();
         ids[3] = String::new();
         let err = RecordValidator::validate_delete(&ids).unwrap_err();
         // Should have both batch-size and empty-id errors
@@ -1834,8 +1806,8 @@ mod tests {
 
     #[test]
     fn list_params_filter_with_special_chars() {
-        let params = ListRecordsParams::new("tbl1")
-            .with_filter("AND({Name} = 'O\\'Brien', {Age} > 21)");
+        let params =
+            ListRecordsParams::new("tbl1").with_filter("AND({Name} = 'O\\'Brien', {Age} > 21)");
         let qp = params.to_query_params();
         let filter = qp
             .iter()
@@ -1846,13 +1818,9 @@ mod tests {
 
     #[test]
     fn sort_field_with_space_in_name() {
-        let params = ListRecordsParams::new("tbl1")
-            .with_sort("First Name", SortDirection::Asc);
+        let params = ListRecordsParams::new("tbl1").with_sort("First Name", SortDirection::Asc);
         let qp = params.to_query_params();
-        assert!(qp.contains(&(
-            "sort[0][field]".to_string(),
-            "First Name".to_string()
-        )));
+        assert!(qp.contains(&("sort[0][field]".to_string(), "First Name".to_string())));
     }
 
     #[test]

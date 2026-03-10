@@ -314,8 +314,7 @@ impl TrelloConnector {
     /// Handle the `self_check` method.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
         let Some(config) = &self.config else {
-            let report =
-                SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            let report = SelfCheckReport::degraded("not_configured", "Connector is not configured");
             return Self::serialize_self_check_report(report);
         };
 
@@ -833,8 +832,7 @@ pub fn provisioning_recipe() -> ProvisioningRecipe {
     .with_step(ProvisioningStep::new(
         StepId::new("enter_api_key"),
         ProvisioningStepType::PromptSecret {
-            message: "Enter your Trello API key (from https://trello.com/power-ups/admin)"
-                .into(),
+            message: "Enter your Trello API key (from https://trello.com/power-ups/admin)".into(),
         },
     ))
     .with_step(

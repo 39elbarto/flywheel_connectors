@@ -493,10 +493,7 @@ impl std::fmt::Display for SigningValidationError {
                 write!(f, "subject too long: {length} chars (max {max})")
             }
             Self::InvalidExpirationDays { days, max } => {
-                write!(
-                    f,
-                    "invalid expiration days: {days} (must be 1..={max})"
-                )
+                write!(f, "invalid expiration days: {days} (must be 1..={max})")
             }
             Self::BlockedEnvelope { envelope_id } => {
                 write!(f, "envelope {envelope_id} is blocked by policy")
@@ -690,12 +687,8 @@ mod tests {
 
     #[test]
     fn action_void_inequality_different_reason() {
-        let a = SigningAction::Void {
-            reason: "a".into(),
-        };
-        let b = SigningAction::Void {
-            reason: "b".into(),
-        };
+        let a = SigningAction::Void { reason: "a".into() };
+        let b = SigningAction::Void { reason: "b".into() };
         assert_ne!(a, b);
     }
 
@@ -783,7 +776,10 @@ mod tests {
             envelope_id: String::new(),
             notification_override: None,
         };
-        assert_eq!(req.validate().unwrap_err(), SigningValidationError::EmptyEnvelopeId);
+        assert_eq!(
+            req.validate().unwrap_err(),
+            SigningValidationError::EmptyEnvelopeId
+        );
     }
 
     #[test]
@@ -792,7 +788,10 @@ mod tests {
             envelope_id: "   ".into(),
             notification_override: None,
         };
-        assert_eq!(req.validate().unwrap_err(), SigningValidationError::EmptyEnvelopeId);
+        assert_eq!(
+            req.validate().unwrap_err(),
+            SigningValidationError::EmptyEnvelopeId
+        );
     }
 
     #[test]
@@ -856,7 +855,10 @@ mod tests {
             envelope_id: String::new(),
             reason: "valid reason".into(),
         };
-        assert_eq!(req.validate().unwrap_err(), SigningValidationError::EmptyEnvelopeId);
+        assert_eq!(
+            req.validate().unwrap_err(),
+            SigningValidationError::EmptyEnvelopeId
+        );
     }
 
     #[test]
@@ -865,7 +867,10 @@ mod tests {
             envelope_id: "  \t  ".into(),
             reason: "valid reason".into(),
         };
-        assert_eq!(req.validate().unwrap_err(), SigningValidationError::EmptyEnvelopeId);
+        assert_eq!(
+            req.validate().unwrap_err(),
+            SigningValidationError::EmptyEnvelopeId
+        );
     }
 
     #[test]
@@ -874,7 +879,10 @@ mod tests {
             envelope_id: "env-001".into(),
             reason: String::new(),
         };
-        assert_eq!(req.validate().unwrap_err(), SigningValidationError::EmptyReason);
+        assert_eq!(
+            req.validate().unwrap_err(),
+            SigningValidationError::EmptyReason
+        );
     }
 
     #[test]
@@ -883,7 +891,10 @@ mod tests {
             envelope_id: "env-001".into(),
             reason: "   ".into(),
         };
-        assert_eq!(req.validate().unwrap_err(), SigningValidationError::EmptyReason);
+        assert_eq!(
+            req.validate().unwrap_err(),
+            SigningValidationError::EmptyReason
+        );
     }
 
     #[test]
@@ -1221,9 +1232,7 @@ mod tests {
     #[test]
     fn policy_blocked_envelope_denies() {
         let mut policy = SigningPolicy::new_permissive();
-        policy
-            .blocked_envelope_ids
-            .insert("blocked-env".into());
+        policy.blocked_envelope_ids.insert("blocked-env".into());
         let decision = policy.check_action(&SigningAction::Send, "blocked-env");
         assert!(decision.is_denied());
         if let SigningDecision::Deny { reason } = &decision {
@@ -1234,9 +1243,7 @@ mod tests {
     #[test]
     fn policy_blocked_allows_other_envelopes() {
         let mut policy = SigningPolicy::new_permissive();
-        policy
-            .blocked_envelope_ids
-            .insert("blocked-env".into());
+        policy.blocked_envelope_ids.insert("blocked-env".into());
         assert_eq!(
             policy.check_action(&SigningAction::Send, "other-env"),
             SigningDecision::Allow,
@@ -1322,9 +1329,7 @@ mod tests {
         let mut policy = SigningPolicy::new_permissive();
         policy.allow_send = false;
         assert!(policy.check_action(&SigningAction::Send, "e").is_denied());
-        let void_action = SigningAction::Void {
-            reason: "x".into(),
-        };
+        let void_action = SigningAction::Void { reason: "x".into() };
         assert_eq!(
             policy.check_action(&void_action, "e"),
             SigningDecision::Allow,
@@ -1335,9 +1340,7 @@ mod tests {
     fn policy_deny_void_not_send() {
         let mut policy = SigningPolicy::new_permissive();
         policy.allow_void = false;
-        let void_action = SigningAction::Void {
-            reason: "x".into(),
-        };
+        let void_action = SigningAction::Void { reason: "x".into() };
         assert!(policy.check_action(&void_action, "e").is_denied());
         assert_eq!(
             policy.check_action(&SigningAction::Send, "e"),
@@ -1349,7 +1352,11 @@ mod tests {
     fn policy_correct_denied_when_send_denied() {
         let mut policy = SigningPolicy::new_permissive();
         policy.allow_send = false;
-        assert!(policy.check_action(&SigningAction::Correct, "e").is_denied());
+        assert!(
+            policy
+                .check_action(&SigningAction::Correct, "e")
+                .is_denied()
+        );
     }
 
     // ===== SigningDecision tests =====
@@ -1449,9 +1456,7 @@ mod tests {
     fn decision_inequality() {
         assert_ne!(
             SigningDecision::Allow,
-            SigningDecision::Deny {
-                reason: "x".into()
-            },
+            SigningDecision::Deny { reason: "x".into() },
         );
     }
 
@@ -1621,7 +1626,10 @@ mod tests {
     #[test]
     fn validator_validate_notification_no_overrides() {
         let v = SigningValidator::default();
-        assert!(v.validate_notification(&NotificationConfig::default()).is_ok());
+        assert!(
+            v.validate_notification(&NotificationConfig::default())
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1732,10 +1740,7 @@ mod tests {
         let err = v.validate_notification(&config).unwrap_err();
         assert_eq!(
             err,
-            SigningValidationError::InvalidExpirationDays {
-                days: 8,
-                max: 7,
-            },
+            SigningValidationError::InvalidExpirationDays { days: 8, max: 7 },
         );
     }
 
@@ -1816,10 +1821,7 @@ mod tests {
         let err = SigningValidationError::BlockedEnvelope {
             envelope_id: "env-b".into(),
         };
-        assert_eq!(
-            err.to_string(),
-            "envelope env-b is blocked by policy",
-        );
+        assert_eq!(err.to_string(), "envelope env-b is blocked by policy",);
     }
 
     #[test]
@@ -1846,7 +1848,10 @@ mod tests {
         };
         let cloned = err.clone();
         drop(err);
-        assert!(matches!(cloned, SigningValidationError::ReasonTooLong { .. }));
+        assert!(matches!(
+            cloned,
+            SigningValidationError::ReasonTooLong { .. }
+        ));
     }
 
     #[test]
@@ -1868,8 +1873,7 @@ mod tests {
 
     #[test]
     fn validation_error_is_std_error() {
-        let err: Box<dyn std::error::Error> =
-            Box::new(SigningValidationError::EmptyEnvelopeId);
+        let err: Box<dyn std::error::Error> = Box::new(SigningValidationError::EmptyEnvelopeId);
         assert!(err.to_string().contains("envelope ID"));
     }
 
@@ -2200,7 +2204,13 @@ mod tests {
             timestamp: "2026-03-09T10:00:00Z".into(),
         };
         assert!(!result.success);
-        assert!(result.error_message.as_ref().unwrap().contains("already sent"));
+        assert!(
+            result
+                .error_message
+                .as_ref()
+                .unwrap()
+                .contains("already sent")
+        );
     }
 
     #[test]

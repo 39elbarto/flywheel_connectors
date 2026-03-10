@@ -312,8 +312,7 @@ impl MailchimpConnector {
     /// Handle the `self_check` method.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
         let Some(config) = &self.config else {
-            let report =
-                SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            let report = SelfCheckReport::degraded("not_configured", "Connector is not configured");
             return Self::serialize_self_check_report(report);
         };
 
@@ -758,10 +757,7 @@ fn base_url_policy(base_url: &str) -> (bool, String) {
 
     let local = is_local_test_host(host);
     // Mailchimp uses datacenter-specific URLs: usX.api.mailchimp.com
-    let allowed_host = host
-        .to_ascii_lowercase()
-        .ends_with(".api.mailchimp.com")
-        || local;
+    let allowed_host = host.to_ascii_lowercase().ends_with(".api.mailchimp.com") || local;
     let secure_or_local = parsed.scheme() == "https" || local;
 
     if allowed_host && secure_or_local {
@@ -1538,8 +1534,13 @@ mod tests {
     #[test]
     fn provisioning_recipe_description_mentions_datacenter() {
         let recipe = provisioning_recipe();
-        assert!(recipe.description.to_ascii_lowercase().contains("datacenter")
-            || recipe.description.contains("-usXX"));
+        assert!(
+            recipe
+                .description
+                .to_ascii_lowercase()
+                .contains("datacenter")
+                || recipe.description.contains("-usXX")
+        );
     }
 
     #[test]

@@ -435,11 +435,8 @@ impl KubernetesClient {
         namespace: &str,
         body: &serde_json::Value,
     ) -> KubernetesResult<serde_json::Value> {
-        self.post(
-            &format!("/api/v1/namespaces/{namespace}/pods"),
-            body,
-        )
-        .await
+        self.post(&format!("/api/v1/namespaces/{namespace}/pods"), body)
+            .await
     }
 
     /// Apply (create or update) a deployment.
@@ -561,11 +558,8 @@ impl KubernetesClient {
         namespace: &str,
         body: &serde_json::Value,
     ) -> KubernetesResult<serde_json::Value> {
-        self.post(
-            &format!("/api/v1/namespaces/{namespace}/configmaps"),
-            body,
-        )
-        .await
+        self.post(&format!("/api/v1/namespaces/{namespace}/configmaps"), body)
+            .await
     }
 
     /// Delete a `ConfigMap`.
@@ -597,11 +591,8 @@ impl KubernetesClient {
         namespace: &str,
         body: &serde_json::Value,
     ) -> KubernetesResult<serde_json::Value> {
-        self.post(
-            &format!("/api/v1/namespaces/{namespace}/secrets"),
-            body,
-        )
-        .await
+        self.post(&format!("/api/v1/namespaces/{namespace}/secrets"), body)
+            .await
     }
 
     /// Delete a secret.

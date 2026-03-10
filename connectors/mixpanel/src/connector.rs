@@ -339,8 +339,7 @@ impl MixpanelConnector {
     /// Handle the `self_check` method.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
         let Some(config) = &self.config else {
-            let report =
-                SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            let report = SelfCheckReport::degraded("not_configured", "Connector is not configured");
             return Self::serialize_self_check_report(report);
         };
 
@@ -569,9 +568,7 @@ fn base_url_policy(base_url: &str) -> (bool, String) {
     let allowed_host = host.eq_ignore_ascii_case("mixpanel.com")
         || host.eq_ignore_ascii_case("data.mixpanel.com")
         || host.eq_ignore_ascii_case("eu.mixpanel.com")
-        || host
-            .to_ascii_lowercase()
-            .ends_with(".mixpanel.com")
+        || host.to_ascii_lowercase().ends_with(".mixpanel.com")
         || local;
     let secure_or_local = parsed.scheme() == "https" || local;
 

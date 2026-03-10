@@ -292,8 +292,7 @@ impl ZapierConnector {
     /// Handle the `self_check` method.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
         let Some(config) = &self.config else {
-            let report =
-                SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            let report = SelfCheckReport::degraded("not_configured", "Connector is not configured");
             return Self::serialize_self_check_report(report);
         };
 
@@ -1419,8 +1418,7 @@ mod tests {
 
     #[test]
     fn provisioning_readiness_bearer_token() {
-        let config =
-            ZapierConfig::from_params(&json!({ "api_key": "tok" })).unwrap();
+        let config = ZapierConfig::from_params(&json!({ "api_key": "tok" })).unwrap();
         let readiness = config.provisioning_readiness();
         assert_eq!(readiness.auth_mode, "api_key");
         assert!(readiness.token_configured);
@@ -1443,8 +1441,7 @@ mod tests {
 
     #[test]
     fn provisioning_readiness_network_ok_with_default_url() {
-        let config =
-            ZapierConfig::from_params(&json!({ "api_key": "tok" })).unwrap();
+        let config = ZapierConfig::from_params(&json!({ "api_key": "tok" })).unwrap();
         let readiness = config.provisioning_readiness();
         assert!(readiness.network_ok);
     }
@@ -1463,8 +1460,7 @@ mod tests {
 
     #[test]
     fn provisioning_readiness_serializes() {
-        let config =
-            ZapierConfig::from_params(&json!({ "api_key": "tok" })).unwrap();
+        let config = ZapierConfig::from_params(&json!({ "api_key": "tok" })).unwrap();
         let readiness = config.provisioning_readiness();
         let v = serde_json::to_value(&readiness).unwrap();
         assert_eq!(v["auth_mode"], "api_key");

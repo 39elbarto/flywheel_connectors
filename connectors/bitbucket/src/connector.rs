@@ -343,8 +343,7 @@ impl BitbucketConnector {
     /// Handle the `self_check` method.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
         let Some(config) = &self.config else {
-            let report =
-                SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            let report = SelfCheckReport::degraded("not_configured", "Connector is not configured");
             return Self::serialize_self_check_report(report);
         };
 
@@ -1636,10 +1635,7 @@ mod tests {
         assert!(recipe.steps[1].depends_on.is_empty());
         // enter_app_password depends on open_app_passwords
         assert_eq!(recipe.steps[2].depends_on.len(), 1);
-        assert_eq!(
-            recipe.steps[2].depends_on[0].as_str(),
-            "open_app_passwords"
-        );
+        assert_eq!(recipe.steps[2].depends_on[0].as_str(), "open_app_passwords");
         // store_credentials depends on enter_username and enter_app_password
         assert_eq!(recipe.steps[3].depends_on.len(), 2);
         let store_deps: Vec<&str> = recipe.steps[3]

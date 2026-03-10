@@ -277,10 +277,7 @@ impl SearchQuery {
             return Some("query must not be empty".to_string());
         }
         if trimmed.len() > 512 {
-            return Some(format!(
-                "query too long ({} chars, max 512)",
-                trimmed.len()
-            ));
+            return Some(format!("query too long ({} chars, max 512)", trimmed.len()));
         }
         if self.limit == 0 || self.limit > 100 {
             return Some(format!("limit must be 1..=100, got {}", self.limit));

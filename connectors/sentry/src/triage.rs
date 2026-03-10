@@ -408,8 +408,11 @@ impl TriageEngine {
         }
 
         // Find matching rules.
-        let matching: Vec<&TriageRule> =
-            self.rules.iter().filter(|r| r.matches_issue(issue)).collect();
+        let matching: Vec<&TriageRule> = self
+            .rules
+            .iter()
+            .filter(|r| r.matches_issue(issue))
+            .collect();
 
         if matching.is_empty() {
             self.audit_log.push(TriageAuditEvent {
@@ -439,7 +442,10 @@ impl TriageEngine {
         let mut labels: Vec<String> = Vec::new();
 
         // Add standard labels.
-        labels.push(format!("{}:level:{}", self.config.label_prefix, issue.level));
+        labels.push(format!(
+            "{}:level:{}",
+            self.config.label_prefix, issue.level
+        ));
         labels.push(format!(
             "{}:project:{}",
             self.config.label_prefix, issue.project_slug
@@ -502,7 +508,14 @@ impl TriageEngine {
 
 // ── Helper to build test issues ──────────────────────────────────────
 
-fn make_issue(id: &str, title: &str, level: IssueLevel, events: u64, users: u64, project: &str) -> IssueSummary {
+fn make_issue(
+    id: &str,
+    title: &str,
+    level: IssueLevel,
+    events: u64,
+    users: u64,
+    project: &str,
+) -> IssueSummary {
     IssueSummary {
         id: id.into(),
         title: title.into(),
@@ -564,8 +577,14 @@ mod tests {
     fn issue_level_from_str_loose_all() {
         assert_eq!(IssueLevel::from_str_loose("fatal"), Some(IssueLevel::Fatal));
         assert_eq!(IssueLevel::from_str_loose("error"), Some(IssueLevel::Error));
-        assert_eq!(IssueLevel::from_str_loose("warning"), Some(IssueLevel::Warning));
-        assert_eq!(IssueLevel::from_str_loose("warn"), Some(IssueLevel::Warning));
+        assert_eq!(
+            IssueLevel::from_str_loose("warning"),
+            Some(IssueLevel::Warning)
+        );
+        assert_eq!(
+            IssueLevel::from_str_loose("warn"),
+            Some(IssueLevel::Warning)
+        );
         assert_eq!(IssueLevel::from_str_loose("info"), Some(IssueLevel::Info));
         assert_eq!(IssueLevel::from_str_loose("debug"), Some(IssueLevel::Debug));
     }
@@ -574,7 +593,10 @@ mod tests {
     fn issue_level_from_str_case_insensitive() {
         assert_eq!(IssueLevel::from_str_loose("FATAL"), Some(IssueLevel::Fatal));
         assert_eq!(IssueLevel::from_str_loose("Error"), Some(IssueLevel::Error));
-        assert_eq!(IssueLevel::from_str_loose("WARNING"), Some(IssueLevel::Warning));
+        assert_eq!(
+            IssueLevel::from_str_loose("WARNING"),
+            Some(IssueLevel::Warning)
+        );
     }
 
     #[test]
@@ -647,36 +669,58 @@ mod tests {
 
     #[test]
     fn issue_level_partial_ord_consistent() {
-        assert!(IssueLevel::Fatal.partial_cmp(&IssueLevel::Error) == Some(std::cmp::Ordering::Less));
-        assert!(IssueLevel::Debug.partial_cmp(&IssueLevel::Info) == Some(std::cmp::Ordering::Greater));
-        assert!(IssueLevel::Warning.partial_cmp(&IssueLevel::Warning) == Some(std::cmp::Ordering::Equal));
+        assert!(
+            IssueLevel::Fatal.partial_cmp(&IssueLevel::Error) == Some(std::cmp::Ordering::Less)
+        );
+        assert!(
+            IssueLevel::Debug.partial_cmp(&IssueLevel::Info) == Some(std::cmp::Ordering::Greater)
+        );
+        assert!(
+            IssueLevel::Warning.partial_cmp(&IssueLevel::Warning)
+                == Some(std::cmp::Ordering::Equal)
+        );
     }
 
     // ── BeadPriority tests ───────────────────────────────────────────
 
     #[test]
     fn bead_priority_from_issue_level_fatal() {
-        assert_eq!(BeadPriority::from_issue_level(IssueLevel::Fatal), BeadPriority::P0);
+        assert_eq!(
+            BeadPriority::from_issue_level(IssueLevel::Fatal),
+            BeadPriority::P0
+        );
     }
 
     #[test]
     fn bead_priority_from_issue_level_error() {
-        assert_eq!(BeadPriority::from_issue_level(IssueLevel::Error), BeadPriority::P1);
+        assert_eq!(
+            BeadPriority::from_issue_level(IssueLevel::Error),
+            BeadPriority::P1
+        );
     }
 
     #[test]
     fn bead_priority_from_issue_level_warning() {
-        assert_eq!(BeadPriority::from_issue_level(IssueLevel::Warning), BeadPriority::P2);
+        assert_eq!(
+            BeadPriority::from_issue_level(IssueLevel::Warning),
+            BeadPriority::P2
+        );
     }
 
     #[test]
     fn bead_priority_from_issue_level_info() {
-        assert_eq!(BeadPriority::from_issue_level(IssueLevel::Info), BeadPriority::P3);
+        assert_eq!(
+            BeadPriority::from_issue_level(IssueLevel::Info),
+            BeadPriority::P3
+        );
     }
 
     #[test]
     fn bead_priority_from_issue_level_debug() {
-        assert_eq!(BeadPriority::from_issue_level(IssueLevel::Debug), BeadPriority::P3);
+        assert_eq!(
+            BeadPriority::from_issue_level(IssueLevel::Debug),
+            BeadPriority::P3
+        );
     }
 
     #[test]
@@ -764,9 +808,22 @@ mod tests {
 
     #[test]
     fn bead_priority_sort_vec() {
-        let mut priorities = vec![BeadPriority::P3, BeadPriority::P0, BeadPriority::P2, BeadPriority::P1];
+        let mut priorities = vec![
+            BeadPriority::P3,
+            BeadPriority::P0,
+            BeadPriority::P2,
+            BeadPriority::P1,
+        ];
         priorities.sort();
-        assert_eq!(priorities, vec![BeadPriority::P0, BeadPriority::P1, BeadPriority::P2, BeadPriority::P3]);
+        assert_eq!(
+            priorities,
+            vec![
+                BeadPriority::P0,
+                BeadPriority::P1,
+                BeadPriority::P2,
+                BeadPriority::P3
+            ]
+        );
     }
 
     // ── IssueSummary tests ───────────────────────────────────────────
@@ -1313,9 +1370,21 @@ mod tests {
         engine.add_rule(simple_rule("my-rule"));
         let i = issue("1", IssueLevel::Error, 50, 5, "backend");
         let result = engine.triage_issue(&i);
-        assert!(result.suggested_labels.contains(&"sentry:level:error".into()));
-        assert!(result.suggested_labels.contains(&"sentry:project:backend".into()));
-        assert!(result.suggested_labels.contains(&"sentry:rule:my-rule".into()));
+        assert!(
+            result
+                .suggested_labels
+                .contains(&"sentry:level:error".into())
+        );
+        assert!(
+            result
+                .suggested_labels
+                .contains(&"sentry:project:backend".into())
+        );
+        assert!(
+            result
+                .suggested_labels
+                .contains(&"sentry:rule:my-rule".into())
+        );
     }
 
     #[test]
@@ -1343,7 +1412,12 @@ mod tests {
         engine.add_rule(simple_rule("r1"));
         let i = issue("1", IssueLevel::Error, 50, 5, "api");
         let result = engine.triage_issue(&i);
-        assert!(result.suggested_labels.iter().all(|l| l.starts_with("myprefix:")));
+        assert!(
+            result
+                .suggested_labels
+                .iter()
+                .all(|l| l.starts_with("myprefix:"))
+        );
     }
 
     // ── Deduplication tests ──────────────────────────────────────────
@@ -1702,9 +1776,19 @@ mod tests {
     fn engine_issue_title_preserved() {
         let mut engine = default_engine();
         engine.add_rule(simple_rule("r1"));
-        let i = make_issue("1", "NullPointerException in com.example.Main", IssueLevel::Fatal, 100, 10, "backend");
+        let i = make_issue(
+            "1",
+            "NullPointerException in com.example.Main",
+            IssueLevel::Fatal,
+            100,
+            10,
+            "backend",
+        );
         let result = engine.triage_issue(&i);
-        assert_eq!(result.issue_title, "NullPointerException in com.example.Main");
+        assert_eq!(
+            result.issue_title,
+            "NullPointerException in com.example.Main"
+        );
     }
 
     #[test]
@@ -1823,10 +1907,10 @@ mod tests {
         engine.add_rule(rule);
 
         let issues = vec![
-            issue("1", IssueLevel::Error, 50, 5, "backend"),   // match
-            issue("2", IssueLevel::Error, 50, 5, "frontend"),  // no match (project)
+            issue("1", IssueLevel::Error, 50, 5, "backend"), // match
+            issue("2", IssueLevel::Error, 50, 5, "frontend"), // no match (project)
             issue("3", IssueLevel::Warning, 50, 5, "backend"), // no match (level)
-            issue("4", IssueLevel::Fatal, 50, 5, "backend"),   // match
+            issue("4", IssueLevel::Fatal, 50, 5, "backend"), // match
         ];
         let results = engine.triage_batch(&issues);
         assert!(results[0].existing_bead_id.is_some());
@@ -1873,7 +1957,13 @@ mod tests {
 
     #[test]
     fn issue_level_deserialize_all_variants() {
-        for s in &["\"fatal\"", "\"error\"", "\"warning\"", "\"info\"", "\"debug\""] {
+        for s in &[
+            "\"fatal\"",
+            "\"error\"",
+            "\"warning\"",
+            "\"info\"",
+            "\"debug\"",
+        ] {
             let level: IssueLevel = serde_json::from_str(s).unwrap();
             let back = serde_json::to_string(&level).unwrap();
             assert_eq!(&back, s);
@@ -1884,7 +1974,12 @@ mod tests {
 
     #[test]
     fn bead_priority_partial_ord_consistent_with_ord() {
-        let all = [BeadPriority::P0, BeadPriority::P1, BeadPriority::P2, BeadPriority::P3];
+        let all = [
+            BeadPriority::P0,
+            BeadPriority::P1,
+            BeadPriority::P2,
+            BeadPriority::P3,
+        ];
         for a in &all {
             for b in &all {
                 assert_eq!(a.partial_cmp(b), Some(a.cmp(b)));

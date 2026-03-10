@@ -532,14 +532,17 @@ async fn create_pod() {
         .await;
 
     let c = setup_connector(&server.uri()).await;
-    let result = c.handle_invoke(json!({
-        "operation_id": "kubernetes.create_pod",
-        "input": {
-            "namespace": "default",
-            "name": "debug-pod",
-            "spec": {"containers": [{"name": "debug", "image": "busybox"}]}
-        }
-    })).await.unwrap();
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "kubernetes.create_pod",
+            "input": {
+                "namespace": "default",
+                "name": "debug-pod",
+                "spec": {"containers": [{"name": "debug", "image": "busybox"}]}
+            }
+        }))
+        .await
+        .unwrap();
     assert_eq!(result["pod"]["metadata"]["name"], "debug-pod");
 }
 
@@ -557,15 +560,18 @@ async fn create_pod_with_labels() {
         .await;
 
     let c = setup_connector(&server.uri()).await;
-    let result = c.handle_invoke(json!({
-        "operation_id": "kubernetes.create_pod",
-        "input": {
-            "namespace": "default",
-            "name": "labeled-pod",
-            "spec": {"containers": [{"name": "app", "image": "nginx"}]},
-            "labels": {"app": "test"}
-        }
-    })).await.unwrap();
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "kubernetes.create_pod",
+            "input": {
+                "namespace": "default",
+                "name": "labeled-pod",
+                "spec": {"containers": [{"name": "app", "image": "nginx"}]},
+                "labels": {"app": "test"}
+            }
+        }))
+        .await
+        .unwrap();
     assert_eq!(result["pod"]["metadata"]["name"], "labeled-pod");
 }
 
@@ -573,20 +579,28 @@ async fn create_pod_with_labels() {
 async fn create_pod_missing_spec() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({
-        "operation_id": "kubernetes.create_pod",
-        "input": {"namespace": "default", "name": "test-pod"}
-    })).await.is_err());
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "kubernetes.create_pod",
+            "input": {"namespace": "default", "name": "test-pod"}
+        }))
+        .await
+        .is_err()
+    );
 }
 
 #[fcp_async_core::runtime::test]
 async fn create_pod_missing_namespace() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({
-        "operation_id": "kubernetes.create_pod",
-        "input": {"name": "test-pod", "spec": {"containers": []}}
-    })).await.is_err());
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "kubernetes.create_pod",
+            "input": {"name": "test-pod", "spec": {"containers": []}}
+        }))
+        .await
+        .is_err()
+    );
 }
 
 // -- apply_deployment --
@@ -621,9 +635,7 @@ async fn apply_deployment_create() {
 async fn apply_deployment_update() {
     let server = MockServer::start().await;
     Mock::given(method("PUT"))
-        .and(path(
-            "/apis/apps/v1/namespaces/default/deployments/web-app",
-        ))
+        .and(path("/apis/apps/v1/namespaces/default/deployments/web-app"))
         .and(header("Content-Type", "application/json"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "kind": "Deployment",
@@ -650,20 +662,28 @@ async fn apply_deployment_update() {
 async fn apply_deployment_missing_spec() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({
-        "operation_id": "kubernetes.apply_deployment",
-        "input": {"namespace": "default", "name": "web-app"}
-    })).await.is_err());
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "kubernetes.apply_deployment",
+            "input": {"namespace": "default", "name": "web-app"}
+        }))
+        .await
+        .is_err()
+    );
 }
 
 #[fcp_async_core::runtime::test]
 async fn apply_deployment_missing_name() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({
-        "operation_id": "kubernetes.apply_deployment",
-        "input": {"namespace": "default", "spec": {"replicas": 1}}
-    })).await.is_err());
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "kubernetes.apply_deployment",
+            "input": {"namespace": "default", "spec": {"replicas": 1}}
+        }))
+        .await
+        .is_err()
+    );
 }
 
 // -- delete_deployment --
@@ -672,9 +692,7 @@ async fn apply_deployment_missing_name() {
 async fn delete_deployment() {
     let server = MockServer::start().await;
     Mock::given(method("DELETE"))
-        .and(path(
-            "/apis/apps/v1/namespaces/default/deployments/old-app",
-        ))
+        .and(path("/apis/apps/v1/namespaces/default/deployments/old-app"))
         .respond_with(
             ResponseTemplate::new(200)
                 .set_body_json(json!({"kind": "Status", "status": "Success"})),
@@ -683,10 +701,13 @@ async fn delete_deployment() {
         .await;
 
     let c = setup_connector(&server.uri()).await;
-    let result = c.handle_invoke(json!({
-        "operation_id": "kubernetes.delete_deployment",
-        "input": {"namespace": "default", "name": "old-app"}
-    })).await.unwrap();
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "kubernetes.delete_deployment",
+            "input": {"namespace": "default", "name": "old-app"}
+        }))
+        .await
+        .unwrap();
     assert_eq!(result["deleted"], true);
 }
 
@@ -694,20 +715,28 @@ async fn delete_deployment() {
 async fn delete_deployment_missing_name() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({
-        "operation_id": "kubernetes.delete_deployment",
-        "input": {"namespace": "default"}
-    })).await.is_err());
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "kubernetes.delete_deployment",
+            "input": {"namespace": "default"}
+        }))
+        .await
+        .is_err()
+    );
 }
 
 #[fcp_async_core::runtime::test]
 async fn delete_deployment_missing_namespace() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({
-        "operation_id": "kubernetes.delete_deployment",
-        "input": {"name": "old-app"}
-    })).await.is_err());
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "kubernetes.delete_deployment",
+            "input": {"name": "old-app"}
+        }))
+        .await
+        .is_err()
+    );
 }
 
 // -- list_services --
@@ -728,10 +757,13 @@ async fn list_services() {
         .await;
 
     let c = setup_connector(&server.uri()).await;
-    let result = c.handle_invoke(json!({
-        "operation_id": "kubernetes.list_services",
-        "input": {"namespace": "default"}
-    })).await.unwrap();
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "kubernetes.list_services",
+            "input": {"namespace": "default"}
+        }))
+        .await
+        .unwrap();
     assert_eq!(result["services"].as_array().unwrap().len(), 2);
 }
 
@@ -747,10 +779,13 @@ async fn list_services_empty() {
         .await;
 
     let c = setup_connector(&server.uri()).await;
-    let result = c.handle_invoke(json!({
-        "operation_id": "kubernetes.list_services",
-        "input": {"namespace": "production"}
-    })).await.unwrap();
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "kubernetes.list_services",
+            "input": {"namespace": "production"}
+        }))
+        .await
+        .unwrap();
     assert!(result["services"].as_array().unwrap().is_empty());
 }
 
@@ -758,10 +793,14 @@ async fn list_services_empty() {
 async fn list_services_missing_namespace() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({
-        "operation_id": "kubernetes.list_services",
-        "input": {}
-    })).await.is_err());
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "kubernetes.list_services",
+            "input": {}
+        }))
+        .await
+        .is_err()
+    );
 }
 
 // -- simulate new ops --
@@ -1053,7 +1092,9 @@ async fn counters_error_increment() {
 async fn exec_command() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path_regex(r"/api/v1/namespaces/default/pods/debug-pod/exec.*"))
+        .and(path_regex(
+            r"/api/v1/namespaces/default/pods/debug-pod/exec.*",
+        ))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "stdout": "total 4\ndrwxr-xr-x 2 root root 4096 Jan 1 00:00 app\n",
             "stderr": "",
@@ -1063,15 +1104,23 @@ async fn exec_command() {
         .await;
 
     let c = setup_connector(&server.uri()).await;
-    let result = c.handle_invoke(json!({
-        "operation_id": "kubernetes.exec",
-        "input": {
-            "namespace": "default",
-            "name": "debug-pod",
-            "command": ["ls", "-la", "/app"]
-        }
-    })).await.unwrap();
-    assert!(result["exec_result"]["stdout"].as_str().unwrap().contains("app"));
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "kubernetes.exec",
+            "input": {
+                "namespace": "default",
+                "name": "debug-pod",
+                "command": ["ls", "-la", "/app"]
+            }
+        }))
+        .await
+        .unwrap();
+    assert!(
+        result["exec_result"]["stdout"]
+            .as_str()
+            .unwrap()
+            .contains("app")
+    );
     assert_eq!(result["exec_result"]["exit_code"], 0);
 }
 
@@ -1079,7 +1128,9 @@ async fn exec_command() {
 async fn exec_with_container() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path_regex(r"/api/v1/namespaces/default/pods/multi-pod/exec.*"))
+        .and(path_regex(
+            r"/api/v1/namespaces/default/pods/multi-pod/exec.*",
+        ))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "stdout": "hello\n",
             "stderr": "",
@@ -1089,64 +1140,93 @@ async fn exec_with_container() {
         .await;
 
     let c = setup_connector(&server.uri()).await;
-    let result = c.handle_invoke(json!({
-        "operation_id": "kubernetes.exec",
-        "input": {
-            "namespace": "default",
-            "name": "multi-pod",
-            "container": "sidecar",
-            "command": ["echo", "hello"]
-        }
-    })).await.unwrap();
-    assert!(result["exec_result"]["stdout"].as_str().unwrap().contains("hello"));
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "kubernetes.exec",
+            "input": {
+                "namespace": "default",
+                "name": "multi-pod",
+                "container": "sidecar",
+                "command": ["echo", "hello"]
+            }
+        }))
+        .await
+        .unwrap();
+    assert!(
+        result["exec_result"]["stdout"]
+            .as_str()
+            .unwrap()
+            .contains("hello")
+    );
 }
 
 #[fcp_async_core::runtime::test]
 async fn exec_missing_command() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({
-        "operation_id": "kubernetes.exec",
-        "input": {"namespace": "default", "name": "debug-pod"}
-    })).await.is_err());
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "kubernetes.exec",
+            "input": {"namespace": "default", "name": "debug-pod"}
+        }))
+        .await
+        .is_err()
+    );
 }
 
 #[fcp_async_core::runtime::test]
 async fn exec_empty_command() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({
-        "operation_id": "kubernetes.exec",
-        "input": {"namespace": "default", "name": "debug-pod", "command": []}
-    })).await.is_err());
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "kubernetes.exec",
+            "input": {"namespace": "default", "name": "debug-pod", "command": []}
+        }))
+        .await
+        .is_err()
+    );
 }
 
 #[fcp_async_core::runtime::test]
 async fn exec_missing_namespace() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({
-        "operation_id": "kubernetes.exec",
-        "input": {"name": "debug-pod", "command": ["ls"]}
-    })).await.is_err());
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "kubernetes.exec",
+            "input": {"name": "debug-pod", "command": ["ls"]}
+        }))
+        .await
+        .is_err()
+    );
 }
 
 #[fcp_async_core::runtime::test]
 async fn exec_missing_name() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({
-        "operation_id": "kubernetes.exec",
-        "input": {"namespace": "default", "command": ["ls"]}
-    })).await.is_err());
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "kubernetes.exec",
+            "input": {"namespace": "default", "command": ["ls"]}
+        }))
+        .await
+        .is_err()
+    );
 }
 
 #[fcp_async_core::runtime::test]
 async fn simulate_exec() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_simulate(json!({"operation_id": "kubernetes.exec"}))
-        .await.unwrap()["allowed"].as_bool().unwrap());
+    assert!(
+        c.handle_simulate(json!({"operation_id": "kubernetes.exec"}))
+            .await
+            .unwrap()["allowed"]
+            .as_bool()
+            .unwrap()
+    );
 }
 
 // ── Feature 3: ConfigMap CRUD ────────────────────────────────────
@@ -1167,10 +1247,13 @@ async fn configmap_list() {
         .await;
 
     let c = setup_connector(&server.uri()).await;
-    let result = c.handle_invoke(json!({
-        "operation_id": "kubernetes.configmap.list",
-        "input": {"namespace": "default"}
-    })).await.unwrap();
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "kubernetes.configmap.list",
+            "input": {"namespace": "default"}
+        }))
+        .await
+        .unwrap();
     assert_eq!(result["configmaps"].as_array().unwrap().len(), 2);
 }
 
@@ -1186,10 +1269,13 @@ async fn configmap_list_empty() {
         .await;
 
     let c = setup_connector(&server.uri()).await;
-    let result = c.handle_invoke(json!({
-        "operation_id": "kubernetes.configmap.list",
-        "input": {"namespace": "production"}
-    })).await.unwrap();
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "kubernetes.configmap.list",
+            "input": {"namespace": "production"}
+        }))
+        .await
+        .unwrap();
     assert!(result["configmaps"].as_array().unwrap().is_empty());
 }
 
@@ -1197,10 +1283,14 @@ async fn configmap_list_empty() {
 async fn configmap_list_missing_namespace() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({
-        "operation_id": "kubernetes.configmap.list",
-        "input": {}
-    })).await.is_err());
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "kubernetes.configmap.list",
+            "input": {}
+        }))
+        .await
+        .is_err()
+    );
 }
 
 #[fcp_async_core::runtime::test]
@@ -1217,10 +1307,13 @@ async fn configmap_get() {
         .await;
 
     let c = setup_connector(&server.uri()).await;
-    let result = c.handle_invoke(json!({
-        "operation_id": "kubernetes.configmap.get",
-        "input": {"namespace": "default", "name": "app-config"}
-    })).await.unwrap();
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "kubernetes.configmap.get",
+            "input": {"namespace": "default", "name": "app-config"}
+        }))
+        .await
+        .unwrap();
     assert_eq!(result["configmap"]["data"]["LOG_LEVEL"], "info");
 }
 
@@ -1228,10 +1321,14 @@ async fn configmap_get() {
 async fn configmap_get_missing_name() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({
-        "operation_id": "kubernetes.configmap.get",
-        "input": {"namespace": "default"}
-    })).await.is_err());
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "kubernetes.configmap.get",
+            "input": {"namespace": "default"}
+        }))
+        .await
+        .is_err()
+    );
 }
 
 #[fcp_async_core::runtime::test]
@@ -1249,14 +1346,17 @@ async fn configmap_create() {
         .await;
 
     let c = setup_connector(&server.uri()).await;
-    let result = c.handle_invoke(json!({
-        "operation_id": "kubernetes.configmap.create",
-        "input": {
-            "namespace": "default",
-            "name": "new-config",
-            "data": {"KEY": "value"}
-        }
-    })).await.unwrap();
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "kubernetes.configmap.create",
+            "input": {
+                "namespace": "default",
+                "name": "new-config",
+                "data": {"KEY": "value"}
+            }
+        }))
+        .await
+        .unwrap();
     assert_eq!(result["configmap"]["metadata"]["name"], "new-config");
 }
 
@@ -1274,15 +1374,18 @@ async fn configmap_create_with_labels() {
         .await;
 
     let c = setup_connector(&server.uri()).await;
-    let result = c.handle_invoke(json!({
-        "operation_id": "kubernetes.configmap.create",
-        "input": {
-            "namespace": "default",
-            "name": "labeled-cm",
-            "data": {"KEY": "val"},
-            "labels": {"app": "test"}
-        }
-    })).await.unwrap();
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "kubernetes.configmap.create",
+            "input": {
+                "namespace": "default",
+                "name": "labeled-cm",
+                "data": {"KEY": "val"},
+                "labels": {"app": "test"}
+            }
+        }))
+        .await
+        .unwrap();
     assert_eq!(result["configmap"]["metadata"]["name"], "labeled-cm");
 }
 
@@ -1290,20 +1393,28 @@ async fn configmap_create_with_labels() {
 async fn configmap_create_missing_data() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({
-        "operation_id": "kubernetes.configmap.create",
-        "input": {"namespace": "default", "name": "new-config"}
-    })).await.is_err());
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "kubernetes.configmap.create",
+            "input": {"namespace": "default", "name": "new-config"}
+        }))
+        .await
+        .is_err()
+    );
 }
 
 #[fcp_async_core::runtime::test]
 async fn configmap_create_missing_name() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({
-        "operation_id": "kubernetes.configmap.create",
-        "input": {"namespace": "default", "data": {"K": "V"}}
-    })).await.is_err());
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "kubernetes.configmap.create",
+            "input": {"namespace": "default", "data": {"K": "V"}}
+        }))
+        .await
+        .is_err()
+    );
 }
 
 #[fcp_async_core::runtime::test]
@@ -1320,10 +1431,13 @@ async fn configmap_update() {
         .await;
 
     let c = setup_connector(&server.uri()).await;
-    let result = c.handle_invoke(json!({
-        "operation_id": "kubernetes.configmap.update",
-        "input": {"namespace": "default", "name": "app-config", "data": {"LOG_LEVEL": "debug"}}
-    })).await.unwrap();
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "kubernetes.configmap.update",
+            "input": {"namespace": "default", "name": "app-config", "data": {"LOG_LEVEL": "debug"}}
+        }))
+        .await
+        .unwrap();
     assert_eq!(result["configmap"]["data"]["LOG_LEVEL"], "debug");
 }
 
@@ -1331,10 +1445,14 @@ async fn configmap_update() {
 async fn configmap_update_missing_data() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({
-        "operation_id": "kubernetes.configmap.update",
-        "input": {"namespace": "default", "name": "app-config"}
-    })).await.is_err());
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "kubernetes.configmap.update",
+            "input": {"namespace": "default", "name": "app-config"}
+        }))
+        .await
+        .is_err()
+    );
 }
 
 #[fcp_async_core::runtime::test]
@@ -1349,10 +1467,13 @@ async fn configmap_delete() {
         .await;
 
     let c = setup_connector(&server.uri()).await;
-    let result = c.handle_invoke(json!({
-        "operation_id": "kubernetes.configmap.delete",
-        "input": {"namespace": "default", "name": "old-config"}
-    })).await.unwrap();
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "kubernetes.configmap.delete",
+            "input": {"namespace": "default", "name": "old-config"}
+        }))
+        .await
+        .unwrap();
     assert_eq!(result["deleted"], true);
 }
 
@@ -1360,10 +1481,14 @@ async fn configmap_delete() {
 async fn configmap_delete_missing_name() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({
-        "operation_id": "kubernetes.configmap.delete",
-        "input": {"namespace": "default"}
-    })).await.is_err());
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "kubernetes.configmap.delete",
+            "input": {"namespace": "default"}
+        }))
+        .await
+        .is_err()
+    );
 }
 
 // ── Feature 3: Secret CRUD ───────────────────────────────────────
@@ -1384,15 +1509,21 @@ async fn secret_list() {
         .await;
 
     let c = setup_connector(&server.uri()).await;
-    let result = c.handle_invoke(json!({
-        "operation_id": "kubernetes.secret.list",
-        "input": {"namespace": "default"}
-    })).await.unwrap();
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "kubernetes.secret.list",
+            "input": {"namespace": "default"}
+        }))
+        .await
+        .unwrap();
     let secrets = result["secrets"].as_array().unwrap();
     assert_eq!(secrets.len(), 2);
     // Verify data is stripped from list results
     for s in secrets {
-        assert!(s.get("data").is_none(), "secret data should be stripped in list");
+        assert!(
+            s.get("data").is_none(),
+            "secret data should be stripped in list"
+        );
     }
 }
 
@@ -1408,10 +1539,13 @@ async fn secret_list_empty() {
         .await;
 
     let c = setup_connector(&server.uri()).await;
-    let result = c.handle_invoke(json!({
-        "operation_id": "kubernetes.secret.list",
-        "input": {"namespace": "production"}
-    })).await.unwrap();
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "kubernetes.secret.list",
+            "input": {"namespace": "production"}
+        }))
+        .await
+        .unwrap();
     assert!(result["secrets"].as_array().unwrap().is_empty());
 }
 
@@ -1419,10 +1553,14 @@ async fn secret_list_empty() {
 async fn secret_list_missing_namespace() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({
-        "operation_id": "kubernetes.secret.list",
-        "input": {}
-    })).await.is_err());
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "kubernetes.secret.list",
+            "input": {}
+        }))
+        .await
+        .is_err()
+    );
 }
 
 #[fcp_async_core::runtime::test]
@@ -1440,10 +1578,13 @@ async fn secret_get() {
         .await;
 
     let c = setup_connector(&server.uri()).await;
-    let result = c.handle_invoke(json!({
-        "operation_id": "kubernetes.secret.get",
-        "input": {"namespace": "default", "name": "db-creds"}
-    })).await.unwrap();
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "kubernetes.secret.get",
+            "input": {"namespace": "default", "name": "db-creds"}
+        }))
+        .await
+        .unwrap();
     assert!(result["secret"]["data"].is_object());
     assert_eq!(result["secret"]["data"]["username"], "YWRtaW4=");
 }
@@ -1452,10 +1593,14 @@ async fn secret_get() {
 async fn secret_get_missing_name() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({
-        "operation_id": "kubernetes.secret.get",
-        "input": {"namespace": "default"}
-    })).await.is_err());
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "kubernetes.secret.get",
+            "input": {"namespace": "default"}
+        }))
+        .await
+        .is_err()
+    );
 }
 
 #[fcp_async_core::runtime::test]
@@ -1474,14 +1619,17 @@ async fn secret_create() {
         .await;
 
     let c = setup_connector(&server.uri()).await;
-    let result = c.handle_invoke(json!({
-        "operation_id": "kubernetes.secret.create",
-        "input": {
-            "namespace": "default",
-            "name": "new-secret",
-            "data": {"token": "dG9rZW4="}
-        }
-    })).await.unwrap();
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "kubernetes.secret.create",
+            "input": {
+                "namespace": "default",
+                "name": "new-secret",
+                "data": {"token": "dG9rZW4="}
+            }
+        }))
+        .await
+        .unwrap();
     assert_eq!(result["secret"]["metadata"]["name"], "new-secret");
 }
 
@@ -1500,15 +1648,18 @@ async fn secret_create_with_type() {
         .await;
 
     let c = setup_connector(&server.uri()).await;
-    let result = c.handle_invoke(json!({
-        "operation_id": "kubernetes.secret.create",
-        "input": {
-            "namespace": "default",
-            "name": "tls-secret",
-            "type": "kubernetes.io/tls",
-            "data": {"tls.crt": "...", "tls.key": "..."}
-        }
-    })).await.unwrap();
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "kubernetes.secret.create",
+            "input": {
+                "namespace": "default",
+                "name": "tls-secret",
+                "type": "kubernetes.io/tls",
+                "data": {"tls.crt": "...", "tls.key": "..."}
+            }
+        }))
+        .await
+        .unwrap();
     assert_eq!(result["secret"]["type"], "kubernetes.io/tls");
 }
 
@@ -1526,15 +1677,18 @@ async fn secret_create_with_labels() {
         .await;
 
     let c = setup_connector(&server.uri()).await;
-    let result = c.handle_invoke(json!({
-        "operation_id": "kubernetes.secret.create",
-        "input": {
-            "namespace": "default",
-            "name": "labeled-secret",
-            "data": {"key": "val"},
-            "labels": {"app": "test"}
-        }
-    })).await.unwrap();
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "kubernetes.secret.create",
+            "input": {
+                "namespace": "default",
+                "name": "labeled-secret",
+                "data": {"key": "val"},
+                "labels": {"app": "test"}
+            }
+        }))
+        .await
+        .unwrap();
     assert_eq!(result["secret"]["metadata"]["name"], "labeled-secret");
 }
 
@@ -1542,20 +1696,28 @@ async fn secret_create_with_labels() {
 async fn secret_create_missing_data() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({
-        "operation_id": "kubernetes.secret.create",
-        "input": {"namespace": "default", "name": "new-secret"}
-    })).await.is_err());
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "kubernetes.secret.create",
+            "input": {"namespace": "default", "name": "new-secret"}
+        }))
+        .await
+        .is_err()
+    );
 }
 
 #[fcp_async_core::runtime::test]
 async fn secret_create_missing_name() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({
-        "operation_id": "kubernetes.secret.create",
-        "input": {"namespace": "default", "data": {"k": "v"}}
-    })).await.is_err());
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "kubernetes.secret.create",
+            "input": {"namespace": "default", "data": {"k": "v"}}
+        }))
+        .await
+        .is_err()
+    );
 }
 
 #[fcp_async_core::runtime::test]
@@ -1570,10 +1732,13 @@ async fn secret_delete() {
         .await;
 
     let c = setup_connector(&server.uri()).await;
-    let result = c.handle_invoke(json!({
-        "operation_id": "kubernetes.secret.delete",
-        "input": {"namespace": "default", "name": "old-creds"}
-    })).await.unwrap();
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "kubernetes.secret.delete",
+            "input": {"namespace": "default", "name": "old-creds"}
+        }))
+        .await
+        .unwrap();
     assert_eq!(result["deleted"], true);
 }
 
@@ -1581,20 +1746,28 @@ async fn secret_delete() {
 async fn secret_delete_missing_name() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({
-        "operation_id": "kubernetes.secret.delete",
-        "input": {"namespace": "default"}
-    })).await.is_err());
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "kubernetes.secret.delete",
+            "input": {"namespace": "default"}
+        }))
+        .await
+        .is_err()
+    );
 }
 
 #[fcp_async_core::runtime::test]
 async fn secret_delete_missing_namespace() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({
-        "operation_id": "kubernetes.secret.delete",
-        "input": {"name": "old-creds"}
-    })).await.is_err());
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "kubernetes.secret.delete",
+            "input": {"name": "old-creds"}
+        }))
+        .await
+        .is_err()
+    );
 }
 
 // ── Simulate new ops ────────────────────────────────────────────
@@ -1603,70 +1776,115 @@ async fn secret_delete_missing_namespace() {
 async fn simulate_configmap_list() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_simulate(json!({"operation_id": "kubernetes.configmap.list"}))
-        .await.unwrap()["allowed"].as_bool().unwrap());
+    assert!(
+        c.handle_simulate(json!({"operation_id": "kubernetes.configmap.list"}))
+            .await
+            .unwrap()["allowed"]
+            .as_bool()
+            .unwrap()
+    );
 }
 
 #[fcp_async_core::runtime::test]
 async fn simulate_configmap_get() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_simulate(json!({"operation_id": "kubernetes.configmap.get"}))
-        .await.unwrap()["allowed"].as_bool().unwrap());
+    assert!(
+        c.handle_simulate(json!({"operation_id": "kubernetes.configmap.get"}))
+            .await
+            .unwrap()["allowed"]
+            .as_bool()
+            .unwrap()
+    );
 }
 
 #[fcp_async_core::runtime::test]
 async fn simulate_configmap_create() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_simulate(json!({"operation_id": "kubernetes.configmap.create"}))
-        .await.unwrap()["allowed"].as_bool().unwrap());
+    assert!(
+        c.handle_simulate(json!({"operation_id": "kubernetes.configmap.create"}))
+            .await
+            .unwrap()["allowed"]
+            .as_bool()
+            .unwrap()
+    );
 }
 
 #[fcp_async_core::runtime::test]
 async fn simulate_configmap_update() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_simulate(json!({"operation_id": "kubernetes.configmap.update"}))
-        .await.unwrap()["allowed"].as_bool().unwrap());
+    assert!(
+        c.handle_simulate(json!({"operation_id": "kubernetes.configmap.update"}))
+            .await
+            .unwrap()["allowed"]
+            .as_bool()
+            .unwrap()
+    );
 }
 
 #[fcp_async_core::runtime::test]
 async fn simulate_configmap_delete() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_simulate(json!({"operation_id": "kubernetes.configmap.delete"}))
-        .await.unwrap()["allowed"].as_bool().unwrap());
+    assert!(
+        c.handle_simulate(json!({"operation_id": "kubernetes.configmap.delete"}))
+            .await
+            .unwrap()["allowed"]
+            .as_bool()
+            .unwrap()
+    );
 }
 
 #[fcp_async_core::runtime::test]
 async fn simulate_secret_list() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_simulate(json!({"operation_id": "kubernetes.secret.list"}))
-        .await.unwrap()["allowed"].as_bool().unwrap());
+    assert!(
+        c.handle_simulate(json!({"operation_id": "kubernetes.secret.list"}))
+            .await
+            .unwrap()["allowed"]
+            .as_bool()
+            .unwrap()
+    );
 }
 
 #[fcp_async_core::runtime::test]
 async fn simulate_secret_get() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_simulate(json!({"operation_id": "kubernetes.secret.get"}))
-        .await.unwrap()["allowed"].as_bool().unwrap());
+    assert!(
+        c.handle_simulate(json!({"operation_id": "kubernetes.secret.get"}))
+            .await
+            .unwrap()["allowed"]
+            .as_bool()
+            .unwrap()
+    );
 }
 
 #[fcp_async_core::runtime::test]
 async fn simulate_secret_create() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_simulate(json!({"operation_id": "kubernetes.secret.create"}))
-        .await.unwrap()["allowed"].as_bool().unwrap());
+    assert!(
+        c.handle_simulate(json!({"operation_id": "kubernetes.secret.create"}))
+            .await
+            .unwrap()["allowed"]
+            .as_bool()
+            .unwrap()
+    );
 }
 
 #[fcp_async_core::runtime::test]
 async fn simulate_secret_delete() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_simulate(json!({"operation_id": "kubernetes.secret.delete"}))
-        .await.unwrap()["allowed"].as_bool().unwrap());
+    assert!(
+        c.handle_simulate(json!({"operation_id": "kubernetes.secret.delete"}))
+            .await
+            .unwrap()["allowed"]
+            .as_bool()
+            .unwrap()
+    );
 }

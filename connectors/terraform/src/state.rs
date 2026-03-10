@@ -222,10 +222,7 @@ impl StateInspector {
 
         let mut outputs = Vec::new();
         for (key, val) in outputs_obj {
-            let value = val
-                .get("value")
-                .cloned()
-                .unwrap_or(serde_json::Value::Null);
+            let value = val.get("value").cloned().unwrap_or(serde_json::Value::Null);
             let sensitive = val
                 .get("sensitive")
                 .and_then(serde_json::Value::as_bool)
@@ -266,11 +263,7 @@ impl StateInspector {
     /// List all resources in the state.
     pub fn list_resources(&mut self) -> Vec<&TerraformResource> {
         let count = self.resources.len();
-        self.emit_audit(
-            "list_resources",
-            None,
-            &format!("listed {count} resources"),
-        );
+        self.emit_audit("list_resources", None, &format!("listed {count} resources"));
         self.resources.iter().collect()
     }
 
@@ -1422,9 +1415,11 @@ mod tests {
     #[test]
     fn module_scoped_resource_found_with_prefix() {
         let mut inspector = StateInspector::from_json(&sample_state()).unwrap();
-        assert!(inspector
-            .show_resource("module.network.aws_vpc.main")
-            .is_some());
+        assert!(
+            inspector
+                .show_resource("module.network.aws_vpc.main")
+                .is_some()
+        );
     }
 
     #[test]
@@ -1832,8 +1827,12 @@ mod tests {
     #[test]
     fn repeated_show_resource_same_result() {
         let mut inspector = StateInspector::from_json(&sample_state()).unwrap();
-        let first = inspector.show_resource("aws_instance.web").map(|r| r.id.clone());
-        let second = inspector.show_resource("aws_instance.web").map(|r| r.id.clone());
+        let first = inspector
+            .show_resource("aws_instance.web")
+            .map(|r| r.id.clone());
+        let second = inspector
+            .show_resource("aws_instance.web")
+            .map(|r| r.id.clone());
         assert_eq!(first, second);
     }
 

@@ -279,8 +279,7 @@ impl ElasticsearchConnector {
             .as_ref()
             .map_or_else(|| DEFAULT_BASE_URL.to_string(), |c| c.base_url.clone());
 
-        let network_ok = base_url.contains(".elastic-cloud.com")
-            || base_url.contains(".found.io");
+        let network_ok = base_url.contains(".elastic-cloud.com") || base_url.contains(".found.io");
 
         json!({
             "auth_mode": auth_mode,
@@ -1493,7 +1492,11 @@ mod tests {
         let store_step = &recipe.steps[2];
         assert_eq!(store_step.id.as_str(), "store_api_key");
         match &store_step.kind {
-            ProvisioningStepType::StoreSecret { scope, key, value_from } => {
+            ProvisioningStepType::StoreSecret {
+                scope,
+                key,
+                value_from,
+            } => {
                 assert_eq!(scope, "connector:fcp.elasticsearch");
                 assert_eq!(key, "elasticsearch_api_key");
                 assert_eq!(value_from.as_str(), "prompt_api_key");

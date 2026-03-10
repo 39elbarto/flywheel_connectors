@@ -299,8 +299,7 @@ impl N8nConnector {
     /// Handle the `self_check` method.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
         let Some(config) = &self.config else {
-            let report =
-                SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            let report = SelfCheckReport::degraded("not_configured", "Connector is not configured");
             return Self::serialize_self_check_report(report);
         };
 
@@ -1417,10 +1416,7 @@ mod tests {
         let recipe = provisioning_recipe();
         assert!(recipe.steps[0].depends_on.is_empty());
         assert_eq!(recipe.steps[1].depends_on.len(), 1);
-        assert_eq!(
-            recipe.steps[1].depends_on[0].as_str(),
-            "enter_instance_url"
-        );
+        assert_eq!(recipe.steps[1].depends_on[0].as_str(), "enter_instance_url");
         assert_eq!(recipe.steps[2].depends_on.len(), 1);
         assert_eq!(recipe.steps[2].depends_on[0].as_str(), "enter_api_key");
     }

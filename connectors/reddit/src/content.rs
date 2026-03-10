@@ -250,10 +250,7 @@ impl CommentFetchConfig {
             ));
         }
         if self.max_depth > 50 {
-            return Err(format!(
-                "max_depth {} exceeds limit of 50",
-                self.max_depth
-            ));
+            return Err(format!("max_depth {} exceeds limit of 50", self.max_depth));
         }
         Ok(())
     }
@@ -398,15 +395,18 @@ pub fn flatten_comments(comments: &[Comment]) -> Vec<&Comment> {
 /// Truncate a comment tree to respect depth and count bounds.
 ///
 /// Returns the truncated tree and whether truncation occurred.
-pub fn truncate_tree(
-    comments: &[Comment],
-    config: &CommentFetchConfig,
-) -> (Vec<Comment>, bool) {
+pub fn truncate_tree(comments: &[Comment], config: &CommentFetchConfig) -> (Vec<Comment>, bool) {
     let mut result = Vec::new();
     let mut remaining = config.max_comments;
     let mut truncated = false;
 
-    truncate_recursive(comments, config.max_depth, &mut remaining, &mut truncated, &mut result);
+    truncate_recursive(
+        comments,
+        config.max_depth,
+        &mut remaining,
+        &mut truncated,
+        &mut result,
+    );
 
     (result, truncated)
 }
@@ -438,13 +438,7 @@ fn truncate_recursive(
             // Recursively truncate children.
             let mut child_out = Vec::new();
             *remaining = remaining.saturating_sub(1);
-            truncate_recursive(
-                &c.replies,
-                max_depth,
-                remaining,
-                truncated,
-                &mut child_out,
-            );
+            truncate_recursive(&c.replies, max_depth, remaining, truncated, &mut child_out);
             cloned.replies = child_out;
             out.push(cloned);
             continue;
@@ -481,7 +475,10 @@ pub fn build_comment_tree(
 pub fn apply_bounds_to_post(post: &mut Post, bounds: &ContentBounds) {
     if let Some(ref text) = post.selftext {
         if text.len() > bounds.max_selftext_length {
-            post.selftext = Some(ContentBounds::truncate_text(text, bounds.max_selftext_length));
+            post.selftext = Some(ContentBounds::truncate_text(
+                text,
+                bounds.max_selftext_length,
+            ));
         }
     }
 }

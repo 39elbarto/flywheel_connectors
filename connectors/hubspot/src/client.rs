@@ -445,10 +445,7 @@ impl HubSpotClient {
     }
 
     /// Search deals using filter groups.
-    pub async fn search_deals(
-        &self,
-        body: &serde_json::Value,
-    ) -> HubSpotResult<serde_json::Value> {
+    pub async fn search_deals(&self, body: &serde_json::Value) -> HubSpotResult<serde_json::Value> {
         self.post("/crm/v3/objects/deals/search", body).await
     }
 

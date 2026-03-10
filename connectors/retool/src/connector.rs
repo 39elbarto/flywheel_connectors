@@ -277,8 +277,7 @@ impl RetoolConnector {
     /// Handle the `self_check` method.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
         let Some(config) = &self.config else {
-            let report =
-                SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            let report = SelfCheckReport::degraded("not_configured", "Connector is not configured");
             return Self::serialize_self_check_report(report);
         };
 
@@ -1547,10 +1546,7 @@ mod tests {
     #[test]
     fn effective_base_url_no_overrides() {
         let config = RetoolConfig::from_params(&json!({"api_token": "tok"})).unwrap();
-        assert_eq!(
-            config.effective_base_url(),
-            "https://app.retool.com/api/v1"
-        );
+        assert_eq!(config.effective_base_url(), "https://app.retool.com/api/v1");
     }
 
     #[test]

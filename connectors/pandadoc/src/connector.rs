@@ -532,8 +532,7 @@ fn provisioning_recipe() -> ProvisioningRecipe {
     .with_step(ProvisioningStep::new(
         StepId::new("prompt_api_key"),
         ProvisioningStepType::PromptSecret {
-            message: "Enter your PandaDoc API key (Settings > Integrations > API > API Key)"
-                .into(),
+            message: "Enter your PandaDoc API key (Settings > Integrations > API > API Key)".into(),
         },
     ))
     .with_step(

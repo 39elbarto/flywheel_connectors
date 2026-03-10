@@ -1911,9 +1911,7 @@ impl TwilioConnector {
             "twilio.get_account" => self.invoke_get_account().await,
             "twilio.list_phone_numbers" => self.invoke_list_phone_numbers(input).await,
             "twilio.whatsapp_send" => self.invoke_whatsapp_send(input).await,
-            "twilio.whatsapp_send_template" => {
-                self.invoke_whatsapp_send_template(input).await
-            }
+            "twilio.whatsapp_send_template" => self.invoke_whatsapp_send_template(input).await,
             "twilio.whatsapp_get" => self.invoke_whatsapp_get(input).await,
             "twilio.whatsapp_list" => self.invoke_whatsapp_list(input).await,
             // Conversations API
@@ -1941,23 +1939,15 @@ impl TwilioConnector {
             "twilio.video.room.get" => self.invoke_video_room_get(input).await,
             "twilio.video.room.list" => self.invoke_video_room_list(input).await,
             "twilio.video.room.end" => self.invoke_video_room_end(input).await,
-            "twilio.video.room.participants" => {
-                self.invoke_video_room_participants(input).await
-            }
-            "twilio.video.recording.list" => {
-                self.invoke_video_recording_list(input).await
-            }
+            "twilio.video.room.participants" => self.invoke_video_room_participants(input).await,
+            "twilio.video.recording.list" => self.invoke_video_recording_list(input).await,
             // Webhook handling
-            "twilio.webhook.validate_signature" => {
-                self.invoke_webhook_validate_signature(&input)
-            }
+            "twilio.webhook.validate_signature" => self.invoke_webhook_validate_signature(&input),
             "twilio.webhook.parse_sms_event" => self.invoke_webhook_parse_sms_event(&input),
             "twilio.webhook.parse_status_callback" => {
                 self.invoke_webhook_parse_status_callback(&input)
             }
-            "twilio.webhook.parse_voice_event" => {
-                self.invoke_webhook_parse_voice_event(&input)
-            }
+            "twilio.webhook.parse_voice_event" => self.invoke_webhook_parse_voice_event(&input),
             _ => Err(FcpError::OperationNotGranted {
                 operation: operation.into(),
             }),
@@ -2249,10 +2239,7 @@ impl TwilioConnector {
 
     // ── WhatsApp operation implementations ─────────────────────
 
-    async fn invoke_whatsapp_send(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_whatsapp_send(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let to = require_str(&input, "to")?;
         let from = require_str(&input, "from")?;
@@ -2295,10 +2282,7 @@ impl TwilioConnector {
         })
     }
 
-    async fn invoke_whatsapp_get(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_whatsapp_get(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let message_sid = require_str(&input, "message_sid")?;
         let resp = client
@@ -2310,10 +2294,7 @@ impl TwilioConnector {
         })
     }
 
-    async fn invoke_whatsapp_list(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_whatsapp_list(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let to = input.get("to").and_then(|v| v.as_str());
         let from = input.get("from").and_then(|v| v.as_str());
@@ -2322,10 +2303,7 @@ impl TwilioConnector {
             .get("page_size")
             .and_then(|v| v.as_u64())
             .map(|v| v as u32);
-        let page = input
-            .get("page")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as u32);
+        let page = input.get("page").and_then(|v| v.as_u64()).map(|v| v as u32);
         let resp = client
             .whatsapp_list(to, from, date_sent, page_size, page)
             .await
@@ -2464,10 +2442,7 @@ impl TwilioConnector {
 
     // ── Verify API implementations ─────────────────────────────
 
-    async fn invoke_verify_send(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_verify_send(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let service_sid = require_str(&input, "service_sid")?;
         let to = require_str(&input, "to")?;
@@ -2481,10 +2456,7 @@ impl TwilioConnector {
         })
     }
 
-    async fn invoke_verify_check(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_verify_check(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let service_sid = require_str(&input, "service_sid")?;
         let to = require_str(&input, "to")?;
@@ -2498,10 +2470,7 @@ impl TwilioConnector {
         })
     }
 
-    async fn invoke_verify_cancel(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_verify_cancel(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let service_sid = require_str(&input, "service_sid")?;
         let verification_sid = require_str(&input, "verification_sid")?;
@@ -2697,13 +2666,13 @@ impl TwilioConnector {
             message: "Missing required field: body".into(),
         })?;
 
-        let message_sid = body
-            .get("MessageSid")
-            .and_then(|v| v.as_str())
-            .ok_or(FcpError::InvalidRequest {
-                code: 1003,
-                message: "Missing MessageSid in webhook body".into(),
-            })?;
+        let message_sid =
+            body.get("MessageSid")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing MessageSid in webhook body".into(),
+                })?;
         let from = body
             .get("From")
             .and_then(|v| v.as_str())
@@ -2831,13 +2800,13 @@ impl TwilioConnector {
             message: "Missing required field: body".into(),
         })?;
 
-        let call_sid = body
-            .get("CallSid")
-            .and_then(|v| v.as_str())
-            .ok_or(FcpError::InvalidRequest {
-                code: 1003,
-                message: "Missing CallSid in webhook body".into(),
-            })?;
+        let call_sid =
+            body.get("CallSid")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing CallSid in webhook body".into(),
+                })?;
         let from = body
             .get("From")
             .and_then(|v| v.as_str())
@@ -3568,10 +3537,7 @@ mod tests {
         let connector = TwilioConnector::new();
         let result = connector.handle_introspect().await.unwrap();
         let ops = result["operations"].as_array().unwrap();
-        let op = ops
-            .iter()
-            .find(|o| o["id"] == "twilio.list_calls")
-            .unwrap();
+        let op = ops.iter().find(|o| o["id"] == "twilio.list_calls").unwrap();
         assert_eq!(op["safety_tier"].as_str().unwrap(), "safe");
         assert_eq!(op["risk_level"].as_str().unwrap(), "low");
         assert_eq!(op["capability"].as_str().unwrap(), "twilio.read");

@@ -973,9 +973,8 @@ fn base_url_policy(base_url: &str) -> (bool, String) {
     };
 
     let local = is_local_test_host(host);
-    let allowed_host = host.eq_ignore_ascii_case("app.terraform.io")
-        || host.ends_with(".terraform.io")
-        || local;
+    let allowed_host =
+        host.eq_ignore_ascii_case("app.terraform.io") || host.ends_with(".terraform.io") || local;
     let secure_or_local = parsed.scheme() == "https" || local;
 
     if allowed_host && secure_or_local {
@@ -1876,18 +1875,18 @@ mod tests {
             .unwrap();
         let result = connector.handle_self_check().await.unwrap();
         assert_eq!(result["status"], "ok");
-        assert!(result["details"]["provisioning"]["api_token_configured"]
-            .as_bool()
-            .unwrap());
+        assert!(
+            result["details"]["provisioning"]["api_token_configured"]
+                .as_bool()
+                .unwrap()
+        );
     }
 
     #[fcp_async_core::runtime::test]
     async fn self_check_credential_id_is_degraded() {
         let mut connector = TerraformConnector::new();
         connector
-            .handle_configure(
-                json!({"credential_id": "550e8400-e29b-41d4-a716-446655440000"}),
-            )
+            .handle_configure(json!({"credential_id": "550e8400-e29b-41d4-a716-446655440000"}))
             .await
             .unwrap();
         let result = connector.handle_self_check().await.unwrap();
@@ -1929,10 +1928,7 @@ mod tests {
             .unwrap();
         let result = connector.handle_doctor().await.unwrap();
         let checks = result["checks"].as_array().unwrap();
-        let check_names: Vec<&str> = checks
-            .iter()
-            .filter_map(|c| c["name"].as_str())
-            .collect();
+        let check_names: Vec<&str> = checks.iter().filter_map(|c| c["name"].as_str()).collect();
         assert!(check_names.contains(&"network_constraints"));
         assert!(check_names.contains(&"auth_mode"));
         assert!(check_names.contains(&"api_token"));

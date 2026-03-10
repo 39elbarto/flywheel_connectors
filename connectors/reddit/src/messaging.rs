@@ -258,9 +258,7 @@ impl MarkReadRequest {
         }
         for id in &self.thing_ids {
             if !is_valid_fullname(id) {
-                return Err(MessagingValidationError::InvalidThingId {
-                    id: id.clone(),
-                });
+                return Err(MessagingValidationError::InvalidThingId { id: id.clone() });
             }
         }
         Ok(())
@@ -458,9 +456,7 @@ impl MessagingValidator {
         }
         for id in &req.thing_ids {
             if !is_valid_fullname(id) {
-                return Err(MessagingValidationError::InvalidThingId {
-                    id: id.clone(),
-                });
+                return Err(MessagingValidationError::InvalidThingId { id: id.clone() });
             }
         }
         Ok(())
@@ -1061,7 +1057,10 @@ mod tests {
 
     #[test]
     fn inbox_query_serialize_roundtrip() {
-        let q = InboxQuery::new().with_limit(30).with_after("pg2").mark_read();
+        let q = InboxQuery::new()
+            .with_limit(30)
+            .with_after("pg2")
+            .mark_read();
         let json = serde_json::to_value(&q).unwrap();
         let back: InboxQuery = serde_json::from_value(json).unwrap();
         assert_eq!(back.limit, 30);
@@ -1088,14 +1087,20 @@ mod tests {
     fn send_request_validate_empty_to() {
         let mut req = sample_send_request();
         req.to = String::new();
-        assert_eq!(req.validate().unwrap_err(), MessagingValidationError::EmptyRecipient);
+        assert_eq!(
+            req.validate().unwrap_err(),
+            MessagingValidationError::EmptyRecipient
+        );
     }
 
     #[test]
     fn send_request_validate_empty_subject() {
         let mut req = sample_send_request();
         req.subject = String::new();
-        assert_eq!(req.validate().unwrap_err(), MessagingValidationError::EmptySubject);
+        assert_eq!(
+            req.validate().unwrap_err(),
+            MessagingValidationError::EmptySubject
+        );
     }
 
     #[test]
@@ -1122,7 +1127,10 @@ mod tests {
     fn send_request_validate_empty_body() {
         let mut req = sample_send_request();
         req.body = String::new();
-        assert_eq!(req.validate().unwrap_err(), MessagingValidationError::EmptyBody);
+        assert_eq!(
+            req.validate().unwrap_err(),
+            MessagingValidationError::EmptyBody
+        );
     }
 
     #[test]
@@ -1234,10 +1242,11 @@ mod tests {
 
     #[test]
     fn mark_read_validate_empty() {
-        let req = MarkReadRequest {
-            thing_ids: vec![],
-        };
-        assert_eq!(req.validate().unwrap_err(), MessagingValidationError::EmptyBatch);
+        let req = MarkReadRequest { thing_ids: vec![] };
+        assert_eq!(
+            req.validate().unwrap_err(),
+            MessagingValidationError::EmptyBatch
+        );
     }
 
     #[test]
@@ -1514,9 +1523,18 @@ mod tests {
         p.blocked_recipients.insert("bot1".into());
         p.blocked_recipients.insert("bot2".into());
         p.blocked_recipients.insert("bot3".into());
-        assert!(matches!(p.check_send("bot1"), MessagingDecision::Deny { .. }));
-        assert!(matches!(p.check_send("bot2"), MessagingDecision::Deny { .. }));
-        assert!(matches!(p.check_send("bot3"), MessagingDecision::Deny { .. }));
+        assert!(matches!(
+            p.check_send("bot1"),
+            MessagingDecision::Deny { .. }
+        ));
+        assert!(matches!(
+            p.check_send("bot2"),
+            MessagingDecision::Deny { .. }
+        ));
+        assert!(matches!(
+            p.check_send("bot3"),
+            MessagingDecision::Deny { .. }
+        ));
         assert_eq!(p.check_send("legit"), MessagingDecision::Allow);
     }
 
@@ -1540,12 +1558,8 @@ mod tests {
 
     #[test]
     fn decision_deny_ne() {
-        let d1 = MessagingDecision::Deny {
-            reason: "a".into(),
-        };
-        let d2 = MessagingDecision::Deny {
-            reason: "b".into(),
-        };
+        let d1 = MessagingDecision::Deny { reason: "a".into() };
+        let d2 = MessagingDecision::Deny { reason: "b".into() };
         assert_ne!(d1, d2);
     }
 
@@ -1567,7 +1581,12 @@ mod tests {
         };
         #[allow(clippy::redundant_clone)]
         let d2 = d.clone();
-        assert_eq!(d2, MessagingDecision::Deny { reason: "test".into() });
+        assert_eq!(
+            d2,
+            MessagingDecision::Deny {
+                reason: "test".into()
+            }
+        );
     }
 
     #[test]
@@ -1580,8 +1599,12 @@ mod tests {
     fn decision_serialize_roundtrip() {
         for decision in [
             MessagingDecision::Allow,
-            MessagingDecision::Deny { reason: "nope".into() },
-            MessagingDecision::RequireApproval { reason: "maybe".into() },
+            MessagingDecision::Deny {
+                reason: "nope".into(),
+            },
+            MessagingDecision::RequireApproval {
+                reason: "maybe".into(),
+            },
         ] {
             let json = serde_json::to_value(&decision).unwrap();
             let back: MessagingDecision = serde_json::from_value(json).unwrap();
@@ -1729,9 +1752,7 @@ mod tests {
     #[test]
     fn validator_validate_mark_read_empty() {
         let v = MessagingValidator::default();
-        let req = MarkReadRequest {
-            thing_ids: vec![],
-        };
+        let req = MarkReadRequest { thing_ids: vec![] };
         assert_eq!(
             v.validate_mark_read(&req).unwrap_err(),
             MessagingValidationError::EmptyBatch
@@ -1864,7 +1885,10 @@ mod tests {
 
     #[test]
     fn validation_error_display_body_too_long() {
-        let e = MessagingValidationError::BodyTooLong { max: 10_000, got: 10_001 };
+        let e = MessagingValidationError::BodyTooLong {
+            max: 10_000,
+            got: 10_001,
+        };
         assert_eq!(e.to_string(), "body too long (10001 > 10000 chars)");
     }
 
@@ -1915,7 +1939,10 @@ mod tests {
         let e = MessagingValidationError::SubjectTooLong { max: 100, got: 200 };
         #[allow(clippy::redundant_clone)]
         let e2 = e.clone();
-        assert_eq!(e2, MessagingValidationError::SubjectTooLong { max: 100, got: 200 });
+        assert_eq!(
+            e2,
+            MessagingValidationError::SubjectTooLong { max: 100, got: 200 }
+        );
     }
 
     #[test]
@@ -1932,8 +1959,13 @@ mod tests {
             MessagingValidationError::EmptySubject,
             MessagingValidationError::SubjectTooLong { max: 100, got: 200 },
             MessagingValidationError::EmptyBody,
-            MessagingValidationError::BodyTooLong { max: 10_000, got: 20_000 },
-            MessagingValidationError::BlockedRecipient { username: "x".into() },
+            MessagingValidationError::BodyTooLong {
+                max: 10_000,
+                got: 20_000,
+            },
+            MessagingValidationError::BlockedRecipient {
+                username: "x".into(),
+            },
             MessagingValidationError::EmptyBatch,
             MessagingValidationError::BatchTooLarge { max: 25, got: 50 },
             MessagingValidationError::InvalidThingId { id: "bad".into() },
@@ -1990,7 +2022,10 @@ mod tests {
         // guarantee, but we also check serialization.
         let e = MessagingAuditEvent::message_sent(1_700_000_000.0, "user", true);
         let json = serde_json::to_value(&e).unwrap();
-        assert!(json.get("body").is_none(), "audit event must never contain body");
+        assert!(
+            json.get("body").is_none(),
+            "audit event must never contain body"
+        );
         assert!(
             json.get("subject").is_none(),
             "audit event must never contain subject"
@@ -2084,9 +2119,7 @@ mod tests {
     #[test]
     fn full_workflow_inbox_query_validate_fetch_mark_read() {
         // Build and validate query
-        let query = InboxQuery::new()
-            .with_limit(10)
-            .with_after("t4_start");
+        let query = InboxQuery::new().with_limit(10).with_after("t4_start");
         assert!(query.validate().is_ok());
 
         let validator = MessagingValidator::default();
@@ -2189,7 +2222,10 @@ mod tests {
             subject: String::new(),
             body: String::new(),
         };
-        assert_eq!(req.validate().unwrap_err(), MessagingValidationError::EmptyRecipient);
+        assert_eq!(
+            req.validate().unwrap_err(),
+            MessagingValidationError::EmptyRecipient
+        );
     }
 
     #[test]

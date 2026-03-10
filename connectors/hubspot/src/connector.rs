@@ -302,8 +302,7 @@ impl HubSpotConnector {
     /// Handle the `self_check` method.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
         let Some(config) = &self.config else {
-            let report =
-                SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            let report = SelfCheckReport::degraded("not_configured", "Connector is not configured");
             return Self::serialize_self_check_report(report);
         };
 
@@ -1310,7 +1309,9 @@ impl HubSpotConnector {
             "hubspot.pipelines.list" => self.invoke_pipelines_list(client, &input).await,
             "hubspot.analytics.report" => self.invoke_analytics_report(client, &input).await,
             "hubspot.pipeline.metrics" => self.invoke_pipeline_metrics(client, &input).await,
-            "hubspot.pipeline.stage_metrics" => self.invoke_pipeline_stage_metrics(client, &input).await,
+            "hubspot.pipeline.stage_metrics" => {
+                self.invoke_pipeline_stage_metrics(client, &input).await
+            }
             "hubspot.events.stream" => self.invoke_events_stream(client, &input).await,
             _ => {
                 return Err(FcpError::InvalidRequest {
@@ -1458,7 +1459,9 @@ impl HubSpotConnector {
     ) -> Result<serde_json::Value, HubSpotError> {
         let company_id = require_str(input, "company_id")?;
         let properties = extract_string_array(input, "properties");
-        let data = client.get_company(company_id, properties.as_deref()).await?;
+        let data = client
+            .get_company(company_id, properties.as_deref())
+            .await?;
         Ok(json!({ "company": data }))
     }
 
@@ -1547,7 +1550,9 @@ impl HubSpotConnector {
         let from_object_type = require_str(input, "from_object_type")?;
         let from_object_id = require_str(input, "from_object_id")?;
         let to_object_type = require_str(input, "to_object_type")?;
-        client.get_associations(from_object_type, from_object_id, to_object_type).await
+        client
+            .get_associations(from_object_type, from_object_id, to_object_type)
+            .await
     }
 
     async fn invoke_deals_list(
@@ -1655,7 +1660,13 @@ impl HubSpotConnector {
         let to_object_id = require_str(input, "to_object_id")?;
         let association_type = require_str(input, "association_type")?;
         client
-            .create_association("deals", deal_id, to_object_type, to_object_id, association_type)
+            .create_association(
+                "deals",
+                deal_id,
+                to_object_type,
+                to_object_id,
+                association_type,
+            )
             .await
     }
 
@@ -1866,8 +1877,8 @@ pub fn provisioning_recipe() -> ProvisioningRecipe {
             StepId::new("register_webhooks"),
             ProvisioningStepType::Webhook {
                 registration: WebhookRecipe {
-                    registration_url:
-                        "https://api.hubapi.com/webhooks/v3/{appId}/subscriptions".into(),
+                    registration_url: "https://api.hubapi.com/webhooks/v3/{appId}/subscriptions"
+                        .into(),
                     events: vec![
                         "contact.creation".into(),
                         "contact.propertyChange".into(),
@@ -2857,10 +2868,7 @@ mod tests {
                     scopes,
                     ..
                 } => {
-                    assert_eq!(
-                        authorization_url,
-                        "https://app.hubspot.com/oauth/authorize"
-                    );
+                    assert_eq!(authorization_url, "https://app.hubspot.com/oauth/authorize");
                     assert_eq!(token_url, "https://api.hubapi.com/oauth/v1/token");
                     assert!(scopes.contains(&"crm.objects.contacts.read".to_string()));
                     assert!(scopes.contains(&"crm.objects.deals.read".to_string()));
@@ -2876,20 +2884,24 @@ mod tests {
     fn provisioning_recipe_store_step_depends_on_oauth() {
         let recipe = provisioning_recipe();
         let store_step = &recipe.steps[1];
-        assert!(store_step
-            .depends_on
-            .iter()
-            .any(|d| d.as_str() == "oauth_authorize"));
+        assert!(
+            store_step
+                .depends_on
+                .iter()
+                .any(|d| d.as_str() == "oauth_authorize")
+        );
     }
 
     #[test]
     fn provisioning_recipe_webhook_step_depends_on_store() {
         let recipe = provisioning_recipe();
         let webhook_step = &recipe.steps[2];
-        assert!(webhook_step
-            .depends_on
-            .iter()
-            .any(|d| d.as_str() == "store_token"));
+        assert!(
+            webhook_step
+                .depends_on
+                .iter()
+                .any(|d| d.as_str() == "store_token")
+        );
     }
 
     #[test]
@@ -2898,10 +2910,16 @@ mod tests {
         let webhook_step = &recipe.steps[2];
         match &webhook_step.kind {
             ProvisioningStepType::Webhook { registration } => {
-                assert!(registration.events.contains(&"contact.creation".to_string()));
-                assert!(registration
-                    .events
-                    .contains(&"deal.propertyChange".to_string()));
+                assert!(
+                    registration
+                        .events
+                        .contains(&"contact.creation".to_string())
+                );
+                assert!(
+                    registration
+                        .events
+                        .contains(&"deal.propertyChange".to_string())
+                );
                 assert_eq!(registration.events.len(), 6);
             }
             other => panic!("expected Webhook step, got {other:?}"),
@@ -2930,10 +2948,7 @@ mod tests {
         let v = serde_json::to_value(&recipe).unwrap();
         assert_eq!(v["id"], "hubspot.oauth2_pkce");
         assert_eq!(v["version"], "1");
-        assert!(v["description"]
-            .as_str()
-            .unwrap()
-            .contains("OAuth2"));
+        assert!(v["description"].as_str().unwrap().contains("OAuth2"));
     }
 
     // ── base_url_policy tests ────────────────────────────────────────
@@ -3010,8 +3025,7 @@ mod tests {
 
     #[test]
     fn provisioning_readiness_network_ok_default_url() {
-        let config =
-            HubSpotConfig::from_params(&json!({ "access_token": "tok" })).unwrap();
+        let config = HubSpotConfig::from_params(&json!({ "access_token": "tok" })).unwrap();
         let readiness = config.provisioning_readiness();
         assert!(readiness.network_ok);
         assert_eq!(readiness.base_url, DEFAULT_BASE_URL);

@@ -883,8 +883,14 @@ async fn test_get_ticket_sla() {
         .unwrap();
 
     assert_eq!(result["ticket_metric"]["ticket_id"], 456);
-    assert_eq!(result["ticket_metric"]["reply_time_in_minutes"]["calendar"], 15);
-    assert_eq!(result["ticket_metric"]["first_resolution_time_in_minutes"]["business"], 60);
+    assert_eq!(
+        result["ticket_metric"]["reply_time_in_minutes"]["calendar"],
+        15
+    );
+    assert_eq!(
+        result["ticket_metric"]["first_resolution_time_in_minutes"]["business"],
+        60
+    );
 }
 
 #[fcp_async_core::runtime::test]

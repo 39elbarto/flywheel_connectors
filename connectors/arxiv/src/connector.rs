@@ -283,8 +283,7 @@ impl ArxivConnector {
     /// Handle the `self_check` method.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
         let Some(config) = &self.config else {
-            let report =
-                SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            let report = SelfCheckReport::degraded("not_configured", "Connector is not configured");
             return Self::serialize_self_check_report(report);
         };
 
@@ -1588,7 +1587,8 @@ mod tests {
 
     #[test]
     fn provisioning_readiness_bad_url_rejected() {
-        let config = ArxivConfig::from_params(&json!({"arxiv_base_url": "https://evil.example.com"}));
+        let config =
+            ArxivConfig::from_params(&json!({"arxiv_base_url": "https://evil.example.com"}));
         let readiness = config.provisioning_readiness();
         assert!(!readiness.network_ok);
         assert!(readiness.network_message.contains("export.arxiv.org"));

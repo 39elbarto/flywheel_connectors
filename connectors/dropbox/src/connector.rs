@@ -309,8 +309,7 @@ impl DropboxConnector {
     /// Handle the `self_check` method.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
         let Some(config) = &self.config else {
-            let report =
-                SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            let report = SelfCheckReport::degraded("not_configured", "Connector is not configured");
             return Self::serialize_self_check_report(report);
         };
 
@@ -1740,7 +1739,10 @@ mod tests {
         let v = serde_json::to_value(&recipe).unwrap();
         let oauth_step = &v["steps"][0];
         let flow = &oauth_step["flow"];
-        assert_eq!(flow["authorization_url"], "https://www.dropbox.com/oauth2/authorize");
+        assert_eq!(
+            flow["authorization_url"],
+            "https://www.dropbox.com/oauth2/authorize"
+        );
         assert_eq!(flow["token_url"], "https://api.dropboxapi.com/oauth2/token");
     }
 
@@ -1751,7 +1753,11 @@ mod tests {
         let oauth_step = &v["steps"][0];
         let scopes = oauth_step["flow"]["scopes"].as_array().unwrap();
         assert!(!scopes.is_empty());
-        assert!(scopes.iter().any(|s| s.as_str() == Some("files.metadata.read")));
+        assert!(
+            scopes
+                .iter()
+                .any(|s| s.as_str() == Some("files.metadata.read"))
+        );
     }
 
     #[test]

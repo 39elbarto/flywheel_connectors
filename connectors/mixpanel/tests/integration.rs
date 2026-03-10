@@ -71,8 +71,16 @@ async fn lifecycle_self_check() {
     let c = setup_connector(&server.uri()).await;
     let check = c.handle_self_check().await.unwrap();
     assert_eq!(check["status"], "ok");
-    assert!(check["details"]["provisioning"]["network_ok"].as_bool().unwrap());
-    assert!(check["details"]["provisioning"]["username_configured"].as_bool().unwrap());
+    assert!(
+        check["details"]["provisioning"]["network_ok"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        check["details"]["provisioning"]["username_configured"]
+            .as_bool()
+            .unwrap()
+    );
 }
 
 #[fcp_async_core::runtime::test]

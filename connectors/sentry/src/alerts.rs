@@ -66,11 +66,7 @@ impl AlertCondition {
 
     /// Add a parameter to this condition.
     #[must_use]
-    pub fn with_parameter(
-        mut self,
-        key: impl Into<String>,
-        value: serde_json::Value,
-    ) -> Self {
+    pub fn with_parameter(mut self, key: impl Into<String>, value: serde_json::Value) -> Self {
         self.parameters.insert(key.into(), value);
         self
     }
@@ -124,11 +120,7 @@ impl AlertAction {
 
     /// Add a parameter to this action.
     #[must_use]
-    pub fn with_parameter(
-        mut self,
-        key: impl Into<String>,
-        value: serde_json::Value,
-    ) -> Self {
+    pub fn with_parameter(mut self, key: impl Into<String>, value: serde_json::Value) -> Self {
         self.parameters.insert(key.into(), value);
         self
     }
@@ -162,11 +154,7 @@ impl AlertFilter {
 
     /// Add a parameter to this filter.
     #[must_use]
-    pub fn with_parameter(
-        mut self,
-        key: impl Into<String>,
-        value: serde_json::Value,
-    ) -> Self {
+    pub fn with_parameter(mut self, key: impl Into<String>, value: serde_json::Value) -> Self {
         self.parameters.insert(key.into(), value);
         self
     }
@@ -836,8 +824,7 @@ mod tests {
 
     #[test]
     fn alert_condition_serde_roundtrip() {
-        let c = AlertCondition::new("c1", "regression")
-            .with_parameter("threshold", json!(5));
+        let c = AlertCondition::new("c1", "regression").with_parameter("threshold", json!(5));
         let v = serde_json::to_value(&c).unwrap();
         let back: AlertCondition = serde_json::from_value(v).unwrap();
         assert_eq!(c, back);
@@ -939,8 +926,7 @@ mod tests {
 
     #[test]
     fn alert_action_with_parameter() {
-        let a = AlertAction::new("a1", "pagerduty")
-            .with_parameter("severity", json!("critical"));
+        let a = AlertAction::new("a1", "pagerduty").with_parameter("severity", json!("critical"));
         assert_eq!(a.parameters["severity"], json!("critical"));
     }
 
@@ -1002,12 +988,7 @@ mod tests {
 
     #[test]
     fn alert_action_common_types() {
-        for at in [
-            "notify_email",
-            "notify_event_service",
-            "slack",
-            "pagerduty",
-        ] {
+        for at in ["notify_email", "notify_event_service", "slack", "pagerduty"] {
             let a = AlertAction::new("id", at);
             assert_eq!(a.action_type, at);
         }
@@ -1025,8 +1006,7 @@ mod tests {
 
     #[test]
     fn alert_filter_with_parameter() {
-        let f = AlertFilter::new("f1", "issue_occurrences")
-            .with_parameter("value", json!(10));
+        let f = AlertFilter::new("f1", "issue_occurrences").with_parameter("value", json!(10));
         assert_eq!(f.parameters["value"], json!(10));
     }
 
@@ -1498,34 +1478,49 @@ mod tests {
     fn validator_validate_condition_empty_id() {
         let v = AlertRuleValidator::new();
         let c = AlertCondition::new("", "first_seen");
-        assert_eq!(v.validate_condition(&c).unwrap_err(), ValidationError::EmptyName);
+        assert_eq!(
+            v.validate_condition(&c).unwrap_err(),
+            ValidationError::EmptyName
+        );
     }
 
     #[test]
     fn validator_validate_condition_empty_type() {
         let v = AlertRuleValidator::new();
         let c = AlertCondition::new("c1", "");
-        assert_eq!(v.validate_condition(&c).unwrap_err(), ValidationError::EmptyName);
+        assert_eq!(
+            v.validate_condition(&c).unwrap_err(),
+            ValidationError::EmptyName
+        );
     }
 
     #[test]
     fn validator_validate_action_empty_id() {
         let v = AlertRuleValidator::new();
         let a = AlertAction::new("", "slack");
-        assert_eq!(v.validate_action(&a).unwrap_err(), ValidationError::EmptyName);
+        assert_eq!(
+            v.validate_action(&a).unwrap_err(),
+            ValidationError::EmptyName
+        );
     }
 
     #[test]
     fn validator_validate_action_empty_type() {
         let v = AlertRuleValidator::new();
         let a = AlertAction::new("a1", "");
-        assert_eq!(v.validate_action(&a).unwrap_err(), ValidationError::EmptyName);
+        assert_eq!(
+            v.validate_action(&a).unwrap_err(),
+            ValidationError::EmptyName
+        );
     }
 
     #[test]
     fn validator_validate_condition_valid() {
         let v = AlertRuleValidator::new();
-        assert!(v.validate_condition(&AlertCondition::new("c1", "first_seen")).is_ok());
+        assert!(
+            v.validate_condition(&AlertCondition::new("c1", "first_seen"))
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1565,7 +1560,10 @@ mod tests {
 
     #[test]
     fn validation_error_display_empty_name() {
-        assert_eq!(ValidationError::EmptyName.to_string(), "alert rule name must not be empty");
+        assert_eq!(
+            ValidationError::EmptyName.to_string(),
+            "alert rule name must not be empty"
+        );
     }
 
     #[test]
@@ -1581,7 +1579,11 @@ mod tests {
 
     #[test]
     fn validation_error_display_no_conditions() {
-        assert!(ValidationError::NoConditions.to_string().contains("condition"));
+        assert!(
+            ValidationError::NoConditions
+                .to_string()
+                .contains("condition")
+        );
     }
 
     #[test]

@@ -1966,9 +1966,7 @@ async fn library_tracks_check() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/me/tracks/contains"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!([true, false])),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([true, false])))
         .mount(&server)
         .await;
 

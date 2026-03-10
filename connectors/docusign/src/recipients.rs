@@ -505,9 +505,7 @@ impl RecipientTabs {
     /// Returns `true` if any tab is an initials field.
     #[must_use]
     pub fn has_initials(&self) -> bool {
-        self.tabs
-            .iter()
-            .any(|t| t.tab_type == TabType::InitialHere)
+        self.tabs.iter().any(|t| t.tab_type == TabType::InitialHere)
     }
 }
 
@@ -706,10 +704,7 @@ impl fmt::Display for ValidationError {
                 recipient_id,
                 tab_index,
                 error,
-            } => write!(
-                f,
-                "recipient {recipient_id} tab {tab_index}: {error}"
-            ),
+            } => write!(f, "recipient {recipient_id} tab {tab_index}: {error}"),
             Self::TooManyRecipients { count, max } => {
                 write!(f, "too many recipients: {count} (max {max})")
             }
@@ -840,12 +835,7 @@ pub struct RecipientsAuditEvent {
 impl RecipientsAuditEvent {
     /// Create a new audit event.
     #[must_use]
-    pub fn new(
-        timestamp: &str,
-        action: &str,
-        recipient_count: usize,
-        tab_count: usize,
-    ) -> Self {
+    pub fn new(timestamp: &str, action: &str, recipient_count: usize, tab_count: usize) -> Self {
         Self {
             timestamp: timestamp.to_owned(),
             action: action.to_owned(),
@@ -907,7 +897,10 @@ mod tests {
 
     #[test]
     fn role_as_str_certified_delivery() {
-        assert_eq!(RecipientRole::CertifiedDelivery.as_str(), "certifiedDelivery");
+        assert_eq!(
+            RecipientRole::CertifiedDelivery.as_str(),
+            "certifiedDelivery"
+        );
     }
 
     #[test]
@@ -1113,11 +1106,26 @@ mod tests {
 
     #[test]
     fn recipient_validation_error_display() {
-        assert_eq!(RecipientValidationError::EmptyEmail.to_string(), "email must not be empty");
-        assert_eq!(RecipientValidationError::InvalidEmailFormat.to_string(), "email must contain '@'");
-        assert_eq!(RecipientValidationError::EmptyName.to_string(), "name must not be empty");
-        assert_eq!(RecipientValidationError::EmptyRecipientId.to_string(), "recipient_id must not be empty");
-        assert_eq!(RecipientValidationError::ZeroRoutingOrder.to_string(), "routing_order must be >= 1");
+        assert_eq!(
+            RecipientValidationError::EmptyEmail.to_string(),
+            "email must not be empty"
+        );
+        assert_eq!(
+            RecipientValidationError::InvalidEmailFormat.to_string(),
+            "email must contain '@'"
+        );
+        assert_eq!(
+            RecipientValidationError::EmptyName.to_string(),
+            "name must not be empty"
+        );
+        assert_eq!(
+            RecipientValidationError::EmptyRecipientId.to_string(),
+            "recipient_id must not be empty"
+        );
+        assert_eq!(
+            RecipientValidationError::ZeroRoutingOrder.to_string(),
+            "routing_order must be >= 1"
+        );
     }
 
     // ===================================================================
@@ -1275,7 +1283,11 @@ mod tests {
 
     #[test]
     fn placement_coordinate_debug() {
-        let p = TabPlacement::Coordinate { page: 1, x: 100, y: 200 };
+        let p = TabPlacement::Coordinate {
+            page: 1,
+            x: 100,
+            y: 200,
+        };
         let dbg = format!("{p:?}");
         assert!(dbg.contains("Coordinate"));
     }
@@ -1294,15 +1306,31 @@ mod tests {
 
     #[test]
     fn placement_coordinate_eq() {
-        let a = TabPlacement::Coordinate { page: 1, x: 50, y: 60 };
-        let b = TabPlacement::Coordinate { page: 1, x: 50, y: 60 };
+        let a = TabPlacement::Coordinate {
+            page: 1,
+            x: 50,
+            y: 60,
+        };
+        let b = TabPlacement::Coordinate {
+            page: 1,
+            x: 50,
+            y: 60,
+        };
         assert_eq!(a, b);
     }
 
     #[test]
     fn placement_coordinate_ne() {
-        let a = TabPlacement::Coordinate { page: 1, x: 50, y: 60 };
-        let b = TabPlacement::Coordinate { page: 2, x: 50, y: 60 };
+        let a = TabPlacement::Coordinate {
+            page: 1,
+            x: 50,
+            y: 60,
+        };
+        let b = TabPlacement::Coordinate {
+            page: 2,
+            x: 50,
+            y: 60,
+        };
         assert_ne!(a, b);
     }
 
@@ -1325,7 +1353,11 @@ mod tests {
 
     #[test]
     fn placement_serde_roundtrip_coordinate() {
-        let p = TabPlacement::Coordinate { page: 3, x: 150, y: 300 };
+        let p = TabPlacement::Coordinate {
+            page: 3,
+            x: 150,
+            y: 300,
+        };
         let json = serde_json::to_value(&p).unwrap();
         let back: TabPlacement = serde_json::from_value(json).unwrap();
         assert_eq!(p, back);
@@ -1346,7 +1378,11 @@ mod tests {
 
     #[test]
     fn placement_clone() {
-        let p = TabPlacement::Coordinate { page: 1, x: 10, y: 20 };
+        let p = TabPlacement::Coordinate {
+            page: 1,
+            x: 10,
+            y: 20,
+        };
         let cloned = p.clone();
         assert_eq!(p, cloned);
     }
@@ -1362,7 +1398,14 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(tab.tab_type, TabType::SignHere);
-        assert_eq!(tab.placement, TabPlacement::Coordinate { page: 1, x: 100, y: 200 });
+        assert_eq!(
+            tab.placement,
+            TabPlacement::Coordinate {
+                page: 1,
+                x: 100,
+                y: 200
+            }
+        );
         assert!(!tab.required);
         assert!(!tab.locked);
         assert!(!tab.bold);
@@ -1375,7 +1418,12 @@ mod tests {
             .build()
             .unwrap();
         match &tab.placement {
-            TabPlacement::Anchor { anchor_string, x_offset, y_offset, page } => {
+            TabPlacement::Anchor {
+                anchor_string,
+                x_offset,
+                y_offset,
+                page,
+            } => {
                 assert_eq!(anchor_string, "Sign here:");
                 assert_eq!(*x_offset, 5);
                 assert_eq!(*y_offset, -10);
@@ -1570,43 +1618,70 @@ mod tests {
 
     #[test]
     fn tab_validation_error_display_missing_placement() {
-        assert_eq!(TabValidationError::MissingPlacement.to_string(), "tab placement is required");
+        assert_eq!(
+            TabValidationError::MissingPlacement.to_string(),
+            "tab placement is required"
+        );
     }
 
     #[test]
     fn tab_validation_error_display_invalid_coordinate() {
-        assert_eq!(TabValidationError::InvalidCoordinate.to_string(), "coordinate values out of range");
+        assert_eq!(
+            TabValidationError::InvalidCoordinate.to_string(),
+            "coordinate values out of range"
+        );
     }
 
     #[test]
     fn tab_validation_error_display_empty_anchor() {
-        assert_eq!(TabValidationError::EmptyAnchorString.to_string(), "anchor string must not be empty");
+        assert_eq!(
+            TabValidationError::EmptyAnchorString.to_string(),
+            "anchor string must not be empty"
+        );
     }
 
     #[test]
     fn tab_validation_error_display_anchor_too_long() {
-        assert_eq!(TabValidationError::AnchorTooLong.to_string(), "anchor string exceeds maximum length");
+        assert_eq!(
+            TabValidationError::AnchorTooLong.to_string(),
+            "anchor string exceeds maximum length"
+        );
     }
 
     #[test]
     fn tab_validation_error_display_invalid_page() {
-        assert_eq!(TabValidationError::InvalidPageNumber.to_string(), "page number must be >= 1");
+        assert_eq!(
+            TabValidationError::InvalidPageNumber.to_string(),
+            "page number must be >= 1"
+        );
     }
 
     #[test]
     fn tab_validation_error_display_value_too_long() {
-        assert_eq!(TabValidationError::ValueTooLong.to_string(), "value exceeds maximum length");
+        assert_eq!(
+            TabValidationError::ValueTooLong.to_string(),
+            "value exceeds maximum length"
+        );
     }
 
     #[test]
     fn tab_validation_error_display_negative_offset() {
-        assert_eq!(TabValidationError::NegativeOffset.to_string(), "negative offset not allowed");
+        assert_eq!(
+            TabValidationError::NegativeOffset.to_string(),
+            "negative offset not allowed"
+        );
     }
 
     #[test]
     fn tab_validation_error_eq() {
-        assert_eq!(TabValidationError::MissingPlacement, TabValidationError::MissingPlacement);
-        assert_ne!(TabValidationError::MissingPlacement, TabValidationError::EmptyAnchorString);
+        assert_eq!(
+            TabValidationError::MissingPlacement,
+            TabValidationError::MissingPlacement
+        );
+        assert_ne!(
+            TabValidationError::MissingPlacement,
+            TabValidationError::EmptyAnchorString
+        );
     }
 
     #[test]
@@ -1985,7 +2060,11 @@ mod tests {
         er.add_recipient(make_recipient("2", RecipientRole::CarbonCopy, 2));
         er.add_recipient(make_recipient("3", RecipientRole::Editor, 3));
         let errors = v.validate_all(&er);
-        assert!(errors.iter().any(|e| matches!(e, ValidationError::TooManyRecipients { .. })));
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::TooManyRecipients { .. }))
+        );
     }
 
     #[test]
@@ -2000,7 +2079,11 @@ mod tests {
         er.add_tab_to_recipient("1", make_sign_tab(1, 100, 200));
         er.add_tab_to_recipient("1", make_sign_tab(1, 100, 300));
         let errors = v.validate_all(&er);
-        assert!(errors.iter().any(|e| matches!(e, ValidationError::TooManyTabs { .. })));
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::TooManyTabs { .. }))
+        );
     }
 
     #[test]
@@ -2012,8 +2095,16 @@ mod tests {
         er.add_recipient(bad);
         er.add_tab_to_recipient("1", make_sign_tab(0, 0, 0));
         let errors = v.validate_all(&er);
-        assert!(errors.iter().any(|e| matches!(e, ValidationError::Recipient { .. })));
-        assert!(errors.iter().any(|e| matches!(e, ValidationError::Tab { .. })));
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::Recipient { .. }))
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::Tab { .. }))
+        );
     }
 
     #[test]

@@ -707,8 +707,7 @@ mod tests {
 
     #[test]
     fn query_with_types_replaces() {
-        let q = SearchQuery::new("test")
-            .with_types(vec![SearchType::Artist, SearchType::Album]);
+        let q = SearchQuery::new("test").with_types(vec![SearchType::Artist, SearchType::Album]);
         assert_eq!(q.search_types.len(), 2);
         assert!(!q.search_types.contains(&SearchType::Track));
     }
@@ -762,8 +761,11 @@ mod tests {
 
     #[test]
     fn query_type_string_multiple() {
-        let q = SearchQuery::new("test")
-            .with_types(vec![SearchType::Track, SearchType::Album, SearchType::Artist]);
+        let q = SearchQuery::new("test").with_types(vec![
+            SearchType::Track,
+            SearchType::Album,
+            SearchType::Artist,
+        ]);
         assert_eq!(q.type_string(), "track,album,artist");
     }
 
@@ -1700,29 +1702,20 @@ mod tests {
 
     #[test]
     fn validation_error_display_invalid_limit() {
-        let e = SearchValidationError::InvalidLimit {
-            value: 0,
-            max: 50,
-        };
+        let e = SearchValidationError::InvalidLimit { value: 0, max: 50 };
         assert_eq!(e.to_string(), "limit 0 is invalid (must be 1..=50)");
     }
 
     #[test]
     fn validation_error_display_no_types() {
         let e = SearchValidationError::NoSearchTypes;
-        assert_eq!(
-            e.to_string(),
-            "at least one search type must be specified"
-        );
+        assert_eq!(e.to_string(), "at least one search type must be specified");
     }
 
     #[test]
     fn validation_error_display_invalid_offset() {
         let e = SearchValidationError::InvalidOffset { value: 5000 };
-        assert_eq!(
-            e.to_string(),
-            "offset 5000 exceeds maximum allowed value"
-        );
+        assert_eq!(e.to_string(), "offset 5000 exceeds maximum allowed value");
     }
 
     #[test]
@@ -1779,10 +1772,7 @@ mod tests {
                 length: 300,
                 max: 256,
             },
-            SearchValidationError::InvalidLimit {
-                value: 0,
-                max: 50,
-            },
+            SearchValidationError::InvalidLimit { value: 0, max: 50 },
             SearchValidationError::NoSearchTypes,
             SearchValidationError::InvalidOffset { value: 5000 },
         ];
@@ -1871,10 +1861,7 @@ mod tests {
     #[test]
     fn query_type_string_all_types() {
         let q = SearchQuery::new("test").with_types(SearchType::all().to_vec());
-        assert_eq!(
-            q.type_string(),
-            "track,album,artist,playlist,show,episode"
-        );
+        assert_eq!(q.type_string(), "track,album,artist,playlist,show,episode");
     }
 
     #[test]

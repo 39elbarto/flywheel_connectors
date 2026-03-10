@@ -82,12 +82,12 @@ async fn lifecycle_self_check_ready() {
     let c = setup_connector(&server.uri()).await;
     let check = c.handle_self_check().await.unwrap();
     assert_eq!(check["status"], "ok");
-    assert!(check["details"]["provisioning"]["network_ok"]
-        .as_bool()
-        .unwrap());
-    assert_eq!(
-        check["details"]["provisioning"]["auth_mode"], "api_key"
+    assert!(
+        check["details"]["provisioning"]["network_ok"]
+            .as_bool()
+            .unwrap()
     );
+    assert_eq!(check["details"]["provisioning"]["auth_mode"], "api_key");
 }
 
 #[fcp_async_core::runtime::test]
@@ -109,9 +109,11 @@ async fn lifecycle_self_check_credential_id() {
     let check = c.handle_self_check().await.unwrap();
     assert_eq!(check["status"], "degraded");
     assert_eq!(check["reason_code"], "credential_injection_required");
-    assert!(check["details"]["provisioning"]["requires_credential_injection"]
-        .as_bool()
-        .unwrap());
+    assert!(
+        check["details"]["provisioning"]["requires_credential_injection"]
+            .as_bool()
+            .unwrap()
+    );
 }
 
 #[fcp_async_core::runtime::test]

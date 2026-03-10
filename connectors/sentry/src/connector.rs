@@ -330,7 +330,8 @@ impl SentryConnector {
                 self.invoke_performance_transactions(client, &input).await
             }
             "sentry.performance.transaction.summary" => {
-                self.invoke_performance_transaction_summary(client, &input).await
+                self.invoke_performance_transaction_summary(client, &input)
+                    .await
             }
             "sentry.performance.trace.summary" => {
                 self.invoke_performance_trace_summary(client, &input).await
@@ -664,11 +665,23 @@ impl SentryConnector {
         let first_seen_end = input.get("first_seen_end").and_then(|v| v.as_str());
         let sort = input.get("sort").and_then(|v| v.as_str());
         let cursor = input.get("cursor").and_then(|v| v.as_str());
-        let per_page = input.get("per_page").and_then(|v| v.as_u64()).map(|v| v as u32);
+        let per_page = input
+            .get("per_page")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
         let data = client
             .search_issues(
-                org, project, query, status, assigned_to, level,
-                first_seen_start, first_seen_end, sort, cursor, per_page,
+                org,
+                project,
+                query,
+                status,
+                assigned_to,
+                level,
+                first_seen_start,
+                first_seen_end,
+                sort,
+                cursor,
+                per_page,
             )
             .await?;
         Ok(json!({ "issues": data }))
@@ -755,11 +768,22 @@ impl SentryConnector {
         let start = input.get("start").and_then(|v| v.as_str());
         let end = input.get("end").and_then(|v| v.as_str());
         let sort = input.get("sort").and_then(|v| v.as_str());
-        let per_page = input.get("per_page").and_then(|v| v.as_u64()).map(|v| v as u32);
+        let per_page = input
+            .get("per_page")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
         let cursor = input.get("cursor").and_then(|v| v.as_str());
         let data = client
             .query_transactions(
-                org, project, transaction, environment, start, end, sort, per_page, cursor,
+                org,
+                project,
+                transaction,
+                environment,
+                start,
+                end,
+                sort,
+                per_page,
+                cursor,
             )
             .await?;
         Ok(data)

@@ -865,7 +865,13 @@ async fn list_documents() {
         .await
         .unwrap();
     assert!(result["documents"].is_object());
-    assert_eq!(result["documents"]["envelopeDocuments"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        result["documents"]["envelopeDocuments"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
 }
 
 #[fcp_async_core::runtime::test]

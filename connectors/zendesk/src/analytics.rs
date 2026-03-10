@@ -374,11 +374,7 @@ impl MetricDataPoint {
     }
 
     /// Create a new data point with a label.
-    pub fn with_label(
-        timestamp: impl Into<String>,
-        value: f64,
-        label: impl Into<String>,
-    ) -> Self {
+    pub fn with_label(timestamp: impl Into<String>, value: f64, label: impl Into<String>) -> Self {
         Self {
             timestamp: timestamp.into(),
             value,
@@ -838,9 +834,7 @@ pub fn validate_csat_score(score: f64) -> Result<f64, AnalyticsError> {
 
 /// Sanitize agent workload data by removing raw identity information.
 /// Returns aggregate-only values suitable for reporting.
-pub fn sanitize_agent_workload(
-    agent_ticket_counts: &[u64],
-) -> (f64, f64, f64, f64) {
+pub fn sanitize_agent_workload(agent_ticket_counts: &[u64]) -> (f64, f64, f64, f64) {
     if agent_ticket_counts.is_empty() {
         return (0.0, 0.0, 0.0, 0.0);
     }
@@ -1018,7 +1012,11 @@ mod tests {
 
     #[test]
     fn time_window_new() {
-        let tw = TimeWindow::new("2026-01-01T00:00:00Z", "2026-01-31T23:59:59Z", Granularity::Daily);
+        let tw = TimeWindow::new(
+            "2026-01-01T00:00:00Z",
+            "2026-01-31T23:59:59Z",
+            Granularity::Daily,
+        );
         assert_eq!(tw.start, "2026-01-01T00:00:00Z");
         assert_eq!(tw.end, "2026-01-31T23:59:59Z");
         assert_eq!(tw.granularity, Granularity::Daily);
@@ -1191,7 +1189,11 @@ mod tests {
     fn metric_query_builder_basic() {
         let q = MetricQuery::new()
             .add_metric(MetricType::TicketVolume)
-            .with_time_window(TimeWindow::new("2026-01-01", "2026-01-31", Granularity::Daily));
+            .with_time_window(TimeWindow::new(
+                "2026-01-01",
+                "2026-01-31",
+                Granularity::Daily,
+            ));
         assert_eq!(q.metrics.len(), 1);
         assert!(q.time_window.is_some());
         assert!(q.validate().is_ok());
@@ -1203,7 +1205,11 @@ mod tests {
             .add_metric(MetricType::TicketVolume)
             .add_metric(MetricType::Csat)
             .add_metric(MetricType::ResolutionTime)
-            .with_time_window(TimeWindow::new("2026-01-01", "2026-01-31", Granularity::Daily));
+            .with_time_window(TimeWindow::new(
+                "2026-01-01",
+                "2026-01-31",
+                Granularity::Daily,
+            ));
         assert_eq!(q.metrics.len(), 3);
         assert_eq!(q.metric_count(), 3);
         assert!(q.validate().is_ok());
@@ -1213,7 +1219,11 @@ mod tests {
     fn metric_query_builder_with_group_by() {
         let q = MetricQuery::new()
             .add_metric(MetricType::TicketVolume)
-            .with_time_window(TimeWindow::new("2026-01-01", "2026-01-31", Granularity::Daily))
+            .with_time_window(TimeWindow::new(
+                "2026-01-01",
+                "2026-01-31",
+                Granularity::Daily,
+            ))
             .group_by(GroupBy::Priority);
         assert_eq!(q.group_by, Some(GroupBy::Priority));
         assert!(q.validate().is_ok());
@@ -1223,7 +1233,11 @@ mod tests {
     fn metric_query_builder_with_filter() {
         let q = MetricQuery::new()
             .add_metric(MetricType::TicketVolume)
-            .with_time_window(TimeWindow::new("2026-01-01", "2026-01-31", Granularity::Daily))
+            .with_time_window(TimeWindow::new(
+                "2026-01-01",
+                "2026-01-31",
+                Granularity::Daily,
+            ))
             .add_filter(MetricFilter::new("priority", FilterOp::Equals, "high"));
         assert_eq!(q.filters.len(), 1);
         assert!(q.validate().is_ok());
@@ -1231,8 +1245,11 @@ mod tests {
 
     #[test]
     fn metric_query_validate_empty_metrics() {
-        let q = MetricQuery::new()
-            .with_time_window(TimeWindow::new("2026-01-01", "2026-01-31", Granularity::Daily));
+        let q = MetricQuery::new().with_time_window(TimeWindow::new(
+            "2026-01-01",
+            "2026-01-31",
+            Granularity::Daily,
+        ));
         assert!(q.validate().is_err());
     }
 
@@ -1247,7 +1264,11 @@ mod tests {
         let q = MetricQuery::new()
             .add_metric(MetricType::TicketVolume)
             .add_metric(MetricType::TicketVolume)
-            .with_time_window(TimeWindow::new("2026-01-01", "2026-01-31", Granularity::Daily));
+            .with_time_window(TimeWindow::new(
+                "2026-01-01",
+                "2026-01-31",
+                Granularity::Daily,
+            ));
         assert!(q.validate().is_err());
     }
 
@@ -1255,7 +1276,11 @@ mod tests {
     fn metric_query_validate_empty_filter_field() {
         let q = MetricQuery::new()
             .add_metric(MetricType::TicketVolume)
-            .with_time_window(TimeWindow::new("2026-01-01", "2026-01-31", Granularity::Daily))
+            .with_time_window(TimeWindow::new(
+                "2026-01-01",
+                "2026-01-31",
+                Granularity::Daily,
+            ))
             .add_filter(MetricFilter::new("", FilterOp::Equals, "val"));
         assert!(q.validate().is_err());
     }
@@ -1285,7 +1310,11 @@ mod tests {
     fn metric_query_serde_roundtrip() {
         let q = MetricQuery::new()
             .add_metric(MetricType::Csat)
-            .with_time_window(TimeWindow::new("2026-01-01", "2026-01-31", Granularity::Weekly))
+            .with_time_window(TimeWindow::new(
+                "2026-01-01",
+                "2026-01-31",
+                Granularity::Weekly,
+            ))
             .group_by(GroupBy::Brand);
         let json = serde_json::to_string(&q).unwrap();
         let parsed: MetricQuery = serde_json::from_str(&json).unwrap();
@@ -1297,7 +1326,11 @@ mod tests {
     fn metric_query_multiple_filters() {
         let q = MetricQuery::new()
             .add_metric(MetricType::TicketVolume)
-            .with_time_window(TimeWindow::new("2026-01-01", "2026-01-31", Granularity::Daily))
+            .with_time_window(TimeWindow::new(
+                "2026-01-01",
+                "2026-01-31",
+                Granularity::Daily,
+            ))
             .add_filter(MetricFilter::new("priority", FilterOp::Equals, "high"))
             .add_filter(MetricFilter::new("status", FilterOp::NotEquals, "closed"));
         assert_eq!(q.filters.len(), 2);
@@ -1308,7 +1341,11 @@ mod tests {
     fn metric_query_validate_bad_time_window() {
         let q = MetricQuery::new()
             .add_metric(MetricType::TicketVolume)
-            .with_time_window(TimeWindow::new("2026-02-01", "2026-01-01", Granularity::Daily));
+            .with_time_window(TimeWindow::new(
+                "2026-02-01",
+                "2026-01-01",
+                Granularity::Daily,
+            ));
         assert!(q.validate().is_err());
     }
 
@@ -1777,7 +1814,10 @@ mod tests {
         let tw = TimeWindow::new("2026-01-01", "2026-01-31", Granularity::Daily);
         let mut report = AnalyticsReport::new(tw, "2026-02-01");
         assert_eq!(report.series_count(), 0);
-        report.add_series(MetricSeries::new(MetricType::TicketVolume, Aggregation::Sum));
+        report.add_series(MetricSeries::new(
+            MetricType::TicketVolume,
+            Aggregation::Sum,
+        ));
         report.add_series(MetricSeries::new(MetricType::Csat, Aggregation::Average));
         assert_eq!(report.series_count(), 2);
     }
@@ -1788,7 +1828,11 @@ mod tests {
     fn audit_event_from_query_standard() {
         let q = MetricQuery::new()
             .add_metric(MetricType::TicketVolume)
-            .with_time_window(TimeWindow::new("2026-01-01", "2026-01-31", Granularity::Daily));
+            .with_time_window(TimeWindow::new(
+                "2026-01-01",
+                "2026-01-31",
+                Granularity::Daily,
+            ));
         let event = AnalyticsAuditEvent::from_query(&q, "2026-02-01T00:00:00Z");
         assert_eq!(event.query_type, "analytics_standard");
         assert_eq!(event.metric_count, 1);
@@ -1800,7 +1844,11 @@ mod tests {
         let q = MetricQuery::new()
             .add_metric(MetricType::AgentWorkload)
             .add_metric(MetricType::TicketVolume)
-            .with_time_window(TimeWindow::new("2026-01-01", "2026-01-31", Granularity::Daily));
+            .with_time_window(TimeWindow::new(
+                "2026-01-01",
+                "2026-01-31",
+                Granularity::Daily,
+            ));
         let event = AnalyticsAuditEvent::from_query(&q, "2026-02-01");
         assert_eq!(event.query_type, "analytics_with_workload");
         assert_eq!(event.metric_count, 2);
@@ -1817,7 +1865,11 @@ mod tests {
     fn audit_event_log_summary() {
         let q = MetricQuery::new()
             .add_metric(MetricType::TicketVolume)
-            .with_time_window(TimeWindow::new("2026-01-01", "2026-01-31", Granularity::Daily));
+            .with_time_window(TimeWindow::new(
+                "2026-01-01",
+                "2026-01-31",
+                Granularity::Daily,
+            ));
         let event = AnalyticsAuditEvent::from_query(&q, "2026-02-01");
         let summary = event.log_summary();
         assert!(summary.contains("2026-02-01"));
@@ -2051,7 +2103,11 @@ mod tests {
             .add_metric(MetricType::TicketVolume)
             .add_metric(MetricType::FirstResponseTime)
             .add_metric(MetricType::Csat)
-            .with_time_window(TimeWindow::new("2026-01-01", "2026-01-31", Granularity::Daily))
+            .with_time_window(TimeWindow::new(
+                "2026-01-01",
+                "2026-01-31",
+                Granularity::Daily,
+            ))
             .group_by(GroupBy::Priority)
             .add_filter(MetricFilter::new("status", FilterOp::NotEquals, "closed"));
         assert!(query.validate().is_ok());
@@ -2061,10 +2117,8 @@ mod tests {
         assert_eq!(audit.metric_count, 3);
 
         // Build report with mock data
-        let mut report = AnalyticsReport::new(
-            query.time_window.clone().unwrap(),
-            "2026-02-01T10:00:00Z",
-        );
+        let mut report =
+            AnalyticsReport::new(query.time_window.clone().unwrap(), "2026-02-01T10:00:00Z");
         report.add_filter_description(query.filters[0].description());
 
         let vol = build_series(
@@ -2112,8 +2166,11 @@ mod tests {
     #[test]
     fn query_validation_catches_all_errors() {
         // No metrics
-        let q1 = MetricQuery::new()
-            .with_time_window(TimeWindow::new("2026-01-01", "2026-01-31", Granularity::Daily));
+        let q1 = MetricQuery::new().with_time_window(TimeWindow::new(
+            "2026-01-01",
+            "2026-01-31",
+            Granularity::Daily,
+        ));
         assert!(matches!(q1.validate(), Err(AnalyticsError::EmptyQuery(_))));
 
         // No time window
@@ -2127,7 +2184,11 @@ mod tests {
         let q3 = MetricQuery::new()
             .add_metric(MetricType::Csat)
             .add_metric(MetricType::Csat)
-            .with_time_window(TimeWindow::new("2026-01-01", "2026-01-31", Granularity::Daily));
+            .with_time_window(TimeWindow::new(
+                "2026-01-01",
+                "2026-01-31",
+                Granularity::Daily,
+            ));
         assert!(matches!(
             q3.validate(),
             Err(AnalyticsError::DuplicateMetric(_))
@@ -2136,7 +2197,11 @@ mod tests {
         // Empty filter field
         let q4 = MetricQuery::new()
             .add_metric(MetricType::TicketVolume)
-            .with_time_window(TimeWindow::new("2026-01-01", "2026-01-31", Granularity::Daily))
+            .with_time_window(TimeWindow::new(
+                "2026-01-01",
+                "2026-01-31",
+                Granularity::Daily,
+            ))
             .add_filter(MetricFilter::new("", FilterOp::Equals, "x"));
         assert!(matches!(
             q4.validate(),
@@ -2233,7 +2298,10 @@ mod tests {
     fn analytics_report_clone() {
         let tw = TimeWindow::new("2026-01-01", "2026-01-31", Granularity::Daily);
         let mut report = AnalyticsReport::new(tw, "2026-02-01");
-        report.add_series(MetricSeries::new(MetricType::TicketVolume, Aggregation::Sum));
+        report.add_series(MetricSeries::new(
+            MetricType::TicketVolume,
+            Aggregation::Sum,
+        ));
         let cloned = report.clone();
         assert_eq!(report.series_count(), cloned.series_count());
     }
@@ -2254,7 +2322,11 @@ mod tests {
     fn metric_query_clone() {
         let q = MetricQuery::new()
             .add_metric(MetricType::TicketVolume)
-            .with_time_window(TimeWindow::new("2026-01-01", "2026-01-31", Granularity::Daily));
+            .with_time_window(TimeWindow::new(
+                "2026-01-01",
+                "2026-01-31",
+                Granularity::Daily,
+            ));
         let cloned = q.clone();
         assert_eq!(q.metrics.len(), cloned.metrics.len());
     }
@@ -2315,7 +2387,11 @@ mod tests {
             .add_metric(MetricType::AgentWorkload)
             .add_metric(MetricType::ReopenRate)
             .add_metric(MetricType::OneTouch)
-            .with_time_window(TimeWindow::new("2026-01-01", "2026-12-31", Granularity::Monthly));
+            .with_time_window(TimeWindow::new(
+                "2026-01-01",
+                "2026-12-31",
+                Granularity::Monthly,
+            ));
         assert_eq!(q.metric_count(), 8);
         assert!(q.validate().is_ok());
         assert!(q.includes_agent_workload());
@@ -2365,7 +2441,11 @@ mod tests {
     fn metric_query_serde_with_filters() {
         let q = MetricQuery::new()
             .add_metric(MetricType::TicketVolume)
-            .with_time_window(TimeWindow::new("2026-01-01", "2026-01-31", Granularity::Daily))
+            .with_time_window(TimeWindow::new(
+                "2026-01-01",
+                "2026-01-31",
+                Granularity::Daily,
+            ))
             .add_filter(MetricFilter::new("priority", FilterOp::In, "high,urgent"))
             .add_filter(MetricFilter::new("channel", FilterOp::Equals, "email"));
         let json = serde_json::to_string(&q).unwrap();

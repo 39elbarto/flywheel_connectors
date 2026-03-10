@@ -272,9 +272,8 @@ impl EnvelopeConfig {
             doc.validate(self)?;
         }
         if let Some(ref recips) = envelope.recipients {
-            let total = recips.signers.len()
-                + recips.cc_recipients.len()
-                + recips.carbon_copies.len();
+            let total =
+                recips.signers.len() + recips.cc_recipients.len() + recips.carbon_copies.len();
             if total > self.max_recipients {
                 return Err(EnvelopeValidationError::TooManyRecipients {
                     max: self.max_recipients,
@@ -745,21 +744,30 @@ mod tests {
     fn document_validate_empty_name() {
         let doc = test_doc("", "pdf");
         let err = doc.validate(&EnvelopeConfig::default()).unwrap_err();
-        assert!(matches!(err, EnvelopeValidationError::InvalidContentType { .. }));
+        assert!(matches!(
+            err,
+            EnvelopeValidationError::InvalidContentType { .. }
+        ));
     }
 
     #[test]
     fn document_validate_disallowed_extension() {
         let doc = test_doc("malware.exe", "exe");
         let err = doc.validate(&EnvelopeConfig::default()).unwrap_err();
-        assert!(matches!(err, EnvelopeValidationError::InvalidContentType { .. }));
+        assert!(matches!(
+            err,
+            EnvelopeValidationError::InvalidContentType { .. }
+        ));
     }
 
     #[test]
     fn document_validate_disallowed_zip() {
         let doc = test_doc("archive.zip", "zip");
         let err = doc.validate(&EnvelopeConfig::default()).unwrap_err();
-        assert!(matches!(err, EnvelopeValidationError::InvalidContentType { .. }));
+        assert!(matches!(
+            err,
+            EnvelopeValidationError::InvalidContentType { .. }
+        ));
     }
 
     #[test]
@@ -1095,8 +1103,13 @@ mod tests {
     #[test]
     fn config_validate_document_bad_ext() {
         let c = EnvelopeConfig::default();
-        let err = c.validate_document(&test_doc("bad.txt", "txt")).unwrap_err();
-        assert!(matches!(err, EnvelopeValidationError::InvalidContentType { .. }));
+        let err = c
+            .validate_document(&test_doc("bad.txt", "txt"))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            EnvelopeValidationError::InvalidContentType { .. }
+        ));
     }
 
     #[test]
@@ -1132,7 +1145,10 @@ mod tests {
             created_at: None,
             updated_at: None,
         };
-        assert_eq!(c.validate_envelope(&e).unwrap_err(), EnvelopeValidationError::EmptySubject);
+        assert_eq!(
+            c.validate_envelope(&e).unwrap_err(),
+            EnvelopeValidationError::EmptySubject
+        );
     }
 
     #[test]
@@ -1150,7 +1166,10 @@ mod tests {
         };
         assert!(matches!(
             c.validate_envelope(&e).unwrap_err(),
-            EnvelopeValidationError::SubjectTooLong { max: 100, actual: 101 }
+            EnvelopeValidationError::SubjectTooLong {
+                max: 100,
+                actual: 101
+            }
         ));
     }
 
@@ -1167,7 +1186,10 @@ mod tests {
             created_at: None,
             updated_at: None,
         };
-        assert_eq!(c.validate_envelope(&e).unwrap_err(), EnvelopeValidationError::NoDocuments);
+        assert_eq!(
+            c.validate_envelope(&e).unwrap_err(),
+            EnvelopeValidationError::NoDocuments
+        );
     }
 
     #[test]
@@ -1192,7 +1214,10 @@ mod tests {
         };
         assert!(matches!(
             c.validate_envelope(&e).unwrap_err(),
-            EnvelopeValidationError::TooManyDocuments { max: 10, actual: 11 }
+            EnvelopeValidationError::TooManyDocuments {
+                max: 10,
+                actual: 11
+            }
         ));
     }
 
@@ -1255,10 +1280,7 @@ mod tests {
             email_body: None,
             documents: vec![test_doc("a.pdf", "pdf")],
             recipients: Some(Recipients {
-                signers: vec![
-                    test_signer("1", "a@b.com"),
-                    test_signer("1", "b@b.com"),
-                ],
+                signers: vec![test_signer("1", "a@b.com"), test_signer("1", "b@b.com")],
                 cc_recipients: vec![],
                 carbon_copies: vec![],
             }),
@@ -1511,7 +1533,10 @@ mod tests {
             .add_signer(test_signer("1", "a@b.com"))
             .build()
             .unwrap_err();
-        assert!(matches!(err, EnvelopeValidationError::SubjectTooLong { .. }));
+        assert!(matches!(
+            err,
+            EnvelopeValidationError::SubjectTooLong { .. }
+        ));
     }
 
     #[test]
@@ -1543,7 +1568,10 @@ mod tests {
         }
         b = b.add_signer(test_signer("1", "a@b.com"));
         let err = b.build().unwrap_err();
-        assert!(matches!(err, EnvelopeValidationError::TooManyDocuments { .. }));
+        assert!(matches!(
+            err,
+            EnvelopeValidationError::TooManyDocuments { .. }
+        ));
     }
 
     #[test]
@@ -1553,7 +1581,10 @@ mod tests {
             .add_signer(test_signer("1", "a@b.com"))
             .build()
             .unwrap_err();
-        assert!(matches!(err, EnvelopeValidationError::InvalidContentType { .. }));
+        assert!(matches!(
+            err,
+            EnvelopeValidationError::InvalidContentType { .. }
+        ));
     }
 
     #[test]
@@ -1565,7 +1596,10 @@ mod tests {
             .add_signer(test_signer("1", "a@b.com"))
             .build()
             .unwrap_err();
-        assert!(matches!(err, EnvelopeValidationError::DocumentTooLarge { .. }));
+        assert!(matches!(
+            err,
+            EnvelopeValidationError::DocumentTooLarge { .. }
+        ));
     }
 
     #[test]
@@ -1599,7 +1633,10 @@ mod tests {
             b = b.add_signer(test_signer(&i.to_string(), &format!("s{i}@x.com")));
         }
         let err = b.build().unwrap_err();
-        assert!(matches!(err, EnvelopeValidationError::TooManyRecipients { .. }));
+        assert!(matches!(
+            err,
+            EnvelopeValidationError::TooManyRecipients { .. }
+        ));
     }
 
     #[test]
@@ -1610,7 +1647,10 @@ mod tests {
             .add_signer(test_signer("1", "c@b.com"))
             .build()
             .unwrap_err();
-        assert!(matches!(err, EnvelopeValidationError::DuplicateRecipientId { .. }));
+        assert!(matches!(
+            err,
+            EnvelopeValidationError::DuplicateRecipientId { .. }
+        ));
     }
 
     #[test]
@@ -1621,7 +1661,10 @@ mod tests {
             .add_cc(test_cc("1", "cc@b.com"))
             .build()
             .unwrap_err();
-        assert!(matches!(err, EnvelopeValidationError::DuplicateRecipientId { .. }));
+        assert!(matches!(
+            err,
+            EnvelopeValidationError::DuplicateRecipientId { .. }
+        ));
     }
 
     #[test]
@@ -1728,7 +1771,10 @@ mod tests {
 
     #[test]
     fn error_display_subject_too_long() {
-        let e = EnvelopeValidationError::SubjectTooLong { max: 100, actual: 150 };
+        let e = EnvelopeValidationError::SubjectTooLong {
+            max: 100,
+            actual: 150,
+        };
         assert_eq!(e.to_string(), "email subject too long (150 chars, max 100)");
     }
 
@@ -1742,7 +1788,10 @@ mod tests {
 
     #[test]
     fn error_display_too_many_documents() {
-        let e = EnvelopeValidationError::TooManyDocuments { max: 10, actual: 15 };
+        let e = EnvelopeValidationError::TooManyDocuments {
+            max: 10,
+            actual: 15,
+        };
         assert_eq!(e.to_string(), "too many documents (15, max 10)");
     }
 
@@ -1781,19 +1830,26 @@ mod tests {
 
     #[test]
     fn error_display_too_many_recipients() {
-        let e = EnvelopeValidationError::TooManyRecipients { max: 20, actual: 25 };
+        let e = EnvelopeValidationError::TooManyRecipients {
+            max: 20,
+            actual: 25,
+        };
         assert_eq!(e.to_string(), "too many recipients (25, max 20)");
     }
 
     #[test]
     fn error_display_invalid_email() {
-        let e = EnvelopeValidationError::InvalidEmail { email: "bad".into() };
+        let e = EnvelopeValidationError::InvalidEmail {
+            email: "bad".into(),
+        };
         assert_eq!(e.to_string(), "invalid email address: \"bad\"");
     }
 
     #[test]
     fn error_display_duplicate_recipient_id() {
-        let e = EnvelopeValidationError::DuplicateRecipientId { recipient_id: "1".into() };
+        let e = EnvelopeValidationError::DuplicateRecipientId {
+            recipient_id: "1".into(),
+        };
         assert_eq!(e.to_string(), "duplicate recipient ID: \"1\"");
     }
 
@@ -1824,7 +1880,10 @@ mod tests {
         };
         let cloned = e.clone();
         drop(e);
-        assert!(matches!(cloned, EnvelopeValidationError::DocumentTooLarge { .. }));
+        assert!(matches!(
+            cloned,
+            EnvelopeValidationError::DocumentTooLarge { .. }
+        ));
     }
 
     #[test]
@@ -1885,7 +1944,11 @@ mod tests {
 
     #[test]
     fn audit_action_all_variants() {
-        for action in &[AuditAction::Created, AuditAction::Updated, AuditAction::DocumentAdded] {
+        for action in &[
+            AuditAction::Created,
+            AuditAction::Updated,
+            AuditAction::DocumentAdded,
+        ] {
             let json = serde_json::to_string(action).unwrap();
             let back: AuditAction = serde_json::from_str(&json).unwrap();
             assert_eq!(&back, action);
@@ -2240,8 +2303,7 @@ mod tests {
 
     #[test]
     fn builder_twenty_recipients_ok() {
-        let mut b = EnvelopeBuilder::new("Max recips")
-            .add_document(test_doc("a.pdf", "pdf"));
+        let mut b = EnvelopeBuilder::new("Max recips").add_document(test_doc("a.pdf", "pdf"));
         for i in 0..20 {
             b = b.add_signer(test_signer(&i.to_string(), &format!("s{i}@x.com")));
         }
@@ -2250,8 +2312,7 @@ mod tests {
 
     #[test]
     fn builder_twenty_one_recipients_fails() {
-        let mut b = EnvelopeBuilder::new("Over recips")
-            .add_document(test_doc("a.pdf", "pdf"));
+        let mut b = EnvelopeBuilder::new("Over recips").add_document(test_doc("a.pdf", "pdf"));
         for i in 0..21 {
             b = b.add_signer(test_signer(&i.to_string(), &format!("s{i}@x.com")));
         }

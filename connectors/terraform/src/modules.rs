@@ -107,9 +107,7 @@ impl ModuleSource {
                 let (url, ref_spec) = Self::split_git_ref(s);
                 return Self::Git { url, ref_spec };
             }
-            return Self::Http {
-                url: s.to_string(),
-            };
+            return Self::Http { url: s.to_string() };
         }
 
         // Bare github.com / bitbucket.org references
@@ -288,8 +286,7 @@ impl ModuleGraph {
         };
 
         // Modules
-        let modules = if let Some(arr) = json.get("modules").and_then(serde_json::Value::as_array)
-        {
+        let modules = if let Some(arr) = json.get("modules").and_then(serde_json::Value::as_array) {
             arr.iter()
                 .enumerate()
                 .map(|(i, m)| {
@@ -498,7 +495,10 @@ impl InitPolicy {
             Self::AllowDownload => Ok(()),
             Self::Deny => {
                 if has_remote_modules {
-                    Err("init denied: configuration contains remote modules but policy is Deny".into())
+                    Err(
+                        "init denied: configuration contains remote modules but policy is Deny"
+                            .into(),
+                    )
                 } else {
                     Ok(())
                 }
@@ -800,10 +800,7 @@ mod tests {
             url: "https://example.com/mod.git".into(),
             ref_spec: Some("v1.0".into()),
         };
-        assert_eq!(
-            src.to_string(),
-            "git::https://example.com/mod.git?ref=v1.0"
-        );
+        assert_eq!(src.to_string(), "git::https://example.com/mod.git?ref=v1.0");
     }
 
     #[test]
@@ -848,17 +845,13 @@ mod tests {
 
     #[test]
     fn source_type_local() {
-        let src = ModuleSource::Local {
-            path: ".".into(),
-        };
+        let src = ModuleSource::Local { path: ".".into() };
         assert_eq!(src.source_type(), "local");
     }
 
     #[test]
     fn source_type_http() {
-        let src = ModuleSource::Http {
-            url: "u".into(),
-        };
+        let src = ModuleSource::Http { url: "u".into() };
         assert_eq!(src.source_type(), "http");
     }
 
@@ -1114,9 +1107,7 @@ mod tests {
             },
             modules: vec![ModuleEntry {
                 key: "a".into(),
-                source: ModuleSource::Local {
-                    path: "./a".into(),
-                },
+                source: ModuleSource::Local { path: "./a".into() },
                 version: None,
                 dir: None,
             }],
@@ -1700,9 +1691,7 @@ mod tests {
     fn module_entry_clone() {
         let e = ModuleEntry {
             key: "k".into(),
-            source: ModuleSource::Local {
-                path: "./m".into(),
-            },
+            source: ModuleSource::Local { path: "./m".into() },
             version: None,
             dir: None,
         };
@@ -1796,9 +1785,7 @@ mod tests {
     fn module_entry_debug() {
         let e = ModuleEntry {
             key: "k".into(),
-            source: ModuleSource::Local {
-                path: ".".into(),
-            },
+            source: ModuleSource::Local { path: ".".into() },
             version: None,
             dir: None,
         };
@@ -1968,20 +1955,14 @@ mod tests {
 
     #[test]
     fn module_source_equality() {
-        let a = ModuleSource::Local {
-            path: "./a".into(),
-        };
-        let b = ModuleSource::Local {
-            path: "./a".into(),
-        };
+        let a = ModuleSource::Local { path: "./a".into() };
+        let b = ModuleSource::Local { path: "./a".into() };
         assert_eq!(a, b);
     }
 
     #[test]
     fn module_source_inequality_different_variants() {
-        let a = ModuleSource::Local {
-            path: "./a".into(),
-        };
+        let a = ModuleSource::Local { path: "./a".into() };
         let b = ModuleSource::Git {
             url: "./a".into(),
             ref_spec: None,
@@ -1997,7 +1978,11 @@ mod tests {
     fn init_policy_with_mixed_graph() {
         let g = ModuleGraph::from_json(&sample_json()).unwrap();
         let s = g.summary();
-        assert!(InitPolicy::AllowDownload.evaluate(s.has_remote_modules).is_ok());
+        assert!(
+            InitPolicy::AllowDownload
+                .evaluate(s.has_remote_modules)
+                .is_ok()
+        );
         assert!(InitPolicy::Deny.evaluate(s.has_remote_modules).is_err());
         assert!(InitPolicy::DryRun.evaluate(s.has_remote_modules).is_err());
     }
@@ -2012,7 +1997,11 @@ mod tests {
         });
         let g = ModuleGraph::from_json(&j).unwrap();
         let s = g.summary();
-        assert!(InitPolicy::AllowDownload.evaluate(s.has_remote_modules).is_ok());
+        assert!(
+            InitPolicy::AllowDownload
+                .evaluate(s.has_remote_modules)
+                .is_ok()
+        );
         assert!(InitPolicy::Deny.evaluate(s.has_remote_modules).is_ok());
         assert!(InitPolicy::DryRun.evaluate(s.has_remote_modules).is_ok());
     }

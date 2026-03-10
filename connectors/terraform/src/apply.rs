@@ -447,12 +447,7 @@ impl ApplyAuditEvent {
 
     /// Create a new audit event at a specific time.
     #[must_use]
-    pub fn at(
-        timestamp: DateTime<Utc>,
-        event_type: &str,
-        details: &str,
-        actor: &str,
-    ) -> Self {
+    pub fn at(timestamp: DateTime<Utc>, event_type: &str, details: &str, actor: &str) -> Self {
         Self {
             timestamp,
             event_type: event_type.to_owned(),
@@ -507,15 +502,11 @@ impl ApplyLifecycle {
     /// Returns an error if the current status is not `Pending`.
     pub fn approve(&mut self, actor: &str) -> Result<(), String> {
         if self.status != ApplyStatus::Pending {
-            return Err(format!(
-                "Cannot approve: current status is {}",
-                self.status
-            ));
+            return Err(format!("Cannot approve: current status is {}", self.status));
         }
         self.status = ApplyStatus::Approved;
         self.audit_trail.push(
-            ApplyAuditEvent::now("approved", "Apply approved", actor)
-                .with_apply_id(&self.apply_id),
+            ApplyAuditEvent::now("approved", "Apply approved", actor).with_apply_id(&self.apply_id),
         );
         Ok(())
     }
@@ -554,12 +545,8 @@ impl ApplyLifecycle {
         }
         self.status = ApplyStatus::Completed;
         self.audit_trail.push(
-            ApplyAuditEvent::now(
-                "completed",
-                "Apply completed successfully",
-                "system",
-            )
-            .with_apply_id(&self.apply_id),
+            ApplyAuditEvent::now("completed", "Apply completed successfully", "system")
+                .with_apply_id(&self.apply_id),
         );
         Ok(())
     }
@@ -571,16 +558,11 @@ impl ApplyLifecycle {
     /// Returns an error if the current status is not `Executing`.
     pub fn fail(&mut self, reason: &str) -> Result<(), String> {
         if self.status != ApplyStatus::Executing {
-            return Err(format!(
-                "Cannot fail: current status is {}",
-                self.status
-            ));
+            return Err(format!("Cannot fail: current status is {}", self.status));
         }
         self.status = ApplyStatus::Failed;
-        self.audit_trail.push(
-            ApplyAuditEvent::now("failed", reason, "system")
-                .with_apply_id(&self.apply_id),
-        );
+        self.audit_trail
+            .push(ApplyAuditEvent::now("failed", reason, "system").with_apply_id(&self.apply_id));
         Ok(())
     }
 
@@ -611,10 +593,7 @@ impl ApplyLifecycle {
     /// Returns an error if the current status is not `Executing`.
     pub fn timeout(&mut self) -> Result<(), String> {
         if self.status != ApplyStatus::Executing {
-            return Err(format!(
-                "Cannot timeout: current status is {}",
-                self.status
-            ));
+            return Err(format!("Cannot timeout: current status is {}", self.status));
         }
         self.status = ApplyStatus::TimedOut;
         self.audit_trail.push(
@@ -925,18 +904,12 @@ mod tests {
 
     #[test]
     fn denial_code_display_token_missing() {
-        assert_eq!(
-            ApplyDenialCode::TokenMissing.to_string(),
-            "token_missing"
-        );
+        assert_eq!(ApplyDenialCode::TokenMissing.to_string(), "token_missing");
     }
 
     #[test]
     fn denial_code_display_token_expired() {
-        assert_eq!(
-            ApplyDenialCode::TokenExpired.to_string(),
-            "token_expired"
-        );
+        assert_eq!(ApplyDenialCode::TokenExpired.to_string(), "token_expired");
     }
 
     #[test]
@@ -1516,10 +1489,7 @@ mod tests {
     #[test]
     fn token_allows_multiple_targets() {
         let mut t = sample_token("sha256:abc", "ws-1");
-        t.allowed_targets = vec![
-            "aws_instance.web".into(),
-            "aws_instance.api".into(),
-        ];
+        t.allowed_targets = vec!["aws_instance.web".into(), "aws_instance.api".into()];
         assert!(t.allows_target("aws_instance.web"));
         assert!(t.allows_target("aws_instance.api"));
         assert!(!t.allows_target("aws_instance.db"));
@@ -1728,8 +1698,8 @@ mod tests {
 
     #[test]
     fn audit_event_serde_roundtrip() {
-        let evt = ApplyAuditEvent::now("created", "lifecycle created", "system")
-            .with_apply_id("apply-1");
+        let evt =
+            ApplyAuditEvent::now("created", "lifecycle created", "system").with_apply_id("apply-1");
         let json = serde_json::to_string(&evt).unwrap();
         let back: ApplyAuditEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(back.event_type, "created");

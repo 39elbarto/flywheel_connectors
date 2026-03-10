@@ -486,7 +486,9 @@ pub fn provisioning_recipe() -> ProvisioningRecipe {
     .with_step(ProvisioningStep::new(
         StepId::new("prompt_auth_mode"),
         ProvisioningStepType::PromptUser {
-            message: "Choose authentication mode: (1) Service account token or (2) Credential injection".into(),
+            message:
+                "Choose authentication mode: (1) Service account token or (2) Credential injection"
+                    .into(),
         },
     ))
     .with_step(
@@ -1280,7 +1282,11 @@ mod tests {
             .expect("store_access_token step not found");
 
         match &store_step.kind {
-            ProvisioningStepType::StoreSecret { scope, key, value_from } => {
+            ProvisioningStepType::StoreSecret {
+                scope,
+                key,
+                value_from,
+            } => {
                 assert_eq!(scope, "connector:fcp.1password");
                 assert_eq!(key, "access_token");
                 assert_eq!(value_from.as_str(), "prompt_access_token");

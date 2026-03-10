@@ -294,8 +294,7 @@ impl ClickUpConnector {
     /// Handle the `self_check` method.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
         let Some(config) = &self.config else {
-            let report =
-                SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            let report = SelfCheckReport::degraded("not_configured", "Connector is not configured");
             return Self::serialize_self_check_report(report);
         };
 
@@ -493,19 +492,19 @@ pub fn provisioning_recipe() -> ProvisioningRecipe {
         "1",
         "Provision ClickUp connector with a personal API token",
     )
-    .with_step(
-        ProvisioningStep::new(
-            StepId::new("open_settings"),
-            ProvisioningStepType::OpenUrl {
-                url: "https://app.clickup.com/settings/apps".into(),
-            },
-        ),
-    )
+    .with_step(ProvisioningStep::new(
+        StepId::new("open_settings"),
+        ProvisioningStepType::OpenUrl {
+            url: "https://app.clickup.com/settings/apps".into(),
+        },
+    ))
     .with_step(
         ProvisioningStep::new(
             StepId::new("enter_token"),
             ProvisioningStepType::PromptSecret {
-                message: "Generate a personal API token from ClickUp Settings > Apps and paste it here.".into(),
+                message:
+                    "Generate a personal API token from ClickUp Settings > Apps and paste it here."
+                        .into(),
             },
         )
         .depends_on(StepId::new("open_settings")),
@@ -539,7 +538,10 @@ fn base_url_policy(base_url: &str) -> (bool, String) {
     if parsed.scheme() != "https" {
         return (
             false,
-            format!("non-local host {host} must use https, got {}", parsed.scheme()),
+            format!(
+                "non-local host {host} must use https, got {}",
+                parsed.scheme()
+            ),
         );
     }
 

@@ -250,17 +250,16 @@ impl SalesforceConnector {
     }
 
     pub fn provisioning_readiness(&self) -> serde_json::Value {
-        let (auth_mode, token_configured, credential_id_configured, base_url) =
-            match &self.config {
-                Some(cfg) => {
-                    let (am, tc, cc) = match &cfg.auth {
-                        SalesforceAuth::AccessToken(_) => ("access_token", true, false),
-                        SalesforceAuth::CredentialId(_) => ("credential_id", false, true),
-                    };
-                    (am, tc, cc, cfg.base_url.as_str())
-                }
-                None => ("unconfigured", false, false, DEFAULT_BASE_URL),
-            };
+        let (auth_mode, token_configured, credential_id_configured, base_url) = match &self.config {
+            Some(cfg) => {
+                let (am, tc, cc) = match &cfg.auth {
+                    SalesforceAuth::AccessToken(_) => ("access_token", true, false),
+                    SalesforceAuth::CredentialId(_) => ("credential_id", false, true),
+                };
+                (am, tc, cc, cfg.base_url.as_str())
+            }
+            None => ("unconfigured", false, false, DEFAULT_BASE_URL),
+        };
 
         let network_ok = is_salesforce_domain(base_url);
 
@@ -1923,16 +1922,20 @@ mod tests {
             .find(|s| s.id.as_str() == "store_token")
             .expect("store_token step missing");
         match &store_step.kind {
-            ProvisioningStepType::StoreSecret { scope, value_from, .. } => {
+            ProvisioningStepType::StoreSecret {
+                scope, value_from, ..
+            } => {
                 assert_eq!(scope, "connector:fcp.salesforce");
                 assert_eq!(value_from.as_str(), "oauth_flow");
             }
             other => panic!("expected StoreSecret step, got {other:?}"),
         }
-        assert!(store_step
-            .depends_on
-            .iter()
-            .any(|d| d.as_str() == "oauth_flow"));
+        assert!(
+            store_step
+                .depends_on
+                .iter()
+                .any(|d| d.as_str() == "oauth_flow")
+        );
     }
 
     // -- provisioning_readiness --

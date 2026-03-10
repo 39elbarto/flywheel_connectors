@@ -566,9 +566,7 @@ impl PlaybackCommandValidator {
     /// or `Err` with the first validation error found.
     pub fn validate(&self, command: &PlaybackCommand) -> Result<(), PlaybackValidationError> {
         // Check if command is in the allowed set (if the set is non-empty).
-        if !self.allowed_commands.is_empty()
-            && !self.allowed_commands.contains(command.name())
-        {
+        if !self.allowed_commands.is_empty() && !self.allowed_commands.contains(command.name()) {
             return Err(PlaybackValidationError::CommandRestricted {
                 command: command.name().to_owned(),
             });
@@ -741,10 +739,7 @@ impl PlaybackPolicy {
     /// Checks whether a command is allowed by this policy.
     ///
     /// Returns `Ok(())` if the command is permitted, or `Err` if restricted.
-    pub fn check_command(
-        &self,
-        command: &PlaybackCommand,
-    ) -> Result<(), PlaybackValidationError> {
+    pub fn check_command(&self, command: &PlaybackCommand) -> Result<(), PlaybackValidationError> {
         let allowed = match command {
             PlaybackCommand::Play { .. } => self.allow_play,
             PlaybackCommand::Pause => self.allow_pause,
@@ -1336,10 +1331,7 @@ mod tests {
         assert_eq!(PlaybackCommand::Pause.name(), "pause");
         assert_eq!(PlaybackCommand::Next.name(), "next");
         assert_eq!(PlaybackCommand::Previous.name(), "previous");
-        assert_eq!(
-            PlaybackCommand::Seek { position_ms: 0 }.name(),
-            "seek"
-        );
+        assert_eq!(PlaybackCommand::Seek { position_ms: 0 }.name(), "seek");
         assert_eq!(
             PlaybackCommand::SetVolume { volume_percent: 50 }.name(),
             "set_volume"
@@ -1649,26 +1641,30 @@ mod tests {
     #[test]
     fn validator_volume_in_range() {
         let v = PlaybackCommandValidator::new();
-        assert!(v
-            .validate(&PlaybackCommand::SetVolume { volume_percent: 50 })
-            .is_ok());
-        assert!(v
-            .validate(&PlaybackCommand::SetVolume { volume_percent: 0 })
-            .is_ok());
-        assert!(v
-            .validate(&PlaybackCommand::SetVolume {
+        assert!(
+            v.validate(&PlaybackCommand::SetVolume { volume_percent: 50 })
+                .is_ok()
+        );
+        assert!(
+            v.validate(&PlaybackCommand::SetVolume { volume_percent: 0 })
+                .is_ok()
+        );
+        assert!(
+            v.validate(&PlaybackCommand::SetVolume {
                 volume_percent: 100
             })
-            .is_ok());
+            .is_ok()
+        );
     }
 
     #[test]
     fn validator_volume_custom_max() {
         let mut v = PlaybackCommandValidator::new();
         v.max_volume = 80;
-        assert!(v
-            .validate(&PlaybackCommand::SetVolume { volume_percent: 80 })
-            .is_ok());
+        assert!(
+            v.validate(&PlaybackCommand::SetVolume { volume_percent: 80 })
+                .is_ok()
+        );
         let err = v
             .validate(&PlaybackCommand::SetVolume { volume_percent: 81 })
             .unwrap_err();
@@ -1681,14 +1677,16 @@ mod tests {
     #[test]
     fn validator_seek_in_range() {
         let v = PlaybackCommandValidator::new();
-        assert!(v
-            .validate(&PlaybackCommand::Seek { position_ms: 0 })
-            .is_ok());
-        assert!(v
-            .validate(&PlaybackCommand::Seek {
+        assert!(
+            v.validate(&PlaybackCommand::Seek { position_ms: 0 })
+                .is_ok()
+        );
+        assert!(
+            v.validate(&PlaybackCommand::Seek {
                 position_ms: 1_000_000
             })
-            .is_ok());
+            .is_ok()
+        );
     }
 
     #[test]
@@ -1936,26 +1934,31 @@ mod tests {
         assert!(p.check_command(&PlaybackCommand::Pause).is_ok());
         assert!(p.check_command(&PlaybackCommand::Next).is_ok());
         assert!(p.check_command(&PlaybackCommand::Previous).is_ok());
-        assert!(p
-            .check_command(&PlaybackCommand::Seek { position_ms: 100 })
-            .is_ok());
-        assert!(p
-            .check_command(&PlaybackCommand::SetVolume { volume_percent: 50 })
-            .is_ok());
-        assert!(p
-            .check_command(&PlaybackCommand::SetShuffle { state: true })
-            .is_ok());
-        assert!(p
-            .check_command(&PlaybackCommand::SetRepeat {
+        assert!(
+            p.check_command(&PlaybackCommand::Seek { position_ms: 100 })
+                .is_ok()
+        );
+        assert!(
+            p.check_command(&PlaybackCommand::SetVolume { volume_percent: 50 })
+                .is_ok()
+        );
+        assert!(
+            p.check_command(&PlaybackCommand::SetShuffle { state: true })
+                .is_ok()
+        );
+        assert!(
+            p.check_command(&PlaybackCommand::SetRepeat {
                 mode: RepeatMode::Track
             })
-            .is_ok());
-        assert!(p
-            .check_command(&PlaybackCommand::TransferPlayback {
+            .is_ok()
+        );
+        assert!(
+            p.check_command(&PlaybackCommand::TransferPlayback {
                 device_id: "d1".into(),
                 play: false,
             })
-            .is_ok());
+            .is_ok()
+        );
     }
 
     #[test]
@@ -1965,26 +1968,31 @@ mod tests {
         assert!(p.check_command(&PlaybackCommand::Pause).is_err());
         assert!(p.check_command(&PlaybackCommand::Next).is_err());
         assert!(p.check_command(&PlaybackCommand::Previous).is_err());
-        assert!(p
-            .check_command(&PlaybackCommand::Seek { position_ms: 0 })
-            .is_err());
-        assert!(p
-            .check_command(&PlaybackCommand::SetVolume { volume_percent: 0 })
-            .is_err());
-        assert!(p
-            .check_command(&PlaybackCommand::SetShuffle { state: false })
-            .is_err());
-        assert!(p
-            .check_command(&PlaybackCommand::SetRepeat {
+        assert!(
+            p.check_command(&PlaybackCommand::Seek { position_ms: 0 })
+                .is_err()
+        );
+        assert!(
+            p.check_command(&PlaybackCommand::SetVolume { volume_percent: 0 })
+                .is_err()
+        );
+        assert!(
+            p.check_command(&PlaybackCommand::SetShuffle { state: false })
+                .is_err()
+        );
+        assert!(
+            p.check_command(&PlaybackCommand::SetRepeat {
                 mode: RepeatMode::Off
             })
-            .is_err());
-        assert!(p
-            .check_command(&PlaybackCommand::TransferPlayback {
+            .is_err()
+        );
+        assert!(
+            p.check_command(&PlaybackCommand::TransferPlayback {
                 device_id: "d".into(),
                 play: false,
             })
-            .is_err());
+            .is_err()
+        );
     }
 
     #[test]
@@ -2174,36 +2182,42 @@ mod tests {
     fn validator_boundary_volume_at_max() {
         let mut v = PlaybackCommandValidator::new();
         v.max_volume = 50;
-        assert!(v
-            .validate(&PlaybackCommand::SetVolume { volume_percent: 50 })
-            .is_ok());
-        assert!(v
-            .validate(&PlaybackCommand::SetVolume { volume_percent: 51 })
-            .is_err());
+        assert!(
+            v.validate(&PlaybackCommand::SetVolume { volume_percent: 50 })
+                .is_ok()
+        );
+        assert!(
+            v.validate(&PlaybackCommand::SetVolume { volume_percent: 51 })
+                .is_err()
+        );
     }
 
     #[test]
     fn validator_boundary_seek_at_max() {
         let mut v = PlaybackCommandValidator::new();
         v.max_seek_ms = 1000;
-        assert!(v
-            .validate(&PlaybackCommand::Seek { position_ms: 1000 })
-            .is_ok());
-        assert!(v
-            .validate(&PlaybackCommand::Seek { position_ms: 1001 })
-            .is_err());
+        assert!(
+            v.validate(&PlaybackCommand::Seek { position_ms: 1000 })
+                .is_ok()
+        );
+        assert!(
+            v.validate(&PlaybackCommand::Seek { position_ms: 1001 })
+                .is_err()
+        );
     }
 
     #[test]
     fn validator_boundary_seek_at_min() {
         let mut v = PlaybackCommandValidator::new();
         v.min_seek_ms = 100;
-        assert!(v
-            .validate(&PlaybackCommand::Seek { position_ms: 100 })
-            .is_ok());
-        assert!(v
-            .validate(&PlaybackCommand::Seek { position_ms: 99 })
-            .is_err());
+        assert!(
+            v.validate(&PlaybackCommand::Seek { position_ms: 100 })
+                .is_ok()
+        );
+        assert!(
+            v.validate(&PlaybackCommand::Seek { position_ms: 99 })
+                .is_err()
+        );
     }
 
     #[test]
@@ -2284,21 +2298,21 @@ mod tests {
     #[test]
     fn validator_shuffle_always_valid() {
         let v = PlaybackCommandValidator::new();
-        assert!(v
-            .validate(&PlaybackCommand::SetShuffle { state: true })
-            .is_ok());
-        assert!(v
-            .validate(&PlaybackCommand::SetShuffle { state: false })
-            .is_ok());
+        assert!(
+            v.validate(&PlaybackCommand::SetShuffle { state: true })
+                .is_ok()
+        );
+        assert!(
+            v.validate(&PlaybackCommand::SetShuffle { state: false })
+                .is_ok()
+        );
     }
 
     #[test]
     fn validator_repeat_always_valid() {
         let v = PlaybackCommandValidator::new();
         for mode in [RepeatMode::Off, RepeatMode::Track, RepeatMode::Context] {
-            assert!(v
-                .validate(&PlaybackCommand::SetRepeat { mode })
-                .is_ok());
+            assert!(v.validate(&PlaybackCommand::SetRepeat { mode }).is_ok());
         }
     }
 
@@ -2336,12 +2350,14 @@ mod tests {
         p.allow_seek = true;
         p.allow_volume = true;
         assert_eq!(p.allowed_count(), 2);
-        assert!(p
-            .check_command(&PlaybackCommand::Seek { position_ms: 100 })
-            .is_ok());
-        assert!(p
-            .check_command(&PlaybackCommand::SetVolume { volume_percent: 50 })
-            .is_ok());
+        assert!(
+            p.check_command(&PlaybackCommand::Seek { position_ms: 100 })
+                .is_ok()
+        );
+        assert!(
+            p.check_command(&PlaybackCommand::SetVolume { volume_percent: 50 })
+                .is_ok()
+        );
         assert!(p.check_command(&PlaybackCommand::Pause).is_err());
         assert!(p.check_command(&PlaybackCommand::Next).is_err());
     }

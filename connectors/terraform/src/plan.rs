@@ -215,7 +215,9 @@ impl TerraformPlan {
             .to_owned();
 
         // Parse resource_changes
-        let resource_changes = if let Some(arr) = plan_json.get("resource_changes").and_then(Value::as_array) {
+        let resource_changes = if let Some(arr) =
+            plan_json.get("resource_changes").and_then(Value::as_array)
+        {
             let mut changes = Vec::with_capacity(arr.len());
             for item in arr {
                 let address = item
@@ -245,7 +247,10 @@ impl TerraformPlan {
 
                 let before = change.get("before").cloned().filter(|v| !v.is_null());
                 let after = change.get("after").cloned().filter(|v| !v.is_null());
-                let after_unknown = change.get("after_unknown").cloned().filter(|v| !v.is_null());
+                let after_unknown = change
+                    .get("after_unknown")
+                    .cloned()
+                    .filter(|v| !v.is_null());
 
                 changes.push(ResourceChange {
                     address,
@@ -262,36 +267,37 @@ impl TerraformPlan {
         };
 
         // Parse output_changes
-        let output_changes = if let Some(obj) = plan_json.get("output_changes").and_then(Value::as_object) {
-            let mut outputs = Vec::with_capacity(obj.len());
-            for (name, val) in obj {
-                let actions = val
-                    .get("actions")
-                    .and_then(Value::as_array)
-                    .cloned()
-                    .unwrap_or_default();
-                let action = resolve_action(&actions);
-                let before = val.get("before").cloned().filter(|v| !v.is_null());
-                let after = val.get("after").cloned().filter(|v| !v.is_null());
-                let sensitive = val
-                    .get("after_sensitive")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
+        let output_changes =
+            if let Some(obj) = plan_json.get("output_changes").and_then(Value::as_object) {
+                let mut outputs = Vec::with_capacity(obj.len());
+                for (name, val) in obj {
+                    let actions = val
+                        .get("actions")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default();
+                    let action = resolve_action(&actions);
+                    let before = val.get("before").cloned().filter(|v| !v.is_null());
+                    let after = val.get("after").cloned().filter(|v| !v.is_null());
+                    let sensitive = val
+                        .get("after_sensitive")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
 
-                outputs.push(OutputChange {
-                    name: name.clone(),
-                    action,
-                    before,
-                    after,
-                    sensitive,
-                });
-            }
-            // Sort by name for determinism
-            outputs.sort_by(|a, b| a.name.cmp(&b.name));
-            outputs
-        } else {
-            Vec::new()
-        };
+                    outputs.push(OutputChange {
+                        name: name.clone(),
+                        action,
+                        before,
+                        after,
+                        sensitive,
+                    });
+                }
+                // Sort by name for determinism
+                outputs.sort_by(|a, b| a.name.cmp(&b.name));
+                outputs
+            } else {
+                Vec::new()
+            };
 
         // Parse provider_versions (optional; terraform plan JSON may include
         // configuration.provider_config with version constraints)
@@ -355,9 +361,9 @@ impl TerraformPlan {
     /// Return `true` if the plan contains any delete or replace actions.
     #[must_use]
     pub fn has_destructive_changes(&self) -> bool {
-        self.resource_changes.iter().any(|rc| {
-            matches!(rc.action, PlanAction::Delete | PlanAction::Replace)
-        })
+        self.resource_changes
+            .iter()
+            .any(|rc| matches!(rc.action, PlanAction::Delete | PlanAction::Replace))
     }
 
     /// The integrity hash of the plan JSON.
@@ -389,38 +395,37 @@ impl PlanValidation {
             .and_then(Value::as_u64)
             .unwrap_or(0) as usize;
 
-        let diagnostics = if let Some(arr) = validate_json.get("diagnostics").and_then(Value::as_array) {
-            let mut diags = Vec::with_capacity(arr.len());
-            for item in arr {
-                let severity_str = item
-                    .get("severity")
-                    .and_then(Value::as_str)
-                    .unwrap_or("error");
-                let severity = match severity_str {
-                    "warning" => DiagnosticSeverity::Warning,
-                    _ => DiagnosticSeverity::Error,
-                };
-                let summary = item
-                    .get("summary")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned();
-                let detail = item.get("detail").and_then(Value::as_str).map(String::from);
-                let range = item
-                    .get("range")
-                    .map(|r| r.to_string());
+        let diagnostics =
+            if let Some(arr) = validate_json.get("diagnostics").and_then(Value::as_array) {
+                let mut diags = Vec::with_capacity(arr.len());
+                for item in arr {
+                    let severity_str = item
+                        .get("severity")
+                        .and_then(Value::as_str)
+                        .unwrap_or("error");
+                    let severity = match severity_str {
+                        "warning" => DiagnosticSeverity::Warning,
+                        _ => DiagnosticSeverity::Error,
+                    };
+                    let summary = item
+                        .get("summary")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned();
+                    let detail = item.get("detail").and_then(Value::as_str).map(String::from);
+                    let range = item.get("range").map(|r| r.to_string());
 
-                diags.push(PlanDiagnostic {
-                    severity,
-                    summary,
-                    detail,
-                    range,
-                });
-            }
-            diags
-        } else {
-            Vec::new()
-        };
+                    diags.push(PlanDiagnostic {
+                        severity,
+                        summary,
+                        detail,
+                        range,
+                    });
+                }
+                diags
+            } else {
+                Vec::new()
+            };
 
         Ok(Self {
             valid,
@@ -1247,7 +1252,11 @@ mod tests {
                 "change": {"actions": ["delete", "create"], "before": {}, "after": {}}
             }]
         });
-        assert!(TerraformPlan::from_json(&j).unwrap().has_destructive_changes());
+        assert!(
+            TerraformPlan::from_json(&j)
+                .unwrap()
+                .has_destructive_changes()
+        );
     }
 
     #[test]
@@ -1272,7 +1281,11 @@ mod tests {
                 "change": {"actions": ["update"], "before": {}, "after": {}}
             }]
         });
-        assert!(!TerraformPlan::from_json(&j).unwrap().has_destructive_changes());
+        assert!(
+            !TerraformPlan::from_json(&j)
+                .unwrap()
+                .has_destructive_changes()
+        );
     }
 
     // -----------------------------------------------------------------------

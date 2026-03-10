@@ -248,7 +248,10 @@ impl WatchFilter {
 
         // Resource kind filter
         if !self.resource_kinds.is_empty()
-            && !self.resource_kinds.iter().any(|k| k == &event.resource_kind)
+            && !self
+                .resource_kinds
+                .iter()
+                .any(|k| k == &event.resource_kind)
         {
             return false;
         }
@@ -420,14 +423,8 @@ impl EventBuffer {
             capacity: self.capacity,
             dropped_total: self.dropped_count,
             is_full: self.is_full(),
-            oldest_timestamp: self
-                .events
-                .front()
-                .and_then(|e| e.timestamp.clone()),
-            newest_timestamp: self
-                .events
-                .back()
-                .and_then(|e| e.timestamp.clone()),
+            oldest_timestamp: self.events.front().and_then(|e| e.timestamp.clone()),
+            newest_timestamp: self.events.back().and_then(|e| e.timestamp.clone()),
         }
     }
 
@@ -461,7 +458,12 @@ pub struct EventSubscription {
 impl EventSubscription {
     /// Create a new active subscription.
     #[must_use]
-    pub fn new(id: u64, filter: WatchFilter, buffer_capacity: usize, policy: OverflowPolicy) -> Self {
+    pub fn new(
+        id: u64,
+        filter: WatchFilter,
+        buffer_capacity: usize,
+        policy: OverflowPolicy,
+    ) -> Self {
         Self {
             id,
             filter,
@@ -634,7 +636,10 @@ impl SubscriptionManager {
     /// Number of active subscriptions.
     #[must_use]
     pub fn active_count(&self) -> usize {
-        self.subscriptions.values().filter(|s| s.is_active()).count()
+        self.subscriptions
+            .values()
+            .filter(|s| s.is_active())
+            .count()
     }
 
     /// Total number of subscriptions (active and inactive).
@@ -662,7 +667,9 @@ impl SubscriptionManager {
 
     /// Drain events from a specific subscription.
     pub fn drain_events(&mut self, id: u64) -> Option<Vec<WatchEvent>> {
-        self.subscriptions.get_mut(&id).map(EventSubscription::drain_events)
+        self.subscriptions
+            .get_mut(&id)
+            .map(EventSubscription::drain_events)
     }
 
     /// Deactivate a subscription (but don't remove it).
@@ -779,11 +786,7 @@ impl ClusterEvent {
 
     /// Set the first and last timestamps.
     #[must_use]
-    pub fn with_timestamps(
-        mut self,
-        first: impl Into<String>,
-        last: impl Into<String>,
-    ) -> Self {
+    pub fn with_timestamps(mut self, first: impl Into<String>, last: impl Into<String>) -> Self {
         self.first_timestamp = Some(first.into());
         self.last_timestamp = Some(last.into());
         self
@@ -852,10 +855,7 @@ pub struct RolloutCondition {
 impl RolloutCondition {
     /// Create a new rollout condition.
     #[must_use]
-    pub fn new(
-        condition_type: impl Into<String>,
-        status: impl Into<String>,
-    ) -> Self {
+    pub fn new(condition_type: impl Into<String>, status: impl Into<String>) -> Self {
         Self {
             condition_type: condition_type.into(),
             status: status.into(),
@@ -913,10 +913,7 @@ pub struct RolloutStatus {
 impl RolloutStatus {
     /// Create a new rollout status.
     #[must_use]
-    pub fn new(
-        deployment_name: impl Into<String>,
-        desired_replicas: u32,
-    ) -> Self {
+    pub fn new(deployment_name: impl Into<String>, desired_replicas: u32) -> Self {
         Self {
             deployment_name: deployment_name.into(),
             namespace: None,
@@ -1095,8 +1092,7 @@ mod tests {
     fn watch_event_with_labels_map() {
         let mut labels = HashMap::new();
         labels.insert("tier".to_string(), "frontend".to_string());
-        let e = WatchEvent::new(WatchEventType::Added, "Pod", "p1")
-            .with_labels(labels);
+        let e = WatchEvent::new(WatchEventType::Added, "Pod", "p1").with_labels(labels);
         assert_eq!(e.labels.len(), 1);
         assert_eq!(e.labels.get("tier").unwrap(), "frontend");
     }
@@ -1170,8 +1166,8 @@ mod tests {
             "data": "x".repeat(10000),
             "nested": {"a": [1, 2, 3]}
         });
-        let e = WatchEvent::new(WatchEventType::Modified, "ConfigMap", "big")
-            .with_payload(big.clone());
+        let e =
+            WatchEvent::new(WatchEventType::Modified, "ConfigMap", "big").with_payload(big.clone());
         assert_eq!(e.payload, big);
     }
 
@@ -1216,10 +1212,8 @@ mod tests {
     #[test]
     fn watch_filter_matches_namespace() {
         let f = WatchFilter::new().with_namespace("prod");
-        let e1 = WatchEvent::new(WatchEventType::Added, "Pod", "p1")
-            .with_namespace("prod");
-        let e2 = WatchEvent::new(WatchEventType::Added, "Pod", "p2")
-            .with_namespace("dev");
+        let e1 = WatchEvent::new(WatchEventType::Added, "Pod", "p1").with_namespace("prod");
+        let e2 = WatchEvent::new(WatchEventType::Added, "Pod", "p2").with_namespace("dev");
         let e3 = WatchEvent::new(WatchEventType::Added, "Pod", "p3");
 
         assert!(f.matches(&e1));
@@ -1245,8 +1239,7 @@ mod tests {
         let e1 = WatchEvent::new(WatchEventType::Added, "Pod", "p1")
             .with_label("app", "nginx")
             .with_label("env", "prod");
-        let e2 = WatchEvent::new(WatchEventType::Added, "Pod", "p2")
-            .with_label("app", "nginx");
+        let e2 = WatchEvent::new(WatchEventType::Added, "Pod", "p2").with_label("app", "nginx");
         let e3 = WatchEvent::new(WatchEventType::Added, "Pod", "p3")
             .with_label("app", "redis")
             .with_label("env", "prod");
@@ -1372,7 +1365,11 @@ mod tests {
     fn event_buffer_drop_oldest() {
         let mut buf = EventBuffer::new(3, OverflowPolicy::DropOldest);
         for i in 0..5 {
-            buf.push(WatchEvent::new(WatchEventType::Added, "Pod", format!("p{i}")));
+            buf.push(WatchEvent::new(
+                WatchEventType::Added,
+                "Pod",
+                format!("p{i}"),
+            ));
         }
         assert_eq!(buf.len(), 3);
         assert_eq!(buf.dropped_count(), 2);
@@ -1387,7 +1384,11 @@ mod tests {
     fn event_buffer_drop_newest() {
         let mut buf = EventBuffer::new(3, OverflowPolicy::DropNewest);
         for i in 0..5 {
-            buf.push(WatchEvent::new(WatchEventType::Added, "Pod", format!("p{i}")));
+            buf.push(WatchEvent::new(
+                WatchEventType::Added,
+                "Pod",
+                format!("p{i}"),
+            ));
         }
         assert_eq!(buf.len(), 3);
         assert_eq!(buf.dropped_count(), 2);
@@ -1582,8 +1583,7 @@ mod tests {
     #[test]
     fn subscription_push_and_drain() {
         let mut sub = EventSubscription::new(1, WatchFilter::new(), 10, OverflowPolicy::DropOldest);
-        let e = WatchEvent::new(WatchEventType::Added, "Pod", "p1")
-            .with_resource_version("100");
+        let e = WatchEvent::new(WatchEventType::Added, "Pod", "p1").with_resource_version("100");
         assert!(sub.push_event(&e));
         assert_eq!(sub.buffered_count(), 1);
         assert_eq!(sub.last_event_version(), Some("100"));
@@ -1598,10 +1598,8 @@ mod tests {
         let filter = WatchFilter::new().with_namespace("prod");
         let mut sub = EventSubscription::new(1, filter, 10, OverflowPolicy::DropOldest);
 
-        let e1 = WatchEvent::new(WatchEventType::Added, "Pod", "p1")
-            .with_namespace("prod");
-        let e2 = WatchEvent::new(WatchEventType::Added, "Pod", "p2")
-            .with_namespace("dev");
+        let e1 = WatchEvent::new(WatchEventType::Added, "Pod", "p1").with_namespace("prod");
+        let e2 = WatchEvent::new(WatchEventType::Added, "Pod", "p2").with_namespace("dev");
 
         assert!(sub.push_event(&e1));
         assert!(!sub.push_event(&e2));
@@ -1733,10 +1731,7 @@ mod tests {
         let err = mgr
             .create_subscription(WatchFilter::new(), 5, OverflowPolicy::DropOldest)
             .unwrap_err();
-        assert_eq!(
-            err,
-            SubscriptionError::MaxSubscriptionsReached { limit: 2 }
-        );
+        assert_eq!(err, SubscriptionError::MaxSubscriptionsReached { limit: 2 });
     }
 
     #[test]
@@ -1774,8 +1769,7 @@ mod tests {
         mgr.create_subscription(WatchFilter::new(), 5, OverflowPolicy::DropOldest)
             .unwrap();
 
-        let e = WatchEvent::new(WatchEventType::Added, "Pod", "p1")
-            .with_namespace("prod");
+        let e = WatchEvent::new(WatchEventType::Added, "Pod", "p1").with_namespace("prod");
         let count = mgr.push_to_matching(&e);
         // Matches: "prod" filter and "no filter" (matches all)
         assert_eq!(count, 2);
@@ -1791,8 +1785,7 @@ mod tests {
         )
         .unwrap();
 
-        let e = WatchEvent::new(WatchEventType::Added, "Pod", "p1")
-            .with_namespace("dev");
+        let e = WatchEvent::new(WatchEventType::Added, "Pod", "p1").with_namespace("dev");
         let count = mgr.push_to_matching(&e);
         assert_eq!(count, 0);
     }
@@ -1956,11 +1949,16 @@ mod tests {
 
     #[test]
     fn cluster_event_builder() {
-        let ce = ClusterEvent::new("uid-2", "FailedScheduling", "no nodes", ClusterEventType::Warning)
-            .with_source("scheduler")
-            .with_regarding("Pod", "my-pod", Some("default".to_string()))
-            .with_count(5)
-            .with_timestamps("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z");
+        let ce = ClusterEvent::new(
+            "uid-2",
+            "FailedScheduling",
+            "no nodes",
+            ClusterEventType::Warning,
+        )
+        .with_source("scheduler")
+        .with_regarding("Pod", "my-pod", Some("default".to_string()))
+        .with_count(5)
+        .with_timestamps("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z");
 
         assert_eq!(ce.source_component.as_deref(), Some("scheduler"));
         assert_eq!(ce.regarding_kind.as_deref(), Some("Pod"));
@@ -2203,8 +2201,7 @@ mod tests {
     #[test]
     fn rollout_status_has_failure_condition_deadline() {
         let r = RolloutStatus::new("web", 3).with_condition(
-            RolloutCondition::new("Progressing", "False")
-                .with_reason("ProgressDeadlineExceeded"),
+            RolloutCondition::new("Progressing", "False").with_reason("ProgressDeadlineExceeded"),
         );
         assert!(r.has_failure_condition());
     }
@@ -2222,8 +2219,7 @@ mod tests {
         let r = RolloutStatus::new("web", 3)
             .with_condition(RolloutCondition::new("Available", "True"))
             .with_condition(
-                RolloutCondition::new("Progressing", "True")
-                    .with_reason("NewReplicaSetAvailable"),
+                RolloutCondition::new("Progressing", "True").with_reason("NewReplicaSetAvailable"),
             );
 
         let c = r.find_condition("Progressing").unwrap();
@@ -2254,8 +2250,7 @@ mod tests {
             .with_condition(RolloutCondition::new("Available", "True"))
             .with_condition(RolloutCondition::new("Progressing", "True"))
             .with_condition(
-                RolloutCondition::new("ReplicaFailure", "False")
-                    .with_message("all good"),
+                RolloutCondition::new("ReplicaFailure", "False").with_message("all good"),
             );
         assert_eq!(r.conditions.len(), 3);
     }
@@ -2319,18 +2314,17 @@ mod tests {
             .unwrap();
 
         // Pod event -> matches sub 1 and sub 3
-        let pod_event = WatchEvent::new(WatchEventType::Added, "Pod", "p1")
-            .with_namespace("dev");
+        let pod_event = WatchEvent::new(WatchEventType::Added, "Pod", "p1").with_namespace("dev");
         assert_eq!(mgr.push_to_matching(&pod_event), 2);
 
         // Deployment in prod -> matches sub 2 and sub 3
-        let deploy_event = WatchEvent::new(WatchEventType::Modified, "Deployment", "d1")
-            .with_namespace("prod");
+        let deploy_event =
+            WatchEvent::new(WatchEventType::Modified, "Deployment", "d1").with_namespace("prod");
         assert_eq!(mgr.push_to_matching(&deploy_event), 2);
 
         // Deployment in dev -> matches sub 3 only
-        let deploy_dev = WatchEvent::new(WatchEventType::Modified, "Deployment", "d2")
-            .with_namespace("dev");
+        let deploy_dev =
+            WatchEvent::new(WatchEventType::Modified, "Deployment", "d2").with_namespace("dev");
         assert_eq!(mgr.push_to_matching(&deploy_dev), 1);
     }
 
@@ -2403,8 +2397,7 @@ mod tests {
     fn watch_filter_label_no_value() {
         // "key=" means empty value
         let f = WatchFilter::new().with_label("key=");
-        let e = WatchEvent::new(WatchEventType::Added, "Pod", "p")
-            .with_label("key", "");
+        let e = WatchEvent::new(WatchEventType::Added, "Pod", "p").with_label("key", "");
         assert!(f.matches(&e));
     }
 
@@ -2444,18 +2437,9 @@ mod tests {
     #[test]
     fn event_buffer_status_after_overflow() {
         let mut buf = EventBuffer::new(2, OverflowPolicy::DropOldest);
-        buf.push(
-            WatchEvent::new(WatchEventType::Added, "Pod", "p0")
-                .with_timestamp("t0"),
-        );
-        buf.push(
-            WatchEvent::new(WatchEventType::Added, "Pod", "p1")
-                .with_timestamp("t1"),
-        );
-        buf.push(
-            WatchEvent::new(WatchEventType::Added, "Pod", "p2")
-                .with_timestamp("t2"),
-        );
+        buf.push(WatchEvent::new(WatchEventType::Added, "Pod", "p0").with_timestamp("t0"));
+        buf.push(WatchEvent::new(WatchEventType::Added, "Pod", "p1").with_timestamp("t1"));
+        buf.push(WatchEvent::new(WatchEventType::Added, "Pod", "p2").with_timestamp("t2"));
 
         let s = buf.status();
         assert_eq!(s.dropped_total, 1);
@@ -2505,9 +2489,10 @@ mod tests {
             .unwrap();
 
         // At limit
-        assert!(mgr
-            .create_subscription(WatchFilter::new(), 5, OverflowPolicy::DropOldest)
-            .is_err());
+        assert!(
+            mgr.create_subscription(WatchFilter::new(), 5, OverflowPolicy::DropOldest)
+                .is_err()
+        );
 
         // Remove one
         mgr.remove_subscription(id1);
@@ -2523,16 +2508,13 @@ mod tests {
     fn subscription_overflow_drop_oldest_tracks_version() {
         let mut sub = EventSubscription::new(1, WatchFilter::new(), 2, OverflowPolicy::DropOldest);
         sub.push_event(
-            &WatchEvent::new(WatchEventType::Added, "Pod", "p0")
-                .with_resource_version("10"),
+            &WatchEvent::new(WatchEventType::Added, "Pod", "p0").with_resource_version("10"),
         );
         sub.push_event(
-            &WatchEvent::new(WatchEventType::Added, "Pod", "p1")
-                .with_resource_version("20"),
+            &WatchEvent::new(WatchEventType::Added, "Pod", "p1").with_resource_version("20"),
         );
         sub.push_event(
-            &WatchEvent::new(WatchEventType::Added, "Pod", "p2")
-                .with_resource_version("30"),
+            &WatchEvent::new(WatchEventType::Added, "Pod", "p2").with_resource_version("30"),
         );
         assert_eq!(sub.last_event_version(), Some("30"));
         assert_eq!(sub.dropped_count(), 1);
@@ -2584,9 +2566,10 @@ mod tests {
         let mut mgr = SubscriptionManager::new(1);
         mgr.create_subscription(WatchFilter::new(), 5, OverflowPolicy::DropOldest)
             .unwrap();
-        assert!(mgr
-            .create_subscription(WatchFilter::new(), 5, OverflowPolicy::DropOldest)
-            .is_err());
+        assert!(
+            mgr.create_subscription(WatchFilter::new(), 5, OverflowPolicy::DropOldest)
+                .is_err()
+        );
     }
 
     #[test]

@@ -14,7 +14,7 @@ use serde_json::json;
 use tracing::{info, instrument};
 
 use crate::{
-    client::{DEFAULT_BASE_URL, BigQueryAuth, BigQueryClient},
+    client::{BigQueryAuth, BigQueryClient, DEFAULT_BASE_URL},
     error::BigQueryError,
 };
 
@@ -59,10 +59,7 @@ impl BigQueryConfig {
     }
 
     fn provisioning_readiness(&self) -> ProvisioningReadiness {
-        let effective_url = self
-            .base_url
-            .as_deref()
-            .unwrap_or(DEFAULT_BASE_URL);
+        let effective_url = self.base_url.as_deref().unwrap_or(DEFAULT_BASE_URL);
         let (network_ok, network_message) = base_url_policy(effective_url);
 
         ProvisioningReadiness {
@@ -279,8 +276,7 @@ impl BigQueryConnector {
     /// Handle the `self_check` method.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
         let Some(config) = &self.config else {
-            let report =
-                SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            let report = SelfCheckReport::degraded("not_configured", "Connector is not configured");
             return Self::serialize_self_check_report(report);
         };
 
@@ -667,9 +663,7 @@ fn base_url_policy(base_url: &str) -> (bool, String) {
 
     let local = is_local_test_host(host);
     let allowed_host = host.eq_ignore_ascii_case("bigquery.googleapis.com")
-        || host
-            .to_ascii_lowercase()
-            .ends_with(".googleapis.com")
+        || host.to_ascii_lowercase().ends_with(".googleapis.com")
         || local;
     let secure_or_local = parsed.scheme() == "https" || local;
 

@@ -506,8 +506,7 @@ impl ResearchBounds {
                 request.max_comments_per_thread, self.max_comments_per_thread
             ));
         }
-        let potential_total =
-            request.thread_ids.len() as u32 * request.max_comments_per_thread;
+        let potential_total = request.thread_ids.len() as u32 * request.max_comments_per_thread;
         if potential_total > self.max_total_excerpts {
             return Err(format!(
                 "potential total excerpts {potential_total} exceeds bound {}",
@@ -821,43 +820,39 @@ mod tests {
 
     #[test]
     fn research_query_validate_custom_time_invalid() {
-        let q = ResearchQuery::new("test")
-            .with_time_window(TimeWindow::Custom {
-                after_utc: 2000.0,
-                before_utc: 1000.0,
-            });
+        let q = ResearchQuery::new("test").with_time_window(TimeWindow::Custom {
+            after_utc: 2000.0,
+            before_utc: 1000.0,
+        });
         assert!(q.validate().is_err());
         assert!(q.validate().unwrap_err().contains("before"));
     }
 
     #[test]
     fn research_query_validate_custom_time_equal() {
-        let q = ResearchQuery::new("test")
-            .with_time_window(TimeWindow::Custom {
-                after_utc: 1000.0,
-                before_utc: 1000.0,
-            });
+        let q = ResearchQuery::new("test").with_time_window(TimeWindow::Custom {
+            after_utc: 1000.0,
+            before_utc: 1000.0,
+        });
         assert!(q.validate().is_err());
     }
 
     #[test]
     fn research_query_validate_custom_time_negative() {
-        let q = ResearchQuery::new("test")
-            .with_time_window(TimeWindow::Custom {
-                after_utc: -1.0,
-                before_utc: 1000.0,
-            });
+        let q = ResearchQuery::new("test").with_time_window(TimeWindow::Custom {
+            after_utc: -1.0,
+            before_utc: 1000.0,
+        });
         assert!(q.validate().is_err());
         assert!(q.validate().unwrap_err().contains("non-negative"));
     }
 
     #[test]
     fn research_query_validate_custom_time_valid() {
-        let q = ResearchQuery::new("test")
-            .with_time_window(TimeWindow::Custom {
-                after_utc: 100.0,
-                before_utc: 200.0,
-            });
+        let q = ResearchQuery::new("test").with_time_window(TimeWindow::Custom {
+            after_utc: 100.0,
+            before_utc: 200.0,
+        });
         assert!(q.validate().is_ok());
     }
 
@@ -879,7 +874,9 @@ mod tests {
 
     #[test]
     fn research_query_serialize_roundtrip() {
-        let q = ResearchQuery::new("serde").add_subreddit("rust").with_min_score(10);
+        let q = ResearchQuery::new("serde")
+            .add_subreddit("rust")
+            .with_min_score(10);
         let v = serde_json::to_value(&q).unwrap();
         let q2: ResearchQuery = serde_json::from_value(v).unwrap();
         assert_eq!(q2.query, "serde");
@@ -1554,10 +1551,11 @@ mod tests {
         let mut r = EvidenceRequest::new(vec!["t3_a".into()]);
         r.max_comments_per_thread = 100;
         assert!(b.validate_evidence_request(&r).is_err());
-        assert!(b
-            .validate_evidence_request(&r)
-            .unwrap_err()
-            .contains("exceeds"));
+        assert!(
+            b.validate_evidence_request(&r)
+                .unwrap_err()
+                .contains("exceeds")
+        );
     }
 
     #[test]
@@ -1569,10 +1567,11 @@ mod tests {
         // 3 threads * 50 comments = 150 > 100
         let r = EvidenceRequest::new(vec!["t3_a".into(), "t3_b".into(), "t3_c".into()]);
         assert!(b.validate_evidence_request(&r).is_err());
-        assert!(b
-            .validate_evidence_request(&r)
-            .unwrap_err()
-            .contains("total"));
+        assert!(
+            b.validate_evidence_request(&r)
+                .unwrap_err()
+                .contains("total")
+        );
     }
 
     #[test]
@@ -1617,10 +1616,7 @@ mod tests {
         };
         // Multi-byte characters should be handled correctly
         let result = b.truncate_excerpt("\u{1F600}\u{1F601}\u{1F602}\u{1F603}");
-        assert_eq!(
-            result,
-            "\u{1F600}\u{1F601}\u{1F602}..."
-        );
+        assert_eq!(result, "\u{1F600}\u{1F601}\u{1F602}...");
     }
 
     #[test]

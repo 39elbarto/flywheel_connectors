@@ -18,7 +18,7 @@ use crate::{
         ConversationMessageListResponse, ConversationParticipant, MediaListResponse,
         MessageListResponse, PhoneNumberListResponse, RecordingListResponse, TwilioAccount,
         TwilioCall, TwilioConversation, TwilioMediaResource, TwilioMessage, TwilioVerification,
-        TwimlTemplate, TwilioVideoRoom, VerificationCheck, VideoParticipantListResponse,
+        TwilioVideoRoom, TwimlTemplate, VerificationCheck, VideoParticipantListResponse,
         VideoRecordingListResponse, VideoRoomListResponse, WhatsAppMessage,
     },
 };
@@ -399,7 +399,10 @@ impl TwilioClient {
                 let v = voice.unwrap_or("alice");
                 let lang = language.unwrap_or("en-US");
                 let num_digits = digits.unwrap_or("1");
-                let _ = write!(xml, "  <Gather numDigits=\"{num_digits}\">\n    <Say voice=\"{v}\" language=\"{lang}\">{prompt}</Say>\n  </Gather>\n");
+                let _ = write!(
+                    xml,
+                    "  <Gather numDigits=\"{num_digits}\">\n    <Say voice=\"{v}\" language=\"{lang}\">{prompt}</Say>\n  </Gather>\n"
+                );
             }
             TwimlTemplate::Dial => {
                 let num = Self::escape_xml(number.unwrap_or(""));
@@ -709,12 +712,10 @@ impl TwilioClient {
             payload["Identity"] = serde_json::Value::String(id.to_string());
         }
         if let Some(addr) = messaging_address {
-            payload["MessagingBinding.Address"] =
-                serde_json::Value::String(addr.to_string());
+            payload["MessagingBinding.Address"] = serde_json::Value::String(addr.to_string());
         }
         if let Some(proxy) = messaging_proxy_address {
-            payload["MessagingBinding.ProxyAddress"] =
-                serde_json::Value::String(proxy.to_string());
+            payload["MessagingBinding.ProxyAddress"] = serde_json::Value::String(proxy.to_string());
         }
         let data = self.post_json(&url, &payload).await?;
         Ok(serde_json::from_value(data)?)
@@ -1310,9 +1311,7 @@ mod tests {
         let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
 
         Mock::given(method("POST"))
-            .and(path(
-                "/2010-04-01/Accounts/ACtest123/Calls/CAactive.json",
-            ))
+            .and(path("/2010-04-01/Accounts/ACtest123/Calls/CAactive.json"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "sid": "CAactive",
                 "status": "completed",

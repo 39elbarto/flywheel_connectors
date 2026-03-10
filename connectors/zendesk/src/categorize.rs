@@ -413,10 +413,7 @@ impl CategorizationEngine {
         let escalation_flags = self.detect_escalation_flags(text);
 
         // Boost priority if there are high-severity escalation flags.
-        let suggested_priority = if escalation_flags
-            .iter()
-            .any(|f| f.severity() >= 4)
-        {
+        let suggested_priority = if escalation_flags.iter().any(|f| f.severity() >= 4) {
             Some(priority_hint.unwrap_or(TicketPriority::High))
         } else {
             priority_hint
@@ -471,10 +468,7 @@ impl CategorizationEngine {
         }
 
         // VIP indicators
-        if lower.contains("vip")
-            || lower.contains("enterprise")
-            || lower.contains("executive")
-        {
+        if lower.contains("vip") || lower.contains("enterprise") || lower.contains("executive") {
             flags.push(EscalationFlag::VipCustomer);
         }
 
@@ -591,18 +585,42 @@ mod tests {
 
     #[test]
     fn priority_from_str_valid() {
-        assert_eq!("urgent".parse::<TicketPriority>().unwrap(), TicketPriority::Urgent);
-        assert_eq!("high".parse::<TicketPriority>().unwrap(), TicketPriority::High);
-        assert_eq!("normal".parse::<TicketPriority>().unwrap(), TicketPriority::Normal);
-        assert_eq!("low".parse::<TicketPriority>().unwrap(), TicketPriority::Low);
+        assert_eq!(
+            "urgent".parse::<TicketPriority>().unwrap(),
+            TicketPriority::Urgent
+        );
+        assert_eq!(
+            "high".parse::<TicketPriority>().unwrap(),
+            TicketPriority::High
+        );
+        assert_eq!(
+            "normal".parse::<TicketPriority>().unwrap(),
+            TicketPriority::Normal
+        );
+        assert_eq!(
+            "low".parse::<TicketPriority>().unwrap(),
+            TicketPriority::Low
+        );
     }
 
     #[test]
     fn priority_from_str_case_insensitive() {
-        assert_eq!("URGENT".parse::<TicketPriority>().unwrap(), TicketPriority::Urgent);
-        assert_eq!("High".parse::<TicketPriority>().unwrap(), TicketPriority::High);
-        assert_eq!("NORMAL".parse::<TicketPriority>().unwrap(), TicketPriority::Normal);
-        assert_eq!("Low".parse::<TicketPriority>().unwrap(), TicketPriority::Low);
+        assert_eq!(
+            "URGENT".parse::<TicketPriority>().unwrap(),
+            TicketPriority::Urgent
+        );
+        assert_eq!(
+            "High".parse::<TicketPriority>().unwrap(),
+            TicketPriority::High
+        );
+        assert_eq!(
+            "NORMAL".parse::<TicketPriority>().unwrap(),
+            TicketPriority::Normal
+        );
+        assert_eq!(
+            "Low".parse::<TicketPriority>().unwrap(),
+            TicketPriority::Low
+        );
     }
 
     #[test]
@@ -683,8 +701,14 @@ mod tests {
 
     #[test]
     fn priority_from_str_loose_valid() {
-        assert_eq!(TicketPriority::from_str_loose("URGENT"), Some(TicketPriority::Urgent));
-        assert_eq!(TicketPriority::from_str_loose("low"), Some(TicketPriority::Low));
+        assert_eq!(
+            TicketPriority::from_str_loose("URGENT"),
+            Some(TicketPriority::Urgent)
+        );
+        assert_eq!(
+            TicketPriority::from_str_loose("low"),
+            Some(TicketPriority::Low)
+        );
     }
 
     // ── EscalationFlag ──────────────────────────────────────────────
@@ -692,7 +716,10 @@ mod tests {
     #[test]
     fn escalation_flag_as_str() {
         assert_eq!(EscalationFlag::SlaRisk.as_str(), "sla_risk");
-        assert_eq!(EscalationFlag::NegativeSentiment.as_str(), "negative_sentiment");
+        assert_eq!(
+            EscalationFlag::NegativeSentiment.as_str(),
+            "negative_sentiment"
+        );
         assert_eq!(EscalationFlag::HighPriority.as_str(), "high_priority");
         assert_eq!(EscalationFlag::VipCustomer.as_str(), "vip_customer");
         assert_eq!(EscalationFlag::SecurityIssue.as_str(), "security_issue");
@@ -738,7 +765,10 @@ mod tests {
     #[test]
     fn escalation_flag_display() {
         assert_eq!(format!("{}", EscalationFlag::SlaRisk), "sla_risk");
-        assert_eq!(format!("{}", EscalationFlag::SecurityIssue), "security_issue");
+        assert_eq!(
+            format!("{}", EscalationFlag::SecurityIssue),
+            "security_issue"
+        );
     }
 
     #[test]
@@ -837,7 +867,10 @@ mod tests {
     #[test]
     fn ticket_input_combined_text_both() {
         let input = sample_input("1", "Login issue", "Cannot log in to my account");
-        assert_eq!(input.combined_text(), "Login issue Cannot log in to my account");
+        assert_eq!(
+            input.combined_text(),
+            "Login issue Cannot log in to my account"
+        );
     }
 
     #[test]
@@ -897,7 +930,12 @@ mod tests {
         assert_eq!(back.subject.as_deref(), Some("Serde test"));
         assert_eq!(back.requester_email.as_deref(), Some("test@example.com"));
         assert_eq!(back.channel.as_deref(), Some("email"));
-        assert_eq!(back.custom_fields.get("priority_override").map(String::as_str), Some("high"));
+        assert_eq!(
+            back.custom_fields
+                .get("priority_override")
+                .map(String::as_str),
+            Some("high")
+        );
     }
 
     #[test]
@@ -1036,7 +1074,10 @@ mod tests {
     #[test]
     fn config_auto_apply_defaults_false() {
         let cfg = CategorizationConfig::default();
-        assert!(!cfg.auto_apply, "auto_apply must default to false for safety");
+        assert!(
+            !cfg.auto_apply,
+            "auto_apply must default to false for safety"
+        );
     }
 
     #[test]
@@ -1059,7 +1100,9 @@ mod tests {
     fn config_clone() {
         let cfg = CategorizationConfig::default();
         let cloned = cfg.clone();
-        assert!((cloned.min_confidence_threshold - cfg.min_confidence_threshold).abs() < f64::EPSILON);
+        assert!(
+            (cloned.min_confidence_threshold - cfg.min_confidence_threshold).abs() < f64::EPSILON
+        );
         assert_eq!(cloned.max_tags_per_ticket, cfg.max_tags_per_ticket);
     }
 
@@ -1209,7 +1252,11 @@ mod tests {
 
     #[test]
     fn audit_action_serde_roundtrip() {
-        for action in [AuditAction::Categorized, AuditAction::Applied, AuditAction::Skipped] {
+        for action in [
+            AuditAction::Categorized,
+            AuditAction::Applied,
+            AuditAction::Skipped,
+        ] {
             let json = serde_json::to_string(&action).unwrap();
             let back: AuditAction = serde_json::from_str(&json).unwrap();
             assert_eq!(back, action);
@@ -1386,7 +1433,7 @@ mod tests {
             suggested_tags: vec![],
             macro_suggestions: vec![],
             escalation_flags: vec![
-                EscalationFlag::RepeatContact,    // 1
+                EscalationFlag::RepeatContact,     // 1
                 EscalationFlag::NegativeSentiment, // 2
                 EscalationFlag::SecurityIssue,     // 5
             ],
@@ -1498,13 +1545,20 @@ mod tests {
         let engine = build_engine();
         let input = sample_input("2", "App crash", "The app keeps crashing with an error");
         let result = engine.categorize(&input);
-        assert_eq!(result.suggested_category.as_deref(), Some("technical_support"));
+        assert_eq!(
+            result.suggested_category.as_deref(),
+            Some("technical_support")
+        );
     }
 
     #[test]
     fn engine_categorize_security() {
         let engine = build_engine();
-        let input = sample_input("3", "Security breach", "There was a security vulnerability found");
+        let input = sample_input(
+            "3",
+            "Security breach",
+            "There was a security vulnerability found",
+        );
         let result = engine.categorize(&input);
         assert_eq!(result.suggested_category.as_deref(), Some("security"));
         assert!(result.needs_escalation());
@@ -1561,23 +1615,43 @@ mod tests {
         let engine = build_engine();
         let input = sample_input("s1", "Help", "I found a security breach in your system");
         let result = engine.categorize(&input);
-        assert!(result.escalation_flags.contains(&EscalationFlag::SecurityIssue));
+        assert!(
+            result
+                .escalation_flags
+                .contains(&EscalationFlag::SecurityIssue)
+        );
     }
 
     #[test]
     fn engine_escalation_compliance_keyword() {
         let engine = build_engine();
-        let input = sample_input("s2", "GDPR request", "We need GDPR compliance data deletion");
+        let input = sample_input(
+            "s2",
+            "GDPR request",
+            "We need GDPR compliance data deletion",
+        );
         let result = engine.categorize(&input);
-        assert!(result.escalation_flags.contains(&EscalationFlag::ComplianceIssue));
+        assert!(
+            result
+                .escalation_flags
+                .contains(&EscalationFlag::ComplianceIssue)
+        );
     }
 
     #[test]
     fn engine_escalation_negative_sentiment() {
         let engine = build_engine();
-        let input = sample_input("s3", "Terrible service", "This is unacceptable and I am furious");
+        let input = sample_input(
+            "s3",
+            "Terrible service",
+            "This is unacceptable and I am furious",
+        );
         let result = engine.categorize(&input);
-        assert!(result.escalation_flags.contains(&EscalationFlag::NegativeSentiment));
+        assert!(
+            result
+                .escalation_flags
+                .contains(&EscalationFlag::NegativeSentiment)
+        );
     }
 
     #[test]
@@ -1585,7 +1659,11 @@ mod tests {
         let engine = build_engine();
         let input = sample_input("s4", "VIP request", "Our enterprise account needs help");
         let result = engine.categorize(&input);
-        assert!(result.escalation_flags.contains(&EscalationFlag::VipCustomer));
+        assert!(
+            result
+                .escalation_flags
+                .contains(&EscalationFlag::VipCustomer)
+        );
     }
 
     #[test]
@@ -1720,7 +1798,11 @@ mod tests {
     #[test]
     fn engine_categorize_unicode_text() {
         let engine = build_engine();
-        let input = sample_input("u1", "Invoice billing", "Je veux mon invoice et billing s'il vous plait");
+        let input = sample_input(
+            "u1",
+            "Invoice billing",
+            "Je veux mon invoice et billing s'il vous plait",
+        );
         let result = engine.categorize(&input);
         // "invoice" and "billing" match billing rule (2/5 = 0.4 > 0.3 threshold)
         assert_eq!(result.suggested_category.as_deref(), Some("billing"));
@@ -1729,9 +1811,17 @@ mod tests {
     #[test]
     fn engine_escalation_unauthorized_access() {
         let engine = build_engine();
-        let input = sample_input("ua", "Urgent", "Someone got unauthorized access to our data");
+        let input = sample_input(
+            "ua",
+            "Urgent",
+            "Someone got unauthorized access to our data",
+        );
         let result = engine.categorize(&input);
-        assert!(result.escalation_flags.contains(&EscalationFlag::SecurityIssue));
+        assert!(
+            result
+                .escalation_flags
+                .contains(&EscalationFlag::SecurityIssue)
+        );
     }
 
     #[test]
@@ -1739,7 +1829,11 @@ mod tests {
         let engine = build_engine();
         let input = sample_input("h1", "HIPAA", "We need HIPAA compliance verification");
         let result = engine.categorize(&input);
-        assert!(result.escalation_flags.contains(&EscalationFlag::ComplianceIssue));
+        assert!(
+            result
+                .escalation_flags
+                .contains(&EscalationFlag::ComplianceIssue)
+        );
     }
 
     #[test]
@@ -1747,7 +1841,11 @@ mod tests {
         let engine = build_engine();
         let input = sample_input("l1", "Legal", "We will pursue a lawsuit if not resolved");
         let result = engine.categorize(&input);
-        assert!(result.escalation_flags.contains(&EscalationFlag::NegativeSentiment));
+        assert!(
+            result
+                .escalation_flags
+                .contains(&EscalationFlag::NegativeSentiment)
+        );
     }
 
     #[test]
@@ -1763,7 +1861,11 @@ mod tests {
         let engine = build_engine();
         let input = sample_input("e1", "Bug", "We found an exploit in the API");
         let result = engine.categorize(&input);
-        assert!(result.escalation_flags.contains(&EscalationFlag::SecurityIssue));
+        assert!(
+            result
+                .escalation_flags
+                .contains(&EscalationFlag::SecurityIssue)
+        );
     }
 
     #[test]
@@ -1771,23 +1873,43 @@ mod tests {
         let engine = build_engine();
         let input = sample_input("w1", "Feedback", "This is the worst experience");
         let result = engine.categorize(&input);
-        assert!(result.escalation_flags.contains(&EscalationFlag::NegativeSentiment));
+        assert!(
+            result
+                .escalation_flags
+                .contains(&EscalationFlag::NegativeSentiment)
+        );
     }
 
     #[test]
     fn engine_escalation_regulation() {
         let engine = build_engine();
-        let input = sample_input("r1", "Regulation", "New regulation requires data handling changes");
+        let input = sample_input(
+            "r1",
+            "Regulation",
+            "New regulation requires data handling changes",
+        );
         let result = engine.categorize(&input);
-        assert!(result.escalation_flags.contains(&EscalationFlag::ComplianceIssue));
+        assert!(
+            result
+                .escalation_flags
+                .contains(&EscalationFlag::ComplianceIssue)
+        );
     }
 
     #[test]
     fn engine_escalation_executive() {
         let engine = build_engine();
-        let input = sample_input("ex1", "From executive", "Our executive team needs a response");
+        let input = sample_input(
+            "ex1",
+            "From executive",
+            "Our executive team needs a response",
+        );
         let result = engine.categorize(&input);
-        assert!(result.escalation_flags.contains(&EscalationFlag::VipCustomer));
+        assert!(
+            result
+                .escalation_flags
+                .contains(&EscalationFlag::VipCustomer)
+        );
     }
 
     #[test]
@@ -1810,7 +1932,11 @@ mod tests {
         let policy = CategorizationPolicy::new_suggest_only();
         let config = CategorizationConfig::default();
 
-        let input = sample_input("full-1", "Billing issue", "I was charged twice on my invoice");
+        let input = sample_input(
+            "full-1",
+            "Billing issue",
+            "I was charged twice on my invoice",
+        );
         let result = engine.categorize(&input);
 
         assert_eq!(result.suggested_category.as_deref(), Some("billing"));
@@ -1871,7 +1997,10 @@ mod tests {
         ];
         let results = engine.categorize_batch(&inputs);
         assert_eq!(results[0].suggested_category.as_deref(), Some("billing"));
-        assert_eq!(results[1].suggested_category.as_deref(), Some("technical_support"));
+        assert_eq!(
+            results[1].suggested_category.as_deref(),
+            Some("technical_support")
+        );
         assert_eq!(results[2].suggested_category.as_deref(), Some("security"));
         assert_eq!(results[3].suggested_category.as_deref(), Some("general"));
     }

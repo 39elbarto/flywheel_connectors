@@ -431,12 +431,8 @@ impl RedditClient {
     // -- Delete content --
 
     /// Delete an existing post or comment.
-    pub async fn delete_content(
-        &self,
-        thing_fullname: &str,
-    ) -> RedditResult<serde_json::Value> {
-        self.post_form("/api/del", &[("id", thing_fullname)])
-            .await
+    pub async fn delete_content(&self, thing_fullname: &str) -> RedditResult<serde_json::Value> {
+        self.post_form("/api/del", &[("id", thing_fullname)]).await
     }
 
     // -- Saved items --
@@ -463,19 +459,12 @@ impl RedditClient {
     }
 
     /// Save a post or comment.
-    pub async fn save_thing(
-        &self,
-        thing_fullname: &str,
-    ) -> RedditResult<serde_json::Value> {
-        self.post_form("/api/save", &[("id", thing_fullname)])
-            .await
+    pub async fn save_thing(&self, thing_fullname: &str) -> RedditResult<serde_json::Value> {
+        self.post_form("/api/save", &[("id", thing_fullname)]).await
     }
 
     /// Unsave a post or comment.
-    pub async fn unsave_thing(
-        &self,
-        thing_fullname: &str,
-    ) -> RedditResult<serde_json::Value> {
+    pub async fn unsave_thing(&self, thing_fullname: &str) -> RedditResult<serde_json::Value> {
         self.post_form("/api/unsave", &[("id", thing_fullname)])
             .await
     }
@@ -504,10 +493,7 @@ impl RedditClient {
     }
 
     /// Approve a flagged item via moderator action.
-    pub async fn mod_approve(
-        &self,
-        thing_fullname: &str,
-    ) -> RedditResult<serde_json::Value> {
+    pub async fn mod_approve(&self, thing_fullname: &str) -> RedditResult<serde_json::Value> {
         self.post_form("/api/approve", &[("id", thing_fullname)])
             .await
     }
@@ -536,13 +522,9 @@ impl RedditClient {
     }
 
     /// Mark messages as read.
-    pub async fn mark_messages_read(
-        &self,
-        fullnames: &[&str],
-    ) -> RedditResult<serde_json::Value> {
+    pub async fn mark_messages_read(&self, fullnames: &[&str]) -> RedditResult<serde_json::Value> {
         let csv = fullnames.join(",");
-        self.post_form("/api/read_message", &[("id", &csv)])
-            .await
+        self.post_form("/api/read_message", &[("id", &csv)]).await
     }
 
     // -- Download media --

@@ -1313,9 +1313,7 @@ async fn invoke_performance_transaction_summary() {
 async fn invoke_performance_trace_summary() {
     let mock = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path_regex(
-            "/organizations/my-org/events-trace/[a-f0-9]+/",
-        ))
+        .and(path_regex("/organizations/my-org/events-trace/[a-f0-9]+/"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "transactions": [
                 {"transaction": "/api/users", "span_id": "abc123", "children": []},
@@ -1348,9 +1346,7 @@ async fn invoke_performance_trace_summary() {
 async fn invoke_release_health() {
     let mock = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path_regex(
-            "/organizations/my-org/releases/.*/health/",
-        ))
+        .and(path_regex("/organizations/my-org/releases/.*/health/"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "sessionsCrashed": 5,
             "sessionsHealthy": 995,

@@ -331,7 +331,10 @@ impl DriftDetector {
             timestamp: Self::now(),
             action: "detection_started".into(),
             resource_address: None,
-            details: format!("Starting drift detection across {} resources", self.resources.len()),
+            details: format!(
+                "Starting drift detection across {} resources",
+                self.resources.len()
+            ),
         });
 
         let mut drifted = Vec::new();
@@ -350,11 +353,7 @@ impl DriftDetector {
 
             for attr_name in attr_names {
                 let expected_val = &record.expected[attr_name];
-                let actual_val = record
-                    .actual
-                    .get(attr_name)
-                    .cloned()
-                    .unwrap_or_default();
+                let actual_val = record.actual.get(attr_name).cloned().unwrap_or_default();
 
                 if *expected_val != actual_val {
                     let severity = compute_severity(attr_name);
@@ -825,7 +824,10 @@ mod tests {
 
     #[test]
     fn severity_encryption_is_critical() {
-        assert_eq!(compute_severity("encryption_enabled"), DriftSeverity::Critical);
+        assert_eq!(
+            compute_severity("encryption_enabled"),
+            DriftSeverity::Critical
+        );
     }
 
     #[test]
@@ -1092,10 +1094,7 @@ mod tests {
             resource_address: Some("aws_instance.web".into()),
             details: "Found 2 drifted attrs".into(),
         };
-        assert_eq!(
-            ev.resource_address,
-            Some("aws_instance.web".to_string())
-        );
+        assert_eq!(ev.resource_address, Some("aws_instance.web".to_string()));
     }
 
     #[test]
@@ -1282,7 +1281,13 @@ mod tests {
         let mut d = DriftDetector::new("ws-1");
         let expected = HashMap::from([("instance_type".to_string(), "t2.micro".to_string())]);
         let actual = expected.clone();
-        d.add_resource("aws_instance.web", "aws_instance", "hashicorp/aws", expected, actual);
+        d.add_resource(
+            "aws_instance.web",
+            "aws_instance",
+            "hashicorp/aws",
+            expected,
+            actual,
+        );
         let drifted = d.detect_drift();
         assert!(drifted.is_empty());
     }
@@ -1292,12 +1297,21 @@ mod tests {
         let mut d = DriftDetector::new("ws-1");
         let expected = HashMap::from([("instance_type".to_string(), "t2.micro".to_string())]);
         let actual = HashMap::from([("instance_type".to_string(), "t3.large".to_string())]);
-        d.add_resource("aws_instance.web", "aws_instance", "hashicorp/aws", expected, actual);
+        d.add_resource(
+            "aws_instance.web",
+            "aws_instance",
+            "hashicorp/aws",
+            expected,
+            actual,
+        );
         let drifted = d.detect_drift();
         assert_eq!(drifted.len(), 1);
         assert_eq!(drifted[0].address, "aws_instance.web");
         assert_eq!(drifted[0].drifted_attributes.len(), 1);
-        assert_eq!(drifted[0].drifted_attributes[0].attribute_name, "instance_type");
+        assert_eq!(
+            drifted[0].drifted_attributes[0].attribute_name,
+            "instance_type"
+        );
     }
 
     #[test]
@@ -1308,7 +1322,10 @@ mod tests {
         d.add_resource("r.a", "r", "p", expected, actual);
         let drifted = d.detect_drift();
         assert_eq!(drifted.len(), 1);
-        assert_eq!(drifted[0].drifted_attributes[0].attribute_name, "instance_type");
+        assert_eq!(
+            drifted[0].drifted_attributes[0].attribute_name,
+            "instance_type"
+        );
     }
 
     #[test]
@@ -1388,7 +1405,13 @@ mod tests {
         let mut d = DriftDetector::new("ws-prod");
         let expected = HashMap::from([("instance_type".to_string(), "t2.micro".to_string())]);
         let actual = HashMap::from([("instance_type".to_string(), "m5.xlarge".to_string())]);
-        d.add_resource("aws_instance.web", "aws_instance", "hashicorp/aws", expected, actual);
+        d.add_resource(
+            "aws_instance.web",
+            "aws_instance",
+            "hashicorp/aws",
+            expected,
+            actual,
+        );
         let report = d.report();
         assert_eq!(report.resources_checked, 1);
         assert_eq!(report.resources_drifted, 1);
@@ -1447,7 +1470,13 @@ mod tests {
     #[test]
     fn detector_audit_trail_resource_added_event() {
         let mut d = DriftDetector::new("ws-1");
-        d.add_resource("aws_instance.web", "aws_instance", "p", HashMap::new(), HashMap::new());
+        d.add_resource(
+            "aws_instance.web",
+            "aws_instance",
+            "p",
+            HashMap::new(),
+            HashMap::new(),
+        );
         let last = d.audit_trail().last().unwrap();
         assert_eq!(last.action, "resource_added");
         assert_eq!(last.resource_address, Some("aws_instance.web".to_string()));
@@ -1645,7 +1674,13 @@ mod tests {
             ("iam_role".to_string(), "role-new".to_string()),
             ("tags".to_string(), "new".to_string()),
         ]);
-        d.add_resource("aws_iam_role.admin", "aws_iam_role", "hashicorp/aws", expected, actual);
+        d.add_resource(
+            "aws_iam_role.admin",
+            "aws_iam_role",
+            "hashicorp/aws",
+            expected,
+            actual,
+        );
         assert!(d.exceeds_threshold());
     }
 
@@ -1820,7 +1855,11 @@ mod tests {
             HashMap::from([("x".to_string(), "new".to_string())]),
         );
         let report = d.report();
-        let actions: Vec<&str> = report.audit_events.iter().map(|e| e.action.as_str()).collect();
+        let actions: Vec<&str> = report
+            .audit_events
+            .iter()
+            .map(|e| e.action.as_str())
+            .collect();
         assert!(actions.contains(&"detector_created"));
         assert!(actions.contains(&"resource_added"));
         assert!(actions.contains(&"detection_started"));
@@ -1927,13 +1966,7 @@ mod tests {
     fn detector_add_many_resources() {
         let mut d = DriftDetector::new("ws-1");
         for i in 0..100 {
-            d.add_resource(
-                format!("r.{i}"),
-                "t",
-                "p",
-                HashMap::new(),
-                HashMap::new(),
-            );
+            d.add_resource(format!("r.{i}"), "t", "p", HashMap::new(), HashMap::new());
         }
         assert_eq!(d.resource_count(), 100);
     }

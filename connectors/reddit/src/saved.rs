@@ -324,7 +324,10 @@ impl SaveAction {
             });
         }
 
-        if !suffix.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        if !suffix
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
             return Err(SavedValidationError::InvalidThingId {
                 value: id.to_string(),
                 reason: "ID suffix must be alphanumeric".into(),
@@ -453,7 +456,10 @@ impl SavedItemsValidator {
     /// # Errors
     ///
     /// Returns `SavedValidationError::InvalidLimit` if the limit is out of range.
-    pub const fn validate_query(&self, query: &SavedItemsQuery) -> Result<(), SavedValidationError> {
+    pub const fn validate_query(
+        &self,
+        query: &SavedItemsQuery,
+    ) -> Result<(), SavedValidationError> {
         if query.limit == 0 || query.limit > self.max_limit {
             return Err(SavedValidationError::InvalidLimit {
                 value: query.limit,
@@ -1368,18 +1374,12 @@ mod tests {
 
     #[test]
     fn validation_error_serialize_roundtrip() {
-        let err = SavedValidationError::InvalidLimit {
-            value: 0,
-            max: 100,
-        };
+        let err = SavedValidationError::InvalidLimit { value: 0, max: 100 };
         let v = serde_json::to_value(&err).unwrap();
         let err2: SavedValidationError = serde_json::from_value(v).unwrap();
         assert!(matches!(
             err2,
-            SavedValidationError::InvalidLimit {
-                value: 0,
-                max: 100
-            }
+            SavedValidationError::InvalidLimit { value: 0, max: 100 }
         ));
     }
 
@@ -1637,10 +1637,7 @@ mod tests {
 
     #[test]
     fn audit_event_debug() {
-        let dbg = format!(
-            "{:?}",
-            SavedAuditEvent::for_list(1_700_000_000.0, true)
-        );
+        let dbg = format!("{:?}", SavedAuditEvent::for_list(1_700_000_000.0, true));
         assert!(dbg.contains("list"));
     }
 
@@ -1752,7 +1749,12 @@ mod tests {
     #[test]
     fn page_filtering_scenario() {
         let page = SavedItemsPage {
-            items: vec![sample_post(), sample_comment(), sample_post(), sample_comment()],
+            items: vec![
+                sample_post(),
+                sample_comment(),
+                sample_post(),
+                sample_comment(),
+            ],
             after: Some("next".into()),
             before: None,
             count: 4,
@@ -1762,7 +1764,10 @@ mod tests {
         assert_eq!(page.comment_count(), 2);
         assert_eq!(page.len(), 4);
 
-        assert!(page.items_of_type(SavedItemType::Post).all(SavedItem::is_post));
+        assert!(
+            page.items_of_type(SavedItemType::Post)
+                .all(SavedItem::is_post)
+        );
     }
 
     #[test]
@@ -1865,9 +1870,6 @@ mod tests {
         };
         #[allow(clippy::redundant_clone)]
         let err2 = err.clone();
-        assert!(matches!(
-            err2,
-            SavedValidationError::InvalidThingId { .. }
-        ));
+        assert!(matches!(err2, SavedValidationError::InvalidThingId { .. }));
     }
 }

@@ -381,7 +381,10 @@ impl SlaQuery {
         }
         if !self.include_fulfilled {
             let all_fulfilled = !status.metrics.is_empty()
-                && status.metrics.iter().all(|m| m.stage == SlaStage::Fulfilled);
+                && status
+                    .metrics
+                    .iter()
+                    .all(|m| m.stage == SlaStage::Fulfilled);
             if all_fulfilled {
                 return false;
             }
@@ -556,10 +559,7 @@ mod tests {
 
     #[test]
     fn metric_as_str_requester_wait() {
-        assert_eq!(
-            SlaMetric::RequesterWaitTime.as_str(),
-            "requester_wait_time"
-        );
+        assert_eq!(SlaMetric::RequesterWaitTime.as_str(), "requester_wait_time");
     }
 
     #[test]
@@ -744,64 +744,134 @@ mod tests {
 
     #[test]
     fn metric_status_is_at_risk_when_breached() {
-        let ms = make_metric_status(SlaMetric::FirstReplyTime, SlaStage::Breached, 3600, 4000, Some(-400), true);
+        let ms = make_metric_status(
+            SlaMetric::FirstReplyTime,
+            SlaStage::Breached,
+            3600,
+            4000,
+            Some(-400),
+            true,
+        );
         assert!(ms.is_at_risk(0.5));
     }
 
     #[test]
     fn metric_status_is_at_risk_low_remaining() {
-        let ms = make_metric_status(SlaMetric::FirstReplyTime, SlaStage::Active, 3600, 3200, Some(400), false);
+        let ms = make_metric_status(
+            SlaMetric::FirstReplyTime,
+            SlaStage::Active,
+            3600,
+            3200,
+            Some(400),
+            false,
+        );
         // 400/3600 ~ 0.11 < 0.25
         assert!(ms.is_at_risk(0.25));
     }
 
     #[test]
     fn metric_status_not_at_risk_plenty_remaining() {
-        let ms = make_metric_status(SlaMetric::FirstReplyTime, SlaStage::Active, 3600, 600, Some(3000), false);
+        let ms = make_metric_status(
+            SlaMetric::FirstReplyTime,
+            SlaStage::Active,
+            3600,
+            600,
+            Some(3000),
+            false,
+        );
         // 3000/3600 ~ 0.83 > 0.25
         assert!(!ms.is_at_risk(0.25));
     }
 
     #[test]
     fn metric_status_at_risk_zero_remaining() {
-        let ms = make_metric_status(SlaMetric::FirstReplyTime, SlaStage::Active, 3600, 3600, Some(0), false);
+        let ms = make_metric_status(
+            SlaMetric::FirstReplyTime,
+            SlaStage::Active,
+            3600,
+            3600,
+            Some(0),
+            false,
+        );
         assert!(ms.is_at_risk(0.5));
     }
 
     #[test]
     fn metric_status_not_at_risk_no_remaining() {
-        let ms = make_metric_status(SlaMetric::FirstReplyTime, SlaStage::Fulfilled, 3600, 1800, None, false);
+        let ms = make_metric_status(
+            SlaMetric::FirstReplyTime,
+            SlaStage::Fulfilled,
+            3600,
+            1800,
+            None,
+            false,
+        );
         assert!(!ms.is_at_risk(0.25));
     }
 
     #[test]
     fn metric_status_at_risk_negative_remaining() {
-        let ms = make_metric_status(SlaMetric::FirstReplyTime, SlaStage::Active, 3600, 4000, Some(-400), false);
+        let ms = make_metric_status(
+            SlaMetric::FirstReplyTime,
+            SlaStage::Active,
+            3600,
+            4000,
+            Some(-400),
+            false,
+        );
         assert!(ms.is_at_risk(0.1));
     }
 
     #[test]
     fn metric_status_breach_risk_breached() {
-        let ms = make_metric_status(SlaMetric::FirstReplyTime, SlaStage::Breached, 3600, 4000, Some(-400), true);
+        let ms = make_metric_status(
+            SlaMetric::FirstReplyTime,
+            SlaStage::Breached,
+            3600,
+            4000,
+            Some(-400),
+            true,
+        );
         assert_eq!(ms.breach_risk(), BreachRisk::Breached);
     }
 
     #[test]
     fn metric_status_breach_risk_critical() {
-        let ms = make_metric_status(SlaMetric::FirstReplyTime, SlaStage::Active, 3600, 3500, Some(100), false);
+        let ms = make_metric_status(
+            SlaMetric::FirstReplyTime,
+            SlaStage::Active,
+            3600,
+            3500,
+            Some(100),
+            false,
+        );
         // 100/3600 ~ 0.028
         assert_eq!(ms.breach_risk(), BreachRisk::Critical);
     }
 
     #[test]
     fn metric_status_breach_risk_none_when_fulfilled() {
-        let ms = make_metric_status(SlaMetric::FirstReplyTime, SlaStage::Fulfilled, 3600, 1000, None, false);
+        let ms = make_metric_status(
+            SlaMetric::FirstReplyTime,
+            SlaStage::Fulfilled,
+            3600,
+            1000,
+            None,
+            false,
+        );
         assert_eq!(ms.breach_risk(), BreachRisk::None);
     }
 
     #[test]
     fn metric_status_breach_risk_medium() {
-        let ms = make_metric_status(SlaMetric::FirstReplyTime, SlaStage::Active, 3600, 2400, Some(1200), false);
+        let ms = make_metric_status(
+            SlaMetric::FirstReplyTime,
+            SlaStage::Active,
+            3600,
+            2400,
+            Some(1200),
+            false,
+        );
         // 1200/3600 ~ 0.33 → Medium
         assert_eq!(ms.breach_risk(), BreachRisk::Medium);
     }
@@ -826,13 +896,27 @@ mod tests {
 
     #[test]
     fn metric_status_at_risk_zero_target() {
-        let ms = make_metric_status(SlaMetric::FirstReplyTime, SlaStage::Active, 0, 0, Some(0), false);
+        let ms = make_metric_status(
+            SlaMetric::FirstReplyTime,
+            SlaStage::Active,
+            0,
+            0,
+            Some(0),
+            false,
+        );
         assert!(!ms.is_at_risk(0.5));
     }
 
     #[test]
     fn metric_status_breach_risk_zero_target() {
-        let ms = make_metric_status(SlaMetric::FirstReplyTime, SlaStage::Active, 0, 0, Some(100), false);
+        let ms = make_metric_status(
+            SlaMetric::FirstReplyTime,
+            SlaStage::Active,
+            0,
+            0,
+            Some(100),
+            false,
+        );
         assert_eq!(ms.breach_risk(), BreachRisk::None);
     }
 
@@ -840,22 +924,50 @@ mod tests {
 
     #[test]
     fn ticket_sla_is_breached_true() {
-        let ms = make_metric_status(SlaMetric::FirstReplyTime, SlaStage::Breached, 3600, 4000, Some(-400), true);
+        let ms = make_metric_status(
+            SlaMetric::FirstReplyTime,
+            SlaStage::Breached,
+            3600,
+            4000,
+            Some(-400),
+            true,
+        );
         let ticket = make_ticket_status(1, Some(10), vec![ms], BreachRisk::Breached);
         assert!(ticket.is_breached());
     }
 
     #[test]
     fn ticket_sla_is_breached_false() {
-        let ms = make_metric_status(SlaMetric::FirstReplyTime, SlaStage::Active, 3600, 1000, Some(2600), false);
+        let ms = make_metric_status(
+            SlaMetric::FirstReplyTime,
+            SlaStage::Active,
+            3600,
+            1000,
+            Some(2600),
+            false,
+        );
         let ticket = make_ticket_status(1, Some(10), vec![ms], BreachRisk::Low);
         assert!(!ticket.is_breached());
     }
 
     #[test]
     fn ticket_sla_highest_risk_multiple_metrics() {
-        let m1 = make_metric_status(SlaMetric::FirstReplyTime, SlaStage::Active, 3600, 3200, Some(400), false);
-        let m2 = make_metric_status(SlaMetric::NextReplyTime, SlaStage::Active, 3600, 2000, Some(1600), false);
+        let m1 = make_metric_status(
+            SlaMetric::FirstReplyTime,
+            SlaStage::Active,
+            3600,
+            3200,
+            Some(400),
+            false,
+        );
+        let m2 = make_metric_status(
+            SlaMetric::NextReplyTime,
+            SlaStage::Active,
+            3600,
+            2000,
+            Some(1600),
+            false,
+        );
         let ticket = make_ticket_status(1, Some(10), vec![m1, m2], BreachRisk::None);
         // m1: 400/3600 ~ 0.11 → High, m2: 1600/3600 ~ 0.44 → Medium
         assert_eq!(ticket.highest_risk(), BreachRisk::High);
@@ -869,15 +981,36 @@ mod tests {
 
     #[test]
     fn ticket_sla_time_to_next_breach() {
-        let m1 = make_metric_status(SlaMetric::FirstReplyTime, SlaStage::Active, 3600, 3200, Some(400), false);
-        let m2 = make_metric_status(SlaMetric::NextReplyTime, SlaStage::Active, 7200, 2000, Some(5200), false);
+        let m1 = make_metric_status(
+            SlaMetric::FirstReplyTime,
+            SlaStage::Active,
+            3600,
+            3200,
+            Some(400),
+            false,
+        );
+        let m2 = make_metric_status(
+            SlaMetric::NextReplyTime,
+            SlaStage::Active,
+            7200,
+            2000,
+            Some(5200),
+            false,
+        );
         let ticket = make_ticket_status(1, Some(10), vec![m1, m2], BreachRisk::None);
         assert_eq!(ticket.time_to_next_breach(), Some(400));
     }
 
     #[test]
     fn ticket_sla_time_to_next_breach_none_when_all_breached() {
-        let ms = make_metric_status(SlaMetric::FirstReplyTime, SlaStage::Breached, 3600, 4000, Some(-400), true);
+        let ms = make_metric_status(
+            SlaMetric::FirstReplyTime,
+            SlaStage::Breached,
+            3600,
+            4000,
+            Some(-400),
+            true,
+        );
         let ticket = make_ticket_status(1, Some(10), vec![ms], BreachRisk::Breached);
         assert_eq!(ticket.time_to_next_breach(), None);
     }
@@ -890,15 +1023,36 @@ mod tests {
 
     #[test]
     fn ticket_sla_time_to_breach_skips_fulfilled() {
-        let m1 = make_metric_status(SlaMetric::FirstReplyTime, SlaStage::Fulfilled, 3600, 1000, Some(2600), false);
-        let m2 = make_metric_status(SlaMetric::NextReplyTime, SlaStage::Active, 7200, 2000, Some(5200), false);
+        let m1 = make_metric_status(
+            SlaMetric::FirstReplyTime,
+            SlaStage::Fulfilled,
+            3600,
+            1000,
+            Some(2600),
+            false,
+        );
+        let m2 = make_metric_status(
+            SlaMetric::NextReplyTime,
+            SlaStage::Active,
+            7200,
+            2000,
+            Some(5200),
+            false,
+        );
         let ticket = make_ticket_status(1, Some(10), vec![m1, m2], BreachRisk::None);
         assert_eq!(ticket.time_to_next_breach(), Some(5200));
     }
 
     #[test]
     fn ticket_sla_serde_roundtrip() {
-        let ms = make_metric_status(SlaMetric::FirstReplyTime, SlaStage::Active, 3600, 1000, Some(2600), false);
+        let ms = make_metric_status(
+            SlaMetric::FirstReplyTime,
+            SlaStage::Active,
+            3600,
+            1000,
+            Some(2600),
+            false,
+        );
         let ticket = make_ticket_status(42, Some(10), vec![ms], BreachRisk::Low);
         let json = serde_json::to_string(&ticket).unwrap();
         let back: TicketSlaStatus = serde_json::from_str(&json).unwrap();
@@ -908,8 +1062,22 @@ mod tests {
 
     #[test]
     fn ticket_sla_is_breached_mixed_metrics() {
-        let m1 = make_metric_status(SlaMetric::FirstReplyTime, SlaStage::Fulfilled, 3600, 1000, None, false);
-        let m2 = make_metric_status(SlaMetric::NextReplyTime, SlaStage::Breached, 3600, 4000, Some(-400), true);
+        let m1 = make_metric_status(
+            SlaMetric::FirstReplyTime,
+            SlaStage::Fulfilled,
+            3600,
+            1000,
+            None,
+            false,
+        );
+        let m2 = make_metric_status(
+            SlaMetric::NextReplyTime,
+            SlaStage::Breached,
+            3600,
+            4000,
+            Some(-400),
+            true,
+        );
         let ticket = make_ticket_status(1, Some(10), vec![m1, m2], BreachRisk::Breached);
         assert!(ticket.is_breached());
     }
@@ -1126,8 +1294,32 @@ mod tests {
     #[test]
     fn sla_query_matches_ticket_filter() {
         let q = SlaQuery::new().with_tickets(vec![1, 2]);
-        let t1 = make_ticket_status(1, None, vec![make_metric_status(SlaMetric::FirstReplyTime, SlaStage::Active, 3600, 1000, Some(2600), false)], BreachRisk::None);
-        let t3 = make_ticket_status(3, None, vec![make_metric_status(SlaMetric::FirstReplyTime, SlaStage::Active, 3600, 1000, Some(2600), false)], BreachRisk::None);
+        let t1 = make_ticket_status(
+            1,
+            None,
+            vec![make_metric_status(
+                SlaMetric::FirstReplyTime,
+                SlaStage::Active,
+                3600,
+                1000,
+                Some(2600),
+                false,
+            )],
+            BreachRisk::None,
+        );
+        let t3 = make_ticket_status(
+            3,
+            None,
+            vec![make_metric_status(
+                SlaMetric::FirstReplyTime,
+                SlaStage::Active,
+                3600,
+                1000,
+                Some(2600),
+                false,
+            )],
+            BreachRisk::None,
+        );
         assert!(q.matches(&t1));
         assert!(!q.matches(&t3));
     }
@@ -1135,9 +1327,45 @@ mod tests {
     #[test]
     fn sla_query_matches_policy_filter() {
         let q = SlaQuery::new().with_policies(vec![10]);
-        let t1 = make_ticket_status(1, Some(10), vec![make_metric_status(SlaMetric::FirstReplyTime, SlaStage::Active, 3600, 1000, Some(2600), false)], BreachRisk::None);
-        let t2 = make_ticket_status(2, Some(20), vec![make_metric_status(SlaMetric::FirstReplyTime, SlaStage::Active, 3600, 1000, Some(2600), false)], BreachRisk::None);
-        let t3 = make_ticket_status(3, None, vec![make_metric_status(SlaMetric::FirstReplyTime, SlaStage::Active, 3600, 1000, Some(2600), false)], BreachRisk::None);
+        let t1 = make_ticket_status(
+            1,
+            Some(10),
+            vec![make_metric_status(
+                SlaMetric::FirstReplyTime,
+                SlaStage::Active,
+                3600,
+                1000,
+                Some(2600),
+                false,
+            )],
+            BreachRisk::None,
+        );
+        let t2 = make_ticket_status(
+            2,
+            Some(20),
+            vec![make_metric_status(
+                SlaMetric::FirstReplyTime,
+                SlaStage::Active,
+                3600,
+                1000,
+                Some(2600),
+                false,
+            )],
+            BreachRisk::None,
+        );
+        let t3 = make_ticket_status(
+            3,
+            None,
+            vec![make_metric_status(
+                SlaMetric::FirstReplyTime,
+                SlaStage::Active,
+                3600,
+                1000,
+                Some(2600),
+                false,
+            )],
+            BreachRisk::None,
+        );
         assert!(q.matches(&t1));
         assert!(!q.matches(&t2));
         assert!(!q.matches(&t3));
@@ -1157,21 +1385,57 @@ mod tests {
     #[test]
     fn sla_query_excludes_fulfilled_by_default() {
         let q = SlaQuery::new();
-        let t = make_ticket_status(1, None, vec![make_metric_status(SlaMetric::FirstReplyTime, SlaStage::Fulfilled, 3600, 1000, None, false)], BreachRisk::None);
+        let t = make_ticket_status(
+            1,
+            None,
+            vec![make_metric_status(
+                SlaMetric::FirstReplyTime,
+                SlaStage::Fulfilled,
+                3600,
+                1000,
+                None,
+                false,
+            )],
+            BreachRisk::None,
+        );
         assert!(!q.matches(&t));
     }
 
     #[test]
     fn sla_query_includes_fulfilled_when_set() {
         let q = SlaQuery::new().include_fulfilled();
-        let t = make_ticket_status(1, None, vec![make_metric_status(SlaMetric::FirstReplyTime, SlaStage::Fulfilled, 3600, 1000, None, false)], BreachRisk::None);
+        let t = make_ticket_status(
+            1,
+            None,
+            vec![make_metric_status(
+                SlaMetric::FirstReplyTime,
+                SlaStage::Fulfilled,
+                3600,
+                1000,
+                None,
+                false,
+            )],
+            BreachRisk::None,
+        );
         assert!(q.matches(&t));
     }
 
     #[test]
     fn sla_query_no_filter_matches_active() {
         let q = SlaQuery::new();
-        let t = make_ticket_status(1, None, vec![make_metric_status(SlaMetric::FirstReplyTime, SlaStage::Active, 3600, 1000, Some(2600), false)], BreachRisk::None);
+        let t = make_ticket_status(
+            1,
+            None,
+            vec![make_metric_status(
+                SlaMetric::FirstReplyTime,
+                SlaStage::Active,
+                3600,
+                1000,
+                Some(2600),
+                false,
+            )],
+            BreachRisk::None,
+        );
         assert!(q.matches(&t));
     }
 
@@ -1195,9 +1459,19 @@ mod tests {
     #[test]
     fn sla_report_breach_rate_zero() {
         let report = SlaReport {
-            tickets: vec![
-                make_ticket_status(1, None, vec![make_metric_status(SlaMetric::FirstReplyTime, SlaStage::Active, 3600, 1000, Some(2600), false)], BreachRisk::None),
-            ],
+            tickets: vec![make_ticket_status(
+                1,
+                None,
+                vec![make_metric_status(
+                    SlaMetric::FirstReplyTime,
+                    SlaStage::Active,
+                    3600,
+                    1000,
+                    Some(2600),
+                    false,
+                )],
+                BreachRisk::None,
+            )],
             total_at_risk: 0,
             total_breached: 0,
             generated_at: "2026-03-09T00:00:00Z".to_string(),
@@ -1235,19 +1509,40 @@ mod tests {
         let t1 = make_ticket_status(
             1,
             Some(10),
-            vec![make_metric_status(SlaMetric::FirstReplyTime, SlaStage::Breached, 3600, 4000, Some(-400), true)],
+            vec![make_metric_status(
+                SlaMetric::FirstReplyTime,
+                SlaStage::Breached,
+                3600,
+                4000,
+                Some(-400),
+                true,
+            )],
             BreachRisk::Breached,
         );
         let t2 = make_ticket_status(
             2,
             Some(10),
-            vec![make_metric_status(SlaMetric::FirstReplyTime, SlaStage::Active, 3600, 3400, Some(200), false)],
+            vec![make_metric_status(
+                SlaMetric::FirstReplyTime,
+                SlaStage::Active,
+                3600,
+                3400,
+                Some(200),
+                false,
+            )],
             BreachRisk::High,
         );
         let t3 = make_ticket_status(
             3,
             Some(10),
-            vec![make_metric_status(SlaMetric::FirstReplyTime, SlaStage::Active, 3600, 1000, Some(2600), false)],
+            vec![make_metric_status(
+                SlaMetric::FirstReplyTime,
+                SlaStage::Active,
+                3600,
+                1000,
+                Some(2600),
+                false,
+            )],
             BreachRisk::None,
         );
         let report = SlaReport::from_statuses(vec![t1, t2, t3], "2026-03-09T12:00:00Z".to_string());
@@ -1259,13 +1554,29 @@ mod tests {
     #[test]
     fn sla_report_breach_rate_all_breached() {
         let t1 = make_ticket_status(
-            1, None,
-            vec![make_metric_status(SlaMetric::FirstReplyTime, SlaStage::Breached, 3600, 5000, Some(-1400), true)],
+            1,
+            None,
+            vec![make_metric_status(
+                SlaMetric::FirstReplyTime,
+                SlaStage::Breached,
+                3600,
+                5000,
+                Some(-1400),
+                true,
+            )],
             BreachRisk::Breached,
         );
         let t2 = make_ticket_status(
-            2, None,
-            vec![make_metric_status(SlaMetric::NextReplyTime, SlaStage::Breached, 7200, 8000, Some(-800), true)],
+            2,
+            None,
+            vec![make_metric_status(
+                SlaMetric::NextReplyTime,
+                SlaStage::Breached,
+                7200,
+                8000,
+                Some(-800),
+                true,
+            )],
             BreachRisk::Breached,
         );
         let report = SlaReport::from_statuses(vec![t1, t2], "2026-03-09T00:00:00Z".to_string());
@@ -1337,9 +1648,15 @@ mod tests {
 
     #[test]
     fn escalation_action_equality() {
-        let a = EscalationAction::Notify { target: "x".to_string() };
-        let b = EscalationAction::Notify { target: "x".to_string() };
-        let c = EscalationAction::Notify { target: "y".to_string() };
+        let a = EscalationAction::Notify {
+            target: "x".to_string(),
+        };
+        let b = EscalationAction::Notify {
+            target: "x".to_string(),
+        };
+        let c = EscalationAction::Notify {
+            target: "y".to_string(),
+        };
         assert_eq!(a, b);
         assert_ne!(a, c);
     }
@@ -1350,7 +1667,9 @@ mod tests {
     fn escalation_rule_should_trigger_exact() {
         let rule = EscalationRule {
             risk_threshold: BreachRisk::High,
-            action: EscalationAction::Notify { target: "team".to_string() },
+            action: EscalationAction::Notify {
+                target: "team".to_string(),
+            },
             cooldown_seconds: 300,
         };
         assert!(rule.should_trigger(BreachRisk::High));
@@ -1360,7 +1679,9 @@ mod tests {
     fn escalation_rule_should_trigger_above() {
         let rule = EscalationRule {
             risk_threshold: BreachRisk::High,
-            action: EscalationAction::Notify { target: "team".to_string() },
+            action: EscalationAction::Notify {
+                target: "team".to_string(),
+            },
             cooldown_seconds: 300,
         };
         assert!(rule.should_trigger(BreachRisk::Critical));
@@ -1371,7 +1692,9 @@ mod tests {
     fn escalation_rule_should_not_trigger_below() {
         let rule = EscalationRule {
             risk_threshold: BreachRisk::High,
-            action: EscalationAction::Notify { target: "team".to_string() },
+            action: EscalationAction::Notify {
+                target: "team".to_string(),
+            },
             cooldown_seconds: 300,
         };
         assert!(!rule.should_trigger(BreachRisk::Medium));
@@ -1395,7 +1718,9 @@ mod tests {
     fn escalation_rule_clone() {
         let rule = EscalationRule {
             risk_threshold: BreachRisk::Medium,
-            action: EscalationAction::AddTag { tag: "escalated".to_string() },
+            action: EscalationAction::AddTag {
+                tag: "escalated".to_string(),
+            },
             cooldown_seconds: 120,
         };
         let cloned = rule.clone();
@@ -1511,7 +1836,12 @@ mod tests {
     fn deserialize_escalation_action_custom() {
         let payload = json!({"type": "custom", "action_type": "pagerduty"});
         let a: EscalationAction = serde_json::from_value(payload).unwrap();
-        assert_eq!(a, EscalationAction::Custom { action_type: "pagerduty".to_string() });
+        assert_eq!(
+            a,
+            EscalationAction::Custom {
+                action_type: "pagerduty".to_string()
+            }
+        );
     }
 
     // ── Edge cases ──────────────────────────────────────────────────
@@ -1568,14 +1898,28 @@ mod tests {
 
     #[test]
     fn metric_status_is_at_risk_exact_threshold() {
-        let ms = make_metric_status(SlaMetric::FirstReplyTime, SlaStage::Active, 1000, 750, Some(250), false);
+        let ms = make_metric_status(
+            SlaMetric::FirstReplyTime,
+            SlaStage::Active,
+            1000,
+            750,
+            Some(250),
+            false,
+        );
         // 250/1000 = 0.25, threshold_pct = 0.25 → NOT at risk (strictly less than)
         assert!(!ms.is_at_risk(0.25));
     }
 
     #[test]
     fn metric_status_is_at_risk_just_below_threshold() {
-        let ms = make_metric_status(SlaMetric::FirstReplyTime, SlaStage::Active, 1000, 751, Some(249), false);
+        let ms = make_metric_status(
+            SlaMetric::FirstReplyTime,
+            SlaStage::Active,
+            1000,
+            751,
+            Some(249),
+            false,
+        );
         // 249/1000 = 0.249 < 0.25 → at risk
         assert!(ms.is_at_risk(0.25));
     }
@@ -1598,8 +1942,22 @@ mod tests {
 
     #[test]
     fn ticket_sla_time_to_breach_ignores_zero_remaining() {
-        let m1 = make_metric_status(SlaMetric::FirstReplyTime, SlaStage::Active, 3600, 3600, Some(0), false);
-        let m2 = make_metric_status(SlaMetric::NextReplyTime, SlaStage::Active, 7200, 2000, Some(5200), false);
+        let m1 = make_metric_status(
+            SlaMetric::FirstReplyTime,
+            SlaStage::Active,
+            3600,
+            3600,
+            Some(0),
+            false,
+        );
+        let m2 = make_metric_status(
+            SlaMetric::NextReplyTime,
+            SlaStage::Active,
+            7200,
+            2000,
+            Some(5200),
+            false,
+        );
         let ticket = make_ticket_status(1, None, vec![m1, m2], BreachRisk::None);
         // m1 has 0 remaining (filtered out), m2 has 5200
         assert_eq!(ticket.time_to_next_breach(), Some(5200));
@@ -1608,8 +1966,16 @@ mod tests {
     #[test]
     fn sla_report_from_statuses_all_healthy() {
         let t1 = make_ticket_status(
-            1, None,
-            vec![make_metric_status(SlaMetric::FirstReplyTime, SlaStage::Active, 3600, 500, Some(3100), false)],
+            1,
+            None,
+            vec![make_metric_status(
+                SlaMetric::FirstReplyTime,
+                SlaStage::Active,
+                3600,
+                500,
+                Some(3100),
+                false,
+            )],
             BreachRisk::None,
         );
         let report = SlaReport::from_statuses(vec![t1], "2026-03-09T00:00:00Z".to_string());
@@ -1629,7 +1995,9 @@ mod tests {
     fn escalation_rule_none_threshold_always_triggers() {
         let rule = EscalationRule {
             risk_threshold: BreachRisk::None,
-            action: EscalationAction::Notify { target: "t".to_string() },
+            action: EscalationAction::Notify {
+                target: "t".to_string(),
+            },
             cooldown_seconds: 0,
         };
         assert!(rule.should_trigger(BreachRisk::None));
@@ -1641,7 +2009,9 @@ mod tests {
     fn escalation_rule_breached_threshold_only_breached() {
         let rule = EscalationRule {
             risk_threshold: BreachRisk::Breached,
-            action: EscalationAction::SetPriority { priority: "urgent".to_string() },
+            action: EscalationAction::SetPriority {
+                priority: "urgent".to_string(),
+            },
             cooldown_seconds: 0,
         };
         assert!(!rule.should_trigger(BreachRisk::Critical));
@@ -1662,7 +2032,12 @@ mod tests {
 
     #[test]
     fn sla_stage_serde_all_variants() {
-        for stage in [SlaStage::Active, SlaStage::Paused, SlaStage::Fulfilled, SlaStage::Breached] {
+        for stage in [
+            SlaStage::Active,
+            SlaStage::Paused,
+            SlaStage::Fulfilled,
+            SlaStage::Breached,
+        ] {
             let json = serde_json::to_string(&stage).unwrap();
             let back: SlaStage = serde_json::from_str(&json).unwrap();
             assert_eq!(stage, back);
@@ -1671,7 +2046,11 @@ mod tests {
 
     #[test]
     fn sla_audit_action_serde_all_variants() {
-        for action in [SlaAuditAction::Query, SlaAuditAction::BreachDetected, SlaAuditAction::EscalationTriggered] {
+        for action in [
+            SlaAuditAction::Query,
+            SlaAuditAction::BreachDetected,
+            SlaAuditAction::EscalationTriggered,
+        ] {
             let json = serde_json::to_string(&action).unwrap();
             let back: SlaAuditAction = serde_json::from_str(&json).unwrap();
             assert_eq!(action, back);
@@ -1734,8 +2113,22 @@ mod tests {
             1,
             None,
             vec![
-                make_metric_status(SlaMetric::FirstReplyTime, SlaStage::Fulfilled, 3600, 1000, None, false),
-                make_metric_status(SlaMetric::NextReplyTime, SlaStage::Active, 3600, 500, Some(3100), false),
+                make_metric_status(
+                    SlaMetric::FirstReplyTime,
+                    SlaStage::Fulfilled,
+                    3600,
+                    1000,
+                    None,
+                    false,
+                ),
+                make_metric_status(
+                    SlaMetric::NextReplyTime,
+                    SlaStage::Active,
+                    3600,
+                    500,
+                    Some(3100),
+                    false,
+                ),
             ],
             BreachRisk::None,
         );

@@ -315,8 +315,7 @@ impl StreamRuleSet {
             ));
         }
         for (i, rule) in self.rules.iter().enumerate() {
-            rule.validate()
-                .map_err(|e| format!("rule[{i}]: {e}"))?;
+            rule.validate().map_err(|e| format!("rule[{i}]: {e}"))?;
         }
         Ok(())
     }
@@ -507,8 +506,7 @@ impl StreamBuffer {
     /// Returns `true` if the buffer is applying backpressure (full with Block policy).
     #[must_use]
     pub fn is_backpressured(&self) -> bool {
-        self.overflow_policy == OverflowPolicy::Block
-            && self.events.len() >= self.capacity
+        self.overflow_policy == OverflowPolicy::Block && self.events.len() >= self.capacity
     }
 
     /// Number of events currently in the buffer.
@@ -606,10 +604,7 @@ impl LeaseManager {
         // If there is an active, non-expired lease held by someone else, reject.
         if let Some(existing) = &self.active_lease {
             if !existing.is_expired() && existing.holder != holder {
-                return Err(format!(
-                    "lease already held by '{}'",
-                    existing.holder
-                ));
+                return Err(format!("lease already held by '{}'", existing.holder));
             }
         }
 
@@ -641,9 +636,7 @@ impl LeaseManager {
     /// Returns `true` if a non-expired lease is currently held.
     #[must_use]
     pub fn is_held(&self) -> bool {
-        self.active_lease
-            .as_ref()
-            .is_some_and(|l| !l.is_expired())
+        self.active_lease.as_ref().is_some_and(|l| !l.is_expired())
     }
 
     /// Returns the holder of the current (non-expired) lease, if any.
@@ -804,7 +797,10 @@ mod tests {
 
     #[test]
     fn expansion_referenced_tweets_id_as_str() {
-        assert_eq!(Expansion::ReferencedTweetsId.as_str(), "referenced_tweets.id");
+        assert_eq!(
+            Expansion::ReferencedTweetsId.as_str(),
+            "referenced_tweets.id"
+        );
     }
 
     #[test]
@@ -1236,9 +1232,21 @@ mod tests {
             rules: Vec::new(),
             max_rules: 2,
         };
-        let r1 = StreamRule { id: None, value: "a".into(), tag: None };
-        let r2 = StreamRule { id: None, value: "b".into(), tag: None };
-        let r3 = StreamRule { id: None, value: "c".into(), tag: None };
+        let r1 = StreamRule {
+            id: None,
+            value: "a".into(),
+            tag: None,
+        };
+        let r2 = StreamRule {
+            id: None,
+            value: "b".into(),
+            tag: None,
+        };
+        let r3 = StreamRule {
+            id: None,
+            value: "c".into(),
+            tag: None,
+        };
         assert!(set.add_rule(r1).is_ok());
         assert!(set.add_rule(r2).is_ok());
         let err = set.add_rule(r3).unwrap_err();
@@ -1964,9 +1972,7 @@ mod tests {
             ..Default::default()
         };
         let _audit1 = StreamAuditEvent::now(AuditAction::LeaseAcquired, "agent-a");
-        let _lease = mgr
-            .acquire("agent-a", "l1", config)
-            .unwrap();
+        let _lease = mgr.acquire("agent-a", "l1", config).unwrap();
         assert!(mgr.is_held());
 
         // Add rules

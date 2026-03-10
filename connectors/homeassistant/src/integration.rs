@@ -141,11 +141,9 @@ impl EntityDomain {
     #[must_use]
     pub const fn capability_family(&self) -> CapabilityFamily {
         match self {
-            Self::Sensor
-            | Self::BinarySensor
-            | Self::Weather
-            | Self::Person
-            | Self::Zone => CapabilityFamily::ReadOnly,
+            Self::Sensor | Self::BinarySensor | Self::Weather | Self::Person | Self::Zone => {
+                CapabilityFamily::ReadOnly
+            }
 
             Self::Light
             | Self::Switch
@@ -401,10 +399,7 @@ pub enum DeviceControl {
     ArmHome,
     ArmAway,
     Disarm,
-    Custom {
-        service: String,
-        data: Value,
-    },
+    Custom { service: String, data: Value },
 }
 
 impl DeviceControl {
@@ -416,17 +411,12 @@ impl DeviceControl {
             Self::TurnOff => ServiceCall::new(domain, "turn_off"),
             Self::Toggle => ServiceCall::new(domain, "toggle"),
             Self::SetBrightness(b) => {
-                ServiceCall::new(domain, "turn_on")
-                    .with_data(serde_json::json!({"brightness": b}))
+                ServiceCall::new(domain, "turn_on").with_data(serde_json::json!({"brightness": b}))
             }
-            Self::SetTemperature(t) => {
-                ServiceCall::new(domain, "set_temperature")
-                    .with_data(serde_json::json!({"temperature": t}))
-            }
-            Self::SetPosition(p) => {
-                ServiceCall::new(domain, "set_cover_position")
-                    .with_data(serde_json::json!({"position": p}))
-            }
+            Self::SetTemperature(t) => ServiceCall::new(domain, "set_temperature")
+                .with_data(serde_json::json!({"temperature": t})),
+            Self::SetPosition(p) => ServiceCall::new(domain, "set_cover_position")
+                .with_data(serde_json::json!({"position": p})),
             Self::Lock => ServiceCall::new(domain, "lock"),
             Self::Unlock => ServiceCall::new(domain, "unlock"),
             Self::ArmHome => ServiceCall::new(domain, "alarm_arm_home"),
@@ -755,47 +745,74 @@ mod tests {
 
     #[test]
     fn capability_sensor_readonly() {
-        assert_eq!(EntityDomain::Sensor.capability_family(), CapabilityFamily::ReadOnly);
+        assert_eq!(
+            EntityDomain::Sensor.capability_family(),
+            CapabilityFamily::ReadOnly
+        );
     }
 
     #[test]
     fn capability_binary_sensor_readonly() {
-        assert_eq!(EntityDomain::BinarySensor.capability_family(), CapabilityFamily::ReadOnly);
+        assert_eq!(
+            EntityDomain::BinarySensor.capability_family(),
+            CapabilityFamily::ReadOnly
+        );
     }
 
     #[test]
     fn capability_weather_readonly() {
-        assert_eq!(EntityDomain::Weather.capability_family(), CapabilityFamily::ReadOnly);
+        assert_eq!(
+            EntityDomain::Weather.capability_family(),
+            CapabilityFamily::ReadOnly
+        );
     }
 
     #[test]
     fn capability_person_readonly() {
-        assert_eq!(EntityDomain::Person.capability_family(), CapabilityFamily::ReadOnly);
+        assert_eq!(
+            EntityDomain::Person.capability_family(),
+            CapabilityFamily::ReadOnly
+        );
     }
 
     #[test]
     fn capability_zone_readonly() {
-        assert_eq!(EntityDomain::Zone.capability_family(), CapabilityFamily::ReadOnly);
+        assert_eq!(
+            EntityDomain::Zone.capability_family(),
+            CapabilityFamily::ReadOnly
+        );
     }
 
     #[test]
     fn capability_light_controllable() {
-        assert_eq!(EntityDomain::Light.capability_family(), CapabilityFamily::Controllable);
+        assert_eq!(
+            EntityDomain::Light.capability_family(),
+            CapabilityFamily::Controllable
+        );
     }
 
     #[test]
     fn capability_switch_controllable() {
-        assert_eq!(EntityDomain::Switch.capability_family(), CapabilityFamily::Controllable);
+        assert_eq!(
+            EntityDomain::Switch.capability_family(),
+            CapabilityFamily::Controllable
+        );
     }
 
     #[test]
     fn capability_climate_controllable() {
-        assert_eq!(EntityDomain::Climate.capability_family(), CapabilityFamily::Controllable);
+        assert_eq!(
+            EntityDomain::Climate.capability_family(),
+            CapabilityFamily::Controllable
+        );
     }
 
     #[test]
     fn capability_cover_controllable() {
-        assert_eq!(EntityDomain::Cover.capability_family(), CapabilityFamily::Controllable);
+        assert_eq!(
+            EntityDomain::Cover.capability_family(),
+            CapabilityFamily::Controllable
+        );
     }
 
     #[test]
@@ -808,12 +825,18 @@ mod tests {
 
     #[test]
     fn capability_fan_controllable() {
-        assert_eq!(EntityDomain::Fan.capability_family(), CapabilityFamily::Controllable);
+        assert_eq!(
+            EntityDomain::Fan.capability_family(),
+            CapabilityFamily::Controllable
+        );
     }
 
     #[test]
     fn capability_vacuum_controllable() {
-        assert_eq!(EntityDomain::Vacuum.capability_family(), CapabilityFamily::Controllable);
+        assert_eq!(
+            EntityDomain::Vacuum.capability_family(),
+            CapabilityFamily::Controllable
+        );
     }
 
     #[test]
@@ -874,17 +897,26 @@ mod tests {
 
     #[test]
     fn capability_automation_family() {
-        assert_eq!(EntityDomain::Automation.capability_family(), CapabilityFamily::Automation);
+        assert_eq!(
+            EntityDomain::Automation.capability_family(),
+            CapabilityFamily::Automation
+        );
     }
 
     #[test]
     fn capability_script_family() {
-        assert_eq!(EntityDomain::Script.capability_family(), CapabilityFamily::Automation);
+        assert_eq!(
+            EntityDomain::Script.capability_family(),
+            CapabilityFamily::Automation
+        );
     }
 
     #[test]
     fn capability_scene_family() {
-        assert_eq!(EntityDomain::Scene.capability_family(), CapabilityFamily::Automation);
+        assert_eq!(
+            EntityDomain::Scene.capability_family(),
+            CapabilityFamily::Automation
+        );
     }
 
     #[test]
@@ -928,7 +960,10 @@ mod tests {
     fn capability_family_display() {
         assert_eq!(CapabilityFamily::ReadOnly.to_string(), "read_only");
         assert_eq!(CapabilityFamily::Controllable.to_string(), "controllable");
-        assert_eq!(CapabilityFamily::SecurityAdjacent.to_string(), "security_adjacent");
+        assert_eq!(
+            CapabilityFamily::SecurityAdjacent.to_string(),
+            "security_adjacent"
+        );
         assert_eq!(CapabilityFamily::Automation.to_string(), "automation");
     }
 
@@ -987,7 +1022,11 @@ mod tests {
 
     #[test]
     fn entity_security_adjacent_alarm() {
-        let e = make_entity("alarm_control_panel", "alarm_control_panel.home", "armed_home");
+        let e = make_entity(
+            "alarm_control_panel",
+            "alarm_control_panel.home",
+            "armed_home",
+        );
         assert!(e.is_security_adjacent());
     }
 
@@ -1196,8 +1235,7 @@ mod tests {
 
     #[test]
     fn service_call_with_data() {
-        let sc = ServiceCall::new("light", "turn_on")
-            .with_data(json!({"brightness": 128}));
+        let sc = ServiceCall::new("light", "turn_on").with_data(json!({"brightness": 128}));
         assert_eq!(sc.data["brightness"], 128);
     }
 
@@ -1512,7 +1550,11 @@ mod tests {
     #[test]
     fn policy_safe_requires_approval_for_alarm() {
         let policy = ControlPolicy::new_safe();
-        let entity = make_entity("alarm_control_panel", "alarm_control_panel.home", "armed_home");
+        let entity = make_entity(
+            "alarm_control_panel",
+            "alarm_control_panel.home",
+            "armed_home",
+        );
         let decision = policy.check_control(&entity, &DeviceControl::Disarm);
         assert!(matches!(decision, ControlDecision::RequireApproval { .. }));
     }
@@ -1662,12 +1704,8 @@ mod tests {
 
     #[test]
     fn decision_deny_ne() {
-        let a = ControlDecision::Deny {
-            reason: "a".into(),
-        };
-        let b = ControlDecision::Deny {
-            reason: "b".into(),
-        };
+        let a = ControlDecision::Deny { reason: "a".into() };
+        let b = ControlDecision::Deny { reason: "b".into() };
         assert_ne!(a, b);
     }
 
@@ -1739,10 +1777,12 @@ mod tests {
             },
         };
         let json = serde_json::to_value(&event).unwrap();
-        assert!(json["decision"]["Deny"]["reason"]
-            .as_str()
-            .unwrap()
-            .contains("security"));
+        assert!(
+            json["decision"]["Deny"]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("security")
+        );
     }
 
     #[test]
@@ -1921,7 +1961,11 @@ mod tests {
         let mut reg = EntityRegistry::new();
         reg.register(make_entity("vacuum", "vacuum.a", "on"));
         reg.register(make_entity("light", "light.b", "off"));
-        reg.register(make_entity("alarm_control_panel", "alarm_control_panel.c", "armed"));
+        reg.register(make_entity(
+            "alarm_control_panel",
+            "alarm_control_panel.c",
+            "armed",
+        ));
         let domains = reg.domains();
         assert_eq!(domains[0], "alarm_control_panel");
         assert_eq!(domains[1], "light");

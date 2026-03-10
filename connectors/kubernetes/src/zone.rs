@@ -163,14 +163,11 @@ impl OperationCategory {
             return Some(Self::Exec);
         }
         // Deploy / create
-        if operation_id.contains("create")
-            || operation_id.contains("apply")
-        {
+        if operation_id.contains("create") || operation_id.contains("apply") {
             return Some(Self::Deploy);
         }
         // Secret access
-        if operation_id.starts_with("kubernetes.secret.")
-            || operation_id == "kubernetes.get_secret"
+        if operation_id.starts_with("kubernetes.secret.") || operation_id == "kubernetes.get_secret"
         {
             return Some(Self::Secret);
         }
@@ -199,10 +196,7 @@ impl OperationCategory {
     /// Whether this category mutates cluster state.
     #[must_use]
     pub const fn is_mutation(&self) -> bool {
-        matches!(
-            self,
-            Self::Write | Self::Deploy | Self::Exec | Self::Delete
-        )
+        matches!(self, Self::Write | Self::Deploy | Self::Exec | Self::Delete)
     }
 }
 
@@ -395,9 +389,7 @@ impl ZonePolicy {
                         return PolicyDecision::Allow;
                     }
                     return PolicyDecision::Deny {
-                        reason: format!(
-                            "Approval token does not authorise '{operation_id}'"
-                        ),
+                        reason: format!("Approval token does not authorise '{operation_id}'"),
                     };
                 }
                 PolicyDecision::RequiresApproval {
@@ -418,7 +410,11 @@ impl ZonePolicy {
             OperationCategory::Delete => {
                 if self.prod_allow_deletes {
                     // Even with the override, deletes require approval.
-                    Self::require_approval(operation_id, approval, "Delete in prod requires approval")
+                    Self::require_approval(
+                        operation_id,
+                        approval,
+                        "Delete in prod requires approval",
+                    )
                 } else {
                     PolicyDecision::Deny {
                         reason: format!(
@@ -428,16 +424,12 @@ impl ZonePolicy {
                     }
                 }
             }
-            OperationCategory::Deploy => Self::require_approval(
-                operation_id,
-                approval,
-                "Deploy in prod requires approval",
-            ),
-            OperationCategory::Exec => Self::require_approval(
-                operation_id,
-                approval,
-                "Exec in prod requires approval",
-            ),
+            OperationCategory::Deploy => {
+                Self::require_approval(operation_id, approval, "Deploy in prod requires approval")
+            }
+            OperationCategory::Exec => {
+                Self::require_approval(operation_id, approval, "Exec in prod requires approval")
+            }
             OperationCategory::Write => Self::require_approval(
                 operation_id,
                 approval,
@@ -848,7 +840,10 @@ mod tests {
     fn classify_unknown_operation() {
         assert_eq!(OperationCategory::classify("kubernetes.unknown"), None);
         assert_eq!(OperationCategory::classify(""), None);
-        assert_eq!(OperationCategory::classify("other.list"), Some(OperationCategory::Read));
+        assert_eq!(
+            OperationCategory::classify("other.list"),
+            Some(OperationCategory::Read)
+        );
     }
 
     #[test]
@@ -957,9 +952,7 @@ mod tests {
 
     #[test]
     fn decision_clone() {
-        let d = PolicyDecision::Deny {
-            reason: "x".into(),
-        };
+        let d = PolicyDecision::Deny { reason: "x".into() };
         let d2 = d.clone();
         assert_eq!(d, d2);
     }
@@ -1180,8 +1173,7 @@ mod tests {
     fn prod_deploy_allowed_with_approval() {
         let p = ZonePolicy::new(ZoneConfig::new(ZoneTier::Prod, "us-east-1"));
         let token = ApprovalToken::new("tok-prod", "sre-team", "kubernetes.apply_deployment");
-        let decision =
-            p.evaluate_with_approval("kubernetes.apply_deployment", Some(&token));
+        let decision = p.evaluate_with_approval("kubernetes.apply_deployment", Some(&token));
         assert!(decision.is_allowed());
     }
 
@@ -1229,8 +1221,8 @@ mod tests {
 
     #[test]
     fn prod_delete_with_override_requires_approval() {
-        let p = ZonePolicy::new(ZoneConfig::new(ZoneTier::Prod, "us-east-1"))
-            .with_prod_deletes(true);
+        let p =
+            ZonePolicy::new(ZoneConfig::new(ZoneTier::Prod, "us-east-1")).with_prod_deletes(true);
         let decision = p.evaluate("kubernetes.delete_pod");
         assert!(
             decision.requires_approval(),
@@ -1240,8 +1232,8 @@ mod tests {
 
     #[test]
     fn prod_delete_with_override_and_approval() {
-        let p = ZonePolicy::new(ZoneConfig::new(ZoneTier::Prod, "us-east-1"))
-            .with_prod_deletes(true);
+        let p =
+            ZonePolicy::new(ZoneConfig::new(ZoneTier::Prod, "us-east-1")).with_prod_deletes(true);
         let token = ApprovalToken::new("tok-d", "sre", "kubernetes.delete_pod");
         let decision = p.evaluate_with_approval("kubernetes.delete_pod", Some(&token));
         assert!(decision.is_allowed());
@@ -1273,8 +1265,8 @@ mod tests {
 
     #[test]
     fn prod_allows_delete_with_override() {
-        let p = ZonePolicy::new(ZoneConfig::new(ZoneTier::Prod, "us-east-1"))
-            .with_prod_deletes(true);
+        let p =
+            ZonePolicy::new(ZoneConfig::new(ZoneTier::Prod, "us-east-1")).with_prod_deletes(true);
         assert!(p.allows_delete());
     }
 
@@ -1332,8 +1324,7 @@ mod tests {
     fn prod_deploy_with_wrong_token_denied() {
         let p = ZonePolicy::new(ZoneConfig::new(ZoneTier::Prod, "us-east-1"));
         let token = ApprovalToken::new("tok-x", "sre", "kubernetes.exec");
-        let decision =
-            p.evaluate_with_approval("kubernetes.apply_deployment", Some(&token));
+        let decision = p.evaluate_with_approval("kubernetes.apply_deployment", Some(&token));
         assert!(decision.is_denied());
     }
 
@@ -1354,7 +1345,10 @@ mod tests {
             let decision = p.evaluate("kubernetes.unknown_op");
             // classify returns None for unrecognised IDs, triggering Deny
             // even in dev (classify runs before the tier match).
-            assert!(decision.is_denied(), "unknown op should be denied in {tier}");
+            assert!(
+                decision.is_denied(),
+                "unknown op should be denied in {tier}"
+            );
         }
     }
 
@@ -1362,29 +1356,26 @@ mod tests {
 
     #[test]
     fn with_prod_deletes_true() {
-        let p = ZonePolicy::new(ZoneConfig::new(ZoneTier::Prod, "c"))
-            .with_prod_deletes(true);
+        let p = ZonePolicy::new(ZoneConfig::new(ZoneTier::Prod, "c")).with_prod_deletes(true);
         assert!(p.prod_allow_deletes);
     }
 
     #[test]
     fn with_prod_deletes_false() {
-        let p = ZonePolicy::new(ZoneConfig::new(ZoneTier::Prod, "c"))
-            .with_prod_deletes(false);
+        let p = ZonePolicy::new(ZoneConfig::new(ZoneTier::Prod, "c")).with_prod_deletes(false);
         assert!(!p.prod_allow_deletes);
     }
 
     #[test]
     fn with_prod_secret_writes_true() {
-        let p = ZonePolicy::new(ZoneConfig::new(ZoneTier::Prod, "c"))
-            .with_prod_secret_writes(true);
+        let p = ZonePolicy::new(ZoneConfig::new(ZoneTier::Prod, "c")).with_prod_secret_writes(true);
         assert!(p.prod_allow_secret_writes);
     }
 
     #[test]
     fn with_prod_secret_writes_false() {
-        let p = ZonePolicy::new(ZoneConfig::new(ZoneTier::Prod, "c"))
-            .with_prod_secret_writes(false);
+        let p =
+            ZonePolicy::new(ZoneConfig::new(ZoneTier::Prod, "c")).with_prod_secret_writes(false);
         assert!(!p.prod_allow_secret_writes);
     }
 
@@ -1397,8 +1388,8 @@ mod tests {
 
     #[test]
     fn policy_clone() {
-        let p = ZonePolicy::new(ZoneConfig::new(ZoneTier::Prod, "us-west-2"))
-            .with_prod_deletes(true);
+        let p =
+            ZonePolicy::new(ZoneConfig::new(ZoneTier::Prod, "us-west-2")).with_prod_deletes(true);
         let p2 = p.clone();
         assert_eq!(p.config, p2.config);
         assert_eq!(p.prod_allow_deletes, p2.prod_allow_deletes);
@@ -1415,7 +1406,10 @@ mod tests {
         // scale_deployment: dev=allow, staging=allow, prod=requires_approval
         assert!(dev.evaluate("kubernetes.scale_deployment").is_allowed());
         assert!(stg.evaluate("kubernetes.scale_deployment").is_allowed());
-        assert!(prod.evaluate("kubernetes.scale_deployment").requires_approval());
+        assert!(
+            prod.evaluate("kubernetes.scale_deployment")
+                .requires_approval()
+        );
     }
 
     #[test]
@@ -1484,7 +1478,10 @@ mod tests {
     #[test]
     fn prod_scale_requires_approval() {
         let p = ZonePolicy::new(ZoneConfig::new(ZoneTier::Prod, "prod-1"));
-        assert!(p.evaluate("kubernetes.scale_deployment").requires_approval());
+        assert!(
+            p.evaluate("kubernetes.scale_deployment")
+                .requires_approval()
+        );
     }
 
     #[test]
@@ -1496,19 +1493,28 @@ mod tests {
     #[test]
     fn prod_update_configmap_requires_approval() {
         let p = ZonePolicy::new(ZoneConfig::new(ZoneTier::Prod, "prod-1"));
-        assert!(p.evaluate("kubernetes.update_configmap").requires_approval());
+        assert!(
+            p.evaluate("kubernetes.update_configmap")
+                .requires_approval()
+        );
     }
 
     #[test]
     fn prod_rollout_rollback_requires_approval() {
         let p = ZonePolicy::new(ZoneConfig::new(ZoneTier::Prod, "prod-1"));
-        assert!(p.evaluate("kubernetes.rollout.rollback").requires_approval());
+        assert!(
+            p.evaluate("kubernetes.rollout.rollback")
+                .requires_approval()
+        );
     }
 
     #[test]
     fn prod_configmap_update_requires_approval() {
         let p = ZonePolicy::new(ZoneConfig::new(ZoneTier::Prod, "prod-1"));
-        assert!(p.evaluate("kubernetes.configmap.update").requires_approval());
+        assert!(
+            p.evaluate("kubernetes.configmap.update")
+                .requires_approval()
+        );
     }
 
     #[test]
@@ -1520,7 +1526,10 @@ mod tests {
     #[test]
     fn prod_configmap_create_requires_approval() {
         let p = ZonePolicy::new(ZoneConfig::new(ZoneTier::Prod, "prod-1"));
-        assert!(p.evaluate("kubernetes.configmap.create").requires_approval());
+        assert!(
+            p.evaluate("kubernetes.configmap.create")
+                .requires_approval()
+        );
     }
 
     // ── Prod write with approval ─────────────────────────────────
@@ -1652,7 +1661,11 @@ mod tests {
         // Modifying dev policy doesn't affect prod
         let dev_with_deletes = dev.with_prod_deletes(true);
         // dev_with_deletes flag is irrelevant since dev always allows
-        assert!(dev_with_deletes.evaluate("kubernetes.delete_pod").is_allowed());
+        assert!(
+            dev_with_deletes
+                .evaluate("kubernetes.delete_pod")
+                .is_allowed()
+        );
         // prod is still strict
         assert!(prod.evaluate("kubernetes.delete_pod").is_denied());
     }
@@ -1698,7 +1711,10 @@ mod tests {
         // Staging: open
         assert!(stg.evaluate("kubernetes.apply_deployment").is_allowed());
         // Prod: gated
-        assert!(prod.evaluate("kubernetes.apply_deployment").requires_approval());
+        assert!(
+            prod.evaluate("kubernetes.apply_deployment")
+                .requires_approval()
+        );
     }
 
     #[test]

@@ -1731,19 +1731,31 @@ mod tests {
 
         // Verify step types
         assert!(
-            matches!(recipe.steps[0].kind, ProvisioningStepType::PromptUser { .. }),
+            matches!(
+                recipe.steps[0].kind,
+                ProvisioningStepType::PromptUser { .. }
+            ),
             "step 0 should be PromptUser"
         );
         assert!(
-            matches!(recipe.steps[1].kind, ProvisioningStepType::PromptSecret { .. }),
+            matches!(
+                recipe.steps[1].kind,
+                ProvisioningStepType::PromptSecret { .. }
+            ),
             "step 1 should be PromptSecret"
         );
         assert!(
-            matches!(recipe.steps[2].kind, ProvisioningStepType::StoreSecret { .. }),
+            matches!(
+                recipe.steps[2].kind,
+                ProvisioningStepType::StoreSecret { .. }
+            ),
             "step 2 should be StoreSecret"
         );
         assert!(
-            matches!(recipe.steps[3].kind, ProvisioningStepType::PromptUser { .. }),
+            matches!(
+                recipe.steps[3].kind,
+                ProvisioningStepType::PromptUser { .. }
+            ),
             "step 3 should be PromptUser"
         );
     }
@@ -1776,7 +1788,11 @@ mod tests {
         let recipe = provisioning_recipe();
         let store_step = &recipe.steps[2];
         match &store_step.kind {
-            ProvisioningStepType::StoreSecret { scope, key, value_from } => {
+            ProvisioningStepType::StoreSecret {
+                scope,
+                key,
+                value_from,
+            } => {
                 assert_eq!(scope, "connector:fcp.grafana");
                 assert_eq!(key, "grafana_api_key");
                 assert_eq!(value_from.as_str(), "prompt_api_key");

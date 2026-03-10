@@ -64,10 +64,9 @@ impl AlgoliaConfig {
     }
 
     fn provisioning_readiness(&self) -> ProvisioningReadiness {
-        let effective_url = self
-            .base_url
-            .clone()
-            .unwrap_or_else(|| DEFAULT_BASE_URL_TEMPLATE.replace("{app_id}", &self.auth.application_id));
+        let effective_url = self.base_url.clone().unwrap_or_else(|| {
+            DEFAULT_BASE_URL_TEMPLATE.replace("{app_id}", &self.auth.application_id)
+        });
         let (network_ok, network_message) = base_url_policy(&effective_url);
 
         ProvisioningReadiness {
@@ -278,8 +277,7 @@ impl AlgoliaConnector {
     /// Handle the `self_check` method.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
         let Some(config) = &self.config else {
-            let report =
-                SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            let report = SelfCheckReport::degraded("not_configured", "Connector is not configured");
             return Self::serialize_self_check_report(report);
         };
 

@@ -472,10 +472,7 @@ impl HistoryPrivacy {
     ///
     /// Strips all names and personal context, keeping only IDs.
     #[must_use]
-    pub fn sanitize_top_items_for_audit(
-        &self,
-        items: &TopItems,
-    ) -> HistoryAuditEvent {
+    pub fn sanitize_top_items_for_audit(&self, items: &TopItems) -> HistoryAuditEvent {
         let query_type = match items.items.first().map(|i| i.item_type) {
             Some(TopItemType::Track) => "top_tracks",
             Some(TopItemType::Artist) => "top_artists",
@@ -528,10 +525,7 @@ mod tests {
 
     #[test]
     fn time_range_parse_medium() {
-        assert_eq!(
-            TimeRange::parse("medium_term"),
-            Some(TimeRange::MediumTerm)
-        );
+        assert_eq!(TimeRange::parse("medium_term"), Some(TimeRange::MediumTerm));
     }
 
     #[test]
@@ -625,7 +619,11 @@ mod tests {
 
     #[test]
     fn time_range_roundtrip_serde() {
-        for tr in [TimeRange::ShortTerm, TimeRange::MediumTerm, TimeRange::LongTerm] {
+        for tr in [
+            TimeRange::ShortTerm,
+            TimeRange::MediumTerm,
+            TimeRange::LongTerm,
+        ] {
             let v = serde_json::to_value(tr).unwrap();
             let back: TimeRange = serde_json::from_value(v).unwrap();
             assert_eq!(tr, back);
@@ -1105,9 +1103,7 @@ mod tests {
 
     #[test]
     fn history_query_builder_chain() {
-        let q = HistoryQuery::new()
-            .with_limit(30)
-            .with_after(1_000_000_000);
+        let q = HistoryQuery::new().with_limit(30).with_after(1_000_000_000);
         assert_eq!(q.limit, 30);
         assert_eq!(q.after, Some(1_000_000_000));
         assert!(q.before.is_none());
@@ -1133,10 +1129,7 @@ mod tests {
         let q = HistoryQuery::new().with_limit(51);
         assert!(matches!(
             q.validate(),
-            Err(HistoryValidationError::InvalidLimit {
-                value: 51,
-                max: 50
-            })
+            Err(HistoryValidationError::InvalidLimit { value: 51, max: 50 })
         ));
     }
 
@@ -1212,8 +1205,7 @@ mod tests {
 
     #[test]
     fn top_items_query_with_time_range() {
-        let q = TopItemsQuery::new(TopItemType::Track)
-            .with_time_range(TimeRange::ShortTerm);
+        let q = TopItemsQuery::new(TopItemType::Track).with_time_range(TimeRange::ShortTerm);
         assert_eq!(q.time_range, TimeRange::ShortTerm);
     }
 
@@ -1260,10 +1252,7 @@ mod tests {
         let q = TopItemsQuery::new(TopItemType::Track).with_limit(51);
         assert!(matches!(
             q.validate(),
-            Err(HistoryValidationError::InvalidLimit {
-                value: 51,
-                max: 50
-            })
+            Err(HistoryValidationError::InvalidLimit { value: 51, max: 50 })
         ));
     }
 
@@ -1369,19 +1358,13 @@ mod tests {
         );
         assert_ne!(
             HistoryValidationError::AfterBeforeConflict,
-            HistoryValidationError::InvalidLimit {
-                value: 0,
-                max: 50
-            }
+            HistoryValidationError::InvalidLimit { value: 0, max: 50 }
         );
     }
 
     #[test]
     fn validation_error_clone() {
-        let e = HistoryValidationError::InvalidLimit {
-            value: 0,
-            max: 50,
-        };
+        let e = HistoryValidationError::InvalidLimit { value: 0, max: 50 };
         let cloned = e.clone();
         assert_eq!(e, cloned);
     }
@@ -1395,10 +1378,7 @@ mod tests {
 
     #[test]
     fn validation_error_serialize_roundtrip() {
-        let e = HistoryValidationError::InvalidLimit {
-            value: 99,
-            max: 50,
-        };
+        let e = HistoryValidationError::InvalidLimit { value: 99, max: 50 };
         let v = serde_json::to_value(&e).unwrap();
         let back: HistoryValidationError = serde_json::from_value(v).unwrap();
         assert_eq!(e, back);
@@ -1406,8 +1386,7 @@ mod tests {
 
     #[test]
     fn validation_error_implements_std_error() {
-        let e: Box<dyn std::error::Error> =
-            Box::new(HistoryValidationError::AfterBeforeConflict);
+        let e: Box<dyn std::error::Error> = Box::new(HistoryValidationError::AfterBeforeConflict);
         assert!(!e.to_string().is_empty());
     }
 
@@ -1442,10 +1421,7 @@ mod tests {
         let q = HistoryQuery::new().with_limit(11);
         assert!(matches!(
             v.validate_history_query(&q),
-            Err(HistoryValidationError::InvalidLimit {
-                value: 11,
-                max: 10
-            })
+            Err(HistoryValidationError::InvalidLimit { value: 11, max: 10 })
         ));
     }
 
@@ -1512,7 +1488,13 @@ mod tests {
             timestamp: "2025-01-15T10:00:00Z".into(),
             query_type: "recently_played".into(),
             item_count: 5,
-            item_ids: vec!["t1".into(), "t2".into(), "t3".into(), "t4".into(), "t5".into()],
+            item_ids: vec![
+                "t1".into(),
+                "t2".into(),
+                "t3".into(),
+                "t4".into(),
+                "t5".into(),
+            ],
             time_range: None,
         };
         assert_eq!(event.item_count, 5);
@@ -1936,7 +1918,9 @@ mod tests {
     #[test]
     fn full_workflow_recently_played() {
         // 1. Build query
-        let query = HistoryQuery::new().with_limit(5).with_after(1_700_000_000_000);
+        let query = HistoryQuery::new()
+            .with_limit(5)
+            .with_after(1_700_000_000_000);
         assert!(query.validate().is_ok());
 
         // 2. Simulate response
@@ -2052,10 +2036,7 @@ mod tests {
     #[test]
     fn validation_error_all_variants_serializable() {
         let errors = vec![
-            HistoryValidationError::InvalidLimit {
-                value: 0,
-                max: 50,
-            },
+            HistoryValidationError::InvalidLimit { value: 0, max: 50 },
             HistoryValidationError::InvalidTimeWindow {
                 span_days: 120,
                 max_days: 90,
@@ -2211,7 +2192,11 @@ mod tests {
     #[test]
     fn validator_rejects_limit_zero_history() {
         let v = HistoryValidator::default();
-        let q = HistoryQuery { limit: 0, after: None, before: None };
+        let q = HistoryQuery {
+            limit: 0,
+            after: None,
+            before: None,
+        };
         assert!(v.validate_history_query(&q).is_err());
     }
 
@@ -2231,8 +2216,15 @@ mod tests {
     fn validator_accepts_boundary_limit_history() {
         let v = HistoryValidator::default();
         for limit in [1, 25, 50] {
-            let q = HistoryQuery { limit, after: None, before: None };
-            assert!(v.validate_history_query(&q).is_ok(), "limit {limit} should be valid");
+            let q = HistoryQuery {
+                limit,
+                after: None,
+                before: None,
+            };
+            assert!(
+                v.validate_history_query(&q).is_ok(),
+                "limit {limit} should be valid"
+            );
         }
     }
 
@@ -2246,7 +2238,10 @@ mod tests {
                 limit,
                 offset: 0,
             };
-            assert!(v.validate_top_query(&q).is_ok(), "limit {limit} should be valid");
+            assert!(
+                v.validate_top_query(&q).is_ok(),
+                "limit {limit} should be valid"
+            );
         }
     }
 
@@ -2260,7 +2255,10 @@ mod tests {
                 limit: 20,
                 offset,
             };
-            assert!(v.validate_top_query(&q).is_ok(), "offset {offset} should be valid");
+            assert!(
+                v.validate_top_query(&q).is_ok(),
+                "offset {offset} should be valid"
+            );
         }
     }
 

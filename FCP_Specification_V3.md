@@ -1024,6 +1024,115 @@ Implementations MUST expose deterministic provenance merge behavior:
 3. taint = OR of input taints minus only those reductions justified by verified sanitizer receipts,
 4. zone crossings MUST be recorded in order.
 
+#### 5.3.3 Effective Label Resolution and Zone-Crossing Decisions
+
+Implementations SHOULD make effective provenance resolution explicit rather than embedding it in ad hoc
+policy code.
+
+```rust
+pub struct ZoneCrossing {
+    pub from_zone: ZoneId,
+    pub to_zone: ZoneId,
+    pub crossed_at: u64,
+    pub authorized_by: Option<ObjectId>,
+}
+
+pub enum ProvenanceDecision {
+    Allow,
+    RequireElevation { reason_code: String },
+    RequireDeclassification { reason_code: String },
+    Deny { reason_code: String },
+}
+```
+
+Recommended effective-value rules:
+
+1. effective integrity starts at the base label and MAY be raised only by verified approval evidence,
+2. effective confidentiality starts at the base label and MAY be lowered only by verified declassification evidence,
+3. effective taint starts as the accumulated union and MAY be reduced only by verified sanitizer receipts that cover the relevant objects.
+
+Recommended decision procedure for zone or sink crossing:
+
+1. compare effective integrity of the data against the target integrity requirement,
+2. compare effective confidentiality of the data against the target confidentiality ceiling,
+3. evaluate effective taint against operation safety tier,
+4. determine whether approval or sanitization evidence already satisfies the required adjustment,
+5. emit an explicit allow, elevation-required, declassification-required, or deny outcome.
+
+Illustrative cases:
+
+- `z:public` text driving a dangerous connector action SHOULD deny unless a specific elevation path exists.
+- `z:private` content being posted into `z:community` SHOULD require declassification even if the connector otherwise has write capability.
+- content with `UNVERIFIED_LINK` taint MAY flow into a safe archival connector but SHOULD NOT drive a dangerous external write without verified sanitization.
+
+#### 5.3.4 External Sink Classification and Write Rules
+
+The most important confidentiality and integrity failures often happen at the boundary between the FCP
+mesh and external systems. Implementations SHOULD treat writes to external resources as writes into
+classified sinks, not merely network operations.
+
+Normative guidance:
+
+1. a connector writing to an external destination MUST classify the destination or associated `ResourceObject`,
+2. if target confidentiality is lower than the effective confidentiality of the input, declassification evidence is required,
+3. if target integrity is higher than the effective integrity of the input and the action is risky or dangerous, elevation evidence is required,
+4. if the destination classification cannot be determined and policy does not specify a safe default, the operation SHOULD fail closed.
+
+Representative low-confidentiality sinks:
+
+- public social posts,
+- external email recipients outside the trusted zone,
+- community chat channels,
+- issue comments on public repositories.
+
+Representative higher-integrity sinks:
+
+- deployment systems,
+- finance or billing systems,
+- repository mutation surfaces,
+- destructive administrative APIs.
+
+#### 5.3.5 Worked Provenance Merge Cases
+
+The following cases illustrate how the normative merge rules are intended to behave.
+
+Case 1: trusted private draft + public attachment summary
+
+- input A: `z:private`, integrity `80`, confidentiality `90`, taint `NONE`
+- input B: `z:public`, integrity `20`, confidentiality `10`, taint `PUBLIC_INPUT | UNVERIFIED_LINK`
+- merged result:
+  - integrity `20`
+  - confidentiality `90`
+  - taint includes `PUBLIC_INPUT | UNVERIFIED_LINK`
+
+Implication:
+
+- the merged object may remain stored inside `z:private`,
+- it SHOULD NOT drive a dangerous external action without explicit elevation and likely sanitization.
+
+Case 2: malware scan clears one taint but not all
+
+- input carries `PUBLIC_INPUT | UNVERIFIED_LINK | PROMPT_SURFACE`
+- sanitizer receipt clears `UNVERIFIED_LINK`
+- effective taint after verification:
+  - `PUBLIC_INPUT | PROMPT_SURFACE`
+
+Implication:
+
+- clearing one taint MUST NOT erase unrelated taint flags,
+- policy should still treat the object as unsafe for high-risk autonomous action.
+
+Case 3: declassification to community output
+
+- input confidentiality `90`
+- target zone confidentiality `40`
+- valid declassification approval lowers effective confidentiality to the target or policy-approved level
+
+Implication:
+
+- the derived object can now flow inside the lower-confidentiality target zone,
+- but the chain of custody remains visible through approval and crossing records.
+
 ### 5.4 Approval and Sanitization Evidence
 
 Elevations, declassifications, and taint reductions MUST be evidenced by durable objects:
@@ -1115,6 +1224,61 @@ Recommended verification steps:
 3. verify declared taints cleared are a subset of what the sanitizer is trusted to clear,
 4. retain the receipt in evidence bundles when a high-risk action depends on it.
 
+#### 5.4.4 Approval Lifecycle, Freshness, and Coverage
+
+Approvals SHOULD be treated as short-lived, reviewable authority artifacts rather than generic
+"permission slips."
+
+Recommended lifecycle:
+
+1. request creation with exact target operation or data objects,
+2. human or policy review,
+3. issuance as a durable approval object,
+4. consumption by one or more operations within the allowed scope,
+5. expiry, replacement, or explicit revocation.
+
+Normative guidance:
+
+1. approval objects SHOULD have short validity windows for risky and dangerous operations,
+2. approval scope MUST cover the actual request, object set, or method pattern being exercised,
+3. stale approvals MUST fail in the same way as stale capability or checkpoint evidence,
+4. if approval is reused across multiple actions, the scope and audit policy MUST make that reuse explicit.
+
+#### 5.4.5 Approval Verification Order
+
+Implementations SHOULD verify approvals in a stable order:
+
+1. signature and approver identity,
+2. temporal validity,
+3. scope match against request or object set,
+4. zone and connector compatibility,
+5. any input-hash or input-constraint coverage,
+6. any dependent checkpoint or revocation freshness requirements.
+
+This keeps explainability stable and prevents one implementation from blaming a different failure
+cause than another for the same invalid approval.
+
+#### 5.4.6 Approval Examples and Failure Modes
+
+Representative approval outcomes:
+
+1. exact-match execution approval for one risky request:
+   - valid if request id, input hash, and connector all match,
+   - invalid if the same approval is replayed against a different request body.
+2. declassification approval for a specific object set:
+   - valid only for the enumerated objects,
+   - invalid if additional objects are attached later without new approval.
+3. broad method-pattern approval:
+   - acceptable for safe or low-risk operational convenience,
+   - NOT RECOMMENDED for dangerous operations unless policy makes the blast radius explicit.
+
+Common failure modes:
+
+- approval scope too broad for the action attempted,
+- input constraints fail to cover the actual request body,
+- approval expired but the user interface still displayed it as current,
+- approval valid in one zone but presented from another.
+
 ### 5.5 Capabilities and Tokens
 
 Capabilities are explicit and composable:
@@ -1152,6 +1316,48 @@ Capabilities SHOULD be organized hierarchically. Representative families include
 
 Host restrictions MUST NOT be encoded in capability IDs. Host and TLS constraints belong in
 network constraints or manifest-declared operation policy.
+
+#### 5.5.1.1 Capability Definition Metadata
+
+Capability catalogs SHOULD include more than a bare identifier. A first-class capability definition
+helps hosts, agents, and operator surfaces reason about blast radius, approval expectations, and
+idempotency requirements.
+
+```rust
+pub struct CapabilityDefinition {
+    pub capability_id: CapabilityId,
+    pub name: String,
+    pub description: String,
+    pub safety_tier: SafetyTier,
+    pub risk_level: RiskLevel,
+    pub parent: Option<CapabilityId>,
+    pub implies: Vec<CapabilityId>,
+    pub conflicts_with: Vec<CapabilityId>,
+    pub idempotency: IdempotencyClass,
+    pub requires_approval: ApprovalMode,
+    pub audit_level: AuditLevel,
+}
+
+pub enum RiskLevel {
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+pub enum AuditLevel {
+    Minimal,
+    Standard,
+    High,
+    Always,
+}
+```
+
+Normative guidance:
+
+1. dangerous capabilities SHOULD declare `Strict` idempotency unless impossible,
+2. `implies` relationships MUST NOT silently grant capabilities outside the current zone ceiling,
+3. conflicting capabilities SHOULD be surfaced during manifest compilation rather than at first runtime use.
 
 #### 5.5.2 Capability Objects and Constraints
 
@@ -1206,6 +1412,71 @@ pub struct NetworkConstraints {
 }
 ```
 
+#### 5.5.2.1 Constraint Monotonicity and Grant Resolution
+
+Capability attenuation is monotone: issued tokens and derived scopes MAY reduce authority but MUST
+NOT expand it beyond what the referenced grants allow.
+
+Recommended grant-resolution procedure:
+
+1. fetch all referenced `CapabilityObject`s,
+2. verify signature, validity window, and revocation state for each object,
+3. compute the union of granted capabilities,
+4. intersect that union with zone ceilings and manifest constraints,
+5. apply attenuation by intersection or minimum bounds, never by union,
+6. reject the token if any requested grant falls outside the resolved authority.
+
+Constraint monotonicity rules:
+
+1. `resource_allow` narrows by intersection,
+2. `resource_deny` narrows by union,
+3. `max_calls` and `max_bytes` narrow by minimum,
+4. placement narrows by intersection of eligible devices and zones,
+5. credential allow-lists narrow by intersection.
+
+If two constraints cannot be combined without ambiguity, the safer result is denial rather than
+guessing the intended composite rule.
+
+#### 5.5.2.2 Placement Policy in Capability Objects
+
+Placement policy is part of authority, not only scheduling. If a capability may execute only on
+certain devices or under certain locality assumptions, that restriction belongs in the capability
+object and must survive token issuance.
+
+```rust
+pub struct PlacementPolicy {
+    pub requires: Vec<DeviceRequirement>,
+    pub prefers: Vec<DevicePreference>,
+    pub excludes: Vec<DevicePattern>,
+    pub zones: Vec<ZoneId>,
+}
+
+pub enum DeviceRequirement {
+    Gpu { min_vram_mb: u32 },
+    Memory { min_mb: u32 },
+    OnPower,
+    Software { name: String, version: Option<String> },
+    Network { min_bandwidth_mbps: Option<u32> },
+    TailscaleTag(String),
+    ConnectorAvailable { connector_id: ConnectorId, min_version: Option<String> },
+    SecretReconstructable { secret_id: SecretId, min_nodes: u8 },
+    ZoneQuotaHeadroom { zone_id: ZoneId, min_free_mb: u32 },
+}
+
+pub enum DevicePreference {
+    LowLatency { max_ms: u32, weight_bps: u16 },
+    HighResources { weight_bps: u16 },
+    SpecificDevice { node_id: NodeId, weight_bps: u16 },
+    DataLocality { object_ids: Vec<ObjectId>, weight_bps: u16 },
+}
+```
+
+Normative rules:
+
+1. token issuance MUST NOT erase placement restrictions present in the granting capability,
+2. dangerous execution SHOULD reject if required placement properties cannot be satisfied,
+3. placement preferences MAY influence scheduling but MUST NOT override hard requirements.
+
 #### 5.5.3 Role Objects
 
 Roles are named capability bundles that simplify policy administration.
@@ -1231,6 +1502,29 @@ pub struct RoleGrant {
 ```
 
 Role inheritance is additive only unless an explicit deny mechanism is introduced by policy.
+
+#### 5.5.3.1 Role Assignments and Resolution
+
+Roles SHOULD be assigned explicitly and resolved deterministically.
+
+```rust
+pub struct RoleAssignment {
+    pub header: ObjectHeader,
+    pub role_object_id: ObjectId,
+    pub grantee: PrincipalId,
+    pub attenuation: Option<CapabilityConstraints>,
+    pub valid_from: u64,
+    pub valid_until: u64,
+    pub signature: Signature,
+}
+```
+
+Normative rules:
+
+1. role inheritance MUST form a DAG,
+2. assignment attenuation applies to inherited grants as well as direct grants,
+3. role resolution MUST happen before token issuance so the token can cite concrete grant objects or role-derived authority,
+4. cycles in role inheritance MUST be rejected at policy load time.
 
 #### 5.5.4 CapabilityToken Extended Binding Fields
 
@@ -1265,12 +1559,42 @@ Normative guidance:
 2. `holder_node` SHOULD be present when proof-of-possession is required.
 3. `checkpoint_id` / `checkpoint_seq` SHOULD bind token freshness to the verified zone frontier.
 
+#### 5.5.4.1 Proof-of-Possession and Holder Binding
+
+When `holder_node` is present, privileged requests SHOULD carry proof that the designated node is
+actually presenting the token.
+
+Recommended transcript ingredients:
+
+- token identifier,
+- request object identifier,
+- nonce or verifier challenge,
+- connector audience,
+- optional binary audience.
+
+Normative rules:
+
+1. risky and dangerous operations SHOULD require holder binding unless a stronger authenticated session binding already provides equivalent guarantees,
+2. proof-of-possession checks MUST be performed before expensive provider-side work,
+3. failed holder proofs SHOULD emit distinct reason codes from ordinary signature failures.
+
 #### 5.5.5 CapabilityToken Encoding
 
 Capability tokens SHOULD use deterministic CBOR and COSE-style signing structures rather than ad hoc
 JSON encodings. Private claims MAY be used for FCP-specific fields such as `grant_object_ids`,
 checkpoint binding, and binary audience binding, provided the encoding remains deterministic and
 interoperable.
+
+#### 5.5.5.1 COSE Protected Header Requirements
+
+Implementations SHOULD standardize the protected header set for capability tokens:
+
+- `alg`,
+- `kid`,
+- optional content-type or schema hint when needed for interoperability.
+
+Duplicate or unexpected protected-header encodings MUST be rejected for signed tokens used in
+policy enforcement.
 
 #### 5.5.6 CapabilityToken Claim Map and Verification
 
@@ -1303,6 +1627,78 @@ Recommended verification order:
 5. verify referenced grant objects and attenuation monotonicity,
 6. verify checkpoint or revocation freshness constraints,
 7. verify proof-of-possession requirements if `holder_node` is present.
+
+#### 5.5.6.1 Validation Failure Ordering and Evidence
+
+Token validation SHOULD fail in a stable order so that explain surfaces remain reproducible.
+
+Recommended failure ordering:
+
+1. malformed or non-canonical encoding,
+2. signature or key resolution failure,
+3. temporal validity failure,
+4. audience mismatch,
+5. grant-resolution or attenuation failure,
+6. checkpoint or revocation freshness failure,
+7. holder-proof failure.
+
+Validation evidence SHOULD cite:
+
+- token object id,
+- referenced grant object ids,
+- checkpoint or revocation heads consulted,
+- exact reason code chosen as decisive.
+
+#### 5.5.6.2 COSE/CWT Example and Claim Semantics
+
+Implementations SHOULD document one canonical token shape so that new implementations do not invent
+subtly incompatible claim encodings.
+
+Illustrative payload fields:
+
+```text
+iss = z:work
+sub = principal:agent.example
+aud = fcp.github
+iat = 1770000000
+exp = 1770000300
+cti = 00112233445566778899aabbccddeeff
+fcp.iss_node = node:abc
+fcp.grant_object_ids = [obj.grant.1, obj.grant.2]
+fcp.checkpoint_id = obj.chk.5
+fcp.checkpoint_seq = 105
+fcp.aud_binary = obj.bin.9
+```
+
+Semantics:
+
+- `iss` binds the issuing zone rather than a generic service name,
+- `aud` binds the connector family,
+- `aud_binary`, when present, binds the concrete artifact identity,
+- `grant_object_ids` are the real authority roots the verifier can inspect,
+- checkpoint binding prevents tokens from floating free of the enforceable zone frontier.
+
+#### 5.5.6.3 Capability Resolution Examples
+
+Example 1: direct grant
+
+- one `CapabilityObject` grants `github.issue.comment`
+- token requests only that operation
+- attenuation narrows host set to `api.github.com`
+- result: valid if the zone ceiling and connector manifest both allow it
+
+Example 2: role-derived grant plus attenuation
+
+- role grants `slack.read` and `slack.write`
+- assignment attenuation restricts writes to one workspace
+- issued token requests only `slack.write` for `send_message`
+- result: valid only if the token keeps the workspace restriction
+
+Example 3: invalid expansion
+
+- grant allows 10 MiB responses
+- token attenuation tries to omit the response-size cap entirely
+- result: invalid, because omission would expand authority rather than narrow it
 
 ### 5.6 Network Guard and Secret Use
 
@@ -2276,6 +2672,28 @@ Normative rules:
 Replayable event streams SHOULD define cursor or sequence semantics sufficient to resume after
 disconnect without guessing.
 
+### 9.5.1 Epoch-Buffered Replayable Streams
+
+High-throughput or bursty event sources SHOULD support epoch-buffered replay artifacts so that
+resumption and forensic replay do not depend only on hot in-memory queues.
+
+```rust
+pub struct EventEpochBuffer {
+    pub epoch_id: EpochId,
+    pub topic: String,
+    pub first_seq: u64,
+    pub last_seq: u64,
+    pub event_object_ids: Vec<ObjectId>,
+    pub finalized_at: u64,
+}
+```
+
+Recommended behavior:
+
+1. batch replayable events into bounded epoch artifacts,
+2. checkpoint the last durable epoch reference for resumable connectors,
+3. prefer epoch fetch and selective replay over unbounded raw log scanning.
+
 ### 9.6 Cancellation and Drain Frames
 
 ```rust
@@ -2628,6 +3046,18 @@ Normative anti-amplification rule:
 1. A node MUST NOT send more symbols in response to a repair or symbol request than the request explicitly allows.
 2. Unauthenticated or low-trust requests MUST be subject to lower caps.
 3. Expensive decode work MUST be accounted against the requester's budget or rejected.
+
+### 9.8.5 Connector Artifact Distribution
+
+FCPS SHOULD be usable for durable distribution of connector binaries, WASI modules, manifests, and
+attestation bundles once they are admitted into trusted registry or mirror state.
+
+Benefits include:
+
+- resumable multi-source transfer,
+- offline installation after mirroring,
+- targeted repair instead of full re-download,
+- one durable object model for both operational payloads and connector artifacts.
 
 ## 10. Manifest, Provisioning, and Isolation
 
@@ -3147,6 +3577,22 @@ impl TailscaleClient {
 }
 ```
 
+#### 11.6.1.1 Status Model and Path Classification
+
+Placement and routing surfaces SHOULD distinguish at least:
+
+- direct path,
+- direct path via NAT traversal,
+- relay/DERP path,
+- disconnected or unknown status.
+
+The client surface SHOULD provide enough information for:
+
+- latency-aware placement,
+- degraded-mode explanation,
+- repair prioritization,
+- source-diversity evaluation.
+
 #### 11.6.2 Symbol Routing
 
 ```rust
@@ -3169,6 +3615,22 @@ impl TailscaleSymbolRouter {
 Routing implementations SHOULD prefer direct paths, respect zone eligibility, and track repair or
 rebalancing decisions as auditable events where they affect availability policy.
 
+#### 11.6.2.1 Routing Heuristics and Source Selection
+
+Recommended routing order:
+
+1. direct eligible peers with low latency,
+2. local node when sufficient for current durability policy,
+3. multiple direct peers to improve diversity,
+4. relay paths only when direct paths are unavailable or policy permits degraded mode.
+
+Routing SHOULD account for:
+
+- current coverage deficit,
+- zone eligibility,
+- peer health,
+- whether a peer already holds too large a fraction of the object's symbols.
+
 #### 11.6.3 Device Enrollment and Removal
 
 ```rust
@@ -3177,9 +3639,16 @@ pub struct DeviceEnrollment {
     pub node_id: NodeId,
     pub node_sig_pubkey: PublicKey,
     pub allowed_zones: Vec<ZoneId>,
+    pub storage_permissions: Vec<StoragePermission>,
     pub issued_at: u64,
     pub expires_at: Option<u64>,
     pub signature: Signature,
+}
+
+pub enum StoragePermission {
+    StoreSymbols { zones: Vec<ZoneId> },
+    StoreSecretShares,
+    StoreAuditEvents,
 }
 ```
 
@@ -3189,6 +3658,24 @@ Removal of a device SHOULD trigger:
 2. issuer-key revocation where relevant,
 3. zone-key rotation for affected zones,
 4. secret resharing excluding the removed device.
+
+#### 11.6.3.1 Enrollment and Removal Workflow
+
+Recommended enrollment flow:
+
+1. device joins the tailnet,
+2. owner issues `DeviceEnrollment`,
+3. owner issues or refreshes `NodeKeyAttestation`,
+4. device receives zone and key material allowed by policy,
+5. peers accept the device only after both enrollment and attestation verify.
+
+Recommended removal flow:
+
+1. revoke enrollment,
+2. revoke node attestation or issuer keys where relevant,
+3. rotate affected zone keys,
+4. re-share threshold secrets excluding the removed device,
+5. refresh checkpoints so the removal becomes part of the enforceable frontier.
 
 #### 11.6.4 Funnel Gateway
 
@@ -3232,6 +3719,29 @@ Recommended design characteristics:
 - signed summaries so gossip participates in attribution and peer budgeting,
 - bounded per-peer reconciliation cost.
 
+#### 11.6.5.1 Peer State and Anti-Entropy
+
+Implementations SHOULD maintain explicit peer state for repair and discovery:
+
+```rust
+pub struct PeerGossipState {
+    pub peer_id: NodeId,
+    pub last_summary_at: u64,
+    pub object_filter_digest: [u8; 32],
+    pub symbol_filter_digest: [u8; 32],
+    pub estimated_latency_ms: Option<u32>,
+    pub direct_path: bool,
+    pub health: String,
+}
+```
+
+Recommended behavior:
+
+1. anti-entropy cycles SHOULD be bounded and incremental,
+2. peers with stale summaries SHOULD be deprioritized for critical repair decisions,
+3. reconciliation work SHOULD count against peer budgets,
+4. repair decisions SHOULD distinguish "peer claims object presence" from "peer proved usable coverage."
+
 #### 11.6.6 Distributed State and Coverage
 
 Object availability SHOULD be evaluated as a coverage property, not only as presence on one node.
@@ -3252,6 +3762,37 @@ Coverage reasoning SHOULD inform:
 - planner scoring,
 - degraded-mode decisions,
 - offline-availability claims.
+
+#### 11.6.6.1 Coverage SLOs and Repair Triggers
+
+Coverage evaluation SHOULD feed explicit service objectives:
+
+- minimum distinct-node count,
+- maximum single-node concentration,
+- minimum reconstructable coverage,
+- target redundancy for pinned or critical artifacts.
+
+Repair SHOULD trigger when:
+
+1. the object is no longer reconstructable,
+2. concentration exceeds policy,
+3. diversity falls below zone or object requirements,
+4. offline-availability promises would be violated without intervention.
+
+### 11.6.7 MeshNode Responsibilities
+
+The combined host-plus-mesh implementation SHOULD maintain a conceptual `MeshNode` surface even if
+the runtime is split across crates or services.
+
+Representative responsibilities:
+
+- verify incoming token, attestation, and revocation evidence,
+- evaluate provenance and approval requirements,
+- select or confirm execution target,
+- coordinate lease acquisition,
+- manage object admission, repair, and checkpoint interaction,
+- delegate to local or remote connector execution,
+- emit receipts, audit events, and operator-facing evidence.
 
 ### 11.7 Threat Model, Diversity, and Degraded Operation
 
@@ -3277,6 +3818,45 @@ pub struct DiversityPolicy {
 ```
 
 Dangerous operations SHOULD refuse to proceed in degraded mode unless explicit policy allows it.
+
+### 11.7.3 Byzantine and Quorum Guidance
+
+Deployments claiming stronger distributed guarantees SHOULD document an explicit Byzantine model.
+
+```rust
+pub struct ByzantineModel {
+    pub n: u8,
+    pub f: u8,
+}
+
+pub enum OperationClass {
+    ReadOnly,
+    NormalWrite,
+    CriticalWrite,
+    Unanimous,
+}
+```
+
+Recommended guidance:
+
+1. `ReadOnly` operations MAY rely on single-node execution with ordinary freshness checks.
+2. `NormalWrite` operations SHOULD use the weakest quorum consistent with availability and safety goals.
+3. `CriticalWrite` and similar dangerous operations SHOULD use stronger quorum and lease-witness policy.
+4. If a deployment cannot justify a Byzantine model, it SHOULD avoid making claims that depend on one.
+
+### 11.7.4 Source Diversity Enforcement
+
+Source diversity claims SHOULD be enforced mechanically where they matter for correctness or trust.
+
+Recommended enforcement points:
+
+1. checkpoint acceptance for highly sensitive zones,
+2. repair completion for objects with explicit diversity policy,
+3. dangerous execution that depends on multi-node evidence or quorum-backed lease issuance,
+4. mirror promotion when artifacts are expected to be retained across multiple failure domains.
+
+If source diversity is not presently satisfiable, the operator surface SHOULD explain whether the
+system is still safe, merely degraded, or fully blocked for the attempted action.
 
 ### 11.7.1 Admission Control and DoS Resistance
 
@@ -3370,6 +3950,22 @@ pub struct RegistryConnectorEntry {
 }
 ```
 
+### 12.1.2 Source Selection, Pinning, and Promotion
+
+Source selection SHOULD be policy-driven rather than first-success-wins.
+
+Recommended order:
+
+1. pinned local or sovereign mirror source,
+2. trusted direct mirror on the mesh,
+3. remote or self-hosted registry if policy allows and freshness checks pass.
+
+Normative guidance:
+
+1. once an artifact is pinned for a zone or deployment, subsequent activation SHOULD prefer the pinned source unless an explicit update policy says otherwise,
+2. promotion from remote source to mirror SHOULD retain the exact manifest, digest, and attestation references used for verification,
+3. operator surfaces SHOULD be able to explain why one source was preferred over another.
+
 ### 12.2 Verification Chain
 
 Before activation, a host MUST verify:
@@ -3398,6 +3994,36 @@ Verification SHOULD proceed in a fail-closed order that maximizes safety and exp
 
 Failures MUST produce stable reason codes and SHOULD identify the first failing stage plus any
 additional dependent stages skipped because the prior stage failed.
+
+### 12.2.3 Attestation Evaluation and Builder Trust
+
+Attestations SHOULD be evaluated as a typed set rather than opaque attachments.
+
+Recommended checks:
+
+1. subject artifact matches the manifest or binary under verification,
+2. attestation signature chains to a trusted builder or attestor,
+3. required attestation types are all present,
+4. builder identity matches policy,
+5. optional vulnerability or review claims satisfy configured thresholds.
+
+If multiple attestations of the same type are present, the verifier SHOULD define whether policy
+requires all of them to pass or only a quorum or best-match subset.
+
+### 12.2.4 Transparency, Freeze, and Rollback Detection
+
+Supply-chain verification SHOULD explicitly defend against:
+
+- freeze attacks serving stale metadata,
+- rollback attacks serving older signed artifacts,
+- equivocation attacks serving different artifacts to different nodes.
+
+Recommended mitigations:
+
+1. metadata freshness limits,
+2. append-only transparency or mirror history,
+3. explicit comparison against already pinned or installed versions,
+4. evidence emission whenever a lower or different version is proposed than the one currently trusted.
 
 ### 12.2.1 Registry Security Profile
 
@@ -3486,6 +4112,25 @@ Normative rules:
 1. A mirror MUST preserve enough metadata to re-run verification without consulting the upstream source.
 2. Mirror policy MAY restrict which builders, publishers, or attestation classes are admitted into a sovereign mirror.
 3. Offline activation MUST rely only on already mirrored and policy-pinned objects.
+
+### 12.4.2 Offline Installation and Mirror Promotion
+
+Offline installation SHOULD be a first-class outcome of successful mirroring, not a degraded accident.
+
+Recommended flow:
+
+1. verify the upstream or source artifact once,
+2. mirror manifest, artifact, attestations, and transparency references as durable objects,
+3. publish or update a mirror index,
+4. pin the chosen version according to zone or deployment policy,
+5. install from the mirror without depending on upstream availability.
+
+Mirror promotion SHOULD be auditable and SHOULD emit evidence identifying:
+
+- original source,
+- verified manifest and artifact ids,
+- attestation set accepted,
+- policy version used for promotion.
 
 ## 13. Observability, Explainability, and Errors
 
@@ -3763,6 +4408,52 @@ High-value zones SHOULD additionally consider:
 - MLS/TreeKEM group keying where available,
 - stricter degraded-mode denial,
 - stronger execution-form isolation requirements.
+
+### 13.7.1 Defense-in-Depth Responsibilities by Layer
+
+Each security layer SHOULD have a distinct operational role:
+
+1. tailnet identity and ACLs restrict who can even reach the relevant surfaces,
+2. zone keying and manifests restrict who can decrypt or use zone-bound artifacts,
+3. capability and provenance enforcement restrict which actions can be attempted,
+4. supervision, budgets, and drains restrict the blast radius of runtime failure,
+5. receipts, checkpoints, and audit artifacts restrict ambiguity after the fact.
+
+If one layer weakens temporarily, operators SHOULD be able to see which remaining layers still hold.
+
+### 13.7.2 Source Diversity and Threshold-Secret Operational Guidance
+
+High-value deployments SHOULD define:
+
+- required source diversity for object reconstruction,
+- when threshold-secret reconstruction is permitted locally versus proxy-mediated,
+- which operations require stronger quorum, witness, or lease policy,
+- what degraded behavior is acceptable when diversity is temporarily lost.
+
+Operational doctrine matters here because availability pressure is where many systems silently give
+up their security model.
+
+### 13.7.3 Degraded-Mode Guardrails
+
+Degraded mode MUST NOT become an invisible alternate security model.
+
+Recommended guardrails:
+
+1. dangerous operations default to deny unless policy explicitly opts them in,
+2. degraded placement, stale checkpoint tolerance, or reduced source diversity MUST be surfaced in explain and health outputs,
+3. degraded-mode decisions SHOULD emit evidence identifying exactly which guarantees were unavailable,
+4. recovery from degraded mode SHOULD be explicit and auditable.
+
+### 13.7.4 Threshold-Secret Operating Model
+
+Threshold secrets are only valuable if their operational handling preserves the intended blast-radius reduction.
+
+Recommended rules:
+
+1. reconstruction SHOULD be demand-driven rather than eager,
+2. reconstructed bytes SHOULD stay in the smallest feasible trusted boundary,
+3. proxy-mediated use SHOULD be preferred when the connector does not genuinely need raw secret material,
+4. device removal or compromise SHOULD trigger re-sharing and, where appropriate, rotation.
 
 ### 13.8 Threat and Trust Assumptions
 
@@ -4786,6 +5477,36 @@ Illustrative debugging chain for a denied dangerous operation:
 | Webhook | taint/provenance, public ingress policy | ingress, deny, replay, repair |
 | Queue / pub-sub | delivery semantics, resume position | nack, redelivery, drain |
 | Browser | sandbox policy, secret mediation | interactive setup, risky action, evidence retrieval |
+
+### Appendix AG: Source Diversity and Quorum Questions
+
+Recommended design questions:
+
+- how many distinct nodes are required for a claim of availability,
+- what fraction of symbols may safely reside on one node,
+- which operations need stronger witness or quorum policy,
+- what is the acceptable degraded behavior when quorum is temporarily unavailable,
+- which operator surfaces expose those assumptions clearly.
+
+### Appendix AH: Event Buffer Example
+
+Illustrative buffered stream progression:
+
+```text
+epoch e100 -> events 1000..1099 -> finalized object obj.epoch.100
+epoch e101 -> events 1100..1199 -> finalized object obj.epoch.101
+cursor state points to (epoch=e101, seq=1142)
+resume fetches obj.epoch.101 and replays 1143..
+```
+
+### Appendix AI: Artifact Distribution Notes
+
+Recommended artifact-transfer preference order:
+
+1. local pinned artifact already present,
+2. trusted mirror on direct tailnet path,
+3. multiple trusted peers contributing chunks or symbols,
+4. upstream registry fetch only if still required by policy.
 
 ## 16. Summary
 

@@ -625,6 +625,104 @@ mod tests {
         assert!(new_handler.verify_and_parse(&new_headers, body).is_ok());
     }
 
+    #[test]
+    fn test_webhook_registration_routing_and_secret_rotation_lifecycle() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let server = MockServer::start().await;
+            let challenge = "challenge-token-lifecycle";
+
+            Mock::given(method("POST"))
+                .and(path("/github/webhooks"))
+                .and(body_string_contains("issues"))
+                .and(body_string_contains(
+                    "https://connector.example.test/github",
+                ))
+                .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                    "id": "wh_lifecycle",
+                    "challenge_url": format!(
+                        "{}/github/challenge?challenge={challenge}",
+                        server.uri()
+                    ),
+                    "secret_version": 2
+                })))
+                .mount(&server)
+                .await;
+
+            Mock::given(method("GET"))
+                .and(path("/github/challenge"))
+                .and(query_param("challenge", challenge))
+                .respond_with(ResponseTemplate::new(200).set_body_string(challenge))
+                .mount(&server)
+                .await;
+
+            let client = reqwest::Client::new();
+            let registration = client
+                .post(format!("{}/github/webhooks", server.uri()))
+                .json(&serde_json::json!({
+                    "events": ["issues"],
+                    "target": "https://connector.example.test/github"
+                }))
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .json::<serde_json::Value>()
+                .await
+                .unwrap();
+            assert_eq!(registration["id"], "wh_lifecycle");
+            assert_eq!(registration["secret_version"], 2);
+
+            let challenge_url = registration["challenge_url"].as_str().unwrap();
+            let challenge_response = client
+                .get(challenge_url)
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .text()
+                .await
+                .unwrap();
+            assert_eq!(challenge_response, challenge);
+
+            let mut router = EventRouter::new();
+            router.subscribe(
+                EventSubscription::for_types(vec!["issues".to_string()]).with_provider("github"),
+                "github_issue_handler",
+            );
+
+            let old_handler = GitHubWebhook::new("old-secret");
+            let new_handler = GitHubWebhook::new("new-secret");
+            let body =
+                br#"{"action":"opened","issue":{"number":7,"title":"Lifecycle regression"}}"#;
+
+            let old_signature = format!("sha256={}", old_handler.verifier.compute(body));
+            let mut old_headers = HashMap::new();
+            old_headers.insert("x-hub-signature-256".to_string(), old_signature);
+            old_headers.insert("x-github-event".to_string(), "issues".to_string());
+            old_headers.insert("x-github-delivery".to_string(), "delivery-old".to_string());
+
+            let old_event = old_handler.verify_and_parse(&old_headers, body).unwrap();
+            assert_eq!(old_event.id, "delivery-old");
+            assert_eq!(old_event.payload["issue"]["title"], "Lifecycle regression");
+            assert_eq!(router.route(&old_event), vec!["github_issue_handler"]);
+            assert!(new_handler.verify_and_parse(&old_headers, body).is_err());
+
+            let new_signature = format!("sha256={}", new_handler.verifier.compute(body));
+            let mut new_headers = HashMap::new();
+            new_headers.insert("x-hub-signature-256".to_string(), new_signature);
+            new_headers.insert("x-github-event".to_string(), "issues".to_string());
+            new_headers.insert("x-github-delivery".to_string(), "delivery-new".to_string());
+
+            let new_event = new_handler.verify_and_parse(&new_headers, body).unwrap();
+            assert_eq!(new_event.id, "delivery-new");
+            assert_eq!(new_event.event_type, "issues");
+            assert_eq!(router.route(&new_event), vec!["github_issue_handler"]);
+        })
+        .unwrap();
+    }
+
     // ── Batch 2: SunnyMoose test expansion ──
 
     #[test]

@@ -486,6 +486,7 @@ mod tests {
     use async_trait::async_trait;
     use serde_json::json;
     use std::collections::{HashMap, HashSet};
+    use std::time::Instant;
 
     // ─────────────────────────────────────────────────────────────────────────
     // RecipeId
@@ -1511,11 +1512,27 @@ mod tests {
             };
         }
 
-        fn log_step(&mut self, step_id: &StepId, outcome: &str) {
+        fn log_step(
+            &mut self,
+            step_id: &StepId,
+            outcome: &str,
+            requires_approval: bool,
+            prompt_type: Option<&str>,
+            error_message: Option<&str>,
+            recovery_hint: Option<&str>,
+            started: Instant,
+        ) {
             self.step_logs.push(json!({
                 "recipe_id": self.recipe.id.as_str(),
                 "step_name": step_id.as_str(),
                 "outcome": outcome,
+                "requires_approval": requires_approval,
+                "prompt_type": prompt_type,
+                "error_message": error_message,
+                "recovery_hint": recovery_hint,
+                "duration_ms": u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                "logged_at": chrono::Utc::now()
+                    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             }));
         }
     }
@@ -1534,6 +1551,7 @@ mod tests {
             &mut self,
             step_id: StepId,
         ) -> Result<ProvisioningStepResult, FcpError> {
+            let started = Instant::now();
             let step = self
                 .recipe
                 .steps
@@ -1556,7 +1574,15 @@ mod tests {
                 };
                 self.state.status = ProvisioningStatus::AwaitingUser;
                 self.state.awaiting_human.push(prompt.clone());
-                self.log_step(&step.id, "awaiting_approval");
+                self.log_step(
+                    &step.id,
+                    "awaiting_approval",
+                    step.requires_approval,
+                    Some("approval"),
+                    None,
+                    None,
+                    started,
+                );
                 return Ok(ProvisioningStepResult::AwaitingHuman { prompt });
             }
 
@@ -1570,7 +1596,15 @@ mod tests {
                     };
                     self.state.status = ProvisioningStatus::AwaitingUser;
                     self.state.awaiting_human.push(prompt.clone());
-                    self.log_step(&step.id, "awaiting_input");
+                    self.log_step(
+                        &step.id,
+                        "awaiting_input",
+                        step.requires_approval,
+                        Some("text"),
+                        None,
+                        None,
+                        started,
+                    );
                     Ok(ProvisioningStepResult::AwaitingHuman { prompt })
                 }
                 ProvisioningStepType::PromptSecret { message } => {
@@ -1582,7 +1616,15 @@ mod tests {
                     };
                     self.state.status = ProvisioningStatus::AwaitingUser;
                     self.state.awaiting_human.push(prompt.clone());
-                    self.log_step(&step.id, "awaiting_secret");
+                    self.log_step(
+                        &step.id,
+                        "awaiting_secret",
+                        step.requires_approval,
+                        Some("secret"),
+                        None,
+                        None,
+                        started,
+                    );
                     Ok(ProvisioningStepResult::AwaitingHuman { prompt })
                 }
                 ProvisioningStepType::OpenUrl { url } => {
@@ -1594,7 +1636,15 @@ mod tests {
                     };
                     self.state.status = ProvisioningStatus::AwaitingUser;
                     self.state.awaiting_human.push(prompt.clone());
-                    self.log_step(&step.id, "awaiting_url");
+                    self.log_step(
+                        &step.id,
+                        "awaiting_url",
+                        step.requires_approval,
+                        Some("url"),
+                        None,
+                        None,
+                        started,
+                    );
                     Ok(ProvisioningStepResult::AwaitingHuman { prompt })
                 }
                 ProvisioningStepType::StoreSecret {
@@ -1605,12 +1655,21 @@ mod tests {
                             .get(&value_from)
                             .cloned()
                             .ok_or_else(|| {
+                                let error_message =
+                                    format!("missing prompted value for {}", value_from.as_str());
                                 self.state.status = ProvisioningStatus::Failed;
-                                self.state.error_message = Some(format!(
-                                    "missing prompted value for {}",
-                                    value_from.as_str()
-                                ));
-                                self.log_step(&step.id, "failed");
+                                self.state.error_message = Some(error_message.clone());
+                                self.log_step(
+                                    &step.id,
+                                    "failed",
+                                    step.requires_approval,
+                                    None,
+                                    Some(error_message.as_str()),
+                                    Some(
+                                        "Execute the prerequisite prompt step before store_secret",
+                                    ),
+                                    started,
+                                );
                                 FcpError::ResourceNotFound {
                                     resource: format!("prompt_value:{}", value_from.as_str()),
                                 }
@@ -1618,19 +1677,43 @@ mod tests {
 
                     self.stored_secrets.insert(key, value);
                     self.mark_completed(&step.id);
-                    self.log_step(&step.id, "completed");
+                    self.log_step(
+                        &step.id,
+                        "completed",
+                        step.requires_approval,
+                        None,
+                        None,
+                        None,
+                        started,
+                    );
                     Ok(ProvisioningStepResult::Completed { step_id: step.id })
                 }
                 ProvisioningStepType::Oauth { .. } => {
                     self.mark_completed(&step.id);
-                    self.log_step(&step.id, "completed");
+                    self.log_step(
+                        &step.id,
+                        "completed",
+                        step.requires_approval,
+                        None,
+                        None,
+                        None,
+                        started,
+                    );
                     Ok(ProvisioningStepResult::Completed { step_id: step.id })
                 }
                 ProvisioningStepType::Webhook { registration } => {
                     self.webhook_registrations
                         .push((registration.registration_url, registration.events));
                     self.mark_completed(&step.id);
-                    self.log_step(&step.id, "completed");
+                    self.log_step(
+                        &step.id,
+                        "completed",
+                        step.requires_approval,
+                        None,
+                        None,
+                        None,
+                        started,
+                    );
                     Ok(ProvisioningStepResult::Completed { step_id: step.id })
                 }
             }
@@ -1771,6 +1854,22 @@ mod tests {
             assert!(logs.contains("\"recipe_id\":\"discord/setup\""));
             assert!(logs.contains("\"step_name\":\"webhook\""));
             assert!(!logs.contains("super-secret-token"));
+            assert_eq!(provisioner.step_logs.len(), 4);
+            let prompt_secret_log = provisioner
+                .step_logs
+                .iter()
+                .find(|entry| entry["step_name"] == "prompt_secret")
+                .expect("prompt_secret log should exist");
+            assert_eq!(prompt_secret_log["prompt_type"], "secret");
+            assert_eq!(prompt_secret_log["outcome"], "awaiting_secret");
+            assert!(
+                prompt_secret_log["duration_ms"].as_u64().is_some(),
+                "duration_ms should be captured for structured setup logs"
+            );
+            assert!(
+                prompt_secret_log["logged_at"].as_str().is_some(),
+                "logged_at timestamp should be present"
+            );
         })
         .expect("runtime should execute provisioning setup flow");
     }
@@ -1821,9 +1920,19 @@ mod tests {
                 .await
                 .unwrap();
             assert!(matches!(second, ProvisioningStepResult::Completed { .. }));
+            assert!(provisioner.get_state().awaiting_human.is_empty());
             assert_eq!(
                 provisioner.get_state().status,
                 ProvisioningStatus::Completed
+            );
+            assert_eq!(provisioner.step_logs.len(), 2);
+            assert_eq!(provisioner.step_logs[0]["outcome"], "awaiting_approval");
+            assert_eq!(provisioner.step_logs[0]["prompt_type"], "approval");
+            assert_eq!(provisioner.step_logs[0]["requires_approval"], true);
+            assert_eq!(provisioner.step_logs[1]["outcome"], "completed");
+            assert!(
+                provisioner.step_logs[1]["duration_ms"].as_u64().is_some(),
+                "approval completion log should include duration_ms"
             );
         })
         .expect("runtime should execute privileged approval flow");
@@ -1857,6 +1966,18 @@ mod tests {
             assert!(!validation.valid);
             assert!(!validation.errors.is_empty());
             assert_eq!(provisioner.get_state().status, ProvisioningStatus::Failed);
+            assert_eq!(provisioner.step_logs.len(), 1);
+            assert_eq!(provisioner.step_logs[0]["outcome"], "failed");
+            assert!(
+                provisioner.step_logs[0]["error_message"]
+                    .as_str()
+                    .expect("failed provisioning log should carry error details")
+                    .contains("missing prompted value")
+            );
+            assert_eq!(
+                provisioner.step_logs[0]["recovery_hint"],
+                "Execute the prerequisite prompt step before store_secret"
+            );
         })
         .expect("runtime should execute missing secret validation");
     }
@@ -2669,6 +2790,14 @@ mod tests {
             assert_eq!(provisioner.step_logs[0]["outcome"], "completed");
             assert_eq!(provisioner.step_logs[0]["step_name"], "oauth");
             assert_eq!(provisioner.step_logs[0]["recipe_id"], "log-test");
+            assert!(
+                provisioner.step_logs[0]["duration_ms"].as_u64().is_some(),
+                "step logs should include duration_ms"
+            );
+            assert!(
+                provisioner.step_logs[0]["logged_at"].as_str().is_some(),
+                "step logs should include a timestamp"
+            );
         })
         .expect("runtime should execute step log test");
     }

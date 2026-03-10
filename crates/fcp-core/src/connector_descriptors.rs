@@ -195,7 +195,7 @@ impl ConnectorDescriptor {
 
     /// Compute the worst status across auth, prerequisites, and readiness.
     #[must_use]
-    pub fn overall_status(&self) -> DescriptorStatus {
+    pub const fn overall_status(&self) -> DescriptorStatus {
         let mut status = DescriptorStatus::Unknown;
         if let Some(auth) = &self.auth {
             status = status.combine(auth.status);
@@ -587,8 +587,8 @@ impl ReadinessDescriptor {
         if self.summary.is_none() {
             self.summary = Some(match &health {
                 ConnectorHealth::Healthy => "Connector reports healthy runtime state.".to_string(),
-                ConnectorHealth::Degraded { reason } => reason.clone(),
-                ConnectorHealth::Unavailable { reason, .. } => reason.clone(),
+                ConnectorHealth::Degraded { reason }
+                | ConnectorHealth::Unavailable { reason, .. } => reason.clone(),
             });
         }
         self.health = Some(health);

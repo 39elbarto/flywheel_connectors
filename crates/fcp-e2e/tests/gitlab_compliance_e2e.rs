@@ -22,7 +22,10 @@ use fcp_core::{
     SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
-use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
+use fcp_e2e::{
+    ComplianceSuite, ConnectorSuite, E2eReport, E2eRunner, InvokeExpectations, scan_log_jsonl,
+    validate_log_entry_value,
+};
 use fcp_gitlab::connector::GitLabConnector;
 use fcp_manifest::ConnectorManifest;
 use fcp_testkit::MockApiServer;
@@ -370,6 +373,44 @@ fn host_allowed(host: &str, host_allow: &[String]) -> bool {
     })
 }
 
+fn assert_report_logs_validate(report: &E2eReport) {
+    let jsonl = report.to_stable_json_lines();
+    assert!(
+        !jsonl.trim().is_empty(),
+        "report should emit stable JSONL evidence"
+    );
+
+    let first_line = jsonl.lines().next().expect("at least one JSONL line");
+    let first_value: serde_json::Value =
+        serde_json::from_str(first_line).expect("first JSONL line should parse");
+    assert_eq!(
+        first_value
+            .get("timestamp")
+            .and_then(serde_json::Value::as_str),
+        Some("1970-01-01T00:00:00Z")
+    );
+    assert_eq!(
+        first_value
+            .get("correlation_id")
+            .and_then(serde_json::Value::as_str),
+        Some("00000000-0000-4000-8000-000000000000")
+    );
+    assert_eq!(
+        first_value
+            .get("duration_ms")
+            .and_then(serde_json::Value::as_u64),
+        Some(0)
+    );
+
+    for line in jsonl.lines() {
+        let value: serde_json::Value = serde_json::from_str(line).expect("jsonl line should parse");
+        validate_log_entry_value(&value).expect("jsonl line should satisfy E2E schema");
+    }
+
+    let scan = scan_log_jsonl(&jsonl);
+    assert_eq!(scan.error_count, 0, "stable evidence should scan cleanly");
+}
+
 #[fcp_async_core::runtime::test]
 async fn gitlab_default_deny_compliance_suite_passes() {
     let mock = MockApiServer::start().await;
@@ -407,6 +448,7 @@ async fn gitlab_default_deny_compliance_suite_passes() {
         report.passed,
         "default deny compliance should pass: {report:#?}"
     );
+    assert_report_logs_validate(&report);
 }
 
 #[fcp_async_core::runtime::test]
@@ -455,6 +497,7 @@ async fn gitlab_allow_valid_token_connector_suite_passes() {
         .await
         .expect("connector suite run");
     assert!(report.passed, "allow valid token should pass: {report:#?}");
+    assert_report_logs_validate(&report);
     let invoke_entry = report
         .logs
         .iter()

@@ -921,6 +921,83 @@ mod tests {
     }
 
     #[test]
+    fn test_authorization_code_pkce_full_lifecycle_with_mock_server() {
+        run_with_tokio_reactor(async {
+            let server = MockServer::start().await;
+            let config = OAuth2Config::public_client(
+                "public-client",
+                format!("{}/authorize", server.uri()),
+                format!("{}/token", server.uri()),
+            )
+            .with_redirect_uri("https://localhost:3000/callback")
+            .with_scopes(vec!["openid".into()]);
+            let client = OAuth2Client::new(config).unwrap();
+
+            let (authorization_url, state, pkce) = client
+                .authorization_url_with_pkce(&["email", "profile"])
+                .unwrap();
+            assert!(
+                authorization_url
+                    .contains("redirect_uri=https%3A%2F%2Flocalhost%3A3000%2Fcallback")
+            );
+            assert!(authorization_url.contains("scope=openid+email+profile"));
+            assert!(authorization_url.contains("code_challenge="));
+
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .and(body_string_contains("grant_type=authorization_code"))
+                .and(body_string_contains("code=auth-code-lifecycle"))
+                .and(body_string_contains(format!(
+                    "code_verifier={}",
+                    pkce.verifier()
+                )))
+                .and(body_string_contains("client_id=public-client"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "access_token": "access-stage-1",
+                    "token_type": "Bearer",
+                    "refresh_token": "refresh-stage-1",
+                    "expires_in": 3600,
+                    "scope": "openid email profile"
+                })))
+                .mount(&server)
+                .await;
+
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .and(body_string_contains("grant_type=refresh_token"))
+                .and(body_string_contains("refresh_token=refresh-stage-1"))
+                .and(body_string_contains("client_id=public-client"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "access_token": "access-stage-2",
+                    "token_type": "Bearer",
+                    "refresh_token": "refresh-stage-2",
+                    "expires_in": 7200,
+                    "scope": "openid email profile"
+                })))
+                .mount(&server)
+                .await;
+
+            let callback = AuthorizationCallback::from_url(&format!(
+                "https://localhost:3000/callback?code=auth-code-lifecycle&state={state}"
+            ))
+            .unwrap();
+            let code = callback.validate(&state).unwrap();
+            let tokens = client.exchange_code_with_pkce(&code, &pkce).await.unwrap();
+            assert_eq!(tokens.access_token(), "access-stage-1");
+            assert_eq!(tokens.refresh_token(), Some("refresh-stage-1"));
+            assert_eq!(tokens.scopes(), &["openid", "email", "profile"]);
+
+            let refreshed = client
+                .refresh_tokens(tokens.refresh_token().expect("refresh token should exist"))
+                .await
+                .unwrap();
+            assert_eq!(refreshed.access_token(), "access-stage-2");
+            assert_eq!(refreshed.refresh_token(), Some("refresh-stage-2"));
+            assert_eq!(refreshed.scopes(), &["openid", "email", "profile"]);
+        });
+    }
+
+    #[test]
     fn test_exchange_code_maps_error_response() {
         run_with_tokio_reactor(async {
             let server = MockServer::start().await;

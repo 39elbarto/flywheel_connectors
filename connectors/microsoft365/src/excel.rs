@@ -545,10 +545,7 @@ impl ExcelValidator {
     }
 
     /// Validate an append-rows request against this validator's bounds.
-    pub fn validate_append(
-        &self,
-        req: &AppendRowsRequest,
-    ) -> Result<(), ExcelValidationError> {
+    pub fn validate_append(&self, req: &AppendRowsRequest) -> Result<(), ExcelValidationError> {
         if req.workbook_id.is_empty() {
             return Err(ExcelValidationError::WorkbookNotFound(
                 "workbook_id is empty".into(),
@@ -612,12 +609,7 @@ pub struct ExcelAuditEvent {
 impl ExcelAuditEvent {
     /// Create an audit event for a range write.
     #[must_use]
-    pub fn range_write(
-        workbook_id: &str,
-        range: &str,
-        cell_count: u64,
-        timestamp: &str,
-    ) -> Self {
+    pub fn range_write(workbook_id: &str, range: &str, cell_count: u64, timestamp: &str) -> Self {
         Self {
             timestamp: timestamp.to_string(),
             action: "write_range".to_string(),
@@ -674,7 +666,11 @@ mod tests {
 
     #[test]
     fn visibility_serde_roundtrip() {
-        for v in [Visibility::Visible, Visibility::Hidden, Visibility::VeryHidden] {
+        for v in [
+            Visibility::Visible,
+            Visibility::Hidden,
+            Visibility::VeryHidden,
+        ] {
             let json = serde_json::to_value(v).unwrap();
             let back: Visibility = serde_json::from_value(json).unwrap();
             assert_eq!(back, v);
@@ -1206,8 +1202,16 @@ mod tests {
             row_count: 100,
             column_count: 5,
             columns: vec![
-                TableColumn { id: "col-1".into(), name: "Product".into(), index: 0 },
-                TableColumn { id: "col-2".into(), name: "Revenue".into(), index: 1 },
+                TableColumn {
+                    id: "col-1".into(),
+                    name: "Product".into(),
+                    index: 0,
+                },
+                TableColumn {
+                    id: "col-2".into(),
+                    name: "Revenue".into(),
+                    index: 1,
+                },
             ],
         };
         let json = serde_json::to_value(&tbl).unwrap();
@@ -1303,10 +1307,7 @@ mod tests {
     fn table_row_serde_roundtrip() {
         let row = TableRow {
             index: 0,
-            values: vec![
-                CellValue::Text("Alice".into()),
-                CellValue::Number(1_000.0),
-            ],
+            values: vec![CellValue::Text("Alice".into()), CellValue::Number(1_000.0)],
         };
         let json = serde_json::to_value(&row).unwrap();
         assert_eq!(json["index"], 0);
@@ -1940,8 +1941,14 @@ mod tests {
     fn validation_error_serde_roundtrip() {
         let errors = vec![
             ExcelValidationError::InvalidRangeAddress("x".into()),
-            ExcelValidationError::RangeTooLarge { requested: 1, max: 2 },
-            ExcelValidationError::TooManyRows { requested: 3, max: 4 },
+            ExcelValidationError::RangeTooLarge {
+                requested: 1,
+                max: 2,
+            },
+            ExcelValidationError::TooManyRows {
+                requested: 3,
+                max: 4,
+            },
             ExcelValidationError::EmptyValues,
             ExcelValidationError::WorkbookNotFound("wb".into()),
             ExcelValidationError::WriteDenied("no".into()),
@@ -2057,7 +2064,10 @@ mod tests {
             workbook_id: "wb-e2e".into(),
             range_address: RangeAddress::parse("A1:B2").unwrap(),
             values: vec![
-                vec![CellValue::Text("Name".into()), CellValue::Text("Score".into())],
+                vec![
+                    CellValue::Text("Name".into()),
+                    CellValue::Text("Score".into()),
+                ],
                 vec![CellValue::Text("Alice".into()), CellValue::Number(95.5)],
             ],
         };
@@ -2131,7 +2141,10 @@ mod tests {
         };
         assert!(matches!(
             v.validate_write_request(&write_req).unwrap_err(),
-            ExcelValidationError::RangeTooLarge { requested: 4, max: 2 }
+            ExcelValidationError::RangeTooLarge {
+                requested: 4,
+                max: 2
+            }
         ));
 
         let append_req = AppendRowsRequest {
@@ -2141,7 +2154,10 @@ mod tests {
         };
         assert!(matches!(
             v.validate_append(&append_req).unwrap_err(),
-            ExcelValidationError::TooManyRows { requested: 2, max: 1 }
+            ExcelValidationError::TooManyRows {
+                requested: 2,
+                max: 1
+            }
         ));
     }
 
@@ -2196,10 +2212,26 @@ mod tests {
             row_count: 500,
             column_count: 4,
             columns: vec![
-                TableColumn { id: "c1".into(), name: "Item".into(), index: 0 },
-                TableColumn { id: "c2".into(), name: "Qty".into(), index: 1 },
-                TableColumn { id: "c3".into(), name: "Price".into(), index: 2 },
-                TableColumn { id: "c4".into(), name: "Total".into(), index: 3 },
+                TableColumn {
+                    id: "c1".into(),
+                    name: "Item".into(),
+                    index: 0,
+                },
+                TableColumn {
+                    id: "c2".into(),
+                    name: "Qty".into(),
+                    index: 1,
+                },
+                TableColumn {
+                    id: "c3".into(),
+                    name: "Price".into(),
+                    index: 2,
+                },
+                TableColumn {
+                    id: "c4".into(),
+                    name: "Total".into(),
+                    index: 3,
+                },
             ],
         };
         assert_eq!(tbl.columns.len(), 4);
@@ -2229,15 +2261,27 @@ mod tests {
 
     #[test]
     fn validation_error_eq_range_too_large() {
-        let err1 = ExcelValidationError::RangeTooLarge { requested: 1, max: 2 };
-        let err2 = ExcelValidationError::RangeTooLarge { requested: 1, max: 2 };
+        let err1 = ExcelValidationError::RangeTooLarge {
+            requested: 1,
+            max: 2,
+        };
+        let err2 = ExcelValidationError::RangeTooLarge {
+            requested: 1,
+            max: 2,
+        };
         assert_eq!(err1, err2);
     }
 
     #[test]
     fn validation_error_ne_different_values() {
-        let err1 = ExcelValidationError::RangeTooLarge { requested: 1, max: 2 };
-        let err2 = ExcelValidationError::RangeTooLarge { requested: 3, max: 4 };
+        let err1 = ExcelValidationError::RangeTooLarge {
+            requested: 1,
+            max: 2,
+        };
+        let err2 = ExcelValidationError::RangeTooLarge {
+            requested: 3,
+            max: 4,
+        };
         assert_ne!(err1, err2);
     }
 

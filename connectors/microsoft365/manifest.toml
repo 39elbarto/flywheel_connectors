@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:cb23860f2ff7091a7bbd26e27e42f901fa884c229ef8472d881f6ccdfec1339b"
+interface_hash = "blake3-256:fcp.interface.v2:51f0b423e00f008be5d4937d2e81bd4a4fc33f0e9e81438cbc0d4e6abf2b63cf"
 
 [connector]
 id = "fcp.microsoft365"
@@ -257,95 +257,6 @@ related = [
     "m365.calendar.delete_event",
 ]
 
-[provides.operations."m365.calendar.update_event"]
-description = "Update properties of an existing calendar event"
-capability = "m365.calendar.write"
-risk_level = "medium"
-safety_tier = "risky"
-requires_approval = "policy"
-idempotency = "best_effort"
-
-[provides.operations."m365.calendar.update_event".input_schema]
-required = [
-    "user_id",
-    "event_id",
-]
-type = "object"
-
-[provides.operations."m365.calendar.update_event".input_schema.properties.attendees]
-description = "Updated list of attendee objects"
-type = "array"
-
-[provides.operations."m365.calendar.update_event".input_schema.properties.body]
-description = "Updated event body with contentType and content"
-type = "object"
-
-[provides.operations."m365.calendar.update_event".input_schema.properties.end]
-description = "Updated end time object with dateTime and timeZone"
-type = "object"
-
-[provides.operations."m365.calendar.update_event".input_schema.properties.event_id]
-description = "Event ID to update"
-type = "string"
-
-[provides.operations."m365.calendar.update_event".input_schema.properties.location]
-description = "Updated event location"
-type = "object"
-
-[provides.operations."m365.calendar.update_event".input_schema.properties.start]
-description = "Updated start time object with dateTime and timeZone"
-type = "object"
-
-[provides.operations."m365.calendar.update_event".input_schema.properties.subject]
-description = "Updated event subject"
-type = "string"
-
-[provides.operations."m365.calendar.update_event".input_schema.properties.user_id]
-description = "User principal name or 'me'"
-type = "string"
-
-[provides.operations."m365.calendar.update_event".output_schema]
-required = ["event"]
-type = "object"
-
-[provides.operations."m365.calendar.update_event".output_schema.properties.event]
-type = "object"
-
-[provides.operations."m365.calendar.update_event".network_constraints]
-host_allow = [
-    "graph.microsoft.com",
-    "login.microsoftonline.com",
-]
-port_allow = [443]
-ip_allow = []
-cidr_deny = []
-deny_localhost = true
-deny_private_ranges = true
-deny_tailnet_ranges = true
-require_sni = true
-spki_pins = []
-deny_ip_literals = true
-require_host_canonicalization = true
-dns_max_ips = 16
-max_redirects = 3
-connect_timeout_ms = 10000
-total_timeout_ms = 30000
-max_response_bytes = 1048576
-
-[provides.operations."m365.calendar.update_event".ai_hints]
-when_to_use = "Update an existing calendar event's subject, time, attendees, or other properties. Uses PATCH semantics (only changed fields needed)."
-common_mistakes = [
-    "Adding attendees without user confirmation (sends real meeting invites).",
-    "Not specifying timeZone in start/end objects.",
-    "Sending the full event body instead of just the changed fields.",
-]
-examples = ['{"user_id": "me", "event_id": "AAMkAG...", "subject": "Updated Standup", "start": {"dateTime": "2026-03-03T10:00:00", "timeZone": "America/Chicago"}, "end": {"dateTime": "2026-03-03T10:30:00", "timeZone": "America/Chicago"}}']
-related = [
-    "m365.calendar.get_event",
-    "m365.calendar.create_event",
-    "m365.calendar.delete_event",
-]
-
 [provides.operations."m365.calendar.get_freebusy"]
 description = "Check free/busy availability for one or more users"
 capability = "m365.calendar.read"
@@ -479,6 +390,95 @@ related = [
     "m365.calendar.get_freebusy",
 ]
 
+[provides.operations."m365.calendar.update_event"]
+description = "Update properties of an existing calendar event"
+capability = "m365.calendar.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "best_effort"
+
+[provides.operations."m365.calendar.update_event".input_schema]
+required = [
+    "user_id",
+    "event_id",
+]
+type = "object"
+
+[provides.operations."m365.calendar.update_event".input_schema.properties.attendees]
+description = "Updated list of attendee objects"
+type = "array"
+
+[provides.operations."m365.calendar.update_event".input_schema.properties.body]
+description = "Updated event body with contentType and content"
+type = "object"
+
+[provides.operations."m365.calendar.update_event".input_schema.properties.end]
+description = "Updated end time object with dateTime and timeZone"
+type = "object"
+
+[provides.operations."m365.calendar.update_event".input_schema.properties.event_id]
+description = "Event ID to update"
+type = "string"
+
+[provides.operations."m365.calendar.update_event".input_schema.properties.location]
+description = "Updated event location"
+type = "object"
+
+[provides.operations."m365.calendar.update_event".input_schema.properties.start]
+description = "Updated start time object with dateTime and timeZone"
+type = "object"
+
+[provides.operations."m365.calendar.update_event".input_schema.properties.subject]
+description = "Updated event subject"
+type = "string"
+
+[provides.operations."m365.calendar.update_event".input_schema.properties.user_id]
+description = "User principal name or 'me'"
+type = "string"
+
+[provides.operations."m365.calendar.update_event".output_schema]
+required = ["event"]
+type = "object"
+
+[provides.operations."m365.calendar.update_event".output_schema.properties.event]
+type = "object"
+
+[provides.operations."m365.calendar.update_event".network_constraints]
+host_allow = [
+    "graph.microsoft.com",
+    "login.microsoftonline.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."m365.calendar.update_event".ai_hints]
+when_to_use = "Update an existing calendar event's subject, time, attendees, or other properties. Uses PATCH semantics (only changed fields needed)."
+common_mistakes = [
+    "Adding attendees without user confirmation (sends real meeting invites).",
+    "Not specifying timeZone in start/end objects.",
+    "Sending the full event body instead of just the changed fields.",
+]
+examples = ['{"user_id": "me", "event_id": "AAMkAG...", "subject": "Updated Standup", "start": {"dateTime": "2026-03-03T10:00:00", "timeZone": "America/Chicago"}, "end": {"dateTime": "2026-03-03T10:30:00", "timeZone": "America/Chicago"}}']
+related = [
+    "m365.calendar.get_event",
+    "m365.calendar.create_event",
+    "m365.calendar.delete_event",
+]
+
 [provides.operations."m365.delta.sync"]
 description = "Perform incremental delta query to get changes since last sync"
 capability = "m365.delta.read"
@@ -546,6 +546,78 @@ examples = [
 ]
 related = ["m365.subscriptions.create"]
 
+[provides.operations."m365.files.create_share_link"]
+description = "Create a sharing link for a file or folder"
+capability = "m365.files.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "none"
+
+[provides.operations."m365.files.create_share_link".input_schema]
+required = [
+    "user_id",
+    "item_id",
+    "type",
+]
+type = "object"
+
+[provides.operations."m365.files.create_share_link".input_schema.properties.item_id]
+description = "Drive item ID to share"
+type = "string"
+
+[provides.operations."m365.files.create_share_link".input_schema.properties.scope]
+description = "Link scope: anonymous or organization"
+type = "string"
+
+[provides.operations."m365.files.create_share_link".input_schema.properties.type]
+description = "Link type: view, edit, or embed"
+type = "string"
+
+[provides.operations."m365.files.create_share_link".input_schema.properties.user_id]
+description = "User principal name or 'me'"
+type = "string"
+
+[provides.operations."m365.files.create_share_link".output_schema]
+required = ["link"]
+type = "object"
+
+[provides.operations."m365.files.create_share_link".output_schema.properties.link]
+type = "object"
+
+[provides.operations."m365.files.create_share_link".network_constraints]
+host_allow = [
+    "graph.microsoft.com",
+    "login.microsoftonline.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."m365.files.create_share_link".ai_hints]
+when_to_use = "Create a shareable link for a file or folder. Grants access to anyone with the link."
+common_mistakes = [
+    "Creating anonymous links without user confirmation (exposes data externally).",
+    "Not distinguishing between view and edit links.",
+]
+examples = ['{"user_id": "me", "item_id": "01ABCDEF...", "type": "view", "scope": "organization"}']
+related = [
+    "m365.files.get_item",
+    "m365.files.list_items",
+]
+
 [provides.operations."m365.files.delete_item"]
 description = "Delete a file or folder from OneDrive"
 capability = "m365.files.write"
@@ -598,66 +670,6 @@ when_to_use = "Permanently delete a file or folder. Items go to the recycle bin 
 common_mistakes = ["Deleting folders with contents without user confirmation."]
 examples = ['{"user_id": "me", "item_id": "01ABCDEF..."}']
 related = ["m365.files.list_items"]
-
-[provides.operations."m365.files.get_item"]
-description = "Get metadata for a single file or folder by ID"
-capability = "m365.files.read"
-risk_level = "low"
-safety_tier = "safe"
-requires_approval = "none"
-idempotency = "strict"
-
-[provides.operations."m365.files.get_item".input_schema]
-required = [
-    "user_id",
-    "item_id",
-]
-type = "object"
-
-[provides.operations."m365.files.get_item".input_schema.properties.item_id]
-description = "Drive item ID"
-type = "string"
-
-[provides.operations."m365.files.get_item".input_schema.properties.user_id]
-description = "User principal name or 'me'"
-type = "string"
-
-[provides.operations."m365.files.get_item".output_schema]
-required = ["item"]
-type = "object"
-
-[provides.operations."m365.files.get_item".output_schema.properties.item]
-type = "object"
-
-[provides.operations."m365.files.get_item".network_constraints]
-host_allow = [
-    "graph.microsoft.com",
-    "login.microsoftonline.com",
-]
-port_allow = [443]
-ip_allow = []
-cidr_deny = []
-deny_localhost = true
-deny_private_ranges = true
-deny_tailnet_ranges = true
-require_sni = true
-spki_pins = []
-deny_ip_literals = true
-require_host_canonicalization = true
-dns_max_ips = 16
-max_redirects = 3
-connect_timeout_ms = 10000
-total_timeout_ms = 30000
-max_response_bytes = 1048576
-
-[provides.operations."m365.files.get_item".ai_hints]
-when_to_use = "Get full metadata for a specific file or folder by item ID."
-common_mistakes = ["Using a stale item_id after the item has been moved or deleted."]
-examples = ['{"user_id": "me", "item_id": "01ABCDEF..."}']
-related = [
-    "m365.files.list_items",
-    "m365.files.download_file",
-]
 
 [provides.operations."m365.files.download_file"]
 description = "Download a file from OneDrive"
@@ -726,6 +738,66 @@ related = [
     "m365.files.upload_file",
 ]
 
+[provides.operations."m365.files.get_item"]
+description = "Get metadata for a single file or folder by ID"
+capability = "m365.files.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."m365.files.get_item".input_schema]
+required = [
+    "user_id",
+    "item_id",
+]
+type = "object"
+
+[provides.operations."m365.files.get_item".input_schema.properties.item_id]
+description = "Drive item ID"
+type = "string"
+
+[provides.operations."m365.files.get_item".input_schema.properties.user_id]
+description = "User principal name or 'me'"
+type = "string"
+
+[provides.operations."m365.files.get_item".output_schema]
+required = ["item"]
+type = "object"
+
+[provides.operations."m365.files.get_item".output_schema.properties.item]
+type = "object"
+
+[provides.operations."m365.files.get_item".network_constraints]
+host_allow = [
+    "graph.microsoft.com",
+    "login.microsoftonline.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."m365.files.get_item".ai_hints]
+when_to_use = "Get full metadata for a specific file or folder by item ID."
+common_mistakes = ["Using a stale item_id after the item has been moved or deleted."]
+examples = ['{"user_id": "me", "item_id": "01ABCDEF..."}']
+related = [
+    "m365.files.list_items",
+    "m365.files.download_file",
+]
+
 [provides.operations."m365.files.list_items"]
 description = "List files and folders in a OneDrive path or drive root"
 capability = "m365.files.read"
@@ -785,6 +857,66 @@ examples = ['{"user_id": "me", "path": "/Documents"}']
 related = [
     "m365.files.download_file",
     "m365.files.upload_file",
+]
+
+[provides.operations."m365.files.search"]
+description = "Search for files and folders in OneDrive"
+capability = "m365.files.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."m365.files.search".input_schema]
+required = [
+    "user_id",
+    "query",
+]
+type = "object"
+
+[provides.operations."m365.files.search".input_schema.properties.query]
+description = "Search query string"
+type = "string"
+
+[provides.operations."m365.files.search".input_schema.properties.user_id]
+description = "User principal name or 'me'"
+type = "string"
+
+[provides.operations."m365.files.search".output_schema]
+required = ["items"]
+type = "object"
+
+[provides.operations."m365.files.search".output_schema.properties.items]
+type = "array"
+
+[provides.operations."m365.files.search".network_constraints]
+host_allow = [
+    "graph.microsoft.com",
+    "login.microsoftonline.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."m365.files.search".ai_hints]
+when_to_use = "Search for files by name, content, or metadata across OneDrive."
+common_mistakes = ["Using overly broad queries that return too many results."]
+examples = ['{"user_id": "me", "query": "quarterly report"}']
+related = [
+    "m365.files.list_items",
+    "m365.files.get_item",
 ]
 
 [provides.operations."m365.files.upload_file"]
@@ -856,138 +988,6 @@ common_mistakes = [
 examples = ['{"user_id": "me", "path": "/Documents/notes.txt", "content": "SGVsbG8gV29ybGQ="}']
 related = [
     "m365.files.download_file",
-    "m365.files.list_items",
-]
-
-[provides.operations."m365.files.search"]
-description = "Search for files and folders in OneDrive"
-capability = "m365.files.read"
-risk_level = "low"
-safety_tier = "safe"
-requires_approval = "none"
-idempotency = "strict"
-
-[provides.operations."m365.files.search".input_schema]
-required = [
-    "user_id",
-    "query",
-]
-type = "object"
-
-[provides.operations."m365.files.search".input_schema.properties.query]
-description = "Search query string"
-type = "string"
-
-[provides.operations."m365.files.search".input_schema.properties.user_id]
-description = "User principal name or 'me'"
-type = "string"
-
-[provides.operations."m365.files.search".output_schema]
-required = ["items"]
-type = "object"
-
-[provides.operations."m365.files.search".output_schema.properties.items]
-type = "array"
-
-[provides.operations."m365.files.search".network_constraints]
-host_allow = [
-    "graph.microsoft.com",
-    "login.microsoftonline.com",
-]
-port_allow = [443]
-ip_allow = []
-cidr_deny = []
-deny_localhost = true
-deny_private_ranges = true
-deny_tailnet_ranges = true
-require_sni = true
-spki_pins = []
-deny_ip_literals = true
-require_host_canonicalization = true
-dns_max_ips = 16
-max_redirects = 3
-connect_timeout_ms = 10000
-total_timeout_ms = 30000
-max_response_bytes = 10485760
-
-[provides.operations."m365.files.search".ai_hints]
-when_to_use = "Search for files by name, content, or metadata across OneDrive."
-common_mistakes = ["Using overly broad queries that return too many results."]
-examples = ['{"user_id": "me", "query": "quarterly report"}']
-related = [
-    "m365.files.list_items",
-    "m365.files.get_item",
-]
-
-[provides.operations."m365.files.create_share_link"]
-description = "Create a sharing link for a file or folder"
-capability = "m365.files.write"
-risk_level = "high"
-safety_tier = "dangerous"
-requires_approval = "interactive"
-idempotency = "none"
-
-[provides.operations."m365.files.create_share_link".input_schema]
-required = [
-    "user_id",
-    "item_id",
-    "type",
-]
-type = "object"
-
-[provides.operations."m365.files.create_share_link".input_schema.properties.item_id]
-description = "Drive item ID to share"
-type = "string"
-
-[provides.operations."m365.files.create_share_link".input_schema.properties.scope]
-description = "Link scope: anonymous or organization"
-type = "string"
-
-[provides.operations."m365.files.create_share_link".input_schema.properties.type]
-description = "Link type: view, edit, or embed"
-type = "string"
-
-[provides.operations."m365.files.create_share_link".input_schema.properties.user_id]
-description = "User principal name or 'me'"
-type = "string"
-
-[provides.operations."m365.files.create_share_link".output_schema]
-required = ["link"]
-type = "object"
-
-[provides.operations."m365.files.create_share_link".output_schema.properties.link]
-type = "object"
-
-[provides.operations."m365.files.create_share_link".network_constraints]
-host_allow = [
-    "graph.microsoft.com",
-    "login.microsoftonline.com",
-]
-port_allow = [443]
-ip_allow = []
-cidr_deny = []
-deny_localhost = true
-deny_private_ranges = true
-deny_tailnet_ranges = true
-require_sni = true
-spki_pins = []
-deny_ip_literals = true
-require_host_canonicalization = true
-dns_max_ips = 16
-max_redirects = 3
-connect_timeout_ms = 10000
-total_timeout_ms = 30000
-max_response_bytes = 1048576
-
-[provides.operations."m365.files.create_share_link".ai_hints]
-when_to_use = "Create a shareable link for a file or folder. Grants access to anyone with the link."
-common_mistakes = [
-    "Creating anonymous links without user confirmation (exposes data externally).",
-    "Not distinguishing between view and edit links.",
-]
-examples = ['{"user_id": "me", "item_id": "01ABCDEF...", "type": "view", "scope": "organization"}']
-related = [
-    "m365.files.get_item",
     "m365.files.list_items",
 ]
 
@@ -1666,6 +1666,470 @@ related = [
     "m365.mail.list_messages",
 ]
 
+[provides.operations."m365.onenote.create_page"]
+description = "Create a OneNote page in a section from HTML content"
+capability = "m365.onenote.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."m365.onenote.create_page".input_schema]
+required = [
+    "user_id",
+    "section_id",
+    "html",
+]
+type = "object"
+
+[provides.operations."m365.onenote.create_page".input_schema.properties.html]
+description = "Full HTML payload for the new page"
+type = "string"
+
+[provides.operations."m365.onenote.create_page".input_schema.properties.section_id]
+description = "Target section ID"
+type = "string"
+
+[provides.operations."m365.onenote.create_page".input_schema.properties.user_id]
+description = "User principal name or 'me'"
+type = "string"
+
+[provides.operations."m365.onenote.create_page".output_schema]
+required = ["page"]
+type = "object"
+
+[provides.operations."m365.onenote.create_page".output_schema.properties.page]
+type = "object"
+
+[provides.operations."m365.onenote.create_page".network_constraints]
+host_allow = [
+    "graph.microsoft.com",
+    "login.microsoftonline.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."m365.onenote.create_page".ai_hints]
+when_to_use = "Create a new note page when you already have the HTML payload to submit."
+common_mistakes = [
+    "Passing fragmentary plain text instead of page HTML.",
+    "Creating a page in the wrong section because section discovery was skipped.",
+]
+examples = ['{"user_id": "me", "section_id": "section-123", "html": "<html><body><p>Daily notes</p></body></html>"}']
+related = [
+    "m365.onenote.list_sections",
+    "m365.onenote.update_page",
+]
+
+[provides.operations."m365.onenote.get_page"]
+description = "Get OneNote page metadata by page ID"
+capability = "m365.onenote.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."m365.onenote.get_page".input_schema]
+required = [
+    "user_id",
+    "page_id",
+]
+type = "object"
+
+[provides.operations."m365.onenote.get_page".input_schema.properties.page_id]
+description = "OneNote page ID"
+type = "string"
+
+[provides.operations."m365.onenote.get_page".input_schema.properties.user_id]
+description = "User principal name or 'me'"
+type = "string"
+
+[provides.operations."m365.onenote.get_page".output_schema]
+required = ["page"]
+type = "object"
+
+[provides.operations."m365.onenote.get_page".output_schema.properties.page]
+type = "object"
+
+[provides.operations."m365.onenote.get_page".network_constraints]
+host_allow = [
+    "graph.microsoft.com",
+    "login.microsoftonline.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."m365.onenote.get_page".ai_hints]
+when_to_use = "Fetch page metadata before reading content or applying updates."
+common_mistakes = ["Expecting get_page to include the HTML body; use get_page_content for that."]
+examples = ['{"user_id": "me", "page_id": "page-123"}']
+related = [
+    "m365.onenote.get_page_content",
+    "m365.onenote.update_page",
+]
+
+[provides.operations."m365.onenote.get_page_content"]
+description = "Get OneNote page HTML content with extracted plain text"
+capability = "m365.onenote.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."m365.onenote.get_page_content".input_schema]
+required = [
+    "user_id",
+    "page_id",
+]
+type = "object"
+
+[provides.operations."m365.onenote.get_page_content".input_schema.properties.include_ids]
+description = "Include stable DOM IDs in the returned HTML"
+type = "boolean"
+
+[provides.operations."m365.onenote.get_page_content".input_schema.properties.page_id]
+description = "OneNote page ID"
+type = "string"
+
+[provides.operations."m365.onenote.get_page_content".input_schema.properties.user_id]
+description = "User principal name or 'me'"
+type = "string"
+
+[provides.operations."m365.onenote.get_page_content".output_schema]
+required = ["page_content"]
+type = "object"
+
+[provides.operations."m365.onenote.get_page_content".output_schema.properties.page_content]
+type = "object"
+
+[provides.operations."m365.onenote.get_page_content".network_constraints]
+host_allow = [
+    "graph.microsoft.com",
+    "login.microsoftonline.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."m365.onenote.get_page_content".ai_hints]
+when_to_use = "Read the HTML body of a OneNote page and get a plain-text extraction for downstream summarization or editing."
+common_mistakes = [
+    "Assuming plain_text preserves every formatting detail.",
+    "Forgetting include_ids when later patch commands need stable DOM targets.",
+]
+examples = ['{"user_id": "me", "page_id": "page-123", "include_ids": true}']
+related = [
+    "m365.onenote.get_page",
+    "m365.onenote.update_page",
+]
+
+[provides.operations."m365.onenote.list_notebooks"]
+description = "List OneNote notebooks for a user"
+capability = "m365.onenote.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."m365.onenote.list_notebooks".input_schema]
+required = ["user_id"]
+type = "object"
+
+[provides.operations."m365.onenote.list_notebooks".input_schema.properties.top]
+description = "Page size (max 100)"
+maximum = 100
+minimum = 1
+type = "integer"
+
+[provides.operations."m365.onenote.list_notebooks".input_schema.properties.user_id]
+description = "User principal name or 'me'"
+type = "string"
+
+[provides.operations."m365.onenote.list_notebooks".output_schema]
+required = ["notebooks"]
+type = "object"
+
+[provides.operations."m365.onenote.list_notebooks".output_schema.properties.notebooks]
+type = "array"
+
+[provides.operations."m365.onenote.list_notebooks".network_constraints]
+host_allow = [
+    "graph.microsoft.com",
+    "login.microsoftonline.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."m365.onenote.list_notebooks".ai_hints]
+when_to_use = "Discover OneNote notebooks before listing sections or pages."
+common_mistakes = [
+    "Guessing notebook IDs instead of listing notebooks first.",
+    "Requesting more than 100 notebooks in one page.",
+]
+examples = ['{"user_id": "me", "top": 25}']
+related = [
+    "m365.onenote.list_sections",
+    "m365.onenote.list_pages",
+]
+
+[provides.operations."m365.onenote.list_pages"]
+description = "List OneNote pages in a section"
+capability = "m365.onenote.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."m365.onenote.list_pages".input_schema]
+required = [
+    "user_id",
+    "section_id",
+]
+type = "object"
+
+[provides.operations."m365.onenote.list_pages".input_schema.properties.section_id]
+description = "Section ID containing the pages to list"
+type = "string"
+
+[provides.operations."m365.onenote.list_pages".input_schema.properties.top]
+description = "Page size (max 100)"
+maximum = 100
+minimum = 1
+type = "integer"
+
+[provides.operations."m365.onenote.list_pages".input_schema.properties.user_id]
+description = "User principal name or 'me'"
+type = "string"
+
+[provides.operations."m365.onenote.list_pages".output_schema]
+required = ["pages"]
+type = "object"
+
+[provides.operations."m365.onenote.list_pages".output_schema.properties.pages]
+type = "array"
+
+[provides.operations."m365.onenote.list_pages".network_constraints]
+host_allow = [
+    "graph.microsoft.com",
+    "login.microsoftonline.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."m365.onenote.list_pages".ai_hints]
+when_to_use = "List note pages inside a specific section."
+common_mistakes = [
+    "Passing a notebook ID where a section ID is required.",
+    "Ignoring pagination on very large sections.",
+]
+examples = ['{"user_id": "me", "section_id": "section-123", "top": 25}']
+related = [
+    "m365.onenote.list_sections",
+    "m365.onenote.get_page",
+]
+
+[provides.operations."m365.onenote.list_sections"]
+description = "List OneNote sections, optionally scoped to a notebook or section group"
+capability = "m365.onenote.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."m365.onenote.list_sections".input_schema]
+required = ["user_id"]
+type = "object"
+
+[provides.operations."m365.onenote.list_sections".input_schema.properties.notebook_id]
+description = "Optional notebook ID to scope sections"
+type = "string"
+
+[provides.operations."m365.onenote.list_sections".input_schema.properties.section_group_id]
+description = "Optional section group ID to scope sections"
+type = "string"
+
+[provides.operations."m365.onenote.list_sections".input_schema.properties.top]
+description = "Page size (max 100)"
+maximum = 100
+minimum = 1
+type = "integer"
+
+[provides.operations."m365.onenote.list_sections".input_schema.properties.user_id]
+description = "User principal name or 'me'"
+type = "string"
+
+[provides.operations."m365.onenote.list_sections".output_schema]
+required = ["sections"]
+type = "object"
+
+[provides.operations."m365.onenote.list_sections".output_schema.properties.sections]
+type = "array"
+
+[provides.operations."m365.onenote.list_sections".network_constraints]
+host_allow = [
+    "graph.microsoft.com",
+    "login.microsoftonline.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."m365.onenote.list_sections".ai_hints]
+when_to_use = "Enumerate sections inside a notebook or section group."
+common_mistakes = [
+    "Confusing notebook IDs with section IDs.",
+    "Expecting list_sections to include page content.",
+]
+examples = ['{"user_id": "me", "notebook_id": "notebook-123", "top": 50}']
+related = [
+    "m365.onenote.list_notebooks",
+    "m365.onenote.list_pages",
+]
+
+[provides.operations."m365.onenote.update_page"]
+description = "Patch OneNote page content using Graph content commands"
+capability = "m365.onenote.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."m365.onenote.update_page".input_schema]
+required = [
+    "user_id",
+    "page_id",
+    "commands",
+]
+type = "object"
+
+[provides.operations."m365.onenote.update_page".input_schema.properties.commands]
+description = "Graph OneNote content change commands"
+type = "array"
+
+[provides.operations."m365.onenote.update_page".input_schema.properties.page_id]
+description = "OneNote page ID"
+type = "string"
+
+[provides.operations."m365.onenote.update_page".input_schema.properties.user_id]
+description = "User principal name or 'me'"
+type = "string"
+
+[provides.operations."m365.onenote.update_page".output_schema]
+required = ["status"]
+type = "object"
+
+[provides.operations."m365.onenote.update_page".output_schema.properties.status]
+type = "string"
+
+[provides.operations."m365.onenote.update_page".network_constraints]
+host_allow = [
+    "graph.microsoft.com",
+    "login.microsoftonline.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."m365.onenote.update_page".ai_hints]
+when_to_use = "Apply targeted content changes to an existing OneNote page."
+common_mistakes = [
+    "Sending an empty commands array.",
+    "Using unstable DOM targets because get_page_content was fetched without include_ids.",
+]
+examples = ['{"user_id": "me", "page_id": "page-123", "commands": [{"target": "body", "action": "append", "content": "<p>Follow-up</p>"}]}']
+related = [
+    "m365.onenote.get_page_content",
+    "m365.onenote.create_page",
+]
+
 [provides.operations."m365.subscriptions.create"]
 description = "Create a Graph API webhook subscription for change notifications"
 capability = "m365.subscriptions.write"
@@ -2028,6 +2492,445 @@ related = [
     "m365.tasks.list_task_lists",
 ]
 
+[provides.operations."m365.word.create_document"]
+description = "Create a new .docx document from plain text content"
+capability = "m365.word.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."m365.word.create_document".input_schema]
+required = [
+    "user_id",
+    "path",
+    "content",
+]
+type = "object"
+
+[provides.operations."m365.word.create_document".input_schema.properties.content]
+description = "Plain text document body"
+type = "string"
+
+[provides.operations."m365.word.create_document".input_schema.properties.path]
+description = "Destination path ending in .docx"
+type = "string"
+
+[provides.operations."m365.word.create_document".input_schema.properties.user_id]
+description = "User principal name or 'me'"
+type = "string"
+
+[provides.operations."m365.word.create_document".output_schema]
+required = [
+    "document",
+    "audit",
+]
+type = "object"
+
+[provides.operations."m365.word.create_document".output_schema.properties.audit]
+type = "object"
+
+[provides.operations."m365.word.create_document".output_schema.properties.document]
+type = "object"
+
+[provides.operations."m365.word.create_document".network_constraints]
+host_allow = [
+    "graph.microsoft.com",
+    "login.microsoftonline.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 30000
+total_timeout_ms = 120000
+max_response_bytes = 1048576
+
+[provides.operations."m365.word.create_document".ai_hints]
+when_to_use = "Create a Word document only after the user has confirmed the destination and content."
+common_mistakes = [
+    "Omitting the .docx extension in path.",
+    "Writing sensitive content without confirming the target folder.",
+]
+examples = ['{"user_id":"me","path":"/Documents/meeting-notes.docx","content":"Agenda\n- Review roadmap"}']
+related = [
+    "m365.word.update_document",
+    "m365.word.list_documents",
+]
+
+[provides.operations."m365.word.export_document"]
+description = "Export a Word-compatible document to PDF"
+capability = "m365.word.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."m365.word.export_document".input_schema]
+required = [
+    "user_id",
+    "item_id",
+    "format",
+]
+type = "object"
+
+[provides.operations."m365.word.export_document".input_schema.properties.format]
+description = "Export format"
+enum = ["pdf"]
+type = "string"
+
+[provides.operations."m365.word.export_document".input_schema.properties.item_id]
+description = "Drive item ID"
+type = "string"
+
+[provides.operations."m365.word.export_document".input_schema.properties.user_id]
+description = "User principal name or 'me'"
+type = "string"
+
+[provides.operations."m365.word.export_document".output_schema]
+required = [
+    "document",
+    "format",
+    "name",
+    "size",
+    "content",
+]
+type = "object"
+
+[provides.operations."m365.word.export_document".output_schema.properties.content]
+description = "Exported file content (base64-encoded)"
+type = "string"
+
+[provides.operations."m365.word.export_document".output_schema.properties.document]
+type = "object"
+
+[provides.operations."m365.word.export_document".output_schema.properties.format]
+type = "string"
+
+[provides.operations."m365.word.export_document".output_schema.properties.name]
+type = "string"
+
+[provides.operations."m365.word.export_document".output_schema.properties.size]
+type = "integer"
+
+[provides.operations."m365.word.export_document".network_constraints]
+host_allow = [
+    "graph.microsoft.com",
+    "login.microsoftonline.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 30000
+total_timeout_ms = 120000
+max_response_bytes = 26214400
+
+[provides.operations."m365.word.export_document".ai_hints]
+when_to_use = "Convert a Word document into PDF bytes for downstream review or delivery."
+common_mistakes = [
+    "Assuming export preserves editable Word structure; PDF output is read-only.",
+    "Ignoring response size when exporting large documents.",
+]
+examples = ['{"user_id":"me","item_id":"01ABCDEF...","format":"pdf"}']
+related = [
+    "m365.word.get_document",
+    "m365.word.extract_text",
+]
+
+[provides.operations."m365.word.extract_text"]
+description = "Extract bounded plain text from a supported Word document"
+capability = "m365.word.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."m365.word.extract_text".input_schema]
+required = [
+    "user_id",
+    "item_id",
+]
+type = "object"
+
+[provides.operations."m365.word.extract_text".input_schema.properties.item_id]
+description = "Drive item ID"
+type = "string"
+
+[provides.operations."m365.word.extract_text".input_schema.properties.max_chars]
+description = "Maximum number of characters to return"
+maximum = 100000
+minimum = 1
+type = "integer"
+
+[provides.operations."m365.word.extract_text".input_schema.properties.user_id]
+description = "User principal name or 'me'"
+type = "string"
+
+[provides.operations."m365.word.extract_text".output_schema]
+required = [
+    "document",
+    "text",
+    "truncated",
+    "extracted_chars",
+]
+type = "object"
+
+[provides.operations."m365.word.extract_text".output_schema.properties.document]
+type = "object"
+
+[provides.operations."m365.word.extract_text".output_schema.properties.extracted_chars]
+type = "integer"
+
+[provides.operations."m365.word.extract_text".output_schema.properties.text]
+type = "string"
+
+[provides.operations."m365.word.extract_text".output_schema.properties.truncated]
+type = "boolean"
+
+[provides.operations."m365.word.extract_text".network_constraints]
+host_allow = [
+    "graph.microsoft.com",
+    "login.microsoftonline.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 30000
+total_timeout_ms = 120000
+max_response_bytes = 8388608
+
+[provides.operations."m365.word.extract_text".ai_hints]
+when_to_use = "Read the plain-text body of a Word document without handling binary .docx bytes directly."
+common_mistakes = [
+    "Using extract_text for legacy .doc files; only OOXML packages are parsed locally.",
+    "Requesting unbounded output instead of setting max_chars for large documents.",
+]
+examples = ['{"user_id":"me","item_id":"01ABCDEF...","max_chars":4000}']
+related = [
+    "m365.word.get_document",
+    "m365.word.export_document",
+]
+
+[provides.operations."m365.word.get_document"]
+description = "Get metadata for a Word-compatible document"
+capability = "m365.word.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."m365.word.get_document".input_schema]
+required = [
+    "user_id",
+    "item_id",
+]
+type = "object"
+
+[provides.operations."m365.word.get_document".input_schema.properties.item_id]
+description = "Drive item ID"
+type = "string"
+
+[provides.operations."m365.word.get_document".input_schema.properties.user_id]
+description = "User principal name or 'me'"
+type = "string"
+
+[provides.operations."m365.word.get_document".output_schema]
+required = ["document"]
+type = "object"
+
+[provides.operations."m365.word.get_document".output_schema.properties.document]
+type = "object"
+
+[provides.operations."m365.word.get_document".network_constraints]
+host_allow = [
+    "graph.microsoft.com",
+    "login.microsoftonline.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."m365.word.get_document".ai_hints]
+when_to_use = "Inspect a Word document's metadata and supported capabilities before acting on it."
+common_mistakes = ["Passing a folder or non-document item ID."]
+examples = ['{"user_id":"me","item_id":"01ABCDEF..."}']
+related = [
+    "m365.word.list_documents",
+    "m365.word.export_document",
+]
+
+[provides.operations."m365.word.list_documents"]
+description = "List Word-compatible documents in a OneDrive path"
+capability = "m365.word.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."m365.word.list_documents".input_schema]
+required = ["user_id"]
+type = "object"
+
+[provides.operations."m365.word.list_documents".input_schema.properties.path]
+description = "Folder path (default: root)"
+type = "string"
+
+[provides.operations."m365.word.list_documents".input_schema.properties.user_id]
+description = "User principal name or 'me'"
+type = "string"
+
+[provides.operations."m365.word.list_documents".output_schema]
+required = ["documents"]
+type = "object"
+
+[provides.operations."m365.word.list_documents".output_schema.properties.documents]
+type = "array"
+
+[provides.operations."m365.word.list_documents".network_constraints]
+host_allow = [
+    "graph.microsoft.com",
+    "login.microsoftonline.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."m365.word.list_documents".ai_hints]
+when_to_use = "List Word-compatible documents before selecting a specific file to inspect or export."
+common_mistakes = [
+    "Assuming every drive item is a document; folders are filtered out automatically.",
+    "Expecting legacy .doc files to support structured text extraction.",
+]
+examples = ['{"user_id":"me","path":"/Documents"}']
+related = [
+    "m365.word.get_document",
+    "m365.word.extract_text",
+]
+
+[provides.operations."m365.word.update_document"]
+description = "Replace the contents of an existing .docx document"
+capability = "m365.word.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."m365.word.update_document".input_schema]
+required = [
+    "user_id",
+    "item_id",
+    "content",
+]
+type = "object"
+
+[provides.operations."m365.word.update_document".input_schema.properties.content]
+description = "Plain text document body"
+type = "string"
+
+[provides.operations."m365.word.update_document".input_schema.properties.item_id]
+description = "Drive item ID"
+type = "string"
+
+[provides.operations."m365.word.update_document".input_schema.properties.user_id]
+description = "User principal name or 'me'"
+type = "string"
+
+[provides.operations."m365.word.update_document".output_schema]
+required = [
+    "document",
+    "audit",
+]
+type = "object"
+
+[provides.operations."m365.word.update_document".output_schema.properties.audit]
+type = "object"
+
+[provides.operations."m365.word.update_document".output_schema.properties.document]
+type = "object"
+
+[provides.operations."m365.word.update_document".network_constraints]
+host_allow = [
+    "graph.microsoft.com",
+    "login.microsoftonline.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 30000
+total_timeout_ms = 120000
+max_response_bytes = 1048576
+
+[provides.operations."m365.word.update_document".ai_hints]
+when_to_use = "Replace a Word document body when the user explicitly wants a full content rewrite."
+common_mistakes = [
+    "Attempting to update legacy .doc files; content replacement is limited to .docx.",
+    "Overwriting a document without confirming the target item ID.",
+]
+examples = ['{"user_id":"me","item_id":"01ABCDEF...","content":"Updated draft\n\nApproved."}']
+related = [
+    "m365.word.get_document",
+    "m365.word.extract_text",
+]
+
 [event_caps]
 streaming = true
 replay = false
@@ -2087,6 +2990,38 @@ burst = 25
 scope = "instance"
 
 [[rate_limits.pools]]
+id = "m365.word.read"
+description = "Word document read/extract/export operations"
+requests = 5000
+window_ms = 600000
+burst = 50
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "m365.word.write"
+description = "Word document create/update operations"
+requests = 500
+window_ms = 600000
+burst = 15
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "m365.onenote.read"
+description = "OneNote read operations"
+requests = 5000
+window_ms = 600000
+burst = 50
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "m365.onenote.write"
+description = "OneNote page create/update operations"
+requests = 500
+window_ms = 600000
+burst = 15
+scope = "instance"
+
+[[rate_limits.pools]]
 id = "m365.calendar.read"
 description = "Calendar read operations"
 requests = 10000
@@ -2135,33 +3070,46 @@ burst = 50
 scope = "instance"
 
 [rate_limits.operation_pools]
-"m365.mail.search_messages" = ["m365.mail.read"]
-"m365.mail.reply_message" = ["m365.mail.send"]
-"m365.subscriptions.create" = ["m365.subscriptions.write"]
-"m365.files.upload_file" = ["m365.files.write"]
-"m365.subscriptions.renew" = ["m365.subscriptions.write"]
-"m365.mail.create_draft" = ["m365.mail.write"]
-"m365.files.list_items" = ["m365.files.read"]
-"m365.files.download_file" = ["m365.files.read"]
-"m365.tasks.create_task" = ["m365.tasks.write"]
-"m365.subscriptions.delete" = ["m365.subscriptions.write"]
-"m365.calendar.list_events" = ["m365.calendar.read"]
-"m365.calendar.delete_event" = ["m365.calendar.write"]
-"m365.mail.list_threads" = ["m365.mail.read"]
-"m365.mail.send_message" = ["m365.mail.send"]
-"m365.mail.get_message" = ["m365.mail.read"]
-"m365.tasks.list_task_lists" = ["m365.tasks.read"]
-"m365.tasks.list_tasks" = ["m365.tasks.read"]
-"m365.files.delete_item" = ["m365.files.write"]
-"m365.files.get_item" = ["m365.files.read"]
-"m365.files.search" = ["m365.files.read"]
-"m365.files.create_share_link" = ["m365.files.write"]
-"m365.calendar.get_freebusy" = ["m365.calendar.read"]
-"m365.delta.sync" = ["m365.delta.read"]
-"m365.mail.forward_message" = ["m365.mail.send"]
-"m365.mail.list_messages" = ["m365.mail.read"]
-"m365.mail.add_attachment" = ["m365.mail.write"]
-"m365.calendar.create_event" = ["m365.calendar.write"]
-"m365.calendar.get_event" = ["m365.calendar.read"]
-"m365.calendar.update_event" = ["m365.calendar.write"]
+"m365.onenote.get_page" = ["m365.onenote.read"]
 "m365.mail.list_attachments" = ["m365.mail.read"]
+"m365.files.delete_item" = ["m365.files.write"]
+"m365.calendar.list_events" = ["m365.calendar.read"]
+"m365.files.list_items" = ["m365.files.read"]
+"m365.subscriptions.delete" = ["m365.subscriptions.write"]
+"m365.onenote.list_sections" = ["m365.onenote.read"]
+"m365.subscriptions.renew" = ["m365.subscriptions.write"]
+"m365.files.create_share_link" = ["m365.files.write"]
+"m365.calendar.delete_event" = ["m365.calendar.write"]
+"m365.mail.list_messages" = ["m365.mail.read"]
+"m365.mail.send_message" = ["m365.mail.send"]
+"m365.files.download_file" = ["m365.files.read"]
+"m365.mail.search_messages" = ["m365.mail.read"]
+"m365.onenote.create_page" = ["m365.onenote.write"]
+"m365.files.search" = ["m365.files.read"]
+"m365.mail.reply_message" = ["m365.mail.send"]
+"m365.calendar.create_event" = ["m365.calendar.write"]
+"m365.mail.list_threads" = ["m365.mail.read"]
+"m365.onenote.update_page" = ["m365.onenote.write"]
+"m365.tasks.list_task_lists" = ["m365.tasks.read"]
+"m365.tasks.create_task" = ["m365.tasks.write"]
+"m365.tasks.list_tasks" = ["m365.tasks.read"]
+"m365.word.create_document" = ["m365.word.write"]
+"m365.calendar.get_freebusy" = ["m365.calendar.read"]
+"m365.files.upload_file" = ["m365.files.write"]
+"m365.word.export_document" = ["m365.word.read"]
+"m365.calendar.get_event" = ["m365.calendar.read"]
+"m365.word.extract_text" = ["m365.word.read"]
+"m365.onenote.get_page_content" = ["m365.onenote.read"]
+"m365.onenote.list_notebooks" = ["m365.onenote.read"]
+"m365.mail.add_attachment" = ["m365.mail.write"]
+"m365.files.get_item" = ["m365.files.read"]
+"m365.calendar.update_event" = ["m365.calendar.write"]
+"m365.mail.create_draft" = ["m365.mail.write"]
+"m365.mail.get_message" = ["m365.mail.read"]
+"m365.subscriptions.create" = ["m365.subscriptions.write"]
+"m365.mail.forward_message" = ["m365.mail.send"]
+"m365.onenote.list_pages" = ["m365.onenote.read"]
+"m365.word.get_document" = ["m365.word.read"]
+"m365.word.list_documents" = ["m365.word.read"]
+"m365.delta.sync" = ["m365.delta.read"]
+"m365.word.update_document" = ["m365.word.write"]

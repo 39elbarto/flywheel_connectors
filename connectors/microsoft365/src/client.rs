@@ -12,6 +12,7 @@ use tracing::{debug, warn};
 
 use crate::{
     error::{M365Error, M365Result},
+    onenote::PageContentCommand,
     types::GraphListResponse,
 };
 
@@ -97,6 +98,16 @@ impl M365Client {
     pub fn with_retry_config(mut self, max_retries: u32) -> Self {
         self.max_retries = max_retries;
         self
+    }
+
+    fn build_api_url(&self, relative_path: &str) -> M365Result<String> {
+        let base = format!("{}/", self.api_url.trim_end_matches('/'));
+        let base_url = reqwest::Url::parse(&base)
+            .map_err(|e| M365Error::InvalidConfig(format!("Invalid Graph base URL: {e}")))?;
+        let url = base_url
+            .join(relative_path.trim_start_matches('/'))
+            .map_err(|e| M365Error::InvalidConfig(format!("Invalid Graph request path: {e}")))?;
+        Ok(url.to_string())
     }
 
     fn apply_auth(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -333,9 +344,16 @@ impl M365Client {
     ) -> M365Result<GraphListResponse> {
         let url = match path {
             Some(p) if !p.is_empty() => {
-                format!("{}/users/{user_id}/drive/root:/{p}:/children", self.api_url)
+                let normalized_path = p.trim_matches('/');
+                if normalized_path.is_empty() {
+                    self.build_api_url(&format!("users/{user_id}/drive/root/children"))?
+                } else {
+                    self.build_api_url(&format!(
+                        "users/{user_id}/drive/root:/{normalized_path}:/children"
+                    ))?
+                }
             }
-            _ => format!("{}/users/{user_id}/drive/root/children", self.api_url),
+            _ => self.build_api_url(&format!("users/{user_id}/drive/root/children"))?,
         };
         let data = self.get(&url).await?;
         Ok(serde_json::from_value(data)?)
@@ -347,18 +365,29 @@ impl M365Client {
         user_id: &str,
         item_id: &str,
     ) -> M365Result<(String, serde_json::Value)> {
-        // First get metadata for name/size
-        let meta_url = format!("{}/users/{user_id}/drive/items/{item_id}", self.api_url);
-        let metadata = self.get(&meta_url).await?;
-
-        // Then download the content
-        let url = format!(
-            "{}/users/{user_id}/drive/items/{item_id}/content",
-            self.api_url
-        );
-        let bytes = self.get_bytes(&url).await?;
+        let (bytes, metadata) = self.download_file_raw(user_id, item_id).await?;
         let content = BASE64.encode(&bytes);
         Ok((content, metadata))
+    }
+
+    /// Download a file from OneDrive and return the raw bytes plus metadata.
+    pub async fn download_file_raw(
+        &self,
+        user_id: &str,
+        item_id: &str,
+    ) -> M365Result<(Vec<u8>, serde_json::Value)> {
+        self.download_drive_item_bytes(user_id, item_id, None).await
+    }
+
+    /// Download a drive item converted into another format (for example PDF).
+    pub async fn download_file_as(
+        &self,
+        user_id: &str,
+        item_id: &str,
+        format: &str,
+    ) -> M365Result<(Vec<u8>, serde_json::Value)> {
+        self.download_drive_item_bytes(user_id, item_id, Some(format))
+            .await
     }
 
     /// Upload a file to OneDrive (simple upload, up to 4 MB).
@@ -368,10 +397,10 @@ impl M365Client {
         path: &str,
         content: &[u8],
     ) -> M365Result<serde_json::Value> {
-        let url = format!(
-            "{}/users/{user_id}/drive/root:/{path}:/content",
-            self.api_url
-        );
+        let normalized_path = normalize_drive_root_path(path)?;
+        let url = self.build_api_url(&format!(
+            "users/{user_id}/drive/root:/{normalized_path}:/content"
+        ))?;
         self.put_bytes(&url, content).await
     }
 
@@ -416,6 +445,20 @@ impl M365Client {
             body["scope"] = serde_json::Value::String(s.to_string());
         }
         self.post_json(&url, &body).await
+    }
+
+    /// Replace the contents of an existing drive item.
+    pub async fn update_item_content(
+        &self,
+        user_id: &str,
+        item_id: &str,
+        content: &[u8],
+    ) -> M365Result<serde_json::Value> {
+        let url = format!(
+            "{}/users/{user_id}/drive/items/{item_id}/content",
+            self.api_url
+        );
+        self.put_bytes(&url, content).await
     }
 
     // ── Calendar operations ──────────────────────────────────────
@@ -522,6 +565,125 @@ impl M365Client {
         self.post_json(&url, task).await
     }
 
+    // ── OneNote operations ───────────────────────────────────────
+
+    /// List OneNote notebooks for a user.
+    pub async fn list_notebooks(
+        &self,
+        user_id: &str,
+        top: Option<u32>,
+    ) -> M365Result<GraphListResponse> {
+        let mut url = format!("{}/users/{user_id}/onenote/notebooks", self.api_url);
+        if let Some(top) = top {
+            url = format!("{url}?$top={top}");
+        }
+        let data = self.get(&url).await?;
+        Ok(serde_json::from_value(data)?)
+    }
+
+    /// List OneNote sections for a user, optionally scoped to a notebook or section group.
+    pub async fn list_sections(
+        &self,
+        user_id: &str,
+        notebook_id: Option<&str>,
+        section_group_id: Option<&str>,
+        top: Option<u32>,
+    ) -> M365Result<GraphListResponse> {
+        let mut url = if let Some(notebook_id) = notebook_id {
+            format!(
+                "{}/users/{user_id}/onenote/notebooks/{notebook_id}/sections",
+                self.api_url
+            )
+        } else if let Some(section_group_id) = section_group_id {
+            format!(
+                "{}/users/{user_id}/onenote/sectionGroups/{section_group_id}/sections",
+                self.api_url
+            )
+        } else {
+            format!("{}/users/{user_id}/onenote/sections", self.api_url)
+        };
+
+        if let Some(top) = top {
+            url = format!("{url}?$top={top}");
+        }
+
+        let data = self.get(&url).await?;
+        Ok(serde_json::from_value(data)?)
+    }
+
+    /// List OneNote pages in a section.
+    pub async fn list_pages(
+        &self,
+        user_id: &str,
+        section_id: &str,
+        top: Option<u32>,
+    ) -> M365Result<GraphListResponse> {
+        let mut url = format!(
+            "{}/users/{user_id}/onenote/sections/{section_id}/pages",
+            self.api_url
+        );
+        if let Some(top) = top {
+            url = format!("{url}?$top={top}");
+        }
+        let data = self.get(&url).await?;
+        Ok(serde_json::from_value(data)?)
+    }
+
+    /// Get OneNote page metadata by page ID.
+    pub async fn get_page(&self, user_id: &str, page_id: &str) -> M365Result<serde_json::Value> {
+        let url = format!("{}/users/{user_id}/onenote/pages/{page_id}", self.api_url);
+        self.get(&url).await
+    }
+
+    /// Fetch raw HTML content for a OneNote page.
+    pub async fn get_page_content(
+        &self,
+        user_id: &str,
+        page_id: &str,
+        include_ids: bool,
+    ) -> M365Result<String> {
+        let mut url = reqwest::Url::parse(&format!(
+            "{}/users/{user_id}/onenote/pages/{page_id}/content",
+            self.api_url
+        ))
+        .map_err(|error| {
+            M365Error::InvalidConfig(format!("Invalid OneNote content URL: {error}"))
+        })?;
+        if include_ids {
+            url.query_pairs_mut().append_pair("includeIDs", "true");
+        }
+        self.get_text(url.as_str()).await
+    }
+
+    /// Create a OneNote page from HTML content.
+    pub async fn create_page(
+        &self,
+        user_id: &str,
+        section_id: &str,
+        html: &str,
+    ) -> M365Result<serde_json::Value> {
+        let url = format!(
+            "{}/users/{user_id}/onenote/sections/{section_id}/pages",
+            self.api_url
+        );
+        self.post_html(&url, html).await
+    }
+
+    /// Update a OneNote page using Graph content commands.
+    pub async fn update_page(
+        &self,
+        user_id: &str,
+        page_id: &str,
+        commands: &[PageContentCommand],
+    ) -> M365Result<()> {
+        let body = serde_json::to_value(commands)?;
+        let url = format!(
+            "{}/users/{user_id}/onenote/pages/{page_id}/content",
+            self.api_url
+        );
+        self.patch_json_no_content(&url, &body).await
+    }
+
     // ── Subscription operations ──────────────────────────────────
 
     /// Create a webhook subscription.
@@ -601,6 +763,34 @@ impl M365Client {
             .await
     }
 
+    async fn download_drive_item_bytes(
+        &self,
+        user_id: &str,
+        item_id: &str,
+        format: Option<&str>,
+    ) -> M365Result<(Vec<u8>, serde_json::Value)> {
+        let meta_url = format!("{}/users/{user_id}/drive/items/{item_id}", self.api_url);
+        let metadata = self.get(&meta_url).await?;
+
+        let content_url = match format {
+            Some(format) => format!(
+                "{}/users/{user_id}/drive/items/{item_id}/content?format={format}",
+                self.api_url
+            ),
+            None => format!(
+                "{}/users/{user_id}/drive/items/{item_id}/content",
+                self.api_url
+            ),
+        };
+        let bytes = self.get_bytes(&content_url).await?;
+        Ok((bytes, metadata))
+    }
+
+    async fn get_text(&self, url: &str) -> M365Result<String> {
+        self.execute_text(|| self.apply_auth(self.http.get(url)))
+            .await
+    }
+
     async fn post_json(
         &self,
         url: &str,
@@ -615,12 +805,31 @@ impl M365Client {
             .await
     }
 
+    async fn post_html(&self, url: &str, html: &str) -> M365Result<serde_json::Value> {
+        let html = html.to_string();
+        self.execute(|| {
+            self.apply_auth(
+                self.http
+                    .post(url)
+                    .header(header::ACCEPT, "application/json")
+                    .header(header::CONTENT_TYPE, "text/html")
+                    .body(html.clone()),
+            )
+        })
+        .await
+    }
+
     async fn patch_json(
         &self,
         url: &str,
         body: &serde_json::Value,
     ) -> M365Result<serde_json::Value> {
         self.execute(|| self.apply_auth(self.http.patch(url).json(body)))
+            .await
+    }
+
+    async fn patch_json_no_content(&self, url: &str, body: &serde_json::Value) -> M365Result<()> {
+        self.execute_no_content(|| self.apply_auth(self.http.patch(url).json(body)))
             .await
     }
 
@@ -728,6 +937,54 @@ impl M365Client {
                         continue;
                     }
                     return Err(M365Error::Http(e));
+                }
+            }
+        }
+
+        Err(last_err.unwrap_or(M365Error::Api {
+            message: "Max retries exceeded".into(),
+            status_code: None,
+            error_code: None,
+        }))
+    }
+
+    async fn execute_text(
+        &self,
+        build_request: impl Fn() -> reqwest::RequestBuilder,
+    ) -> M365Result<String> {
+        let mut last_err = None;
+
+        for attempt in 0..=self.max_retries {
+            if attempt > 0 {
+                let delay = std::time::Duration::from_millis(500 * u64::from(attempt));
+                debug!(attempt, delay_ms = delay.as_millis(), "retrying request");
+                fcp_async_core::time::sleep(delay).await;
+            }
+
+            let result = build_request().send().await;
+
+            match result {
+                Ok(response) => {
+                    let status = response.status();
+                    match self.handle_error_status(status, &response, attempt).await {
+                        ErrorAction::Return(err) => return Err(err),
+                        ErrorAction::Retry(err) => {
+                            last_err = Some(err);
+                            continue;
+                        }
+                        ErrorAction::Success => {}
+                    }
+
+                    let body = response.text().await.map_err(M365Error::Http)?;
+                    return Ok(body);
+                }
+                Err(error) => {
+                    if attempt < self.max_retries {
+                        warn!(attempt, error = %error, "request failed, will retry");
+                        last_err = Some(M365Error::Http(error));
+                        continue;
+                    }
+                    return Err(M365Error::Http(error));
                 }
             }
         }
@@ -848,6 +1105,16 @@ impl M365Client {
 
         ErrorAction::Success
     }
+}
+
+fn normalize_drive_root_path(path: &str) -> M365Result<&str> {
+    let normalized = path.trim_matches('/');
+    if normalized.is_empty() {
+        return Err(M365Error::InvalidConfig(
+            "path must not be empty or root-only".into(),
+        ));
+    }
+    Ok(normalized)
 }
 
 enum ErrorAction {
@@ -1078,6 +1345,110 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn test_list_items_normalizes_and_encodes_path() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/users/me/drive/root:/Shared%20Documents:/children"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": [{ "id": "item_1", "name": "Quarterly Report.docx" }]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = M365Client::new("test_token")
+            .unwrap()
+            .with_api_url(&mock_server.uri());
+
+        let result = client
+            .list_items("me", Some("/Shared Documents/"))
+            .await
+            .unwrap();
+        assert_eq!(result.value.len(), 1);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_download_file_as_pdf() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/users/me/drive/items/doc-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "doc-1",
+                "name": "Quarterly Report.docx",
+                "size": 5120
+            })))
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/users/me/drive/items/doc-1/content"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"%PDF-test".to_vec()))
+            .mount(&mock_server)
+            .await;
+
+        let client = M365Client::new("test_token")
+            .unwrap()
+            .with_api_url(&mock_server.uri());
+
+        let (content, metadata) = client.download_file_as("me", "doc-1", "pdf").await.unwrap();
+        assert_eq!(content, b"%PDF-test".to_vec());
+        assert_eq!(metadata["name"], "Quarterly Report.docx");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_update_item_content() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("PUT"))
+            .and(path("/users/me/drive/items/doc-1/content"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "doc-1",
+                "name": "Updated Report.docx",
+                "size": 1280
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = M365Client::new("test_token")
+            .unwrap()
+            .with_api_url(&mock_server.uri());
+
+        let item = client
+            .update_item_content("me", "doc-1", b"updated content")
+            .await
+            .unwrap();
+        assert_eq!(item["name"], "Updated Report.docx");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_upload_file_normalizes_and_encodes_path() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("PUT"))
+            .and(path(
+                "/users/me/drive/root:/Documents/Meeting%20Notes.docx:/content",
+            ))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": "doc-9",
+                "name": "Meeting Notes.docx",
+                "size": 1024
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = M365Client::new("test_token")
+            .unwrap()
+            .with_api_url(&mock_server.uri());
+
+        let item = client
+            .upload_file("me", "/Documents/Meeting Notes.docx", b"payload")
+            .await
+            .unwrap();
+        assert_eq!(item["name"], "Meeting Notes.docx");
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn test_list_events() {
         let mock_server = MockServer::start().await;
 
@@ -1119,6 +1490,106 @@ mod tests {
 
         let result = client.list_task_lists("me").await.unwrap();
         assert_eq!(result.value.len(), 1);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_list_notebooks() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/users/me/onenote/notebooks"))
+            .and(query_param("$top", "10"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": [
+                    { "id": "notebook_1", "displayName": "Engineering" }
+                ]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = M365Client::new("test_token")
+            .unwrap()
+            .with_api_url(&mock_server.uri());
+        let result = client.list_notebooks("me", Some(10)).await.unwrap();
+        assert_eq!(result.value.len(), 1);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_get_page_content() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/users/me/onenote/pages/page_123/content"))
+            .and(query_param("includeIDs", "true"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/html")
+                    .set_body_string("<html><body><p>Hello OneNote</p></body></html>"),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let client = M365Client::new("test_token")
+            .unwrap()
+            .with_api_url(&mock_server.uri());
+        let result = client
+            .get_page_content("me", "page_123", true)
+            .await
+            .unwrap();
+        assert!(result.contains("Hello OneNote"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_create_page() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/users/me/onenote/sections/section_123/pages"))
+            .and(header("content-type", "text/html"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": "page_123",
+                "title": "Daily Notes"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = M365Client::new("test_token")
+            .unwrap()
+            .with_api_url(&mock_server.uri());
+        let result = client
+            .create_page(
+                "me",
+                "section_123",
+                "<html><body><p>Daily Notes</p></body></html>",
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["id"], "page_123");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_update_page() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("PATCH"))
+            .and(path("/users/me/onenote/pages/page_123/content"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&mock_server)
+            .await;
+
+        let client = M365Client::new("test_token")
+            .unwrap()
+            .with_api_url(&mock_server.uri());
+        let commands = vec![PageContentCommand {
+            target: "body".into(),
+            action: "append".into(),
+            position: None,
+            content: Some("<p>Follow-up</p>".into()),
+        }];
+        client
+            .update_page("me", "page_123", &commands)
+            .await
+            .unwrap();
     }
 
     #[fcp_async_core::runtime::test]

@@ -3,7 +3,8 @@
 use std::{
     collections::BTreeMap,
     fmt::Write as _,
-    fs, io,
+    fs,
+    io::{self, Cursor, Read, Write},
     path::{Path, PathBuf},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -19,13 +20,20 @@ use fcp_core::{
     IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
     SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
+use quick_xml::{Reader, escape::unescape, events::Event};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument, warn};
+use zip::{CompressionMethod, ZipArchive, write::FileOptions};
 
 use crate::{
     client::{DEFAULT_API_URL, M365Auth, M365Client},
     error::M365Error,
+    onenote::{
+        CreatePageInput, GetPageContentInput, GetPageInput, ListNotebooksInput, ListPagesInput,
+        ListSectionsInput, OneNotePageContent, UpdatePageInput,
+    },
+    types::DriveItem,
 };
 
 const DEFAULT_AUTH_URL: &str = "https://login.microsoftonline.com";
@@ -33,6 +41,11 @@ const DEFAULT_CLIENT_CREDENTIAL_SCOPE: &str = "https://graph.microsoft.com/.defa
 const M365_SYNC_STATE_FILE: &str = "m365_sync_state.json";
 const M365_SYNC_LEASE_FILE: &str = "m365_sync_lease.json";
 const M365_SYNC_LEASE_TTL_SECONDS: u64 = 120;
+const WORD_EXTRACT_DEFAULT_MAX_CHARS: usize = 20_000;
+const WORD_EXTRACT_MAX_CHARS_LIMIT: usize = 100_000;
+const WORD_EXTRACT_MAX_BYTES: usize = 8 * 1024 * 1024;
+const WORD_EXPORT_MAX_BYTES: usize = 25 * 1024 * 1024;
+const WORD_SIMPLE_UPLOAD_MAX_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 struct M365Config {
@@ -354,6 +367,187 @@ struct ThreadSummary {
     latest_received_datetime: Option<String>,
     last_message_id: Option<String>,
     subject_preview: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListWordDocumentsInput {
+    user_id: String,
+    #[serde(default)]
+    path: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GetWordDocumentInput {
+    user_id: String,
+    item_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExtractWordTextInput {
+    user_id: String,
+    item_id: String,
+    #[serde(default)]
+    max_chars: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateWordDocumentInput {
+    user_id: String,
+    path: String,
+    content: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateWordDocumentInput {
+    user_id: String,
+    item_id: String,
+    content: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExportWordDocumentInput {
+    user_id: String,
+    item_id: String,
+    format: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WordDocumentMetadata {
+    id: Option<String>,
+    name: Option<String>,
+    size: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    web_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mime_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    extension: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_date_time: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_modified_date_time: Option<String>,
+    supports_text_extraction: bool,
+    supports_content_replace: bool,
+    supports_pdf_export: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WordAuditEvent {
+    timestamp: String,
+    action: String,
+    user_id: String,
+    target: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    item_id: Option<String>,
+    content_chars: usize,
+}
+
+impl ListWordDocumentsInput {
+    fn parse(value: serde_json::Value) -> FcpResult<Self> {
+        let parsed: Self = parse_input(value, "m365.word.list_documents")?;
+        validate_non_empty(&parsed.user_id, "user_id")?;
+        validate_optional_non_empty(parsed.path.as_deref(), "path")?;
+        Ok(parsed)
+    }
+}
+
+impl GetWordDocumentInput {
+    fn parse(value: serde_json::Value, operation: &str) -> FcpResult<Self> {
+        let parsed: Self = parse_input(value, operation)?;
+        validate_non_empty(&parsed.user_id, "user_id")?;
+        validate_non_empty(&parsed.item_id, "item_id")?;
+        Ok(parsed)
+    }
+}
+
+impl ExtractWordTextInput {
+    fn parse(value: serde_json::Value) -> FcpResult<Self> {
+        let parsed: Self = parse_input(value, "m365.word.extract_text")?;
+        validate_non_empty(&parsed.user_id, "user_id")?;
+        validate_non_empty(&parsed.item_id, "item_id")?;
+        validate_max_chars(parsed.max_chars)?;
+        Ok(parsed)
+    }
+}
+
+impl CreateWordDocumentInput {
+    fn parse(value: serde_json::Value) -> FcpResult<Self> {
+        let parsed: Self = parse_input(value, "m365.word.create_document")?;
+        validate_non_empty(&parsed.user_id, "user_id")?;
+        validate_non_empty(&parsed.path, "path")?;
+        validate_non_empty(&parsed.content, "content")?;
+        ensure_docx_path(&parsed.path, "path")?;
+        Ok(parsed)
+    }
+}
+
+impl UpdateWordDocumentInput {
+    fn parse(value: serde_json::Value) -> FcpResult<Self> {
+        let parsed: Self = parse_input(value, "m365.word.update_document")?;
+        validate_non_empty(&parsed.user_id, "user_id")?;
+        validate_non_empty(&parsed.item_id, "item_id")?;
+        validate_non_empty(&parsed.content, "content")?;
+        Ok(parsed)
+    }
+}
+
+impl ExportWordDocumentInput {
+    fn parse(value: serde_json::Value) -> FcpResult<Self> {
+        let parsed: Self = parse_input(value, "m365.word.export_document")?;
+        validate_non_empty(&parsed.user_id, "user_id")?;
+        validate_non_empty(&parsed.item_id, "item_id")?;
+        validate_export_format(&parsed.format)?;
+        Ok(parsed)
+    }
+}
+
+impl WordDocumentMetadata {
+    fn from_drive_item(item: &DriveItem) -> Self {
+        let extension = item.file_extension().map(str::to_ascii_lowercase);
+        let supports_text_extraction = extension
+            .as_deref()
+            .is_some_and(is_docx_text_extractable_extension);
+        let supports_content_replace = extension.as_deref() == Some("docx");
+
+        Self {
+            id: item.id.clone(),
+            name: item.name.clone(),
+            size: item.size,
+            web_url: item.web_url.clone(),
+            mime_type: item.mime_type().map(str::to_string),
+            extension,
+            created_date_time: item.created_date_time.clone(),
+            last_modified_date_time: item.last_modified_date_time.clone(),
+            supports_text_extraction,
+            supports_content_replace,
+            supports_pdf_export: item.is_word_document(),
+        }
+    }
+}
+
+impl WordAuditEvent {
+    fn new(
+        action: &str,
+        user_id: &str,
+        target: String,
+        item_id: Option<String>,
+        content_chars: usize,
+    ) -> Self {
+        Self {
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            action: action.to_string(),
+            user_id: user_id.to_string(),
+            target,
+            item_id,
+            content_chars,
+        }
+    }
 }
 
 /// FCP Microsoft 365 Connector.
@@ -901,6 +1095,21 @@ impl M365Connector {
             "m365.files.delete_item" => self.invoke_delete_item(input).await,
             "m365.files.search" => self.invoke_search_files(input).await,
             "m365.files.create_share_link" => self.invoke_create_share_link(input).await,
+            // ── Word ─────────────────────────────────────────
+            "m365.word.list_documents" => self.invoke_word_list_documents(input).await,
+            "m365.word.get_document" => self.invoke_word_get_document(input).await,
+            "m365.word.extract_text" => self.invoke_word_extract_text(input).await,
+            "m365.word.create_document" => self.invoke_word_create_document(input).await,
+            "m365.word.update_document" => self.invoke_word_update_document(input).await,
+            "m365.word.export_document" => self.invoke_word_export_document(input).await,
+            // ── OneNote ──────────────────────────────────────
+            "m365.onenote.list_notebooks" => self.invoke_list_notebooks(input).await,
+            "m365.onenote.list_sections" => self.invoke_list_sections(input).await,
+            "m365.onenote.list_pages" => self.invoke_list_pages(input).await,
+            "m365.onenote.get_page" => self.invoke_get_page(input).await,
+            "m365.onenote.get_page_content" => self.invoke_get_page_content(input).await,
+            "m365.onenote.create_page" => self.invoke_create_page(input).await,
+            "m365.onenote.update_page" => self.invoke_update_page(input).await,
             // ── Calendar ─────────────────────────────────────
             "m365.calendar.list_events" => self.invoke_list_events(input).await,
             "m365.calendar.create_event" => self.invoke_create_event(input).await,
@@ -1226,6 +1435,303 @@ impl M365Connector {
             .await
             .map_err(|e: M365Error| e.to_fcp_error())?;
         Ok(json!({ "link": link }))
+    }
+
+    // ── Word operation implementations ───────────────────────────
+
+    async fn invoke_word_list_documents(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let input = ListWordDocumentsInput::parse(input)?;
+        let result = client
+            .list_items(&input.user_id, input.path.as_deref())
+            .await
+            .map_err(|e: M365Error| e.to_fcp_error())?;
+
+        let documents = result
+            .value
+            .iter()
+            .map(|item| parse_drive_item(item, "m365.word.list_documents"))
+            .filter_map(|item| match item {
+                Ok(item) if item.is_word_document() => {
+                    Some(Ok(WordDocumentMetadata::from_drive_item(&item)))
+                }
+                Ok(_) => None,
+                Err(err) => Some(Err(err)),
+            })
+            .collect::<FcpResult<Vec<_>>>()?;
+
+        Ok(json!({ "documents": documents }))
+    }
+
+    async fn invoke_word_get_document(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let input = GetWordDocumentInput::parse(input, "m365.word.get_document")?;
+        let item = client
+            .get_item(&input.user_id, &input.item_id)
+            .await
+            .map_err(|e: M365Error| e.to_fcp_error())?;
+        let drive_item = parse_drive_item(&item, "m365.word.get_document")?;
+        let document = ensure_word_document(&drive_item, "m365.word.get_document")?;
+        Ok(json!({ "document": document }))
+    }
+
+    async fn invoke_word_extract_text(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let input = ExtractWordTextInput::parse(input)?;
+        let item = client
+            .get_item(&input.user_id, &input.item_id)
+            .await
+            .map_err(|e: M365Error| e.to_fcp_error())?;
+        let drive_item = parse_drive_item(&item, "m365.word.extract_text")?;
+        let document = ensure_word_document(&drive_item, "m365.word.extract_text")?;
+        ensure_text_extraction_supported(&document)?;
+        enforce_word_document_size(&document, WORD_EXTRACT_MAX_BYTES, "text extraction")?;
+
+        let (bytes, _) = client
+            .download_file_raw(&input.user_id, &input.item_id)
+            .await
+            .map_err(|e: M365Error| e.to_fcp_error())?;
+        if bytes.len() > WORD_EXTRACT_MAX_BYTES {
+            return Err(invalid_request(format!(
+                "Document exceeds the {WORD_EXTRACT_MAX_BYTES}-byte limit for text extraction"
+            )));
+        }
+
+        let extracted = extract_docx_text(&bytes)?;
+        let (text, truncated) = truncate_text(
+            &extracted,
+            input.max_chars.unwrap_or(WORD_EXTRACT_DEFAULT_MAX_CHARS),
+        );
+
+        Ok(json!({
+            "document": document,
+            "text": text,
+            "truncated": truncated,
+            "extracted_chars": extracted.chars().count(),
+        }))
+    }
+
+    async fn invoke_word_create_document(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let input = CreateWordDocumentInput::parse(input)?;
+        let content_chars = input.content.chars().count();
+        let bytes = build_docx_document(&input.content)?;
+        if bytes.len() > WORD_SIMPLE_UPLOAD_MAX_BYTES {
+            return Err(invalid_request(format!(
+                "Generated .docx payload exceeds the {WORD_SIMPLE_UPLOAD_MAX_BYTES}-byte simple upload limit"
+            )));
+        }
+
+        let item = client
+            .upload_file(&input.user_id, &input.path, &bytes)
+            .await
+            .map_err(|e: M365Error| e.to_fcp_error())?;
+        let drive_item = parse_drive_item(&item, "m365.word.create_document")?;
+        let document = ensure_word_document(&drive_item, "m365.word.create_document")?;
+        let audit = WordAuditEvent::new(
+            "create_document",
+            &input.user_id,
+            input.path.clone(),
+            document.id.clone(),
+            content_chars,
+        );
+
+        info!(
+            operation = "m365.word.create_document",
+            user_id = %input.user_id,
+            path = %input.path,
+            content_chars,
+            item_id = ?document.id,
+            "created Word document"
+        );
+
+        Ok(json!({
+            "document": document,
+            "audit": audit,
+        }))
+    }
+
+    async fn invoke_word_update_document(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let input = UpdateWordDocumentInput::parse(input)?;
+        let existing_item = client
+            .get_item(&input.user_id, &input.item_id)
+            .await
+            .map_err(|e: M365Error| e.to_fcp_error())?;
+        let existing_drive_item = parse_drive_item(&existing_item, "m365.word.update_document")?;
+        let existing_document =
+            ensure_word_document(&existing_drive_item, "m365.word.update_document")?;
+        ensure_content_replace_supported(&existing_document)?;
+
+        let content_chars = input.content.chars().count();
+        let bytes = build_docx_document(&input.content)?;
+        if bytes.len() > WORD_SIMPLE_UPLOAD_MAX_BYTES {
+            return Err(invalid_request(format!(
+                "Generated .docx payload exceeds the {WORD_SIMPLE_UPLOAD_MAX_BYTES}-byte simple upload limit"
+            )));
+        }
+
+        let item = client
+            .update_item_content(&input.user_id, &input.item_id, &bytes)
+            .await
+            .map_err(|e: M365Error| e.to_fcp_error())?;
+        let drive_item = parse_drive_item(&item, "m365.word.update_document")?;
+        let document = ensure_word_document(&drive_item, "m365.word.update_document")?;
+        let audit = WordAuditEvent::new(
+            "update_document",
+            &input.user_id,
+            input.item_id.clone(),
+            document.id.clone().or(existing_document.id.clone()),
+            content_chars,
+        );
+
+        info!(
+            operation = "m365.word.update_document",
+            user_id = %input.user_id,
+            item_id = %input.item_id,
+            content_chars,
+            "updated Word document"
+        );
+
+        Ok(json!({
+            "document": document,
+            "audit": audit,
+        }))
+    }
+
+    async fn invoke_word_export_document(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let input = ExportWordDocumentInput::parse(input)?;
+        let item = client
+            .get_item(&input.user_id, &input.item_id)
+            .await
+            .map_err(|e: M365Error| e.to_fcp_error())?;
+        let drive_item = parse_drive_item(&item, "m365.word.export_document")?;
+        let document = ensure_word_document(&drive_item, "m365.word.export_document")?;
+        enforce_word_document_size(&document, WORD_EXPORT_MAX_BYTES, "export")?;
+
+        let (bytes, _) = client
+            .download_file_as(&input.user_id, &input.item_id, &input.format)
+            .await
+            .map_err(|e: M365Error| e.to_fcp_error())?;
+        if bytes.len() > WORD_EXPORT_MAX_BYTES {
+            return Err(invalid_request(format!(
+                "Exported document exceeds the {WORD_EXPORT_MAX_BYTES}-byte limit"
+            )));
+        }
+
+        let exported_name = replace_extension(document.name.as_deref(), &input.format)
+            .unwrap_or_else(|| format!("document.{}", input.format));
+
+        Ok(json!({
+            "document": document,
+            "format": input.format,
+            "name": exported_name,
+            "size": bytes.len(),
+            "content": BASE64.encode(bytes),
+        }))
+    }
+
+    // ── OneNote operation implementations ───────────────────────
+
+    async fn invoke_list_notebooks(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let input = ListNotebooksInput::parse(input)?;
+        let result = client
+            .list_notebooks(&input.user_id, input.top)
+            .await
+            .map_err(|e: M365Error| e.to_fcp_error())?;
+        Ok(json!({ "notebooks": result.value }))
+    }
+
+    async fn invoke_list_sections(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let input = ListSectionsInput::parse(input)?;
+        let result = client
+            .list_sections(
+                &input.user_id,
+                input.notebook_id.as_deref(),
+                input.section_group_id.as_deref(),
+                input.top,
+            )
+            .await
+            .map_err(|e: M365Error| e.to_fcp_error())?;
+        Ok(json!({ "sections": result.value }))
+    }
+
+    async fn invoke_list_pages(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let input = ListPagesInput::parse(input)?;
+        let result = client
+            .list_pages(&input.user_id, &input.section_id, input.top)
+            .await
+            .map_err(|e: M365Error| e.to_fcp_error())?;
+        Ok(json!({ "pages": result.value }))
+    }
+
+    async fn invoke_get_page(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let input = GetPageInput::parse(input)?;
+        let page = client
+            .get_page(&input.user_id, &input.page_id)
+            .await
+            .map_err(|e: M365Error| e.to_fcp_error())?;
+        Ok(json!({ "page": page }))
+    }
+
+    async fn invoke_get_page_content(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let input = GetPageContentInput::parse(input)?;
+        let html = client
+            .get_page_content(&input.user_id, &input.page_id, input.include_ids)
+            .await
+            .map_err(|e: M365Error| e.to_fcp_error())?;
+        let content = OneNotePageContent::from_html(html);
+        Ok(json!({ "page_content": content }))
+    }
+
+    async fn invoke_create_page(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let input = CreatePageInput::parse(input)?;
+        let page = client
+            .create_page(&input.user_id, &input.section_id, &input.html)
+            .await
+            .map_err(|e: M365Error| e.to_fcp_error())?;
+        Ok(json!({ "page": page }))
+    }
+
+    async fn invoke_update_page(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let input = UpdatePageInput::parse(input)?;
+        client
+            .update_page(&input.user_id, &input.page_id, &input.commands)
+            .await
+            .map_err(|e: M365Error| e.to_fcp_error())?;
+        Ok(json!({ "status": "updated" }))
     }
 
     // ── Calendar operation implementations ───────────────────────
@@ -1828,6 +2334,339 @@ impl Default for M365Connector {
     }
 }
 
+fn parse_input<T>(value: serde_json::Value, operation: &str) -> FcpResult<T>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    serde_json::from_value(value).map_err(|error| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("Invalid {operation} input: {error}"),
+    })
+}
+
+fn validate_non_empty(value: &str, field: &str) -> FcpResult<()> {
+    if value.trim().is_empty() {
+        return Err(invalid_request(format!("{field} must not be empty")));
+    }
+    Ok(())
+}
+
+fn validate_optional_non_empty(value: Option<&str>, field: &str) -> FcpResult<()> {
+    if let Some(value) = value {
+        validate_non_empty(value, field)?;
+    }
+    Ok(())
+}
+
+fn validate_max_chars(max_chars: Option<usize>) -> FcpResult<()> {
+    if let Some(max_chars) = max_chars
+        && !(1..=WORD_EXTRACT_MAX_CHARS_LIMIT).contains(&max_chars)
+    {
+        return Err(invalid_request(format!(
+            "max_chars must be between 1 and {WORD_EXTRACT_MAX_CHARS_LIMIT}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_export_format(format: &str) -> FcpResult<()> {
+    if !format.eq_ignore_ascii_case("pdf") {
+        return Err(invalid_request(
+            "format must be 'pdf' for m365.word.export_document",
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_docx_path(path: &str, field: &str) -> FcpResult<()> {
+    if path
+        .rsplit('.')
+        .next()
+        .is_none_or(|extension| !extension.eq_ignore_ascii_case("docx"))
+    {
+        return Err(invalid_request(format!(
+            "{field} must end with .docx for Word document creation"
+        )));
+    }
+    Ok(())
+}
+
+fn invalid_request(message: impl Into<String>) -> FcpError {
+    FcpError::InvalidRequest {
+        code: 1003,
+        message: message.into(),
+    }
+}
+
+fn parse_drive_item(value: &serde_json::Value, operation: &str) -> FcpResult<DriveItem> {
+    serde_json::from_value(value.clone()).map_err(|error| FcpError::Internal {
+        message: format!("Failed to parse drive item for {operation}: {error}"),
+    })
+}
+
+fn ensure_word_document(item: &DriveItem, operation: &str) -> FcpResult<WordDocumentMetadata> {
+    if !item.is_word_document() {
+        return Err(invalid_request(format!(
+            "{operation} requires a Word-compatible document"
+        )));
+    }
+    Ok(WordDocumentMetadata::from_drive_item(item))
+}
+
+fn ensure_text_extraction_supported(document: &WordDocumentMetadata) -> FcpResult<()> {
+    if !document.supports_text_extraction {
+        return Err(invalid_request(
+            "Text extraction currently supports OOXML Word documents (.docx, .docm, .dotx, .dotm) only",
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_content_replace_supported(document: &WordDocumentMetadata) -> FcpResult<()> {
+    if !document.supports_content_replace {
+        return Err(invalid_request(
+            "Content replacement currently supports .docx documents only",
+        ));
+    }
+    Ok(())
+}
+
+fn enforce_word_document_size(
+    document: &WordDocumentMetadata,
+    max_bytes: usize,
+    operation_label: &str,
+) -> FcpResult<()> {
+    let max_bytes = i64::try_from(max_bytes).map_err(|_| FcpError::Internal {
+        message: format!("Document size limit {max_bytes} exceeds supported range"),
+    })?;
+    if let Some(size) = document.size
+        && size > max_bytes
+    {
+        return Err(invalid_request(format!(
+            "Document exceeds the {max_bytes}-byte limit for {operation_label}"
+        )));
+    }
+    Ok(())
+}
+
+fn truncate_text(text: &str, max_chars: usize) -> (String, bool) {
+    let total_chars = text.chars().count();
+    if total_chars <= max_chars {
+        return (text.to_string(), false);
+    }
+
+    let truncated = text.chars().take(max_chars).collect::<String>();
+    (truncated, true)
+}
+
+fn is_docx_text_extractable_extension(extension: &str) -> bool {
+    matches!(extension, "docx" | "docm" | "dotx" | "dotm")
+}
+
+fn build_docx_document(content: &str) -> FcpResult<Vec<u8>> {
+    let mut cursor = Cursor::new(Vec::new());
+    let options = FileOptions::default().compression_method(CompressionMethod::Deflated);
+    {
+        let mut archive = zip::ZipWriter::new(&mut cursor);
+
+        let files = [
+            (
+                "[Content_Types].xml",
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>"#,
+            ),
+            (
+                "_rels/.rels",
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>"#,
+            ),
+        ];
+
+        for (path, body) in files {
+            archive
+                .start_file(path, options)
+                .map_err(|error| FcpError::Internal {
+                    message: format!("Failed to start DOCX entry {path}: {error}"),
+                })?;
+            archive
+                .write_all(body.as_bytes())
+                .map_err(|error| FcpError::Internal {
+                    message: format!("Failed to write DOCX entry {path}: {error}"),
+                })?;
+        }
+
+        archive
+            .start_file("word/document.xml", options)
+            .map_err(|error| FcpError::Internal {
+                message: format!("Failed to start DOCX document.xml: {error}"),
+            })?;
+        archive
+            .write_all(render_docx_document_xml(content).as_bytes())
+            .map_err(|error| FcpError::Internal {
+                message: format!("Failed to write DOCX document.xml: {error}"),
+            })?;
+
+        archive.finish().map_err(|error| FcpError::Internal {
+            message: format!("Failed to finalize DOCX payload: {error}"),
+        })?;
+    }
+    Ok(cursor.into_inner())
+}
+
+fn render_docx_document_xml(content: &str) -> String {
+    let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
+    let mut xml = String::from(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:wpc="http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas"
+ xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+ xmlns:o="urn:schemas-microsoft-com:office:office"
+ xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+ xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"
+ xmlns:v="urn:schemas-microsoft-com:vml"
+ xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing"
+ xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+ xmlns:w10="urn:schemas-microsoft-com:office:word"
+ xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+ xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"
+ xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup"
+ xmlns:wpi="http://schemas.microsoft.com/office/word/2010/wordprocessingInk"
+ xmlns:wne="http://schemas.microsoft.com/office/word/2006/wordml"
+ xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+ mc:Ignorable="w14 wp14"><w:body>"#,
+    );
+
+    if normalized.is_empty() {
+        xml.push_str("<w:p/>");
+    } else {
+        for paragraph in normalized.split('\n') {
+            if paragraph.is_empty() {
+                xml.push_str("<w:p/>");
+                continue;
+            }
+
+            xml.push_str("<w:p><w:r><w:t xml:space=\"preserve\">");
+            xml.push_str(&escape_xml_text(paragraph));
+            xml.push_str("</w:t></w:r></w:p>");
+        }
+    }
+
+    xml.push_str("</w:body></w:document>");
+    xml
+}
+
+fn escape_xml_text(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&apos;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+fn extract_docx_text(bytes: &[u8]) -> FcpResult<String> {
+    let cursor = Cursor::new(bytes);
+    let mut archive = ZipArchive::new(cursor).map_err(|error| {
+        invalid_request(format!("Document is not a valid .docx package: {error}"))
+    })?;
+    let mut document_xml = String::new();
+    archive
+        .by_name("word/document.xml")
+        .map_err(|error| {
+            invalid_request(format!("Document is missing word/document.xml: {error}"))
+        })?
+        .read_to_string(&mut document_xml)
+        .map_err(|error| invalid_request(format!("Failed to read word/document.xml: {error}")))?;
+
+    let mut reader = Reader::from_reader(document_xml.as_bytes());
+    reader.config_mut().trim_text(false);
+
+    let mut buffer = Vec::new();
+    let mut text = String::new();
+    let mut paragraph_has_content = false;
+
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Start(event)) if event.name().as_ref() == b"w:p" => {
+                paragraph_has_content = false;
+            }
+            Ok(Event::End(event)) if event.name().as_ref() == b"w:p" => {
+                if paragraph_has_content || !text.is_empty() {
+                    text.push('\n');
+                }
+                paragraph_has_content = false;
+            }
+            Ok(Event::Empty(event)) if event.name().as_ref() == b"w:tab" => {
+                text.push('\t');
+                paragraph_has_content = true;
+            }
+            Ok(Event::Empty(event)) if matches!(event.name().as_ref(), b"w:br" | b"w:cr") => {
+                text.push('\n');
+                paragraph_has_content = true;
+            }
+            Ok(Event::Text(event)) => {
+                let raw =
+                    std::str::from_utf8(event.as_ref()).map_err(|error| FcpError::Internal {
+                        message: format!("Invalid UTF-8 in Word document XML: {error}"),
+                    })?;
+                let decoded = unescape(raw).map_err(|error| FcpError::Internal {
+                    message: format!("Invalid XML escape sequence in Word document XML: {error}"),
+                })?;
+                if !decoded.is_empty() {
+                    text.push_str(decoded.as_ref());
+                    paragraph_has_content = true;
+                }
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(error) => {
+                return Err(FcpError::Internal {
+                    message: format!("Failed to parse Word document XML: {error}"),
+                });
+            }
+        }
+        buffer.clear();
+    }
+
+    Ok(normalize_extracted_text(&text))
+}
+
+fn normalize_extracted_text(input: &str) -> String {
+    let mut normalized = String::new();
+
+    for line in input.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if !normalized.is_empty() {
+            normalized.push('\n');
+        }
+
+        normalized.push_str(trimmed);
+    }
+
+    normalized
+}
+
+fn replace_extension(name: Option<&str>, new_extension: &str) -> Option<String> {
+    let name = name?;
+    let (stem, _) = name.rsplit_once('.')?;
+    Some(format!("{stem}.{new_extension}"))
+}
+
 fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<&'a str> {
     input
         .get(field)
@@ -2378,6 +3217,449 @@ fn build_operations() -> Vec<OperationInfo> {
                 related: vec![
                     CapabilityId::from_static("m365.files.get_item"),
                     CapabilityId::from_static("m365.files.list_items"),
+                ],
+            },
+        ),
+        // ── Word operations ──────────────────────────────────────
+        op_info(
+            "m365.word.list_documents",
+            "List Word-compatible documents in a OneDrive path",
+            json!({
+                "type": "object",
+                "required": ["user_id"],
+                "properties": {
+                    "user_id": { "type": "string" },
+                    "path": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["documents"],
+                "properties": {
+                    "documents": { "type": "array" }
+                }
+            }),
+            "m365.word.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Find Word-compatible documents in a OneDrive folder before extracting or exporting content.".into(),
+                common_mistakes: vec![
+                    "Assuming every drive item is a document; folders are filtered out automatically.".into(),
+                    "Forgetting that legacy .doc files are exportable but not directly text-extractable.".into(),
+                ],
+                examples: vec![r#"{"user_id":"me","path":"/Documents"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("m365.word.get_document"),
+                    CapabilityId::from_static("m365.word.extract_text"),
+                ],
+            },
+        ),
+        op_info(
+            "m365.word.get_document",
+            "Get metadata for a Word-compatible document",
+            json!({
+                "type": "object",
+                "required": ["user_id", "item_id"],
+                "properties": {
+                    "user_id": { "type": "string" },
+                    "item_id": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["document"],
+                "properties": {
+                    "document": { "type": "object" }
+                }
+            }),
+            "m365.word.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Inspect a single Word document to confirm its type and supported operations.".into(),
+                common_mistakes: vec![
+                    "Passing a non-document item_id such as a folder.".into(),
+                ],
+                examples: vec![r#"{"user_id":"me","item_id":"01ABCDEF..."}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("m365.word.list_documents"),
+                    CapabilityId::from_static("m365.word.export_document"),
+                ],
+            },
+        ),
+        op_info(
+            "m365.word.extract_text",
+            "Extract bounded plain text from a supported Word document",
+            json!({
+                "type": "object",
+                "required": ["user_id", "item_id"],
+                "properties": {
+                    "user_id": { "type": "string" },
+                    "item_id": { "type": "string" },
+                    "max_chars": { "type": "integer", "minimum": 1, "maximum": WORD_EXTRACT_MAX_CHARS_LIMIT }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["document", "text", "truncated", "extracted_chars"],
+                "properties": {
+                    "document": { "type": "object" },
+                    "text": { "type": "string" },
+                    "truncated": { "type": "boolean" },
+                    "extracted_chars": { "type": "integer" }
+                }
+            }),
+            "m365.word.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Read document body text without exposing the original binary payload.".into(),
+                common_mistakes: vec![
+                    "Using extract_text for legacy .doc files; this operation only parses OOXML packages.".into(),
+                    "Requesting unbounded output instead of setting max_chars for large documents.".into(),
+                ],
+                examples: vec![r#"{"user_id":"me","item_id":"01ABCDEF...","max_chars":4000}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("m365.word.get_document"),
+                    CapabilityId::from_static("m365.word.export_document"),
+                ],
+            },
+        ),
+        op_info(
+            "m365.word.create_document",
+            "Create a new .docx document from plain text content",
+            json!({
+                "type": "object",
+                "required": ["user_id", "path", "content"],
+                "properties": {
+                    "user_id": { "type": "string" },
+                    "path": { "type": "string", "description": "Destination path ending in .docx" },
+                    "content": { "type": "string", "description": "Plain text document body" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["document", "audit"],
+                "properties": {
+                    "document": { "type": "object" },
+                    "audit": { "type": "object" }
+                }
+            }),
+            "m365.word.write",
+            RiskLevel::High,
+            SafetyTier::Dangerous,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Create a Word document when the user explicitly wants new persistent content written to OneDrive.".into(),
+                common_mistakes: vec![
+                    "Omitting the .docx extension in path.".into(),
+                    "Writing sensitive content without confirming the destination folder.".into(),
+                ],
+                examples: vec![r#"{"user_id":"me","path":"/Documents/meeting-notes.docx","content":"Agenda\n- Introductions\n- Risks"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("m365.word.update_document"),
+                    CapabilityId::from_static("m365.word.list_documents"),
+                ],
+            },
+        ),
+        op_info(
+            "m365.word.update_document",
+            "Replace the contents of an existing .docx document",
+            json!({
+                "type": "object",
+                "required": ["user_id", "item_id", "content"],
+                "properties": {
+                    "user_id": { "type": "string" },
+                    "item_id": { "type": "string" },
+                    "content": { "type": "string", "description": "Plain text document body" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["document", "audit"],
+                "properties": {
+                    "document": { "type": "object" },
+                    "audit": { "type": "object" }
+                }
+            }),
+            "m365.word.write",
+            RiskLevel::High,
+            SafetyTier::Dangerous,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Replace a Word document body when the user wants a full-content rewrite.".into(),
+                common_mistakes: vec![
+                    "Attempting to update legacy .doc files; content replacement is limited to .docx.".into(),
+                    "Overwriting a document without first confirming the target item_id.".into(),
+                ],
+                examples: vec![r#"{"user_id":"me","item_id":"01ABCDEF...","content":"Updated draft\n\nApproved."}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("m365.word.get_document"),
+                    CapabilityId::from_static("m365.word.extract_text"),
+                ],
+            },
+        ),
+        op_info(
+            "m365.word.export_document",
+            "Export a Word-compatible document to PDF",
+            json!({
+                "type": "object",
+                "required": ["user_id", "item_id", "format"],
+                "properties": {
+                    "user_id": { "type": "string" },
+                    "item_id": { "type": "string" },
+                    "format": { "type": "string", "enum": ["pdf"] }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["document", "format", "name", "size", "content"],
+                "properties": {
+                    "document": { "type": "object" },
+                    "format": { "type": "string" },
+                    "name": { "type": "string" },
+                    "size": { "type": "integer" },
+                    "content": { "type": "string" }
+                }
+            }),
+            "m365.word.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Convert a Word document into PDF bytes for downstream review or delivery.".into(),
+                common_mistakes: vec![
+                    "Assuming export preserves editable Word structure; PDF is read-only output.".into(),
+                    "Ignoring response size when exporting large documents.".into(),
+                ],
+                examples: vec![r#"{"user_id":"me","item_id":"01ABCDEF...","format":"pdf"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("m365.word.get_document"),
+                    CapabilityId::from_static("m365.word.extract_text"),
+                ],
+            },
+        ),
+        // ── OneNote operations ───────────────────────────────────
+        op_info(
+            "m365.onenote.list_notebooks",
+            "List OneNote notebooks for a user",
+            json!({
+                "type": "object",
+                "required": ["user_id"],
+                "properties": {
+                    "user_id": { "type": "string" },
+                    "top": { "type": "integer", "minimum": 1, "maximum": 100 }
+                }
+            }),
+            json!({ "type": "object", "properties": { "notebooks": { "type": "array" } } }),
+            "m365.onenote.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Discover available OneNote notebooks before drilling into sections or pages.".into(),
+                common_mistakes: vec![
+                    "Skipping notebook discovery and guessing notebook IDs.".into(),
+                    "Requesting more than 100 notebooks in a single page.".into(),
+                ],
+                examples: vec![r#"{"user_id":"me","top":25}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("m365.onenote.list_sections"),
+                    CapabilityId::from_static("m365.onenote.list_pages"),
+                ],
+            },
+        ),
+        op_info(
+            "m365.onenote.list_sections",
+            "List OneNote sections, optionally scoped to a notebook or section group",
+            json!({
+                "type": "object",
+                "required": ["user_id"],
+                "properties": {
+                    "user_id": { "type": "string" },
+                    "notebook_id": { "type": "string" },
+                    "section_group_id": { "type": "string" },
+                    "top": { "type": "integer", "minimum": 1, "maximum": 100 }
+                }
+            }),
+            json!({ "type": "object", "properties": { "sections": { "type": "array" } } }),
+            "m365.onenote.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Enumerate sections inside a OneNote notebook or section group.".into(),
+                common_mistakes: vec![
+                    "Confusing notebook IDs with section IDs.".into(),
+                    "Expecting list_sections to return page content.".into(),
+                ],
+                examples: vec![r#"{"user_id":"me","notebook_id":"notebook-123","top":50}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("m365.onenote.list_notebooks"),
+                    CapabilityId::from_static("m365.onenote.list_pages"),
+                ],
+            },
+        ),
+        op_info(
+            "m365.onenote.list_pages",
+            "List OneNote pages in a section",
+            json!({
+                "type": "object",
+                "required": ["user_id", "section_id"],
+                "properties": {
+                    "user_id": { "type": "string" },
+                    "section_id": { "type": "string" },
+                    "top": { "type": "integer", "minimum": 1, "maximum": 100 }
+                }
+            }),
+            json!({ "type": "object", "properties": { "pages": { "type": "array" } } }),
+            "m365.onenote.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List note pages within a specific OneNote section.".into(),
+                common_mistakes: vec![
+                    "Passing a notebook ID where a section ID is required.".into(),
+                    "Ignoring page-level pagination when sections are large.".into(),
+                ],
+                examples: vec![r#"{"user_id":"me","section_id":"section-123","top":25}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("m365.onenote.list_sections"),
+                    CapabilityId::from_static("m365.onenote.get_page"),
+                ],
+            },
+        ),
+        op_info(
+            "m365.onenote.get_page",
+            "Get OneNote page metadata by page ID",
+            json!({
+                "type": "object",
+                "required": ["user_id", "page_id"],
+                "properties": {
+                    "user_id": { "type": "string" },
+                    "page_id": { "type": "string" }
+                }
+            }),
+            json!({ "type": "object", "properties": { "page": { "type": "object" } } }),
+            "m365.onenote.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Fetch metadata for a OneNote page before reading or updating content.".into(),
+                common_mistakes: vec![
+                    "Expecting get_page to include the HTML body; use get_page_content for that.".into(),
+                ],
+                examples: vec![r#"{"user_id":"me","page_id":"page-123"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("m365.onenote.get_page_content"),
+                    CapabilityId::from_static("m365.onenote.update_page"),
+                ],
+            },
+        ),
+        op_info(
+            "m365.onenote.get_page_content",
+            "Get OneNote page HTML content with extracted plain text",
+            json!({
+                "type": "object",
+                "required": ["user_id", "page_id"],
+                "properties": {
+                    "user_id": { "type": "string" },
+                    "page_id": { "type": "string" },
+                    "include_ids": { "type": "boolean" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "properties": {
+                    "page_content": {
+                        "type": "object",
+                        "properties": {
+                            "html": { "type": "string" },
+                            "plain_text": { "type": "string" }
+                        }
+                    }
+                }
+            }),
+            "m365.onenote.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Read the actual HTML body of a OneNote page and get a plain-text extract for LLM-friendly consumption.".into(),
+                common_mistakes: vec![
+                    "Assuming the extracted plain_text preserves every formatting detail.".into(),
+                    "Forgetting include_ids when downstream HTML patch targets need stable DOM IDs.".into(),
+                ],
+                examples: vec![r#"{"user_id":"me","page_id":"page-123","include_ids":true}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("m365.onenote.get_page"),
+                    CapabilityId::from_static("m365.onenote.update_page"),
+                ],
+            },
+        ),
+        op_info(
+            "m365.onenote.create_page",
+            "Create a OneNote page in a section from HTML content",
+            json!({
+                "type": "object",
+                "required": ["user_id", "section_id", "html"],
+                "properties": {
+                    "user_id": { "type": "string" },
+                    "section_id": { "type": "string" },
+                    "html": { "type": "string" }
+                }
+            }),
+            json!({ "type": "object", "properties": { "page": { "type": "object" } } }),
+            "m365.onenote.write",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::None,
+            AgentHint {
+                when_to_use: "Create a new OneNote page when you already have the full HTML payload to submit.".into(),
+                common_mistakes: vec![
+                    "Passing fragmentary text instead of valid page HTML.".into(),
+                    "Creating pages in the wrong section because section discovery was skipped.".into(),
+                ],
+                examples: vec![r#"{"user_id":"me","section_id":"section-123","html":"<html><body><p>Daily notes</p></body></html>"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("m365.onenote.list_sections"),
+                    CapabilityId::from_static("m365.onenote.update_page"),
+                ],
+            },
+        ),
+        op_info(
+            "m365.onenote.update_page",
+            "Patch OneNote page content using Graph content commands",
+            json!({
+                "type": "object",
+                "required": ["user_id", "page_id", "commands"],
+                "properties": {
+                    "user_id": { "type": "string" },
+                    "page_id": { "type": "string" },
+                    "commands": { "type": "array" }
+                }
+            }),
+            json!({ "type": "object", "properties": { "status": { "type": "string" } } }),
+            "m365.onenote.write",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::None,
+            AgentHint {
+                when_to_use: "Apply targeted content changes to an existing OneNote page without recreating it.".into(),
+                common_mistakes: vec![
+                    "Sending an empty commands array.".into(),
+                    "Using unstable targets because get_page_content was fetched without include_ids.".into(),
+                ],
+                examples: vec![r#"{"user_id":"me","page_id":"page-123","commands":[{"target":"body","action":"append","content":"<p>Follow-up</p>"}]}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("m365.onenote.get_page_content"),
+                    CapabilityId::from_static("m365.onenote.create_page"),
                 ],
             },
         ),
@@ -3208,6 +4490,50 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn test_invoke_get_page_content_extracts_plain_text() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/users/me/onenote/pages/page-123/content"))
+            .and(query_param("includeIDs", "true"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/html")
+                    .set_body_string(
+                        "<html><body><h1>Launch Notes</h1><p>Status: <b>green</b></p></body></html>",
+                    ),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let mut connector = M365Connector::new();
+        connector.client = Some(
+            M365Client::new("test_token")
+                .unwrap()
+                .with_api_url(&mock_server.uri()),
+        );
+
+        let result = connector
+            .invoke_get_page_content(json!({
+                "user_id": "me",
+                "page_id": "page-123",
+                "include_ids": true
+            }))
+            .await
+            .unwrap();
+        assert_eq!(
+            result["page_content"]["plain_text"],
+            "Launch Notes\nStatus: green"
+        );
+        assert!(
+            result["page_content"]["html"]
+                .as_str()
+                .unwrap()
+                .contains("Launch Notes")
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn test_invoke_without_config() {
         let mut connector = M365Connector::new();
         let signing_key = Ed25519SigningKey::generate();
@@ -3300,6 +4626,21 @@ mod tests {
         assert!(op_ids.contains(&"m365.files.delete_item"));
         assert!(op_ids.contains(&"m365.files.search"));
         assert!(op_ids.contains(&"m365.files.create_share_link"));
+        // Word (6)
+        assert!(op_ids.contains(&"m365.word.list_documents"));
+        assert!(op_ids.contains(&"m365.word.get_document"));
+        assert!(op_ids.contains(&"m365.word.extract_text"));
+        assert!(op_ids.contains(&"m365.word.create_document"));
+        assert!(op_ids.contains(&"m365.word.update_document"));
+        assert!(op_ids.contains(&"m365.word.export_document"));
+        // OneNote (7)
+        assert!(op_ids.contains(&"m365.onenote.list_notebooks"));
+        assert!(op_ids.contains(&"m365.onenote.list_sections"));
+        assert!(op_ids.contains(&"m365.onenote.list_pages"));
+        assert!(op_ids.contains(&"m365.onenote.get_page"));
+        assert!(op_ids.contains(&"m365.onenote.get_page_content"));
+        assert!(op_ids.contains(&"m365.onenote.create_page"));
+        assert!(op_ids.contains(&"m365.onenote.update_page"));
         // Calendar (6)
         assert!(op_ids.contains(&"m365.calendar.list_events"));
         assert!(op_ids.contains(&"m365.calendar.create_event"));
@@ -3318,7 +4659,7 @@ mod tests {
         // Delta (1)
         assert!(op_ids.contains(&"m365.delta.sync"));
 
-        assert_eq!(ops.len(), 30);
+        assert_eq!(ops.len(), 43);
     }
 
     #[test]
@@ -3437,6 +4778,15 @@ mod tests {
             "m365.files.get_item",
             "m365.files.download_file",
             "m365.files.search",
+            "m365.word.list_documents",
+            "m365.word.get_document",
+            "m365.word.extract_text",
+            "m365.word.export_document",
+            "m365.onenote.list_notebooks",
+            "m365.onenote.list_sections",
+            "m365.onenote.list_pages",
+            "m365.onenote.get_page",
+            "m365.onenote.get_page_content",
             "m365.calendar.list_events",
             "m365.calendar.get_event",
             "m365.calendar.get_freebusy",
@@ -3465,6 +4815,8 @@ mod tests {
             "m365.mail.reply_message",
             "m365.mail.forward_message",
             "m365.files.delete_item",
+            "m365.word.create_document",
+            "m365.word.update_document",
             "m365.calendar.delete_event",
         ];
         for op in &ops {
@@ -3500,8 +4852,8 @@ mod tests {
     #[test]
     fn operation_count_matches_expected() {
         let ops = build_operations();
-        // Mail: 10, Files: 7, Calendar: 6, Tasks: 3, Subscriptions: 3, Delta: 1 = 30
-        assert_eq!(ops.len(), 30);
+        // Mail: 10, Files: 7, Word: 6, OneNote: 7, Calendar: 6, Tasks: 3, Subscriptions: 3, Delta: 1 = 43
+        assert_eq!(ops.len(), 43);
     }
 
     // ── Helper function tests ─────────────────────────────────────
@@ -4010,6 +5362,68 @@ mod tests {
         // streaming events
         assert_eq!(result["event_caps"]["streaming"], true);
         assert_eq!(result["event_caps"]["replay"], false);
+    }
+
+    // ── Word helper tests ────────────────────────────────────────
+
+    #[test]
+    fn word_document_metadata_flags_docx_support() {
+        let item = DriveItem {
+            id: Some("doc-1".into()),
+            name: Some("draft.docx".into()),
+            size: Some(2048),
+            web_url: Some("https://example.invalid/doc-1".into()),
+            folder: None,
+            file: Some(crate::types::FileFacet {
+                mime_type: Some(
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                        .into(),
+                ),
+            }),
+            created_date_time: None,
+            last_modified_date_time: None,
+        };
+
+        let metadata = WordDocumentMetadata::from_drive_item(&item);
+        assert!(metadata.supports_text_extraction);
+        assert!(metadata.supports_content_replace);
+        assert!(metadata.supports_pdf_export);
+        assert_eq!(metadata.extension.as_deref(), Some("docx"));
+    }
+
+    #[test]
+    fn build_docx_document_roundtrips_text() {
+        let bytes = build_docx_document("Quarterly Review\nLine two").unwrap();
+        let extracted = extract_docx_text(&bytes).unwrap();
+        assert_eq!(extracted, "Quarterly Review\nLine two");
+    }
+
+    #[test]
+    fn create_word_document_input_rejects_non_docx_paths() {
+        let result = CreateWordDocumentInput::parse(json!({
+            "user_id": "me",
+            "path": "/Documents/notes.txt",
+            "content": "hello"
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn extract_word_text_input_rejects_large_max_chars() {
+        let result = ExtractWordTextInput::parse(json!({
+            "user_id": "me",
+            "item_id": "doc-1",
+            "max_chars": WORD_EXTRACT_MAX_CHARS_LIMIT + 1
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn replace_extension_swaps_suffix() {
+        assert_eq!(
+            replace_extension(Some("report.docx"), "pdf").as_deref(),
+            Some("report.pdf")
+        );
     }
 
     // ── require_str tests ────────────────────────────────────────

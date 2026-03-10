@@ -19,11 +19,13 @@ use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_testkit::AsyncTestContext;
 use serde_json::json;
+use std::io::{Cursor, Write};
 use uuid::Uuid;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{method, path, path_regex},
 };
+use zip::{CompressionMethod, write::FileOptions};
 
 use fcp_microsoft365::connector::M365Connector;
 
@@ -107,6 +109,50 @@ async fn setup_configure_credential_id(connector: &mut M365Connector, base_url: 
         }))
         .await
         .expect("configure should succeed");
+}
+
+fn sample_docx_bytes(text: &str) -> Vec<u8> {
+    let mut cursor = Cursor::new(Vec::new());
+    let options = FileOptions::default().compression_method(CompressionMethod::Deflated);
+    {
+        let mut archive = zip::ZipWriter::new(&mut cursor);
+
+        archive.start_file("[Content_Types].xml", options).unwrap();
+        archive
+            .write_all(
+                br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>"#,
+            )
+            .unwrap();
+
+        archive.start_file("_rels/.rels", options).unwrap();
+        archive
+            .write_all(
+                br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>"#,
+            )
+            .unwrap();
+
+        archive.start_file("word/document.xml", options).unwrap();
+        archive
+            .write_all(
+                format!(
+                    r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:body></w:document>"#
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+
+        archive.finish().unwrap();
+    }
+    cursor.into_inner()
 }
 
 // ============================================================================
@@ -261,7 +307,7 @@ async fn files_upload_happy_path() {
     let mock_server = MockServer::start().await;
 
     Mock::given(method("PUT"))
-        .and(path_regex("/users/me/drive/root.*"))
+        .and(path("/users/me/drive/root:/Documents/hello.txt:/content"))
         .respond_with(ResponseTemplate::new(201).set_body_json(json!({
             "id": "new-item-1",
             "name": "hello.txt",
@@ -563,6 +609,320 @@ async fn introspect_files_risk_levels() {
         .filter(|id| id.starts_with("m365.files."))
         .count();
     assert_eq!(file_op_count, 7, "should have exactly 7 file operations");
+}
+
+// ============================================================================
+// Happy-path: Word operations
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn word_list_documents_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("m365.word.list_documents.happy_path");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/users/me/drive/root/children"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "value": [
+                {
+                    "id": "doc-1",
+                    "name": "Quarterly Report.docx",
+                    "size": 4096,
+                    "file": {
+                        "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    }
+                },
+                {
+                    "id": "pdf-1",
+                    "name": "diagram.pdf",
+                    "size": 1024,
+                    "file": { "mimeType": "application/pdf" }
+                }
+            ]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = M365Connector::new();
+    setup_configure_access_token(&mut connector, &mock_server.uri(), &["Files.Read"]).await;
+    let signing_key = setup_handshake(&mut connector, &["m365.word.list_documents"]).await;
+    let token = generate_valid_token(&signing_key, "m365.word.list_documents");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "m365.word.list_documents",
+            "input": { "user_id": "me" },
+            "capability_token": token
+        }))
+        .await
+        .expect("list_documents should succeed");
+
+    let documents = result["documents"].as_array().expect("documents array");
+    assert_eq!(documents.len(), 1);
+    assert_eq!(documents[0]["name"], "Quarterly Report.docx");
+    assert_eq!(documents[0]["supports_text_extraction"], true);
+}
+
+#[fcp_async_core::runtime::test]
+async fn word_extract_text_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("m365.word.extract_text.happy_path");
+    let mock_server = MockServer::start().await;
+    let docx = sample_docx_bytes("Quarterly Review");
+
+    Mock::given(method("GET"))
+        .and(path("/users/me/drive/items/doc-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "doc-1",
+            "name": "Quarterly Review.docx",
+            "size": docx.len(),
+            "file": {
+                "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/users/me/drive/items/doc-1/content"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(docx))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = M365Connector::new();
+    setup_configure_access_token(&mut connector, &mock_server.uri(), &["Files.Read"]).await;
+    let signing_key = setup_handshake(&mut connector, &["m365.word.extract_text"]).await;
+    let token = generate_valid_token(&signing_key, "m365.word.extract_text");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "m365.word.extract_text",
+            "input": { "user_id": "me", "item_id": "doc-1", "max_chars": 5000 },
+            "capability_token": token
+        }))
+        .await
+        .expect("extract_text should succeed");
+
+    assert_eq!(result["text"], "Quarterly Review");
+    assert_eq!(result["truncated"], false);
+    assert_eq!(result["document"]["name"], "Quarterly Review.docx");
+}
+
+#[fcp_async_core::runtime::test]
+async fn word_create_document_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("m365.word.create_document.happy_path");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("PUT"))
+        .and(path("/users/me/drive/root:/Documents/Meeting%20Notes.docx:/content"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "id": "doc-2",
+            "name": "Meeting Notes.docx",
+            "size": 2048,
+            "file": {
+                "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = M365Connector::new();
+    setup_configure_access_token(&mut connector, &mock_server.uri(), &["Files.ReadWrite"]).await;
+    let signing_key = setup_handshake(&mut connector, &["m365.word.create_document"]).await;
+    let token = generate_valid_token(&signing_key, "m365.word.create_document");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "m365.word.create_document",
+            "input": {
+                "user_id": "me",
+                "path": "/Documents/Meeting Notes.docx",
+                "content": "Agenda\n- Review roadmap"
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("create_document should succeed");
+
+    assert_eq!(result["document"]["name"], "Meeting Notes.docx");
+    assert_eq!(result["audit"]["action"], "create_document");
+}
+
+#[fcp_async_core::runtime::test]
+async fn word_update_document_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("m365.word.update_document.happy_path");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/users/me/drive/items/doc-3"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "doc-3",
+            "name": "Draft.docx",
+            "size": 1024,
+            "file": {
+                "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    Mock::given(method("PUT"))
+        .and(path("/users/me/drive/items/doc-3/content"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "doc-3",
+            "name": "Draft.docx",
+            "size": 1536,
+            "file": {
+                "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = M365Connector::new();
+    setup_configure_access_token(&mut connector, &mock_server.uri(), &["Files.ReadWrite"]).await;
+    let signing_key = setup_handshake(&mut connector, &["m365.word.update_document"]).await;
+    let token = generate_valid_token(&signing_key, "m365.word.update_document");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "m365.word.update_document",
+            "input": {
+                "user_id": "me",
+                "item_id": "doc-3",
+                "content": "Updated draft"
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("update_document should succeed");
+
+    assert_eq!(result["document"]["name"], "Draft.docx");
+    assert_eq!(result["audit"]["action"], "update_document");
+}
+
+#[fcp_async_core::runtime::test]
+async fn word_export_document_pdf_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("m365.word.export_document.happy_path");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/users/me/drive/items/doc-4"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "doc-4",
+            "name": "Quarterly Review.docx",
+            "size": 4096,
+            "file": {
+                "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/users/me/drive/items/doc-4/content"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"%PDF-1.7".to_vec()))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = M365Connector::new();
+    setup_configure_access_token(&mut connector, &mock_server.uri(), &["Files.Read"]).await;
+    let signing_key = setup_handshake(&mut connector, &["m365.word.export_document"]).await;
+    let token = generate_valid_token(&signing_key, "m365.word.export_document");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "m365.word.export_document",
+            "input": {
+                "user_id": "me",
+                "item_id": "doc-4",
+                "format": "pdf"
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("export_document should succeed");
+
+    assert_eq!(result["format"], "pdf");
+    assert_eq!(result["name"], "Quarterly Review.pdf");
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(result["content"].as_str().unwrap())
+            .unwrap(),
+        b"%PDF-1.7".to_vec()
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn word_extract_text_rejects_oversized_metadata() {
+    let _ctx = AsyncTestContext::for_scenario("m365.word.extract_text.oversized_metadata");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/users/me/drive/items/doc-oversized"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "doc-oversized",
+            "name": "Huge.docx",
+            "size": 16 * 1024 * 1024,
+            "file": {
+                "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = M365Connector::new();
+    setup_configure_access_token(&mut connector, &mock_server.uri(), &["Files.Read"]).await;
+    let signing_key = setup_handshake(&mut connector, &["m365.word.extract_text"]).await;
+    let token = generate_valid_token(&signing_key, "m365.word.extract_text");
+
+    let err = connector
+        .handle_invoke(json!({
+            "operation": "m365.word.extract_text",
+            "input": { "user_id": "me", "item_id": "doc-oversized" },
+            "capability_token": token
+        }))
+        .await
+        .expect_err("oversized document should fail closed");
+
+    assert!(
+        format!("{err:?}").contains("text extraction"),
+        "error should mention extraction bounds: {err:?}"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn introspect_word_risk_levels() {
+    let _ctx = AsyncTestContext::for_scenario("m365.introspect.word_risk_levels");
+    let connector = M365Connector::new();
+    let result = connector
+        .handle_introspect()
+        .await
+        .expect("introspect should succeed");
+
+    let ops = result["operations"].as_array().expect("operations array");
+    for op in ops {
+        let id = op["id"].as_str().unwrap();
+        let risk = op["risk_level"].as_str().unwrap();
+        match id {
+            "m365.word.list_documents"
+            | "m365.word.get_document"
+            | "m365.word.extract_text"
+            | "m365.word.export_document" => {
+                assert_eq!(risk, "low", "read op {id} should be low risk");
+            }
+            "m365.word.create_document" | "m365.word.update_document" => {
+                assert_eq!(risk, "high", "write op {id} should be high risk");
+            }
+            _ => {}
+        }
+    }
+
+    let word_op_count = ops
+        .iter()
+        .filter_map(|o| o["id"].as_str())
+        .filter(|id| id.starts_with("m365.word."))
+        .count();
+    assert_eq!(word_op_count, 6, "should have exactly 6 word operations");
 }
 
 // ============================================================================
@@ -1451,6 +1811,12 @@ async fn introspect_lists_all_operations() {
     assert!(op_ids.contains(&"m365.files.delete_item"));
     assert!(op_ids.contains(&"m365.files.search"));
     assert!(op_ids.contains(&"m365.files.create_share_link"));
+    assert!(op_ids.contains(&"m365.word.list_documents"));
+    assert!(op_ids.contains(&"m365.word.extract_text"));
+    assert!(op_ids.contains(&"m365.word.create_document"));
+    assert!(op_ids.contains(&"m365.word.export_document"));
+    assert!(op_ids.contains(&"m365.onenote.list_notebooks"));
+    assert!(op_ids.contains(&"m365.onenote.get_page_content"));
     assert!(op_ids.contains(&"m365.calendar.list_events"));
     assert!(op_ids.contains(&"m365.calendar.create_event"));
     assert!(op_ids.contains(&"m365.calendar.get_event"));
@@ -1461,7 +1827,7 @@ async fn introspect_lists_all_operations() {
     assert!(op_ids.contains(&"m365.tasks.create_task"));
     assert!(op_ids.contains(&"m365.subscriptions.create"));
     assert!(op_ids.contains(&"m365.delta.sync"));
-    assert_eq!(ops.len(), 30);
+    assert_eq!(ops.len(), 43);
 }
 
 #[fcp_async_core::runtime::test]

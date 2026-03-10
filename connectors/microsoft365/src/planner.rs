@@ -16,11 +16,19 @@ use std::fmt;
 pub struct Plan {
     pub id: String,
     pub title: String,
-    #[serde(rename = "ownerGroupId", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "ownerGroupId",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub owner_group_id: Option<String>,
     #[serde(rename = "createdAt", default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
-    #[serde(rename = "containerId", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "containerId",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub container_id: Option<String>,
 }
 
@@ -119,7 +127,11 @@ pub struct PlannerTask {
     pub priority: TaskPriority,
     #[serde(rename = "createdAt", default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
-    #[serde(rename = "completedAt", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "completedAt",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub completed_at: Option<String>,
     #[serde(rename = "checklistItems", default)]
     pub checklist_items: Vec<ChecklistItem>,
@@ -139,9 +151,7 @@ impl PlannerTask {
     #[must_use]
     pub fn is_overdue_at(&self, now: &str) -> bool {
         match &self.due_date {
-            Some(due) if !due.is_empty() => {
-                !self.is_complete() && due.as_str() < now
-            }
+            Some(due) if !due.is_empty() => !self.is_complete() && due.as_str() < now,
             _ => false,
         }
     }
@@ -218,13 +228,21 @@ pub struct UpdateTaskRequest {
     pub title: Option<String>,
     #[serde(rename = "bucketId", default, skip_serializing_if = "Option::is_none")]
     pub bucket_id: Option<String>,
-    #[serde(rename = "assignedTo", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "assignedTo",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub assigned_to: Option<Vec<String>>,
     #[serde(rename = "dueDate", default, skip_serializing_if = "Option::is_none")]
     pub due_date: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<TaskPriority>,
-    #[serde(rename = "percentComplete", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "percentComplete",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub percent_complete: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -317,7 +335,11 @@ pub struct PlannerQuery {
     pub plan_id: Option<String>,
     #[serde(rename = "bucketId", default, skip_serializing_if = "Option::is_none")]
     pub bucket_id: Option<String>,
-    #[serde(rename = "assignedToFilter", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "assignedToFilter",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub assigned_to_filter: Option<String>,
     #[serde(rename = "statusFilter", default)]
     pub status_filter: Option<TaskStatusFilter>,
@@ -499,7 +521,11 @@ pub struct PlannerPolicy {
     pub allow_delete: bool,
     pub allow_assign: bool,
     pub require_approval_for_create: bool,
-    #[serde(rename = "maxTasksPerPlan", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "maxTasksPerPlan",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub max_tasks_per_plan: Option<usize>,
 }
 
@@ -1211,8 +1237,16 @@ mod tests {
     fn planner_task_with_checklist() {
         let mut task = make_task("t-cl", "p-1", 0);
         task.checklist_items = vec![
-            ChecklistItem { id: "a".into(), title: "A".into(), is_checked: false },
-            ChecklistItem { id: "b".into(), title: "B".into(), is_checked: true },
+            ChecklistItem {
+                id: "a".into(),
+                title: "A".into(),
+                is_checked: false,
+            },
+            ChecklistItem {
+                id: "b".into(),
+                title: "B".into(),
+                is_checked: true,
+            },
         ];
         assert_eq!(task.checklist_items.len(), 2);
         assert!(task.checklist_items[1].is_checked);
@@ -1998,7 +2032,9 @@ mod tests {
 
     #[test]
     fn apply_filters_limit_truncates() {
-        let tasks: Vec<PlannerTask> = (0..10).map(|i| make_task(&format!("t-{i}"), "p-1", 0)).collect();
+        let tasks: Vec<PlannerTask> = (0..10)
+            .map(|i| make_task(&format!("t-{i}"), "p-1", 0))
+            .collect();
         let q = PlannerQuery::new().with_limit(3);
         let result = q.apply_filters(&tasks, "2026-03-09");
         assert_eq!(result.len(), 3);
@@ -2185,8 +2221,7 @@ mod tests {
 
     #[test]
     fn audit_event_with_task_id() {
-        let evt = PlannerAuditEvent::new("ts", "update", "p-1", "updated")
-            .with_task_id("task-42");
+        let evt = PlannerAuditEvent::new("ts", "update", "p-1", "updated").with_task_id("task-42");
         assert_eq!(evt.task_id.as_deref(), Some("task-42"));
     }
 
@@ -2210,8 +2245,7 @@ mod tests {
 
     #[test]
     fn audit_event_serde_roundtrip() {
-        let evt = PlannerAuditEvent::new("ts", "update_task", "p-1", "detail")
-            .with_task_id("t-1");
+        let evt = PlannerAuditEvent::new("ts", "update_task", "p-1", "detail").with_task_id("t-1");
         let json = serde_json::to_value(&evt).unwrap();
         assert_eq!(json["taskId"], "t-1");
         assert_eq!(json["planId"], "p-1");
@@ -2246,31 +2280,46 @@ mod tests {
     #[test]
     fn graph_plan_tasks_url_format() {
         let url = graph_plan_tasks_url("plan-abc");
-        assert_eq!(url, "https://graph.microsoft.com/v1.0/planner/plans/plan-abc/tasks");
+        assert_eq!(
+            url,
+            "https://graph.microsoft.com/v1.0/planner/plans/plan-abc/tasks"
+        );
     }
 
     #[test]
     fn graph_plan_buckets_url_format() {
         let url = graph_plan_buckets_url("plan-xyz");
-        assert_eq!(url, "https://graph.microsoft.com/v1.0/planner/plans/plan-xyz/buckets");
+        assert_eq!(
+            url,
+            "https://graph.microsoft.com/v1.0/planner/plans/plan-xyz/buckets"
+        );
     }
 
     #[test]
     fn graph_task_url_format() {
         let url = graph_task_url("task-123");
-        assert_eq!(url, "https://graph.microsoft.com/v1.0/planner/tasks/task-123");
+        assert_eq!(
+            url,
+            "https://graph.microsoft.com/v1.0/planner/tasks/task-123"
+        );
     }
 
     #[test]
     fn graph_plan_url_format() {
         let url = graph_plan_url("plan-42");
-        assert_eq!(url, "https://graph.microsoft.com/v1.0/planner/plans/plan-42");
+        assert_eq!(
+            url,
+            "https://graph.microsoft.com/v1.0/planner/plans/plan-42"
+        );
     }
 
     #[test]
     fn graph_task_details_url_format() {
         let url = graph_task_details_url("task-99");
-        assert_eq!(url, "https://graph.microsoft.com/v1.0/planner/tasks/task-99/details");
+        assert_eq!(
+            url,
+            "https://graph.microsoft.com/v1.0/planner/tasks/task-99/details"
+        );
     }
 
     // ========== execute_create_task ==========

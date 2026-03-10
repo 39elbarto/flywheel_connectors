@@ -2,7 +2,7 @@
 //!
 //! Implements the Flywheel Connector Protocol for the Microsoft Graph API,
 //! providing access to Outlook mail, OneDrive files, Calendar events,
-//! To Do tasks, webhook subscriptions, and delta sync.
+//! To Do tasks, OneNote notes, webhook subscriptions, and delta sync.
 
 #![forbid(unsafe_code)]
 #![allow(dead_code)]
@@ -36,6 +36,7 @@ pub mod client;
 pub mod connector;
 pub mod error;
 pub mod excel;
+pub mod onenote;
 pub mod planner;
 pub mod sharepoint;
 pub mod types;

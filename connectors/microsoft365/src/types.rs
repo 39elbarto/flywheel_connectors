@@ -58,6 +58,65 @@ pub struct DriveItem {
     pub last_modified_date_time: Option<String>,
 }
 
+impl DriveItem {
+    const WORD_DOCUMENT_EXTENSIONS: [&'static str; 10] = [
+        "doc", "docx", "docm", "dot", "dotx", "dotm", "odt", "rtf", "txt", "md",
+    ];
+
+    const WORD_DOCUMENT_MIME_TYPES: [&'static str; 8] = [
+        "application/msword",
+        "application/rtf",
+        "application/vnd.ms-word.document.macroenabled.12",
+        "application/vnd.ms-word.template.macroenabled.12",
+        "application/vnd.oasis.opendocument.text",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.template",
+        "text/plain",
+    ];
+
+    #[must_use]
+    pub fn is_folder(&self) -> bool {
+        self.folder.is_some()
+    }
+
+    #[must_use]
+    pub fn file_extension(&self) -> Option<&str> {
+        self.name
+            .as_deref()
+            .and_then(|name| name.rsplit_once('.').map(|(_, ext)| ext))
+    }
+
+    #[must_use]
+    pub fn mime_type(&self) -> Option<&str> {
+        self.file
+            .as_ref()
+            .and_then(|file| file.mime_type.as_deref())
+    }
+
+    #[must_use]
+    pub fn is_word_document(&self) -> bool {
+        if self.is_folder() {
+            return false;
+        }
+
+        if let Some(mime_type) = self.mime_type() {
+            let mime_lower = mime_type.to_ascii_lowercase();
+            if Self::WORD_DOCUMENT_MIME_TYPES
+                .iter()
+                .any(|candidate| mime_lower == *candidate)
+            {
+                return true;
+            }
+        }
+
+        self.file_extension().is_some_and(|extension| {
+            Self::WORD_DOCUMENT_EXTENSIONS
+                .iter()
+                .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+        })
+    }
+}
+
 /// Folder facet indicating an item is a folder.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FolderFacet {
@@ -263,6 +322,65 @@ mod tests {
         let json = serde_json::to_value(&file).unwrap();
         assert_eq!(json["name"], "report.pdf");
         assert_eq!(json["size"], 12345);
+    }
+
+    #[test]
+    fn drive_item_word_document_by_mime_type() {
+        let item = DriveItem {
+            id: Some("file-2".into()),
+            name: Some("proposal".into()),
+            size: Some(2048),
+            web_url: None,
+            folder: None,
+            file: Some(FileFacet {
+                mime_type: Some(
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                        .into(),
+                ),
+            }),
+            created_date_time: None,
+            last_modified_date_time: None,
+        };
+
+        assert!(item.is_word_document());
+        assert!(!item.is_folder());
+        assert!(item.file_extension().is_none());
+    }
+
+    #[test]
+    fn drive_item_word_document_by_extension() {
+        let item = DriveItem {
+            id: Some("file-3".into()),
+            name: Some("Notes.DOCX".into()),
+            size: Some(1024),
+            web_url: None,
+            folder: None,
+            file: Some(FileFacet { mime_type: None }),
+            created_date_time: None,
+            last_modified_date_time: None,
+        };
+
+        assert!(item.is_word_document());
+        assert_eq!(item.file_extension(), Some("DOCX"));
+    }
+
+    #[test]
+    fn drive_item_non_word_document_is_rejected() {
+        let item = DriveItem {
+            id: Some("file-4".into()),
+            name: Some("slides.pdf".into()),
+            size: Some(4096),
+            web_url: None,
+            folder: None,
+            file: Some(FileFacet {
+                mime_type: Some("application/pdf".into()),
+            }),
+            created_date_time: None,
+            last_modified_date_time: None,
+        };
+
+        assert!(!item.is_word_document());
+        assert_eq!(item.mime_type(), Some("application/pdf"));
     }
 
     // ---- Event serde ----

@@ -594,10 +594,7 @@ pub struct SharePointAuditEvent {
 impl SharePointAuditEvent {
     /// Create a new audit event with the current timestamp placeholder.
     #[must_use]
-    pub fn new(
-        action: impl Into<String>,
-        details: impl Into<String>,
-    ) -> Self {
+    pub fn new(action: impl Into<String>, details: impl Into<String>) -> Self {
         Self {
             timestamp: "2026-01-01T00:00:00Z".into(),
             action: action.into(),
@@ -661,17 +658,13 @@ pub fn site_drives_url(site_id: &str) -> String {
 /// Build the Graph API URL for listing items in a drive root.
 #[must_use]
 pub fn drive_root_children_url(site_id: &str, drive_id: &str) -> String {
-    format!(
-        "https://graph.microsoft.com/v1.0/sites/{site_id}/drives/{drive_id}/root/children"
-    )
+    format!("https://graph.microsoft.com/v1.0/sites/{site_id}/drives/{drive_id}/root/children")
 }
 
 /// Build the Graph API URL for a specific item in a drive.
 #[must_use]
 pub fn drive_item_url(site_id: &str, drive_id: &str, item_id: &str) -> String {
-    format!(
-        "https://graph.microsoft.com/v1.0/sites/{site_id}/drives/{drive_id}/items/{item_id}"
-    )
+    format!("https://graph.microsoft.com/v1.0/sites/{site_id}/drives/{drive_id}/items/{item_id}")
 }
 
 /// Build the Graph API URL for listing lists on a site.
@@ -721,7 +714,10 @@ mod tests {
         assert_eq!(json["id"], "site-1");
         assert_eq!(json["name"], "Engineering");
         assert_eq!(json["displayName"], "Engineering Hub");
-        assert_eq!(json["webUrl"], "https://contoso.sharepoint.com/sites/engineering");
+        assert_eq!(
+            json["webUrl"],
+            "https://contoso.sharepoint.com/sites/engineering"
+        );
         let back: Site = serde_json::from_value(json).unwrap();
         assert_eq!(back.id, "site-1");
         assert_eq!(back.display_name.as_deref(), Some("Engineering Hub"));
@@ -1009,7 +1005,9 @@ mod tests {
             id: "item-1".into(),
             name: "report.docx".into(),
             size_bytes: Some(50_000),
-            mime_type: Some("application/vnd.openxmlformats-officedocument.wordprocessingml.document".into()),
+            mime_type: Some(
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document".into(),
+            ),
             web_url: Some("https://contoso.sharepoint.com/sites/eng/report.docx".into()),
             created_at: Some("2026-01-15T10:00:00Z".into()),
             modified_at: Some("2026-03-01T14:00:00Z".into()),
@@ -1023,7 +1021,10 @@ mod tests {
         assert_eq!(json["size"], 50_000);
         assert_eq!(json["isFolder"], false);
         let back: DriveItem = serde_json::from_value(json).unwrap();
-        assert_eq!(back.mime_type.as_deref(), Some("application/vnd.openxmlformats-officedocument.wordprocessingml.document"));
+        assert_eq!(
+            back.mime_type.as_deref(),
+            Some("application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        );
     }
 
     #[test]
@@ -1340,15 +1341,13 @@ mod tests {
 
     #[test]
     fn search_query_validate_empty() {
-        let q = SearchQuery::new("")
-            .with_entity_type(SearchEntityType::DriveItem);
+        let q = SearchQuery::new("").with_entity_type(SearchEntityType::DriveItem);
         assert_eq!(q.validate(), Err(SearchValidationError::EmptyQuery));
     }
 
     #[test]
     fn search_query_validate_whitespace_only() {
-        let q = SearchQuery::new("   ")
-            .with_entity_type(SearchEntityType::Site);
+        let q = SearchQuery::new("   ").with_entity_type(SearchEntityType::Site);
         assert_eq!(q.validate(), Err(SearchValidationError::EmptyQuery));
     }
 
@@ -1400,8 +1399,7 @@ mod tests {
 
     #[test]
     fn search_query_clone() {
-        let q = SearchQuery::new("clone")
-            .with_entity_type(SearchEntityType::DriveItem);
+        let q = SearchQuery::new("clone").with_entity_type(SearchEntityType::DriveItem);
         let cloned = q.clone();
         assert_eq!(cloned.query, q.query);
         assert_eq!(cloned.entity_types.len(), q.entity_types.len());
@@ -1420,19 +1418,37 @@ mod tests {
 
     #[test]
     fn search_validation_error_display() {
-        assert!(SearchValidationError::EmptyQuery.to_string().contains("empty"));
-        assert!(SearchValidationError::LimitTooHigh(150).to_string().contains("150"));
-        assert!(SearchValidationError::NoEntityTypes.to_string().contains("entity type"));
+        assert!(
+            SearchValidationError::EmptyQuery
+                .to_string()
+                .contains("empty")
+        );
+        assert!(
+            SearchValidationError::LimitTooHigh(150)
+                .to_string()
+                .contains("150")
+        );
+        assert!(
+            SearchValidationError::NoEntityTypes
+                .to_string()
+                .contains("entity type")
+        );
     }
 
     #[test]
     fn search_validation_error_eq() {
-        assert_eq!(SearchValidationError::EmptyQuery, SearchValidationError::EmptyQuery);
+        assert_eq!(
+            SearchValidationError::EmptyQuery,
+            SearchValidationError::EmptyQuery
+        );
         assert_eq!(
             SearchValidationError::LimitTooHigh(100),
             SearchValidationError::LimitTooHigh(100)
         );
-        assert_ne!(SearchValidationError::EmptyQuery, SearchValidationError::NoEntityTypes);
+        assert_ne!(
+            SearchValidationError::EmptyQuery,
+            SearchValidationError::NoEntityTypes
+        );
     }
 
     // ====================================================================
@@ -1800,7 +1816,10 @@ mod tests {
     #[test]
     fn policy_decision_eq() {
         assert_eq!(PolicyDecision::Allow, PolicyDecision::Allow);
-        assert_eq!(PolicyDecision::RequiresApproval, PolicyDecision::RequiresApproval);
+        assert_eq!(
+            PolicyDecision::RequiresApproval,
+            PolicyDecision::RequiresApproval
+        );
         assert_eq!(
             PolicyDecision::Deny("x".into()),
             PolicyDecision::Deny("x".into())
@@ -2038,8 +2057,7 @@ mod tests {
 
     #[test]
     fn audit_event_serde_roundtrip() {
-        let e = SharePointAuditEvent::new("search", "searched for budget")
-            .with_site("finance");
+        let e = SharePointAuditEvent::new("search", "searched for budget").with_site("finance");
         let json = serde_json::to_value(&e).unwrap();
         assert_eq!(json["action"], "search");
         assert_eq!(json["site_id"], "finance");
@@ -2114,7 +2132,10 @@ mod tests {
 
     #[test]
     fn url_search() {
-        assert_eq!(search_url(), "https://graph.microsoft.com/v1.0/search/query");
+        assert_eq!(
+            search_url(),
+            "https://graph.microsoft.com/v1.0/search/query"
+        );
     }
 
     #[test]
@@ -2149,8 +2170,9 @@ mod tests {
         let decision = policy.check_action(SharePointAction::Share, None);
         assert!(decision.requires_approval());
 
-        let audit = SharePointAuditEvent::new("share_pending_approval", "anonymous edit link requested")
-            .with_item("/public/deck.pptx");
+        let audit =
+            SharePointAuditEvent::new("share_pending_approval", "anonymous edit link requested")
+                .with_item("/public/deck.pptx");
         assert!(audit.summary().contains("pending_approval"));
     }
 
@@ -2160,7 +2182,9 @@ mod tests {
             id: "doc-1".into(),
             name: "presentation.pptx".into(),
             size_bytes: Some(2_000_000),
-            mime_type: Some("application/vnd.openxmlformats-officedocument.presentationml.presentation".into()),
+            mime_type: Some(
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation".into(),
+            ),
             web_url: None,
             created_at: None,
             modified_at: None,
@@ -2249,7 +2273,11 @@ mod tests {
             SharePointAction::Share,
         ] {
             let d = p.check_action(action, None);
-            assert_eq!(d, PolicyDecision::Allow, "action {action} should be allowed");
+            assert_eq!(
+                d,
+                PolicyDecision::Allow,
+                "action {action} should be allowed"
+            );
         }
     }
 
@@ -2275,9 +2303,18 @@ mod tests {
         p.blocked_sites.insert("beta".into());
         p.blocked_sites.insert("gamma".into());
 
-        assert!(p.check_action(SharePointAction::Read, Some("alpha")).is_denied());
-        assert!(p.check_action(SharePointAction::Write, Some("beta")).is_denied());
-        assert!(p.check_action(SharePointAction::Search, Some("gamma")).is_denied());
+        assert!(
+            p.check_action(SharePointAction::Read, Some("alpha"))
+                .is_denied()
+        );
+        assert!(
+            p.check_action(SharePointAction::Write, Some("beta"))
+                .is_denied()
+        );
+        assert!(
+            p.check_action(SharePointAction::Search, Some("gamma"))
+                .is_denied()
+        );
         assert_eq!(
             p.check_action(SharePointAction::Read, Some("delta")),
             PolicyDecision::Allow
@@ -2328,7 +2365,10 @@ mod tests {
         let site: Site = serde_json::from_value(json).unwrap();
         assert_eq!(site.description.as_deref(), Some("A site with all fields"));
         assert_eq!(site.created_at.as_deref(), Some("2025-06-01T00:00:00Z"));
-        assert_eq!(site.last_modified_at.as_deref(), Some("2026-02-15T12:00:00Z"));
+        assert_eq!(
+            site.last_modified_at.as_deref(),
+            Some("2026-02-15T12:00:00Z")
+        );
     }
 
     #[test]
@@ -2375,8 +2415,7 @@ mod tests {
 
     #[test]
     fn audit_event_with_item_only() {
-        let e = SharePointAuditEvent::new("read", "downloaded")
-            .with_item("/path/to/file.pdf");
+        let e = SharePointAuditEvent::new("read", "downloaded").with_item("/path/to/file.pdf");
         let s = e.summary();
         assert!(s.contains("/path/to/file.pdf"), "got: {s}");
         assert!(e.site_id.is_none());
@@ -2384,8 +2423,7 @@ mod tests {
 
     #[test]
     fn audit_event_with_site_only() {
-        let e = SharePointAuditEvent::new("search", "queried")
-            .with_site("marketing");
+        let e = SharePointAuditEvent::new("search", "queried").with_site("marketing");
         let s = e.summary();
         assert!(s.contains("marketing"), "got: {s}");
         assert!(e.item_path.is_none());

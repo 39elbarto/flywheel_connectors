@@ -31,12 +31,14 @@ chrono.workspace = true
 futures-util.workspace = true
 reqwest.workspace = true
 percent-encoding.workspace = true
+quick-xml = "0.39.2"
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
+zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 wiremock.workspace = true

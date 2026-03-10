@@ -786,6 +786,12 @@ pub enum LifecycleError {
         connector_id: ConnectorId,
     },
 
+    /// Lifecycle state could not be persisted durably.
+    Persistence {
+        /// Reason persistence failed.
+        reason: String,
+    },
+
     /// Rollback target not available.
     NoRollbackTarget,
 }
@@ -801,6 +807,9 @@ impl fmt::Display for LifecycleError {
             }
             Self::NotFound { connector_id } => {
                 write!(f, "connector not found: {connector_id}")
+            }
+            Self::Persistence { reason } => {
+                write!(f, "failed to persist lifecycle state: {reason}")
             }
             Self::NoRollbackTarget => {
                 write!(f, "no previous version available for rollback")
@@ -1294,6 +1303,11 @@ mod tests {
             connector_id: test_connector_id(),
         };
         assert!(err.to_string().contains("not found"));
+
+        let err = LifecycleError::Persistence {
+            reason: "disk full".into(),
+        };
+        assert!(err.to_string().contains("disk full"));
 
         let err = LifecycleError::NoRollbackTarget;
         assert!(err.to_string().contains("rollback"));
@@ -1989,6 +2003,16 @@ mod tests {
         };
         let msg = err.to_string();
         assert!(msg.contains("connector not found"));
+    }
+
+    #[test]
+    fn lifecycle_error_persistence_display() {
+        let err = LifecycleError::Persistence {
+            reason: "permission denied".into(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("persist"));
+        assert!(msg.contains("permission denied"));
     }
 
     #[test]
@@ -4527,6 +4551,17 @@ mod tests {
         };
         let b = LifecycleError::NotFound {
             connector_id: test_connector_id(),
+        };
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn lifecycle_error_persistence_eq() {
+        let a = LifecycleError::Persistence {
+            reason: "disk full".into(),
+        };
+        let b = LifecycleError::Persistence {
+            reason: "disk full".into(),
         };
         assert_eq!(a, b);
     }

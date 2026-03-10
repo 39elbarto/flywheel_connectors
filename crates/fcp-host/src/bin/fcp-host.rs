@@ -3,7 +3,8 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 #[cfg(unix)]
-use std::path::{Path as FsPath, PathBuf};
+use std::path::Path as FsPath;
+use std::path::PathBuf;
 use std::pin::pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -26,13 +27,12 @@ use fcp_async_core::net::TcpListener;
 #[cfg(unix)]
 use fcp_async_core::net::UnixListener;
 use fcp_async_core::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use fcp_async_core::sync::{Mutex, RwLock};
+use fcp_async_core::sync::Mutex;
 use fcp_async_core::task::{self, JoinHandle};
 use fcp_core::{
     ConnectorHealth, ConnectorId, HealthSnapshot, Introspection, InvokeRequest, InvokeResponse,
-    LifecycleError, LifecycleManager, LifecycleRecord, LifecycleState, LifecycleStatus, RequestId,
-    RolloutPolicy, SafetyTier, SelfCheckReport, SoftwareBillOfMaterials, SupplyChainAttestation,
-    TransitionReason,
+    LifecycleError, LifecycleManager, LifecycleState, LifecycleStatus, RequestId, RolloutPolicy,
+    SafetyTier, SelfCheckReport, SoftwareBillOfMaterials, SupplyChainAttestation,
 };
 use fcp_host::{
     BatchExecutor, BatchInvokeRequest, BatchInvokeResponse, BatchOperation, BatchOperationError,
@@ -40,10 +40,10 @@ use fcp_host::{
     CancellationController, CancellationRequest, CancellationResponse, ConnectorArchetype,
     ConnectorInventoryResponse, ConnectorRegistry, ConnectorSummary, DiscoveryEndpoint,
     DiscoveryFilter, DiscoveryResponse, DoctorReport, DoctorRequest, DoctorService, GateOutcome,
-    HostHealthResponse, HostHealthStatus, IntrospectionResponse, OperationResult,
-    OperationResultStatus, PreflightRequest, PreflightResponse, RequestPriority, ResilienceError,
-    ResilienceLayer, RolloutController, RolloutDecision, RolloutObservation, RolloutOutcome,
-    SafetyTierExt, SupplyChainGate, SupplyChainGateConfig, merge_connector_health,
+    HostAdminStateStore, HostHealthResponse, HostHealthStatus, IntrospectionResponse,
+    OperationResult, OperationResultStatus, PreflightRequest, PreflightResponse, RequestPriority,
+    ResilienceError, ResilienceLayer, RolloutController, RolloutDecision, RolloutObservation,
+    RolloutOutcome, SafetyTierExt, SupplyChainGate, SupplyChainGateConfig, merge_connector_health,
 };
 use fcp_host::{HostError, HostResult};
 use futures_util::future::join_all;
@@ -55,6 +55,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tower::ServiceExt;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
+
+#[cfg(test)]
+use fcp_core::{LifecycleRecord, TransitionReason};
 
 #[derive(Debug, Deserialize)]
 struct ConnectorConfig {
@@ -291,128 +294,6 @@ impl ConnectorRegistry for SubprocessRegistry {
     }
 }
 
-struct HostLifecycleManager {
-    records: RwLock<HashMap<ConnectorId, LifecycleRecord>>,
-    pinned_versions: RwLock<HashMap<ConnectorId, semver::Version>>,
-}
-
-impl HostLifecycleManager {
-    fn new() -> Self {
-        Self {
-            records: RwLock::new(HashMap::new()),
-            pinned_versions: RwLock::new(HashMap::new()),
-        }
-    }
-
-    async fn pin(&self, connector_id: &ConnectorId, version: semver::Version) {
-        self.pinned_versions
-            .write()
-            .await
-            .insert(connector_id.clone(), version);
-    }
-
-    async fn unpin(&self, connector_id: &ConnectorId) -> Option<semver::Version> {
-        self.pinned_versions.write().await.remove(connector_id)
-    }
-
-    async fn pinned_version(&self, connector_id: &ConnectorId) -> Option<semver::Version> {
-        self.pinned_versions.read().await.get(connector_id).cloned()
-    }
-
-    async fn pin_state(&self, connector_id: &ConnectorId) -> PinStateResponse {
-        PinStateResponse::new(connector_id, self.pinned_version(connector_id).await)
-    }
-
-    async fn rollout_status(
-        &self,
-        connector_id: &ConnectorId,
-    ) -> Result<RolloutStatusResponse, LifecycleError> {
-        let status = self.status(connector_id).await?;
-        let records = self.records.read().await;
-        let record = records
-            .get(connector_id)
-            .ok_or_else(|| LifecycleError::NotFound {
-                connector_id: connector_id.clone(),
-            })?;
-        let pinned_version = self.pinned_versions.read().await.get(connector_id).cloned();
-        Ok(RolloutStatusResponse {
-            status,
-            pinned: pinned_version.is_some(),
-            pinned_version,
-            canary_percent: record.canary_policy.canary_traffic_percent,
-        })
-    }
-}
-
-#[async_trait::async_trait]
-impl LifecycleManager for HostLifecycleManager {
-    async fn get(
-        &self,
-        connector_id: &ConnectorId,
-    ) -> Result<Option<LifecycleRecord>, LifecycleError> {
-        Ok(self.records.read().await.get(connector_id).cloned())
-    }
-
-    async fn save(&self, record: &LifecycleRecord) -> Result<(), LifecycleError> {
-        self.records
-            .write()
-            .await
-            .insert(record.connector_id.clone(), record.clone());
-        Ok(())
-    }
-
-    async fn promote(&self, connector_id: &ConnectorId) -> Result<LifecycleRecord, LifecycleError> {
-        let mut records = self.records.write().await;
-        let record = records
-            .get_mut(connector_id)
-            .ok_or_else(|| LifecycleError::NotFound {
-                connector_id: connector_id.clone(),
-            })?;
-        let health_score = record.health.success_rate.min(100);
-        record.transition(
-            LifecycleState::Production,
-            TransitionReason::AutoPromotion { health_score },
-        )?;
-        Ok(record.clone())
-    }
-
-    async fn rollback(
-        &self,
-        connector_id: &ConnectorId,
-        reason: Option<String>,
-    ) -> Result<LifecycleRecord, LifecycleError> {
-        let mut records = self.records.write().await;
-        let record = records
-            .get_mut(connector_id)
-            .ok_or_else(|| LifecycleError::NotFound {
-                connector_id: connector_id.clone(),
-            })?;
-        if record.previous_version.is_none() {
-            return Err(LifecycleError::NoRollbackTarget);
-        }
-        let health_score = record.health.success_rate.min(100);
-        let failure_reason = reason.unwrap_or_else(|| "rollback requested".to_string());
-        record.transition(
-            LifecycleState::RolledBack,
-            TransitionReason::AutoRollback {
-                health_score,
-                failure_reason,
-            },
-        )?;
-        Ok(record.clone())
-    }
-
-    async fn status(&self, connector_id: &ConnectorId) -> Result<LifecycleStatus, LifecycleError> {
-        let records = self.records.read().await;
-        let record = records
-            .get(connector_id)
-            .ok_or_else(|| LifecycleError::NotFound {
-                connector_id: connector_id.clone(),
-            })?;
-        Ok(LifecycleStatus::from_record(record, Utc::now(), false))
-    }
-}
-
 struct ConnectorProcessRunner {
     _child: Child,
     stdin: ChildStdin,
@@ -576,8 +457,8 @@ struct AppState {
     doctor: DoctorService<SubprocessRegistry>,
     discovery: Arc<DiscoveryEndpoint<SubprocessRegistry, BudgetPolicyEngine>>,
     cancellation: Arc<CancellationController>,
-    lifecycle: Arc<HostLifecycleManager>,
-    rollout: Arc<RolloutController<SubprocessRegistry, HostLifecycleManager>>,
+    lifecycle: Arc<HostAdminStateStore>,
+    rollout: Arc<RolloutController<SubprocessRegistry, HostAdminStateStore>>,
     supply_chain: Arc<SupplyChainGate>,
     started_at: Instant,
 }
@@ -708,6 +589,33 @@ struct RolloutStatusResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pinned_version: Option<semver::Version>,
     canary_percent: u8,
+}
+
+async fn pin_state_response(
+    lifecycle: &HostAdminStateStore,
+    connector_id: &ConnectorId,
+) -> PinStateResponse {
+    PinStateResponse::new(connector_id, lifecycle.pinned_version(connector_id).await)
+}
+
+async fn rollout_status_response(
+    lifecycle: &HostAdminStateStore,
+    connector_id: &ConnectorId,
+) -> Result<RolloutStatusResponse, LifecycleError> {
+    let record = lifecycle
+        .get(connector_id)
+        .await?
+        .ok_or_else(|| LifecycleError::NotFound {
+            connector_id: connector_id.clone(),
+        })?;
+    let status = LifecycleStatus::from_record(&record, Utc::now(), false);
+    let pinned_version = lifecycle.pinned_version(connector_id).await;
+    Ok(RolloutStatusResponse {
+        status,
+        pinned: pinned_version.is_some(),
+        pinned_version,
+        canary_percent: record.canary_policy.canary_traffic_percent,
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -1103,7 +1011,7 @@ async fn async_main() -> HostResult<()> {
         Arc::clone(&registry),
         Arc::new(BudgetPolicyEngine::new()),
     ));
-    let lifecycle = Arc::new(HostLifecycleManager::new());
+    let lifecycle = Arc::new(HostAdminStateStore::from_env()?);
     let rollout = Arc::new(RolloutController::new(
         Arc::clone(&registry),
         Arc::clone(&lifecycle),
@@ -1885,8 +1793,9 @@ async fn rollout_pin_handler(
     state
         .lifecycle
         .pin(&connector_id, request.version.clone())
-        .await;
-    let response = state.lifecycle.pin_state(&connector_id).await;
+        .await
+        .map_err(|e| map_host_error(map_lifecycle_host_error(e)))?;
+    let response = pin_state_response(&state.lifecycle, &connector_id).await;
     tracing::info!(
         event = "rollout_pin_response",
         connector_id = %connector_id,
@@ -1910,7 +1819,7 @@ async fn rollout_pin_status_handler(
         connector_id = %connector_id,
         "processing rollout pin status request"
     );
-    let response = state.lifecycle.pin_state(&connector_id).await;
+    let response = pin_state_response(&state.lifecycle, &connector_id).await;
     tracing::debug!(
         event = "rollout_pin_status_response",
         connector_id = %connector_id,
@@ -1934,8 +1843,12 @@ async fn rollout_unpin_handler(
         connector_id = %connector_id,
         "processing rollout unpin request"
     );
-    let removed_version = state.lifecycle.unpin(&connector_id).await;
-    let response = state.lifecycle.pin_state(&connector_id).await;
+    let removed_version = state
+        .lifecycle
+        .unpin(&connector_id)
+        .await
+        .map_err(|e| map_host_error(map_lifecycle_host_error(e)))?;
+    let response = pin_state_response(&state.lifecycle, &connector_id).await;
     tracing::info!(
         event = "rollout_unpin_response",
         connector_id = %connector_id,
@@ -2043,7 +1956,11 @@ async fn rollout_evaluate_handler(
             if matches!(outcome.decision, RolloutDecision::Rollback)
                 && let Some(target_version) = outcome.record.previous_version.clone()
             {
-                state.lifecycle.pin(&connector_id, target_version).await;
+                state
+                    .lifecycle
+                    .pin(&connector_id, target_version)
+                    .await
+                    .map_err(|e| map_host_error(map_lifecycle_host_error(e)))?;
             }
             tracing::info!(
                 event = "rollout_evaluate_response",
@@ -2113,7 +2030,11 @@ async fn rollout_manual_rollback_handler(
         .rollback(&connector_id, reason)
         .await
         .map_err(|e| map_host_error(map_lifecycle_host_error(e)))?;
-    state.lifecycle.pin(&connector_id, to_version.clone()).await;
+    state
+        .lifecycle
+        .pin(&connector_id, to_version.clone())
+        .await
+        .map_err(|e| map_host_error(map_lifecycle_host_error(e)))?;
 
     let response = RollbackResponse {
         connector_id: connector_id.to_string(),
@@ -2145,7 +2066,7 @@ async fn rollout_status_handler(
         connector_id = %connector_id,
         "processing rollout status request"
     );
-    match state.lifecycle.rollout_status(&connector_id).await {
+    match rollout_status_response(&state.lifecycle, &connector_id).await {
         Ok(status) => {
             tracing::debug!(
                 event = "rollout_status_response",
@@ -2876,7 +2797,7 @@ mod tests {
             Arc::clone(&registry),
             Arc::new(BudgetPolicyEngine::new()),
         ));
-        let lifecycle = Arc::new(HostLifecycleManager::new());
+        let lifecycle = Arc::new(HostAdminStateStore::new());
         let rollout = Arc::new(RolloutController::new(
             Arc::clone(&registry),
             Arc::clone(&lifecycle),
@@ -2930,5 +2851,55 @@ mod tests {
         let dbg = format!("{config:?}");
         assert!(dbg.contains("ConnectorConfig"));
         assert!(dbg.contains("fcp.test:echo:1.0.0"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn host_lifecycle_manager_persists_records_and_pins_across_restart() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state_path = dir.path().join("state").join("lifecycle.json");
+        let connector_id = ConnectorId::from_static("fcp.test.lifecycle:utility:1.0.0");
+        let previous_version = semver::Version::new(1, 4, 0);
+        let current_version = semver::Version::new(1, 5, 0);
+
+        let manager =
+            HostAdminStateStore::with_state_path(state_path.clone()).expect("manager should load");
+        let mut record = LifecycleRecord::new(connector_id.clone(), current_version.clone())
+            .with_previous_version(previous_version.clone());
+        record
+            .transition(
+                LifecycleState::Installing,
+                TransitionReason::InstallComplete,
+            )
+            .expect("pending -> installing");
+        record
+            .transition(
+                LifecycleState::Canary,
+                TransitionReason::NewVersion {
+                    from_version: previous_version.to_string(),
+                    to_version: current_version.to_string(),
+                },
+            )
+            .expect("installing -> canary");
+        manager.save(&record).await.expect("save should persist");
+        manager
+            .pin(&connector_id, current_version.clone())
+            .await
+            .expect("pin should persist");
+
+        let reloaded =
+            HostAdminStateStore::with_state_path(state_path).expect("manager should reload");
+        let restored_record = reloaded
+            .get(&connector_id)
+            .await
+            .expect("get should succeed")
+            .expect("record should exist");
+        assert_eq!(
+            serde_json::to_value(&restored_record).expect("record should serialize"),
+            serde_json::to_value(&record).expect("record should serialize")
+        );
+        assert_eq!(
+            reloaded.pinned_version(&connector_id).await,
+            Some(current_version)
+        );
     }
 }

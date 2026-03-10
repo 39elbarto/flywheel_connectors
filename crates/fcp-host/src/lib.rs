@@ -13,6 +13,7 @@
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
 #![allow(clippy::module_name_repetitions)]
 
+mod admin_state;
 mod batch;
 mod budget;
 mod cancellation;
@@ -24,6 +25,7 @@ mod resilience;
 mod rollout;
 mod supply_chain;
 
+pub use admin_state::*;
 pub use batch::*;
 pub use budget::*;
 pub use cancellation::*;

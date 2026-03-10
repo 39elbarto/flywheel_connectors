@@ -619,6 +619,8 @@ struct HttpHostProcess {
     client: reqwest::Client,
     base_url: String,
     #[allow(dead_code)]
+    lifecycle_state_dir: tempfile::TempDir,
+    #[allow(dead_code)]
     stderr_logs: StderrLogs,
     stderr_thread: Option<JoinHandle<()>>,
 }
@@ -693,6 +695,8 @@ impl HttpHostProcess {
         drop(bind_listener);
 
         let base_url = format!("http://{bind_addr}");
+        let lifecycle_state_dir = tempfile::tempdir()?;
+        let lifecycle_state_path = lifecycle_state_dir.path().join("lifecycle-state.json");
         let mut command = Command::new(env!("CARGO_BIN_EXE_fcp-host"));
         command
             .env("FCP_HOST_BIND", bind_addr.to_string())
@@ -700,6 +704,7 @@ impl HttpHostProcess {
                 "FCP_HOST_CONNECTORS",
                 serde_json::to_string(&connector_configs)?,
             )
+            .env("FCP_HOST_LIFECYCLE_STATE_FILE", &lifecycle_state_path)
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
         for (name, value) in extra_env {
@@ -715,6 +720,7 @@ impl HttpHostProcess {
             child,
             client,
             base_url,
+            lifecycle_state_dir,
             stderr_logs,
             stderr_thread: Some(stderr_thread),
         })
@@ -737,6 +743,8 @@ struct UnixHostProcess {
     client: reqwest::Client,
     base_url: String,
     #[allow(dead_code)]
+    lifecycle_state_dir: tempfile::TempDir,
+    #[allow(dead_code)]
     stderr_logs: StderrLogs,
     stderr_thread: Option<JoinHandle<()>>,
 }
@@ -748,12 +756,15 @@ impl UnixHostProcess {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let socket_path = unique_unix_socket_path()?;
         let base_url = "http://localhost".to_string();
+        let lifecycle_state_dir = tempfile::tempdir()?;
+        let lifecycle_state_path = lifecycle_state_dir.path().join("lifecycle-state.json");
         let mut child = Command::new(env!("CARGO_BIN_EXE_fcp-host"))
             .env("FCP_HOST_BIND", format!("unix://{}", socket_path.display()))
             .env(
                 "FCP_HOST_CONNECTORS",
                 serde_json::to_string(&connector_configs)?,
             )
+            .env("FCP_HOST_LIFECYCLE_STATE_FILE", &lifecycle_state_path)
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()?;
@@ -770,6 +781,7 @@ impl UnixHostProcess {
             child,
             client,
             base_url,
+            lifecycle_state_dir,
             stderr_logs,
             stderr_thread: Some(stderr_thread),
         })

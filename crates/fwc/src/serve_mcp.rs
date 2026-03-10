@@ -1,12 +1,17 @@
 //! MCP server module for exposing connectors as MCP tools via JSON-RPC 2.0.
 //!
 //! This module implements the data layer of `fwc serve-mcp`. It defines the
-//! JSON-RPC protocol types, MCP server state, and pure request-handling logic.
-//! The transport layer (stdio, SSE) is out of scope — this module provides
-//! the routing and response generation that the transport calls into.
+//! JSON-RPC protocol types, MCP server state, and request-handling logic. The
+//! stdio transport stays small and delegates tool execution to a callback so
+//! the CLI can reuse the existing invoke planning path.
 
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
+
+use crate::export_tools;
+use crate::readiness::DiscoveredConnector;
 
 // ── JSON-RPC 2.0 Error Codes ────────────────────────────────────────────
 
@@ -579,6 +584,31 @@ pub fn from_operations(ops: &[DiscoveredOperationStub]) -> McpServerState {
     builder.build()
 }
 
+/// Build an MCP server state from discovered connectors.
+#[must_use]
+pub fn state_from_connectors(
+    connectors: &[&DiscoveredConnector],
+    config: McpServerConfig,
+) -> McpServerState {
+    let options = export_tools::ExportOptions::default();
+    let mut builder = McpServerState::builder().with_config(config);
+
+    for connector in connectors {
+        for operation in &connector.operations {
+            let tool = export_tools::to_mcp_tool(operation, &options);
+            builder = builder.with_tool(McpToolDefinition::new(
+                tool.name,
+                tool.description,
+                tool.input_schema,
+                connector.slug.clone(),
+                operation.preferred_selector.clone(),
+            ));
+        }
+    }
+
+    builder.build()
+}
+
 // ── Builder ─────────────────────────────────────────────────────────────
 
 /// Builder for [`McpServerState`].
@@ -667,6 +697,97 @@ pub fn handle_raw(state: &McpServerState, raw: &str) -> JsonRpcResponse {
             JsonRpcError::parse_error(format!("Failed to parse request: {e}")),
         ),
     }
+}
+
+/// Run the newline-delimited JSON stdio transport for `fwc serve-mcp`.
+///
+/// # Errors
+///
+/// Returns an error if reading from stdin, writing to stdout, or serializing a
+/// response fails.
+pub async fn run_stdio_transport<R, W, F>(
+    state: &McpServerState,
+    reader: R,
+    mut writer: W,
+    mut tool_handler: F,
+) -> Result<()>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin,
+    F: FnMut(&McpToolDefinition, Value, Value) -> JsonRpcResponse,
+{
+    let mut lines = reader.lines();
+
+    while let Some(line) = lines.next_line().await? {
+        let raw = line.trim();
+        if raw.is_empty() {
+            continue;
+        }
+
+        let response = match serde_json::from_str::<JsonRpcRequest>(raw) {
+            Ok(request) => {
+                if request.id.is_none() && request.method.starts_with("notifications/") {
+                    let _ = handle_request(state, &request);
+                    continue;
+                }
+                if request.method == "tools/call" {
+                    handle_stdio_tools_call(state, &request, &mut tool_handler)
+                } else {
+                    handle_request(state, &request)
+                }
+            }
+            Err(error) => JsonRpcResponse::error(
+                Value::Null,
+                JsonRpcError::parse_error(format!("Failed to parse request: {error}")),
+            ),
+        };
+
+        let encoded = serde_json::to_string(&response)?;
+        writer.write_all(encoded.as_bytes()).await?;
+        writer.write_all(b"\n").await?;
+        writer.flush().await?;
+    }
+
+    Ok(())
+}
+
+fn handle_stdio_tools_call<F>(
+    state: &McpServerState,
+    request: &JsonRpcRequest,
+    tool_handler: &mut F,
+) -> JsonRpcResponse
+where
+    F: FnMut(&McpToolDefinition, Value, Value) -> JsonRpcResponse,
+{
+    let id = request.id.clone().unwrap_or(Value::Null);
+    let Some(params) = request.params.as_ref() else {
+        return JsonRpcResponse::error(
+            id,
+            JsonRpcError::invalid_params("Missing params for tools/call"),
+        );
+    };
+
+    let tool_name = params
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+
+    if tool_name.is_empty() {
+        return JsonRpcResponse::error(
+            id,
+            JsonRpcError::invalid_params("Missing 'name' in tools/call params"),
+        );
+    }
+
+    let Some(tool) = state.find_tool(tool_name) else {
+        return JsonRpcResponse::error(
+            id,
+            JsonRpcError::invalid_params(format!("Tool not found: {tool_name}")),
+        );
+    };
+
+    let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
+    tool_handler(tool, id, arguments)
 }
 
 // ── Method Handlers ─────────────────────────────────────────────────────
@@ -926,6 +1047,7 @@ fn handle_prompts_get(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, duplex};
 
     // ── Helpers ─────────────────────────────────────────────────────
 
@@ -979,6 +1101,34 @@ mod tests {
             method: method.to_string(),
             params,
         }
+    }
+
+    async fn drive_stdio_transport<F>(state: McpServerState, input: &str, callback: F) -> String
+    where
+        F: FnMut(&McpToolDefinition, Value, Value) -> JsonRpcResponse + Send + 'static,
+    {
+        let (mut client_input, server_input) = duplex(4096);
+        let (server_output, client_output) = duplex(4096);
+
+        let task = tokio::spawn(async move {
+            run_stdio_transport(
+                &state,
+                BufReader::new(server_input),
+                server_output,
+                callback,
+            )
+            .await
+            .unwrap();
+        });
+
+        client_input.write_all(input.as_bytes()).await.unwrap();
+        client_input.shutdown().await.unwrap();
+        task.await.unwrap();
+
+        let mut output = String::new();
+        let mut reader = BufReader::new(client_output);
+        reader.read_to_string(&mut output).await.unwrap();
+        output
     }
 
     // ── JSON-RPC Serialization ──────────────────────────────────────
@@ -2104,5 +2254,131 @@ mod tests {
         let resp = handle_raw(&state, raw);
         assert!(!resp.is_error());
         assert_eq!(resp.id, json!(5));
+    }
+
+    #[tokio::test]
+    async fn stdio_transport_handles_initialize() {
+        let output = drive_stdio_transport(
+            sample_state(),
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}\n",
+            |tool, id, _arguments| {
+                JsonRpcResponse::success(
+                    id,
+                    json!({
+                        "content": [{
+                            "type": "text",
+                            "text": format!("unexpected tool call: {}", tool.name()),
+                        }],
+                        "isError": true,
+                    }),
+                )
+            },
+        )
+        .await;
+
+        let response: JsonRpcResponse = serde_json::from_str(output.trim()).unwrap();
+        assert_eq!(response.id(), &json!(1));
+        assert_eq!(
+            response.result().unwrap()["serverInfo"]["name"],
+            Value::String("fwc".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn stdio_transport_handles_tools_list() {
+        let output = drive_stdio_transport(
+            sample_state(),
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}\n",
+            |tool, id, _arguments| {
+                JsonRpcResponse::success(
+                    id,
+                    json!({
+                        "content": [{
+                            "type": "text",
+                            "text": format!("unexpected tool call: {}", tool.name()),
+                        }],
+                        "isError": true,
+                    }),
+                )
+            },
+        )
+        .await;
+
+        let response: JsonRpcResponse = serde_json::from_str(output.trim()).unwrap();
+        let tools = response.result().unwrap()["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["name"], "github.list_issues");
+        assert!(tools[0]["inputSchema"].is_object());
+    }
+
+    #[tokio::test]
+    async fn stdio_transport_routes_tools_call_through_callback() {
+        let output = drive_stdio_transport(
+            sample_state(),
+            "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"github.list_issues\",\"arguments\":{\"owner\":\"openai\",\"repo\":\"gpt\"}}}\n",
+            |tool, id, arguments| {
+                assert_eq!(tool.connector_id(), "github");
+                assert_eq!(tool.operation_id(), "list_issues");
+                assert_eq!(arguments["owner"], "openai");
+                JsonRpcResponse::success(
+                    id,
+                    json!({
+                        "content": [{
+                            "type": "text",
+                            "text": format!("planned {} {}", tool.connector_id(), tool.operation_id()),
+                        }],
+                        "isError": false,
+                    }),
+                )
+            },
+        )
+        .await;
+
+        let response: JsonRpcResponse = serde_json::from_str(output.trim()).unwrap();
+        assert_eq!(
+            response.result().unwrap()["content"][0]["text"],
+            "planned github list_issues"
+        );
+    }
+
+    #[tokio::test]
+    async fn stdio_transport_returns_parse_errors() {
+        let output = drive_stdio_transport(sample_state(), "not valid json\n", |tool, id, _| {
+            JsonRpcResponse::success(
+                id,
+                json!({
+                    "content": [{
+                        "type": "text",
+                        "text": format!("unexpected tool call: {}", tool.name()),
+                    }],
+                    "isError": true,
+                }),
+            )
+        })
+        .await;
+
+        let response: JsonRpcResponse = serde_json::from_str(output.trim()).unwrap();
+        let error = response.error.unwrap();
+        assert_eq!(error.code(), PARSE_ERROR);
+        assert!(error.message().contains("Failed to parse request"));
+    }
+
+    #[tokio::test]
+    async fn stdio_transport_exits_cleanly_on_eof() {
+        let output = drive_stdio_transport(sample_state(), "", |tool, id, _| {
+            JsonRpcResponse::success(
+                id,
+                json!({
+                    "content": [{
+                        "type": "text",
+                        "text": format!("unexpected tool call: {}", tool.name()),
+                    }],
+                    "isError": true,
+                }),
+            )
+        })
+        .await;
+
+        assert!(output.is_empty());
     }
 }

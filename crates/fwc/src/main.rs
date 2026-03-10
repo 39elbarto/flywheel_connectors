@@ -159,6 +159,7 @@ Examples:
   fwc export-tools --format mcp --json
   fwc export-tools --format claude github
   fwc export-tools --format openai --risk-max medium --output tools.json
+  fwc serve-mcp github
 ";
 
 #[derive(Parser, Debug)]
@@ -306,6 +307,10 @@ enum Commands {
     /// FCP connector becomes a tool in any agent runtime.
     #[command(visible_alias = "tools")]
     ExportTools(ExportToolsArgs),
+
+    /// Serve discovered connectors as MCP tools over stdio JSON-RPC.
+    #[command(name = "serve-mcp")]
+    ServeMcp(ServeMcpArgs),
 
     /// Suggest relevant operations based on context, goal, or recent usage.
     ///
@@ -823,6 +828,16 @@ struct ExportToolsArgs {
 }
 
 #[derive(Args, Debug, Serialize)]
+struct ServeMcpArgs {
+    /// Optional connector selector. Omit to expose all discovered connectors.
+    connector: Option<String>,
+
+    /// Restrict tool exposure to connectors matching this zone.
+    #[arg(long)]
+    zone: Option<String>,
+}
+
+#[derive(Args, Debug, Serialize)]
 struct SuggestArgs {
     /// Natural-language goal to find operations for.
     #[arg(long)]
@@ -1129,6 +1144,9 @@ fn execute(raw_args: &[String]) -> Result<ExecutionOutcome> {
 
     match prepare_cli(raw_args) {
         Ok(prepared) => {
+            if let Some(outcome) = execute_passthrough_command(&prepared)? {
+                return Ok(outcome);
+            }
             let mut dispatch = dispatch(&prepared.cli)?;
             annotate_with_corrections(
                 &mut dispatch.payload,
@@ -1188,6 +1206,144 @@ fn execute(raw_args: &[String]) -> Result<ExecutionOutcome> {
             fallback_format,
             include_token_stats,
             &RenderOptions::default(),
+        ),
+    }
+}
+
+fn execute_passthrough_command(prepared: &PreparedCli) -> Result<Option<ExecutionOutcome>> {
+    match &prepared.cli.command {
+        Commands::ServeMcp(args) => execute_serve_mcp(prepared, args).map(Some),
+        _ => Ok(None),
+    }
+}
+
+fn execute_serve_mcp(prepared: &PreparedCli, args: &ServeMcpArgs) -> Result<ExecutionOutcome> {
+    let catalog = DiscoveryCatalog::load()?;
+    let connectors: Vec<&DiscoveredConnector> = if let Some(selector) = &args.connector {
+        let connector = match catalog.resolve_connector(selector) {
+            Ok(connector) => connector,
+            Err(error) => {
+                return render_dispatch(
+                    connector_resolution_dispatch("serve-mcp", selector, &error),
+                    prepared.format,
+                    prepared.cli.token_stats,
+                    &prepared.render_options,
+                );
+            }
+        };
+
+        if let Some(zone) = args.zone.as_deref() {
+            if !connector.matches_zone(zone) {
+                return render_dispatch(
+                    DispatchOutcome {
+                        payload: json!({
+                            "status": "error",
+                            "command": "serve-mcp",
+                            "error": {
+                                "type": "zone-mismatch",
+                                "message": format!(
+                                    "Connector `{}` is not available in zone `{zone}`.",
+                                    connector.slug
+                                ),
+                            },
+                            "connector": {
+                                "slug": &connector.slug,
+                                "canonical_id": &connector.detail.summary.id,
+                            },
+                            "next_actions": [
+                                format!("fwc show {}", connector.slug),
+                                "fwc list".to_owned(),
+                            ],
+                        }),
+                        exit_code: CliExitCode::Validation,
+                    },
+                    prepared.format,
+                    prepared.cli.token_stats,
+                    &prepared.render_options,
+                );
+            }
+        }
+
+        vec![connector]
+    } else {
+        catalog.list(args.zone.as_deref(), None)
+    };
+
+    let mut config = serve_mcp::McpServerConfig::new();
+    if let Some(zone) = &args.zone {
+        config = config.with_zone_filter(zone.clone());
+    }
+    if let Some(connector) = &args.connector {
+        config = config.with_connector_filter(connector.clone());
+    }
+
+    let state = serve_mcp::state_from_connectors(&connectors, config);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()?;
+
+    runtime.block_on(async {
+        let reader = tokio::io::BufReader::new(tokio::io::stdin());
+        let writer = tokio::io::stdout();
+        serve_mcp::run_stdio_transport(&state, reader, writer, mcp_tool_call_response).await
+    })?;
+
+    Ok(ExecutionOutcome {
+        text: String::new(),
+        exit_code: ExitCode::SUCCESS,
+    })
+}
+
+fn mcp_tool_call_response(
+    tool: &serve_mcp::McpToolDefinition,
+    id: Value,
+    arguments: Value,
+) -> serve_mcp::JsonRpcResponse {
+    let invoke_args = InvokeArgs {
+        connector: tool.connector_id.clone(),
+        operation: tool.operation_id.clone(),
+        input: Some(arguments.to_string()),
+        file: None,
+        stdin: false,
+        set: Vec::new(),
+    };
+
+    match invoke_dispatch("invoke", &invoke_args) {
+        Ok(dispatch) => {
+            let mut structured_content = dispatch.payload;
+            let message = structured_content["message"]
+                .as_str()
+                .unwrap_or("Planned tool call.")
+                .to_owned();
+            if let Some(object) = structured_content.as_object_mut() {
+                object.insert(
+                    "tool".to_owned(),
+                    json!({
+                        "name": &tool.name,
+                        "connector": &tool.connector_id,
+                        "operation": &tool.operation_id,
+                    }),
+                );
+            }
+
+            serve_mcp::JsonRpcResponse::success(
+                id,
+                json!({
+                    "content": [{
+                        "type": "text",
+                        "text": message,
+                    }],
+                    "structuredContent": structured_content,
+                    "isError": !dispatch.exit_code.is_success(),
+                }),
+            )
+        }
+        Err(error) => serve_mcp::JsonRpcResponse::error(
+            id,
+            serve_mcp::JsonRpcError::internal(format!(
+                "Failed to plan tool call `{}`: {error}",
+                tool.name
+            )),
         ),
     }
 }
@@ -1571,6 +1727,7 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         Commands::Simulate(args) => invoke_dispatch("simulate", args)?,
         Commands::Logs(args) => planned("logs", args)?,
         Commands::ExportTools(args) => export_tools_dispatch(args)?,
+        Commands::ServeMcp(args) => planned("serve-mcp", args)?,
         Commands::Suggest(args) => suggest_dispatch(args)?,
         Commands::Template(args) => template_dispatch(args)?,
         Commands::Validate(args) => validate_dispatch(args)?,
@@ -2603,7 +2760,7 @@ fn invoke_dispatch(command: &str, args: &InvokeArgs) -> Result<DispatchOutcome> 
         }
     };
 
-    let prepared = match prepare_invoke_input(args, &operation.input_schema) {
+    let prepared = match prepare_invoke_input(command, args, &operation.input_schema) {
         Ok(prepared) => prepared,
         Err(error) => {
             return Ok(invoke_input_error_dispatch(
@@ -2625,11 +2782,27 @@ fn invoke_dispatch(command: &str, args: &InvokeArgs) -> Result<DispatchOutcome> 
             })
         })
         .collect::<Vec<_>>();
+    let validation_error_count = validation_errors.len();
+    let payload_preview = invoke_payload_preview(&prepared.payload);
+    let payload_json = serde_json::to_string(&prepared.payload)?;
+    let PreparedInvokeInput {
+        payload: prepared_payload,
+        primary_source,
+        sources,
+        binding_count,
+        warnings,
+    } = prepared;
 
     let scaffold = schema_nav::scaffold_template(&operation.input_schema);
-    let contract = catalog::planned_payload(command, &serde_json::to_value(args)?)["contract"].clone();
+    let contract =
+        catalog::planned_payload(command, &serde_json::to_value(args)?)["contract"].clone();
     let captures = serde_json::to_value(args)?;
-    let examples = operation.examples.iter().take(2).cloned().collect::<Vec<_>>();
+    let examples = operation
+        .examples
+        .iter()
+        .take(2)
+        .cloned()
+        .collect::<Vec<_>>();
     let exit_code = if valid {
         CliExitCode::Success
     } else {
@@ -2669,17 +2842,17 @@ fn invoke_dispatch(command: &str, args: &InvokeArgs) -> Result<DispatchOutcome> 
             "approval_mode": &operation.approval_mode,
         },
         "input_authoring": {
-            "primary_source": prepared.primary_source,
-            "sources": prepared.sources,
-            "binding_count": prepared.binding_count,
-            "warnings": prepared.warnings,
-            "payload": prepared.payload,
-            "payload_preview": invoke_payload_preview(&prepared.payload),
+            "primary_source": primary_source,
+            "sources": sources,
+            "binding_count": binding_count,
+            "warnings": warnings,
+            "payload": prepared_payload,
+            "payload_preview": payload_preview,
             "required_template": scaffold,
             "examples": examples,
             "validation": {
                 "valid": valid,
-                "error_count": validation_errors.len(),
+                "error_count": validation_error_count,
                 "errors": validation_errors,
             },
         },
@@ -2689,7 +2862,7 @@ fn invoke_dispatch(command: &str, args: &InvokeArgs) -> Result<DispatchOutcome> 
                 format!("fwc template {} {}", connector.slug, operation.preferred_selector),
                 format!(
                     "fwc task bind <task-id> payload_json='{}'",
-                    serde_json::to_string(&prepared.payload)?
+                    payload_json
                 ),
             ]
         } else {
@@ -2722,15 +2895,23 @@ fn invoke_input_error_dispatch(
     operation: &DiscoveredOperation,
     error: InvokeInputError,
 ) -> DispatchOutcome {
-    let contract = catalog::planned_payload(command, &serde_json::to_value(args).unwrap_or(Value::Null))
-        ["contract"]
+    let InvokeInputError {
+        error_type,
+        message,
+        next_actions,
+        details,
+    } = error;
+    let contract = catalog::planned_payload(
+        command,
+        &serde_json::to_value(args).unwrap_or(Value::Null),
+    )["contract"]
         .clone();
 
     let mut payload = json!({
         "status": "error",
         "command": command,
         "phase": "input-authoring",
-        "message": error.message,
+        "message": &message,
         "captures": serde_json::to_value(args).unwrap_or(Value::Null),
         "contract": contract,
         "connector": {
@@ -2744,8 +2925,8 @@ fn invoke_input_error_dispatch(
             "canonical_id": &operation.actual_id,
         },
         "error": {
-            "type": error.error_type,
-            "message": error.message,
+            "type": error_type,
+            "message": &message,
             "recoverable": true,
         },
         "input_authoring": {
@@ -2753,10 +2934,10 @@ fn invoke_input_error_dispatch(
             "examples": operation.examples.iter().take(2).cloned().collect::<Vec<_>>(),
             "accepted_sources": ["--input", "--file", "--stdin", "--set path=value"],
         },
-        "next_actions": error.next_actions,
+        "next_actions": next_actions,
     });
 
-    if let Some(details) = error.details {
+    if let Some(details) = details {
         payload["error"]["details"] = details;
     }
 
@@ -2767,6 +2948,7 @@ fn invoke_input_error_dispatch(
 }
 
 fn prepare_invoke_input(
+    command: &str,
     args: &InvokeArgs,
     schema: &Value,
 ) -> std::result::Result<PreparedInvokeInput, InvokeInputError> {
@@ -2802,7 +2984,8 @@ fn prepare_invoke_input(
             message: format!("Could not read `{}`: {error}", path.display()),
             next_actions: vec![
                 "Check that the file exists and is readable.".to_owned(),
-                "Switch to `--input` or `--set path=value` if you only need a small payload.".to_owned(),
+                "Switch to `--input` or `--set path=value` if you only need a small payload."
+                    .to_owned(),
             ],
             details: Some(json!({ "path": path.display().to_string() })),
         })?;
@@ -2830,7 +3013,7 @@ fn prepare_invoke_input(
             .read_to_string(&mut content)
             .map_err(|error| InvokeInputError {
                 error_type: "stdin-read-failed",
-                message: format!("Could not read stdin for `{command}` payload authoring: {error}", command = "invoke"),
+                message: format!("Could not read stdin for `{command}` payload authoring: {error}"),
                 next_actions: vec![
                     "Pipe JSON into stdin or remove `--stdin`.".to_owned(),
                     "Use `--input` or `--file` if the payload already lives elsewhere.".to_owned(),
@@ -2840,7 +3023,9 @@ fn prepare_invoke_input(
         if content.trim().is_empty() {
             return Err(InvokeInputError {
                 error_type: "empty-stdin-input",
-                message: "Stdin was selected as the payload source, but no JSON bytes were provided.".to_owned(),
+                message:
+                    "Stdin was selected as the payload source, but no JSON bytes were provided."
+                        .to_owned(),
                 next_actions: vec![
                     "Pipe a JSON document into `fwc ... --stdin`.".to_owned(),
                     "Use `--input`, `--file`, or `--set path=value` instead.".to_owned(),
@@ -2877,10 +3062,6 @@ fn prepare_invoke_input(
                 "stdin": args.stdin,
             })),
         });
-    }
-
-    if payload.is_null() {
-        payload = Value::Object(serde_json::Map::new());
     }
 
     for binding in &args.set {
@@ -2936,7 +3117,7 @@ fn prepare_invoke_input(
         sources.push(json!({
             "kind": "binding-set",
             "count": args.set.len(),
-            "bindings": args.set,
+            "bindings": &args.set,
         }));
         if primary_source == "none" {
             primary_source = "binding-set";
@@ -2952,9 +3133,7 @@ fn prepare_invoke_input(
     })
 }
 
-fn parse_invoke_binding(
-    binding: &str,
-) -> std::result::Result<(String, String), InvokeInputError> {
+fn parse_invoke_binding(binding: &str) -> std::result::Result<(String, String), InvokeInputError> {
     binding
         .split_once('=')
         .map(|(path, value)| (path.trim().to_owned(), value.trim().to_owned()))
@@ -3018,8 +3197,7 @@ fn parse_invoke_path(
                 error_type: "invalid-input-binding-path",
                 message: format!("`{raw_path}` uses a non-numeric array index `{index_str}`."),
                 next_actions: vec![
-                    "Array indices must be zero-based integers such as `[0]` or `[1]`."
-                        .to_owned(),
+                    "Array indices must be zero-based integers such as `[0]` or `[1]`.".to_owned(),
                 ],
                 details: Some(json!({ "path": raw_path, "index": index_str })),
             })?;
@@ -3043,7 +3221,9 @@ fn invoke_schema_at_path<'a>(schema: &'a Value, path: &[InvokePathSegment]) -> O
                     .or_else(|| invoke_variant_schema(current, name))?;
             }
             InvokePathSegment::Index(_) => {
-                current = current.get("items").or_else(|| invoke_items_from_variant(current))?;
+                current = current
+                    .get("items")
+                    .or_else(|| invoke_items_from_variant(current))?;
             }
         }
     }
@@ -3080,7 +3260,10 @@ fn invoke_items_from_variant(schema: &Value) -> Option<&Value> {
     None
 }
 
-fn coerce_invoke_value(raw_value: &str, schema: Option<&Value>) -> std::result::Result<Value, String> {
+fn coerce_invoke_value(
+    raw_value: &str,
+    schema: Option<&Value>,
+) -> std::result::Result<Value, String> {
     let expected_type = schema.and_then(invoke_expected_type);
     match expected_type {
         Some("string") => Ok(Value::String(raw_value.to_owned())),
@@ -6357,9 +6540,11 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{Cli, CliExitCode, PrepareCliError, catalog, execute, normalize_args, prepare_cli};
+    use super::{
+        Cli, CliExitCode, Commands, PrepareCliError, catalog, execute, normalize_args, prepare_cli,
+    };
     use clap::CommandFactory;
-    use serde_json::Value;
+    use serde_json::{Value, json};
 
     fn execute_json(args: &[&str]) -> (std::process::ExitCode, Value) {
         let owned_args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
@@ -6525,13 +6710,95 @@ mod tests {
             "github",
             "issues.create",
             "--input",
-            "{}",
+            "{\"owner\":\"octocat\",\"repo\":\"hello-world\",\"title\":\"Bug report\"}",
             "--template",
             "{{command}} {{captures.connector}} {{captures.operation}}",
         ]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(text, "invoke github issues.create\n");
+    }
+
+    #[test]
+    fn execute_invoke_accepts_set_bindings_for_payload_authoring() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "invoke",
+            "github",
+            "issues.create",
+            "--set",
+            "owner=octocat",
+            "--set",
+            "repo=hello-world",
+            "--set",
+            "title=Bug report",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["status"], "planned");
+        assert_eq!(payload["phase"], "input-authoring");
+        assert_eq!(payload["input_authoring"]["primary_source"], "binding-set");
+        assert_eq!(payload["input_authoring"]["binding_count"], 3);
+        assert_eq!(
+            payload["input_authoring"]["payload"],
+            json!({
+                "owner": "octocat",
+                "repo": "hello-world",
+                "title": "Bug report",
+            })
+        );
+        assert_eq!(payload["input_authoring"]["validation"]["valid"], true);
+    }
+
+    #[test]
+    fn execute_invoke_returns_validation_for_schema_invalid_payload() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "invoke",
+            "github",
+            "issues.create",
+            "--input",
+            "{}",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["status"], "error");
+        assert_eq!(payload["error"]["type"], "invalid-input-payload");
+        assert_eq!(payload["input_authoring"]["validation"]["valid"], false);
+        assert_eq!(payload["input_authoring"]["validation"]["error_count"], 3);
+    }
+
+    #[test]
+    fn execute_invoke_rejects_conflicting_primary_sources() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("fwc-main-invoke-input-{unique}.json"));
+        std::fs::write(
+            &path,
+            r#"{"owner":"octocat","repo":"hello-world","title":"Bug report"}"#,
+        )
+        .unwrap();
+        let path_string = path.display().to_string();
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "invoke",
+            "github",
+            "issues.create",
+            "--input",
+            r#"{"owner":"octocat","repo":"hello-world","title":"Bug report"}"#,
+            "--file",
+            &path_string,
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["error"]["type"], "conflicting-input-sources");
+        assert_eq!(payload["error"]["recoverable"], true);
     }
 
     #[test]
@@ -7310,7 +7577,7 @@ mod tests {
             "github".to_owned(),
             "issues.create".to_owned(),
             "--input".to_owned(),
-            "{}".to_owned(),
+            "{\"owner\":\"octocat\",\"repo\":\"hello-world\",\"title\":\"Bug report\"}".to_owned(),
         ];
         let outcome = execute(&args).expect("execution should not fail internally");
         let payload: Value =
@@ -7373,7 +7640,7 @@ mod tests {
             "github".to_owned(),
             "issues.create".to_owned(),
             "--input".to_owned(),
-            "{}".to_owned(),
+            "{\"owner\":\"octocat\",\"repo\":\"hello-world\",\"title\":\"Bug report\"}".to_owned(),
         ];
         let outcome = execute(&args).expect("execution should not fail internally");
         let payload: Value =
@@ -8709,5 +8976,25 @@ depends_on = ["missing"]
         let payload: Value = serde_json::from_str(&outcome.text).unwrap();
         assert_eq!(payload["status"], "planned");
         assert_eq!(payload["command"], "batch-file");
+    }
+
+    #[test]
+    fn prepare_cli_parses_serve_mcp_command() {
+        let prepared = prepare_cli(&[
+            "fwc".to_owned(),
+            "serve-mcp".to_owned(),
+            "github".to_owned(),
+            "--zone".to_owned(),
+            "z:work".to_owned(),
+        ])
+        .unwrap();
+
+        match prepared.cli.command {
+            Commands::ServeMcp(args) => {
+                assert_eq!(args.connector.as_deref(), Some("github"));
+                assert_eq!(args.zone.as_deref(), Some("z:work"));
+            }
+            command => panic!("expected serve-mcp command, got {command:?}"),
+        }
     }
 }

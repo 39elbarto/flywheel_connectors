@@ -145,6 +145,272 @@ pub struct ListModelsResponse {
     pub next_page_token: Option<String>,
 }
 
+/// Request to create a tuned model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateTunedModelRequest {
+    #[serde(alias = "tuned_model_id")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tuned_model_id: Option<String>,
+    #[serde(alias = "display_name")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(alias = "source_model")]
+    pub source_model: String,
+    #[serde(alias = "tuning_task")]
+    pub tuning_task: TuningTaskConfig,
+}
+
+impl CreateTunedModelRequest {
+    /// Validate the request before sending it to the API.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.source_model.trim().is_empty() {
+            return Err("source_model must not be empty".into());
+        }
+        self.tuning_task.validate()
+    }
+}
+
+/// User-supplied tuning task configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TuningTaskConfig {
+    #[serde(alias = "training_data")]
+    pub training_data: TuningDataset,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hyperparameters: Option<Hyperparameters>,
+}
+
+impl TuningTaskConfig {
+    /// Validate the tuning task config.
+    pub fn validate(&self) -> Result<(), String> {
+        self.training_data.validate()
+    }
+}
+
+/// Training dataset for a tuned model job.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TuningDataset {
+    pub examples: Vec<TuningExample>,
+}
+
+impl TuningDataset {
+    /// Validate that the dataset contains usable examples.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.examples.is_empty() {
+            return Err("training_data.examples must include at least one example".into());
+        }
+        for (idx, example) in self.examples.iter().enumerate() {
+            if example.text_input.trim().is_empty() {
+                return Err(format!(
+                    "training_data.examples[{idx}].text_input must not be empty"
+                ));
+            }
+            if example.output.trim().is_empty() {
+                return Err(format!(
+                    "training_data.examples[{idx}].output must not be empty"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One supervised tuning example.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TuningExample {
+    #[serde(alias = "text_input")]
+    pub text_input: String,
+    pub output: String,
+}
+
+/// Hyperparameters for a tuning job.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct Hyperparameters {
+    #[serde(alias = "epoch_count")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub epoch_count: Option<u32>,
+    #[serde(alias = "batch_size")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub batch_size: Option<u32>,
+    #[serde(alias = "learning_rate")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub learning_rate: Option<f64>,
+}
+
+/// Request to list tuned models.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ListTunedModelsRequest {
+    #[serde(alias = "page_size")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_size: Option<u32>,
+    #[serde(alias = "page_token")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_token: Option<String>,
+}
+
+impl ListTunedModelsRequest {
+    /// Validate the listing options.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.page_size == Some(0) {
+            return Err("page_size must be greater than zero".into());
+        }
+        Ok(())
+    }
+}
+
+/// Request to fetch one tuned model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetTunedModelRequest {
+    #[serde(alias = "tuned_model")]
+    pub tuned_model: String,
+}
+
+impl GetTunedModelRequest {
+    /// Validate the resource selector.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.tuned_model.trim().is_empty() {
+            return Err("tuned_model must not be empty".into());
+        }
+        Ok(())
+    }
+}
+
+/// Request to fetch a long-running tuning operation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetTuningOperationRequest {
+    pub operation: String,
+}
+
+impl GetTuningOperationRequest {
+    /// Validate the operation selector.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.operation.trim().is_empty() {
+            return Err("operation must not be empty".into());
+        }
+        if !self.operation.contains("/operations/") {
+            return Err("operation must be a full tuned model operation resource".into());
+        }
+        Ok(())
+    }
+}
+
+/// Request to cancel a long-running tuning operation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelTuningOperationRequest {
+    pub operation: String,
+}
+
+impl CancelTuningOperationRequest {
+    /// Validate the cancel request.
+    pub fn validate(&self) -> Result<(), String> {
+        GetTuningOperationRequest {
+            operation: self.operation.clone(),
+        }
+        .validate()
+    }
+}
+
+/// Response from list tuned models.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListTunedModelsResponse {
+    #[serde(default)]
+    pub tuned_models: Vec<TunedModel>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_page_token: Option<String>,
+}
+
+/// Tuned model metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TunedModel {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub create_time: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub update_time: Option<String>,
+    #[serde(default)]
+    pub supported_generation_methods: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_token_limit: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_token_limit: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tuning_task: Option<TuningTask>,
+}
+
+/// Tuning task status embedded in a tuned model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TuningTask {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_time: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub complete_time: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hyperparameters: Option<Hyperparameters>,
+    #[serde(default)]
+    pub snapshots: Vec<TuningSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub training_data: Option<TuningDataset>,
+}
+
+/// One progress snapshot from a tuning task.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TuningSnapshot {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub epoch: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mean_loss: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compute_time: Option<String>,
+}
+
+/// Long-running operation returned by tuned model create jobs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TuningOperation {
+    pub name: String,
+    #[serde(default)]
+    pub done: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<OperationError>,
+}
+
+/// Structured long-running operation error details.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OperationError {
+    pub code: i32,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+}
+
 /// Google AI API error response body.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ApiErrorResponse {
@@ -1039,6 +1305,120 @@ mod tests {
         assert_eq!(cloned.next_page_token.as_deref(), Some("token123"));
         let debug = format!("{resp:?}");
         assert!(debug.contains("ListModelsResponse"));
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // Tuned model requests + responses
+    // ════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn create_tuned_model_request_roundtrip() {
+        let request = CreateTunedModelRequest {
+            tuned_model_id: Some("support-bot".into()),
+            display_name: Some("Support Bot".into()),
+            description: Some("Customer support tuned model".into()),
+            source_model: "models/gemini-1.5-flash-001".into(),
+            tuning_task: TuningTaskConfig {
+                training_data: TuningDataset {
+                    examples: vec![TuningExample {
+                        text_input: "Classify this ticket".into(),
+                        output: "billing".into(),
+                    }],
+                },
+                hyperparameters: Some(Hyperparameters {
+                    epoch_count: Some(3),
+                    batch_size: Some(4),
+                    learning_rate: Some(0.001),
+                }),
+            },
+        };
+        request.validate().unwrap();
+
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(json["tunedModelId"], "support-bot");
+        assert_eq!(json["sourceModel"], "models/gemini-1.5-flash-001");
+        assert_eq!(
+            json["tuningTask"]["trainingData"]["examples"][0]["textInput"],
+            "Classify this ticket"
+        );
+    }
+
+    #[test]
+    fn create_tuned_model_request_rejects_empty_examples() {
+        let request = CreateTunedModelRequest {
+            tuned_model_id: None,
+            display_name: None,
+            description: None,
+            source_model: "models/gemini-1.5-flash-001".into(),
+            tuning_task: TuningTaskConfig {
+                training_data: TuningDataset { examples: vec![] },
+                hyperparameters: None,
+            },
+        };
+        let error = request.validate().unwrap_err();
+        assert!(error.contains("at least one example"));
+    }
+
+    #[test]
+    fn list_tuned_models_response_roundtrip() {
+        let json = json!({
+            "tunedModels": [
+                {
+                    "name": "tunedModels/support-bot",
+                    "displayName": "Support Bot",
+                    "state": "ACTIVE",
+                    "sourceModel": "models/gemini-1.5-flash-001",
+                    "supportedGenerationMethods": ["generateContent"]
+                }
+            ],
+            "nextPageToken": "next-token"
+        });
+        let response: ListTunedModelsResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(response.tuned_models.len(), 1);
+        assert_eq!(response.tuned_models[0].name, "tunedModels/support-bot");
+        assert_eq!(response.next_page_token.as_deref(), Some("next-token"));
+    }
+
+    #[test]
+    fn tuned_model_roundtrip_with_task_metadata() {
+        let json = json!({
+            "name": "tunedModels/support-bot",
+            "displayName": "Support Bot",
+            "tuningTask": {
+                "startTime": "2026-03-10T12:00:00Z",
+                "snapshots": [
+                    {"epoch": 1, "meanLoss": 1.2, "computeTime": "5s"}
+                ]
+            }
+        });
+        let model: TunedModel = serde_json::from_value(json).unwrap();
+        assert_eq!(model.name, "tunedModels/support-bot");
+        assert_eq!(model.display_name.as_deref(), Some("Support Bot"));
+        assert_eq!(model.tuning_task.as_ref().unwrap().snapshots.len(), 1);
+    }
+
+    #[test]
+    fn get_tuning_operation_request_requires_full_operation_resource() {
+        let request = GetTuningOperationRequest {
+            operation: "support-bot-op".into(),
+        };
+        let error = request.validate().unwrap_err();
+        assert!(error.contains("full tuned model operation resource"));
+    }
+
+    #[test]
+    fn tuning_operation_roundtrip() {
+        let json = json!({
+            "name": "tunedModels/support-bot/operations/op-123",
+            "done": false,
+            "metadata": {
+                "state": "RUNNING"
+            }
+        });
+        let operation: TuningOperation = serde_json::from_value(json).unwrap();
+        assert_eq!(operation.name, "tunedModels/support-bot/operations/op-123");
+        assert!(!operation.done);
+        assert_eq!(operation.metadata.unwrap()["state"], "RUNNING");
     }
 
     // ════════════════════════════════════════════════════════════════════

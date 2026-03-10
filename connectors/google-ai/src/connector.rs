@@ -3,10 +3,11 @@
 use std::sync::Arc;
 
 use fcp_core::{
-    AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
-    ConnectorId, CredentialId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
-    SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
+    AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken,
+    CapabilityVerifier, ConnectorId, CredentialId, EventCaps, FcpError, FcpResult,
+    HandshakeRequest, HandshakeResponse, IdempotencyClass, Introspection, OperationId,
+    OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId, SimulateRequest,
+    SimulateResponse,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -14,6 +15,10 @@ use tracing::{info, instrument};
 
 use crate::client::{DEFAULT_BASE_URL, GoogleAiAuth, GoogleAiClient};
 use crate::error::GoogleAiError;
+use crate::types::{
+    CancelTuningOperationRequest, CreateTunedModelRequest, GetTunedModelRequest,
+    GetTuningOperationRequest, ListTunedModelsRequest,
+};
 
 /// Parsed and validated Google AI connector configuration.
 #[derive(Debug, Clone)]
@@ -636,6 +641,234 @@ impl GoogleAiConnector {
                         ],
                     },
                 ),
+                op_info_with_approval(
+                    "google-ai.tuning.create",
+                    "Create a tuned model training job",
+                    json!({
+                        "type": "object",
+                        "required": ["source_model", "tuning_task"],
+                        "properties": {
+                            "tuned_model_id": {
+                                "type": "string",
+                                "description": "Optional stable ID to assign to the tuned model"
+                            },
+                            "display_name": {
+                                "type": "string",
+                                "description": "Human-friendly display name for the tuned model"
+                            },
+                            "description": {
+                                "type": "string",
+                                "description": "Optional description for operators and future readers"
+                            },
+                            "source_model": {
+                                "type": "string",
+                                "description": "Base model resource to tune, for example models/gemini-1.5-flash-001"
+                            },
+                            "tuning_task": {
+                                "type": "object",
+                                "required": ["training_data"],
+                                "properties": {
+                                    "training_data": {
+                                        "type": "object",
+                                        "required": ["examples"],
+                                        "properties": {
+                                            "examples": {
+                                                "type": "array",
+                                                "minItems": 1
+                                            }
+                                        }
+                                    },
+                                    "hyperparameters": {
+                                        "type": "object"
+                                    }
+                                }
+                            }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "required": ["name", "done"],
+                        "properties": {
+                            "name": { "type": "string" },
+                            "done": { "type": "boolean" },
+                            "metadata": { "type": "object" },
+                            "response": { "type": "object" },
+                            "error": { "type": "object" },
+                            "provenance": { "type": "object" }
+                        }
+                    }),
+                    "google-ai.tuning",
+                    RiskLevel::High,
+                    SafetyTier::Dangerous,
+                    IdempotencyClass::None,
+                    Some(ApprovalMode::ElevationToken),
+                    AgentHint {
+                        when_to_use: "Start a new tuned model training job when you have curated prompt/output pairs and explicit approval for the spend and side effects.".into(),
+                        common_mistakes: vec![
+                            "Submitting empty or low-quality training examples.".into(),
+                            "Treating training as instantaneous instead of polling the returned long-running operation.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"tuned_model_id": "support-bot", "source_model": "models/gemini-1.5-flash-001", "tuning_task": {"training_data": {"examples": [{"text_input": "Refund request", "output": "billing"}]}}}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("google-ai.tuning.get_operation"),
+                            CapabilityId::from_static("google-ai.tuning.cancel"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "google-ai.tuning.list",
+                    "List tuned models visible to the current credential",
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "page_size": { "type": "integer", "minimum": 1, "maximum": 1000 },
+                            "page_token": { "type": "string" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "required": ["tuned_models"],
+                        "properties": {
+                            "tuned_models": { "type": "array" },
+                            "next_page_token": { "type": "string" }
+                        }
+                    }),
+                    "google-ai.tuning",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Discover tuned models before invoking or auditing them.".into(),
+                        common_mistakes: vec![
+                            "Forgetting to follow next_page_token when more results exist.".into(),
+                        ],
+                        examples: vec![r"{}".into(), r#"{"page_size": 25}"#.into()],
+                        related: vec![
+                            CapabilityId::from_static("google-ai.tuning.get"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "google-ai.tuning.get",
+                    "Get metadata for one tuned model",
+                    json!({
+                        "type": "object",
+                        "required": ["tuned_model"],
+                        "properties": {
+                            "tuned_model": {
+                                "type": "string",
+                                "description": "Tuned model resource name, for example tunedModels/support-bot"
+                            }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "required": ["name"],
+                        "properties": {
+                            "name": { "type": "string" },
+                            "display_name": { "type": "string" },
+                            "state": { "type": "string" },
+                            "source_model": { "type": "string" },
+                            "tuning_task": { "type": "object" }
+                        }
+                    }),
+                    "google-ai.tuning",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Inspect one tuned model's state, source model, and tuning metadata.".into(),
+                        common_mistakes: vec![
+                            "Passing only a short nickname instead of the tuned model resource name when multiple similar models exist.".into(),
+                        ],
+                        examples: vec![r#"{"tuned_model": "tunedModels/support-bot"}"#.into()],
+                        related: vec![
+                            CapabilityId::from_static("google-ai.tuning.list"),
+                            CapabilityId::from_static("google-ai.tuning.get_operation"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "google-ai.tuning.get_operation",
+                    "Get the status of a long-running tuned model operation",
+                    json!({
+                        "type": "object",
+                        "required": ["operation"],
+                        "properties": {
+                            "operation": {
+                                "type": "string",
+                                "description": "Full operation resource, for example tunedModels/support-bot/operations/op-123"
+                            }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "required": ["name", "done"],
+                        "properties": {
+                            "name": { "type": "string" },
+                            "done": { "type": "boolean" },
+                            "metadata": { "type": "object" },
+                            "response": { "type": "object" },
+                            "error": { "type": "object" },
+                            "provenance": { "type": "object" }
+                        }
+                    }),
+                    "google-ai.tuning",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Poll a training operation until it completes or fails.".into(),
+                        common_mistakes: vec![
+                            "Polling the tuned model instead of the operation returned by create.".into(),
+                        ],
+                        examples: vec![r#"{"operation": "tunedModels/support-bot/operations/op-123"}"#.into()],
+                        related: vec![
+                            CapabilityId::from_static("google-ai.tuning.create"),
+                            CapabilityId::from_static("google-ai.tuning.cancel"),
+                        ],
+                    },
+                ),
+                op_info_with_approval(
+                    "google-ai.tuning.cancel",
+                    "Cancel a running tuned model operation",
+                    json!({
+                        "type": "object",
+                        "required": ["operation"],
+                        "properties": {
+                            "operation": {
+                                "type": "string",
+                                "description": "Full operation resource, for example tunedModels/support-bot/operations/op-123"
+                            }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "required": ["status", "operation"],
+                        "properties": {
+                            "status": { "type": "string" },
+                            "operation": { "type": "string" },
+                            "provenance": { "type": "object" }
+                        }
+                    }),
+                    "google-ai.tuning",
+                    RiskLevel::High,
+                    SafetyTier::Dangerous,
+                    IdempotencyClass::BestEffort,
+                    Some(ApprovalMode::ElevationToken),
+                    AgentHint {
+                        when_to_use: "Stop a tuned model job that is no longer desired or was started with the wrong dataset.".into(),
+                        common_mistakes: vec![
+                            "Cancelling the wrong operation when multiple jobs exist.".into(),
+                        ],
+                        examples: vec![r#"{"operation": "tunedModels/support-bot/operations/op-123"}"#.into()],
+                        related: vec![
+                            CapabilityId::from_static("google-ai.tuning.get_operation"),
+                        ],
+                    },
+                ),
                 op_info(
                     "google-ai.get_usage",
                     "Return local usage and cost totals for the current connector session",
@@ -747,6 +980,11 @@ impl GoogleAiConnector {
             "google-ai.count_tokens" => self.invoke_count_tokens(input).await,
             "google-ai.list_models" => self.invoke_list_models(input).await,
             "google-ai.get_model" => self.invoke_get_model(input).await,
+            "google-ai.tuning.create" => self.invoke_create_tuned_model(input).await,
+            "google-ai.tuning.list" => self.invoke_list_tuned_models(input).await,
+            "google-ai.tuning.get" => self.invoke_get_tuned_model(input).await,
+            "google-ai.tuning.get_operation" => self.invoke_get_tuning_operation(input).await,
+            "google-ai.tuning.cancel" => self.invoke_cancel_tuning_operation(input).await,
             "google-ai.get_usage" => self.invoke_get_usage(),
             _ => Err(FcpError::OperationNotGranted {
                 operation: operation.into(),
@@ -920,6 +1158,142 @@ impl GoogleAiConnector {
         })
     }
 
+    async fn invoke_create_tuned_model(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let request: CreateTunedModelRequest = parse_request(input, "create tuned model")?;
+        request
+            .validate()
+            .map_err(|message| FcpError::InvalidRequest {
+                code: 1003,
+                message,
+            })?;
+
+        let response = client
+            .create_tuned_model(&request)
+            .await
+            .map_err(|e: GoogleAiError| e.to_fcp_error())?;
+        info!(
+            operation = %response.name,
+            source_model = %request.source_model,
+            "submitted Google AI tuned model create request"
+        );
+        let mut result = serde_json::to_value(response).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize response: {e}"),
+        })?;
+        result["provenance"] = json!({
+            "source": "google-ai",
+            "action": "tuning.create",
+            "source_model": request.source_model,
+            "integrity": "untrusted",
+        });
+        Ok(result)
+    }
+
+    async fn invoke_list_tuned_models(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let request: ListTunedModelsRequest = parse_request(input, "list tuned models")?;
+        request
+            .validate()
+            .map_err(|message| FcpError::InvalidRequest {
+                code: 1003,
+                message,
+            })?;
+
+        let response = client
+            .list_tuned_models(&request)
+            .await
+            .map_err(|e: GoogleAiError| e.to_fcp_error())?;
+        serde_json::to_value(response).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize response: {e}"),
+        })
+    }
+
+    async fn invoke_get_tuned_model(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let request: GetTunedModelRequest = parse_request(input, "get tuned model")?;
+        request
+            .validate()
+            .map_err(|message| FcpError::InvalidRequest {
+                code: 1003,
+                message,
+            })?;
+
+        let response = client
+            .get_tuned_model(&request)
+            .await
+            .map_err(|e: GoogleAiError| e.to_fcp_error())?;
+        serde_json::to_value(response).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize response: {e}"),
+        })
+    }
+
+    async fn invoke_get_tuning_operation(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let request: GetTuningOperationRequest = parse_request(input, "get tuning operation")?;
+        request
+            .validate()
+            .map_err(|message| FcpError::InvalidRequest {
+                code: 1003,
+                message,
+            })?;
+
+        let response = client
+            .get_tuning_operation(&request)
+            .await
+            .map_err(|e: GoogleAiError| e.to_fcp_error())?;
+        let mut result = serde_json::to_value(response).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize response: {e}"),
+        })?;
+        result["provenance"] = json!({
+            "source": "google-ai",
+            "action": "tuning.get_operation",
+            "integrity": "untrusted",
+        });
+        Ok(result)
+    }
+
+    async fn invoke_cancel_tuning_operation(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let request: CancelTuningOperationRequest =
+            parse_request(input, "cancel tuning operation")?;
+        request
+            .validate()
+            .map_err(|message| FcpError::InvalidRequest {
+                code: 1003,
+                message,
+            })?;
+
+        client
+            .cancel_tuning_operation(&request)
+            .await
+            .map_err(|e: GoogleAiError| e.to_fcp_error())?;
+        info!(operation = %request.operation, "requested Google AI tuned model cancel");
+        Ok(json!({
+            "status": "cancel_requested",
+            "operation": request.operation,
+            "provenance": {
+                "source": "google-ai",
+                "action": "tuning.cancel",
+                "integrity": "untrusted",
+            }
+        }))
+    }
+
     fn invoke_get_usage(&self) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let usage = client.get_usage();
@@ -957,6 +1331,16 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<&'a s
         })
 }
 
+fn parse_request<T>(input: serde_json::Value, label: &str) -> FcpResult<T>
+where
+    T: for<'de> serde::Deserialize<'de>,
+{
+    serde_json::from_value(input).map_err(|e| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("Invalid {label} input: {e}"),
+    })
+}
+
 #[allow(clippy::fn_params_excessive_bools)]
 fn op_info(
     id: &'static str,
@@ -969,6 +1353,33 @@ fn op_info(
     idempotency: IdempotencyClass,
     ai_hints: AgentHint,
 ) -> OperationInfo {
+    op_info_with_approval(
+        id,
+        summary,
+        input_schema,
+        output_schema,
+        capability,
+        risk_level,
+        safety_tier,
+        idempotency,
+        None,
+        ai_hints,
+    )
+}
+
+#[allow(clippy::fn_params_excessive_bools)]
+fn op_info_with_approval(
+    id: &'static str,
+    summary: &str,
+    input_schema: serde_json::Value,
+    output_schema: serde_json::Value,
+    capability: &'static str,
+    risk_level: RiskLevel,
+    safety_tier: SafetyTier,
+    idempotency: IdempotencyClass,
+    requires_approval: Option<ApprovalMode>,
+    ai_hints: AgentHint,
+) -> OperationInfo {
     OperationInfo {
         id: OperationId::from_static(id),
         summary: summary.into(),
@@ -978,7 +1389,7 @@ fn op_info(
         risk_level,
         description: None,
         rate_limit: None,
-        requires_approval: None,
+        requires_approval,
         safety_tier,
         idempotency,
         ai_hints,
@@ -1455,8 +1866,75 @@ mod tests {
         assert!(op_ids.contains(&"google-ai.count_tokens"));
         assert!(op_ids.contains(&"google-ai.list_models"));
         assert!(op_ids.contains(&"google-ai.get_model"));
+        assert!(op_ids.contains(&"google-ai.tuning.create"));
+        assert!(op_ids.contains(&"google-ai.tuning.list"));
+        assert!(op_ids.contains(&"google-ai.tuning.get"));
+        assert!(op_ids.contains(&"google-ai.tuning.get_operation"));
+        assert!(op_ids.contains(&"google-ai.tuning.cancel"));
         assert!(op_ids.contains(&"google-ai.get_usage"));
-        assert_eq!(ops.len(), 8);
+        assert_eq!(ops.len(), 13);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_create_tuned_model_validates_examples() {
+        let mut connector = GoogleAiConnector::new();
+        connector
+            .handle_configure(json!({
+                "api_key": "test-key",
+                "base_url": "http://127.0.0.1:9/v1beta"
+            }))
+            .await
+            .unwrap();
+
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["google-ai.tuning.create"]
+            }))
+            .await
+            .unwrap();
+        let token = generate_valid_token(&signing_key, "google-ai.tuning.create");
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "google-ai.tuning.create",
+                "input": {
+                    "source_model": "models/gemini-1.5-flash-001",
+                    "tuning_task": {
+                        "training_data": {
+                            "examples": []
+                        }
+                    }
+                },
+                "capability_token": token
+            }))
+            .await;
+
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("at least one example"));
+            }
+            other => panic!("Expected InvalidRequest, got: {other:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_tuning_dangerous_ops_require_approval_metadata() {
+        let connector = GoogleAiConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        for id in ["google-ai.tuning.create", "google-ai.tuning.cancel"] {
+            let op = ops
+                .iter()
+                .find(|op| op["id"] == id)
+                .unwrap_or_else(|| panic!("missing op {id}"));
+            assert_eq!(op["requires_approval"], "elevation_token");
+        }
     }
 
     #[test]

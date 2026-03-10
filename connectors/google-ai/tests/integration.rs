@@ -1627,14 +1627,33 @@ async fn shutdown_then_reinvoke() {
     let _ = signing_key;
 }
 
-/// Introspect returns all 8 operations with correct structure.
+/// Introspect returns the full operation catalog with correct structure.
 #[fcp_async_core::runtime::test]
 async fn introspect_returns_complete_operation_catalog() {
     let connector = GoogleAiConnector::new();
     let result = connector.handle_introspect().await.unwrap();
 
     let ops = result["operations"].as_array().unwrap();
-    assert_eq!(ops.len(), 8, "should have 8 operations");
+    assert_eq!(ops.len(), 13, "should have 13 operations");
+
+    let op_ids: Vec<&str> = ops.iter().filter_map(|op| op["id"].as_str()).collect();
+    for expected in [
+        "google-ai.generate_content",
+        "google-ai.generate_content_stream",
+        "google-ai.embed_content",
+        "google-ai.batch_embed_contents",
+        "google-ai.count_tokens",
+        "google-ai.list_models",
+        "google-ai.get_model",
+        "google-ai.tuning.create",
+        "google-ai.tuning.list",
+        "google-ai.tuning.get",
+        "google-ai.tuning.get_operation",
+        "google-ai.tuning.cancel",
+        "google-ai.get_usage",
+    ] {
+        assert!(op_ids.contains(&expected), "missing operation {expected}");
+    }
 
     for op in ops {
         assert!(op["id"].is_string(), "each op should have an id");
@@ -1959,4 +1978,86 @@ async fn invoke_list_models_with_page_size() {
     let models = result["models"].as_array().unwrap();
     assert_eq!(models.len(), 1);
     assert!(result["nextPageToken"].is_string());
+}
+
+/// google-ai.tuning.create returns a long-running operation with provenance.
+#[fcp_async_core::runtime::test]
+async fn invoke_tuning_create_returns_operation() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1beta/tunedModels"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "name": "tunedModels/support-bot/operations/op-123",
+            "done": false,
+            "metadata": { "state": "PENDING" }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = GoogleAiConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1beta", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["google-ai.tuning.create"]).await;
+    let token = generate_valid_token(&signing_key, "google-ai.tuning.create");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "google-ai.tuning.create",
+            "input": {
+                "tuned_model_id": "support-bot",
+                "source_model": "models/gemini-1.5-flash-001",
+                "tuning_task": {
+                    "training_data": {
+                        "examples": [
+                            {
+                                "text_input": "refund request",
+                                "output": "billing"
+                            }
+                        ]
+                    }
+                }
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["name"], "tunedModels/support-bot/operations/op-123");
+    assert_eq!(result["provenance"]["action"], "tuning.create");
+}
+
+/// google-ai.tuning.cancel returns a structured cancel acknowledgement.
+#[fcp_async_core::runtime::test]
+async fn invoke_tuning_cancel_returns_acknowledgement() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path(
+            "/v1beta/tunedModels/support-bot/operations/op-123:cancel",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = GoogleAiConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1beta", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["google-ai.tuning.cancel"]).await;
+    let token = generate_valid_token(&signing_key, "google-ai.tuning.cancel");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "google-ai.tuning.cancel",
+            "input": {
+                "operation": "tunedModels/support-bot/operations/op-123"
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["status"], "cancel_requested");
+    assert_eq!(
+        result["operation"],
+        "tunedModels/support-bot/operations/op-123"
+    );
 }

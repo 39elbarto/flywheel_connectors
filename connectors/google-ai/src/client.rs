@@ -9,14 +9,17 @@ use std::sync::Arc;
 
 use fcp_core::CredentialId;
 use parking_lot::Mutex;
-use reqwest::{Client, StatusCode};
+use reqwest::{Client, StatusCode, Url};
 use tracing::{debug, warn};
 
 use crate::{
     error::{GoogleAiError, GoogleAiResult},
     types::{
-        ApiErrorResponse, BatchEmbedContentsResponse, CountTokensResponse, EmbedContentResponse,
-        GenerateContentResponse, ListModelsResponse, ModelInfo, UsageCounters, UsageMetadata,
+        ApiErrorResponse, BatchEmbedContentsResponse, CancelTuningOperationRequest,
+        CountTokensResponse, CreateTunedModelRequest, EmbedContentResponse,
+        GenerateContentResponse, GetTunedModelRequest, GetTuningOperationRequest,
+        ListModelsResponse, ListTunedModelsRequest, ListTunedModelsResponse, ModelInfo, TunedModel,
+        TuningOperation, UsageCounters, UsageMetadata,
     },
 };
 
@@ -105,12 +108,39 @@ impl GoogleAiClient {
 
     /// Build a URL, appending the API key as a query parameter when in direct mode.
     fn url(&self, path: &str) -> String {
-        match &self.auth {
-            GoogleAiAuth::ApiKey(key) => {
-                format!("{}/{path}?key={key}", self.base_url)
+        self.url_with_query(path, &[])
+    }
+
+    /// Build a URL with additional query pairs.
+    fn url_with_query(&self, path: &str, query: &[(&str, String)]) -> String {
+        let raw = format!(
+            "{}/{}",
+            self.base_url.trim_end_matches('/'),
+            path.trim_start_matches('/')
+        );
+
+        match Url::parse(&raw) {
+            Ok(mut url) => {
+                {
+                    let mut pairs = url.query_pairs_mut();
+                    if let GoogleAiAuth::ApiKey(key) = &self.auth {
+                        pairs.append_pair("key", key);
+                    }
+                    for (name, value) in query {
+                        pairs.append_pair(name, value);
+                    }
+                }
+                url.to_string()
             }
-            GoogleAiAuth::CredentialId(_) => {
-                format!("{}/{path}", self.base_url)
+            Err(_) => {
+                let mut url = raw;
+                if let GoogleAiAuth::ApiKey(key) = &self.auth {
+                    url = append_query_param(url, "key", key);
+                }
+                for (name, value) in query {
+                    url = append_query_param(url, name, value);
+                }
+                url
             }
         }
     }
@@ -147,7 +177,8 @@ impl GoogleAiClient {
         model: &str,
         body: &serde_json::Value,
     ) -> GoogleAiResult<GenerateContentResponse> {
-        let url = self.url(&format!("models/{model}:generateContent"));
+        let resource = normalize_generation_resource(model);
+        let url = self.url(&format!("{resource}:generateContent"));
         let data = self.post_json(&url, body).await;
         self.record_request(data.is_ok());
         let data = data?;
@@ -162,7 +193,8 @@ impl GoogleAiClient {
         model: &str,
         body: &serde_json::Value,
     ) -> GoogleAiResult<Vec<GenerateContentResponse>> {
-        let url = self.url(&format!("models/{model}:streamGenerateContent"));
+        let resource = normalize_generation_resource(model);
+        let url = self.url(&format!("{resource}:streamGenerateContent"));
         // The streaming endpoint returns an array of response chunks when
         // called without SSE (alt=sse). We parse the entire response as JSON array.
         let data = self.post_json(&url, body).await;
@@ -221,7 +253,8 @@ impl GoogleAiClient {
         model: &str,
         body: &serde_json::Value,
     ) -> GoogleAiResult<CountTokensResponse> {
-        let url = self.url(&format!("models/{model}:countTokens"));
+        let resource = normalize_generation_resource(model);
+        let url = self.url(&format!("{resource}:countTokens"));
         let data = self.post_json(&url, body).await;
         self.record_request(data.is_ok());
         let data = data?;
@@ -236,13 +269,14 @@ impl GoogleAiClient {
         page_size: Option<u32>,
         page_token: Option<&str>,
     ) -> GoogleAiResult<ListModelsResponse> {
-        let mut url = self.url("models");
+        let mut query = Vec::new();
         if let Some(ps) = page_size {
-            url = format!("{url}&pageSize={ps}");
+            query.push(("pageSize", ps.to_string()));
         }
         if let Some(pt) = page_token {
-            url = format!("{url}&pageToken={pt}");
+            query.push(("pageToken", pt.to_string()));
         }
+        let url = self.url_with_query("models", &query);
         let data = self.get(&url).await;
         self.record_request(data.is_ok());
         let data = data?;
@@ -251,11 +285,90 @@ impl GoogleAiClient {
 
     /// Get a specific model.
     pub async fn get_model(&self, model: &str) -> GoogleAiResult<ModelInfo> {
-        let url = self.url(&format!("models/{model}"));
+        let url = self.url(&normalize_model_resource(model));
         let data = self.get(&url).await;
         self.record_request(data.is_ok());
         let data = data?;
         Ok(serde_json::from_value(data)?)
+    }
+
+    /// Create a new tuned model training job.
+    pub async fn create_tuned_model(
+        &self,
+        request: &CreateTunedModelRequest,
+    ) -> GoogleAiResult<TuningOperation> {
+        let query = request
+            .tuned_model_id
+            .as_ref()
+            .map(|id| vec![("tunedModelId", id.clone())])
+            .unwrap_or_default();
+        let url = self.url_with_query("tunedModels", &query);
+        let mut body = serde_json::to_value(request)?;
+        if let Some(map) = body.as_object_mut() {
+            map.remove("tunedModelId");
+        }
+        let data = self.post_json(&url, &body).await;
+        self.record_request(data.is_ok());
+        let data = data?;
+        Ok(serde_json::from_value(data)?)
+    }
+
+    /// List tuned models.
+    pub async fn list_tuned_models(
+        &self,
+        request: &ListTunedModelsRequest,
+    ) -> GoogleAiResult<ListTunedModelsResponse> {
+        let mut query = Vec::new();
+        if let Some(page_size) = request.page_size {
+            query.push(("pageSize", page_size.to_string()));
+        }
+        if let Some(page_token) = &request.page_token {
+            query.push(("pageToken", page_token.clone()));
+        }
+        let url = self.url_with_query("tunedModels", &query);
+        let data = self.get(&url).await;
+        self.record_request(data.is_ok());
+        let data = data?;
+        Ok(serde_json::from_value(data)?)
+    }
+
+    /// Fetch one tuned model.
+    pub async fn get_tuned_model(
+        &self,
+        request: &GetTunedModelRequest,
+    ) -> GoogleAiResult<TunedModel> {
+        let resource = normalize_tuned_model_resource(&request.tuned_model);
+        let url = self.url(&resource);
+        let data = self.get(&url).await;
+        self.record_request(data.is_ok());
+        let data = data?;
+        Ok(serde_json::from_value(data)?)
+    }
+
+    /// Fetch the status of a long-running tuning operation.
+    pub async fn get_tuning_operation(
+        &self,
+        request: &GetTuningOperationRequest,
+    ) -> GoogleAiResult<TuningOperation> {
+        let resource = normalize_tuning_operation_resource(&request.operation);
+        let url = self.url(&resource);
+        let data = self.get(&url).await;
+        self.record_request(data.is_ok());
+        let data = data?;
+        Ok(serde_json::from_value(data)?)
+    }
+
+    /// Cancel a long-running tuning operation.
+    pub async fn cancel_tuning_operation(
+        &self,
+        request: &CancelTuningOperationRequest,
+    ) -> GoogleAiResult<()> {
+        let resource = normalize_tuning_operation_resource(&request.operation);
+        let url = self.url(&format!("{resource}:cancel"));
+        let data = self.post_json(&url, &serde_json::json!({})).await;
+        self.record_request(data.is_ok());
+        data?;
+        Ok(())
     }
 
     /// Perform a safe, read-only health check by listing models.
@@ -413,12 +526,52 @@ impl GoogleAiClient {
     }
 }
 
+fn append_query_param(mut url: String, name: &str, value: &str) -> String {
+    let separator = if url.contains('?') { '&' } else { '?' };
+    url.push(separator);
+    url.push_str(name);
+    url.push('=');
+    url.push_str(value);
+    url
+}
+
+fn normalize_generation_resource(model: &str) -> String {
+    let trimmed = model.trim().trim_start_matches('/');
+    if trimmed.starts_with("models/") || trimmed.starts_with("tunedModels/") {
+        trimmed.to_string()
+    } else {
+        format!("models/{trimmed}")
+    }
+}
+
+fn normalize_model_resource(model: &str) -> String {
+    let trimmed = model.trim().trim_start_matches('/');
+    if trimmed.starts_with("models/") {
+        trimmed.to_string()
+    } else {
+        format!("models/{trimmed}")
+    }
+}
+
+fn normalize_tuned_model_resource(name: &str) -> String {
+    let trimmed = name.trim().trim_start_matches('/');
+    if trimmed.starts_with("tunedModels/") {
+        trimmed.to_string()
+    } else {
+        format!("tunedModels/{trimmed}")
+    }
+}
+
+fn normalize_tuning_operation_resource(name: &str) -> String {
+    name.trim().trim_start_matches('/').to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
-        matchers::{method, path},
+        matchers::{method, path, query_param},
     };
 
     #[fcp_async_core::runtime::test]
@@ -557,6 +710,27 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn test_list_models_credential_id_uses_proper_query_separator() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/v1beta/models"))
+            .and(query_param("pageSize", "5"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "models": []
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = GoogleAiClient::new_with_auth(GoogleAiAuth::CredentialId(CredentialId::new()))
+            .unwrap()
+            .with_base_url(&format!("{}/v1beta", mock_server.uri()));
+
+        let resp = client.list_models(Some(5), None).await.unwrap();
+        assert!(resp.models.is_empty());
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn test_get_model() {
         let mock_server = MockServer::start().await;
 
@@ -579,6 +753,163 @@ mod tests {
         let model = client.get_model("gemini-2.0-flash").await.unwrap();
         assert_eq!(model.name, "models/gemini-2.0-flash");
         assert_eq!(model.input_token_limit, Some(1_048_576));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_generate_content_supports_tuned_model_resources() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1beta/tunedModels/support-bot:generateContent"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "candidates": [{
+                    "content": {"parts": [{"text": "hello"}], "role": "model"}
+                }]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = GoogleAiClient::new("test-key")
+            .unwrap()
+            .with_base_url(&format!("{}/v1beta", mock_server.uri()));
+
+        let body = serde_json::json!({
+            "contents": [{"role": "user", "parts": [{"text": "hi"}]}]
+        });
+        let response = client
+            .generate_content("tunedModels/support-bot", &body)
+            .await
+            .unwrap();
+        assert_eq!(response.candidates.len(), 1);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_create_tuned_model() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1beta/tunedModels"))
+            .and(query_param("tunedModelId", "support-bot"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "name": "tunedModels/support-bot/operations/op-123",
+                "done": false,
+                "metadata": {
+                    "state": "PENDING"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = GoogleAiClient::new("test-key")
+            .unwrap()
+            .with_base_url(&format!("{}/v1beta", mock_server.uri()));
+
+        let request = CreateTunedModelRequest {
+            tuned_model_id: Some("support-bot".into()),
+            display_name: Some("Support Bot".into()),
+            description: None,
+            source_model: "models/gemini-1.5-flash-001".into(),
+            tuning_task: crate::types::TuningTaskConfig {
+                training_data: crate::types::TuningDataset {
+                    examples: vec![crate::types::TuningExample {
+                        text_input: "refund request".into(),
+                        output: "billing".into(),
+                    }],
+                },
+                hyperparameters: None,
+            },
+        };
+
+        let operation = client.create_tuned_model(&request).await.unwrap();
+        assert_eq!(operation.name, "tunedModels/support-bot/operations/op-123");
+        assert!(!operation.done);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_list_tuned_models() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/v1beta/tunedModels"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "tunedModels": [
+                    {
+                        "name": "tunedModels/support-bot",
+                        "displayName": "Support Bot",
+                        "state": "ACTIVE"
+                    }
+                ]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = GoogleAiClient::new("test-key")
+            .unwrap()
+            .with_base_url(&format!("{}/v1beta", mock_server.uri()));
+
+        let response = client
+            .list_tuned_models(&ListTunedModelsRequest::default())
+            .await
+            .unwrap();
+        assert_eq!(response.tuned_models.len(), 1);
+        assert_eq!(response.tuned_models[0].name, "tunedModels/support-bot");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_get_tuning_operation() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/v1beta/tunedModels/support-bot/operations/op-123"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "name": "tunedModels/support-bot/operations/op-123",
+                "done": true,
+                "response": {
+                    "name": "tunedModels/support-bot"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = GoogleAiClient::new("test-key")
+            .unwrap()
+            .with_base_url(&format!("{}/v1beta", mock_server.uri()));
+
+        let response = client
+            .get_tuning_operation(&GetTuningOperationRequest {
+                operation: "tunedModels/support-bot/operations/op-123".into(),
+            })
+            .await
+            .unwrap();
+        assert!(response.done);
+        assert_eq!(
+            response.response.unwrap()["name"],
+            "tunedModels/support-bot"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_cancel_tuning_operation() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path(
+                "/v1beta/tunedModels/support-bot/operations/op-123:cancel",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&mock_server)
+            .await;
+
+        let client = GoogleAiClient::new("test-key")
+            .unwrap()
+            .with_base_url(&format!("{}/v1beta", mock_server.uri()));
+
+        client
+            .cancel_tuning_operation(&CancelTuningOperationRequest {
+                operation: "tunedModels/support-bot/operations/op-123".into(),
+            })
+            .await
+            .unwrap();
     }
 
     #[fcp_async_core::runtime::test]

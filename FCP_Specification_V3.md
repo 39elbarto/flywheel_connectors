@@ -113,6 +113,137 @@ and routing substrate. Every participating node possesses an authenticated devic
 owner-trusted attestation binding device identity to its issuance and encryption roles. Placement,
 lease coordination, object repair, and checkpoint propagation all rely on authenticated node identity.
 
+### 2.2.1 Mesh Identity and Node Attestation
+
+Every node participating in FCP MUST present a mesh identity record and an owner-trusted attestation
+that binds the tailnet identity to the cryptographic roles the node is allowed to perform.
+
+```rust
+pub struct MeshIdentity {
+    pub node_id: NodeId,
+    pub hostname: String,
+    pub ips: Vec<IpAddr>,
+    pub tags: Vec<String>,
+    pub owner_pubkey: PublicKey,
+    pub node_sig_pubkey: PublicKey,
+    pub node_sig_kid: [u8; 8],
+    pub node_enc_pubkey: X25519PublicKey,
+    pub node_enc_kid: [u8; 8],
+    pub node_iss_pubkey: PublicKey,
+    pub node_iss_kid: [u8; 8],
+    pub node_attestation: NodeKeyAttestation,
+}
+
+pub struct NodeKeyAttestation {
+    pub header: ObjectHeader,
+    pub node_id: NodeId,
+    pub owner_pubkey: PublicKey,
+    pub node_sig_pubkey: PublicKey,
+    pub node_sig_kid: [u8; 8],
+    pub node_enc_pubkey: X25519PublicKey,
+    pub node_enc_kid: [u8; 8],
+    pub node_iss_pubkey: PublicKey,
+    pub node_iss_kid: [u8; 8],
+    pub tags: Vec<String>,
+    pub issued_at: u64,
+    pub expires_at: u64,
+    pub attestation_nonce: [u8; 32],
+    pub device_posture: Option<DevicePostureAttestation>,
+    pub signature: Signature,
+}
+
+pub struct DevicePostureAttestation {
+    pub kind: DevicePostureKind,
+    pub payload: Vec<u8>,
+    pub issued_at: u64,
+    pub expires_at: u64,
+    pub nonce: [u8; 32],
+}
+
+pub enum DevicePostureKind {
+    TpmQuote,
+    SecureEnclave,
+    AndroidKeystore,
+    Custom(String),
+}
+```
+
+Normative validation requirements:
+
+1. `NodeKeyAttestation.signature` MUST verify under `owner_pubkey`.
+2. `expires_at` MUST be present and MUST be strictly greater than `issued_at`.
+3. Implementations MUST reject attestations that are expired or outside tolerated clock-skew policy.
+4. `tags` MUST use canonical identifier syntax and MUST be validated before policy application.
+5. All `*_kid` values MUST be derived from the corresponding public key via explicit domain-separated hash.
+6. If `device_posture` is required by zone or host policy, absence or expiry of the posture evidence MUST cause rejection.
+7. The attestation MUST bind all three node key roles together so that signing, encryption, and issuance functions can be revoked independently while still being attributable to the same device identity.
+
+Recommended operational guidance:
+
+- Posture attestations SHOULD have short lifetimes.
+- Node issuance keys SHOULD rotate more frequently than node signing keys.
+- High-trust zones SHOULD require stronger posture evidence and shorter attestation freshness windows.
+
+### 2.2.2 Threshold Owner Signing
+
+The owner public key is the root trust anchor for zone definitions, policy, device attestation,
+revocation authority, and supply-chain trust policy. Implementations SHOULD support threshold
+production of signatures so that no single device is required to hold the complete owner private key.
+
+```rust
+pub struct OwnerKeyPolicy {
+    pub scheme: OwnerKeyScheme,
+    pub threshold_k: u8,
+    pub total_n: u8,
+    pub participants: Vec<NodeId>,
+    pub max_skew_secs: u64,
+}
+
+pub enum OwnerKeyScheme {
+    Single,
+    Threshold,
+}
+
+pub struct OwnerKeyShare {
+    pub header: ObjectHeader,
+    pub share_id: u8,
+    pub node_id: NodeId,
+    pub sealed_share: HpkeSealedBox,
+    pub issued_at: u64,
+    pub signature: Signature,
+}
+```
+
+Threshold production is RECOMMENDED because it materially improves:
+
+- compromise resistance,
+- device-loss tolerance,
+- revocation and recovery workflows,
+- consistency of incident response across the mesh.
+
+The verification surface remains an ordinary owner signature. The mechanism used to produce the
+signature MUST NOT affect the verifiability or canonical encoding of the signed object.
+
+### 2.2.3 Key Role Separation and Rotation
+
+FCP distinguishes the following key roles:
+
+1. owner signing key,
+2. node signing key,
+3. node encryption key,
+4. node issuance key,
+5. zone encryption keys,
+6. object-identifier privacy keying material where deployed.
+
+Normative rules:
+
+1. Owner signing keys MUST NOT be used as online node keys.
+2. Node issuance keys MUST be independently revocable from node signing keys.
+3. Node encryption keys MUST be used only for sealed distribution of secrets, zone keys, or other wrapped material.
+4. Zone encryption keys MUST be replaceable without changing owner or node identities.
+5. Rotation events MUST be represented as durable objects referenced by checkpoints or revocation heads.
+6. Key-role confusion MUST be treated as a security incident.
+
 ### 2.3 Explicit Authority
 
 No connector, worker, or handler runs with ambient authority. The only authority available to code is
@@ -739,6 +870,70 @@ pub struct ZonePolicyObject {
 
 Zone policy changes MUST be durable, signed, and checkpointed.
 
+#### 5.2.1 Zone Structure and Transport Policy
+
+Zone definitions SHOULD carry enough structure for hosts, planners, and repair logic to make
+deterministic decisions without consulting ad hoc side channels.
+
+```rust
+pub struct ZoneDefinitionObjectV3 {
+    pub header: ObjectHeader,
+    pub zone_id: ZoneId,
+    pub name: String,
+    pub integrity_level: u8,
+    pub confidentiality_level: u8,
+    pub symbol_port: u16,
+    pub control_port: u16,
+    pub transport_policy: Option<ZoneTransportPolicy>,
+    pub policy_object_id: ObjectId,
+    pub prev: Option<ObjectId>,
+    pub signature: Signature,
+}
+
+pub struct ZoneTransportPolicy {
+    pub allow_derp: bool,
+    pub allow_funnel: bool,
+    pub allow_lan_broadcast: bool,
+}
+```
+
+Normative rules:
+
+1. Zone semantics MUST be enforced using explicit numeric and object-based policy, not only zone names.
+2. Child zones MUST NOT exceed their parent zone's integrity or confidentiality ceilings.
+3. Transport policy MUST be treated as defense-in-depth; it supplements but does not replace capability and provenance enforcement.
+4. Policy objects referenced by a zone definition MUST be checkpoint-visible so rollback and staleness are detectable.
+
+#### 5.2.2 Zone Key Manifests and Rotation
+
+Zone encryption keys and object-identifier privacy keying material SHOULD be distributed through
+explicit manifests rather than hidden runtime state.
+
+```rust
+pub struct ZoneKeyManifest {
+    pub header: ObjectHeader,
+    pub zone_id: ZoneId,
+    pub zone_key_id: [u8; 8],
+    pub valid_from: u64,
+    pub valid_until: Option<u64>,
+    pub prev_zone_key_id: Option<[u8; 8]>,
+    pub wrapped_keys: Vec<WrappedZoneKey>,
+    pub signature: Signature,
+}
+
+pub struct WrappedZoneKey {
+    pub node_id: NodeId,
+    pub node_enc_kid: [u8; 8],
+    pub sealed_key: HpkeSealedBox,
+}
+```
+
+Normative rules:
+
+1. Zone key rotation MUST be representable as durable state so it can participate in replay, repair, and incident response.
+2. Manifest overlap windows MUST be bounded.
+3. Device removal SHOULD trigger zone key rotation for affected zones.
+
 ### 5.3 Provenance Model
 
 Every request and every durable output MAY carry provenance. Risky and dangerous operations MUST carry it.
@@ -858,6 +1053,67 @@ pub struct SanitizerReceipt {
 Approvals MUST be encoded as durable objects and referenced by object identifier, not treated as
 ambient runtime flags. Elevation, declassification, and execution override SHOULD reuse one durable
 approval object family with distinct scopes rather than multiplying bespoke token types.
+
+#### 5.4.2 Approval Scopes and Constraint Grammar
+
+Approval objects SHOULD use a structured scope model so that operators and agents can reason about
+exactly what was approved.
+
+```rust
+pub enum ApprovalScope {
+    Elevation {
+        operation: OperationId,
+        original_provenance: Provenance,
+    },
+    Declassification {
+        from_zone: ZoneId,
+        to_zone: ZoneId,
+        object_ids: Vec<ObjectId>,
+    },
+    Execution {
+        connector_id: ConnectorId,
+        method_pattern: String,
+        request_object_id: Option<ObjectId>,
+        input_hash: Option<[u8; 32]>,
+        input_constraints: Vec<InputConstraint>,
+    },
+}
+
+pub struct InputConstraint {
+    pub json_pointer: String,
+    pub op: ConstraintOp,
+    pub value: CborValue,
+}
+
+pub enum ConstraintOp {
+    Eq,
+    Neq,
+    In,
+    NotIn,
+    Prefix,
+    Suffix,
+    Contains,
+}
+```
+
+Normative rules:
+
+1. Interactive approval for risky or dangerous execution SHOULD bind to a specific request object whenever feasible.
+2. `method_pattern` MUST use a restricted anchored glob grammar rather than general regular expressions.
+3. `json_pointer` MUST follow RFC 6901 semantics strictly.
+4. If `input_hash` is absent, `input_constraints` MUST be non-empty.
+5. Approval objects MUST be bounded in size and complexity to resist approval-surface DoS.
+
+#### 5.4.3 Sanitizer Verification
+
+Sanitizer receipts MUST be verifiable against both the sanitizer capability and the transformed data.
+
+Recommended verification steps:
+
+1. verify sanitizer capability and token freshness,
+2. verify input and output object references,
+3. verify declared taints cleared are a subset of what the sanitizer is trusted to clear,
+4. retain the receipt in evidence bundles when a high-risk action depends on it.
 
 ### 5.5 Capabilities and Tokens
 
@@ -1016,6 +1272,38 @@ JSON encodings. Private claims MAY be used for FCP-specific fields such as `gran
 checkpoint binding, and binary audience binding, provided the encoding remains deterministic and
 interoperable.
 
+#### 5.5.6 CapabilityToken Claim Map and Verification
+
+Capability tokens SHOULD use a stable claim map so that cross-language verifiers can interoperate.
+
+Recommended claim mapping:
+
+| Claim | Meaning |
+|-------|---------|
+| `iss` | issuing zone |
+| `sub` | principal subject |
+| `aud` | connector audience |
+| `iat` | issued-at time |
+| `exp` | expiry time |
+| `cti` | token identifier |
+| `fcp.iss_node` | issuing node |
+| `fcp.grant_object_ids` | referenced capability grants |
+| `fcp.attenuation` | optional further constraints |
+| `fcp.holder_node` | proof-of-possession holder |
+| `fcp.checkpoint_id` | zone-checkpoint binding |
+| `fcp.checkpoint_seq` | checkpoint sequence binding |
+| `fcp.aud_binary` | optional artifact or binary audience |
+
+Recommended verification order:
+
+1. verify protected headers and signing key identity,
+2. verify token signature,
+3. verify temporal validity with skew policy,
+4. verify audience and, where present, binary audience,
+5. verify referenced grant objects and attenuation monotonicity,
+6. verify checkpoint or revocation freshness constraints,
+7. verify proof-of-possession requirements if `holder_node` is present.
+
 ### 5.6 Network Guard and Secret Use
 
 Connectors SHOULD receive secrets through mediated injection rather than raw persistent credentials.
@@ -1090,6 +1378,17 @@ Normative rules:
 
 Secrets MUST NOT be persisted to disk by default. If a connector requires durable secret storage,
 the storage class and zeroization strategy MUST be declared in the manifest and permitted by policy.
+
+#### 5.6.3 Credential Injection and Zero-Persistence Rules
+
+Credential delivery SHOULD prefer mediated application of credentials over disclosure of raw secret bytes.
+
+Normative rules:
+
+1. Connectors MUST NOT persist injected credentials unless explicit policy and storage class allow it.
+2. Secret material SHOULD be materialized only for the shortest feasible duration and zeroized promptly after use.
+3. Network Guard or equivalent mediation SHOULD support host-side injection for HTTP headers, OAuth bearer tokens, or mTLS material without revealing the underlying secret to connector logs or state snapshots.
+4. Test harnesses MUST include cases that prove secrets are absent from logs, evidence bundles, and crash artifacts by default.
 
 ## 6. Durable Object and Evidence Model
 
@@ -1243,6 +1542,21 @@ Tokens, checkpoints, and high-safety operations SHOULD bind to revocation freshn
 checkpoint sequence or revocation-head sequence. Dangerous operations MUST NOT proceed when
 revocation state is known stale beyond policy tolerance.
 
+#### 6.4.2 Revocation Enforcement Order
+
+Implementations SHOULD enforce revocations in a deterministic order so that the same stale or revoked
+artifact produces the same denial evidence everywhere.
+
+Recommended order:
+
+1. direct token or lease revocation,
+2. issuer-key or attestation revocation,
+3. connector artifact or manifest revocation,
+4. zone-policy or checkpoint freshness failure causing effective revocation of stale authority.
+
+If multiple revocations apply, the evidence surface SHOULD identify the first decisive revocation plus
+additional corroborating revocation objects.
+
 ### 6.5 Zone Checkpoints
 
 The enforceable state of a zone is summarized by checkpoints:
@@ -1264,6 +1578,17 @@ pub struct ZoneCheckpoint {
 ```
 
 Zone checkpoints MUST be used for sync, rollback detection, and failover safety.
+
+#### 6.5.1 Checkpoint Comparison and Fork Detection
+
+Checkpoint comparison SHOULD support fast freshness reasoning plus explicit fork detection.
+
+Normative rules:
+
+1. A higher `checkpoint_seq` MUST dominate a lower sequence only if the checkpoint also validates under current trust and revocation rules.
+2. If two distinct checkpoints claim the same `checkpoint_seq` for a zone, the implementation MUST treat that as a fork until reconciled.
+3. Forks MUST be visible to operators and SHOULD block dangerous execution unless policy explicitly allows degraded operation.
+4. Sync protocols SHOULD compare checkpoint summaries before attempting larger object reconciliation.
 
 ## 7. Host Model
 
@@ -1309,6 +1634,40 @@ Normative rules:
 2. Host shutdown MUST drain or explicitly cancel child applications according to declared policy.
 3. A connector crash loop MUST be surfaced as health degradation and MAY trigger rollback or demotion.
 4. Repairs, replay, and revocation updates MAY continue in background host regions, but only as supervised child services.
+
+### 7.3.1 Activation Requirements
+
+Before a connector may transition into `Active`, the host MUST confirm:
+
+1. manifest extraction succeeded without executing the connector,
+2. interface hash matches the signed and policy-pinned expectation,
+3. supply-chain policy is satisfied,
+4. required provisioning steps have completed successfully,
+5. required zone and capability policy objects are fresh enough,
+6. any mandatory secrets or wrapped credentials are available in the required execution environment,
+7. placement policy produced an admissible target with required storage, network, and isolation properties,
+8. the chosen execution form is compatible with the local platform and policy.
+
+The host SHOULD materialize an activation-plan object or equivalent evidence record summarizing the
+inputs that justified activation. When activation fails, the host MUST emit a denial or failure artifact
+with stable reason codes rather than only ephemeral logs.
+
+### 7.3.2 Updates, Rollback, and Demotion
+
+Connector updates are ordinary lifecycle events and MUST be policy-governed. The host SHOULD support:
+
+- staged rollout by connector family or zone,
+- health-gated promotion,
+- automatic rollback on crash-loop or policy regression,
+- demotion to a less privileged or less preferred placement when a full rollback is unnecessary.
+
+Normative rules:
+
+1. A new connector artifact MUST pass the same activation checks as a first install.
+2. Rollback MUST refer to a previously verified artifact and manifest pair; ad hoc fallback binaries are forbidden.
+3. Rollback or demotion decisions MUST be explainable to operators and retain evidence linking observed failure to the chosen remediation.
+4. In-flight work MUST be drained, cancelled, checkpointed, or explicitly failed according to operation policy before replacement.
+5. Risky and dangerous connectors SHOULD default to staged rollout with health observation before wide activation.
 
 ### 7.4 Operator Surfaces
 
@@ -1428,6 +1787,28 @@ Normative rules:
 3. Resource declarations SHOULD be used wherever external resources can be referenced durably.
 4. Recovery hints MAY assist operator surfaces, but MUST NOT replace structured reason codes.
 
+### 8.3.2 `simulate` and Introspection Contracts
+
+Connectors SHOULD expose a meaningful `simulate` surface for any operation that is risky, dangerous,
+externally expensive, or likely to fail due to policy or provider conditions.
+
+Recommended `simulate` guarantees:
+
+1. no externally visible writes,
+2. bounded remote reads only when necessary,
+3. explicit reporting of missing capability, approval, credential, or provider-availability preconditions,
+4. optional cost, size, or latency estimates.
+
+The `introspect` surface SHOULD report:
+
+- operation schemas,
+- safety tier,
+- approval mode,
+- idempotency class,
+- replay semantics,
+- provider-specific limits and hints,
+- whether checkpoint or resume is supported.
+
 ### 8.4 Connector State
 
 Canonical connector state is durable and externalized:
@@ -1496,6 +1877,71 @@ Normative rules:
 4. Competing writes with stale or conflicting lease sequence values MUST be treated as safety incidents.
 5. CRDT connectors MUST define merge semantics that are deterministic under canonical serialization.
 
+### 8.4.1 Operation Intent and Receipt Objects
+
+Operations with strong idempotency or externally visible risky effects SHOULD externalize intent before
+the side effect and receipt after completion.
+
+```rust
+pub struct OperationIntentV3 {
+    pub header: ObjectHeader,
+    pub request_object_id: ObjectId,
+    pub connector_id: ConnectorId,
+    pub operation_id: OperationId,
+    pub capability_token_jti: [u8; 16],
+    pub idempotency_key: Option<String>,
+    pub planned_at: u64,
+    pub planned_by: NodeId,
+    pub lease_seq: Option<u64>,
+    pub upstream_idempotency: Option<String>,
+    pub signature: Signature,
+}
+
+pub struct OperationReceiptV3 {
+    pub header: ObjectHeader,
+    pub request_object_id: ObjectId,
+    pub connector_id: ConnectorId,
+    pub operation_id: OperationId,
+    pub zone_id: ZoneId,
+    pub outcome: ReceiptOutcome,
+    pub result_object_id: Option<ObjectId>,
+    pub resource_object_ids: Vec<ObjectId>,
+    pub executed_at: u64,
+    pub executed_by: NodeId,
+    pub signature: Signature,
+}
+```
+
+Normative rules:
+
+1. Dangerous operations MUST externalize intent before side effects when the operation is restartable or retryable.
+2. The receipt MUST reference enough evidence to prove whether the side effect committed.
+3. Crash recovery MUST check for intents without receipts and treat them as potentially incomplete work rather than blindly retrying.
+
+### 8.4.2 Stream Cursors and Replay Positions
+
+Streaming, polling, queue, and webhook connectors SHOULD externalize cursor or replay state if loss
+or duplication would materially affect correctness.
+
+```rust
+pub struct CursorStateObject {
+    pub header: ObjectHeader,
+    pub connector_id: ConnectorId,
+    pub stream_id: String,
+    pub ordering_scope: OrderingScope,
+    pub last_acknowledged_seq: u64,
+    pub opaque_cursor: Option<Vec<u8>>,
+    pub updated_at: u64,
+    pub signature: Signature,
+}
+```
+
+Normative rules:
+
+1. Replayable connectors MUST define what constitutes the cursor and how it composes with sequence identity.
+2. Cursor updates relevant to failover MUST be durable.
+3. Resume logic MUST NOT guess a cursor from logs when a durable cursor object is required by the connector contract.
+
 ### 8.5 Connector Resources and Handles
 
 Where an external resource can be represented durably, connectors SHOULD use `ResourceObject`
@@ -1532,6 +1978,42 @@ The standard connector surface includes:
 
 Connectors MAY expose additional domain-specific methods, but the host MUST be able to supervise the
 application using the standard lifecycle surface alone.
+
+### 8.6.2 Health and Introspection Payloads
+
+Health surfaces SHOULD be rich enough for both automation and human diagnosis.
+
+```rust
+pub struct ConnectorHealth {
+    pub connector_id: ConnectorId,
+    pub state: String,
+    pub reason_code: Option<String>,
+    pub last_checkpoint: Option<ObjectId>,
+    pub last_success_at: Option<u64>,
+    pub inflight_requests: u32,
+    pub degraded_mode: bool,
+}
+```
+
+The host SHOULD be able to distinguish:
+
+- ready but idle,
+- active and healthy,
+- degraded but serving,
+- draining,
+- failed with retry planned,
+- failed permanently pending operator intervention.
+
+### 8.6.3 Shutdown and Drain Semantics
+
+`shutdown` MUST begin a bounded drain protocol rather than best-effort process termination.
+
+Normative rules:
+
+1. New externally visible work MUST stop being admitted once drain begins unless explicit takeover policy says otherwise.
+2. In-flight work MUST either complete, checkpoint, or fail with durable evidence.
+3. Long-lived streams MUST surface progress toward quiescence.
+4. Host and connector MUST agree on when a drain has reached safe handoff or safe termination.
 
 ## 9. Control, Data, and Evidence Plane
 
@@ -1894,6 +2376,111 @@ Live sessions MUST establish:
 
 A connector MUST reject a live session if host-declared expectations exceed manifest or policy limits.
 
+### 9.7.2 Mesh Session Authentication
+
+FCPS datagrams and FCPC streams MUST be bound to an authenticated session. Per-frame signatures are
+permitted for bootstrap and degraded mode, but the normative high-throughput path uses a signed
+handshake plus derived directional session keys.
+
+```rust
+pub enum SessionCryptoSuite {
+    X25519HkdfHmacSha256,
+    X25519HkdfBlake3,
+}
+
+pub struct MeshSessionHello {
+    pub from: NodeId,
+    pub to: NodeId,
+    pub eph_pubkey: X25519PublicKey,
+    pub nonce: [u8; 16],
+    pub cookie: Option<[u8; 32]>,
+    pub timestamp: u64,
+    pub suites: Vec<SessionCryptoSuite>,
+    pub transport_limits: Option<TransportLimits>,
+    pub signature: Signature,
+}
+
+pub struct TransportLimits {
+    pub max_datagram_bytes: u16,
+    pub max_fcpc_inline_bytes: u32,
+}
+
+pub struct MeshSessionAck {
+    pub from: NodeId,
+    pub to: NodeId,
+    pub eph_pubkey: X25519PublicKey,
+    pub nonce: [u8; 16],
+    pub session_id: [u8; 16],
+    pub suite: SessionCryptoSuite,
+    pub timestamp: u64,
+    pub signature: Signature,
+}
+
+pub struct MeshSessionHelloRetry {
+    pub from: NodeId,
+    pub to: NodeId,
+    pub cookie: [u8; 32],
+    pub timestamp: u64,
+}
+```
+
+Normative rules:
+
+1. `MeshSessionHello` and `MeshSessionAck` MUST be signed by the node signing key attested for the corresponding node.
+2. `cookie` support SHOULD be implemented to resist handshake floods and resource exhaustion.
+3. Derived directional keys MUST bind both node identities, both nonces, the selected suite, and the session identifier.
+4. Session establishment MUST enforce time-skew policy and replay resistance.
+5. A node MUST refuse to complete handshake if the peer attestation or enrollment state is revoked or stale beyond policy.
+6. Transport limits negotiated during handshake MUST be treated as hard ceilings for subsequent live traffic.
+
+### 9.7.3 Session Replay and Rekey Policy
+
+Implementations MUST define explicit replay and rekey policy for live sessions.
+
+```rust
+pub struct SessionReplayPolicy {
+    pub max_reorder_window: u64,
+    pub rekey_after_frames: u64,
+    pub rekey_after_seconds: u64,
+    pub rekey_after_bytes: u64,
+}
+
+pub struct TimeSkewPolicy {
+    pub max_skew_secs: u64,
+    pub log_skew_events: bool,
+}
+```
+
+Normative defaults SHOULD be conservative enough to prevent silent drift while tolerating real-world
+clock skew and mobile-device churn. Long-lived sessions SHOULD rekey proactively rather than waiting
+for transport failure.
+
+### 9.7.4 FCPS Datagrams on the Wire
+
+The authenticated FCPS datagram envelope is the on-wire carrier for object-plane traffic:
+
+```text
+Bytes 0-15:   session_id [16]
+Bytes 16-23:  seq (u64 LE)
+Bytes 24-39:  mac [16]
+Bytes 40..:   fcps_frame_bytes
+```
+
+The message authentication code MUST be computed over:
+
+```text
+session_id || direction || seq || fcps_frame_bytes
+```
+
+where `direction` is a one-byte constant distinguishing initiator-to-responder from responder-to-initiator traffic.
+
+Normative rules:
+
+1. The complete datagram, not only the FCPS payload, MUST fit within negotiated transport limits.
+2. Replay protection MUST operate on authenticated session state, not merely frame-local counters.
+3. Sessions MUST reject datagrams whose authenticated direction or sequence cannot be validated.
+4. Degraded-mode signed datagrams MUST be rate-limited more aggressively than session-authenticated traffic.
+
 ### 9.8 FCPS Object and Symbol Plane
 
 FCPS exists for:
@@ -1932,6 +2519,55 @@ Normative rules:
 2. Replay windows MUST be enforced per authenticated session.
 3. Payload sizes MUST be bounded to stay within negotiated transport limits.
 
+#### 9.8.1.1 MTU Safety and Frame Size Limits
+
+FCP MUST avoid IP fragmentation in normal operation.
+
+Baseline requirements:
+
+- Implementations MUST support FCPS datagrams that fit within a UDP payload of `<= 1200` bytes.
+- Senders SHOULD default to one symbol record per datagram unless negotiated limits safely permit more.
+- Receivers MUST reject frames whose declared sizes would require allocation beyond configured safety bounds.
+
+Recommended interoperability defaults:
+
+| Field | Default |
+|-------|---------|
+| `max_datagram_bytes` | `1200` |
+| `symbol_size` | `1024` |
+| `max_symbol_count_per_frame` | `1` |
+| `max_frame_bytes` | `4 MiB` |
+
+The sender MUST choose `symbol_size`, `symbol_count`, and envelope overhead such that the fully
+authenticated datagram remains within the negotiated maximum.
+
+#### 9.8.1.2 Decode Status and Symbol Acknowledgement
+
+Receivers SHOULD provide bounded feedback so that senders can stop early, target repairs, and avoid
+unnecessary symbol flood.
+
+```rust
+pub struct DecodeStatus {
+    pub object_id: ObjectId,
+    pub zone_id: ZoneId,
+    pub received_unique: u32,
+    pub required: u32,
+    pub missing_hint: Option<Vec<u8>>,
+}
+
+pub struct SymbolAck {
+    pub object_id: ObjectId,
+    pub zone_id: ZoneId,
+    pub reconstructed_object_id: Option<ObjectId>,
+}
+```
+
+Normative rules:
+
+1. Feedback objects MUST be bounded and subject to the same admission and replay protections as other live traffic.
+2. `missing_hint`, if present, MUST NOT exceed the responder's configured bound.
+3. Senders SHOULD stop transmitting once a valid `SymbolAck` or equivalent completion proof is received.
+
 ### 9.8.2 Frame Flags
 
 Representative flags include:
@@ -1944,6 +2580,15 @@ Representative flags include:
 
 Unknown critical flags MUST cause rejection.
 
+#### 9.8.2.1 Flag Handling and Parsing Limits
+
+Normative parsing rules:
+
+1. Reserved flags MUST be zero on transmit and MUST cause rejection if received as set unless explicitly designated ignorable by future specification revision.
+2. Unknown critical flags MUST fail closed.
+3. `CONTROL_PLANE` and `CHECKPOINT_ARTIFACT` MUST NOT be set together unless the encapsulated object is itself a checkpoint-control artifact defined by schema.
+4. `REPAIR_SYMBOL` MUST NOT be used to bypass normal peer-budget accounting.
+
 ### 9.8.3 Multipath Delivery
 
 FCPS delivery MAY aggregate symbols or chunks from multiple peers. Implementations SHOULD:
@@ -1952,6 +2597,37 @@ FCPS delivery MAY aggregate symbols or chunks from multiple peers. Implementatio
 - prefer direct paths when possible,
 - stop delivery when reconstruction or requested budget is satisfied,
 - record repair or rebalance actions when they materially affect availability policy.
+
+### 9.8.4 Symbol-Plane Admission Control
+
+The symbol plane is a major amplification and resource-exhaustion surface. Implementations MUST bound:
+
+- inbound bytes per peer,
+- symbol decode attempts per peer,
+- failed authentication or decryption counts,
+- concurrent object reconstructions,
+- reconciliation or repair work induced by remote hints.
+
+```rust
+pub struct PeerBudget {
+    pub max_bytes_per_min: u64,
+    pub max_symbols_per_min: u32,
+    pub max_failed_auth_per_min: u32,
+    pub max_inflight_decodes: u32,
+    pub max_decode_cpu_ms_per_min: u64,
+}
+
+pub struct AdmissionPolicy {
+    pub per_peer: PeerBudget,
+    pub require_authenticated_requests: bool,
+}
+```
+
+Normative anti-amplification rule:
+
+1. A node MUST NOT send more symbols in response to a repair or symbol request than the request explicitly allows.
+2. Unauthenticated or low-trust requests MUST be subject to lower caps.
+3. Expensive decode work MUST be accounted against the requester's budget or rejected.
 
 ## 10. Manifest, Provisioning, and Isolation
 
@@ -2086,6 +2762,66 @@ Provisioning surfaces MUST support:
 - rotate,
 - revalidate.
 
+### 10.4.1 Recipe Model
+
+Provisioning recipes SHOULD be explicit step graphs rather than free-form imperative scripts.
+
+```rust
+pub struct ProvisioningRecipe {
+    pub recipe_id: String,
+    pub version: String,
+    pub steps: Vec<ProvisioningStep>,
+    pub rollback_steps: Vec<ProvisioningStep>,
+}
+
+pub enum ProvisioningStep {
+    Prompt { prompt_id: String, fields: Vec<String> },
+    BrowserAction { action_id: String, url: String },
+    OAuthExchange { provider: String, scopes: Vec<String> },
+    ApiCall { operation: String, input_schema: SchemaId },
+    SecretInject { secret_id: SecretId, target: String },
+    Validation { check_id: String },
+}
+```
+
+Normative rules:
+
+1. Recipe steps MUST be bounded, typed, and replayable enough for diagnostics.
+2. Browser or prompt steps MUST be explicit in evidence so operators can tell which human action was required.
+3. Rollback or cleanup steps SHOULD be declared whenever the external system may have been partially configured.
+
+### 10.4.2 Provisioning Sessions
+
+Long-running setup flows SHOULD expose a session model:
+
+```rust
+pub struct ProvisioningSession {
+    pub session_id: [u8; 16],
+    pub connector_id: ConnectorId,
+    pub recipe_id: String,
+    pub state: ProvisioningState,
+    pub started_at: u64,
+    pub updated_at: u64,
+}
+
+pub enum ProvisioningState {
+    Pending,
+    WaitingForUser,
+    WaitingForRemote,
+    Validating,
+    Completed,
+    Aborted,
+    Failed,
+}
+```
+
+Provisioning evidence SHOULD retain:
+
+- the recipe identifier and version,
+- which steps completed,
+- any generated external identifiers,
+- any cleanup steps performed after failure.
+
 ### 10.5 Isolation and Storage Classes
 
 The manifest MUST declare storage intent:
@@ -2195,6 +2931,41 @@ Implementations SHOULD consider:
 - current health and crash-loop state,
 - zone-store quota headroom.
 
+#### 11.2.2 Planner Evidence and Explainability
+
+Placement outcomes MUST be explainable with durable or reconstructable evidence. A planner decision
+SHOULD be able to answer:
+
+- why a node was eligible,
+- why competing nodes were rejected or scored lower,
+- whether degraded mode influenced the result,
+- whether secret reconstruction, data locality, or health pressure dominated the outcome.
+
+Representative evidence surface:
+
+```rust
+pub struct PlacementDecisionEvidence {
+    pub request_object_id: Option<ObjectId>,
+    pub connector_id: ConnectorId,
+    pub chosen_node: Option<NodeId>,
+    pub candidate_scores: Vec<(NodeId, i64)>,
+    pub degraded_mode: bool,
+    pub limiting_factors: Vec<String>,
+    pub reason_code: Option<String>,
+}
+```
+
+#### 11.2.3 Degraded Placement
+
+The planner MAY operate in degraded mode during partition, relay-only connectivity, or reduced
+coverage, but it MUST do so explicitly.
+
+Normative rules:
+
+1. Dangerous operations SHOULD default to deny in degraded mode unless policy says otherwise.
+2. Degraded placement MUST be visible to operators and evidence surfaces.
+3. The planner MUST distinguish between "no eligible placement exists" and "placement exists only under degraded assumptions."
+
 ### 11.3 Leases
 
 Leases fence exclusive or quorum-sensitive work:
@@ -2224,6 +2995,45 @@ Normative rules:
 2. Risky and dangerous side effects MAY require an execution lease.
 3. Higher `lease_seq` fences lower ones; stale lease holders MUST be rejected even if their wall-clock expiry has not yet elapsed.
 4. Conflicting leases MUST surface as incidents, not silently resolve.
+
+### 11.3.1 Distributed Lease Issuance
+
+Lease issuance SHOULD use deterministic coordinator selection so that any peer can explain why a given
+coordinator had authority to assemble or witness the lease.
+
+```rust
+pub struct LeaseRequest {
+    pub header: ObjectHeader,
+    pub subject_object_id: ObjectId,
+    pub purpose: LeasePurpose,
+    pub desired_owner: NodeId,
+    pub requested_at: u64,
+    pub expires_at: u64,
+    pub signature: Signature,
+}
+```
+
+Recommended coordinator selection:
+
+- rendezvous or HRW hashing over `zone_id || subject_object_id`,
+- constrained to currently eligible coordinators for the relevant zone and purpose,
+- stable within a checkpoint epoch unless the coordinator is unavailable or revoked.
+
+Quorum guidance:
+
+- safe operations MAY accept single-coordinator leases,
+- risky operations SHOULD require `f + 1` witnesses where a Byzantine model is claimed,
+- dangerous operations SHOULD require stronger quorum matching the zone's configured critical-write policy.
+
+### 11.3.2 Lease Conflict Handling
+
+Conflicting leases are not normal retries. They are evidence-worthy coordination faults.
+
+Normative rules:
+
+1. If two overlapping valid leases are observed for the same subject and purpose, dangerous execution MUST halt until resolved.
+2. Risky execution MAY resolve according to explicit policy only if the conflict can be fenced deterministically and surfaced to operators.
+3. Conflict detection MUST emit structured evidence identifying all competing lease objects and the coordinator or quorum that produced them.
 
 ### 11.4 Checkpoint, Failover, and Resume
 
@@ -2299,6 +3109,19 @@ pub struct CoverageEvaluation {
 Nodes SHOULD evaluate placement-policy objects periodically and initiate targeted repair or rebalance
 when coverage falls below policy.
 
+#### 11.5.3 Predictive Pre-Staging
+
+Implementations SHOULD support predictive pre-staging of:
+
+- connector binaries or modules,
+- manifests and attestation chains,
+- likely-needed checkpoints,
+- large referenced inputs,
+- secret shares or wrapped key material where policy permits local preparation.
+
+Pre-staging MUST remain policy-constrained. It MUST NOT materialize secrets or durable artifacts on
+nodes that are not eligible for the relevant zone or execution policy.
+
 ### 11.6 Tailscale Integration
 
 Tailscale is the reference substrate for:
@@ -2367,6 +3190,69 @@ Removal of a device SHOULD trigger:
 3. zone-key rotation for affected zones,
 4. secret resharing excluding the removed device.
 
+#### 11.6.4 Funnel Gateway
+
+If public ingress is required, Tailscale Funnel or equivalent public gateway support MUST be
+restricted by zone policy.
+
+```rust
+pub struct FunnelPolicy {
+    pub allowed_zones: Vec<ZoneId>,
+    pub blocked_zones: Vec<ZoneId>,
+    pub rate_limit_per_minute: u32,
+}
+```
+
+Normative rules:
+
+1. `z:owner` and similarly high-confidentiality zones SHOULD default to funnel denial.
+2. Public ingress MUST increase taint or trust sensitivity of the resulting inputs unless stronger provenance evidence is attached.
+3. Funnel-backed connectors SHOULD surface public-ingress state in explain and operator health output.
+
+#### 11.6.5 Mesh Gossip and Discovery
+
+The mesh SHOULD support bounded anti-entropy for object and symbol discovery.
+
+```rust
+pub struct GossipSummary {
+    pub from: NodeId,
+    pub epoch_id: EpochId,
+    pub object_filter_digest: [u8; 32],
+    pub symbol_filter_digest: [u8; 32],
+    pub iblt: Vec<u8>,
+    pub timestamp: u64,
+    pub signature: Signature,
+}
+```
+
+Recommended design characteristics:
+
+- fast approximate membership filters for discovery,
+- precise reconciliation structures for reducing redundant repair,
+- signed summaries so gossip participates in attribution and peer budgeting,
+- bounded per-peer reconciliation cost.
+
+#### 11.6.6 Distributed State and Coverage
+
+Object availability SHOULD be evaluated as a coverage property, not only as presence on one node.
+
+```rust
+pub struct DistributedState {
+    pub object_id: ObjectId,
+    pub coverage_bps: u32,
+    pub distinct_nodes: u16,
+    pub max_node_fraction_bps: u16,
+    pub is_available: bool,
+}
+```
+
+Coverage reasoning SHOULD inform:
+
+- repair priority,
+- planner scoring,
+- degraded-mode decisions,
+- offline-availability claims.
+
 ### 11.7 Threat Model, Diversity, and Degraded Operation
 
 Implementations MUST assume the following are possible:
@@ -2392,6 +3278,51 @@ pub struct DiversityPolicy {
 
 Dangerous operations SHOULD refuse to proceed in degraded mode unless explicit policy allows it.
 
+### 11.7.1 Admission Control and DoS Resistance
+
+Meshes MUST protect themselves against:
+
+- symbol floods,
+- bogus object identifiers,
+- expensive decode requests,
+- gossip reconciliation abuse,
+- replay storms during partition healing,
+- public-ingress amplification through low-trust zones.
+
+Every implementation MUST define:
+
+- per-peer rate limits,
+- per-zone quarantine limits,
+- decode-work budgets,
+- repair-work budgets,
+- bounded reconciliation state.
+
+### 11.7.2 Unreferenced Object Quarantine
+
+Unreferenced or unprovenanced objects MUST enter a bounded quarantine store before they are admitted
+into normal gossip or retention classes.
+
+```rust
+pub enum ObjectAdmissionClass {
+    Quarantined,
+    Admitted,
+}
+
+pub struct ObjectAdmissionPolicy {
+    pub max_quarantine_bytes_per_zone: u64,
+    pub max_quarantine_objects_per_zone: u32,
+    pub quarantine_ttl_secs: u64,
+    pub require_schema_validation: bool,
+}
+```
+
+Normative rules:
+
+1. Quarantined objects MUST NOT be inserted into primary gossip summaries.
+2. Promotion from quarantine MUST require either checkpoint reachability, authenticated explicit request, or local policy pinning.
+3. Promotion SHOULD include schema validation before the object becomes visible for ordinary repair or placement reasoning.
+4. Eviction order SHOULD prefer removing oldest, lowest-reputation, or largest quarantined objects first.
+
 ### 11.8 Threshold Secret Use and Reconstruction Cost
 
 Placement and execution planning SHOULD consider the cost of reconstructing threshold-protected
@@ -2416,6 +3347,29 @@ pub enum RegistrySource {
 }
 ```
 
+### 12.1.1 Registry Index and Mirror Objects
+
+Registry and mirror sources SHOULD expose index objects so that the mesh can pin and compare the exact
+artifact sets it trusts.
+
+```rust
+pub struct RegistryIndexObject {
+    pub header: ObjectHeader,
+    pub source_name: String,
+    pub connectors: Vec<RegistryConnectorEntry>,
+    pub generated_at: u64,
+    pub signature: Signature,
+}
+
+pub struct RegistryConnectorEntry {
+    pub connector_id: ConnectorId,
+    pub version: String,
+    pub manifest_object_id: ObjectId,
+    pub artifact_object_id: ObjectId,
+    pub attestation_object_ids: Vec<ObjectId>,
+}
+```
+
 ### 12.2 Verification Chain
 
 Before activation, a host MUST verify:
@@ -2429,6 +3383,21 @@ Before activation, a host MUST verify:
 7. required attestation types,
 8. builder/publisher trust policy,
 9. revocation state for relevant keys or artifacts.
+
+### 12.2.2 Verification Order and Failure Handling
+
+Verification SHOULD proceed in a fail-closed order that maximizes safety and explainability:
+
+1. fetch and authenticate index or manifest source,
+2. verify manifest signatures and format,
+3. verify digest and interface identity,
+4. verify artifact execution-form compatibility,
+5. verify attestations and transparency requirements,
+6. verify revocation state and freshness,
+7. evaluate zone and supply-chain policy compatibility.
+
+Failures MUST produce stable reason codes and SHOULD identify the first failing stage plus any
+additional dependent stages skipped because the prior stage failed.
 
 ### 12.2.1 Registry Security Profile
 
@@ -2496,6 +3465,28 @@ Meshes SHOULD be able to mirror manifests, binaries, modules, and attestations a
 Offline installation and failover MUST NOT depend on continued upstream availability once artifacts
 have been mirrored and policy-pinned.
 
+### 12.4.1 Mirror Indexes and Sovereignty Policy
+
+Meshes operating under sovereignty or offline-first requirements SHOULD maintain their own signed
+mirror indexes:
+
+```rust
+pub struct MirrorIndexObject {
+    pub header: ObjectHeader,
+    pub zone_id: ZoneId,
+    pub upstream_sources: Vec<String>,
+    pub mirrored_entries: Vec<RegistryConnectorEntry>,
+    pub published_at: u64,
+    pub signature: Signature,
+}
+```
+
+Normative rules:
+
+1. A mirror MUST preserve enough metadata to re-run verification without consulting the upstream source.
+2. Mirror policy MAY restrict which builders, publishers, or attestation classes are admitted into a sovereign mirror.
+3. Offline activation MUST rely only on already mirrored and policy-pinned objects.
+
 ## 13. Observability, Explainability, and Errors
 
 ### 13.1 Metrics
@@ -2522,6 +3513,23 @@ Layer-specific metrics SHOULD additionally include:
 - stream replay counts,
 - intent-without-receipt recovery counts.
 
+#### 13.1.1 Required Metric Families
+
+Implementations SHOULD expose metrics in families rather than ad hoc counters so operators can compare
+behavior across connectors and hosts.
+
+Recommended minimum families:
+
+| Family | Representative Metrics |
+|--------|-------------------------|
+| `fcpc_*` | `fcpc_frames_rx_total`, `fcpc_frames_tx_total`, `fcpc_replay_drop_total`, `fcpc_backpressure_wait_ms_total` |
+| `fcps_*` | `fcps_datagrams_rx_total`, `fcps_mac_fail_total`, `fcps_decode_fail_total`, `fcps_quarantine_drop_total` |
+| `lease_*` | `lease_acquire_total`, `lease_conflict_total`, `lease_stale_reject_total` |
+| `checkpoint_*` | `checkpoint_written_total`, `checkpoint_resume_accept_total`, `checkpoint_resume_reject_total` |
+| `placement_*` | `placement_decision_total`, `placement_degraded_total`, `placement_denied_total` |
+| `repair_*` | `repair_cycle_total`, `repair_objects_total`, `repair_rebalance_total` |
+| `secret_*` | `secret_access_total`, `secret_reconstruct_total`, `secret_access_deny_total` |
+
 ### 13.2 Structured Logs
 
 Structured logs MUST:
@@ -2531,6 +3539,33 @@ Structured logs MUST:
 - use stable reason codes,
 - avoid logging secrets or decrypted sensitive payloads by default,
 - support a diagnostic mode with stronger detail and explicit redaction.
+
+### 13.2.1 Log Event Shape
+
+Structured logs SHOULD use a stable event shape so that automated tooling can correlate logs, receipts,
+and transcripts without connector-specific parsers.
+
+```rust
+pub struct LogEvent {
+    pub ts: u64,
+    pub level: String,
+    pub component: String,
+    pub event_type: String,
+    pub zone_id: Option<ZoneId>,
+    pub connector_id: Option<ConnectorId>,
+    pub request_object_id: Option<ObjectId>,
+    pub trace_id: Option<[u8; 16]>,
+    pub reason_code: Option<String>,
+    pub fields: Vec<(String, String)>,
+}
+```
+
+Required characteristics:
+
+1. logs MUST be machine-parseable,
+2. correlation identifiers MUST be stable across a request lifetime,
+3. redaction state SHOULD be explicit when sensitive fields are omitted or transformed,
+4. operator tooling SHOULD be able to pivot from a log event to a receipt or evidence bundle.
 
 ### 13.3 Explainability
 
@@ -2549,6 +3584,25 @@ Preferred evidence order:
 3. audit chain references,
 4. structured logs and traces,
 5. replay transcript or evidence bundle when available.
+
+### 13.3.1 Explain Response Structure
+
+`explain` and `doctor` surfaces SHOULD return structured responses rather than plain-text only:
+
+```rust
+pub struct ExplainResponse {
+    pub request_object_id: ObjectId,
+    pub decision: Option<ObjectId>,
+    pub summary: String,
+    pub reason_code: Option<String>,
+    pub degraded_mode: bool,
+    pub evidence: Vec<ObjectId>,
+    pub suggested_next_actions: Vec<String>,
+}
+```
+
+Operator-facing prose is valuable, but it MUST be derived from structured reason and evidence objects
+so that the same outcome remains machine-actionable.
 
 ### 13.4 Stable Error Taxonomy
 
@@ -2598,6 +3652,39 @@ baseline codes include:
 | `FCP_ERR_ZONE_POLICY_VIOLATION` | Zone policy violation |
 | `FCP_ERR_SUPPLY_CHAIN_POLICY` | Supply-chain policy rejection |
 
+#### 13.4.2 Error Code Ranges
+
+Implementations SHOULD reserve stable numeric or lexical ranges for broad error domains:
+
+| Range | Domain |
+|-------|--------|
+| `FCP-1000..1999` | protocol and framing |
+| `FCP-2000..2999` | identity and attestation |
+| `FCP-3000..3999` | capability and policy |
+| `FCP-4000..4999` | zone, provenance, and taint |
+| `FCP-5000..5999` | lifecycle, drain, quiescence, and health |
+| `FCP-6000..6999` | leases, checkpoints, migration, and resume |
+| `FCP-7000..7999` | external service and provider failures |
+| `FCP-8000..8999` | supply chain and artifact verification |
+| `FCP-9000..9999` | internal runtime |
+
+#### 13.4.3 Error Response Contract
+
+Error responses SHOULD be structured for both humans and automation.
+
+Recommended response fields:
+
+- stable code,
+- stable reason code,
+- retryability,
+- retry delay if applicable,
+- evidence object identifiers,
+- short human summary,
+- optional machine-readable recovery hints.
+
+The recovery hint MUST NOT encourage bypassing security checks. It SHOULD point toward legitimate
+remediation such as refreshing revocation state, acquiring approval, or fixing manifest incompatibility.
+
 ### 13.5 Evidence Bundles
 
 Implementations SHOULD support evidence bundles for postmortem and replay:
@@ -2616,6 +3703,18 @@ pub struct EvidenceBundle {
 
 Evidence bundles are the preferred artifact for debugging, conformance review, and operator trust.
 
+### 13.5.1 Evidence Retention and Replay
+
+Evidence bundles SHOULD preserve enough material to:
+
+- reconstruct why a decision was made,
+- prove which connector artifact and policy heads were in force,
+- replay transport transcripts where policy allows,
+- compare pre- and post-failover behavior,
+- satisfy conformance review for difficult bug classes.
+
+High-risk bundles SHOULD be retained longer than ordinary success bundles, subject to zone policy.
+
 ### 13.6 Audit Chain Requirements
 
 Audit chains SHOULD capture at minimum:
@@ -2630,6 +3729,22 @@ Audit chains SHOULD capture at minimum:
 
 For zones using quorum-backed audit heads, implementations MUST refuse to advance the head when
 required quorum is absent unless explicit degraded-mode policy says otherwise.
+
+### 13.6.1 Decision Receipt Emission Rules
+
+Implementations MUST emit `DecisionReceipt` for:
+
+- denied risky operations,
+- denied dangerous operations,
+- dangerous allows,
+- risky allows when audit policy requires high evidence.
+
+Implementations SHOULD emit `DecisionReceipt` for:
+
+- placement denial,
+- degraded-mode placement acceptance,
+- checkpoint rejection,
+- lease conflict resolution.
 
 ### 13.7 Security Model
 
@@ -2742,6 +3857,19 @@ Conformant implementations MUST interoperate on:
 5. lease fencing behavior,
 6. evidence retrieval for explained denials and successful risky actions.
 
+### 14.2.2 Test Depth and Artifact Expectations
+
+The test program MUST be deep enough that a future maintainer does not need to rediscover basic
+runtime or protocol intent.
+
+Required expectations:
+
+1. Unit tests MUST cover happy paths, boundary cases, and explicit failure conditions for every normative parser, validator, and policy evaluator.
+2. Runtime tests MUST use deterministic clocks where time semantics affect outcome.
+3. E2E scripts MUST be replayable, documented, and produce retained evidence bundles or transcript identifiers.
+4. Hostile-input tests MUST include malformed wire objects, stale checkpoints, replay attempts, and adversarial service responses.
+5. Test fixtures MUST identify which stable reason codes and evidence objects are expected.
+
 ### 14.3 Logging and Evidence Requirements for Tests
 
 Conformance e2e and adversarial tests MUST emit detailed structured logs with:
@@ -2755,6 +3883,35 @@ Conformance e2e and adversarial tests MUST emit detailed structured logs with:
 
 Tests that validate policy, replay, cancellation, or failover MUST retain sufficient evidence to
 reconstruct the causal chain after the run completes.
+
+### 14.3.1 E2E Script Logging Contract
+
+Replayable end-to-end scripts MUST log, at minimum:
+
+- scenario name and version,
+- start and end timestamps,
+- participating nodes and connectors,
+- placement outcome,
+- issued request identifiers,
+- explicit cancellation, drain, or replay steps,
+- evidence bundle identifiers,
+- pass/fail verdict plus mismatch explanation on failure.
+
+Logs SHOULD be emitted in both human-readable and machine-readable form so that operators can inspect
+them directly while automated tooling can diff them across runs.
+
+### 14.3.2 Test Harness Expectations
+
+The reference harness SHOULD provide reusable facilities for:
+
+- deterministic clocks,
+- transcript capture,
+- evidence-bundle export,
+- structured log collection,
+- mock external services,
+- fault injection for transport, time, storage, and provider failures.
+
+Harness output SHOULD make it obvious which objects, logs, and reason codes were expected versus observed.
 
 ### 14.4 Golden Vectors and Schemas
 
@@ -2776,6 +3933,28 @@ An implementation MAY describe itself as:
 - `Full`: adds mobility, advanced repair, threshold secrets, and stronger diversity or quorum features.
 
 Any such profile claims MUST be explicit and test-backed.
+
+### 14.4.2 Minimum Shipped Test Artifacts
+
+The reference implementation SHOULD ship:
+
+- schema or CDDL files for normative objects,
+- unit-test fixture corpora for identifiers, tokens, checkpoints, and leases,
+- replayable FCPC/FCPS transcript fixtures,
+- adversarial fixture sets for malformed or stale objects,
+- end-to-end scripts with expected evidence outputs,
+- structured-log golden samples for key lifecycle and error paths.
+
+### 14.4.3 Reference Testkit Expectations
+
+The project SHOULD ship shared testkit utilities for:
+
+- synthetic connector fixtures,
+- mock capability and approval issuance,
+- fake registry and mirror sources,
+- deterministic FCPC/FCPS transcript builders,
+- evidence-bundle assertions,
+- structured-log assertions with stable reason codes.
 
 ### 14.5 Conformance Claims
 
@@ -3336,6 +4515,277 @@ Illustrative cancelled replayable stream:
 - decision and operation receipts,
 - audit linkage,
 - checkpoint references when applicable.
+
+### Appendix T: Mesh Session Transcript and Key Derivation
+
+Illustrative handshake transcript:
+
+```text
+1. hello(from=node-a, to=node-b, eph_pubkey=..., nonce=a1, suites=[suite1,suite2], limits=...)
+2. hello_retry(cookie=...)
+3. hello(from=node-a, to=node-b, eph_pubkey=..., nonce=a2, cookie=..., suites=[suite1,suite2], limits=...)
+4. ack(from=node-b, to=node-a, eph_pubkey=..., nonce=b1, session_id=s123, suite=suite2)
+5. both sides derive directional keys from session_id, node ids, and both nonces
+```
+
+Recommended derivation pattern:
+
+```text
+prk = HKDF-SHA256(
+  ikm  = X25519(initiator_eph, responder_eph),
+  salt = session_id,
+  info = "fcp.session.v3" || initiator_node_id || responder_node_id || hello_nonce || ack_nonce
+)
+
+expand(prk, "fcp.session.keys.v3", 96) ->
+  k_mac_i2r || k_mac_r2i || k_ctx
+```
+
+Security rationale:
+
+- binds derived keys to a single authenticated handshake,
+- prevents session splicing,
+- allows explicit directionality,
+- leaves room for future envelope or control-plane AEAD evolution.
+
+### Appendix U: Activation, Update, and Rollback Checklist
+
+**Activation checklist:**
+
+- [ ] manifest extracted without execution
+- [ ] interface hash verified
+- [ ] artifact digest matches signed expectation
+- [ ] attestations and transparency policy satisfied
+- [ ] zone and revocation heads fresh enough
+- [ ] provisioning and credential injection complete
+- [ ] placement decision recorded
+- [ ] sandbox or execution-form policy satisfied
+
+**Update checklist:**
+
+- [ ] new artifact passes activation checks
+- [ ] staged rollout or canary plan selected where required
+- [ ] rollback target already verified and retained
+- [ ] evidence plan for observing rollout health exists
+
+**Rollback checklist:**
+
+- [ ] trigger reason recorded with stable reason code
+- [ ] inflight work drained, cancelled, or checkpointed
+- [ ] replacement artifact verified before cutover
+- [ ] post-rollback health observation window started
+
+### Appendix V: Structured Log Event Catalog
+
+Recommended event types include:
+
+| Event Type | Purpose |
+|------------|---------|
+| `activation.started` | connector activation began |
+| `activation.denied` | activation failed due to policy or verification |
+| `placement.chosen` | planner selected a node |
+| `placement.degraded` | placement proceeded in degraded mode |
+| `lease.acquired` | lease became active |
+| `lease.conflict` | conflicting lease observed |
+| `checkpoint.accepted` | checkpoint accepted for resume |
+| `checkpoint.rejected` | checkpoint rejected as stale or inconsistent |
+| `stream.credit_exhausted` | sender blocked waiting for credit |
+| `runtime.cancel_honored` | connector observed and honored cancellation |
+| `repair.promoted` | quarantined object admitted |
+| `repair.rebalanced` | object coverage redistributed |
+| `supply_chain.denied` | artifact rejected by verification policy |
+
+Recommended common fields:
+
+- `trace_id`
+- `request_object_id`
+- `connector_id`
+- `zone_id`
+- `reason_code`
+- `evidence_object_ids`
+- `degraded_mode`
+
+### Appendix W: Required E2E Scenarios and Logging Contract
+
+The reference end-to-end suite SHOULD include at least:
+
+1. first-run provisioning of a connector with expected prompts and resulting manifests,
+2. safe invoke with ordinary success evidence,
+3. risky invoke that emits decision and operation receipts,
+4. dangerous invoke denied by policy with stable reason code,
+5. replayable stream with credit, ack, cancel, drain, and resume,
+6. checkpointed failover between two nodes,
+7. stale revocation or stale checkpoint rejection,
+8. hostile-peer symbol request and quarantine behavior,
+9. supply-chain rejection on attestation or digest mismatch,
+10. operator journey covering explain, doctor, replay, and repair.
+
+Each scenario SHOULD retain:
+
+- scenario transcript identifier,
+- involved object ids,
+- expected reason codes,
+- expected log event types,
+- pass/fail summary.
+
+### Appendix X: Capability Token Claim and Header Example
+
+Illustrative deterministic claim map:
+
+```cbor
+{
+  1: "z:community",
+  2: "principal:agent.example",
+  3: "fcp.telegram",
+  4: 1770000000,
+  6: 1769999700,
+  7: h'00112233445566778899aabbccddeeff',
+  "fcp.iss_node": h'...',
+  "fcp.grant_object_ids": [h'...', h'...'],
+  "fcp.checkpoint_seq": 42,
+  "fcp.checkpoint_id": h'...',
+  "fcp.aud_binary": h'...'
+}
+```
+
+Illustrative protected header:
+
+```cbor
+{
+  1: -8,
+  4: h'0123456789abcdef'
+}
+```
+
+Verification notes:
+
+- protected headers MUST be included in the signature structure,
+- private claim names or labels MUST be stable and documented,
+- duplicate map keys MUST be rejected.
+
+### Appendix Y: Approval Scope Examples
+
+Example execution approval:
+
+```text
+scope = Execution
+connector_id = fcp.telegram
+method_pattern = send_message
+request_object_id = req123
+input_constraints = [
+  { json_pointer = "/chat_resource/resource_uri", op = Eq, value = "telegram://chat/123" },
+  { json_pointer = "/text", op = Prefix, value = "[approved]" }
+]
+```
+
+Example declassification approval:
+
+```text
+scope = Declassification
+from_zone = z:private
+to_zone = z:community
+object_ids = [obj111, obj222]
+```
+
+These examples are illustrative. Real deployments SHOULD use the most specific practical scope rather
+than broad wildcard approvals.
+
+### Appendix Z: Coverage and Repair Playbook
+
+Recommended repair loop:
+
+1. evaluate coverage for pinned or policy-relevant objects,
+2. detect over-concentration or under-replication,
+3. prefer direct eligible peers for rebalance,
+4. emit repair evidence when placement policy materially changes,
+5. update planner and offline-availability views after repair.
+
+Suggested operator questions:
+
+- is the object reconstructable now,
+- is coverage too concentrated on one node,
+- which zone or device class is under-covered,
+- did a recent device removal or revocation create the deficit,
+- does the planner now have enough locality to avoid degraded placement.
+
+### Appendix AA: Example Provisioning Recipe
+
+Illustrative machine-readable recipe:
+
+```text
+recipe_id = telegram/install
+steps = [
+  prompt(account_choice),
+  browser_action(oauth_login, https://example.invalid/oauth/start),
+  oauth_exchange(telegram, scopes=[bot.write, bot.read]),
+  api_call(register_webhook),
+  secret_inject(bot_token, network_guard.header.telegram),
+  validation(send_self_test_message)
+]
+rollback_steps = [
+  api_call(delete_webhook),
+  validation(confirm_remote_cleanup)
+]
+```
+
+### Appendix AB: Example Mirror Index
+
+Illustrative mirror entry:
+
+```text
+zone_id = z:work
+connector_id = fcp.telegram
+version = 2026.3.0
+manifest_object_id = obj.manifest.123
+artifact_object_id = obj.binary.456
+attestation_object_ids = [obj.sbom.1, obj.provenance.2]
+```
+
+### Appendix AC: Verification Decision Checklist
+
+Operator or harness checklist:
+
+- [ ] source index authenticated
+- [ ] manifest signature threshold satisfied
+- [ ] digest matched artifact
+- [ ] interface hash matched expectation
+- [ ] attestations satisfied policy
+- [ ] transparency requirement satisfied
+- [ ] revocation state fresh
+- [ ] execution form supported
+- [ ] zone policy accepted requested capabilities
+
+### Appendix AD: Checkpoint and Revocation Triage Questions
+
+Recommended operator triage questions:
+
+- is the presented checkpoint newer, older, or conflicting,
+- is revocation state stale because of network partition or verification failure,
+- are multiple peers disagreeing about the zone frontier,
+- did a recent device removal trigger expected key rotation and checkpoint advance,
+- does the denial trace back to one decisive stale artifact or many?
+
+### Appendix AE: Example Operator Evidence Walkthrough
+
+Illustrative debugging chain for a denied dangerous operation:
+
+1. open the `DecisionReceipt`,
+2. inspect `reason_code = checkpoint.stale`,
+3. follow evidence to the last accepted `ZoneCheckpoint`,
+4. compare with current `RevocationHead`,
+5. inspect logs for `placement.degraded` or `revocation.refresh_failed`,
+6. decide whether to refresh, repair, or deny until quorum is restored.
+
+### Appendix AF: Suggested Test Matrix by Connector Archetype
+
+| Archetype | Unit Focus | E2E Focus |
+|-----------|------------|-----------|
+| Request-response | input validation, idempotency, receipts | risky invoke, retry, explain |
+| Streaming | cursor state, credit accounting | subscribe, ack/nack, cancel, resume |
+| Polling | cursor durability, checkpoint freshness | failover with preserved cursor |
+| Webhook | taint/provenance, public ingress policy | ingress, deny, replay, repair |
+| Queue / pub-sub | delivery semantics, resume position | nack, redelivery, drain |
+| Browser | sandbox policy, secret mediation | interactive setup, risky action, evidence retrieval |
 
 ## 16. Summary
 

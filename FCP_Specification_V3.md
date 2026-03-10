@@ -1133,6 +1133,35 @@ Implication:
 - the derived object can now flow inside the lower-confidentiality target zone,
 - but the chain of custody remains visible through approval and crossing records.
 
+#### 5.3.6 Reference Merge and Decision Algorithm
+
+Implementations MAY vary internally, but the externally visible result SHOULD be equivalent to the
+following conceptual algorithm:
+
+```text
+merge(inputs):
+  effective_integrity       = min(input.effective_integrity)
+  effective_confidentiality = max(input.effective_confidentiality)
+  effective_taint           = OR(input.effective_taint)
+  crossings                 = concatenation(input.zone_crossings)
+
+decide(target):
+  if target.integrity > effective_integrity and operation is risky_or_dangerous:
+    require elevation
+  if target.confidentiality < effective_confidentiality:
+    require declassification
+  if effective_taint includes public_or_untrusted and operation is dangerous:
+    deny unless explicit reviewed path exists
+  else allow
+```
+
+The important property is not the literal code shape. It is that:
+
+- integrity never silently rises,
+- confidentiality never silently falls,
+- taint never silently disappears,
+- every exception is backed by durable evidence.
+
 ### 5.4 Approval and Sanitization Evidence
 
 Elevations, declassifications, and taint reductions MUST be evidenced by durable objects:
@@ -1278,6 +1307,29 @@ Common failure modes:
 - input constraints fail to cover the actual request body,
 - approval expired but the user interface still displayed it as current,
 - approval valid in one zone but presented from another.
+
+#### 5.4.7 Rich Approval Object Shape
+
+Approval implementations SHOULD preserve enough detail to stand alone as durable evidence:
+
+```rust
+pub struct ApprovalTokenV3 {
+    pub header: ObjectHeader,
+    pub scope: ApprovalScope,
+    pub justification: String,
+    pub approved_by: PrincipalId,
+    pub approved_at: u64,
+    pub expires_at: u64,
+    pub signature: Signature,
+}
+```
+
+Recommended properties:
+
+1. justification SHOULD capture why the approver believed the action was acceptable,
+2. expiry SHOULD be explicit rather than implied,
+3. approval objects SHOULD be independently explainable without consulting ephemeral UI state,
+4. the object SHOULD be suitable for inclusion in evidence bundles and audit chains.
 
 ### 5.5 Capabilities and Tokens
 
@@ -3719,6 +3771,40 @@ Recommended design characteristics:
 - signed summaries so gossip participates in attribution and peer budgeting,
 - bounded per-peer reconciliation cost.
 
+#### 11.6.5.2 Approximate Membership and Reconciliation Structures
+
+Implementations MAY choose different concrete data structures, but the intended roles are:
+
+- one compact summary for "might have object",
+- one compact summary for "might have symbol or chunk",
+- one reconciliation structure for precise delta exchange when peers disagree.
+
+Representative shapes:
+
+```rust
+pub struct ObjectFilterSummary {
+    pub digest: [u8; 32],
+    pub approx_entries: u32,
+}
+
+pub struct SymbolFilterSummary {
+    pub digest: [u8; 32],
+    pub approx_entries: u32,
+}
+
+pub struct ReconciliationDelta {
+    pub encoded: Vec<u8>,
+    pub object_count_hint: u32,
+    pub symbol_count_hint: u32,
+}
+```
+
+Normative guidance:
+
+1. summaries MUST be bounded,
+2. precise reconciliation work MUST remain budgeted,
+3. a peer claiming possible possession is not yet proof of usable availability.
+
 #### 11.6.5.1 Peer State and Anti-Entropy
 
 Implementations SHOULD maintain explicit peer state for repair and discovery:
@@ -3793,6 +3879,26 @@ Representative responsibilities:
 - manage object admission, repair, and checkpoint interaction,
 - delegate to local or remote connector execution,
 - emit receipts, audit events, and operator-facing evidence.
+
+### 11.6.8 MeshNode Request Flow
+
+The following conceptual flow captures the intended order of mesh-side enforcement:
+
+```text
+1. verify token and holder proof
+2. verify revocation and checkpoint freshness
+3. evaluate provenance, taint, and approval requirements
+4. acquire or validate lease if required
+5. run placement logic or confirm current placement
+6. execute locally or delegate to chosen node
+7. persist receipt, checkpoint, and audit evidence as required
+```
+
+This order matters because:
+
+- expensive provider-side work should not happen before token, freshness, and approval checks,
+- placement should not occur before we know the action is actually authorized,
+- receipts and audit artifacts should close the loop immediately after execution.
 
 ### 11.7 Threat Model, Diversity, and Degraded Operation
 
@@ -3877,6 +3983,26 @@ Every implementation MUST define:
 - repair-work budgets,
 - bounded reconciliation state.
 
+#### 11.7.1.1 Peer Budgets and Anti-Amplification
+
+Representative peer budget model:
+
+```rust
+pub struct PeerBudget {
+    pub max_bytes_per_min: u64,
+    pub max_symbols_per_min: u32,
+    pub max_failed_auth_per_min: u32,
+    pub max_inflight_decodes: u32,
+    pub max_decode_cpu_ms_per_min: u64,
+}
+```
+
+Anti-amplification guidance:
+
+1. responses to repair or symbol requests MUST be explicitly bounded,
+2. unauthenticated or low-trust requesters SHOULD have much smaller caps,
+3. replay or auth failure storms SHOULD quickly exhaust the offender's budget rather than the node's.
+
 ### 11.7.2 Unreferenced Object Quarantine
 
 Unreferenced or unprovenanced objects MUST enter a bounded quarantine store before they are admitted
@@ -3902,6 +4028,22 @@ Normative rules:
 2. Promotion from quarantine MUST require either checkpoint reachability, authenticated explicit request, or local policy pinning.
 3. Promotion SHOULD include schema validation before the object becomes visible for ordinary repair or placement reasoning.
 4. Eviction order SHOULD prefer removing oldest, lowest-reputation, or largest quarantined objects first.
+
+#### 11.7.2.1 Promotion and Eviction Procedure
+
+Recommended promotion procedure:
+
+1. reconstruct enough of the object to validate schema and header,
+2. determine whether it is reachable from the current checkpoint frontier or explicitly requested,
+3. verify any required signatures or object references,
+4. move the object from quarantine to admitted storage,
+5. only then allow it to influence gossip, repair, or placement.
+
+Recommended eviction order when pressure is high:
+
+1. oldest quarantined objects,
+2. largest quarantined objects,
+3. objects sourced from low-reputation or repeatedly failing peers.
 
 ### 11.8 Threshold Secret Use and Reconstruction Cost
 
@@ -3965,6 +4107,25 @@ Normative guidance:
 1. once an artifact is pinned for a zone or deployment, subsequent activation SHOULD prefer the pinned source unless an explicit update policy says otherwise,
 2. promotion from remote source to mirror SHOULD retain the exact manifest, digest, and attestation references used for verification,
 3. operator surfaces SHOULD be able to explain why one source was preferred over another.
+
+### 12.1.3 Install and Update Fetch Flow
+
+A typical verified install or update flow SHOULD look like:
+
+1. choose source according to pinning and sovereignty policy,
+2. fetch source index or manifest,
+3. verify signatures and freshness,
+4. fetch artifact and attestation set,
+5. verify artifact digest, interface hash, and execution-form compatibility,
+6. optionally promote to mirror,
+7. activate or stage for rollout.
+
+Install and update flows SHOULD retain enough evidence that an operator can later answer:
+
+- which source was used,
+- which exact artifact and manifest were accepted,
+- why a newer or different candidate was rejected,
+- whether the accepted artifact was mirrored afterward.
 
 ### 12.2 Verification Chain
 
@@ -4131,6 +4292,20 @@ Mirror promotion SHOULD be auditable and SHOULD emit evidence identifying:
 - verified manifest and artifact ids,
 - attestation set accepted,
 - policy version used for promotion.
+
+### 12.4.3 Mirror Retention and Garbage-Collection Expectations
+
+Mirrors SHOULD distinguish:
+
+- pinned artifacts required for current operation,
+- rollback candidates retained for safety,
+- stale superseded artifacts eligible for ordinary garbage collection.
+
+Mirror GC MUST NOT discard:
+
+1. active pinned versions,
+2. explicitly retained rollback targets,
+3. artifacts still referenced by evidence bundles or conformance fixtures under retention policy.
 
 ## 13. Observability, Explainability, and Errors
 
@@ -4455,6 +4630,18 @@ Recommended rules:
 3. proxy-mediated use SHOULD be preferred when the connector does not genuinely need raw secret material,
 4. device removal or compromise SHOULD trigger re-sharing and, where appropriate, rotation.
 
+### 13.7.5 Security-Incident Response Expectations
+
+A conformant operational model SHOULD make the following incident responses mechanically possible:
+
+1. revoke a node or issuer key,
+2. rotate affected zone keys,
+3. refresh checkpoints and revocation heads,
+4. re-share threshold secrets,
+5. explain which in-flight or recently completed actions may have been affected.
+
+Security features that cannot be exercised in incident response are only half implemented.
+
 ### 13.8 Threat and Trust Assumptions
 
 Trusted assumptions:
@@ -4474,6 +4661,37 @@ Adversarial assumptions the system MUST tolerate or explicitly bound:
 
 Where quorum-sensitive claims are made, implementations SHOULD document the assumed `n` / `f` model
 for the relevant zone or deployment.
+
+### 13.8.1 Threat Table
+
+Recommended operator-facing threat framing:
+
+| Threat | Primary Control Layers |
+|--------|------------------------|
+| compromised device | attestation, revocation, zone-key rotation, lease fencing |
+| malicious peer | session auth, admission control, quarantine, diversity policy |
+| replayed authority | token freshness, holder proof, checkpoint binding |
+| stale artifact | registry freshness, transparency, mirror pinning |
+| hostile external service | taint, network guard, bounded execution, evidence emission |
+
+### 13.8.2 Trust Reduction Paths
+
+Implementations SHOULD define what happens when a previously trusted component becomes less trusted.
+
+Examples:
+
+- a direct path falls back to relay,
+- a node loses posture attestation freshness,
+- registry freshness checks fail,
+- diversity requirements are no longer met,
+- a provider begins returning malformed or adversarial responses.
+
+These trust-reduction paths SHOULD map to explicit behavior:
+
+- continue safely,
+- continue in degraded mode,
+- require operator approval,
+- deny outright.
 
 ### 13.9 Agent Integration
 

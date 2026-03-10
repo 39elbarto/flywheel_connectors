@@ -1584,63 +1584,132 @@ scope = "instance"
     #[test]
     fn cohort_full_messaging_list() {
         for name in ["sendgrid", "mailchimp", "intercom"] {
-            assert_eq!(assign_cohort(name), ConnectorCohort::Messaging, "failed for {name}");
+            assert_eq!(
+                assign_cohort(name),
+                ConnectorCohort::Messaging,
+                "failed for {name}"
+            );
         }
     }
 
     #[test]
     fn cohort_full_devtools_list() {
-        for name in ["github", "gitlab", "bitbucket", "sentry", "grafana", "datadog"] {
-            assert_eq!(assign_cohort(name), ConnectorCohort::DevTools, "failed for {name}");
+        for name in [
+            "github",
+            "gitlab",
+            "bitbucket",
+            "sentry",
+            "grafana",
+            "datadog",
+        ] {
+            assert_eq!(
+                assign_cohort(name),
+                ConnectorCohort::DevTools,
+                "failed for {name}"
+            );
         }
     }
 
     #[test]
     fn cohort_full_productivity_list() {
-        for name in ["notion", "asana", "trello", "todoist", "clickup", "monday", "figma", "jira", "linear"] {
-            assert_eq!(assign_cohort(name), ConnectorCohort::Productivity, "failed for {name}");
+        for name in [
+            "notion", "asana", "trello", "todoist", "clickup", "monday", "figma", "jira", "linear",
+        ] {
+            assert_eq!(
+                assign_cohort(name),
+                ConnectorCohort::Productivity,
+                "failed for {name}"
+            );
         }
     }
 
     #[test]
     fn cohort_full_automation_list() {
-        for name in ["zapier", "make", "n8n", "retool", "metabase", "cron", "webhook-receiver", "mcp-bridge"] {
-            assert_eq!(assign_cohort(name), ConnectorCohort::Automation, "failed for {name}");
+        for name in [
+            "zapier",
+            "make",
+            "n8n",
+            "retool",
+            "metabase",
+            "cron",
+            "webhook-receiver",
+            "mcp-bridge",
+        ] {
+            assert_eq!(
+                assign_cohort(name),
+                ConnectorCohort::Automation,
+                "failed for {name}"
+            );
         }
     }
 
     #[test]
     fn cohort_full_data_list() {
-        for name in ["elasticsearch", "bigquery", "snowflake", "duckdb", "mongodb", "postgresql", "redis"] {
-            assert_eq!(assign_cohort(name), ConnectorCohort::Data, "failed for {name}");
+        for name in [
+            "elasticsearch",
+            "bigquery",
+            "snowflake",
+            "duckdb",
+            "mongodb",
+            "postgresql",
+            "redis",
+        ] {
+            assert_eq!(
+                assign_cohort(name),
+                ConnectorCohort::Data,
+                "failed for {name}"
+            );
         }
     }
 
     #[test]
     fn cohort_full_analytics_list() {
         for name in ["posthog", "mixpanel", "amplitude", "segment"] {
-            assert_eq!(assign_cohort(name), ConnectorCohort::Analytics, "failed for {name}");
+            assert_eq!(
+                assign_cohort(name),
+                ConnectorCohort::Analytics,
+                "failed for {name}"
+            );
         }
     }
 
     #[test]
     fn cohort_full_business_list() {
-        for name in ["stripe", "plaid", "salesforce", "hubspot", "docusign", "pandadoc"] {
-            assert_eq!(assign_cohort(name), ConnectorCohort::Business, "failed for {name}");
+        for name in [
+            "stripe",
+            "plaid",
+            "salesforce",
+            "hubspot",
+            "docusign",
+            "pandadoc",
+        ] {
+            assert_eq!(
+                assign_cohort(name),
+                ConnectorCohort::Business,
+                "failed for {name}"
+            );
         }
     }
 
     #[test]
     fn cohort_full_infra_list() {
         for name in ["kubernetes", "terraform", "pulumi"] {
-            assert_eq!(assign_cohort(name), ConnectorCohort::Infra, "failed for {name}");
+            assert_eq!(
+                assign_cohort(name),
+                ConnectorCohort::Infra,
+                "failed for {name}"
+            );
         }
     }
 
     #[test]
     fn cohort_full_ai_list() {
         for name in ["openai", "anthropic", "google-ai", "llm-router", "whisper"] {
-            assert_eq!(assign_cohort(name), ConnectorCohort::Ai, "failed for {name}");
+            assert_eq!(
+                assign_cohort(name),
+                ConnectorCohort::Ai,
+                "failed for {name}"
+            );
         }
     }
 
@@ -1765,7 +1834,12 @@ related = []
         let manifest: toml::Value = toml::from_str(s).unwrap();
         let audit = audit_manifest("emptycap", &manifest);
         assert_eq!(audit.operations.with_capability, 0);
-        assert!(audit.gaps.iter().any(|g| g.description.contains("capability")));
+        assert!(
+            audit
+                .gaps
+                .iter()
+                .any(|g| g.description.contains("capability"))
+        );
     }
 
     // ── Additional completeness / coverage tests ───────────────────

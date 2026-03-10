@@ -1910,7 +1910,11 @@ mod tests {
     fn vault_update_secrets_not_found() {
         let mut vault = ProxyVault::new();
         let err = vault
-            .update_secrets(&CredentialId::new("nope").unwrap(), "github", BTreeMap::new())
+            .update_secrets(
+                &CredentialId::new("nope").unwrap(),
+                "github",
+                BTreeMap::new(),
+            )
             .unwrap_err();
         assert!(err.to_string().contains("not found"));
     }

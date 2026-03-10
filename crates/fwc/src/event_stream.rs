@@ -911,11 +911,26 @@ mod tests {
 
     #[test]
     fn stream_status_serde_values() {
-        assert_eq!(serde_json::to_string(&StreamStatus::Active).unwrap(), "\"active\"");
-        assert_eq!(serde_json::to_string(&StreamStatus::Waiting).unwrap(), "\"waiting\"");
-        assert_eq!(serde_json::to_string(&StreamStatus::Error).unwrap(), "\"error\"");
-        assert_eq!(serde_json::to_string(&StreamStatus::Disconnected).unwrap(), "\"disconnected\"");
-        assert_eq!(serde_json::to_string(&StreamStatus::Unsupported).unwrap(), "\"unsupported\"");
+        assert_eq!(
+            serde_json::to_string(&StreamStatus::Active).unwrap(),
+            "\"active\""
+        );
+        assert_eq!(
+            serde_json::to_string(&StreamStatus::Waiting).unwrap(),
+            "\"waiting\""
+        );
+        assert_eq!(
+            serde_json::to_string(&StreamStatus::Error).unwrap(),
+            "\"error\""
+        );
+        assert_eq!(
+            serde_json::to_string(&StreamStatus::Disconnected).unwrap(),
+            "\"disconnected\""
+        );
+        assert_eq!(
+            serde_json::to_string(&StreamStatus::Unsupported).unwrap(),
+            "\"unsupported\""
+        );
     }
 
     #[test]

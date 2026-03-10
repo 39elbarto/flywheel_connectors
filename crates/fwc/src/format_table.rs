@@ -621,8 +621,7 @@ mod tests {
 
     #[test]
     fn empty_markdown_says_no_rows() {
-        let result =
-            render_tabular(&json!([]), TabularFormat::Markdown, &default_opts()).unwrap();
+        let result = render_tabular(&json!([]), TabularFormat::Markdown, &default_opts()).unwrap();
         assert!(result.contains("no rows"));
     }
 
@@ -656,8 +655,7 @@ mod tests {
             no_headers: true,
             ..default_opts()
         };
-        let result =
-            render_tabular(&sample_issues(), TabularFormat::Markdown, &opts).unwrap();
+        let result = render_tabular(&sample_issues(), TabularFormat::Markdown, &opts).unwrap();
         assert!(!result.contains("---"));
         assert!(result.contains("Bug fix"));
     }

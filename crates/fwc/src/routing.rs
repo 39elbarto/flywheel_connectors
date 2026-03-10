@@ -1295,7 +1295,10 @@ mod tests {
     fn preference_score_monotonic_increase() {
         let vals: Vec<f64> = (0..10).map(|i| preference_score(i * 10)).collect();
         for window in vals.windows(2) {
-            assert!(window[1] >= window[0], "preference score should be monotonic");
+            assert!(
+                window[1] >= window[0],
+                "preference score should be monotonic"
+            );
         }
     }
 
@@ -1501,10 +1504,7 @@ mod tests {
             "UnKnOwN".parse::<HealthState>().unwrap(),
             HealthState::Unknown
         );
-        assert_eq!(
-            "ERROR".parse::<HealthState>().unwrap(),
-            HealthState::Error
-        );
+        assert_eq!("ERROR".parse::<HealthState>().unwrap(), HealthState::Error);
     }
 
     #[test]

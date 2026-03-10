@@ -1153,9 +1153,15 @@ mod tests {
     #[test]
     fn query_combined_connector_and_status() {
         let store = temp_store();
-        store.append(&sample_entry("github", "create_issue", OpStatus::Success)).unwrap();
-        store.append(&sample_entry("github", "list_issues", OpStatus::Error)).unwrap();
-        store.append(&sample_entry("slack", "send_message", OpStatus::Error)).unwrap();
+        store
+            .append(&sample_entry("github", "create_issue", OpStatus::Success))
+            .unwrap();
+        store
+            .append(&sample_entry("github", "list_issues", OpStatus::Error))
+            .unwrap();
+        store
+            .append(&sample_entry("slack", "send_message", OpStatus::Error))
+            .unwrap();
         let mut filter = HistoryFilter::new();
         filter.connector = Some("github".to_owned());
         filter.status = Some(OpStatus::Error);
@@ -1171,7 +1177,9 @@ mod tests {
         let entry = sample_entry("github", "create_issue", OpStatus::Success);
         let target_id = entry.entry_id.clone();
         store.append(&entry).unwrap();
-        store.append(&sample_entry("slack", "send_message", OpStatus::Error)).unwrap();
+        store
+            .append(&sample_entry("slack", "send_message", OpStatus::Error))
+            .unwrap();
         let mut filter = HistoryFilter::new();
         filter.connector = Some("github".to_owned());
         filter.status = Some(OpStatus::Success);
@@ -1186,7 +1194,9 @@ mod tests {
     fn count_after_multiple_appends_and_query() {
         let store = temp_store();
         for _ in 0..7 {
-            store.append(&sample_entry("github", "create_issue", OpStatus::Success)).unwrap();
+            store
+                .append(&sample_entry("github", "create_issue", OpStatus::Success))
+                .unwrap();
         }
         assert_eq!(store.count().unwrap(), 7);
         let mut filter = HistoryFilter::new();
@@ -1200,20 +1210,26 @@ mod tests {
 
     #[test]
     fn query_nonexistent_file() {
-        let store = HistoryStore::new(PathBuf::from("/tmp/nonexistent-fwc-history-xyz/history.jsonl"));
+        let store = HistoryStore::new(PathBuf::from(
+            "/tmp/nonexistent-fwc-history-xyz/history.jsonl",
+        ));
         let results = store.query(&HistoryFilter::new()).unwrap();
         assert!(results.is_empty());
     }
 
     #[test]
     fn count_nonexistent_file() {
-        let store = HistoryStore::new(PathBuf::from("/tmp/nonexistent-fwc-history-xyz/history.jsonl"));
+        let store = HistoryStore::new(PathBuf::from(
+            "/tmp/nonexistent-fwc-history-xyz/history.jsonl",
+        ));
         assert_eq!(store.count().unwrap(), 0);
     }
 
     #[test]
     fn get_nonexistent_file() {
-        let store = HistoryStore::new(PathBuf::from("/tmp/nonexistent-fwc-history-xyz/history.jsonl"));
+        let store = HistoryStore::new(PathBuf::from(
+            "/tmp/nonexistent-fwc-history-xyz/history.jsonl",
+        ));
         assert!(store.get("any-id").unwrap().is_none());
     }
 

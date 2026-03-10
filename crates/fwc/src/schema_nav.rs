@@ -865,7 +865,10 @@ mod tests {
             }
         });
         let fields = walk_schema(&schema, &[]);
-        let l3 = fields.iter().find(|f| f.path == "level1.level2.level3").unwrap();
+        let l3 = fields
+            .iter()
+            .find(|f| f.path == "level1.level2.level3")
+            .unwrap();
         assert_eq!(l3.depth, 2);
         assert_eq!(l3.field_type, "string");
     }
@@ -884,7 +887,11 @@ mod tests {
         });
         let fields = walk_schema(&schema, &[]);
         assert_eq!(fields.len(), 4);
-        let required: Vec<&str> = fields.iter().filter(|f| f.required).map(|f| f.path.as_str()).collect();
+        let required: Vec<&str> = fields
+            .iter()
+            .filter(|f| f.required)
+            .map(|f| f.path.as_str())
+            .collect();
         assert_eq!(required.len(), 2);
         assert!(required.contains(&"a"));
         assert!(required.contains(&"c"));
@@ -996,10 +1003,7 @@ mod tests {
 
     #[test]
     fn infer_type_array_items_no_type() {
-        assert_eq!(
-            infer_type(&json!({"type": "array", "items": {}})),
-            "[any]"
-        );
+        assert_eq!(infer_type(&json!({"type": "array", "items": {}})), "[any]");
     }
 
     // ── Additional scaffold_template tests ─────────────────────────
@@ -1120,7 +1124,11 @@ mod tests {
         let fields = walk_schema(&schema, &[]);
         let filtered = filter_by_field(&fields, "config");
         assert_eq!(filtered.len(), 3); // config + config.timeout + config.retries
-        assert!(filtered.iter().all(|f| f.path == "config" || f.path.starts_with("config.")));
+        assert!(
+            filtered
+                .iter()
+                .all(|f| f.path == "config" || f.path.starts_with("config."))
+        );
     }
 
     #[test]

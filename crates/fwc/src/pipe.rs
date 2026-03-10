@@ -2967,12 +2967,7 @@ operation = "github.list_issues"
         .unwrap();
         let validation = validate_pipeline_definition(&definition);
         assert!(!validation.valid);
-        assert!(
-            validation
-                .errors
-                .iter()
-                .any(|e| e.contains("non-empty id"))
-        );
+        assert!(validation.errors.iter().any(|e| e.contains("non-empty id")));
     }
 
     #[test]
@@ -3065,12 +3060,7 @@ depends_on = ["nonexistent"]
         .unwrap();
         let validation = validate_pipeline_definition(&definition);
         assert!(!validation.valid);
-        assert!(
-            validation
-                .errors
-                .iter()
-                .any(|e| e.contains("unknown step"))
-        );
+        assert!(validation.errors.iter().any(|e| e.contains("unknown step")));
     }
 
     #[test]
@@ -3110,12 +3100,7 @@ name = "empty"
         .unwrap();
         let validation = validate_pipeline_definition(&definition);
         assert!(!validation.valid);
-        assert!(
-            validation
-                .errors
-                .iter()
-                .any(|e| e.contains("at least one"))
-        );
+        assert!(validation.errors.iter().any(|e| e.contains("at least one")));
     }
 
     #[test]
@@ -3184,9 +3169,12 @@ default = "x"
 "#,
         )
         .unwrap();
-        let errors =
-            bind_pipeline_params(&definition, &["unknown=val".to_owned()]).unwrap_err();
-        assert!(errors.iter().any(|e| e.contains("unknown pipeline parameter")));
+        let errors = bind_pipeline_params(&definition, &["unknown=val".to_owned()]).unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("unknown pipeline parameter"))
+        );
     }
 
     #[test]
@@ -3206,8 +3194,7 @@ default = "x"
 "#,
         )
         .unwrap();
-        let errors =
-            bind_pipeline_params(&definition, &["no-equals-sign".to_owned()]).unwrap_err();
+        let errors = bind_pipeline_params(&definition, &["no-equals-sign".to_owned()]).unwrap_err();
         assert!(errors.iter().any(|e| e.contains("expected KEY=VALUE")));
     }
 
@@ -3318,12 +3305,17 @@ required = true
     #[test]
     fn default_pipeline_roots_project() {
         let roots = default_pipeline_roots(std::path::Path::new("/project"));
-        assert_eq!(roots.project, std::path::PathBuf::from("/project/.fwc/pipelines"));
+        assert_eq!(
+            roots.project,
+            std::path::PathBuf::from("/project/.fwc/pipelines")
+        );
     }
 
     #[test]
     fn is_supported_param_type_all_valid() {
-        for t in &["string", "integer", "number", "boolean", "array", "object", "any"] {
+        for t in &[
+            "string", "integer", "number", "boolean", "array", "object", "any",
+        ] {
             assert!(is_supported_param_type(t), "{t} should be supported");
         }
     }

@@ -1103,9 +1103,7 @@ mod tests {
         for connector in ["github", "slack", "jira", "notion", "linear"] {
             let mut fields = BTreeMap::new();
             fields.insert("token".to_owned(), format!("tok_{connector}"));
-            store
-                .add(Credential::new(connector, fields, None))
-                .unwrap();
+            store.add(Credential::new(connector, fields, None)).unwrap();
         }
         assert_eq!(store.count().unwrap(), 5);
         let ids = store.list_ids().unwrap();

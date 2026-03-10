@@ -843,14 +843,16 @@ mod tests {
 
     #[test]
     fn parse_whitespace_only_lines() {
-        let content = "   \n\t\n{\"id\":\"a\",\"connector\":\"g\",\"operation\":\"o\",\"input\":{}}\n  \n";
+        let content =
+            "   \n\t\n{\"id\":\"a\",\"connector\":\"g\",\"operation\":\"o\",\"input\":{}}\n  \n";
         let batch = BatchFile::parse(content).unwrap();
         assert_eq!(batch.len(), 1);
     }
 
     #[test]
     fn parse_inline_comment_before_op() {
-        let content = "# header\n{\"id\":\"a\",\"connector\":\"g\",\"operation\":\"o\",\"input\":{}}";
+        let content =
+            "# header\n{\"id\":\"a\",\"connector\":\"g\",\"operation\":\"o\",\"input\":{}}";
         let batch = BatchFile::parse(content).unwrap();
         assert_eq!(batch.len(), 1);
         assert_eq!(batch.operations[0].id, "a");
@@ -864,7 +866,8 @@ mod tests {
 
     #[test]
     fn parse_invalid_json_on_second_line() {
-        let content = "{\"id\":\"a\",\"connector\":\"g\",\"operation\":\"o\",\"input\":{}}\nnot json";
+        let content =
+            "{\"id\":\"a\",\"connector\":\"g\",\"operation\":\"o\",\"input\":{}}\nnot json";
         let err = BatchFile::parse(content).unwrap_err();
         match err {
             BatchFileError::InvalidJson { line, .. } => assert_eq!(line, 2),
@@ -980,10 +983,22 @@ mod tests {
 
     #[test]
     fn op_status_serde_values() {
-        assert_eq!(serde_json::to_string(&OpStatus::Success).unwrap(), "\"success\"");
-        assert_eq!(serde_json::to_string(&OpStatus::Error).unwrap(), "\"error\"");
-        assert_eq!(serde_json::to_string(&OpStatus::Skipped).unwrap(), "\"skipped\"");
-        assert_eq!(serde_json::to_string(&OpStatus::Pending).unwrap(), "\"pending\"");
+        assert_eq!(
+            serde_json::to_string(&OpStatus::Success).unwrap(),
+            "\"success\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OpStatus::Error).unwrap(),
+            "\"error\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OpStatus::Skipped).unwrap(),
+            "\"skipped\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OpStatus::Pending).unwrap(),
+            "\"pending\""
+        );
     }
 
     #[test]
@@ -1076,7 +1091,9 @@ mod tests {
 
     #[test]
     fn error_clone() {
-        let err = BatchFileError::DuplicateId { id: "abc".to_owned() };
+        let err = BatchFileError::DuplicateId {
+            id: "abc".to_owned(),
+        };
         let cloned = err.clone();
         assert_eq!(err, cloned);
     }

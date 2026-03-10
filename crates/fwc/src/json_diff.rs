@@ -594,7 +594,10 @@ mod tests {
 
     #[test]
     fn change_kind_serializes_snake_case() {
-        assert_eq!(serde_json::to_string(&ChangeKind::Added).unwrap(), "\"added\"");
+        assert_eq!(
+            serde_json::to_string(&ChangeKind::Added).unwrap(),
+            "\"added\""
+        );
         assert_eq!(
             serde_json::to_string(&ChangeKind::Removed).unwrap(),
             "\"removed\""
@@ -751,10 +754,7 @@ mod tests {
 
     #[test]
     fn format_path_single_segment() {
-        assert_eq!(
-            format_path(&["name".to_string()]),
-            "name"
-        );
+        assert_eq!(format_path(&["name".to_string()]), "name");
     }
 
     #[test]

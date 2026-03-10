@@ -1018,9 +1018,7 @@ mod tests {
 
     #[test]
     fn validation_result_is_valid_when_no_errors() {
-        let result = ValidationResult {
-            errors: Vec::new(),
-        };
+        let result = ValidationResult { errors: Vec::new() };
         assert!(result.is_valid());
     }
 

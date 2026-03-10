@@ -1382,8 +1382,7 @@ mod tests {
 
     #[test]
     fn recipe_check_requirements_empty_available() {
-        let r = Recipe::new("t", "T", RecipeCategory::Development)
-            .with_connector("github");
+        let r = Recipe::new("t", "T", RecipeCategory::Development).with_connector("github");
         let missing = r.check_requirements(&[]);
         assert_eq!(missing, vec!["github"]);
     }
@@ -1561,7 +1560,11 @@ mod tests {
     fn format_detail_with_default_param() {
         let r = Recipe::new("test", "Test", RecipeCategory::Development)
             .with_connector("github")
-            .with_parameter(RecipeParameter::optional("env", "Environment", "production"))
+            .with_parameter(RecipeParameter::optional(
+                "env",
+                "Environment",
+                "production",
+            ))
             .with_step(RecipeStep::new("s", "github", "o"));
         let s = format_recipe_detail(&r);
         assert!(s.contains("[default: production]"));

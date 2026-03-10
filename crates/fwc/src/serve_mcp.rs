@@ -717,11 +717,7 @@ fn handle_tools_list(state: &McpServerState, id: Value) -> JsonRpcResponse {
     JsonRpcResponse::success(id, json!({ "tools": tools }))
 }
 
-fn handle_tools_call(
-    state: &McpServerState,
-    id: Value,
-    params: Option<&Value>,
-) -> JsonRpcResponse {
+fn handle_tools_call(state: &McpServerState, id: Value, params: Option<&Value>) -> JsonRpcResponse {
     let Some(params) = params else {
         return JsonRpcResponse::error(
             id,
@@ -960,18 +956,12 @@ mod tests {
     }
 
     fn sample_prompt() -> McpPromptEntry {
-        McpPromptEntry::new(
-            "how-to-use-github",
-            "How to use the GitHub connector",
-        )
-        .with_argument(PromptArgDef::required(
-            "task",
-            "What you want to accomplish",
-        ))
-        .with_argument(PromptArgDef::optional(
-            "style",
-            "Output style preference",
-        ))
+        McpPromptEntry::new("how-to-use-github", "How to use the GitHub connector")
+            .with_argument(PromptArgDef::required(
+                "task",
+                "What you want to accomplish",
+            ))
+            .with_argument(PromptArgDef::optional("style", "Output style preference"))
     }
 
     fn sample_state() -> McpServerState {
@@ -1036,10 +1026,7 @@ mod tests {
 
     #[test]
     fn response_error_roundtrip() {
-        let resp = JsonRpcResponse::error(
-            json!(2),
-            JsonRpcError::method_not_found("bogus"),
-        );
+        let resp = JsonRpcResponse::error(json!(2), JsonRpcError::method_not_found("bogus"));
         let serialized = serde_json::to_string(&resp).unwrap();
         let deserialized: JsonRpcResponse = serde_json::from_str(&serialized).unwrap();
         assert_eq!(deserialized.id, json!(2));
@@ -1463,9 +1450,7 @@ mod tests {
 
     #[test]
     fn builder_with_tool() {
-        let state = McpServerState::builder()
-            .with_tool(sample_tool())
-            .build();
+        let state = McpServerState::builder().with_tool(sample_tool()).build();
         assert_eq!(state.tool_count(), 1);
     }
 
@@ -1514,9 +1499,11 @@ mod tests {
     #[test]
     fn find_resource_by_uri() {
         let state = sample_state();
-        assert!(state
-            .find_resource("resource://connector/github/health")
-            .is_some());
+        assert!(
+            state
+                .find_resource("resource://connector/github/health")
+                .is_some()
+        );
     }
 
     #[test]
@@ -1739,10 +1726,7 @@ mod tests {
     #[test]
     fn handle_tools_call_unknown_tool() {
         let state = sample_state();
-        let req = make_request(
-            "tools/call",
-            Some(json!({"name": "nonexistent.tool"})),
-        );
+        let req = make_request("tools/call", Some(json!({"name": "nonexistent.tool"})));
         let resp = handle_request(&state, &req);
         assert!(resp.is_error());
         let err = resp.error.as_ref().unwrap();
@@ -1753,10 +1737,7 @@ mod tests {
     #[test]
     fn handle_tools_call_no_arguments() {
         let state = sample_state();
-        let req = make_request(
-            "tools/call",
-            Some(json!({"name": "github.list_issues"})),
-        );
+        let req = make_request("tools/call", Some(json!({"name": "github.list_issues"})));
         let resp = handle_request(&state, &req);
         assert!(!resp.is_error());
     }
@@ -1826,18 +1807,16 @@ mod tests {
     #[test]
     fn handle_resources_read_not_found() {
         let state = sample_state();
-        let req = make_request(
-            "resources/read",
-            Some(json!({"uri": "resource://missing"})),
-        );
+        let req = make_request("resources/read", Some(json!({"uri": "resource://missing"})));
         let resp = handle_request(&state, &req);
         assert!(resp.is_error());
-        assert!(resp
-            .error
-            .as_ref()
-            .unwrap()
-            .message()
-            .contains("Resource not found"));
+        assert!(
+            resp.error
+                .as_ref()
+                .unwrap()
+                .message()
+                .contains("Resource not found")
+        );
     }
 
     #[test]
@@ -1853,12 +1832,7 @@ mod tests {
         );
         let resp = handle_request(&state, &req);
         assert!(resp.is_error());
-        assert!(resp
-            .error
-            .as_ref()
-            .unwrap()
-            .message()
-            .contains("disabled"));
+        assert!(resp.error.as_ref().unwrap().message().contains("disabled"));
     }
 
     // ── handle_request: prompts/list ────────────────────────────────
@@ -1908,10 +1882,7 @@ mod tests {
     #[test]
     fn handle_prompts_get_success() {
         let state = sample_state();
-        let req = make_request(
-            "prompts/get",
-            Some(json!({"name": "how-to-use-github"})),
-        );
+        let req = make_request("prompts/get", Some(json!({"name": "how-to-use-github"})));
         let resp = handle_request(&state, &req);
         assert!(!resp.is_error());
         let result = resp.result().unwrap();
@@ -1939,18 +1910,16 @@ mod tests {
     #[test]
     fn handle_prompts_get_not_found() {
         let state = sample_state();
-        let req = make_request(
-            "prompts/get",
-            Some(json!({"name": "nonexistent"})),
-        );
+        let req = make_request("prompts/get", Some(json!({"name": "nonexistent"})));
         let resp = handle_request(&state, &req);
         assert!(resp.is_error());
-        assert!(resp
-            .error
-            .as_ref()
-            .unwrap()
-            .message()
-            .contains("Prompt not found"));
+        assert!(
+            resp.error
+                .as_ref()
+                .unwrap()
+                .message()
+                .contains("Prompt not found")
+        );
     }
 
     #[test]
@@ -1960,18 +1929,10 @@ mod tests {
             .with_config(config)
             .with_prompt(sample_prompt())
             .build();
-        let req = make_request(
-            "prompts/get",
-            Some(json!({"name": "how-to-use-github"})),
-        );
+        let req = make_request("prompts/get", Some(json!({"name": "how-to-use-github"})));
         let resp = handle_request(&state, &req);
         assert!(resp.is_error());
-        assert!(resp
-            .error
-            .as_ref()
-            .unwrap()
-            .message()
-            .contains("disabled"));
+        assert!(resp.error.as_ref().unwrap().message().contains("disabled"));
     }
 
     // ── handle_request: unknown method ──────────────────────────────
@@ -2077,20 +2038,8 @@ mod tests {
     #[test]
     fn multiple_tools_in_list() {
         let state = McpServerState::builder()
-            .with_tool(McpToolDefinition::new(
-                "a.op1",
-                "d1",
-                json!({}),
-                "a",
-                "op1",
-            ))
-            .with_tool(McpToolDefinition::new(
-                "b.op2",
-                "d2",
-                json!({}),
-                "b",
-                "op2",
-            ))
+            .with_tool(McpToolDefinition::new("a.op1", "d1", json!({}), "a", "op1"))
+            .with_tool(McpToolDefinition::new("b.op2", "d2", json!({}), "b", "op2"))
             .build();
         let req = make_request("tools/list", None);
         let resp = handle_request(&state, &req);

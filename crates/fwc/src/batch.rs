@@ -557,10 +557,9 @@ mod tests {
 
     #[test]
     fn parse_json_array_nested_objects() {
-        let inputs = BatchInputs::from_json_array(
-            r#"[{"spec":{"replicas":3}},{"spec":{"replicas":5}}]"#,
-        )
-        .unwrap();
+        let inputs =
+            BatchInputs::from_json_array(r#"[{"spec":{"replicas":3}},{"spec":{"replicas":5}}]"#)
+                .unwrap();
         assert_eq!(inputs.len(), 2);
         assert_eq!(inputs.items[0]["spec"]["replicas"], 3);
         assert_eq!(inputs.items[1]["spec"]["replicas"], 5);
@@ -648,8 +647,7 @@ mod tests {
 
     #[test]
     fn template_with_boolean_items() {
-        let inputs =
-            BatchInputs::from_template(r#"{"active":{{item}}}"#, "true,false").unwrap();
+        let inputs = BatchInputs::from_template(r#"{"active":{{item}}}"#, "true,false").unwrap();
         assert_eq!(inputs.len(), 2);
         assert_eq!(inputs.items[0]["active"], true);
         assert_eq!(inputs.items[1]["active"], false);
@@ -663,7 +661,10 @@ mod tests {
 
     #[test]
     fn template_large_batch() {
-        let csv: String = (1..=50).map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+        let csv: String = (1..=50)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
         let inputs = BatchInputs::from_template(r#"{"num":{{item}}}"#, &csv).unwrap();
         assert_eq!(inputs.len(), 50);
         assert_eq!(inputs.items[49]["num"], 50);
@@ -683,9 +684,24 @@ mod tests {
     #[test]
     fn batch_summary_all_failed() {
         let results = vec![
-            ItemResult { index: 0, status: ItemStatus::Error, result: None, error: Some(json!("e1")) },
-            ItemResult { index: 1, status: ItemStatus::Error, result: None, error: Some(json!("e2")) },
-            ItemResult { index: 2, status: ItemStatus::Error, result: None, error: Some(json!("e3")) },
+            ItemResult {
+                index: 0,
+                status: ItemStatus::Error,
+                result: None,
+                error: Some(json!("e1")),
+            },
+            ItemResult {
+                index: 1,
+                status: ItemStatus::Error,
+                result: None,
+                error: Some(json!("e2")),
+            },
+            ItemResult {
+                index: 2,
+                status: ItemStatus::Error,
+                result: None,
+                error: Some(json!("e3")),
+            },
         ];
         let summary = BatchSummary::from_results(&results);
         assert_eq!(summary.total, 3);
@@ -697,8 +713,18 @@ mod tests {
     #[test]
     fn batch_summary_all_skipped() {
         let results = vec![
-            ItemResult { index: 0, status: ItemStatus::Skipped, result: None, error: None },
-            ItemResult { index: 1, status: ItemStatus::Skipped, result: None, error: None },
+            ItemResult {
+                index: 0,
+                status: ItemStatus::Skipped,
+                result: None,
+                error: None,
+            },
+            ItemResult {
+                index: 1,
+                status: ItemStatus::Skipped,
+                result: None,
+                error: None,
+            },
         ];
         let summary = BatchSummary::from_results(&results);
         assert_eq!(summary.total, 2);
@@ -716,7 +742,12 @@ mod tests {
                 1 => ItemStatus::Error,
                 _ => ItemStatus::Skipped,
             };
-            results.push(ItemResult { index: i, status, result: None, error: None });
+            results.push(ItemResult {
+                index: i,
+                status,
+                result: None,
+                error: None,
+            });
         }
         let summary = BatchSummary::from_results(&results);
         assert_eq!(summary.total, 100);
@@ -746,9 +777,24 @@ mod tests {
     #[test]
     fn ndjson_each_line_is_valid_json() {
         let results = vec![
-            ItemResult { index: 0, status: ItemStatus::Success, result: Some(json!(1)), error: None },
-            ItemResult { index: 1, status: ItemStatus::Error, result: None, error: Some(json!("err")) },
-            ItemResult { index: 2, status: ItemStatus::Skipped, result: None, error: None },
+            ItemResult {
+                index: 0,
+                status: ItemStatus::Success,
+                result: Some(json!(1)),
+                error: None,
+            },
+            ItemResult {
+                index: 1,
+                status: ItemStatus::Error,
+                result: None,
+                error: Some(json!("err")),
+            },
+            ItemResult {
+                index: 2,
+                status: ItemStatus::Skipped,
+                result: None,
+                error: None,
+            },
         ];
         let ndjson = results_to_ndjson(&results);
         for line in ndjson.lines() {

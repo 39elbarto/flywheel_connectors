@@ -1076,9 +1076,18 @@ mod tests {
     #[test]
     fn severity_serializes() {
         assert_eq!(serde_json::to_string(&Severity::Info).unwrap(), "\"info\"");
-        assert_eq!(serde_json::to_string(&Severity::Warning).unwrap(), "\"warning\"");
-        assert_eq!(serde_json::to_string(&Severity::Error).unwrap(), "\"error\"");
-        assert_eq!(serde_json::to_string(&Severity::Critical).unwrap(), "\"critical\"");
+        assert_eq!(
+            serde_json::to_string(&Severity::Warning).unwrap(),
+            "\"warning\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Severity::Error).unwrap(),
+            "\"error\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Severity::Critical).unwrap(),
+            "\"critical\""
+        );
     }
 
     #[test]
@@ -1114,8 +1123,14 @@ mod tests {
 
     #[test]
     fn health_status_serializes() {
-        assert_eq!(serde_json::to_string(&HealthStatus::Healthy).unwrap(), "\"healthy\"");
-        assert_eq!(serde_json::to_string(&HealthStatus::Unknown).unwrap(), "\"unknown\"");
+        assert_eq!(
+            serde_json::to_string(&HealthStatus::Healthy).unwrap(),
+            "\"healthy\""
+        );
+        assert_eq!(
+            serde_json::to_string(&HealthStatus::Unknown).unwrap(),
+            "\"unknown\""
+        );
     }
 
     #[test]
@@ -1135,12 +1150,30 @@ mod tests {
 
     #[test]
     fn category_serializes() {
-        assert_eq!(serde_json::to_string(&DiagnosisCategory::Auth).unwrap(), "\"auth\"");
-        assert_eq!(serde_json::to_string(&DiagnosisCategory::RateLimit).unwrap(), "\"rate_limit\"");
-        assert_eq!(serde_json::to_string(&DiagnosisCategory::Network).unwrap(), "\"network\"");
-        assert_eq!(serde_json::to_string(&DiagnosisCategory::Certificate).unwrap(), "\"certificate\"");
-        assert_eq!(serde_json::to_string(&DiagnosisCategory::ServiceError).unwrap(), "\"service_error\"");
-        assert_eq!(serde_json::to_string(&DiagnosisCategory::Unknown).unwrap(), "\"unknown\"");
+        assert_eq!(
+            serde_json::to_string(&DiagnosisCategory::Auth).unwrap(),
+            "\"auth\""
+        );
+        assert_eq!(
+            serde_json::to_string(&DiagnosisCategory::RateLimit).unwrap(),
+            "\"rate_limit\""
+        );
+        assert_eq!(
+            serde_json::to_string(&DiagnosisCategory::Network).unwrap(),
+            "\"network\""
+        );
+        assert_eq!(
+            serde_json::to_string(&DiagnosisCategory::Certificate).unwrap(),
+            "\"certificate\""
+        );
+        assert_eq!(
+            serde_json::to_string(&DiagnosisCategory::ServiceError).unwrap(),
+            "\"service_error\""
+        );
+        assert_eq!(
+            serde_json::to_string(&DiagnosisCategory::Unknown).unwrap(),
+            "\"unknown\""
+        );
     }
 
     #[test]
@@ -1174,7 +1207,10 @@ mod tests {
             .with_url("https://docs.example.com");
         assert!(fix.auto_safe);
         assert_eq!(fix.command.as_deref(), Some("fwc fix"));
-        assert_eq!(fix.reference_url.as_deref(), Some("https://docs.example.com"));
+        assert_eq!(
+            fix.reference_url.as_deref(),
+            Some("https://docs.example.com")
+        );
     }
 
     #[test]
@@ -1320,7 +1356,10 @@ mod tests {
         symptoms.http_status = Some(599);
         let report = diagnose("github", &symptoms);
         assert!(report.has_issues());
-        assert_eq!(report.diagnoses[0].category, DiagnosisCategory::ServiceError);
+        assert_eq!(
+            report.diagnoses[0].category,
+            DiagnosisCategory::ServiceError
+        );
     }
 
     #[test]

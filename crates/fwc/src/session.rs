@@ -735,9 +735,11 @@ mod tests {
         let loaded = store.load(&id).unwrap();
         assert!(loaded.is_some());
         // The session path should use the short_id
-        assert!(std::path::Path::new(&expected_file)
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("json")));
+        assert!(
+            std::path::Path::new(&expected_file)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+        );
     }
 
     // ── Additional resolve_session_id tests ────────────────────────

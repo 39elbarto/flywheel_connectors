@@ -1064,11 +1064,7 @@ mod tests {
         let connectors = vec![stub_connector("github", vec![op])];
         let results = search_operations(&connectors, "new_issue", &SearchFilters::default());
         assert!(!results.is_empty());
-        assert!(
-            results[0]
-                .match_reasons
-                .contains(&"alias_match".to_owned())
-        );
+        assert!(results[0].match_reasons.contains(&"alias_match".to_owned()));
     }
 
     #[test]
@@ -1162,14 +1158,7 @@ mod tests {
 
     #[test]
     fn idempotent_filter_accepts_best_effort() {
-        let mut op = stub_operation(
-            "test.op",
-            "Test op",
-            "test.read",
-            "low",
-            "safe",
-            "Testing",
-        );
+        let mut op = stub_operation("test.op", "Test op", "test.read", "low", "safe", "Testing");
         op.summary.idempotency = "best_effort".to_owned();
         let connectors = vec![stub_connector("test", vec![op])];
         let filters = SearchFilters {

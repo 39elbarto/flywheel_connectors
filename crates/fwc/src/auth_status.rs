@@ -808,7 +808,10 @@ mod tests {
     #[test]
     fn metadata_serde_with_rotations() {
         let mut meta = AuthMetadata::new("github", None);
-        meta.record_rotation(RotationReason::TokenRefresh, Some("auto refresh".to_owned()));
+        meta.record_rotation(
+            RotationReason::TokenRefresh,
+            Some("auto refresh".to_owned()),
+        );
         meta.record_rotation(RotationReason::Expired, None);
         let json = serde_json::to_string(&meta).unwrap();
         let restored: AuthMetadata = serde_json::from_str(&json).unwrap();
@@ -1163,10 +1166,7 @@ mod tests {
 
     #[test]
     fn expiring_soon_warning_message_contains_plan() {
-        let entries = vec![AuthMetadata::new(
-            "github",
-            Some(now() + Duration::days(3)),
-        )];
+        let entries = vec![AuthMetadata::new("github", Some(now() + Duration::days(3)))];
         let warnings = check_expiry_warnings(&entries);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].message.contains("plan rotation"));

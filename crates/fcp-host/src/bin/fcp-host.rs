@@ -38,12 +38,12 @@ use fcp_host::{
     BatchExecutor, BatchInvokeRequest, BatchInvokeResponse, BatchOperation, BatchOperationError,
     BatchOptions, BatchStatus, BudgetPolicyEngine, CacheMetadata, CacheValidator,
     CancellationController, CancellationRequest, CancellationResponse, ConnectorArchetype,
-    ConnectorRegistry, ConnectorSummary, DiscoveryEndpoint, DiscoveryFilter, DiscoveryResponse,
-    DoctorReport, DoctorRequest, DoctorService, GateOutcome, HostHealthResponse, HostHealthStatus,
-    IntrospectionResponse, OperationResult, OperationResultStatus, PreflightRequest,
-    PreflightResponse, RequestPriority, ResilienceError, ResilienceLayer, RolloutController,
-    RolloutDecision, RolloutObservation, RolloutOutcome, SafetyTierExt, SupplyChainGate,
-    SupplyChainGateConfig, merge_connector_health,
+    ConnectorInventoryResponse, ConnectorRegistry, ConnectorSummary, DiscoveryEndpoint,
+    DiscoveryFilter, DiscoveryResponse, DoctorReport, DoctorRequest, DoctorService, GateOutcome,
+    HostHealthResponse, HostHealthStatus, IntrospectionResponse, OperationResult,
+    OperationResultStatus, PreflightRequest, PreflightResponse, RequestPriority, ResilienceError,
+    ResilienceLayer, RolloutController, RolloutDecision, RolloutObservation, RolloutOutcome,
+    SafetyTierExt, SupplyChainGate, SupplyChainGateConfig, merge_connector_health,
 };
 use fcp_host::{HostError, HostResult};
 use futures_util::future::join_all;
@@ -1126,6 +1126,7 @@ async fn async_main() -> HostResult<()> {
     let app = Router::new()
         .route("/doctor", post(doctor_handler))
         .route("/rpc/discover", post(discover_handler))
+        .route("/rpc/connectors/{connector_id}", get(connector_handler))
         .route("/rpc/introspect/{connector_id}", get(introspect_handler))
         .route("/rpc/invoke", post(invoke_handler))
         .route("/rpc/cancel", post(cancel_handler))
@@ -1280,6 +1281,48 @@ async fn introspect_handler(
                 error = %err,
                 duration_ms = started_at.elapsed().as_millis() as u64,
                 "introspection request failed"
+            );
+            Err(map_host_error(err))
+        }
+    }
+}
+
+async fn connector_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(connector_id): Path<String>,
+) -> Result<(HeaderMap, Json<ConnectorInventoryResponse>), (StatusCode, String)> {
+    let connector_id = parse_connector_id(&connector_id)?;
+    let cache_validator = cache_validator_from_headers(&headers);
+    let started_at = Instant::now();
+    tracing::debug!(
+        event = "connector_request",
+        connector_id = %connector_id,
+        "processing connector inventory request"
+    );
+    match state
+        .discovery
+        .connector_with_cache(&connector_id, cache_validator)
+        .await
+    {
+        Ok(response) => {
+            tracing::debug!(
+                event = "connector_response",
+                connector_id = %connector_id,
+                registry_version = response.registry_version,
+                duration_ms = started_at.elapsed().as_millis() as u64,
+                "connector inventory request complete"
+            );
+            let response_headers = cache_headers(response.cache.as_ref());
+            Ok((response_headers, Json(response)))
+        }
+        Err(err) => {
+            tracing::warn!(
+                event = "connector_error",
+                connector_id = %connector_id,
+                error = %err,
+                duration_ms = started_at.elapsed().as_millis() as u64,
+                "connector inventory request failed"
             );
             Err(map_host_error(err))
         }

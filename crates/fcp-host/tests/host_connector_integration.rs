@@ -26,10 +26,10 @@ use fcp_core::{
 use fcp_e2e::{AssertionsSummary, ConnectorProcessRunner, E2eLogEntry, E2eLogger};
 use fcp_host::{
     BatchInvokeResponse, BatchStatus, CancelReason, CancellationOutcome, CancellationRequest,
-    CancellationResponse, CleanupBehavior, ConnectorArchetype, ConnectorRegistry, ConnectorSummary,
-    DiscoveryEndpoint, DiscoveryResponse, GateOutcome, HostHealthResponse, HostHealthStatus,
-    IntrospectionResponse, OperationResultStatus, PolicyEngine, PreflightRequest,
-    PreflightResponse, RolloutDecision, RolloutOutcome,
+    CancellationResponse, CleanupBehavior, ConnectorArchetype, ConnectorInventoryResponse,
+    ConnectorRegistry, ConnectorSummary, DiscoveryEndpoint, DiscoveryResponse, GateOutcome,
+    HostHealthResponse, HostHealthStatus, IntrospectionResponse, OperationResultStatus,
+    PolicyEngine, PreflightRequest, PreflightResponse, RolloutDecision, RolloutOutcome,
 };
 use fcp_testkit::LogCapture;
 use reqwest::header::{CACHE_CONTROL, ETAG, HeaderMap, HeaderValue, IF_NONE_MATCH, LAST_MODIFIED};
@@ -930,6 +930,55 @@ async fn assert_discovery_routes(
         fcp_core::SafetyTier::Safe
     ));
     assert!(discover_filtered.connectors[0].health.is_healthy());
+
+    let connector_summary = http_get_json_response::<ConnectorInventoryResponse>(
+        client.clone(),
+        url(&format!("/rpc/connectors/{}", connector_a_id.as_str())),
+        None,
+    )
+    .await?;
+    assert_eq!(connector_summary.status, reqwest::StatusCode::OK);
+    let connector_summary_headers = connector_summary.headers.clone();
+    let connector_summary = connector_summary.body;
+    assert_eq!(connector_summary.connector.id, *connector_a_id);
+    assert_eq!(connector_summary.connector.tool_count, 1);
+    assert!(matches!(
+        connector_summary.connector.max_safety_tier,
+        fcp_core::SafetyTier::Safe
+    ));
+    assert!(connector_summary.connector.health.is_healthy());
+    let connector_summary_cache = connector_summary
+        .cache
+        .as_ref()
+        .expect("connector inventory response should expose cache metadata");
+    assert_cache_headers(&connector_summary_headers, connector_summary_cache)?;
+
+    let mut connector_not_modified_headers = HeaderMap::new();
+    connector_not_modified_headers.insert(
+        IF_NONE_MATCH,
+        HeaderValue::from_str(&connector_summary_cache.etag)?,
+    );
+    let connector_not_modified = http_get_json_response::<ConnectorInventoryResponse>(
+        client.clone(),
+        url(&format!("/rpc/connectors/{}", connector_a_id.as_str())),
+        Some(connector_not_modified_headers),
+    )
+    .await?;
+    assert_eq!(connector_not_modified.status, reqwest::StatusCode::OK);
+    let connector_not_modified_headers = connector_not_modified.headers.clone();
+    let connector_not_modified = connector_not_modified.body;
+    assert_eq!(
+        connector_not_modified.meta.as_ref().map(|meta| meta.status),
+        Some(304)
+    );
+    assert_eq!(connector_not_modified.connector.id, *connector_a_id);
+    assert_cache_headers(
+        &connector_not_modified_headers,
+        connector_not_modified
+            .cache
+            .as_ref()
+            .expect("not-modified connector inventory should expose cache metadata"),
+    )?;
 
     let mut discover_not_modified_headers = HeaderMap::new();
     discover_not_modified_headers.insert(

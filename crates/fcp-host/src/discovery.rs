@@ -287,6 +287,40 @@ pub struct DiscoveryQueryResult {
     pub cache_hit: bool,
 }
 
+/// Response from the connector inventory/status endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectorInventoryResponse {
+    /// Connector summary.
+    pub connector: ConnectorSummary,
+
+    /// Registry version backing the response.
+    pub registry_version: u64,
+
+    /// Optional cache metadata for agent-side validation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache: Option<CacheMetadata>,
+
+    /// Optional response status metadata.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meta: Option<ResponseMeta>,
+}
+
+impl ConnectorInventoryResponse {
+    #[must_use]
+    fn not_modified(
+        connector: ConnectorSummary,
+        registry_version: u64,
+        cache: CacheMetadata,
+    ) -> Self {
+        Self {
+            connector,
+            registry_version,
+            cache: Some(cache),
+            meta: Some(ResponseMeta::not_modified()),
+        }
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Introspection Types
 // ─────────────────────────────────────────────────────────────────────────────
@@ -825,6 +859,63 @@ where
         }
     }
 
+    /// Fetch a single connector inventory/status record.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HostError::ConnectorNotFound`] if the connector is missing
+    /// from the registry cache.
+    pub async fn connector(
+        &self,
+        connector_id: &ConnectorId,
+    ) -> HostResult<ConnectorInventoryResponse> {
+        self.connector_with_cache(connector_id, None).await
+    }
+
+    /// Fetch a single connector inventory/status record with optional
+    /// conditional cache validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HostError::ConnectorNotFound`] if the connector is missing
+    /// from the registry cache.
+    pub async fn connector_with_cache(
+        &self,
+        connector_id: &ConnectorId,
+        validator: Option<CacheValidator>,
+    ) -> HostResult<ConnectorInventoryResponse> {
+        let cache_result = self.cache.get_or_refresh(&*self.registry).await;
+        let connector = cache_result
+            .connectors
+            .iter()
+            .find(|summary| &summary.id == connector_id)
+            .cloned()
+            .ok_or_else(|| HostError::ConnectorNotFound(connector_id.to_string()))?;
+        let cache = self.connector_cache_metadata(
+            &connector,
+            cache_result.registry_version,
+            cache_result.last_modified,
+        );
+
+        if validator
+            .as_ref()
+            .is_some_and(|validator| validator.is_not_modified(&cache))
+        {
+            return Ok(ConnectorInventoryResponse::not_modified(
+                connector,
+                cache_result.registry_version,
+                cache,
+            ));
+        }
+
+        Ok(ConnectorInventoryResponse {
+            connector,
+            registry_version: cache_result.registry_version,
+            cache: Some(cache),
+            meta: None,
+        })
+    }
+
     /// Introspect a single connector.
     ///
     /// # Errors
@@ -960,6 +1051,16 @@ where
             &(connector, introspection, archetype, rate_limits, tools),
             last_modified,
         )
+    }
+
+    fn connector_cache_metadata(
+        &self,
+        connector: &ConnectorSummary,
+        registry_version: u64,
+        last_modified: DateTime<Utc>,
+    ) -> CacheMetadata {
+        self.cache
+            .cache_metadata(&(registry_version, connector), last_modified)
     }
 }
 

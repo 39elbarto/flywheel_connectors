@@ -696,6 +696,10 @@ impl StreamingSession for FakeStreamingSession {
         self.inner.ack_seq()
     }
 
+    fn first_unacked_heartbeat_sent(&self) -> Option<std::time::Instant> {
+        self.inner.first_unacked_heartbeat_sent()
+    }
+
     fn persist(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.persist_called.store(true, Ordering::Relaxed);
         Ok(())

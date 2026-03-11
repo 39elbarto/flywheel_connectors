@@ -30,7 +30,7 @@
 //! }
 //! ```
 
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{VecDeque, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -327,36 +327,29 @@ pub trait StreamingSession: Send + Sync {
         0
     }
 
+    /// Timestamp of the oldest heartbeat that has not yet been acknowledged.
+    ///
+    /// Implementations that track individual outstanding heartbeats should
+    /// override this to return the oldest unacked send. The default falls back
+    /// to `None`, in which case timeout detection will use coarser heuristics.
+    #[must_use]
+    fn first_unacked_heartbeat_sent(&self) -> Option<Instant> {
+        None
+    }
+
     /// Check if heartbeats have timed out.
     ///
     /// Returns `true` if the last ack is older than the configured timeout.
     fn is_heartbeat_timeout(&self, timeout: Duration) -> bool {
-        match (self.last_heartbeat_sent(), self.last_heartbeat_ack()) {
-            // If we have an ack, the connection is dead if time since last ack exceeds timeout.
-            (Some(_), Some(ack)) => ack.elapsed() > timeout,
-            // If we've sent at least one heartbeat but never got an ack, we can't just check
-            // `sent.elapsed()` because `last_heartbeat_sent` might be overwritten by recent sends.
-            // But if `heartbeat_seq()` is large enough that we should have timed out...
-            // Or we just rely on `sent.elapsed() > timeout` assuming it's the *only* send,
-            // which is flawed if we send multiple.
-            // Best heuristic with available state: if we've sent heartbeats and
-            // haven't gotten an ack in `timeout`, and `sent.elapsed() > timeout`
-            // (meaning even the *last* one is old), we timeout.
-            // To be safe against overwrites, if we haven't gotten an ack, we really should track first_sent.
-            // But since we can't change the state struct easily, we'll check `ack.elapsed() > timeout`.
-            (Some(sent), None) => {
-                // If the most recent send is older than timeout, definitely dead.
-                if sent.elapsed() > timeout {
-                    return true;
-                }
-                // If we've sent multiple heartbeats but no acks, we might be dead.
-                // Not perfectly determinable without first_sent, so we return false and wait for `sent.elapsed() > timeout`
-                // if sends stop, or the caller needs to track first_sent.
-                // Actually, if we just check `ack.elapsed() > timeout` it covers steady state.
-                false
-            }
-            _ => false,
+        if self.heartbeat_seq() > self.ack_seq() {
+            return self
+                .first_unacked_heartbeat_sent()
+                .or_else(|| self.last_heartbeat_sent())
+                .is_some_and(|sent| sent.elapsed() > timeout);
         }
+
+        self.last_heartbeat_ack()
+            .is_some_and(|ack| ack.elapsed() > timeout)
     }
 
     /// Persist session state to storage (connector-specific).
@@ -387,6 +380,7 @@ pub struct InMemoryStreamingSession {
     last_heartbeat_ack: Option<Instant>,
     heartbeat_seq: u64,
     ack_seq: u64,
+    outstanding_heartbeats: VecDeque<Instant>,
 }
 
 impl InMemoryStreamingSession {
@@ -421,11 +415,13 @@ impl StreamingSession for InMemoryStreamingSession {
     fn record_heartbeat_sent(&mut self, at: Instant) {
         self.last_heartbeat_sent = Some(at);
         self.heartbeat_seq = self.heartbeat_seq.saturating_add(1);
+        self.outstanding_heartbeats.push_back(at);
     }
 
     fn record_heartbeat_ack(&mut self, at: Instant) {
         self.last_heartbeat_ack = Some(at);
         self.ack_seq = self.ack_seq.saturating_add(1);
+        let _ = self.outstanding_heartbeats.pop_front();
     }
 
     fn last_heartbeat_sent(&self) -> Option<Instant> {
@@ -442,6 +438,10 @@ impl StreamingSession for InMemoryStreamingSession {
 
     fn ack_seq(&self) -> u64 {
         self.ack_seq
+    }
+
+    fn first_unacked_heartbeat_sent(&self) -> Option<Instant> {
+        self.outstanding_heartbeats.front().copied()
     }
 
     fn persist(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -2212,6 +2212,7 @@ mod tests {
         last_heartbeat_ack: Option<Instant>,
         heartbeat_seq: u64,
         ack_seq: u64,
+        outstanding_heartbeats: VecDeque<Instant>,
         persist_calls: Arc<AtomicUsize>,
         restore_calls: Arc<AtomicUsize>,
     }
@@ -2250,11 +2251,13 @@ mod tests {
         fn record_heartbeat_sent(&mut self, at: Instant) {
             self.last_heartbeat_sent = Some(at);
             self.heartbeat_seq = self.heartbeat_seq.saturating_add(1);
+            self.outstanding_heartbeats.push_back(at);
         }
 
         fn record_heartbeat_ack(&mut self, at: Instant) {
             self.last_heartbeat_ack = Some(at);
             self.ack_seq = self.ack_seq.saturating_add(1);
+            let _ = self.outstanding_heartbeats.pop_front();
         }
 
         fn last_heartbeat_sent(&self) -> Option<Instant> {
@@ -2271,6 +2274,10 @@ mod tests {
 
         fn ack_seq(&self) -> u64 {
             self.ack_seq
+        }
+
+        fn first_unacked_heartbeat_sent(&self) -> Option<Instant> {
+            self.outstanding_heartbeats.front().copied()
         }
 
         fn persist(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -3901,6 +3908,31 @@ mod tests {
         session.record_heartbeat_sent(Instant::now());
         // Just sent, no ack, but timeout is large
         assert!(!session.is_heartbeat_timeout(Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn streaming_session_repeated_unacked_heartbeats_timeout_from_oldest_send() {
+        let mut session = InMemoryStreamingSession::new();
+
+        let now = Instant::now();
+        let first = now.checked_sub(Duration::from_millis(100)).unwrap_or(now);
+        session.record_heartbeat_sent(first);
+        session.record_heartbeat_sent(now);
+
+        assert!(session.is_heartbeat_timeout(Duration::from_millis(50)));
+    }
+
+    #[test]
+    fn streaming_session_ack_advances_oldest_outstanding_heartbeat() {
+        let mut session = InMemoryStreamingSession::new();
+
+        let now = Instant::now();
+        let first = now.checked_sub(Duration::from_millis(100)).unwrap_or(now);
+        session.record_heartbeat_sent(first);
+        session.record_heartbeat_sent(now);
+        session.record_heartbeat_ack(now);
+
+        assert!(!session.is_heartbeat_timeout(Duration::from_millis(50)));
     }
 
     // ─────────────────────────────────────────────────────────────────────────

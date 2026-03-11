@@ -831,6 +831,22 @@ struct CancelArgs {
     #[arg(long)]
     detail: Option<String>,
 
+    /// Remaining milliseconds before timeout when `--reason timeout-approaching` is used.
+    #[arg(long)]
+    remaining_ms: Option<u64>,
+
+    /// Resource name when `--reason resource-limit` is used.
+    #[arg(long)]
+    resource: Option<String>,
+
+    /// Current resource usage when `--reason resource-limit` is used.
+    #[arg(long)]
+    current: Option<u64>,
+
+    /// Resource limit threshold when `--reason resource-limit` is used.
+    #[arg(long)]
+    limit: Option<u64>,
+
     /// Optional superseding operation id for `superseded`.
     #[arg(long)]
     superseded_by: Option<String>,
@@ -1296,6 +1312,7 @@ fn execute_passthrough_command(prepared: &PreparedCli) -> Result<Option<Executio
 
 fn execute_serve_mcp(prepared: &PreparedCli, args: &ServeMcpArgs) -> Result<ExecutionOutcome> {
     let catalog = DiscoveryCatalog::load()?;
+    let resolved_host = resolve_host_config(prepared.cli.host.as_deref())?;
     let connectors: Vec<&DiscoveredConnector> = if let Some(selector) = &args.connector {
         let connector = match catalog.resolve_connector(selector) {
             Ok(connector) => connector,
@@ -1362,7 +1379,11 @@ fn execute_serve_mcp(prepared: &PreparedCli, args: &ServeMcpArgs) -> Result<Exec
     runtime.block_on(async {
         let reader = tokio::io::BufReader::new(tokio::io::stdin());
         let writer = tokio::io::stdout();
-        serve_mcp::run_stdio_transport(&state, reader, writer, mcp_tool_call_response).await
+        let host_context = resolved_host.clone();
+        serve_mcp::run_stdio_transport(&state, reader, writer, move |tool, id, arguments| {
+            mcp_tool_call_response(tool, id, arguments, host_context.as_ref())
+        })
+        .await
     })?;
 
     Ok(ExecutionOutcome {
@@ -1375,6 +1396,7 @@ fn mcp_tool_call_response(
     tool: &serve_mcp::McpToolDefinition,
     id: Value,
     arguments: Value,
+    host: Option<&ResolvedHostConfig>,
 ) -> serve_mcp::JsonRpcResponse {
     let invoke_args = InvokeArgs {
         connector: tool.connector_id.clone(),
@@ -1383,14 +1405,18 @@ fn mcp_tool_call_response(
         file: None,
         stdin: false,
         set: Vec::new(),
+        zone: host.and_then(|config| config.default_zone.clone()),
+        principal: None,
+        idempotency_key: None,
+        deadline_ms: None,
     };
 
-    match invoke_dispatch("invoke", &invoke_args) {
+    match invoke_dispatch("invoke", &invoke_args, host.map(|config| config.endpoint.as_str())) {
         Ok(dispatch) => {
             let mut structured_content = dispatch.payload;
             let message = structured_content["message"]
                 .as_str()
-                .unwrap_or("Planned tool call.")
+                .unwrap_or("Tool call completed.")
                 .to_owned();
             if let Some(object) = structured_content.as_object_mut() {
                 object.insert(
@@ -5228,6 +5254,426 @@ fn invoke_leaf_field_count(value: &Value) -> usize {
     }
 }
 
+fn append_history_entry(
+    status: history::OpStatus,
+    connector_id: &str,
+    operation_id: &str,
+    zone: Option<&str>,
+    input: &Value,
+    output: Option<&Value>,
+    error_code: Option<String>,
+    idempotency_key: Option<&str>,
+    latency_ms: u64,
+) -> Result<()> {
+    let store_path = history::HistoryStore::default_path()?;
+    let store = history::HistoryStore::new(store_path);
+    let entry = history::HistoryEntry {
+        entry_id: RequestId::random().to_string(),
+        timestamp: chrono::Utc::now(),
+        connector_id: connector_id.to_owned(),
+        operation_id: operation_id.to_owned(),
+        zone: zone.map(ToOwned::to_owned),
+        input_hash: history::content_hash(input),
+        input_summary: history::summarize_input(input),
+        output_hash: output.map(history::content_hash),
+        output_summary: output.map(history::summarize_input),
+        status,
+        latency_ms,
+        error_code,
+        idempotency_key: idempotency_key.map(ToOwned::to_owned),
+        agent_session: None,
+    };
+    store.append(&entry)
+}
+
+#[derive(Clone, Debug)]
+struct ResolvedHostOperation {
+    connector: HostConnectorRecord,
+    operation: HostToolDescriptor,
+}
+
+fn parse_operation_reference(reference: &str) -> Option<(&str, &str)> {
+    let (connector, operation) = reference.split_once('.')?;
+    let connector = connector.trim();
+    let operation = operation.trim();
+    if connector.is_empty() || operation.is_empty() {
+        return None;
+    }
+    Some((connector, operation))
+}
+
+fn invalid_operation_reference_dispatch(command: &str, reference: &str) -> DispatchOutcome {
+    DispatchOutcome {
+        payload: json!({
+            "status": "error",
+            "command": command,
+            "error": {
+                "type": "invalid-operation-reference",
+                "message": format!(
+                    "`{reference}` must use `<connector>.<operation>` syntax so `fwc` can resolve the target against the live host."
+                ),
+                "recoverable": true,
+            },
+            "next_actions": [
+                format!("fwc schema {reference}"),
+                "Use a selector like `github.issues.get` or `slack.chat.post_message`.".to_owned(),
+            ],
+        }),
+        exit_code: CliExitCode::Validation,
+    }
+}
+
+fn missing_host_dispatch(
+    command: &str,
+    details: Value,
+    next_actions: Vec<String>,
+) -> DispatchOutcome {
+    DispatchOutcome {
+        payload: json!({
+            "status": "error",
+            "command": command,
+            "error": {
+                "type": "missing-host-endpoint",
+                "message": format!(
+                    "`{command}` requires a live `fcp-host` endpoint. `fwc` will not simulate runtime behavior or fabricate results."
+                ),
+                "recoverable": true,
+            },
+            "details": details,
+            "next_actions": next_actions,
+        }),
+        exit_code: CliExitCode::Transport,
+    }
+}
+
+fn resolve_host_operation_from_catalog(
+    command: &str,
+    client: &HostAdminClient,
+    catalog: &HostConnectorCatalog,
+    connector_selector: &str,
+    operation_selector: &str,
+) -> Result<ResolvedHostOperation, DispatchOutcome> {
+    let connector = match catalog.resolve_connector(connector_selector) {
+        Ok(connector) => connector.clone(),
+        Err(error) => {
+            return Err(connector_resolution_dispatch(
+                command,
+                connector_selector,
+                &error,
+            ));
+        }
+    };
+    let introspection = client
+        .introspect(connector.summary.id.as_str())
+        .map_err(|error| DispatchOutcome {
+            payload: json!({
+                "status": "error",
+                "command": command,
+                "source": "host-admin-api",
+                "connector": {
+                    "slug": &connector.slug,
+                    "canonical_id": connector.summary.id.as_str(),
+                    "name": &connector.summary.name,
+                },
+                "error": {
+                    "type": "host-introspection-failed",
+                    "message": format!(
+                        "Failed to load live operation descriptors for `{}` from `fcp-host`: {error}",
+                        connector.slug
+                    ),
+                    "recoverable": true,
+                },
+                "next_actions": [
+                    format!("fwc show {} --host {}", connector.slug, client.base_url),
+                    format!("fwc status {} --host {}", connector.slug, client.base_url),
+                ],
+            }),
+            exit_code: CliExitCode::Transport,
+        })?;
+    let operation = match resolve_host_tool(&introspection.tools, operation_selector) {
+        Ok(operation) => operation.clone(),
+        Err(error) => {
+            return Err(host_operation_resolution_dispatch(
+                command,
+                &connector.slug,
+                operation_selector,
+                &error,
+            ));
+        }
+    };
+
+    Ok(ResolvedHostOperation {
+        connector,
+        operation,
+    })
+}
+
+fn build_live_invoke_request(
+    connector_id_raw: &str,
+    operation_name: &str,
+    zone: &str,
+    payload: Value,
+    _principal: Option<String>,
+    idempotency_key: Option<String>,
+    deadline_ms: Option<u64>,
+) -> Result<InvokeRequest> {
+    let zone_id: ZoneId = zone
+        .parse()
+        .map_err(|error| anyhow::anyhow!("`{zone}` is not a valid FCP zone: {error}"))?;
+    let connector_id: ConnectorId = connector_id_raw.parse().map_err(|error| {
+        anyhow::anyhow!("host connector id `{connector_id_raw}` is not canonical: {error}")
+    })?;
+    let operation_id: OperationId = operation_name.parse().map_err(|error| {
+        anyhow::anyhow!("host operation id `{operation_name}` is not canonical: {error}")
+    })?;
+
+    Ok(InvokeRequest {
+        r#type: "invoke".to_owned(),
+        id: RequestId::random(),
+        connector_id,
+        operation: operation_id,
+        zone_id,
+        input: payload,
+        capability_token: CapabilityToken::test_token(),
+        holder_proof: None,
+        context: None,
+        idempotency_key,
+        lease_seq: None,
+        deadline_ms,
+        correlation_id: None,
+        provenance: None,
+        approval_tokens: Vec::new(),
+    })
+}
+
+fn build_host_batch_options(concurrency: usize, on_error: batch::OnError) -> HostBatchOptions {
+    HostBatchOptions {
+        max_parallelism: u32::try_from(concurrency).unwrap_or(u32::MAX).max(1),
+        stop_on_first_error: matches!(on_error, batch::OnError::Abort),
+        ..HostBatchOptions::default()
+    }
+}
+
+fn validate_payload_against_schema(
+    payload: &Value,
+    schema: &Value,
+) -> (bool, Vec<Value>) {
+    let validation = validate::validate(payload, schema);
+    let errors = validation
+        .errors
+        .iter()
+        .map(|error| {
+            json!({
+                "path": error.path,
+                "message": error.message,
+                "suggestion": error.suggestion,
+            })
+        })
+        .collect::<Vec<_>>();
+    (validation.is_valid(), errors)
+}
+
+fn preflight_status_label(preflights: &[Value]) -> (&'static str, CliExitCode) {
+    let allowed = preflights
+        .iter()
+        .filter(|entry| entry["allowed"].as_bool().unwrap_or(false))
+        .count();
+    if allowed == preflights.len() {
+        ("ok", CliExitCode::Success)
+    } else if allowed == 0 {
+        ("denied", CliExitCode::PolicyDenied)
+    } else {
+        ("partial", CliExitCode::PolicyDenied)
+    }
+}
+
+fn batch_status_label(response: &HostBatchInvokeResponse) -> (&'static str, CliExitCode) {
+    if response.failed == 0 && response.skipped == 0 {
+        ("ok", CliExitCode::Success)
+    } else if response.completed > 0 {
+        ("partial", CliExitCode::Connector)
+    } else {
+        ("error", CliExitCode::Connector)
+    }
+}
+
+fn cancel_dispatch(args: &CancelArgs, explicit_host: Option<&str>) -> Result<DispatchOutcome> {
+    let host = match resolve_host_config(explicit_host)? {
+        Some(host) => host,
+        None => {
+            return Ok(missing_host_dispatch(
+                "cancel",
+                json!({
+                    "operation_id": &args.operation_id,
+                    "reason": &args.reason,
+                    "cleanup": &args.cleanup,
+                }),
+                vec![
+                    format!("fwc cancel {} --host <endpoint>", args.operation_id),
+                    "Set `FWC_HOST` or `FCP_HOST_ENDPOINT`, or configure an active FCP context.".to_owned(),
+                ],
+            ));
+        }
+    };
+    let client = HostAdminClient::new(&host.endpoint)?;
+
+    let reason = match args.reason.as_str() {
+        "user-requested" | "user_requested" => CancelReason::UserRequested,
+        "agent-abort" | "agent_abort" => CancelReason::AgentAbort {
+            reason: args
+                .detail
+                .clone()
+                .unwrap_or_else(|| "agent requested cancellation".to_owned()),
+        },
+        "timeout-approaching" | "timeout_approaching" => {
+            let Some(remaining_ms) = args.remaining_ms else {
+                return Ok(DispatchOutcome {
+                    payload: json!({
+                        "status": "error",
+                        "command": "cancel",
+                        "error": {
+                            "type": "missing-timeout-detail",
+                            "message": "`--reason timeout-approaching` requires `--remaining-ms`.",
+                            "recoverable": true,
+                        },
+                        "next_actions": [
+                            format!("fwc cancel {} --reason timeout-approaching --remaining-ms 2500", args.operation_id),
+                        ],
+                    }),
+                    exit_code: CliExitCode::Validation,
+                });
+            };
+            CancelReason::TimeoutApproaching { remaining_ms }
+        }
+        "resource-limit" | "resource_limit" => {
+            let (Some(resource), Some(current), Some(limit)) =
+                (args.resource.clone(), args.current, args.limit)
+            else {
+                return Ok(DispatchOutcome {
+                    payload: json!({
+                        "status": "error",
+                        "command": "cancel",
+                        "error": {
+                            "type": "missing-resource-limit-detail",
+                            "message": "`--reason resource-limit` requires `--resource`, `--current`, and `--limit`.",
+                            "recoverable": true,
+                        },
+                        "next_actions": [
+                            format!("fwc cancel {} --reason resource-limit --resource memory --current 950 --limit 1024", args.operation_id),
+                        ],
+                    }),
+                    exit_code: CliExitCode::Validation,
+                });
+            };
+            CancelReason::ResourceLimit {
+                resource,
+                current,
+                limit,
+            }
+        }
+        "superseded" => {
+            let Some(by_operation_id) = args.superseded_by.clone() else {
+                return Ok(DispatchOutcome {
+                    payload: json!({
+                        "status": "error",
+                        "command": "cancel",
+                        "error": {
+                            "type": "missing-superseded-detail",
+                            "message": "`--reason superseded` requires `--superseded-by`.",
+                            "recoverable": true,
+                        },
+                        "next_actions": [
+                            format!("fwc cancel {} --reason superseded --superseded-by <new-operation-id>", args.operation_id),
+                        ],
+                    }),
+                    exit_code: CliExitCode::Validation,
+                });
+            };
+            CancelReason::Superseded { by_operation_id }
+        }
+        "session-closing" | "session_closing" => CancelReason::SessionClosing,
+        other => {
+            return Ok(DispatchOutcome {
+                payload: json!({
+                    "status": "error",
+                    "command": "cancel",
+                    "error": {
+                        "type": "invalid-cancel-reason",
+                        "message": format!(
+                            "`{other}` is not a supported cancel reason. Use `user-requested`, `agent-abort`, `timeout-approaching`, `resource-limit`, `superseded`, or `session-closing`."
+                        ),
+                        "recoverable": true,
+                    },
+                    "next_actions": [
+                        format!("fwc cancel {} --reason user-requested", args.operation_id),
+                    ],
+                }),
+                exit_code: CliExitCode::Validation,
+            });
+        }
+    };
+
+    let cleanup = match args.cleanup.as_str() {
+        "best-effort" | "best_effort" => CleanupBehavior::BestEffort,
+        "full" => CleanupBehavior::Full {
+            timeout_ms: args.cleanup_timeout_ms.unwrap_or(30_000),
+        },
+        "abandon" => CleanupBehavior::Abandon,
+        "checkpoint" => CleanupBehavior::Checkpoint,
+        other => {
+            return Ok(DispatchOutcome {
+                payload: json!({
+                    "status": "error",
+                    "command": "cancel",
+                    "error": {
+                        "type": "invalid-cleanup-behavior",
+                        "message": format!(
+                            "`{other}` is not a supported cleanup mode. Use `best-effort`, `full`, `abandon`, or `checkpoint`."
+                        ),
+                        "recoverable": true,
+                    },
+                    "next_actions": [
+                        format!("fwc cancel {} --cleanup best-effort", args.operation_id),
+                    ],
+                }),
+                exit_code: CliExitCode::Validation,
+            });
+        }
+    };
+
+    let request = HostCancellationRequest {
+        operation_id: args.operation_id.clone(),
+        reason,
+        cleanup,
+        return_partial: args.return_partial,
+    };
+    let response = client.cancel(&request)?;
+    let exit_code = if matches!(response.outcome, fcp_host::CancellationOutcome::Failed) {
+        CliExitCode::Connector
+    } else {
+        CliExitCode::Success
+    };
+
+    Ok(DispatchOutcome {
+        payload: json!({
+            "status": if exit_code.is_success() { "ok" } else { "error" },
+            "command": "cancel",
+            "source": "host-admin-api",
+            "message": format!(
+                "Submitted a live cancellation request for operation `{}` against `fcp-host`.",
+                args.operation_id
+            ),
+            "request": request,
+            "response": response,
+            "next_actions": [
+                format!("fwc history --status error --limit 10"),
+                format!("fwc status --host {}", host.endpoint),
+            ],
+        }),
+        exit_code,
+    })
+}
+
 #[allow(clippy::option_if_let_else)]
 fn history_dispatch(args: &HistoryArgs) -> Result<DispatchOutcome> {
     let store_path = history::HistoryStore::default_path()?;
@@ -6275,7 +6721,7 @@ fn resolve_pipeline_operation_metadata(
     Ok(operations)
 }
 
-fn map_dispatch(args: &MapArgs) -> Result<DispatchOutcome> {
+fn map_dispatch(args: &MapArgs, explicit_host: Option<&str>) -> Result<DispatchOutcome> {
     // Parse the on-error mode.
     let on_error = batch::OnError::parse(&args.on_error).ok_or_else(|| {
         anyhow::anyhow!(
@@ -6316,7 +6762,42 @@ fn map_dispatch(args: &MapArgs) -> Result<DispatchOutcome> {
         });
     };
 
-    // Build batch plan.
+    let host = match resolve_host_config(explicit_host)? {
+        Some(host) => host,
+        None => {
+            return Ok(missing_host_dispatch(
+                "map",
+                json!({
+                    "operation": &args.operation,
+                    "input_count": inputs.len(),
+                    "concurrency": args.concurrency,
+                    "on_error": args.on_error,
+                }),
+                vec![
+                    format!("fwc map {} --host <endpoint> --inputs '[{{...}}]'", args.operation),
+                    "Set `FWC_HOST` or `FCP_HOST_ENDPOINT`, or configure an active FCP context.".to_owned(),
+                ],
+            ));
+        }
+    };
+    let Some((connector_selector, operation_selector)) = parse_operation_reference(&args.operation)
+    else {
+        return Ok(invalid_operation_reference_dispatch("map", &args.operation));
+    };
+    let client = HostAdminClient::new(&host.endpoint)?;
+    let (catalog, _) = client.catalog(None)?;
+    let resolved = match resolve_host_operation_from_catalog(
+        "map",
+        &client,
+        &catalog,
+        connector_selector,
+        operation_selector,
+    ) {
+        Ok(resolved) => resolved,
+        Err(outcome) => return Ok(outcome),
+    };
+    let zone = resolved_zone(args.zone.as_deref(), &host);
+
     let preview_count = inputs.len().min(3);
     let plan = batch::BatchPlan {
         operation: args.operation.clone(),
@@ -6326,49 +6807,318 @@ fn map_dispatch(args: &MapArgs) -> Result<DispatchOutcome> {
         preview_inputs: inputs.items[..preview_count].to_vec(),
     };
 
+    let mut invalid_items = Vec::new();
+    let mut operations = Vec::new();
+    for (index, payload) in inputs.items.iter().cloned().enumerate() {
+        let (valid, errors) = validate_payload_against_schema(
+            &payload,
+            &resolved.operation.input_schema,
+        );
+        if !valid {
+            invalid_items.push(json!({
+                "index": index,
+                "input": payload,
+                "errors": errors,
+            }));
+            continue;
+        }
+        let request = build_live_invoke_request(
+            resolved.connector.summary.id.as_str(),
+            &resolved.operation.name,
+            &zone,
+            payload,
+            None,
+            None,
+            None,
+        )?;
+        operations.push(HostBatchOperation {
+            id: format!("item-{}", index + 1),
+            request,
+            depends_on: Vec::new(),
+        });
+    }
+
+    if !invalid_items.is_empty() {
+        return Ok(DispatchOutcome {
+            payload: json!({
+                "status": "error",
+                "command": "map",
+                "source": "host-admin-api",
+                "message": format!(
+                    "{} mapped input(s) failed local schema validation, so no live batch call was attempted.",
+                    invalid_items.len()
+                ),
+                "connector": {
+                    "slug": &resolved.connector.slug,
+                    "canonical_id": resolved.connector.summary.id.as_str(),
+                    "name": &resolved.connector.summary.name,
+                },
+                "operation": {
+                    "requested_selector": &args.operation,
+                    "selector": &resolved.operation.name,
+                    "canonical_id": &resolved.operation.name,
+                },
+                "plan": plan,
+                "invalid_items": invalid_items,
+                "next_actions": [
+                    format!("fwc schema {} {} --host {}", resolved.connector.slug, resolved.operation.name, host.endpoint),
+                    format!("fwc template {} {}", resolved.connector.slug, resolved.operation.name),
+                ],
+            }),
+            exit_code: CliExitCode::Validation,
+        });
+    }
+
+    let request = HostBatchInvokeRequest {
+        operations,
+        options: build_host_batch_options(args.concurrency, on_error),
+    };
+    let response = client.batch(&request)?;
+    let (status, exit_code) = batch_status_label(&response);
+
     Ok(DispatchOutcome {
         payload: json!({
-            "status": "planned",
+            "status": status,
             "command": "map",
+            "source": "host-admin-api",
             "message": format!(
-                "Batch plan: {} x {} inputs (concurrency={}, on_error={}). \
-                 Execution requires host integration (not yet available).",
-                args.operation, inputs.len(), args.concurrency, on_error
+                "Executed a live mapped batch for `{}.{}` against `fcp-host` ({} inputs, concurrency={}, on_error={}).",
+                resolved.connector.slug,
+                resolved.operation.name,
+                inputs.len(),
+                args.concurrency,
+                on_error
             ),
+            "connector": {
+                "slug": &resolved.connector.slug,
+                "canonical_id": resolved.connector.summary.id.as_str(),
+                "name": &resolved.connector.summary.name,
+            },
+            "operation": {
+                "requested_selector": &args.operation,
+                "selector": &resolved.operation.name,
+                "canonical_id": &resolved.operation.name,
+            },
+            "zone": zone,
             "plan": plan,
+            "response": response,
             "next_actions": [
-                format!("fwc schema {}", args.operation),
-                format!("fwc validate {} --input '<first_input>'", args.operation),
+                format!("fwc status {} --host {}", resolved.connector.slug, host.endpoint),
+                format!("fwc history --connector {} --limit 20", resolved.connector.slug),
             ],
         }),
-        exit_code: CliExitCode::Success,
+        exit_code,
     })
 }
 
-fn batch_file_dispatch(args: &BatchFileArgs) -> Result<DispatchOutcome> {
+fn batch_file_dispatch(args: &BatchFileArgs, explicit_host: Option<&str>) -> Result<DispatchOutcome> {
     let content = std::fs::read_to_string(&args.file)?;
     let batch = batch_file::BatchFile::parse(&content).map_err(|e| anyhow::anyhow!("{e}"))?;
     let plan = batch_file::ExecutionPlan::from_batch(&batch, args.concurrency, &args.on_error);
+    let host = match resolve_host_config(explicit_host)? {
+        Some(host) => host,
+        None => {
+            return Ok(missing_host_dispatch(
+                "batch-file",
+                json!({
+                    "file": args.file.display().to_string(),
+                    "operation_count": plan.total_operations,
+                    "connector_count": plan.connectors.len(),
+                    "dry_run": args.dry_run,
+                }),
+                vec![
+                    format!("fwc batch-file {} --host <endpoint>", args.file.display()),
+                    "Set `FWC_HOST` or `FCP_HOST_ENDPOINT`, or configure an active FCP context.".to_owned(),
+                ],
+            ));
+        }
+    };
+    let on_error = batch::OnError::parse(&args.on_error).ok_or_else(|| {
+        anyhow::anyhow!(
+            "invalid --on-error value '{}'. Use 'abort' or 'continue'.",
+            args.on_error
+        )
+    })?;
+    let client = HostAdminClient::new(&host.endpoint)?;
+    let (catalog, _) = client.catalog(None)?;
+    let mut invalid_operations = Vec::new();
+    let mut request_operations = Vec::new();
+    let mut preflights = Vec::new();
+    let mut introspection_cache = BTreeMap::new();
+
+    for op in &batch.operations {
+        let connector = match catalog.resolve_connector(&op.connector) {
+            Ok(connector) => connector.clone(),
+            Err(error) => {
+                return Ok(connector_resolution_dispatch(
+                    if args.dry_run { "batch-file" } else { "batch-file" },
+                    &op.connector,
+                    &error,
+                ));
+            }
+        };
+        let introspection = if let Some(introspection) =
+            introspection_cache.get(connector.summary.id.as_str())
+        {
+            introspection.clone()
+        } else {
+            let introspection = client.introspect(connector.summary.id.as_str())?;
+            introspection_cache.insert(
+                connector.summary.id.as_str().to_owned(),
+                introspection.clone(),
+            );
+            introspection
+        };
+        let operation = match resolve_host_tool(&introspection.tools, &op.operation) {
+            Ok(operation) => operation.clone(),
+            Err(error) => {
+                return Ok(host_operation_resolution_dispatch(
+                    "batch-file",
+                    &connector.slug,
+                    &op.operation,
+                    &error,
+                ));
+            }
+        };
+        let zone = op
+            .zone
+            .as_deref()
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| resolved_zone(args.zone.as_deref(), &host));
+        let (valid, errors) = validate_payload_against_schema(&op.input, &operation.input_schema);
+        if !valid {
+            invalid_operations.push(json!({
+                "id": &op.id,
+                "connector": &connector.slug,
+                "operation": &operation.name,
+                "zone": &zone,
+                "errors": errors,
+            }));
+            continue;
+        }
+
+        if args.dry_run {
+            let preflight_request = HostPreflightRequest {
+                connector_id: connector.summary.id.as_str().parse().map_err(|error| {
+                    anyhow::anyhow!(
+                        "host connector id `{}` is not canonical: {error}",
+                        connector.summary.id
+                    )
+                })?,
+                operation: operation.name.clone(),
+                params: Some(op.input.clone()),
+                principal: None,
+                zone_id: Some(zone.parse().map_err(|error| {
+                    anyhow::anyhow!("`{zone}` is not a valid FCP zone for `batch-file`: {error}")
+                })?),
+            };
+            let response = client.preflight(&preflight_request)?;
+            preflights.push(json!({
+                "id": &op.id,
+                "connector": &connector.slug,
+                "operation": &operation.name,
+                "zone": &zone,
+                "allowed": response.allowed,
+                "reason": response.reason,
+                "missing_capabilities": response.missing_capabilities,
+                "rate_limit": response.rate_limit,
+                "estimated_cost": response.estimated_cost,
+                "budget_status": response.budget_status,
+            }));
+            continue;
+        }
+
+        let request = build_live_invoke_request(
+            connector.summary.id.as_str(),
+            &operation.name,
+            &zone,
+            op.input.clone(),
+            None,
+            None,
+            None,
+        )?;
+        request_operations.push(HostBatchOperation {
+            id: op.id.clone(),
+            request,
+            depends_on: op.depends_on.clone(),
+        });
+    }
+
+    if !invalid_operations.is_empty() {
+        return Ok(DispatchOutcome {
+            payload: json!({
+                "status": "error",
+                "command": "batch-file",
+                "source": "host-admin-api",
+                "message": format!(
+                    "{} operation(s) in `{}` failed local schema validation, so no live execution was attempted.",
+                    invalid_operations.len(),
+                    args.file.display()
+                ),
+                "file": args.file.display().to_string(),
+                "plan": plan,
+                "dry_run": args.dry_run,
+                "invalid_operations": invalid_operations,
+                "next_actions": plan.connectors.iter().map(|connector| {
+                    format!("fwc show {connector} --host {}", host.endpoint)
+                }).collect::<Vec<_>>(),
+            }),
+            exit_code: CliExitCode::Validation,
+        });
+    }
+
+    if args.dry_run {
+        let (status, exit_code) = preflight_status_label(&preflights);
+        return Ok(DispatchOutcome {
+            payload: json!({
+                "status": status,
+                "command": "batch-file",
+                "source": "host-admin-api",
+                "message": format!(
+                    "Evaluated real preflight checks for `{}` across {} operation(s) and {} wave(s).",
+                    args.file.display(),
+                    plan.total_operations,
+                    plan.waves.len()
+                ),
+                "file": args.file.display().to_string(),
+                "dry_run": true,
+                "plan": plan,
+                "preflights": preflights,
+                "next_actions": [
+                    format!("fwc batch-file {} --host {}", args.file.display(), host.endpoint),
+                ],
+            }),
+            exit_code,
+        });
+    }
+
+    let request = HostBatchInvokeRequest {
+        operations: request_operations,
+        options: build_host_batch_options(args.concurrency, on_error),
+    };
+    let response = client.batch(&request)?;
+    let (status, exit_code) = batch_status_label(&response);
 
     Ok(DispatchOutcome {
         payload: json!({
-            "status": "planned",
+            "status": status,
             "command": "batch-file",
+            "source": "host-admin-api",
             "message": format!(
-                "Batch file: {} operations across {} connectors in {} waves. \
-                 Execution requires host integration (not yet available).",
+                "Executed `{}` as a live batch through `fcp-host` ({} operations across {} connectors).",
+                args.file.display(),
                 plan.total_operations,
-                plan.connectors.len(),
-                plan.waves.len()
+                plan.connectors.len()
             ),
-            "plan": plan,
-            "dry_run": args.dry_run,
             "file": args.file.display().to_string(),
-            "next_actions": plan.connectors.iter().map(|c| {
-                format!("fwc show {c}")
+            "dry_run": false,
+            "plan": plan,
+            "response": response,
+            "next_actions": plan.connectors.iter().map(|connector| {
+                format!("fwc status {connector} --host {}", host.endpoint)
             }).collect::<Vec<_>>(),
         }),
-        exit_code: CliExitCode::Success,
+        exit_code,
     })
 }
 

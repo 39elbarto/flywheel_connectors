@@ -3,7 +3,7 @@
 //! Converts [`DiscoveredOperation`] data from the discovery catalog into
 //! tool schemas consumable by external AI agent runtimes.
 
-use fcp_core::tool_schema::ExportOptions as SharedExportOptions;
+use fcp_core::{OperationInfo, tool_schema::ExportOptions as SharedExportOptions};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -197,12 +197,9 @@ fn is_destructive(op: &DiscoveredOperation) -> bool {
     op.summary.safety_tier == "dangerous" || op.summary.safety_tier == "critical"
 }
 
-/// Convert a discovered operation to an MCP tool.
-pub fn to_mcp_tool(op: &DiscoveredOperation, opts: &ExportOptions) -> McpTool {
-    let tool = fcp_core::tool_schema::to_mcp_tool(
-        &op.operation_info(),
-        &shared_export_options(opts, false),
-    );
+/// Convert canonical `OperationInfo` metadata to an MCP tool.
+pub fn to_mcp_tool_info(op: &OperationInfo, opts: &ExportOptions) -> McpTool {
+    let tool = fcp_core::tool_schema::to_mcp_tool(op, &shared_export_options(opts, false));
     McpTool {
         name: tool.name,
         description: tool.description,
@@ -218,12 +215,14 @@ pub fn to_mcp_tool(op: &DiscoveredOperation, opts: &ExportOptions) -> McpTool {
     }
 }
 
-/// Convert a discovered operation to a Claude tool.
-pub fn to_claude_tool(op: &DiscoveredOperation, opts: &ExportOptions) -> ClaudeTool {
-    let tool = fcp_core::tool_schema::to_claude_tool(
-        &op.operation_info(),
-        &shared_export_options(opts, false),
-    );
+/// Convert a discovered operation to an MCP tool.
+pub fn to_mcp_tool(op: &DiscoveredOperation, opts: &ExportOptions) -> McpTool {
+    to_mcp_tool_info(&op.operation_info(), opts)
+}
+
+/// Convert canonical `OperationInfo` metadata to a Claude tool.
+pub fn to_claude_tool_info(op: &OperationInfo, opts: &ExportOptions) -> ClaudeTool {
+    let tool = fcp_core::tool_schema::to_claude_tool(op, &shared_export_options(opts, false));
     ClaudeTool {
         name: tool.name,
         description: tool.description,
@@ -231,12 +230,14 @@ pub fn to_claude_tool(op: &DiscoveredOperation, opts: &ExportOptions) -> ClaudeT
     }
 }
 
-/// Convert a discovered operation to an `OpenAI` tool.
-pub fn to_openai_tool(op: &DiscoveredOperation, opts: &ExportOptions) -> OpenAiTool {
-    let tool = fcp_core::tool_schema::to_openai_tool(
-        &op.operation_info(),
-        &shared_export_options(opts, true),
-    );
+/// Convert a discovered operation to a Claude tool.
+pub fn to_claude_tool(op: &DiscoveredOperation, opts: &ExportOptions) -> ClaudeTool {
+    to_claude_tool_info(&op.operation_info(), opts)
+}
+
+/// Convert canonical `OperationInfo` metadata to an `OpenAI` tool.
+pub fn to_openai_tool_info(op: &OperationInfo, opts: &ExportOptions) -> OpenAiTool {
+    let tool = fcp_core::tool_schema::to_openai_tool(op, &shared_export_options(opts, true));
     OpenAiTool {
         tool_type: tool.tool_type,
         function: OpenAiFunction {
@@ -245,6 +246,42 @@ pub fn to_openai_tool(op: &DiscoveredOperation, opts: &ExportOptions) -> OpenAiT
             parameters: tool.function.parameters,
             strict: tool.function.strict,
         },
+    }
+}
+
+/// Convert a discovered operation to an `OpenAI` tool.
+pub fn to_openai_tool(op: &DiscoveredOperation, opts: &ExportOptions) -> OpenAiTool {
+    to_openai_tool_info(&op.operation_info(), opts)
+}
+
+/// Export canonical `OperationInfo` values as tool schemas in the specified format.
+pub fn export_operation_infos(
+    operations: &[OperationInfo],
+    format: ToolSchemaFormat,
+    options: &ExportOptions,
+) -> Value {
+    match format {
+        ToolSchemaFormat::Mcp => {
+            let tools: Vec<_> = operations
+                .iter()
+                .map(|op| to_mcp_tool_info(op, options))
+                .collect();
+            json!(tools)
+        }
+        ToolSchemaFormat::Claude => {
+            let tools: Vec<_> = operations
+                .iter()
+                .map(|op| to_claude_tool_info(op, options))
+                .collect();
+            json!(tools)
+        }
+        ToolSchemaFormat::OpenAi => {
+            let tools: Vec<_> = operations
+                .iter()
+                .map(|op| to_openai_tool_info(op, options))
+                .collect();
+            json!(tools)
+        }
     }
 }
 
@@ -279,29 +316,11 @@ pub fn export_tools(
     format: ToolSchemaFormat,
     options: &ExportOptions,
 ) -> Value {
-    match format {
-        ToolSchemaFormat::Mcp => {
-            let tools: Vec<_> = operations
-                .iter()
-                .map(|op| to_mcp_tool(op, options))
-                .collect();
-            json!(tools)
-        }
-        ToolSchemaFormat::Claude => {
-            let tools: Vec<_> = operations
-                .iter()
-                .map(|op| to_claude_tool(op, options))
-                .collect();
-            json!(tools)
-        }
-        ToolSchemaFormat::OpenAi => {
-            let tools: Vec<_> = operations
-                .iter()
-                .map(|op| to_openai_tool(op, options))
-                .collect();
-            json!(tools)
-        }
-    }
+    let operation_infos = operations
+        .iter()
+        .map(|op| op.operation_info())
+        .collect::<Vec<_>>();
+    export_operation_infos(&operation_infos, format, options)
 }
 
 #[cfg(test)]

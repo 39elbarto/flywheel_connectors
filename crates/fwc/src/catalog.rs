@@ -1,11 +1,47 @@
 use serde_json::{Value, json};
 
 pub const COMMANDS: &[&str] = &[
-    "guide", "task", "plan", "explain", "do", "list", "search", "show", "ops", "schema",
-    "examples", "supply-chain", "audit", "manifest", "net", "trace", "policy", "package",
-    "doctor", "status", "budget", "capabilities", "install", "update", "pin", "unpin",
-    "rollout", "config", "invoke", "simulate", "cancel", "export-tools", "serve-mcp",
-    "suggest", "template", "validate", "history", "pipe", "pipeline", "recipe", "map",
+    "guide",
+    "task",
+    "plan",
+    "explain",
+    "do",
+    "list",
+    "search",
+    "show",
+    "ops",
+    "schema",
+    "examples",
+    "supply-chain",
+    "audit",
+    "manifest",
+    "net",
+    "trace",
+    "policy",
+    "package",
+    "doctor",
+    "status",
+    "budget",
+    "capabilities",
+    "install",
+    "update",
+    "pin",
+    "unpin",
+    "rollout",
+    "config",
+    "invoke",
+    "simulate",
+    "cancel",
+    "export-tools",
+    "serve-mcp",
+    "suggest",
+    "template",
+    "validate",
+    "history",
+    "pipe",
+    "pipeline",
+    "recipe",
+    "map",
     "batch-file",
 ];
 
@@ -567,10 +603,10 @@ mod tests {
     }
 
     #[test]
-    fn full_guide_has_seven_families() {
+    fn full_guide_has_eight_families() {
         let g = guide_payload(None);
         let families = g["families"].as_array().expect("families should be array");
-        assert_eq!(families.len(), 7);
+        assert_eq!(families.len(), 8);
     }
 
     #[test]
@@ -586,6 +622,7 @@ mod tests {
         assert!(names.contains(&"discovery"));
         assert!(names.contains(&"evidence"));
         assert!(names.contains(&"lifecycle"));
+        assert!(names.contains(&"capability-governance"));
         assert!(names.contains(&"config"));
         assert!(names.contains(&"execution"));
     }
@@ -824,9 +861,20 @@ mod tests {
 
     #[test]
     fn evidence_commands_have_evidence_family() {
-        for cmd in &["supply-chain", "audit", "manifest", "net", "trace", "policy", "package"] {
+        for cmd in &[
+            "supply-chain",
+            "audit",
+            "manifest",
+            "net",
+            "trace",
+            "policy",
+            "package",
+        ] {
             let p = guide_payload(Some(cmd));
-            assert_eq!(p["contract"]["family"], "evidence", "{cmd} should be evidence family");
+            assert_eq!(
+                p["contract"]["family"], "evidence",
+                "{cmd} should be evidence family"
+            );
         }
     }
 

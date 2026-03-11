@@ -495,10 +495,27 @@ impl DiscoveredConnector {
     fn from_manifest(slug: &str, manifest_path: &Path) -> Result<Self> {
         let raw = fs::read_to_string(manifest_path)
             .with_context(|| format!("failed to read {}", manifest_path.display()))?;
-        // Discovery should tolerate stale interface hashes so the CLI can still
-        // surface real connector metadata while validation is being repaired.
-        let manifest = ConnectorManifest::parse_str_unchecked(&raw)
-            .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
+        // Discovery should tolerate stale interface hashes and a narrow set of
+        // legacy manifest shapes so the CLI can still surface real connector
+        // metadata instead of silently dropping connectors from offline catalog
+        // views.
+        let manifest = match parse_manifest_for_discovery(&raw, manifest_path) {
+            Ok(manifest) => manifest,
+            Err(parse_error) => {
+                let document: toml::Value = toml::from_str(&raw).with_context(|| {
+                    format!(
+                        "failed to parse {} as TOML for discovery fallback",
+                        manifest_path.display()
+                    )
+                })?;
+                return discovered_connector_from_toml(
+                    slug,
+                    manifest_path,
+                    &document,
+                    &parse_error.to_string(),
+                );
+            }
+        };
 
         let inventory_entry = CONNECTOR_INVENTORY.iter().find(|entry| entry.name == slug);
         let cohort = inventory_entry.map_or_else(
@@ -837,6 +854,182 @@ impl DiscoveredConnector {
     }
 }
 
+fn parse_manifest_for_discovery(raw: &str, manifest_path: &Path) -> Result<ConnectorManifest> {
+    match ConnectorManifest::parse_str_unchecked(raw) {
+        Ok(manifest) => Ok(manifest),
+        Err(primary_error) => {
+            let Some(normalized) = normalize_manifest_for_discovery(raw)? else {
+                return Err(anyhow::Error::new(primary_error))
+                    .with_context(|| format!("failed to parse {}", manifest_path.display()));
+            };
+
+            normalized.try_into().map_err(anyhow::Error::new).with_context(|| {
+                format!(
+                    "failed to parse {} after discovery compatibility normalization (original error: {primary_error})",
+                    manifest_path.display()
+                )
+            })
+        }
+    }
+}
+
+fn normalize_manifest_for_discovery(raw: &str) -> Result<Option<toml::Value>> {
+    let mut document: toml::Value =
+        toml::from_str(raw).context("failed to parse manifest TOML for discovery normalization")?;
+    let mut changed = false;
+
+    if let Some(provides) = document
+        .get_mut("provides")
+        .and_then(toml::Value::as_table_mut)
+        && provides.remove("streaming").is_some()
+    {
+        changed = true;
+    }
+
+    let declares_streaming = manifest_declares_streaming(&document);
+    if let Some(connector) = document
+        .get_mut("connector")
+        .and_then(toml::Value::as_table_mut)
+    {
+        if let Some(archetypes) = connector
+            .get_mut("archetypes")
+            .and_then(toml::Value::as_array_mut)
+        {
+            let mut normalized =
+                Vec::with_capacity(archetypes.len() + usize::from(declares_streaming));
+            let mut saw_messaging = false;
+            let mut has_bidirectional = false;
+            let mut has_streaming = false;
+
+            for entry in archetypes.iter() {
+                let Some(label) = entry.as_str() else {
+                    normalized.push(entry.clone());
+                    continue;
+                };
+
+                match label {
+                    "messaging" => {
+                        saw_messaging = true;
+                        if !has_bidirectional {
+                            normalized.push(toml::Value::String("bidirectional".to_owned()));
+                            has_bidirectional = true;
+                        }
+                    }
+                    "bidirectional" => {
+                        has_bidirectional = true;
+                        normalized.push(entry.clone());
+                    }
+                    "streaming" => {
+                        has_streaming = true;
+                        normalized.push(entry.clone());
+                    }
+                    _ => normalized.push(entry.clone()),
+                }
+            }
+
+            if saw_messaging {
+                if declares_streaming && !has_streaming {
+                    normalized.push(toml::Value::String("streaming".to_owned()));
+                }
+                *archetypes = normalized;
+                changed = true;
+            }
+        }
+
+        if let Some(state) = connector
+            .get_mut("state")
+            .and_then(toml::Value::as_table_mut)
+            && state
+                .get("model")
+                .and_then(toml::Value::as_str)
+                .is_some_and(|model| model == "cursor")
+        {
+            state.insert(
+                "model".to_owned(),
+                toml::Value::String("singleton_writer".to_owned()),
+            );
+            changed = true;
+        }
+    }
+
+    if let Some(operations) = document
+        .get_mut("provides")
+        .and_then(toml::Value::as_table_mut)
+        .and_then(|provides| provides.get_mut("operations"))
+        .and_then(toml::Value::as_table_mut)
+    {
+        for (_, operation) in operations.iter_mut() {
+            if let Some(operation_table) = operation.as_table_mut() {
+                if operation_table.remove("network").is_some() {
+                    changed = true;
+                }
+                if !operation_table.contains_key("requires_approval") {
+                    operation_table.insert(
+                        "requires_approval".to_owned(),
+                        toml::Value::String("none".to_owned()),
+                    );
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    if document
+        .get("rate_limits")
+        .and_then(|limits| limits.get("pools"))
+        .is_some_and(toml::Value::is_table)
+    {
+        if let Some(root) = document.as_table_mut() {
+            root.remove("rate_limits");
+            changed = true;
+        }
+    }
+
+    if changed {
+        Ok(Some(document))
+    } else {
+        Ok(None)
+    }
+}
+
+fn manifest_declares_streaming(document: &toml::Value) -> bool {
+    let protocol_features_streaming = document
+        .get("manifest")
+        .and_then(|manifest| manifest.get("protocol_features"))
+        .and_then(toml::Value::as_array)
+        .is_some_and(|features| {
+            features
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .any(|feature| feature == "streaming")
+        });
+    if protocol_features_streaming {
+        return true;
+    }
+
+    let event_caps_streaming = document
+        .get("event_caps")
+        .and_then(|caps| caps.get("streaming"))
+        .and_then(toml::Value::as_bool)
+        .unwrap_or(false);
+    if event_caps_streaming {
+        return true;
+    }
+
+    document
+        .get("provides")
+        .and_then(|provides| provides.get("events"))
+        .and_then(toml::Value::as_table)
+        .is_some_and(|events| {
+            events.values().any(|event| {
+                event
+                    .get("streaming")
+                    .and_then(toml::Value::as_bool)
+                    .unwrap_or(false)
+            })
+        })
+}
+
 #[derive(Clone, Debug)]
 pub struct DiscoveredOperation {
     pub actual_id: String,
@@ -969,6 +1162,402 @@ impl DiscoveredOperation {
             .into_iter()
             .collect()
     }
+}
+
+fn discovered_connector_from_toml(
+    slug: &str,
+    manifest_path: &Path,
+    document: &toml::Value,
+    parse_warning: &str,
+) -> Result<DiscoveredConnector> {
+    let inventory_entry = CONNECTOR_INVENTORY.iter().find(|entry| entry.name == slug);
+    let cohort = inventory_entry.map_or_else(
+        || ConnectorCohort::Other.as_str().to_owned(),
+        |entry| entry.cohort.as_str().to_owned(),
+    );
+
+    let connector = document
+        .get("connector")
+        .and_then(toml::Value::as_table)
+        .with_context(|| format!("{} is missing [connector]", manifest_path.display()))?;
+    let connector_id = required_toml_str(connector, "id", manifest_path)?;
+    let connector_name = required_toml_str(connector, "name", manifest_path)?;
+    let connector_version = required_toml_str(connector, "version", manifest_path)?;
+    let connector_description = required_toml_str(connector, "description", manifest_path)?;
+    let runtime_format = connector
+        .get("format")
+        .and_then(toml::Value::as_str)
+        .unwrap_or("wasi")
+        .to_owned();
+    let state_model = connector
+        .get("state")
+        .and_then(toml::Value::as_table)
+        .and_then(|state| state.get("model"))
+        .and_then(toml::Value::as_str)
+        .map(std::borrow::ToOwned::to_owned);
+    let archetypes = normalize_archetype_labels_from_toml(
+        connector
+            .get("archetypes")
+            .and_then(toml::Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(toml::Value::as_str)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
+        manifest_declares_streaming(document),
+    );
+
+    let namespace = connector_id
+        .strip_prefix("fcp.")
+        .unwrap_or(connector_id.as_str())
+        .to_owned();
+    let operations_table = document
+        .get("provides")
+        .and_then(|provides| provides.get("operations"))
+        .and_then(toml::Value::as_table)
+        .with_context(|| {
+            format!(
+                "{} is missing [provides.operations]",
+                manifest_path.display()
+            )
+        })?;
+    let mut operations = operations_table
+        .iter()
+        .map(|(operation_id, operation)| {
+            discovered_operation_from_toml(&namespace, operation_id, operation, manifest_path)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    operations.sort_by(|left, right| left.preferred_selector.cmp(&right.preferred_selector));
+
+    let max_risk = operations
+        .iter()
+        .map(|operation| operation.summary.risk_level.as_str())
+        .max_by_key(|risk| risk_rank(risk))
+        .unwrap_or("low")
+        .to_owned();
+    let declared_topics = document
+        .get("provides")
+        .and_then(|provides| provides.get("events"))
+        .and_then(toml::Value::as_table)
+        .map(|events| events.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let has_events = !declared_topics.is_empty()
+        || document
+            .get("event_caps")
+            .and_then(|caps| caps.get("streaming"))
+            .and_then(toml::Value::as_bool)
+            .unwrap_or(false)
+        || document
+            .get("event_caps")
+            .and_then(|caps| caps.get("replay"))
+            .and_then(toml::Value::as_bool)
+            .unwrap_or(false);
+    let supported_zones = extract_supported_zones_from_toml(document.get("zones"));
+
+    let summary = ConnectorSummary {
+        id: connector_id.clone(),
+        name: connector_name.clone(),
+        version: connector_version.clone(),
+        description: connector_description.clone(),
+        archetypes: archetypes.clone(),
+        state: ConnectorState::Unknown,
+        operation_count: operations.len(),
+        max_risk,
+        has_events,
+    };
+    let operation_summaries = operations
+        .iter()
+        .map(|operation| operation.summary.clone())
+        .collect::<Vec<_>>();
+    let zones = document
+        .get("zones")
+        .map(toml_value_to_json)
+        .transpose()?
+        .unwrap_or(Value::Null);
+    let capabilities = document
+        .get("capabilities")
+        .map(toml_value_to_json)
+        .transpose()?
+        .unwrap_or(Value::Null);
+    let event_caps = document
+        .get("event_caps")
+        .map(toml_value_to_json)
+        .transpose()?;
+    let sandbox = document
+        .get("sandbox")
+        .map(toml_value_to_json)
+        .transpose()?
+        .unwrap_or(Value::Null);
+    let rate_limits = document
+        .get("rate_limits")
+        .map(toml_value_to_json)
+        .transpose()?;
+    let connector_schema = serde_json::json!({
+        "connector": {
+            "id": &connector_id,
+            "name": &connector_name,
+            "version": &connector_version,
+            "description": &connector_description,
+            "archetypes": archetypes,
+            "format": &runtime_format,
+            "state_model": state_model,
+        },
+        "zones": zones,
+        "capabilities": capabilities,
+        "events": {
+            "event_caps": event_caps,
+            "declared_topics": declared_topics,
+        },
+        "sandbox": sandbox,
+        "rate_limits": rate_limits,
+        "operations": operations
+            .iter()
+            .map(|operation| serde_json::json!({
+                "selector": &operation.preferred_selector,
+                "canonical_id": &operation.actual_id,
+                "aliases": operation.aliases.clone(),
+            }))
+            .collect::<Vec<_>>(),
+        "note": "This connector-level schema comes from raw manifest TOML because strict `fcp-manifest` parsing could not validate the current file shape for discovery.",
+        "manifest_parse_warning": parse_warning,
+    });
+
+    Ok(DiscoveredConnector {
+        slug: slug.to_owned(),
+        manifest_path: relative_to_workspace(manifest_path),
+        cohort,
+        runtime_format,
+        state_model,
+        supported_zones,
+        detail: ConnectorDetail {
+            summary,
+            operations: operation_summaries,
+            config_schema: None,
+            health: None,
+            rate_limits: Vec::new(),
+        },
+        zones,
+        capabilities,
+        connector_schema,
+        operations,
+    })
+}
+
+fn discovered_operation_from_toml(
+    namespace: &str,
+    operation_id: &str,
+    operation: &toml::Value,
+    manifest_path: &Path,
+) -> Result<DiscoveredOperation> {
+    let operation = operation.as_table().with_context(|| {
+        format!(
+            "{} has non-table operation definition for `{operation_id}`",
+            manifest_path.display()
+        )
+    })?;
+    let local_id = operation_id
+        .strip_prefix(&format!("{namespace}."))
+        .unwrap_or(operation_id)
+        .to_owned();
+    let preferred_selector = preferred_operation_selector(&local_id);
+    let aliases = operation_aliases(namespace, operation_id, &local_id);
+    let description = required_toml_str(operation, "description", manifest_path)?;
+    let capability = required_toml_str(operation, "capability", manifest_path)?;
+    let risk_level = operation
+        .get("risk_level")
+        .and_then(toml::Value::as_str)
+        .unwrap_or("low")
+        .to_owned();
+    let safety_tier = operation
+        .get("safety_tier")
+        .and_then(toml::Value::as_str)
+        .unwrap_or("safe")
+        .to_owned();
+    let approval_mode = operation
+        .get("requires_approval")
+        .and_then(toml::Value::as_str)
+        .unwrap_or("none")
+        .to_owned();
+    let idempotency = operation
+        .get("idempotency")
+        .and_then(toml::Value::as_str)
+        .unwrap_or("none")
+        .to_owned();
+    let input_schema = operation
+        .get("input_schema")
+        .map(toml_value_to_json)
+        .transpose()?
+        .unwrap_or_else(|| serde_json::json!({}));
+    let output_schema = operation
+        .get("output_schema")
+        .map(toml_value_to_json)
+        .transpose()?
+        .unwrap_or_else(|| serde_json::json!({}));
+    let ai_hints = operation.get("ai_hints").and_then(toml::Value::as_table);
+    let when_to_use = ai_hints
+        .and_then(|hints| hints.get("when_to_use"))
+        .and_then(toml::Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let common_mistakes = ai_hints
+        .and_then(|hints| hints.get("common_mistakes"))
+        .and_then(toml::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let examples = ai_hints
+        .and_then(|hints| hints.get("examples"))
+        .and_then(toml::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let related = ai_hints
+        .and_then(|hints| hints.get("related"))
+        .and_then(toml::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let network_constraints = operation
+        .get("network_constraints")
+        .or_else(|| operation.get("network"))
+        .map(toml_value_to_json)
+        .transpose()?;
+
+    Ok(DiscoveredOperation {
+        actual_id: operation_id.to_owned(),
+        local_id,
+        preferred_selector,
+        aliases,
+        description: description.clone(),
+        summary: OperationSummary {
+            id: operation_id.to_owned(),
+            summary: description,
+            capability,
+            risk_level,
+            safety_tier,
+            idempotency,
+            requires_approval: approval_mode != "none",
+            supports_simulate: true,
+        },
+        input_schema,
+        output_schema,
+        approval_mode,
+        when_to_use,
+        common_mistakes,
+        examples,
+        related,
+        network_constraints,
+        rate_limits: Vec::new(),
+    })
+}
+
+fn required_toml_str(
+    table: &toml::map::Map<String, toml::Value>,
+    key: &str,
+    manifest_path: &Path,
+) -> Result<String> {
+    table
+        .get(key)
+        .and_then(toml::Value::as_str)
+        .map(str::to_owned)
+        .with_context(|| format!("{} is missing `{key}`", manifest_path.display()))
+}
+
+fn toml_value_to_json(value: &toml::Value) -> Result<Value> {
+    serde_json::to_value(value).context("failed to convert TOML value into JSON")
+}
+
+fn extract_supported_zones_from_toml(zones: Option<&toml::Value>) -> Vec<String> {
+    let Some(zones) = zones.and_then(toml::Value::as_table) else {
+        return Vec::new();
+    };
+
+    let home = zones
+        .get("home")
+        .and_then(toml::Value::as_str)
+        .map(str::to_owned);
+    let allowed_sources = zones
+        .get("allowed_sources")
+        .and_then(toml::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let allowed_targets = zones
+        .get("allowed_targets")
+        .and_then(toml::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    allowed_sources
+        .into_iter()
+        .chain(allowed_targets)
+        .chain(home)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn normalize_archetype_labels_from_toml(
+    labels: Vec<&str>,
+    declares_streaming: bool,
+) -> Vec<String> {
+    let mut normalized = Vec::new();
+    let mut has_bidirectional = false;
+    let mut has_streaming = false;
+
+    for label in labels {
+        match label {
+            "messaging" => {
+                if !has_bidirectional {
+                    normalized.push("bidirectional".to_owned());
+                    has_bidirectional = true;
+                }
+            }
+            "bidirectional" => {
+                has_bidirectional = true;
+                normalized.push(label.to_owned());
+            }
+            "streaming" => {
+                has_streaming = true;
+                normalized.push(label.to_owned());
+            }
+            _ => normalized.push(label.to_owned()),
+        }
+    }
+
+    if declares_streaming && !has_streaming {
+        normalized.push("streaming".to_owned());
+    }
+
+    normalized
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -4667,5 +5256,121 @@ mod tests {
             .filter(|e| e.metadata_tier == MetadataTier::Json)
             .count();
         assert_eq!(json_count, 0);
+    }
+
+    #[test]
+    fn discovery_normalization_supports_legacy_manifest_shapes() {
+        let raw = r#"
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = ["streaming"]
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+
+[connector]
+id = "fcp.legacy"
+name = "Legacy Connector"
+version = "0.1.0"
+description = "Legacy manifest shape"
+archetypes = ["messaging", "operational"]
+format = "wasi"
+
+[connector.state]
+model = "cursor"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:work"]
+allowed_targets = ["z:work"]
+forbidden = []
+
+[capabilities]
+required = ["network.dns"]
+optional = []
+forbidden = []
+
+[provides.operations.echo]
+description = "Echo"
+capability = "legacy.echo"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object" }
+output_schema = { type = "object" }
+
+[provides.operations.echo.network]
+allowed_hosts = ["api.example.test"]
+protocol = "https"
+
+[provides.events.tick]
+description = "Tick"
+streaming = true
+replay = false
+
+[provides.streaming]
+gateway_host = "gateway.example.test"
+protocol = "wss"
+
+[sandbox]
+profile = "strict"
+memory_mb = 64
+cpu_percent = 20
+wall_clock_timeout_ms = 1000
+fs_readonly_paths = ["/usr"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[rate_limits.pools."legacy.echo"]
+description = "Legacy pool"
+max_per_minute = 60
+burst = 5
+"#;
+
+        let normalized =
+            normalize_manifest_for_discovery(raw).expect("normalization should succeed");
+        let normalized = normalized.expect("legacy manifest should need normalization");
+        let manifest: ConnectorManifest = normalized
+            .try_into()
+            .expect("normalized manifest should parse");
+
+        assert_eq!(
+            manifest
+                .connector
+                .archetypes
+                .iter()
+                .map(fcp_manifest::ConnectorArchetype::as_str)
+                .collect::<Vec<_>>(),
+            vec!["bidirectional", "operational", "streaming"]
+        );
+        assert!(manifest.event_caps.is_none());
+        assert!(manifest.provides.events.contains_key("tick"));
+    }
+
+    #[test]
+    fn discovery_catalog_loads_discord_and_telegram() {
+        let discord_manifest = workspace_root().join("connectors/discord/manifest.toml");
+        let telegram_manifest = workspace_root().join("connectors/telegram/manifest.toml");
+
+        DiscoveredConnector::from_manifest("discord", &discord_manifest)
+            .expect("discord manifest should load for discovery");
+        DiscoveredConnector::from_manifest("telegram", &telegram_manifest)
+            .expect("telegram manifest should load for discovery");
+
+        let catalog = DiscoveryCatalog::load().expect("catalog should load");
+        let connector_ids = catalog
+            .connectors()
+            .iter()
+            .map(|connector| connector.detail.summary.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(connector_ids.contains(&"fcp.discord"));
+        assert!(connector_ids.contains(&"fcp.telegram"));
     }
 }

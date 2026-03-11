@@ -1086,7 +1086,7 @@ impl SpotifyConnector {
         let position = input
             .get("position")
             .and_then(serde_json::Value::as_u64)
-            .map(|v| v as u32);
+            .and_then(|v| u32::try_from(v).ok());
         let resp = client
             .add_tracks_to_playlist(playlist_id, &uris, position)
             .await?;

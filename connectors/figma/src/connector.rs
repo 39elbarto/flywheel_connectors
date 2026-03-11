@@ -1180,7 +1180,17 @@ impl FigmaConnector {
             code: 1003,
             message: "Invalid operation ID format".into(),
         })?;
-        let cap_id: CapabilityId = operation.parse().map_err(|_| FcpError::InvalidRequest {
+        let intro = self.handle_introspect().await?;
+        let cap_str = intro.get("operations")
+            .and_then(|ops| ops.as_array())
+            .and_then(|ops| ops.iter().find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation)))
+            .and_then(|op| op.get("capability"))
+            .and_then(|cap| cap.as_str())
+            .ok_or_else(|| FcpError::OperationNotGranted {
+                operation: operation.into(),
+            })?;
+
+        let cap_id: CapabilityId = cap_str.parse().map_err(|_| FcpError::InvalidRequest {
             code: 1003,
             message: "Invalid capability ID format".into(),
         })?;
@@ -1309,7 +1319,7 @@ impl FigmaConnector {
         let depth = input
             .get("depth")
             .and_then(|v| v.as_u64())
-            .map(|v| v as u32);
+            .and_then(|v| u32::try_from(v).ok());
         let geometry = input.get("geometry").and_then(|v| v.as_str());
         let plugin_data = input.get("plugin_data").and_then(|v| v.as_str());
 
@@ -1333,7 +1343,7 @@ impl FigmaConnector {
         let depth = input
             .get("depth")
             .and_then(|v| v.as_u64())
-            .map(|v| v as u32);
+            .and_then(|v| u32::try_from(v).ok());
 
         let nodes = client
             .get_file_nodes(file_key, ids, depth)

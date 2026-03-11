@@ -888,7 +888,7 @@ impl SlackConnector {
         let limit = input
             .get("limit")
             .and_then(|v| v.as_u64())
-            .map(|v| v as u32);
+            .and_then(|v| u32::try_from(v).ok());
 
         let messages = client
             .get_channel_history(channel, limit)

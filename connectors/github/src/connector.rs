@@ -853,7 +853,7 @@ impl GitHubConnector {
             milestone: input
                 .get("milestone")
                 .and_then(|v| v.as_u64())
-                .map(|v| v as u32),
+                .and_then(|v| u32::try_from(v).ok()),
         };
 
         let issue = client
@@ -1232,7 +1232,7 @@ fn require_u32(input: &serde_json::Value, field: &str) -> FcpResult<u32> {
     input
         .get(field)
         .and_then(|v| v.as_u64())
-        .map(|v| v as u32)
+        .and_then(|v| u32::try_from(v).ok())
         .ok_or(FcpError::InvalidRequest {
             code: 1003,
             message: format!("Missing required field: {field}"),

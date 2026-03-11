@@ -1064,7 +1064,17 @@ impl M365Connector {
             code: 1003,
             message: "Invalid operation ID format".into(),
         })?;
-        let cap_id: CapabilityId = operation.parse().map_err(|_| FcpError::InvalidRequest {
+        let intro = self.handle_introspect().await?;
+        let cap_str = intro.get("operations")
+            .and_then(|ops| ops.as_array())
+            .and_then(|ops| ops.iter().find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation)))
+            .and_then(|op| op.get("capability"))
+            .and_then(|cap| cap.as_str())
+            .ok_or_else(|| FcpError::OperationNotGranted {
+                operation: operation.into(),
+            })?;
+
+        let cap_id: CapabilityId = cap_str.parse().map_err(|_| FcpError::InvalidRequest {
             code: 1003,
             message: "Invalid capability ID format".into(),
         })?;
@@ -1139,8 +1149,8 @@ impl M365Connector {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let user_id = require_str(&input, "user_id")?;
         let folder_id = input.get("folder_id").and_then(|v| v.as_str());
-        let top = input.get("top").and_then(|v| v.as_u64()).map(|v| v as u32);
-        let skip = input.get("skip").and_then(|v| v.as_u64()).map(|v| v as u32);
+        let top = input.get("top").and_then(|v| v.as_u64()).and_then(|v| u32::try_from(v).ok());
+        let skip = input.get("skip").and_then(|v| v.as_u64()).and_then(|v| u32::try_from(v).ok());
         let filter = input.get("filter").and_then(|v| v.as_str());
         let result = client
             .list_messages(user_id, folder_id, top, skip, filter)
@@ -1195,8 +1205,8 @@ impl M365Connector {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let user_id = require_str(&input, "user_id")?;
         let query = require_str(&input, "query")?;
-        let top = input.get("top").and_then(|v| v.as_u64()).map(|v| v as u32);
-        let skip = input.get("skip").and_then(|v| v.as_u64()).map(|v| v as u32);
+        let top = input.get("top").and_then(|v| v.as_u64()).and_then(|v| u32::try_from(v).ok());
+        let skip = input.get("skip").and_then(|v| v.as_u64()).and_then(|v| u32::try_from(v).ok());
         let result = client
             .search_messages(user_id, query, top, skip)
             .await
@@ -1208,8 +1218,8 @@ impl M365Connector {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let user_id = require_str(&input, "user_id")?;
         let folder_id = input.get("folder_id").and_then(|v| v.as_str());
-        let top = input.get("top").and_then(|v| v.as_u64()).map(|v| v as u32);
-        let skip = input.get("skip").and_then(|v| v.as_u64()).map(|v| v as u32);
+        let top = input.get("top").and_then(|v| v.as_u64()).and_then(|v| u32::try_from(v).ok());
+        let skip = input.get("skip").and_then(|v| v.as_u64()).and_then(|v| u32::try_from(v).ok());
         let filter = input.get("filter").and_then(|v| v.as_str());
         let result = client
             .list_messages(user_id, folder_id, top, skip, filter)
@@ -1315,8 +1325,8 @@ impl M365Connector {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let user_id = require_str(&input, "user_id")?;
         let message_id = require_str(&input, "message_id")?;
-        let top = input.get("top").and_then(|v| v.as_u64()).map(|v| v as u32);
-        let skip = input.get("skip").and_then(|v| v.as_u64()).map(|v| v as u32);
+        let top = input.get("top").and_then(|v| v.as_u64()).and_then(|v| u32::try_from(v).ok());
+        let skip = input.get("skip").and_then(|v| v.as_u64()).and_then(|v| u32::try_from(v).ok());
         let result = client
             .list_attachments(user_id, message_id, top, skip)
             .await

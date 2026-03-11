@@ -1883,7 +1883,17 @@ impl TwilioConnector {
             code: 1003,
             message: "Invalid operation ID format".into(),
         })?;
-        let cap_id: CapabilityId = operation.parse().map_err(|_| FcpError::InvalidRequest {
+        let intro = self.handle_introspect().await?;
+        let cap_str = intro.get("operations")
+            .and_then(|ops| ops.as_array())
+            .and_then(|ops| ops.iter().find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation)))
+            .and_then(|op| op.get("capability"))
+            .and_then(|cap| cap.as_str())
+            .ok_or_else(|| FcpError::OperationNotGranted {
+                operation: operation.into(),
+            })?;
+
+        let cap_id: CapabilityId = cap_str.parse().map_err(|_| FcpError::InvalidRequest {
             code: 1003,
             message: "Invalid capability ID format".into(),
         })?;
@@ -2003,8 +2013,8 @@ impl TwilioConnector {
         let page_size = input
             .get("page_size")
             .and_then(|v| v.as_u64())
-            .map(|v| v as u32);
-        let page = input.get("page").and_then(|v| v.as_u64()).map(|v| v as u32);
+            .and_then(|v| u32::try_from(v).ok());
+        let page = input.get("page").and_then(|v| v.as_u64()).and_then(|v| u32::try_from(v).ok());
 
         let resp = client
             .list_messages(to, from, date_sent, page_size, page)
@@ -2022,8 +2032,8 @@ impl TwilioConnector {
         let page_size = input
             .get("page_size")
             .and_then(|v| v.as_u64())
-            .map(|v| v as u32);
-        let page = input.get("page").and_then(|v| v.as_u64()).map(|v| v as u32);
+            .and_then(|v| u32::try_from(v).ok());
+        let page = input.get("page").and_then(|v| v.as_u64()).and_then(|v| u32::try_from(v).ok());
 
         let resp = client
             .list_media(message_sid, page_size, page)
@@ -2058,7 +2068,7 @@ impl TwilioConnector {
         let timeout = input
             .get("timeout")
             .and_then(|v| v.as_u64())
-            .map(|v| v as u32);
+            .and_then(|v| u32::try_from(v).ok());
         let record = input.get("record").and_then(|v| v.as_bool());
 
         let resp = client
@@ -2106,8 +2116,8 @@ impl TwilioConnector {
         let page_size = input
             .get("page_size")
             .and_then(|v| v.as_u64())
-            .map(|v| v as u32);
-        let page = input.get("page").and_then(|v| v.as_u64()).map(|v| v as u32);
+            .and_then(|v| u32::try_from(v).ok());
+        let page = input.get("page").and_then(|v| v.as_u64()).and_then(|v| u32::try_from(v).ok());
 
         let resp = client
             .list_calls(to, from, status, start_time, end_time, page_size, page)
@@ -2143,7 +2153,7 @@ impl TwilioConnector {
         let length = input
             .get("length")
             .and_then(|v| v.as_u64())
-            .map(|v| v as u32);
+            .and_then(|v| u32::try_from(v).ok());
         let reason = input.get("reason").and_then(|v| v.as_str());
 
         let twiml = crate::client::TwilioClient::generate_twiml(
@@ -2163,7 +2173,7 @@ impl TwilioConnector {
         let page_size = input
             .get("page_size")
             .and_then(|v| v.as_u64())
-            .map(|v| v as u32);
+            .and_then(|v| u32::try_from(v).ok());
 
         let resp = client
             .list_recordings(call_sid, date_created, page_size)
@@ -2225,7 +2235,7 @@ impl TwilioConnector {
         let page_size = input
             .get("page_size")
             .and_then(|v| v.as_u64())
-            .map(|v| v as u32);
+            .and_then(|v| u32::try_from(v).ok());
 
         let resp = client
             .list_phone_numbers(phone_number, page_size)
@@ -2302,8 +2312,8 @@ impl TwilioConnector {
         let page_size = input
             .get("page_size")
             .and_then(|v| v.as_u64())
-            .map(|v| v as u32);
-        let page = input.get("page").and_then(|v| v.as_u64()).map(|v| v as u32);
+            .and_then(|v| u32::try_from(v).ok());
+        let page = input.get("page").and_then(|v| v.as_u64()).and_then(|v| u32::try_from(v).ok());
         let resp = client
             .whatsapp_list(to, from, date_sent, page_size, page)
             .await
@@ -2355,7 +2365,7 @@ impl TwilioConnector {
         let page_size = input
             .get("page_size")
             .and_then(|v| v.as_u64())
-            .map(|v| v as u32);
+            .and_then(|v| u32::try_from(v).ok());
         let resp = client
             .list_conversations(page_size)
             .await
@@ -2428,7 +2438,7 @@ impl TwilioConnector {
         let page_size = input
             .get("page_size")
             .and_then(|v| v.as_u64())
-            .map(|v| v as u32);
+            .and_then(|v| u32::try_from(v).ok());
         let order = input.get("order").and_then(|v| v.as_str());
         let resp = client
             .list_conversation_messages(conversation_sid, page_size, order)
@@ -2495,7 +2505,7 @@ impl TwilioConnector {
         let max_participants = input
             .get("max_participants")
             .and_then(|v| v.as_u64())
-            .map(|v| v as u32);
+            .and_then(|v| u32::try_from(v).ok());
         let resp = client
             .create_video_room(unique_name, room_type, max_participants)
             .await
@@ -2529,7 +2539,7 @@ impl TwilioConnector {
         let page_size = input
             .get("page_size")
             .and_then(|v| v.as_u64())
-            .map(|v| v as u32);
+            .and_then(|v| u32::try_from(v).ok());
         let resp = client
             .list_video_rooms(status, page_size)
             .await

@@ -538,7 +538,7 @@ impl SentryConnector {
         let per_page = input
             .get("per_page")
             .and_then(|v| v.as_u64())
-            .map(|v| v as u32);
+            .and_then(|v| u32::try_from(v).ok());
 
         let data = client
             .discover_query(
@@ -668,7 +668,7 @@ impl SentryConnector {
         let per_page = input
             .get("per_page")
             .and_then(|v| v.as_u64())
-            .map(|v| v as u32);
+            .and_then(|v| u32::try_from(v).ok());
         let data = client
             .search_issues(
                 org,
@@ -771,7 +771,7 @@ impl SentryConnector {
         let per_page = input
             .get("per_page")
             .and_then(|v| v.as_u64())
-            .map(|v| v as u32);
+            .and_then(|v| u32::try_from(v).ok());
         let cursor = input.get("cursor").and_then(|v| v.as_str());
         let data = client
             .query_transactions(

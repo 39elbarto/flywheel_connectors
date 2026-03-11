@@ -1008,23 +1008,23 @@ impl KubernetesConnector {
         let replicas = status
             .get("replicas")
             .and_then(|v| v.as_u64())
-            .map(|v| v as u32);
+            .and_then(|v| u32::try_from(v).ok());
         let updated = status
             .get("updatedReplicas")
             .and_then(|v| v.as_u64())
-            .map(|v| v as u32);
+            .and_then(|v| u32::try_from(v).ok());
         let ready = status
             .get("readyReplicas")
             .and_then(|v| v.as_u64())
-            .map(|v| v as u32);
+            .and_then(|v| u32::try_from(v).ok());
         let available = status
             .get("availableReplicas")
             .and_then(|v| v.as_u64())
-            .map(|v| v as u32);
+            .and_then(|v| u32::try_from(v).ok());
         let unavailable = status
             .get("unavailableReplicas")
             .and_then(|v| v.as_u64())
-            .map(|v| v as u32);
+            .and_then(|v| u32::try_from(v).ok());
         let generation = status.get("observedGeneration").and_then(|v| v.as_u64());
         let conditions = status.get("conditions").cloned();
         let rollout_complete =
@@ -1081,7 +1081,7 @@ impl KubernetesConnector {
                     .get("spec")
                     .and_then(|s| s.get("replicas"))
                     .and_then(|v| v.as_u64())
-                    .map(|v| v as u32);
+                    .and_then(|v| u32::try_from(v).ok());
                 let image = rs
                     .get("spec")
                     .and_then(|s| s.get("template"))

@@ -42,6 +42,9 @@ pub fn command_alias(token: &str) -> Option<&'static str> {
 
         // Lifecycle aliases
         "health" | "state" | "check" | "healthcheck" => Some("status"),
+        "diagnose" | "diagnostics" => Some("doctor"),
+        "budgets" | "usage" | "spend" => Some("budget"),
+        "caps" | "permissions" | "grants" => Some("capabilities"),
         "add" | "setup" => Some("install"),
         "upgrade" => Some("update"),
         "lock" | "freeze" => Some("pin"),
@@ -98,6 +101,9 @@ pub fn typo_correction(token: &str) -> Option<&'static str> {
 
         // status typos
         "stauts" | "staus" | "sttaus" | "statsu" => Some("status"),
+        "docotr" | "doctro" | "dcotor" => Some("doctor"),
+        "budgte" | "buget" | "bdget" => Some("budget"),
+        "capabilties" | "capabilites" | "capablities" => Some("capabilities"),
 
         // install/update typos
         "insatll" | "intall" | "insall" | "isntall" | "instal" => Some("install"),
@@ -951,8 +957,8 @@ mod tests {
     fn mutating_and_readonly_are_disjoint() {
         let all_commands = [
             "guide", "task", "plan", "explain", "do", "list", "search", "show", "ops", "schema",
-            "examples", "status", "install", "update", "pin", "unpin", "config", "invoke",
-            "simulate",
+            "examples", "doctor", "status", "budget", "capabilities", "install", "update",
+            "pin", "unpin", "config", "invoke", "simulate",
         ];
         for cmd in all_commands {
             assert!(
@@ -1168,8 +1174,8 @@ mod tests {
     fn all_aliases_resolve_to_known_canonical_commands() {
         let known = [
             "guide", "task", "plan", "explain", "do", "list", "search", "show", "ops", "schema",
-            "examples", "status", "install", "update", "pin", "unpin", "config", "invoke",
-            "simulate",
+            "examples", "doctor", "status", "budget", "capabilities", "install", "update",
+            "pin", "unpin", "config", "invoke", "simulate",
         ];
         let test_aliases = [
             "info",
@@ -1228,6 +1234,9 @@ mod tests {
             "templates",
             "state",
             "healthcheck",
+            "diagnose",
+            "budgets",
+            "caps",
             "settings",
             "prefs",
             "preferences",
@@ -1252,13 +1261,13 @@ mod tests {
     fn all_typos_resolve_to_known_canonical_commands() {
         let known = [
             "guide", "task", "plan", "explain", "list", "search", "show", "ops", "schema",
-            "examples", "status", "install", "update", "config", "invoke", "simulate", "pin",
-            "unpin",
+            "examples", "doctor", "status", "budget", "capabilities", "install", "update",
+            "config", "invoke", "simulate", "pin", "unpin",
         ];
         let test_typos = [
             "gudie", "taks", "paln", "expalin", "lsit", "serach", "shwo", "osp", "schmea",
-            "exmaples", "stauts", "insatll", "udpate", "conifg", "invoe", "simlate", "pni",
-            "unpni",
+            "exmaples", "docotr", "stauts", "budgte", "capabilties", "insatll", "udpate",
+            "conifg", "invoe", "simlate", "pni", "unpni",
         ];
         for typo in test_typos {
             let res = resolve_command(typo);

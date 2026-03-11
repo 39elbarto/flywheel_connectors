@@ -3,9 +3,10 @@ use serde_json::{Value, json};
 pub const COMMANDS: &[&str] = &[
     "guide", "task", "plan", "explain", "do", "list", "search", "show", "ops", "schema",
     "examples", "supply-chain", "audit", "manifest", "net", "trace", "policy", "package",
-    "status", "install", "update", "pin", "unpin", "rollout", "config", "invoke", "simulate",
-    "cancel", "export-tools", "serve-mcp", "suggest", "template", "validate", "history", "pipe",
-    "pipeline", "recipe", "map", "batch-file",
+    "doctor", "status", "budget", "capabilities", "install", "update", "pin", "unpin",
+    "rollout", "config", "invoke", "simulate", "cancel", "export-tools", "serve-mcp",
+    "suggest", "template", "validate", "history", "pipe", "pipeline", "recipe", "map",
+    "batch-file",
 ];
 
 #[allow(clippy::too_many_lines)]
@@ -107,7 +108,11 @@ pub fn guide_payload(command: Option<&str>) -> Value {
                     },
                     {
                         "name": "lifecycle",
-                        "commands": ["status", "install", "update", "pin", "unpin", "rollout"],
+                        "commands": ["doctor", "status", "budget", "install", "update", "pin", "unpin", "rollout"],
+                    },
+                    {
+                        "name": "capability-governance",
+                        "commands": ["capabilities"],
                     },
                     {
                         "name": "config",
@@ -277,10 +282,28 @@ fn command_contract(command: &str) -> Option<Value> {
             "next_beads": ["flywheel_connectors-1pjhh"],
             "workflow_handoff": ["Use `fwc install` or `fwc update` with the generated package output directory once packaging completes."],
         })),
+        "doctor" => Some(lifecycle_contract(
+            "Diagnose live zone and connector health through `fcp-host`.",
+            "Live host-backed report covering freshness, degraded mode, and optional connector self-checks.",
+        )),
         "status" => Some(lifecycle_contract(
             "Report desired state, observed runtime state, and current health for one connector or the fleet.",
             "Desired-vs-observed lifecycle summary with audit-aware context.",
         )),
+        "budget" => Some(lifecycle_contract(
+            "Report current usage-budget state for configured zones through `fcp-host`.",
+            "Live per-zone budget snapshots with exceeded-limit visibility and no fabricated usage data.",
+        )),
+        "capabilities" => Some(json!({
+            "family": "capability-governance",
+            "summary": "Report, recommend, and export capability usage using recorded execution history.",
+            "intended_shape": "Least-privilege guidance rooted in real `fwc` history receipts and current connector metadata.",
+            "next_beads": ["flywheel_connectors-1pjhh"],
+            "workflow_handoff": [
+                "Use `fwc history` to inspect the underlying receipts when a recommendation needs explanation.",
+                "Use `fwc capabilities suggest` before tightening grants or policy bundles."
+            ],
+        })),
         "install" => Some(lifecycle_contract(
             "Install or verify a connector package into the persistent host inventory.",
             "Real package verification plus connector-inventory mutation without pretending the running host hot-reloaded.",

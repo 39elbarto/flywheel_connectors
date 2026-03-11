@@ -37,8 +37,9 @@ impl ChunkedObjectManifest {
     #[must_use]
     pub fn from_payload(payload: &[u8], chunk_size: u32) -> (Self, Vec<RawChunk>) {
         let payload_hash = *blake3::hash(payload).as_bytes();
-        let mut chunks = Vec::new();
-        let mut chunk_ids = Vec::new();
+        let chunk_count = payload.len().div_ceil(chunk_size as usize);
+        let mut chunks = Vec::with_capacity(chunk_count);
+        let mut chunk_ids = Vec::with_capacity(chunk_count);
 
         for chunk_data in payload.chunks(chunk_size as usize) {
             let chunk = RawChunk::new(chunk_data.to_vec());

@@ -5,7 +5,7 @@
 //! for later `fwc` lifecycle/config work. The current focus is the storage
 //! shape, monotonic journal semantics, and persistence invariants.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -117,6 +117,96 @@ pub struct ConnectorInventoryMutationResponse {
     pub apply: ConnectorInventoryApplyReport,
     /// Admin-state reconciliation summary after the live registry changed.
     pub admin_state: StartupReconciliationReport,
+}
+
+// ── Lifecycle transition RPC types ──────────────────────────────────────────
+
+/// Lifecycle transition action requested via the host admin API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LifecycleAction {
+    /// Enable a connector (set desired state to `Enabled`).
+    Enable,
+    /// Disable a connector without uninstalling (set desired state to `Disabled`).
+    Disable,
+    /// Restart a running connector (disable then re-enable).
+    Restart,
+    /// Reload connector configuration without a full restart.
+    Reload,
+    /// Remove a connector from active use (set desired state to `Uninstalled`).
+    Uninstall,
+    /// Promote a canary deployment to production.
+    Promote,
+}
+
+/// Host admin API request for a lifecycle state transition.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LifecycleTransitionRequest {
+    /// Requested lifecycle action.
+    pub action: LifecycleAction,
+    /// Optional human-readable reason for the transition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Optional actor or subsystem requesting the transition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initiated_by: Option<String>,
+    /// Preview the transition without persisting it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dry_run: bool,
+}
+
+/// Host admin API response after a lifecycle state transition.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LifecycleTransitionResponse {
+    /// Connector identifier.
+    pub connector_id: String,
+    /// Action that was performed.
+    pub action: LifecycleAction,
+    /// Whether this was a preview only.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dry_run: bool,
+    /// Desired state before the transition.
+    pub previous_desired_state: DesiredRuntimeState,
+    /// Desired state after the transition.
+    pub current_desired_state: DesiredRuntimeState,
+    /// Observed state at the time of the transition.
+    pub observed_state: ObservedRuntimeState,
+    /// Lifecycle record if available after the transition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle_status: Option<LifecycleStatus>,
+    /// Journal sequence number for this transition.
+    pub journal_sequence: u64,
+    /// Timestamp of the transition.
+    pub transitioned_at: DateTime<Utc>,
+}
+
+/// Host admin API request for querying the admin state journal.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JournalQueryRequest {
+    /// Optional connector ID filter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connector_id: Option<String>,
+    /// Only return entries after this sequence number.
+    #[serde(default)]
+    pub after_sequence: u64,
+    /// Maximum number of entries to return.
+    #[serde(default = "default_journal_limit")]
+    pub limit: usize,
+}
+
+fn default_journal_limit() -> usize {
+    100
+}
+
+/// Host admin API response for a journal query.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JournalQueryResponse {
+    /// Journal entries matching the query.
+    pub entries: Vec<AdminStateJournalEntry>,
+    /// Total number of entries in the journal (before filtering).
+    pub total_entries: usize,
+    /// Highest sequence number in the response.
+    pub latest_sequence: u64,
 }
 
 /// Desired connector runtime state persisted by the host admin plane.
@@ -232,6 +322,351 @@ impl ConfigRevisionRecord {
             credential_references: sanitized_payload.credential_references,
             contains_inline_secrets: sanitized_payload.contains_inline_secrets,
         })
+    }
+}
+
+/// Sanitized connector config payload safe for host responses and audit trails.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SanitizedConnectorConfig {
+    /// Export-safe config payload with inline secrets redacted.
+    pub payload: Value,
+    /// Stable digest of the raw serialized payload.
+    pub payload_digest: String,
+    /// JSON pointer paths where inline secret material was redacted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub redacted_fields: Vec<String>,
+    /// Secretless credential references preserved in the payload.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credential_references: Vec<CredentialReferenceRecord>,
+    /// Whether the original payload contained inline secret material.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub contains_inline_secrets: bool,
+}
+
+impl SanitizedConnectorConfig {
+    /// Build a sanitized config view from a raw payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the payload cannot be serialized for digesting.
+    pub fn from_payload(payload: Value) -> Result<Self, LifecycleError> {
+        let payload_digest = config_payload_digest(&payload)?;
+        let sanitized_payload = sanitize_config_payload(payload);
+        Ok(Self {
+            payload: sanitized_payload.payload,
+            payload_digest,
+            redacted_fields: sanitized_payload.redacted_fields,
+            credential_references: sanitized_payload.credential_references,
+            contains_inline_secrets: sanitized_payload.contains_inline_secrets,
+        })
+    }
+
+    /// Whether this sanitized payload can be safely replayed back into the host.
+    #[must_use]
+    pub const fn is_replayable(&self) -> bool {
+        !self.contains_inline_secrets
+    }
+}
+
+impl From<&ConfigRevisionRecord> for SanitizedConnectorConfig {
+    fn from(revision: &ConfigRevisionRecord) -> Self {
+        Self {
+            payload: revision.payload.clone(),
+            payload_digest: revision.payload_digest.clone(),
+            redacted_fields: revision.redacted_fields.clone(),
+            credential_references: revision.credential_references.clone(),
+            contains_inline_secrets: revision.contains_inline_secrets,
+        }
+    }
+}
+
+/// Source of the current host-visible config snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectorConfigSnapshotSource {
+    /// Current config is backed by the active admin-state revision.
+    ActiveRevision,
+    /// Current config comes from the managed inventory but has not yet been
+    /// checkpointed into config revision history.
+    ManagedInventory,
+}
+
+/// Host-visible current config snapshot for one connector.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectorConfigSnapshot {
+    /// Connector identifier.
+    pub connector_id: ConnectorId,
+    /// Current sanitized config payload.
+    pub current: SanitizedConnectorConfig,
+    /// Where the current payload came from.
+    pub source: ConnectorConfigSnapshotSource,
+    /// Active config revision id, if one exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_revision_id: Option<u64>,
+    /// Active revision metadata, when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_revision: Option<ConfigRevisionRecord>,
+    /// Total config revisions tracked for the connector.
+    pub revision_count: usize,
+    /// Latest journal sequence touching this connector.
+    pub last_journal_sequence: u64,
+}
+
+/// Host-visible config revision history for one connector.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectorConfigRevisionsResponse {
+    /// Connector identifier.
+    pub connector_id: ConnectorId,
+    /// Currently active revision id, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_revision_id: Option<u64>,
+    /// Total revisions in history.
+    pub revision_count: usize,
+    /// Latest journal sequence touching this connector.
+    pub last_journal_sequence: u64,
+    /// Recorded config revisions in creation order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revisions: Vec<ConfigRevisionRecord>,
+}
+
+/// Diff request comparing a candidate config payload against the current config
+/// or a specific prior revision.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectorConfigDiffRequest {
+    /// Candidate raw config payload.
+    pub payload: Value,
+    /// Optional baseline revision id. Defaults to the current config snapshot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision_id: Option<u64>,
+}
+
+/// Diff classification for one changed config path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigDiffKind {
+    /// Path was added in the candidate payload.
+    Added,
+    /// Path was removed from the candidate payload.
+    Removed,
+    /// Path existed in both payloads but changed value.
+    Changed,
+}
+
+/// One changed config path between two payloads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigDiffEntry {
+    /// JSON pointer path (`/` for the root payload).
+    pub path: String,
+    /// Change classification.
+    pub kind: ConfigDiffKind,
+    /// Previous value when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before: Option<Value>,
+    /// Candidate value when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after: Option<Value>,
+}
+
+/// Host-visible diff response for one config candidate.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectorConfigDiffResponse {
+    /// Connector identifier.
+    pub connector_id: ConnectorId,
+    /// Baseline revision id when diffing against revision history.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_revision_id: Option<u64>,
+    /// Sanitized baseline payload.
+    pub base: SanitizedConnectorConfig,
+    /// Sanitized candidate payload.
+    pub candidate: SanitizedConnectorConfig,
+    /// Whether any paths changed.
+    pub changed: bool,
+    /// Detailed changed paths.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entries: Vec<ConfigDiffEntry>,
+}
+
+/// Validate a candidate config payload against the live host registry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectorConfigValidateRequest {
+    /// Candidate raw config payload.
+    pub payload: Value,
+    /// Optional optimistic concurrency guard.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_active_revision_id: Option<u64>,
+}
+
+/// Validation result for a candidate config payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectorConfigValidateResponse {
+    /// Connector identifier.
+    pub connector_id: ConnectorId,
+    /// Whether the host accepted the candidate in preview mode.
+    pub valid: bool,
+    /// Current active revision id when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_active_revision_id: Option<u64>,
+    /// Current sanitized config payload.
+    pub current: SanitizedConnectorConfig,
+    /// Candidate sanitized config payload.
+    pub candidate: SanitizedConnectorConfig,
+    /// Detailed changed paths between current and candidate.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diff: Vec<ConfigDiffEntry>,
+    /// Preview of the live registry reconciliation when validation succeeded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview: Option<ConnectorInventoryApplyReport>,
+    /// Validation failure when `valid=false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Apply a candidate config payload through the live host admin plane.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectorConfigApplyRequest {
+    /// Candidate raw config payload.
+    pub payload: Value,
+    /// Optional optimistic concurrency guard.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_active_revision_id: Option<u64>,
+    /// Optional actor/subsystem label recorded in revision history.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<String>,
+    /// Optional change summary recorded in revision history.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub change_reason: Option<String>,
+}
+
+/// Apply response for a host-backed config mutation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectorConfigApplyResponse {
+    /// Connector identifier.
+    pub connector_id: ConnectorId,
+    /// Whether the requested payload changed anything materially.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub changed: bool,
+    /// Previous active revision id when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_active_revision_id: Option<u64>,
+    /// Current active revision id when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_active_revision_id: Option<u64>,
+    /// Previous sanitized config payload.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous: Option<SanitizedConnectorConfig>,
+    /// Current sanitized config payload after the mutation.
+    pub current: SanitizedConnectorConfig,
+    /// Detailed changed paths between previous and current.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diff: Vec<ConfigDiffEntry>,
+    /// Newly recorded active revision when a write occurred.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<ConfigRevisionRecord>,
+    /// Live registry reconciliation report.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub apply: Option<ConnectorInventoryApplyReport>,
+    /// Admin-state reconciliation summary after the live registry changed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub admin_state: Option<StartupReconciliationReport>,
+}
+
+/// Roll back to a previous config revision by re-applying its sanitized payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectorConfigRollbackRequest {
+    /// Revision to re-apply as the new active config.
+    pub revision_id: u64,
+    /// Optional optimistic concurrency guard.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_active_revision_id: Option<u64>,
+    /// Optional actor/subsystem label recorded in the new revision.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<String>,
+    /// Optional change summary recorded in the new revision.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub change_reason: Option<String>,
+}
+
+/// Compute a stable path-level diff between two config payloads.
+#[must_use]
+pub fn diff_config_values(before: &Value, after: &Value) -> Vec<ConfigDiffEntry> {
+    let mut entries = Vec::new();
+    diff_config_values_inner("", Some(before), Some(after), &mut entries);
+    entries.sort_by(|left, right| left.path.cmp(&right.path));
+    entries
+}
+
+fn diff_config_values_inner(
+    path: &str,
+    before: Option<&Value>,
+    after: Option<&Value>,
+    entries: &mut Vec<ConfigDiffEntry>,
+) {
+    match (before, after) {
+        (Some(left), Some(right)) if left == right => {}
+        (None, Some(right)) => entries.push(ConfigDiffEntry {
+            path: config_diff_path(path),
+            kind: ConfigDiffKind::Added,
+            before: None,
+            after: Some(right.clone()),
+        }),
+        (Some(left), None) => entries.push(ConfigDiffEntry {
+            path: config_diff_path(path),
+            kind: ConfigDiffKind::Removed,
+            before: Some(left.clone()),
+            after: None,
+        }),
+        (Some(Value::Object(left)), Some(Value::Object(right))) => {
+            let keys = left
+                .keys()
+                .chain(right.keys())
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            for key in keys {
+                let child_path = join_json_pointer(path, &key);
+                diff_config_values_inner(
+                    &child_path,
+                    left.get(&key),
+                    right.get(&key),
+                    entries,
+                );
+            }
+        }
+        (Some(Value::Array(left)), Some(Value::Array(right))) => {
+            let max_len = left.len().max(right.len());
+            for index in 0..max_len {
+                let child_path = join_json_pointer(path, &index.to_string());
+                diff_config_values_inner(
+                    &child_path,
+                    left.get(index),
+                    right.get(index),
+                    entries,
+                );
+            }
+        }
+        (Some(left), Some(right)) => entries.push(ConfigDiffEntry {
+            path: config_diff_path(path),
+            kind: ConfigDiffKind::Changed,
+            before: Some(left.clone()),
+            after: Some(right.clone()),
+        }),
+        (None, None) => {}
+    }
+}
+
+fn config_diff_path(path: &str) -> String {
+    if path.is_empty() {
+        "/".to_string()
+    } else {
+        path.to_string()
+    }
+}
+
+fn join_json_pointer(path: &str, segment: &str) -> String {
+    let escaped = segment.replace('~', "~0").replace('/', "~1");
+    if path.is_empty() {
+        format!("/{escaped}")
+    } else {
+        format!("{path}/{escaped}")
     }
 }
 
@@ -1147,6 +1582,155 @@ impl HostAdminStateStore {
             connector_state,
             now,
         ))
+    }
+
+    /// Execute a lifecycle transition and return the resulting state.
+    ///
+    /// The transition atomically updates desired state, journals the mutation,
+    /// and optionally delegates to the [`LifecycleManager`] trait for promote
+    /// operations. Dry-run mode returns the projected state without persisting.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the connector is not tracked or if the transition
+    /// is invalid for the current state.
+    pub async fn execute_lifecycle_transition(
+        &self,
+        connector_id: &ConnectorId,
+        request: &LifecycleTransitionRequest,
+    ) -> Result<LifecycleTransitionResponse, LifecycleError> {
+        let now = Utc::now();
+
+        // Read current state first (for dry-run and validation).
+        let (previous_desired, observed, current_lifecycle_status, current_seq) = {
+            let state = self.state.read().await;
+            let cs = state
+                .connectors
+                .get(connector_id)
+                .ok_or_else(|| LifecycleError::NotFound {
+                    connector_id: connector_id.clone(),
+                })?;
+            let lifecycle_status = cs.lifecycle.as_ref().map(|record| LifecycleStatus {
+                connector_id: connector_id.clone(),
+                state: record.state,
+                version: record.version.clone(),
+                health: record.health.clone(),
+                auto_promote_pending: false,
+                auto_rollback_pending: false,
+                canary_expires_in_secs: None,
+                crash_loop_detected: false,
+                rollback_target_version: record.previous_version.clone(),
+            });
+            (
+                cs.desired_state,
+                cs.observed_state,
+                lifecycle_status,
+                cs.last_journal_sequence,
+            )
+        };
+
+        let target_desired = match request.action {
+            LifecycleAction::Enable | LifecycleAction::Restart | LifecycleAction::Reload => {
+                DesiredRuntimeState::Enabled
+            }
+            LifecycleAction::Disable => DesiredRuntimeState::Disabled,
+            LifecycleAction::Uninstall => DesiredRuntimeState::Uninstalled,
+            LifecycleAction::Promote => DesiredRuntimeState::Enabled,
+        };
+
+        if request.dry_run {
+            return Ok(LifecycleTransitionResponse {
+                connector_id: connector_id.to_string(),
+                action: request.action,
+                dry_run: true,
+                previous_desired_state: previous_desired,
+                current_desired_state: target_desired,
+                observed_state: observed,
+                lifecycle_status: current_lifecycle_status,
+                journal_sequence: current_seq,
+                transitioned_at: now,
+            });
+        }
+
+        // For promote, delegate to the LifecycleManager trait implementation.
+        let lifecycle_status = if request.action == LifecycleAction::Promote {
+            match self.promote(connector_id).await {
+                Ok(record) => Some(LifecycleStatus {
+                    connector_id: connector_id.clone(),
+                    state: record.state,
+                    version: record.version.clone(),
+                    health: record.health.clone(),
+                    auto_promote_pending: false,
+                    auto_rollback_pending: false,
+                    canary_expires_in_secs: None,
+                    crash_loop_detected: false,
+                    rollback_target_version: record.previous_version.clone(),
+                }),
+                Err(e) => return Err(e),
+            }
+        } else {
+            current_lifecycle_status
+        };
+
+        // Apply desired state mutation.
+        self.set_desired_state(
+            connector_id,
+            target_desired,
+            request
+                .initiated_by
+                .clone()
+                .or_else(|| Some("admin-api".to_string())),
+        )
+        .await?;
+
+        let new_seq = {
+            let state = self.state.read().await;
+            state
+                .connectors
+                .get(connector_id)
+                .map_or(0, |cs| cs.last_journal_sequence)
+        };
+
+        Ok(LifecycleTransitionResponse {
+            connector_id: connector_id.to_string(),
+            action: request.action,
+            dry_run: false,
+            previous_desired_state: previous_desired,
+            current_desired_state: target_desired,
+            observed_state: observed,
+            lifecycle_status,
+            journal_sequence: new_seq,
+            transitioned_at: now,
+        })
+    }
+
+    /// Query the admin state journal with optional filtering.
+    pub async fn query_journal(
+        &self,
+        request: &JournalQueryRequest,
+    ) -> JournalQueryResponse {
+        let state = self.state.read().await;
+        let all_entries = &state.journal;
+        let total_entries = all_entries.len();
+        let latest_sequence = all_entries.last().map_or(0, |e| e.sequence);
+
+        let filtered: Vec<AdminStateJournalEntry> = all_entries
+            .iter()
+            .filter(|e| e.sequence > request.after_sequence)
+            .filter(|e| {
+                request.connector_id.as_ref().map_or(true, |filter_id| {
+                    e.connector_id.as_str() == filter_id.as_str()
+                })
+            })
+            .take(request.limit)
+            .cloned()
+            .collect();
+
+        JournalQueryResponse {
+            entries: filtered,
+            total_entries,
+            latest_sequence,
+        }
     }
 
     /// Reconcile persisted admin state against the currently registered

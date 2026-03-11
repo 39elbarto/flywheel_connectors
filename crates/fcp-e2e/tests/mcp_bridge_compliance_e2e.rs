@@ -14,15 +14,18 @@
 use chrono::{Duration as ChronoDuration, Utc};
 use fcp_conformance::DynamicSuite;
 use fcp_core::{
-    AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
-    ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus,
-    OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest,
-    SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
-    ZoneId,
+    AgentHint, ApprovalMode, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
+    ConnectorId, ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse,
+    HealthSnapshot, IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse,
+    InvokeStatus, ObjectId, OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier,
+    SessionId, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
+    SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
-use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
+use fcp_e2e::{
+    ComplianceSuite, ConnectorSuite, E2eReport, E2eRunner, InvokeExpectations, scan_log_jsonl,
+    validate_log_entry_value,
+};
 use fcp_manifest::ConnectorManifest;
 use fcp_mcp_bridge::connector::McpBridgeConnector;
 use fcp_testkit::MockApiServer;
@@ -48,6 +51,122 @@ impl McpBridgeConnectorAdapter {
             verifier: None,
         }
     }
+}
+
+fn mcp_bridge_operations() -> Vec<OperationInfo> {
+    vec![
+        OperationInfo {
+            id: OperationId::from_static("mcp.tools.list"),
+            summary: "List available tools from the MCP server".to_string(),
+            description: None,
+            input_schema: json!({"type": "object", "properties": {}}),
+            output_schema: json!({"type": "object", "properties": {"tools": {"type": "array"}}}),
+            capability: CapabilityId::from_static("mcp.tools.read"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "Use to discover what tools are available on the MCP server"
+                    .to_string(),
+                common_mistakes: Vec::new(),
+                examples: Vec::new(),
+                related: vec![CapabilityId::from_static("mcp.tools.read")],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+        OperationInfo {
+            id: OperationId::from_static("mcp.tools.call"),
+            summary: "Call a tool on the MCP server".to_string(),
+            description: None,
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "arguments": {"type": "object"},
+                },
+                "required": ["name", "arguments"],
+            }),
+            output_schema: json!({"type": "object", "properties": {"content": {"type": "array"}}}),
+            capability: CapabilityId::from_static("mcp.tools.write"),
+            risk_level: RiskLevel::High,
+            safety_tier: SafetyTier::Risky,
+            idempotency: IdempotencyClass::None,
+            ai_hints: AgentHint {
+                when_to_use: "Use to invoke a specific tool on the MCP server by name".to_string(),
+                common_mistakes: vec![
+                    "Not providing the tool name".to_string(),
+                    "Passing non-object arguments".to_string(),
+                ],
+                examples: Vec::new(),
+                related: vec![CapabilityId::from_static("mcp.tools.write")],
+            },
+            rate_limit: None,
+            requires_approval: Some(ApprovalMode::Policy),
+        },
+        OperationInfo {
+            id: OperationId::from_static("mcp.resources.list"),
+            summary: "List available resources from the MCP server".to_string(),
+            description: None,
+            input_schema: json!({"type": "object", "properties": {}}),
+            output_schema: json!({"type": "object", "properties": {"resources": {"type": "array"}}}),
+            capability: CapabilityId::from_static("mcp.resources.read"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "Use to discover available resources on the MCP server".to_string(),
+                common_mistakes: Vec::new(),
+                examples: Vec::new(),
+                related: vec![CapabilityId::from_static("mcp.resources.read")],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+        OperationInfo {
+            id: OperationId::from_static("mcp.resources.read"),
+            summary: "Read a resource by URI from the MCP server".to_string(),
+            description: None,
+            input_schema: json!({
+                "type": "object",
+                "properties": {"uri": {"type": "string"}},
+                "required": ["uri"],
+            }),
+            output_schema: json!({"type": "object", "properties": {"contents": {"type": "array"}}}),
+            capability: CapabilityId::from_static("mcp.resources.read"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "Use to read a specific resource by its URI".to_string(),
+                common_mistakes: vec!["Using an invalid resource URI".to_string()],
+                examples: Vec::new(),
+                related: vec![CapabilityId::from_static("mcp.resources.read")],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+        OperationInfo {
+            id: OperationId::from_static("mcp.prompts.list"),
+            summary: "List available prompts from the MCP server".to_string(),
+            description: None,
+            input_schema: json!({"type": "object", "properties": {}}),
+            output_schema: json!({"type": "object", "properties": {"prompts": {"type": "array"}}}),
+            capability: CapabilityId::from_static("mcp.prompts.read"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "Use to discover available prompt templates on the MCP server"
+                    .to_string(),
+                common_mistakes: Vec::new(),
+                examples: Vec::new(),
+                related: vec![CapabilityId::from_static("mcp.prompts.read")],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+    ]
 }
 
 #[fcp_core::async_trait]
@@ -129,25 +248,7 @@ impl FcpConnector for McpBridgeConnectorAdapter {
 
     fn introspect(&self) -> Introspection {
         Introspection {
-            operations: vec![OperationInfo {
-                id: OperationId::from_static("mcp.tools.list"),
-                summary: "mcp.tools.list".to_string(),
-                description: None,
-                input_schema: json!({"type": "object"}),
-                output_schema: json!({"type": "object"}),
-                capability: CapabilityId::from_static("mcp.tools.read"),
-                risk_level: RiskLevel::Low,
-                safety_tier: SafetyTier::Safe,
-                idempotency: IdempotencyClass::Strict,
-                ai_hints: AgentHint {
-                    when_to_use: String::new(),
-                    common_mistakes: Vec::new(),
-                    examples: Vec::new(),
-                    related: Vec::new(),
-                },
-                rate_limit: None,
-                requires_approval: None,
-            }],
+            operations: mcp_bridge_operations(),
             events: vec![],
             resource_types: vec![],
             auth_caps: None,
@@ -160,14 +261,17 @@ impl FcpConnector for McpBridgeConnectorAdapter {
             message: "MCP Bridge verifier not initialized; handshake required".into(),
         })?;
         let required_capability = required_capability(req.operation.as_str())?;
-        verifier.verify(
+        let request_id = req.id.clone();
+        if let Err(err) = verifier.verify(
             &req.capability_token,
             &required_capability,
             &req.operation,
             &[],
-        )?;
-
-        let request_id = req.id.clone();
+        ) {
+            let decision_label = format!("{}.decision", req.operation.as_str());
+            return Ok(InvokeResponse::error(request_id, err)
+                .with_decision_receipt_id(stable_object_id(&decision_label)));
+        }
         let value = self
             .connector
             .handle_invoke(json!({
@@ -175,7 +279,13 @@ impl FcpConnector for McpBridgeConnectorAdapter {
                 "input": req.input,
             }))
             .await?;
-        Ok(InvokeResponse::ok(request_id, value))
+        let mut response = InvokeResponse::ok(request_id, value);
+        if req.operation.as_str() == "mcp.tools.call" {
+            response = response
+                .with_receipt_id(stable_object_id("mcp.tools.call.receipt"))
+                .with_audit_event_id(stable_object_id("mcp.tools.call.audit"));
+        }
+        Ok(response)
     }
 
     async fn simulate(&self, req: SimulateRequest) -> fcp_core::FcpResult<SimulateResponse> {
@@ -251,6 +361,10 @@ fn required_capability(operation: &str) -> fcp_core::FcpResult<CapabilityId> {
         .map_err(|err| FcpError::Internal {
             message: format!("invalid capability id mapping for {operation}: {err}"),
         })
+}
+
+fn stable_object_id(label: &str) -> ObjectId {
+    ObjectId::from_unscoped_bytes(label.as_bytes())
 }
 
 fn mcp_bridge_manifest_with_hash() -> String {
@@ -378,6 +492,44 @@ fn host_allowed(host: &str, host_allow: &[String]) -> bool {
     })
 }
 
+fn assert_report_logs_validate(report: &E2eReport) {
+    let jsonl = report.to_stable_json_lines();
+    assert!(
+        !jsonl.trim().is_empty(),
+        "report should emit stable JSONL evidence"
+    );
+
+    let first_line = jsonl.lines().next().expect("at least one JSONL line");
+    let first_value: serde_json::Value =
+        serde_json::from_str(first_line).expect("first JSONL line should parse");
+    assert_eq!(
+        first_value
+            .get("timestamp")
+            .and_then(serde_json::Value::as_str),
+        Some("1970-01-01T00:00:00Z")
+    );
+    assert_eq!(
+        first_value
+            .get("correlation_id")
+            .and_then(serde_json::Value::as_str),
+        Some("00000000-0000-4000-8000-000000000000")
+    );
+    assert_eq!(
+        first_value
+            .get("duration_ms")
+            .and_then(serde_json::Value::as_u64),
+        Some(0)
+    );
+
+    for line in jsonl.lines() {
+        let value: serde_json::Value = serde_json::from_str(line).expect("jsonl line should parse");
+        validate_log_entry_value(&value).expect("jsonl line should satisfy E2E schema");
+    }
+
+    let scan = scan_log_jsonl(&jsonl);
+    assert_eq!(scan.error_count, 0, "stable evidence should scan cleanly");
+}
+
 #[fcp_async_core::runtime::test]
 async fn mcp_bridge_default_deny_compliance_suite_passes() {
     let mock = MockApiServer::start().await;
@@ -403,7 +555,7 @@ async fn mcp_bridge_default_deny_compliance_suite_passes() {
         expect_simulate_would_succeed: None,
         require_simulate_denial_details: false,
         require_capability_denial: true,
-        require_decision_receipt: false,
+        require_decision_receipt: true,
     };
     let suite = ComplianceSuite::new(
         "mcp_bridge_default_deny",
@@ -421,6 +573,7 @@ async fn mcp_bridge_default_deny_compliance_suite_passes() {
         report.passed,
         "default deny compliance should pass: {report:#?}"
     );
+    assert_report_logs_validate(&report);
 }
 
 #[fcp_async_core::runtime::test]
@@ -466,6 +619,7 @@ async fn mcp_bridge_happy_path_connector_suite_passes() {
         .expect("connector suite run");
 
     assert!(report.passed, "happy path should pass: {report:#?}");
+    assert_report_logs_validate(&report);
     let invoke_entry = report
         .logs
         .iter()
@@ -475,6 +629,136 @@ async fn mcp_bridge_happy_path_connector_suite_passes() {
     assert_eq!(
         invoke_entry.context.get("invoke_status"),
         Some(&json!(format!("{:?}", InvokeStatus::Ok)))
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn mcp_bridge_tool_call_emits_receipt_audit_and_stable_evidence() {
+    let mock = MockApiServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path_regex(r"^/mcp"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "jsonrpc": "2.0",
+            "result": {
+                "content": [
+                    {"type": "text", "text": "file contents here"}
+                ]
+            },
+            "id": 1
+        })))
+        .mount(mock.inner())
+        .await;
+
+    let mut connector = McpBridgeConnectorAdapter::new();
+    let signing_key = Ed25519SigningKey::generate();
+    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["mcp.tools.write"]);
+    let token = build_token(&signing_key, "mcp.tools.write", &["mcp.tools.call"]);
+    let invoke = invoke_request(
+        "mcp.tools.call",
+        json!({ "name": "read_file", "arguments": {"path": "/tmp/test"} }),
+        token,
+    );
+
+    let suite = ConnectorSuite {
+        test_name: "mcp_bridge_tool_call_receipts".to_string(),
+        config: mcp_bridge_config(&mock.base_url()),
+        handshake,
+        invoke: Some(invoke),
+        invoke_expectations: InvokeExpectations {
+            expect_error: false,
+            expect_decision_receipt: false,
+            expect_audit_event: true,
+            expect_receipt: true,
+            expected_reason_code: None,
+            rate_limit_pool: None,
+        },
+    };
+
+    let mut runner = E2eRunner::new("fcp-e2e-mcp-bridge-tool-call");
+    let report = runner
+        .run_connector_suite(&mut connector, suite)
+        .await
+        .expect("tool call evidence suite run");
+
+    assert!(
+        report.passed,
+        "tool call evidence suite should pass: {report:#?}"
+    );
+    assert_report_logs_validate(&report);
+
+    let invoke_entry = report
+        .logs
+        .iter()
+        .find(|entry| entry.context.get("operation") == Some(&json!("invoke")))
+        .expect("invoke entry");
+    assert_eq!(invoke_entry.result, "pass");
+    assert_eq!(
+        invoke_entry.context.get("audit_event_id"),
+        Some(&json!(stable_object_id("mcp.tools.call.audit").to_string()))
+    );
+    assert_eq!(
+        invoke_entry.context.get("receipt_id"),
+        Some(&json!(
+            stable_object_id("mcp.tools.call.receipt").to_string()
+        ))
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn mcp_bridge_handshake_and_introspection_surface_expected_contract() {
+    let mock = MockApiServer::start().await;
+    let mut connector = McpBridgeConnector::new();
+
+    connector
+        .handle_configure(mcp_bridge_config(&mock.base_url()))
+        .await
+        .expect("configure mcp bridge");
+    let handshake = connector
+        .handle_handshake(json!({
+            "session_id": "mcp-bridge-e2e-contract-session",
+        }))
+        .await
+        .expect("handshake response");
+
+    assert_eq!(handshake["protocol_version"], "2.0");
+    assert_eq!(handshake["connector_id"], "fcp.mcp-bridge");
+    assert_eq!(handshake["connector_version"], "0.1.0");
+    assert_eq!(
+        handshake["capabilities"],
+        json!([
+            "mcp.tools.read",
+            "mcp.tools.write",
+            "mcp.resources.read",
+            "mcp.prompts.read"
+        ])
+    );
+
+    let introspection = connector
+        .handle_introspect()
+        .await
+        .expect("introspection payload");
+    let operations = introspection["operations"]
+        .as_array()
+        .expect("operations array");
+    assert_eq!(operations.len(), 5, "mcp bridge should expose 5 operations");
+
+    let tools_call = operations
+        .iter()
+        .find(|operation| operation["id"] == "mcp.tools.call")
+        .expect("mcp.tools.call operation");
+    assert_eq!(tools_call["capability"], "mcp.tools.write");
+    assert_eq!(tools_call["risk_level"], "high");
+    assert_eq!(tools_call["safety_tier"], "risky");
+    assert_eq!(tools_call["idempotency"], "none");
+    assert_eq!(tools_call["requires_approval"], "policy");
+    assert_eq!(
+        tools_call["input_schema"]["required"],
+        json!(["name", "arguments"])
+    );
+    assert_eq!(
+        tools_call["output_schema"]["properties"]["content"]["type"],
+        "array"
     );
 }
 

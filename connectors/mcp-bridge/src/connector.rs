@@ -4,9 +4,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_core::{
-    AgentHint, BaseConnector, CapabilityId, ConnectorId, FcpError, FcpResult, IdempotencyClass,
-    OperationId, OperationInfo, ProvisioningRecipe, ProvisioningStep, ProvisioningStepType,
-    RecipeId, RiskLevel, SafetyTier, SelfCheckReport, StepId,
+    AgentHint, ApprovalMode, BaseConnector, CapabilityId, ConnectorId, FcpError, FcpResult,
+    IdempotencyClass, OperationId, OperationInfo, ProvisioningRecipe, ProvisioningStep,
+    ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, SelfCheckReport, StepId,
 };
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -490,8 +490,15 @@ fn typed_operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static("mcp.tools.call"),
             summary: "Call a tool on the MCP server".into(),
             description: None,
-            input_schema: json!({"type": "object", "properties": {"name": {"type": "string"}, "arguments": {"type": "object"}}, "required": ["name"]}),
-            output_schema: json!({"type": "object", "properties": {"result": {}}}),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "arguments": {"type": "object"},
+                },
+                "required": ["name", "arguments"],
+            }),
+            output_schema: json!({"type": "object", "properties": {"content": {"type": "array"}}}),
             capability: CapabilityId::from_static("mcp.tools.write"),
             risk_level: RiskLevel::High,
             safety_tier: SafetyTier::Risky,
@@ -506,7 +513,7 @@ fn typed_operations_info() -> Vec<OperationInfo> {
                 related: vec![CapabilityId::from_static("mcp.tools.write")],
             },
             rate_limit: None,
-            requires_approval: None,
+            requires_approval: Some(ApprovalMode::Policy),
         },
         OperationInfo {
             id: OperationId::from_static("mcp.resources.list"),
@@ -936,6 +943,18 @@ mod tests {
             .find(|o| o["id"] == "mcp.tools.call")
             .unwrap();
         assert_eq!(call_op["idempotency"], "none");
+    }
+
+    #[test]
+    fn operations_tools_call_requires_policy_approval() {
+        let ops = operations_info();
+        let call_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "mcp.tools.call")
+            .unwrap();
+        assert_eq!(call_op["requires_approval"], "policy");
     }
 
     #[test]

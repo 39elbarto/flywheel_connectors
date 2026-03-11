@@ -56,6 +56,29 @@ pub enum SessionStatus {
     Ended,
 }
 
+impl SessionStatus {
+    /// Return the canonical status tag used by the CLI.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Paused => "paused",
+            Self::Ended => "ended",
+        }
+    }
+
+    /// Parse a CLI status selector.
+    #[must_use]
+    pub fn parse(input: &str) -> Option<Self> {
+        match input {
+            "active" => Some(Self::Active),
+            "paused" => Some(Self::Paused),
+            "ended" => Some(Self::Ended),
+            _ => None,
+        }
+    }
+}
+
 /// An agent session with identity and context.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Session {
@@ -146,6 +169,11 @@ pub struct SessionStore {
 impl SessionStore {
     /// Create a store at the default location.
     pub fn default_path() -> Self {
+        if let Ok(dir) = std::env::var("FWC_SESSION_DIR") {
+            return Self {
+                dir: PathBuf::from(dir),
+            };
+        }
         let home = std::env::var("HOME").map_or_else(|_| PathBuf::from("."), PathBuf::from);
         let dir = home.join(".fwc").join("sessions");
         Self { dir }
@@ -174,6 +202,14 @@ impl SessionStore {
         let json = std::fs::read_to_string(path)?;
         let session: Session = serde_json::from_str(&json)?;
         Ok(Some(session))
+    }
+
+    /// Resolve a short or fully-prefixed session ID and load it from disk.
+    pub fn load_resolved(&self, input: &str) -> anyhow::Result<Option<Session>> {
+        let Some(id) = resolve_session_id(input) else {
+            return Ok(None);
+        };
+        self.load(&id)
     }
 
     /// List all sessions, sorted by last updated (most recent first).
@@ -220,6 +256,12 @@ impl SessionStore {
         }
     }
 
+    /// The root directory used for persisted sessions.
+    #[must_use]
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     fn session_path(&self, id: &SessionId) -> PathBuf {
         self.dir.join(format!("{}.json", id.short_id()))
     }
@@ -244,6 +286,8 @@ pub fn session_dir(base: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static SESSION_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn temp_store() -> SessionStore {
         use std::time::{SystemTime, UNIX_EPOCH};
@@ -655,6 +699,18 @@ mod tests {
         assert_eq!(status, cloned);
     }
 
+    #[test]
+    fn session_status_parse_round_trip() {
+        for status in [
+            SessionStatus::Active,
+            SessionStatus::Paused,
+            SessionStatus::Ended,
+        ] {
+            assert_eq!(SessionStatus::parse(status.as_str()), Some(status));
+        }
+        assert!(SessionStatus::parse("invalid").is_none());
+    }
+
     // ── Additional SessionStore tests ──────────────────────────────
 
     #[test]
@@ -725,6 +781,17 @@ mod tests {
     }
 
     #[test]
+    fn store_load_resolved_accepts_short_id() {
+        let store = temp_store();
+        let session = Session::new("Agent", "goal", None);
+        let short_id = session.id.short_id().to_string();
+        store.save(&session).unwrap();
+
+        let loaded = store.load_resolved(&short_id).unwrap().unwrap();
+        assert_eq!(loaded.id, session.id);
+    }
+
+    #[test]
     fn store_path_contains_short_id() {
         let store = temp_store();
         let session = Session::new("Agent", "goal", None);
@@ -766,6 +833,31 @@ mod tests {
     }
 
     // ── session_dir helper ─────────────────────────────────────────
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn default_path_prefers_env_override() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let _guard = SESSION_ENV_LOCK.lock().unwrap();
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let override_dir = std::env::temp_dir().join(format!("fwc-session-env-{unique}"));
+
+        // SAFETY: test-only env manipulation under SESSION_ENV_LOCK.
+        unsafe {
+            std::env::set_var("FWC_SESSION_DIR", &override_dir);
+        }
+        let store = SessionStore::default_path();
+        // SAFETY: test-only cleanup under SESSION_ENV_LOCK.
+        unsafe {
+            std::env::remove_var("FWC_SESSION_DIR");
+        }
+
+        assert_eq!(store.dir(), override_dir.as_path());
+    }
 
     #[test]
     fn session_dir_appends_sessions() {

@@ -3448,25 +3448,28 @@ fn list_dispatch_host(args: &ListArgs, host: &str) -> Result<DispatchOutcome> {
         .map(host_connector_list_entry)
         .collect::<Vec<_>>();
 
+    let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "list");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "list",
+        "source": "host-admin-api",
+        "message": format!("Listed {} connectors from `fcp-host` discovery.", connectors.len()),
+        "filters": {
+            "zone": args.zone.clone(),
+            "category": args.category.clone(),
+        },
+        "filter_gaps": filter_gaps,
+        "registry_version": response.registry_version,
+        "cache": response.cache,
+        "connectors": connectors,
+        "next_actions": [
+            "Use `fwc show <connector> --host <endpoint>` to inspect one connector in detail.",
+            "Use `fwc ops <connector> --host <endpoint>` to enumerate host-backed operations.",
+        ],
+    });
+    envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
-        payload: json!({
-            "status": "ok",
-            "command": "list",
-            "source": "host-admin-api",
-            "message": format!("Listed {} connectors from `fcp-host` discovery.", connectors.len()),
-            "filters": {
-                "zone": args.zone.clone(),
-                "category": args.category.clone(),
-            },
-            "filter_gaps": filter_gaps,
-            "registry_version": response.registry_version,
-            "cache": response.cache,
-            "connectors": connectors,
-            "next_actions": [
-                "Use `fwc show <connector> --host <endpoint>` to inspect one connector in detail.",
-                "Use `fwc ops <connector> --host <endpoint>` to enumerate host-backed operations.",
-            ],
-        }),
+        payload,
         exit_code: CliExitCode::Success,
     })
 }
@@ -3878,20 +3881,23 @@ fn list_dispatch(args: &ListArgs, host: Option<&str>) -> Result<DispatchOutcome>
         "category": args.category.clone(),
     });
 
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "list");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "list",
+        "source": "workspace-manifests",
+        "mode": "offline-artifact",
+        "message": format!("Listed {} connectors from workspace manifests.", connectors.len()),
+        "filters": filters,
+        "connectors": connectors,
+        "next_actions": [
+            "Use `fwc show <connector> --offline` to inspect one connector in detail.",
+            "Use `fwc ops <connector> --offline` to enumerate operations before asking for schemas.",
+        ],
+    });
+    envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
-        payload: json!({
-            "status": "ok",
-            "command": "list",
-            "source": "workspace-manifests",
-            "mode": "offline-artifact",
-            "message": format!("Listed {} connectors from workspace manifests.", connectors.len()),
-            "filters": filters,
-            "connectors": connectors,
-            "next_actions": [
-                "Use `fwc show <connector> --offline` to inspect one connector in detail.",
-                "Use `fwc ops <connector> --offline` to enumerate operations before asking for schemas.",
-            ],
-        }),
+        payload,
         exit_code: CliExitCode::Success,
     })
 }

@@ -11217,22 +11217,25 @@ fn recipe_validate_dispatch(args: &RecipeRefArgs) -> DispatchOutcome {
         return recipe_invalid_definition_dispatch("validate", &recipe);
     }
 
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "recipe");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "recipe",
+        "subcommand": "validate",
+        "recipe": {
+            "slug": recipe.slug,
+            "title": recipe.title,
+            "category": recipe.category,
+            "summary": recipe.summary,
+            "required_connectors": recipe.required_connectors,
+            "export_path": recipe.export_path,
+        },
+        "validation": recipe.validation,
+        "next_actions": recipe_next_actions(&args.recipe),
+    });
+    envelope.inject_into(&mut payload);
     DispatchOutcome {
-        payload: json!({
-            "status": "ok",
-            "command": "recipe",
-            "subcommand": "validate",
-            "recipe": {
-                "slug": recipe.slug,
-                "title": recipe.title,
-                "category": recipe.category,
-                "summary": recipe.summary,
-                "required_connectors": recipe.required_connectors,
-                "export_path": recipe.export_path,
-            },
-            "validation": recipe.validation,
-            "next_actions": recipe_next_actions(&args.recipe),
-        }),
+        payload,
         exit_code: CliExitCode::Success,
     }
 }
@@ -11283,24 +11286,27 @@ fn recipe_run_dispatch(
         };
         let estimate = pipe::estimate_pipeline(&plan, &operation_metadata)
             .map_err(|error| anyhow::anyhow!("{error}"))?;
+        let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "recipe");
+        let mut payload = json!({
+            "status": "ok",
+            "command": "recipe",
+            "subcommand": mode.subcommand(),
+            "recipe": recipe.slug,
+            "export_path": recipe.export_path,
+            "message": format!(
+                "Recipe estimate: {} ({} step(s), {}, highest risk {}). No host execution was attempted.",
+                recipe.title,
+                plan.step_count,
+                estimate.estimated_api_calls.summary,
+                estimate.risk_assessment.level,
+            ),
+            "estimate": estimate,
+            "dry_run": false,
+            "next_actions": recipe_next_actions(&recipe.slug),
+        });
+        envelope.inject_into(&mut payload);
         return Ok(DispatchOutcome {
-            payload: json!({
-                "status": "ok",
-                "command": "recipe",
-                "subcommand": mode.subcommand(),
-                "recipe": recipe.slug,
-                "export_path": recipe.export_path,
-                "message": format!(
-                    "Recipe estimate: {} ({} step(s), {}, highest risk {}). No host execution was attempted.",
-                    recipe.title,
-                    plan.step_count,
-                    estimate.estimated_api_calls.summary,
-                    estimate.risk_assessment.level,
-                ),
-                "estimate": estimate,
-                "dry_run": false,
-                "next_actions": recipe_next_actions(&recipe.slug),
-            }),
+            payload,
             exit_code: CliExitCode::Success,
         });
     }
@@ -11388,36 +11394,42 @@ fn recipe_run_dispatch(
         PipelinePlanMode::Estimate => unreachable!("handled above"),
     };
 
+    let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "recipe");
+    let mut payload = json!({
+        "status": execution.status,
+        "command": "recipe",
+        "subcommand": mode.subcommand(),
+        "source": "host-admin-api",
+        "recipe": recipe.slug,
+        "export_path": recipe.export_path,
+        "zone": zone,
+        "message": message,
+        "estimate": estimate,
+        "plan": serde_json::to_value(&plan)?,
+        "execution": {
+            "mode": mode.subcommand(),
+            "executed_steps": execution.executed_steps,
+            "preflight_only_steps": execution.preflight_only_steps,
+            "skipped_steps": execution.skipped_steps,
+            "blocked_steps": execution.blocked_steps,
+            "denied_steps": execution.denied_steps,
+            "error_steps": execution.error_steps,
+            "steps": execution.step_results,
+            "outputs": execution.outputs,
+        },
+        "next_actions": [
+            format!("fwc recipe show {}", recipe.slug),
+            format!("fwc history --limit {}", plan.step_count.max(10)),
+            format!("fwc status --host {}", host.endpoint),
+        ],
+    });
+    let exit_code = execution.exit_code;
+    if exit_code.is_success() {
+        envelope.inject_into(&mut payload);
+    }
     Ok(DispatchOutcome {
-        payload: json!({
-            "status": execution.status,
-            "command": "recipe",
-            "subcommand": mode.subcommand(),
-            "source": "host-admin-api",
-            "recipe": recipe.slug,
-            "export_path": recipe.export_path,
-            "zone": zone,
-            "message": message,
-            "estimate": estimate,
-            "plan": serde_json::to_value(&plan)?,
-            "execution": {
-                "mode": mode.subcommand(),
-                "executed_steps": execution.executed_steps,
-                "preflight_only_steps": execution.preflight_only_steps,
-                "skipped_steps": execution.skipped_steps,
-                "blocked_steps": execution.blocked_steps,
-                "denied_steps": execution.denied_steps,
-                "error_steps": execution.error_steps,
-                "steps": execution.step_results,
-                "outputs": execution.outputs,
-            },
-            "next_actions": [
-                format!("fwc recipe show {}", recipe.slug),
-                format!("fwc history --limit {}", plan.step_count.max(10)),
-                format!("fwc status --host {}", host.endpoint),
-            ],
-        }),
-        exit_code: execution.exit_code,
+        payload,
+        exit_code,
     })
 }
 

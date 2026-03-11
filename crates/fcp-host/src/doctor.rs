@@ -27,7 +27,7 @@ pub struct DoctorRequest {
 }
 
 /// Connector self-check entry in the report.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ConnectorSelfCheck {
     /// Connector identifier.
     pub connector_id: String,
@@ -37,7 +37,7 @@ pub struct ConnectorSelfCheck {
 }
 
 /// Overall status of the zone.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum OverallStatus {
     /// Zone is healthy and all checks pass.
@@ -49,7 +49,7 @@ pub enum OverallStatus {
 }
 
 /// Freshness level for heads/checkpoints.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FreshnessLevel {
     /// Data is fresh and up-to-date.
@@ -64,28 +64,28 @@ pub enum FreshnessLevel {
 }
 
 /// Checkpoint freshness status.
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct CheckpointStatus {
     /// Freshness level.
     pub freshness: FreshnessLevel,
 }
 
 /// Revocation head freshness status.
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct RevocationStatus {
     /// Freshness level.
     pub freshness: FreshnessLevel,
 }
 
 /// Audit head freshness status.
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct AuditStatus {
     /// Freshness level.
     pub freshness: FreshnessLevel,
 }
 
 /// Transport policy status.
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct TransportPolicyStatus {
     /// Whether LAN transport is allowed.
     pub allow_lan: bool,
@@ -96,21 +96,21 @@ pub struct TransportPolicyStatus {
 }
 
 /// Store coverage status for key roots.
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct StoreCoverageStatus {
     /// Overall store health.
     pub store_healthy: bool,
 }
 
 /// Degraded mode status.
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct DegradedModeStatus {
     /// Whether the system is in degraded mode.
     pub is_degraded: bool,
 }
 
 /// Individual check result.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CheckResult {
     /// Check name.
     pub name: String,
@@ -123,7 +123,7 @@ pub struct CheckResult {
 }
 
 /// Check status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum CheckStatus {
     Ok,
@@ -132,7 +132,7 @@ pub enum CheckStatus {
 }
 
 /// Check severity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CheckSeverity {
     Info,
@@ -141,7 +141,7 @@ pub enum CheckSeverity {
 }
 
 /// Complete doctor report including zone health and freshness status.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DoctorReport {
     /// Schema version for forward/backward compatibility.
     pub schema_version: String,

@@ -339,7 +339,9 @@ pub trait StreamingSession: Send + Sync {
 
     /// Check if heartbeats have timed out.
     ///
-    /// Returns `true` if the last ack is older than the configured timeout.
+    /// Returns `true` if the oldest outstanding heartbeat send has exceeded the
+    /// configured timeout. When no heartbeats are outstanding, implementations
+    /// fall back to the most recent acknowledgement timestamp.
     fn is_heartbeat_timeout(&self, timeout: Duration) -> bool {
         if self.heartbeat_seq() > self.ack_seq() {
             return self
@@ -420,8 +422,9 @@ impl StreamingSession for InMemoryStreamingSession {
 
     fn record_heartbeat_ack(&mut self, at: Instant) {
         self.last_heartbeat_ack = Some(at);
-        self.ack_seq = self.ack_seq.saturating_add(1);
-        let _ = self.outstanding_heartbeats.pop_front();
+        if self.outstanding_heartbeats.pop_front().is_some() {
+            self.ack_seq = self.ack_seq.saturating_add(1);
+        }
     }
 
     fn last_heartbeat_sent(&self) -> Option<Instant> {
@@ -2256,8 +2259,9 @@ mod tests {
 
         fn record_heartbeat_ack(&mut self, at: Instant) {
             self.last_heartbeat_ack = Some(at);
-            self.ack_seq = self.ack_seq.saturating_add(1);
-            let _ = self.outstanding_heartbeats.pop_front();
+            if self.outstanding_heartbeats.pop_front().is_some() {
+                self.ack_seq = self.ack_seq.saturating_add(1);
+            }
         }
 
         fn last_heartbeat_sent(&self) -> Option<Instant> {
@@ -4824,13 +4828,24 @@ mod tests {
     }
 
     #[test]
-    fn streaming_session_ack_seq_increments_on_ack() {
+    fn streaming_session_ack_without_outstanding_heartbeat_does_not_advance_ack_seq() {
         let mut session = InMemoryStreamingSession::new();
         let now = Instant::now();
         session.record_heartbeat_ack(now);
         session.record_heartbeat_ack(now);
-        assert_eq!(session.ack_seq(), 2);
+        assert_eq!(session.ack_seq(), 0);
         assert_eq!(session.heartbeat_seq(), 0);
+    }
+
+    #[test]
+    fn streaming_session_ack_seq_does_not_exceed_sent_heartbeats() {
+        let mut session = InMemoryStreamingSession::new();
+        let now = Instant::now();
+        session.record_heartbeat_sent(now);
+        session.record_heartbeat_ack(now);
+        session.record_heartbeat_ack(now);
+        assert_eq!(session.heartbeat_seq(), 1);
+        assert_eq!(session.ack_seq(), 1);
     }
 
     // ── NEW: StreamingSupervisor accessor coverage ─────────────────────

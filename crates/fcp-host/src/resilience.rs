@@ -9,9 +9,9 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use fcp_async_core::sync::{OwnedSemaphorePermit, Semaphore};
@@ -637,7 +637,7 @@ impl ResilienceLayer {
                 return Arc::clone(state);
             }
         }
-        
+
         // Slow path: upgrade to write lock and insert if missing
         let mut states = self.connectors.write().unwrap_or_else(|e| e.into_inner());
         Arc::clone(
@@ -1551,8 +1551,8 @@ mod tests {
         assert_eq!(critical_shed, 0);
     }
 
-    #[test]
-    fn timeout_only_failure_predicate_trips_on_timeout() {
+    #[fcp_async_core::runtime::test]
+    async fn timeout_only_failure_predicate_trips_on_timeout() {
         let layer = ResilienceLayer::new(ResilienceConfig {
             operation_timeout: Some(Duration::from_millis(25)),
             circuit_breaker: CircuitBreakerConfig {

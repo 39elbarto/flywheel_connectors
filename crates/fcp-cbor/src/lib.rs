@@ -343,28 +343,35 @@ fn canonicalize_map(
 ) -> Result<(), SerializationError> {
     use std::cmp::Ordering;
 
+    let mut scratch = Vec::new();
     let mut with_keys = Vec::with_capacity(entries.len());
+    
     for (mut key, mut value) in std::mem::take(entries) {
         canonicalize_value_in_place(&mut key, depth)?;
         canonicalize_value_in_place(&mut value, depth)?;
 
-        let mut key_bytes = Vec::new();
-        into_writer(&key, &mut key_bytes)?;
+        let start = scratch.len();
+        into_writer(&key, &mut scratch)?;
+        let end = scratch.len();
 
-        with_keys.push((key_bytes, key, value));
+        with_keys.push((start..end, key, value));
     }
 
-    with_keys.sort_by(
-        |(a_bytes, _, _), (b_bytes, _, _)| match a_bytes.len().cmp(&b_bytes.len()) {
+    with_keys.sort_by(|(a_range, _, _), (b_range, _, _)| {
+        let a_bytes = &scratch[a_range.clone()];
+        let b_bytes = &scratch[b_range.clone()];
+        match a_bytes.len().cmp(&b_bytes.len()) {
             Ordering::Equal => a_bytes.cmp(b_bytes),
             other => other,
-        },
-    );
+        }
+    });
 
     for pair in with_keys.windows(2) {
         // SAFETY: `windows(2)` always yields slices of length 2.
-        let (left_bytes, _, _) = &pair[0];
-        let (right_bytes, _, _) = &pair[1];
+        let (left_range, _, _) = &pair[0];
+        let (right_range, _, _) = &pair[1];
+        let left_bytes = &scratch[left_range.clone()];
+        let right_bytes = &scratch[right_range.clone()];
         if left_bytes == right_bytes {
             return Err(SerializationError::DuplicateMapKey {
                 key_hex: hex::encode(right_bytes),

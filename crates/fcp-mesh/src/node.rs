@@ -1148,6 +1148,11 @@ impl MeshNode {
             .retain(|_, (ts, _)| *ts >= expired_threshold);
         pruned += initial_len - self.sent_symbols.len();
 
+        // Prune stale admission peers (5 minutes threshold)
+        let initial_peers = self.admission.peer_count();
+        self.admission.gc_stale_peers(now_ms, 300_000);
+        pruned += initial_peers.saturating_sub(self.admission.peer_count());
+
         if pruned > 0 {
             debug!(pruned, "pruned stale mesh node state");
         }

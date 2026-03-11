@@ -904,6 +904,10 @@ impl Bulkhead {
     }
 
     async fn acquire(&self) -> Result<OwnedSemaphorePermit, BulkheadAcquireError> {
+        if let Ok(permit) = Arc::clone(&self.permits).try_acquire_owned() {
+            return Ok(permit);
+        }
+
         let queued_before = self.queued.fetch_add(1, Ordering::SeqCst);
         if queued_before >= self.config.max_queued {
             self.queued.fetch_sub(1, Ordering::SeqCst);
@@ -993,7 +997,7 @@ impl HealthRouter {
                 entries.insert(connector_id.clone(), HealthEntry::new(&self.config));
             }
             let entry = entries.get_mut(connector_id).unwrap();
-            
+
             match &entry.status {
                 ConnectorHealth::Healthy => RoutingDecision::Allow,
                 ConnectorHealth::Degraded { reason } => RoutingDecision::AllowDegraded {
@@ -1026,7 +1030,7 @@ impl HealthRouter {
                 entries.insert(connector_id.clone(), HealthEntry::new(&self.config));
             }
             let entry = entries.get_mut(connector_id).unwrap();
-            
+
             entry.consecutive_failures = 0;
             entry.consecutive_successes = entry.consecutive_successes.saturating_add(1);
             entry.avg_latency.record(latency);
@@ -1043,7 +1047,7 @@ impl HealthRouter {
                 entries.insert(connector_id.clone(), HealthEntry::new(&self.config));
             }
             let entry = entries.get_mut(connector_id).unwrap();
-            
+
             entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
             entry.consecutive_successes = 0;
             entry.error_window.record_failure();
@@ -1059,7 +1063,7 @@ impl HealthRouter {
                 entries.insert(connector_id.clone(), HealthEntry::new(&self.config));
             }
             let entry = entries.get_mut(connector_id).unwrap();
-            
+
             entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
             entry.consecutive_successes = 0;
             entry.avg_latency.record(latency.max(timeout));
@@ -2033,6 +2037,16 @@ mod tests {
         assert!(p3.is_ok());
     }
 
+    #[fcp_async_core::runtime::test]
+    async fn bulkhead_zero_queue_allows_immediate_permit() {
+        let bh = Bulkhead::new(BulkheadConfig {
+            max_concurrent: 1,
+            max_queued: 0,
+            queue_timeout: Duration::from_millis(10),
+        });
+        assert!(bh.acquire().await.is_ok());
+    }
+
     #[test]
     fn bulkhead_pressure_per_mille_zero_when_idle() {
         let bh = Bulkhead::new(BulkheadConfig {
@@ -2856,16 +2870,18 @@ mod tests {
         }));
         let cid1 = ConnectorId::from_static("fcp.host:test1:v1");
         let cid2 = ConnectorId::from_static("fcp.host:test2:v1");
-        let _ = layer
+        let first = layer
             .execute(&cid1, RequestPriority::Normal, "op", async {
                 Ok::<_, &str>(())
             })
             .await;
-        let _ = layer
+        assert!(first.is_ok());
+        let second = layer
             .execute(&cid2, RequestPriority::Normal, "op", async {
                 Err::<(), _>("err")
             })
             .await;
+        assert!(matches!(second, Err(ResilienceError::Inner("err"))));
         assert_eq!(layer.metrics(&cid1).successes, 1);
         assert_eq!(layer.metrics(&cid1).failures, 0);
         assert_eq!(layer.metrics(&cid2).successes, 0);

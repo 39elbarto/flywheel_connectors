@@ -336,15 +336,8 @@ impl CwtClaims {
     ///
     /// Returns an error if serialization fails.
     pub fn to_cbor(&self) -> CryptoResult<Vec<u8>> {
-        // Convert BTreeMap to CBOR map (sorted keys = deterministic)
-        let map: Vec<(ciborium::Value, ciborium::Value)> = self
-            .claims
-            .iter()
-            .map(|(k, v)| (ciborium::Value::Integer((*k).into()), v.clone()))
-            .collect();
-
         let mut bytes = Vec::new();
-        ciborium::into_writer(&ciborium::Value::Map(map), &mut bytes)
+        ciborium::into_writer(&self.claims, &mut bytes)
             .map_err(|e| CryptoError::SerializationError(e.to_string()))?;
         Ok(bytes)
     }

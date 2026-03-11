@@ -1341,6 +1341,244 @@ pub fn expected_discovery_source(
     })
 }
 
+// ── Mesh and registry administrative introspection ──────────────────────────
+// Types for mesh node placement, registry provenance, and administrative
+// mutation surfaces.  These ensure `fwc` can reason about mesh/registry
+// state through the canonical host control plane instead of guessing.
+
+/// Where registry catalog data originated.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RegistryCatalogSource {
+    /// Live query to a remote registry endpoint.
+    LiveRegistry { endpoint: String },
+    /// Cached local copy of a remote registry.
+    CachedRegistry { endpoint: String, cached_at: String },
+    /// Workspace-local manifest files (never authoritative for registry state).
+    LocalManifest,
+    /// Source is unknown (legacy path or first-time query).
+    Unknown,
+}
+
+impl RegistryCatalogSource {
+    /// Whether this source reflects current live registry state.
+    #[must_use]
+    pub fn is_authoritative(&self) -> bool {
+        matches!(self, Self::LiveRegistry { .. })
+    }
+
+    /// Whether the data may be stale.
+    #[must_use]
+    pub fn may_be_stale(&self) -> bool {
+        !matches!(self, Self::LiveRegistry { .. })
+    }
+
+    /// Machine-readable tag.
+    #[must_use]
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Self::LiveRegistry { .. } => "live-registry",
+            Self::CachedRegistry { .. } => "cached-registry",
+            Self::LocalManifest => "local-manifest",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// Freshness caveat for display.
+    #[must_use]
+    pub fn freshness_caveat(&self) -> &'static str {
+        match self {
+            Self::LiveRegistry { .. } => "Data reflects current registry state.",
+            Self::CachedRegistry { .. } => "Data from a local cache; may be stale.",
+            Self::LocalManifest => "Data from workspace manifests; not registry-authoritative.",
+            Self::Unknown => "Data source is unknown; treat as potentially stale.",
+        }
+    }
+}
+
+/// Placement strategy for connectors across mesh nodes.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlacementStrategy {
+    /// Connector runs on every node in the mesh.
+    AllNodes,
+    /// Connector runs on a specific set of named nodes.
+    NamedNodes(Vec<String>),
+    /// Connector runs on nodes matching a label selector.
+    LabelSelector(String),
+    /// Connector runs on a single node (affinity or random).
+    SingleNode,
+    /// Placement is unknown or not yet decided by the host.
+    Unknown,
+}
+
+impl PlacementStrategy {
+    /// Machine-readable tag.
+    #[must_use]
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Self::AllNodes => "all-nodes",
+            Self::NamedNodes(_) => "named-nodes",
+            Self::LabelSelector(_) => "label-selector",
+            Self::SingleNode => "single-node",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// Whether the placement is determined.
+    #[must_use]
+    pub fn is_determined(&self) -> bool {
+        !matches!(self, Self::Unknown)
+    }
+}
+
+/// Result of a mesh/registry admin mutation.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdminMutationOutcome {
+    /// Mutation succeeded and was applied.
+    Applied { receipt_id: String },
+    /// Mutation was denied by capability or policy checks.
+    Denied { reason: String },
+    /// The target surface is not supported by this host/mesh.
+    Unsupported,
+    /// The target is temporarily unreachable.
+    Unavailable { retry_hint: String },
+    /// Mutation outcome is unknown (host did not respond clearly).
+    Unknown,
+}
+
+impl AdminMutationOutcome {
+    /// Whether the mutation succeeded.
+    #[must_use]
+    pub fn is_success(&self) -> bool {
+        matches!(self, Self::Applied { .. })
+    }
+
+    /// Whether the caller can potentially retry or remediate.
+    #[must_use]
+    pub fn is_recoverable(&self) -> bool {
+        matches!(self, Self::Denied { .. } | Self::Unavailable { .. } | Self::Unknown)
+    }
+
+    /// Machine-readable tag.
+    #[must_use]
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Self::Applied { .. } => "applied",
+            Self::Denied { .. } => "denied",
+            Self::Unsupported => "unsupported",
+            Self::Unavailable { .. } => "unavailable",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Mesh node state as reported by the host.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MeshNodeState {
+    /// Node is healthy and accepting work.
+    Healthy,
+    /// Node is draining (not accepting new work, finishing existing).
+    Draining,
+    /// Node is unreachable.
+    Unreachable,
+    /// Node state is unknown (host has not reported).
+    Unknown,
+}
+
+impl MeshNodeState {
+    /// Machine-readable tag.
+    #[must_use]
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Self::Healthy => "healthy",
+            Self::Draining => "draining",
+            Self::Unreachable => "unreachable",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// Whether the node can accept new work.
+    #[must_use]
+    pub fn can_accept_work(&self) -> bool {
+        matches!(self, Self::Healthy)
+    }
+}
+
+/// Mesh node summary for administrative introspection.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MeshNodeSummary {
+    /// Node identifier.
+    pub node_id: String,
+    /// Current state.
+    pub state: MeshNodeState,
+    /// Number of connectors hosted on this node.
+    pub connector_count: u32,
+    /// Placement strategy for this node's connectors.
+    pub placement: PlacementStrategy,
+}
+
+/// Registry entry summary for admin introspection.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistryEntrySummary {
+    /// Connector identifier in the registry.
+    pub connector_id: String,
+    /// Latest version in the registry.
+    pub latest_version: String,
+    /// Where this registry data came from.
+    pub source: RegistryCatalogSource,
+    /// Whether this connector is installed locally.
+    pub installed_locally: bool,
+}
+
+/// Admin introspection envelope for mesh/registry queries.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminIntrospection {
+    /// The admin command that produced this result.
+    pub command: String,
+    /// Where the data came from.
+    pub source: RegistryCatalogSource,
+    /// Whether the result is authoritative.
+    pub authoritative: bool,
+    /// Freshness caveat.
+    pub caveat: String,
+}
+
+/// Build an admin introspection envelope.
+#[allow(dead_code)]
+#[must_use]
+pub fn admin_introspection(command: &str, source: RegistryCatalogSource) -> AdminIntrospection {
+    AdminIntrospection {
+        command: command.to_owned(),
+        authoritative: source.is_authoritative(),
+        caveat: source.freshness_caveat().to_owned(),
+        source,
+    }
+}
+
+/// Admin commands that produce mesh/registry introspection.
+#[allow(dead_code)]
+pub const ADMIN_COMMANDS: &[&str] = &[
+    "mesh-status", "mesh-nodes", "registry-search", "registry-show",
+    "registry-sync", "node-drain", "node-restore",
+];
+
+/// Check if a command is an admin command.
+#[allow(dead_code)]
+#[must_use]
+pub fn is_admin_command(command: &str) -> bool {
+    ADMIN_COMMANDS.contains(&command)
+}
+
 // ── Package artifact source validation ───────────────────────────────────────
 // Defines the allowed sources for connector packages on install/update runtime
 // paths. Demo, stub, and placeholder sources are explicitly rejected. Test
@@ -2312,20 +2550,22 @@ fn execution_contract(summary: &str, intended_shape: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        AuthAcquisitionFlow, COMMAND_CLASSIFICATIONS, COMMANDS, CapabilityTokenSource,
-        CommandExecutionMode, CommandTruthSource, DEMO_MARKERS, DISCOVERY_COMMANDS,
-        DiscoveryDataSource, HYBRID_MODE_HELP, HostAbsentBehavior, HostAbsentReason,
-        OFFLINE_FLAG_HELP, OfflineSource, PackageArtifactSource, RuntimeContext, RuntimeMode,
+        ADMIN_COMMANDS, AdminIntrospection, AdminMutationOutcome, AuthAcquisitionFlow,
+        COMMAND_CLASSIFICATIONS, COMMANDS, CapabilityTokenSource, CommandExecutionMode,
+        CommandTruthSource, DEMO_MARKERS, DISCOVERY_COMMANDS, DiscoveryDataSource,
+        HYBRID_MODE_HELP, HostAbsentBehavior, HostAbsentReason, MeshNodeState, MeshNodeSummary,
+        OFFLINE_FLAG_HELP, OfflineSource, PackageArtifactSource, PlacementStrategy,
+        RegistryCatalogSource, RegistryEntrySummary, RuntimeContext, RuntimeMode,
         SYNTHETIC_TOKEN_MARKERS, SimulateCapability, WorkflowKind, WorkflowStepReality,
-        auth_required_commands, auth_ux_guidance, check_auth_requirement, classify_command,
-        classify_token_source, command_requires_host, contains_demo_marker,
+        admin_introspection, auth_required_commands, auth_ux_guidance, check_auth_requirement,
+        classify_command, classify_token_source, command_requires_host, contains_demo_marker,
         contains_synthetic_token_marker, default_offline_source, demo_source_rejection_payload,
         discovery_provenance, evaluate_simulate_request, expected_discovery_source, guide_payload,
-        host_absent_error, host_absent_error_payload, is_discovery_command, live_host_commands,
-        offline_capable_commands, offline_provenance, offline_provenance_payload, planned_payload,
-        resolve_boundary, resolve_runtime_mode, simulate_result, simulate_result_payload,
-        validate_capability_token_source, validate_mode_consistency, validate_package_source,
-        workflow_can_proceed, workflow_kind,
+        host_absent_error, host_absent_error_payload, is_admin_command, is_discovery_command,
+        live_host_commands, offline_capable_commands, offline_provenance,
+        offline_provenance_payload, planned_payload, resolve_boundary, resolve_runtime_mode,
+        simulate_result, simulate_result_payload, validate_capability_token_source,
+        validate_mode_consistency, validate_package_source, workflow_can_proceed, workflow_kind,
     };
     use serde_json::json;
 
@@ -6725,5 +6965,317 @@ mod tests {
                 "Offline discovery source for '{cmd}' claims authoritative: {src:?}"
             );
         }
+    }
+
+    // ── Mesh/registry admin introspection tests ─────────────────────────
+
+    // -- RegistryCatalogSource --
+
+    #[test]
+    fn registry_source_live_is_authoritative() {
+        let src = RegistryCatalogSource::LiveRegistry {
+            endpoint: "https://registry.example.com".into(),
+        };
+        assert!(src.is_authoritative());
+        assert!(!src.may_be_stale());
+        assert_eq!(src.tag(), "live-registry");
+    }
+
+    #[test]
+    fn registry_source_cached_is_stale() {
+        let src = RegistryCatalogSource::CachedRegistry {
+            endpoint: "https://registry.example.com".into(),
+            cached_at: "2026-03-11T00:00:00Z".into(),
+        };
+        assert!(!src.is_authoritative());
+        assert!(src.may_be_stale());
+        assert_eq!(src.tag(), "cached-registry");
+    }
+
+    #[test]
+    fn registry_source_local_manifest_is_stale() {
+        let src = RegistryCatalogSource::LocalManifest;
+        assert!(!src.is_authoritative());
+        assert!(src.may_be_stale());
+        assert_eq!(src.tag(), "local-manifest");
+    }
+
+    #[test]
+    fn registry_source_unknown_is_stale() {
+        let src = RegistryCatalogSource::Unknown;
+        assert!(!src.is_authoritative());
+        assert!(src.may_be_stale());
+        assert_eq!(src.tag(), "unknown");
+    }
+
+    #[test]
+    fn registry_source_all_have_freshness_caveats() {
+        let sources = vec![
+            RegistryCatalogSource::LiveRegistry { endpoint: "x".into() },
+            RegistryCatalogSource::CachedRegistry { endpoint: "x".into(), cached_at: "t".into() },
+            RegistryCatalogSource::LocalManifest,
+            RegistryCatalogSource::Unknown,
+        ];
+        for src in &sources {
+            assert!(!src.freshness_caveat().is_empty(), "Empty caveat for {:?}", src);
+        }
+    }
+
+    #[test]
+    fn registry_source_serde_roundtrip() {
+        let sources = vec![
+            RegistryCatalogSource::LiveRegistry { endpoint: "https://r.io".into() },
+            RegistryCatalogSource::CachedRegistry { endpoint: "https://r.io".into(), cached_at: "2026-01-01".into() },
+            RegistryCatalogSource::LocalManifest,
+            RegistryCatalogSource::Unknown,
+        ];
+        for src in &sources {
+            let json = serde_json::to_string(src).unwrap();
+            let back: RegistryCatalogSource = serde_json::from_str(&json).unwrap();
+            assert_eq!(src, &back);
+        }
+    }
+
+    // -- PlacementStrategy --
+
+    #[test]
+    fn placement_all_nodes_is_determined() {
+        let p = PlacementStrategy::AllNodes;
+        assert!(p.is_determined());
+        assert_eq!(p.tag(), "all-nodes");
+    }
+
+    #[test]
+    fn placement_named_nodes_is_determined() {
+        let p = PlacementStrategy::NamedNodes(vec!["node-1".into(), "node-2".into()]);
+        assert!(p.is_determined());
+        assert_eq!(p.tag(), "named-nodes");
+    }
+
+    #[test]
+    fn placement_label_selector_is_determined() {
+        let p = PlacementStrategy::LabelSelector("region=us-west".into());
+        assert!(p.is_determined());
+        assert_eq!(p.tag(), "label-selector");
+    }
+
+    #[test]
+    fn placement_single_node_is_determined() {
+        let p = PlacementStrategy::SingleNode;
+        assert!(p.is_determined());
+        assert_eq!(p.tag(), "single-node");
+    }
+
+    #[test]
+    fn placement_unknown_is_not_determined() {
+        let p = PlacementStrategy::Unknown;
+        assert!(!p.is_determined());
+        assert_eq!(p.tag(), "unknown");
+    }
+
+    #[test]
+    fn placement_serde_roundtrip() {
+        let strategies = vec![
+            PlacementStrategy::AllNodes,
+            PlacementStrategy::NamedNodes(vec!["a".into()]),
+            PlacementStrategy::LabelSelector("zone=eu".into()),
+            PlacementStrategy::SingleNode,
+            PlacementStrategy::Unknown,
+        ];
+        for s in &strategies {
+            let json = serde_json::to_string(s).unwrap();
+            let back: PlacementStrategy = serde_json::from_str(&json).unwrap();
+            assert_eq!(s, &back);
+        }
+    }
+
+    // -- AdminMutationOutcome --
+
+    #[test]
+    fn mutation_applied_is_success() {
+        let o = AdminMutationOutcome::Applied { receipt_id: "r-123".into() };
+        assert!(o.is_success());
+        assert!(!o.is_recoverable());
+        assert_eq!(o.tag(), "applied");
+    }
+
+    #[test]
+    fn mutation_denied_is_recoverable() {
+        let o = AdminMutationOutcome::Denied { reason: "no caps".into() };
+        assert!(!o.is_success());
+        assert!(o.is_recoverable());
+        assert_eq!(o.tag(), "denied");
+    }
+
+    #[test]
+    fn mutation_unsupported_is_not_recoverable() {
+        let o = AdminMutationOutcome::Unsupported;
+        assert!(!o.is_success());
+        assert!(!o.is_recoverable());
+        assert_eq!(o.tag(), "unsupported");
+    }
+
+    #[test]
+    fn mutation_unavailable_is_recoverable() {
+        let o = AdminMutationOutcome::Unavailable { retry_hint: "30s".into() };
+        assert!(!o.is_success());
+        assert!(o.is_recoverable());
+        assert_eq!(o.tag(), "unavailable");
+    }
+
+    #[test]
+    fn mutation_unknown_is_recoverable() {
+        let o = AdminMutationOutcome::Unknown;
+        assert!(!o.is_success());
+        assert!(o.is_recoverable());
+        assert_eq!(o.tag(), "unknown");
+    }
+
+    #[test]
+    fn mutation_outcome_serde_roundtrip() {
+        let outcomes = vec![
+            AdminMutationOutcome::Applied { receipt_id: "r-1".into() },
+            AdminMutationOutcome::Denied { reason: "no cap".into() },
+            AdminMutationOutcome::Unsupported,
+            AdminMutationOutcome::Unavailable { retry_hint: "5s".into() },
+            AdminMutationOutcome::Unknown,
+        ];
+        for o in &outcomes {
+            let json = serde_json::to_string(o).unwrap();
+            let back: AdminMutationOutcome = serde_json::from_str(&json).unwrap();
+            assert_eq!(o, &back);
+        }
+    }
+
+    // -- MeshNodeState --
+
+    #[test]
+    fn mesh_node_healthy_accepts_work() {
+        let s = MeshNodeState::Healthy;
+        assert!(s.can_accept_work());
+        assert_eq!(s.tag(), "healthy");
+    }
+
+    #[test]
+    fn mesh_node_draining_rejects_work() {
+        let s = MeshNodeState::Draining;
+        assert!(!s.can_accept_work());
+        assert_eq!(s.tag(), "draining");
+    }
+
+    #[test]
+    fn mesh_node_unreachable_rejects_work() {
+        let s = MeshNodeState::Unreachable;
+        assert!(!s.can_accept_work());
+        assert_eq!(s.tag(), "unreachable");
+    }
+
+    #[test]
+    fn mesh_node_unknown_rejects_work() {
+        let s = MeshNodeState::Unknown;
+        assert!(!s.can_accept_work());
+        assert_eq!(s.tag(), "unknown");
+    }
+
+    // -- MeshNodeSummary / RegistryEntrySummary serialization --
+
+    #[test]
+    fn mesh_node_summary_serializes() {
+        let summary = MeshNodeSummary {
+            node_id: "node-1".into(),
+            state: MeshNodeState::Healthy,
+            connector_count: 5,
+            placement: PlacementStrategy::AllNodes,
+        };
+        let json = serde_json::to_value(&summary).unwrap();
+        assert_eq!(json["node_id"], "node-1");
+        assert_eq!(json["connector_count"], 5);
+        assert_eq!(json["state"], "healthy");
+    }
+
+    #[test]
+    fn registry_entry_summary_serializes() {
+        let entry = RegistryEntrySummary {
+            connector_id: "github:fcp2:1.0".into(),
+            latest_version: "2.1.0".into(),
+            source: RegistryCatalogSource::LiveRegistry {
+                endpoint: "https://registry.fcp.io".into(),
+            },
+            installed_locally: true,
+        };
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(json["connector_id"], "github:fcp2:1.0");
+        assert_eq!(json["latest_version"], "2.1.0");
+        assert_eq!(json["installed_locally"], true);
+    }
+
+    // -- AdminIntrospection and admin_introspection() --
+
+    #[test]
+    fn admin_introspection_live_is_authoritative() {
+        let ai = admin_introspection(
+            "registry-search",
+            RegistryCatalogSource::LiveRegistry { endpoint: "https://r.io".into() },
+        );
+        assert!(ai.authoritative);
+        assert_eq!(ai.command, "registry-search");
+    }
+
+    #[test]
+    fn admin_introspection_cached_is_not_authoritative() {
+        let ai = admin_introspection(
+            "registry-show",
+            RegistryCatalogSource::CachedRegistry {
+                endpoint: "https://r.io".into(),
+                cached_at: "2026-01-01".into(),
+            },
+        );
+        assert!(!ai.authoritative);
+    }
+
+    #[test]
+    fn admin_introspection_has_caveat() {
+        let ai = admin_introspection(
+            "mesh-status",
+            RegistryCatalogSource::Unknown,
+        );
+        assert!(!ai.caveat.is_empty());
+        assert!(!ai.authoritative);
+    }
+
+    #[test]
+    fn admin_introspection_serializes() {
+        let ai = admin_introspection(
+            "mesh-nodes",
+            RegistryCatalogSource::LiveRegistry { endpoint: "https://r.io".into() },
+        );
+        let json = serde_json::to_value(&ai).unwrap();
+        assert_eq!(json["command"], "mesh-nodes");
+        assert_eq!(json["authoritative"], true);
+    }
+
+    // -- ADMIN_COMMANDS and is_admin_command --
+
+    #[test]
+    fn admin_commands_is_nonempty() {
+        assert!(!ADMIN_COMMANDS.is_empty());
+    }
+
+    #[test]
+    fn admin_commands_contains_expected() {
+        assert!(is_admin_command("mesh-status"));
+        assert!(is_admin_command("mesh-nodes"));
+        assert!(is_admin_command("registry-search"));
+        assert!(is_admin_command("registry-show"));
+        assert!(is_admin_command("registry-sync"));
+        assert!(is_admin_command("node-drain"));
+        assert!(is_admin_command("node-restore"));
+    }
+
+    #[test]
+    fn admin_commands_excludes_non_admin() {
+        assert!(!is_admin_command("list"));
+        assert!(!is_admin_command("invoke"));
+        assert!(!is_admin_command("show"));
     }
 }

@@ -639,11 +639,36 @@ preserve the same semantics.
 ```rust
 pub struct Cx {
     pub zone_id: ZoneId,
+    pub principal: PrincipalId,
+    pub target: ExecutionTarget,
+    pub request: RequestContext,
     pub budget: Budget,
     pub trace: TraceContext,
     pub provenance: ProvenanceContext,
     pub capability_scope: CapabilityScope,
+    pub approval: ApprovalContext,
     pub cancellation: CancellationState,
+}
+
+pub struct ExecutionTarget {
+    pub connector_id: ConnectorId,
+    pub operation_id: OperationId,
+    pub instance_id: Option<ConnectorInstanceId>,
+}
+
+pub struct RequestContext {
+    pub request_id: RequestId,
+    pub idempotency_key: Option<IdempotencyKey>,
+    pub correlation_id: [u8; 16],
+    pub parent_correlation_id: Option<[u8; 16]>,
+    pub scenario_id: Option<[u8; 16]>,
+    pub lease_seq: Option<u64>,
+}
+
+pub struct ApprovalContext {
+    pub mode: ApprovalMode,
+    pub evidence_refs: Vec<ObjectId>,
+    pub sanitizer_profile: Option<SanitizerProfileId>,
 }
 ```
 
@@ -656,6 +681,103 @@ The `Cx` contract requires:
 5. **Narrowability**: service boundaries SHOULD narrow capabilities and MAY narrow budget.
 6. **Effect discipline**: time, spawn, network, storage, randomness, and external I/O MUST flow
    through the authority and policy visible from `Cx`.
+7. **Target explicitness**: connector identity and operation identity MUST be explicit in the
+   context rather than re-derived from ambient routing state.
+8. **Stable operator identity**: request, correlation, and scenario identifiers MUST remain stable
+   enough for explain, doctor, history, replay, and evidence retrieval surfaces to join artifacts
+   without connector-specific heuristics.
+
+#### 4.1.1 Root Context Construction
+
+Every externally initiated operation MUST enter connector execution through a host-created root
+context. The host MUST validate and normalize the incoming request, policy evidence, and routing
+decision before any connector business logic runs.
+
+Normative rules:
+
+1. The host MUST construct a root `Cx` after validating zone binding, connector selection,
+   operation selection, capability evidence, approval evidence, provenance inputs, and freshness
+   constraints such as revocation or checkpoint requirements.
+2. Raw request artifacts such as capability tokens, holder proofs, approval tokens, checkpoint
+   references, or lease claims are policy inputs to root-context construction; connector-facing
+   code MUST receive their normalized semantic result in `capability_scope`, `approval`,
+   `provenance`, `request`, and `trace`, not an unvalidated bag of transport fields.
+3. If the host cannot determine `zone_id`, `target.connector_id`, `target.operation_id`,
+   `request.request_id`, `request.correlation_id`, or the effective narrowed `capability_scope`,
+   the request MUST fail before connector execution begins.
+4. `principal`, `zone_id`, and `target.connector_id` MUST be fixed for the lifetime of a root
+   context. Any attempt to retarget work to another connector or zone requires a new host-mediated
+   root context and new policy evaluation.
+5. The host SHOULD treat the root context as immutable after creation except for cancellation
+   signaling and monotone budget consumption.
+
+#### 4.1.2 Child Context Derivation and Narrowing
+
+Child work MUST derive from an existing `Cx`; it MUST NOT synthesize authority from scratch.
+
+```rust
+impl Cx {
+    pub fn child(
+        &self,
+        budget: Budget,
+        capability_scope: CapabilityScope,
+        approval: ApprovalContext,
+    ) -> Result<Cx, DerivationError>;
+}
+```
+
+Normative rules:
+
+1. Child derivation MUST be monotone. A child `Cx` MUST NOT widen capability scope, approval
+   scope, provenance authority, or budget relative to its parent.
+2. `zone_id`, `principal`, and `request.request_id` MUST remain invariant across child contexts.
+3. `request.correlation_id` MAY remain identical to the parent or MAY move to a child correlation
+   id, but the lineage MUST be preserved through `parent_correlation_id` so replay and audit tools
+   can recover the execution tree.
+4. Connector-local child work MUST keep `target.connector_id` unchanged. Cross-connector execution
+   is never a child-context derivation; it is a new host-mediated request with fresh policy checks.
+5. Approval evidence MAY be narrowed to the subset actually needed by the child, but child contexts
+   MUST NOT invent approval evidence or sanitize data under a profile that was not authorized by the
+   parent context.
+6. Background regions derived from request work MUST either complete within the parent's bounded
+   lifetime or be re-rooted explicitly under a supervised host/application context with a new root
+   `Cx`, explicit budget, and durable ownership.
+
+#### 4.1.3 Mapping Current Request Fields to Runtime Semantics
+
+Current FCP request envelopes map into runtime context semantics as follows:
+
+| Current field | Runtime meaning |
+|---------------|-----------------|
+| `id` | `request.request_id`; stable per-attempt identifier used across logs, receipts, and replay artifacts |
+| `connector_id` | `target.connector_id`; selected execution target after host routing |
+| `operation` | `target.operation_id`; normalized operation selector for runtime dispatch |
+| `zone_id` | `zone_id`; effective execution zone after validation |
+| `capability_token` | input to host policy evaluation; successful validation yields `capability_scope` rather than exposing the opaque token as ambient runtime authority |
+| `holder_proof` | input to principal/authenticity validation; successful validation contributes to `principal` and provenance trust state |
+| `approval_tokens` | input to approval evaluation; successful validation yields `approval.mode` and `approval.evidence_refs` |
+| `provenance` | `provenance`; normalized taint/origin/declassification context |
+| `idempotency_key` | `request.idempotency_key`; stable dedupe and replay-control key |
+| `deadline_ms` | `budget.deadline`; explicit time bound rather than ambient timeout configuration |
+| `correlation_id` | `request.correlation_id` and `trace`; stable join key across explain/history/logging surfaces |
+| `lease_seq` | `request.lease_seq`; execution fencing input that MUST remain visible to receipts and failover logic |
+| `context` or transport-specific wrappers | MUST normalize into explicit `Cx` fields or be rejected as non-conformant |
+| `input` | business payload only; it is not part of `Cx` authority and MUST be evaluated under the authority already carried by `Cx` |
+
+At minimum, every conforming log stream, explain response, history surface, replay transcript, and
+evidence bundle MUST expose enough fields to reconstruct:
+
+- `request.request_id`
+- `request.correlation_id`
+- `target.connector_id`
+- `target.operation_id`
+- `zone_id`
+- any emitted decision-receipt or operation-receipt object ids
+- any checkpoint or lease identifiers consulted for admission, fencing, resume, or failover
+
+Conformance suites for the runtime context contract MUST include negative cases proving that child
+contexts cannot widen authority, cannot silently retarget connectors, and cannot lose correlation
+lineage across host/connector boundaries.
 
 ### 4.2 Regions and Scopes
 

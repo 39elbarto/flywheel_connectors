@@ -251,7 +251,7 @@ mod tests {
         let sbom = SimpleSbom {
             format_version: "1.0".to_string(),
             created: "2026-03-03T12:00:00Z".to_string(),
-            tool: "fcp-cli".to_string(),
+            tool: "fwc".to_string(),
             component: SbomComponent {
                 component_type: "application".to_string(),
                 name: "my-connector".to_string(),
@@ -277,7 +277,7 @@ mod tests {
         let sbom = SimpleSbom {
             format_version: "1.0".to_string(),
             created: "2026-01-01T00:00:00Z".to_string(),
-            tool: "fcp-cli".to_string(),
+            tool: "fwc".to_string(),
             component: SbomComponent {
                 component_type: "application".to_string(),
                 name: "test".to_string(),
@@ -610,7 +610,7 @@ mod tests {
         let sbom = SimpleSbom {
             format_version: "1.0".to_string(),
             created: "2026-03-04T00:00:00Z".to_string(),
-            tool: "fcp-cli".to_string(),
+            tool: "fwc".to_string(),
             component: SbomComponent {
                 component_type: "application".to_string(),
                 name: "my-connector".to_string(),
@@ -654,7 +654,7 @@ mod tests {
         let sbom = SimpleSbom {
             format_version: "1.0".to_string(),
             created: "2026-01-01T00:00:00Z".to_string(),
-            tool: "fcp-cli".to_string(),
+            tool: "fwc".to_string(),
             component: SbomComponent {
                 component_type: "application".to_string(),
                 name: "test".to_string(),
@@ -856,7 +856,7 @@ mod tests {
         let sbom = SimpleSbom {
             format_version: "1.0".to_string(),
             created: "2026-03-08T00:00:00Z".to_string(),
-            tool: "fcp-cli 0.5.0".to_string(),
+            tool: "fwc 0.5.0".to_string(),
             component: SbomComponent {
                 component_type: "application".to_string(),
                 name: "test-conn".to_string(),
@@ -867,7 +867,7 @@ mod tests {
         };
         let json = serde_json::to_string(&sbom).unwrap();
         let back: SimpleSbom = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.tool, "fcp-cli 0.5.0");
+        assert_eq!(back.tool, "fwc 0.5.0");
         assert_eq!(back.format_version, "1.0");
     }
 
@@ -909,7 +909,7 @@ mod tests {
         let sbom = SimpleSbom {
             format_version: "1.0".to_string(),
             created: "2026-01-01T00:00:00Z".to_string(),
-            tool: "fcp-cli".to_string(),
+            tool: "fwc".to_string(),
             component: SbomComponent {
                 component_type: "application".to_string(),
                 name: "test".to_string(),

@@ -18,8 +18,24 @@ use sha2::{Digest, Sha256};
 
 pub use types::*;
 
+pub const PACKAGE_OUTPUT_FILENAME: &str = "package-output.json";
+
 /// Run the package command.
 pub fn run(args: &PackageArgs) -> Result<()> {
+    let output = package_connector(args)?;
+
+    match args.format {
+        OutputFormat::Human => print_human_output(&output),
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+    }
+
+    Ok(())
+}
+
+/// Build a connector package and return the generated package metadata.
+pub fn package_connector(args: &PackageArgs) -> Result<PackageOutput> {
     let crate_path = args.path.canonicalize().context("invalid crate path")?;
 
     // Verify this is a valid connector crate
@@ -94,15 +110,12 @@ pub fn run(args: &PackageArgs) -> Result<()> {
         version,
     };
 
-    // Print output
-    match args.format {
-        OutputFormat::Human => print_human_output(&output),
-        OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&output)?);
-        }
-    }
+    let package_metadata_path = output.output_dir.join(PACKAGE_OUTPUT_FILENAME);
+    let output_json = serde_json::to_string_pretty(&output)?;
+    fs::write(&package_metadata_path, format!("{output_json}\n"))
+        .context("failed to write package metadata")?;
 
-    Ok(())
+    Ok(output)
 }
 
 /// Find the manifest.toml file in the crate.
@@ -128,7 +141,10 @@ fn find_manifest(crate_path: &Path) -> Result<PathBuf> {
 
 /// Build the connector with deterministic flags.
 fn build_connector(crate_path: &Path, args: &PackageArgs) -> Result<PathBuf> {
-    let mut cmd = Command::new("cargo");
+    let mut cmd = Command::new("rch");
+    cmd.arg("exec");
+    cmd.arg("--");
+    cmd.arg("cargo");
     cmd.arg("build");
     let target_root = crate_path.join("target");
 
@@ -158,9 +174,11 @@ fn build_connector(crate_path: &Path, args: &PackageArgs) -> Result<PathBuf> {
 
     cmd.current_dir(crate_path);
 
-    let status = cmd.status().context("failed to run cargo build")?;
+    let status = cmd
+        .status()
+        .context("failed to run `rch exec -- cargo build`")?;
     if !status.success() {
-        bail!("cargo build failed with status: {status}");
+        bail!("`rch exec -- cargo build` failed with status: {status}");
     }
 
     // Find the built binary
@@ -352,7 +370,7 @@ fn generate_sbom(crate_path: &Path, connector_id: &str, version: &str) -> Result
     Ok(SimpleSbom {
         format_version: "1.0".to_string(),
         created: chrono::Utc::now().to_rfc3339(),
-        tool: format!("fcp-cli {}", env!("CARGO_PKG_VERSION")),
+        tool: format!("fwc {}", env!("CARGO_PKG_VERSION")),
         component: SbomComponent {
             component_type: "application".to_string(),
             name: connector_id.to_string(),

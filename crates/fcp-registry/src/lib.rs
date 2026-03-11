@@ -64,7 +64,7 @@ pub enum RegistryError {
     #[error("manifest signing bytes serialization failed: {0}")]
     SigningBytes(SerializationError),
     #[error("canonical serialization failed: {0}")]
-    Canonical(SerializationError),
+    Canonical(#[from] SerializationError),
     #[error("signature bytes malformed")]
     SignatureBytes,
     #[error("object store failure: {0}")]

@@ -12,7 +12,7 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
-asupersync = { path = "/dp/asupersync", default-features = false }
+asupersync = { path = "/dp/asupersync", default-features = false, features = ["tracing-integration"] }
 fcp-async-core-macros = { path = "../fcp-async-core-macros" }
 futures-util.workspace = true
 thiserror.workspace = true

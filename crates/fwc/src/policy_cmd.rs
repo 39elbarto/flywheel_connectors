@@ -402,7 +402,7 @@ const POLICY_BUNDLE_STATE_FORMAT: &str = "fcp-policy-bundle-state";
 const POLICY_BUNDLE_STATE_SCHEMA_VERSION: &str = "1.0.0";
 const POLICY_BUNDLE_EVENT_APPLIED: &str = "policy.bundle.applied";
 const POLICY_BUNDLE_EVENT_ROLLED_BACK: &str = "policy.bundle.rolled_back";
-const POLICY_BUNDLE_AUDIT_ACTOR: &str = "fcp-cli";
+const POLICY_BUNDLE_AUDIT_ACTOR: &str = "fwc";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PolicyBundleState {

@@ -93,18 +93,38 @@ mod workflow;
 #[allow(dead_code)]
 mod zone_scope;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum, error::ErrorKind};
-use serde::Serialize;
+use reqwest::blocking::{Client as BlockingClient, ClientBuilder as BlockingClientBuilder};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
+
+use fcp_core::{
+    CapabilityToken, ConnectorId, InvokeRequest, InvokeResponse, InvokeStatus, LifecycleStatus,
+    OperationId, RequestId, ZoneId,
+};
+use fcp_host::{
+    BatchInvokeResponse as HostBatchInvokeResponse, BatchOptions as HostBatchOptions,
+    CancellationRequest as HostCancellationRequest,
+    CancellationResponse as HostCancellationResponse, CancelReason, CleanupBehavior,
+    ConnectorAdminStatus as HostConnectorAdminStatus,
+    ConnectorInventoryResponse as HostConnectorInventoryResponse,
+    DiscoveryFilter as HostDiscoveryFilter, DiscoveryResponse as HostDiscoveryResponse,
+    HostHealthResponse as HostHealthResponse,
+    IntrospectionResponse as HostIntrospectionResponse,
+    PreflightRequest as HostPreflightRequest, PreflightResponse as HostPreflightResponse,
+    ToolDescriptor as HostToolDescriptor,
+};
 
 use crate::readiness::{
     DiscoveredConnector, DiscoveredOperation, DiscoveryCatalog, SelectorError, SelectorErrorKind,
+    idempotency_label, normalize_connector_selector, normalize_operation_selector,
+    risk_level_label, safety_tier_label, selector_distance,
 };
 use crate::render::{
     ExtractRender, OutputFormat, RenderOptions, TemplateRender, render_with_options, token_stats,
@@ -297,6 +317,9 @@ enum Commands {
 
     /// Preflight or dry-run a connector operation.
     Simulate(InvokeArgs),
+
+    /// Cancel an in-flight connector operation.
+    Cancel(CancelArgs),
 
     /// Read connector logs or event streams.
     Logs(LogsArgs),
@@ -777,6 +800,52 @@ struct InvokeArgs {
     /// Set or override one payload field as `path=value`.
     #[arg(long = "set", value_name = "PATH=VALUE")]
     set: Vec<String>,
+
+    /// Execution zone. Defaults to the active context zone or `z:work`.
+    #[arg(long)]
+    zone: Option<String>,
+
+    /// Optional principal identity for preflight and invoke.
+    #[arg(long)]
+    principal: Option<String>,
+
+    /// Optional idempotency key for retries or risky operations.
+    #[arg(long)]
+    idempotency_key: Option<String>,
+
+    /// Optional deadline in milliseconds.
+    #[arg(long)]
+    deadline_ms: Option<u64>,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct CancelArgs {
+    /// Operation id returned by a prior invoke or batch execution.
+    operation_id: String,
+
+    /// Cancellation reason kind.
+    #[arg(long, default_value = "user-requested")]
+    reason: String,
+
+    /// Optional reason detail for `agent-abort`.
+    #[arg(long)]
+    detail: Option<String>,
+
+    /// Optional superseding operation id for `superseded`.
+    #[arg(long)]
+    superseded_by: Option<String>,
+
+    /// Cleanup behavior: `best-effort`, `full`, `abandon`, or `checkpoint`.
+    #[arg(long, default_value = "best-effort")]
+    cleanup: String,
+
+    /// Cleanup timeout in milliseconds when `--cleanup full` is used.
+    #[arg(long)]
+    cleanup_timeout_ms: Option<u64>,
+
+    /// Return partial results if available.
+    #[arg(long, default_value_t = false)]
+    return_partial: bool,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -1070,6 +1139,10 @@ struct MapArgs {
     /// What to do when an item fails: `abort` or `continue`.
     #[arg(long, default_value = "abort")]
     on_error: String,
+
+    /// Execution zone for all mapped inputs. Defaults to the active context zone or `z:work`.
+    #[arg(long)]
+    zone: Option<String>,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -1088,6 +1161,10 @@ struct BatchFileArgs {
     /// What to do when an operation fails: `abort` or `continue`.
     #[arg(long, default_value = "abort")]
     on_error: String,
+
+    /// Default execution zone for operations that do not specify one in the JSONL file.
+    #[arg(long)]
+    zone: Option<String>,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -1706,26 +1783,63 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
             intent_explain_dispatch(&args.request(intent::IntentMode::Explain))?
         }
         Commands::Do(args) => intent_do_dispatch(args)?,
-        Commands::List(args) => list_dispatch(args)?,
+        Commands::List(args) => list_dispatch(args, cli.host.as_deref())?,
         Commands::Search(args) => search_dispatch(args)?,
-        Commands::Show(args) => show_dispatch(args)?,
-        Commands::Ops(args) => ops_dispatch(args)?,
-        Commands::Schema(args) => schema_dispatch(args)?,
-        Commands::Examples(args) => examples_dispatch(args)?,
-        Commands::Status(args) => planned("status", args)?,
-        Commands::Enable(args) => planned("enable", args)?,
-        Commands::Disable(args) => planned("disable", args)?,
-        Commands::Start(args) => planned("start", args)?,
-        Commands::Stop(args) => planned("stop", args)?,
-        Commands::Restart(args) => planned("restart", args)?,
-        Commands::Install(args) => planned("install", args)?,
-        Commands::Update(args) => planned("update", args)?,
-        Commands::Pin(args) => planned("pin", args)?,
-        Commands::Unpin(args) => planned("unpin", args)?,
-        Commands::Config(args) => planned("config", args)?,
-        Commands::Invoke(args) => invoke_dispatch("invoke", args)?,
-        Commands::Simulate(args) => invoke_dispatch("simulate", args)?,
-        Commands::Logs(args) => planned("logs", args)?,
+        Commands::Show(args) => show_dispatch(args, cli.host.as_deref())?,
+        Commands::Ops(args) => ops_dispatch(args, cli.host.as_deref())?,
+        Commands::Schema(args) => schema_dispatch(args, cli.host.as_deref())?,
+        Commands::Examples(args) => examples_dispatch(args, cli.host.as_deref())?,
+        Commands::Status(args) => status_dispatch(args, cli.host.as_deref())?,
+        Commands::Enable(args) => unavailable_command_dispatch(
+            "enable",
+            args,
+            "No live host admin endpoint exists yet for enable/disable lifecycle control. Use `fwc pin`, `fwc unpin`, `fwc status`, and rollout routes for the currently implemented host-backed controls.",
+        )?,
+        Commands::Disable(args) => unavailable_command_dispatch(
+            "disable",
+            args,
+            "No live host admin endpoint exists yet for enable/disable lifecycle control. Use `fwc pin`, `fwc unpin`, `fwc status`, and rollout routes for the currently implemented host-backed controls.",
+        )?,
+        Commands::Start(args) => unavailable_command_dispatch(
+            "start",
+            args,
+            "No live host admin endpoint exists yet for process start/stop control.",
+        )?,
+        Commands::Stop(args) => unavailable_command_dispatch(
+            "stop",
+            args,
+            "No live host admin endpoint exists yet for process start/stop control.",
+        )?,
+        Commands::Restart(args) => unavailable_command_dispatch(
+            "restart",
+            args,
+            "No live host admin endpoint exists yet for process restart control.",
+        )?,
+        Commands::Install(args) => unavailable_command_dispatch(
+            "install",
+            args,
+            "No live host admin endpoint exists yet for install/verify/update lifecycle control.",
+        )?,
+        Commands::Update(args) => unavailable_command_dispatch(
+            "update",
+            args,
+            "No live host admin endpoint exists yet for install/verify/update lifecycle control.",
+        )?,
+        Commands::Pin(args) => pin_dispatch(args, cli.host.as_deref())?,
+        Commands::Unpin(args) => unpin_dispatch(args, cli.host.as_deref())?,
+        Commands::Config(args) => unavailable_command_dispatch(
+            "config",
+            args,
+            "Connector config read/write endpoints are not live in `fcp-host` yet, so `fwc` refuses to invent state. Use `fwc schema`, `fwc show`, and `fwc status` until the host admin config routes land.",
+        )?,
+        Commands::Invoke(args) => invoke_dispatch("invoke", args, cli.host.as_deref())?,
+        Commands::Simulate(args) => invoke_dispatch("simulate", args, cli.host.as_deref())?,
+        Commands::Cancel(args) => cancel_dispatch(args, cli.host.as_deref())?,
+        Commands::Logs(args) => unavailable_command_dispatch(
+            "logs",
+            args,
+            "No live host log streaming endpoint exists yet.",
+        )?,
         Commands::ExportTools(args) => export_tools_dispatch(args)?,
         Commands::ServeMcp(args) => planned("serve-mcp", args)?,
         Commands::Suggest(args) => suggest_dispatch(args)?,
@@ -1735,9 +1849,13 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         Commands::Pipe(args) => pipe_dispatch(args)?,
         Commands::Pipeline(args) => pipeline_dispatch(args)?,
         Commands::Recipe(args) => recipe_dispatch(args)?,
-        Commands::Map(args) => map_dispatch(args)?,
-        Commands::BatchFile(args) => batch_file_dispatch(args)?,
-        Commands::Events(args) => planned("events", args)?,
+        Commands::Map(args) => map_dispatch(args, cli.host.as_deref())?,
+        Commands::BatchFile(args) => batch_file_dispatch(args, cli.host.as_deref())?,
+        Commands::Events(args) => unavailable_command_dispatch(
+            "events",
+            args,
+            "No live host event tail endpoint exists yet.",
+        )?,
     };
 
     Ok(outcome)
@@ -1753,7 +1871,1165 @@ where
     })
 }
 
-fn list_dispatch(args: &ListArgs) -> Result<DispatchOutcome> {
+fn unavailable_command_dispatch<T>(
+    command: &str,
+    args: &T,
+    message: &str,
+) -> Result<DispatchOutcome>
+where
+    T: Serialize,
+{
+    Ok(DispatchOutcome {
+        payload: json!({
+            "status": "error",
+            "command": command,
+            "message": message,
+            "captures": serde_json::to_value(args)?,
+            "error": {
+                "type": "host-endpoint-not-implemented",
+                "message": message,
+                "recoverable": true,
+            },
+        }),
+        exit_code: CliExitCode::Validation,
+    })
+}
+
+#[derive(Clone, Debug)]
+struct ResolvedHostConfig {
+    endpoint: String,
+    default_zone: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ContextConfigFile {
+    current_context: String,
+    contexts: BTreeMap<String, MeshContextFile>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MeshContextFile {
+    endpoint: String,
+    #[serde(default)]
+    default_zone: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct HostPinState {
+    connector_id: String,
+    pinned: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<semver::Version>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct HostRolloutStatus {
+    #[serde(flatten)]
+    status: LifecycleStatus,
+    pinned: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pinned_version: Option<semver::Version>,
+    canary_percent: u8,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct HostRollbackResponse {
+    connector_id: String,
+    state: fcp_core::LifecycleState,
+    from_version: semver::Version,
+    to_version: semver::Version,
+    message: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct HostBatchInvokeRequest {
+    operations: Vec<HostBatchOperation>,
+    options: HostBatchOptions,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct HostBatchOperation {
+    id: String,
+    request: InvokeRequest,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    depends_on: Vec<String>,
+}
+
+fn resolve_host_config(explicit_host: Option<&str>) -> Result<Option<ResolvedHostConfig>> {
+    if let Some(host) = explicit_host.map(str::trim).filter(|host| !host.is_empty()) {
+        return Ok(Some(ResolvedHostConfig {
+            endpoint: host.to_owned(),
+            default_zone: None,
+        }));
+    }
+
+    for env_name in ["FWC_HOST", "FCP_HOST_ENDPOINT", "FCP_HOST_BIND"] {
+        if let Ok(endpoint) = std::env::var(env_name)
+            && !endpoint.trim().is_empty()
+        {
+            return Ok(Some(ResolvedHostConfig {
+                endpoint,
+                default_zone: None,
+            }));
+        }
+    }
+
+    let Some(path) = context_config_path()? else {
+        return Ok(None);
+    };
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let raw = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read host context file `{}`", path.display()))?;
+    let config: ContextConfigFile = toml::from_str(&raw)
+        .with_context(|| format!("failed to parse host context file `{}`", path.display()))?;
+    let Some(context) = config.contexts.get(&config.current_context) else {
+        return Ok(None);
+    };
+    if context.endpoint.trim().is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(ResolvedHostConfig {
+        endpoint: context.endpoint.clone(),
+        default_zone: context.default_zone.clone(),
+    }))
+}
+
+fn context_config_path() -> Result<Option<PathBuf>> {
+    if let Ok(dir) = std::env::var("FCP_CONFIG_DIR")
+        && !dir.trim().is_empty()
+    {
+        return Ok(Some(PathBuf::from(dir).join("contexts.toml")));
+    }
+
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok();
+    Ok(home.map(|home| PathBuf::from(home).join(".fcp").join("contexts.toml")))
+}
+
+fn resolved_host_or_transport_error(
+    command: &str,
+    explicit_host: Option<&str>,
+) -> Result<ResolvedHostConfig> {
+    resolve_host_config(explicit_host)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "`{command}` requires a live `fcp-host` endpoint. Pass `--host`, set `FWC_HOST`/`FCP_HOST_ENDPOINT`, or configure an active FCP context."
+        )
+    })
+}
+
+fn resolved_zone(explicit_zone: Option<&str>, host: &ResolvedHostConfig) -> String {
+    explicit_zone
+        .map(str::trim)
+        .filter(|zone| !zone.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| host.default_zone.clone())
+        .unwrap_or_else(|| ZoneId::work().to_string())
+}
+
+#[derive(Debug)]
+struct HostAdminClient {
+    client: BlockingClient,
+    base_url: String,
+}
+
+#[derive(Clone, Debug)]
+struct HostConnectorRecord {
+    slug: String,
+    aliases: Vec<String>,
+    summary: fcp_host::ConnectorSummary,
+}
+
+#[derive(Clone, Debug)]
+struct HostConnectorCatalog {
+    connectors: Vec<HostConnectorRecord>,
+}
+
+impl HostAdminClient {
+    fn new(endpoint: &str) -> Result<Self> {
+        let endpoint = endpoint.trim();
+        if endpoint.is_empty() {
+            bail!("`--host` cannot be empty");
+        }
+
+        #[cfg(unix)]
+        {
+            if endpoint.starts_with("unix://") || endpoint.starts_with('/') {
+                let socket_path = endpoint.strip_prefix("unix://").unwrap_or(endpoint);
+                let client = BlockingClientBuilder::new()
+                    .unix_socket(socket_path)
+                    .build()
+                    .with_context(|| {
+                        format!(
+                            "failed to build Unix-socket client for host endpoint `{socket_path}`"
+                        )
+                    })?;
+                return Ok(Self {
+                    client,
+                    base_url: "http://localhost".to_owned(),
+                });
+            }
+        }
+
+        let normalized_endpoint = if endpoint.starts_with("http://")
+            || endpoint.starts_with("https://")
+        {
+            endpoint.to_owned()
+        } else {
+            let stripped = endpoint.strip_prefix("tcp://").unwrap_or(endpoint);
+            format!("http://{stripped}")
+        };
+
+        let client = BlockingClientBuilder::new()
+            .build()
+            .context("failed to build HTTP host client")?;
+        Ok(Self {
+            client,
+            base_url: normalized_endpoint.trim_end_matches('/').to_owned(),
+        })
+    }
+
+    fn catalog(
+        &self,
+        filter: Option<HostDiscoveryFilter>,
+    ) -> Result<(HostConnectorCatalog, HostDiscoveryResponse)> {
+        let response = self.discover(filter)?;
+        Ok((HostConnectorCatalog::from_response(&response), response))
+    }
+
+    fn discover(&self, filter: Option<HostDiscoveryFilter>) -> Result<HostDiscoveryResponse> {
+        self.post_json("/rpc/discover", &json!({ "filter": filter }))
+    }
+
+    fn connector(&self, connector_id: &str) -> Result<HostConnectorInventoryResponse> {
+        self.get_json(&format!("/rpc/connectors/{connector_id}"))
+    }
+
+    fn introspect(&self, connector_id: &str) -> Result<HostIntrospectionResponse> {
+        self.get_json(&format!("/rpc/introspect/{connector_id}"))
+    }
+
+    fn health(&self) -> Result<HostHealthResponse> {
+        self.get_json("/rpc/health")
+    }
+
+    fn connector_status(&self, connector_id: &str) -> Result<HostConnectorAdminStatus> {
+        self.get_json(&format!("/rpc/connectors/{connector_id}/status"))
+    }
+
+    fn preflight(&self, request: &HostPreflightRequest) -> Result<HostPreflightResponse> {
+        self.post_json("/rpc/preflight", request)
+    }
+
+    fn invoke(&self, request: &InvokeRequest) -> Result<InvokeResponse> {
+        self.post_json("/rpc/invoke", request)
+    }
+
+    fn cancel(&self, request: &HostCancellationRequest) -> Result<HostCancellationResponse> {
+        self.post_json("/rpc/cancel", request)
+    }
+
+    fn batch(&self, request: &HostBatchInvokeRequest) -> Result<HostBatchInvokeResponse> {
+        self.post_json("/rpc/batch", request)
+    }
+
+    fn pin(&self, connector_id: &str, version: &semver::Version) -> Result<HostPinState> {
+        self.put_json(
+            &format!("/rpc/rollout/pin/{connector_id}"),
+            &json!({ "version": version }),
+        )
+    }
+
+    fn unpin(&self, connector_id: &str) -> Result<HostPinState> {
+        self.delete_json(&format!("/rpc/rollout/pin/{connector_id}"))
+    }
+
+    fn pin_status(&self, connector_id: &str) -> Result<HostPinState> {
+        self.get_json(&format!("/rpc/rollout/pin/{connector_id}"))
+    }
+
+    fn rollout_status(&self, connector_id: &str) -> Result<HostRolloutStatus> {
+        self.get_json(&format!("/rpc/rollout/{connector_id}"))
+    }
+
+    fn rollback(
+        &self,
+        connector_id: &str,
+        to_version: &semver::Version,
+    ) -> Result<HostRollbackResponse> {
+        self.post_json(
+            "/rpc/rollout/rollback",
+            &json!({
+                "connector_id": connector_id,
+                "to_version": to_version,
+            }),
+        )
+    }
+
+    fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+        let response = self
+            .client
+            .get(format!("{}{}", self.base_url, path))
+            .send()
+            .with_context(|| format!("GET {path} from host admin API failed"))?;
+        Self::decode_response(response, "GET", path)
+    }
+
+    fn post_json<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T> {
+        let response = self
+            .client
+            .post(format!("{}{}", self.base_url, path))
+            .json(body)
+            .send()
+            .with_context(|| format!("POST {path} to host admin API failed"))?;
+        Self::decode_response(response, "POST", path)
+    }
+
+    fn put_json<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T> {
+        let response = self
+            .client
+            .put(format!("{}{}", self.base_url, path))
+            .json(body)
+            .send()
+            .with_context(|| format!("PUT {path} to host admin API failed"))?;
+        Self::decode_response(response, "PUT", path)
+    }
+
+    fn delete_json<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+        let response = self
+            .client
+            .delete(format!("{}{}", self.base_url, path))
+            .send()
+            .with_context(|| format!("DELETE {path} to host admin API failed"))?;
+        Self::decode_response(response, "DELETE", path)
+    }
+
+    fn decode_response<T: DeserializeOwned>(
+        response: reqwest::blocking::Response,
+        method: &str,
+        path: &str,
+    ) -> Result<T> {
+        let response = response
+            .error_for_status()
+            .with_context(|| format!("{method} {path} returned an error status"))?;
+        response
+            .json()
+            .with_context(|| format!("{method} {path} returned invalid JSON"))
+    }
+}
+
+impl HostConnectorCatalog {
+    fn from_response(response: &HostDiscoveryResponse) -> Self {
+        let connectors = response
+            .connectors
+            .iter()
+            .cloned()
+            .map(|summary| HostConnectorRecord {
+                slug: host_connector_slug(&summary),
+                aliases: host_connector_aliases(&summary),
+                summary,
+            })
+            .collect();
+        Self { connectors }
+    }
+
+    fn resolve_connector(&self, selector: &str) -> Result<&HostConnectorRecord, SelectorError> {
+        let normalized = normalize_connector_selector(selector);
+        let exact = self
+            .connectors
+            .iter()
+            .filter(|connector| connector.aliases.iter().any(|alias| alias == &normalized))
+            .collect::<Vec<_>>();
+
+        if exact.len() == 1 {
+            return Ok(exact[0]);
+        }
+        if exact.len() > 1 {
+            return Err(SelectorError::ambiguous(
+                selector,
+                exact
+                    .iter()
+                    .map(|connector| connector.slug.clone())
+                    .collect(),
+            ));
+        }
+
+        let prefix = self
+            .connectors
+            .iter()
+            .filter(|connector| {
+                connector
+                    .aliases
+                    .iter()
+                    .any(|alias| alias.starts_with(&normalized))
+            })
+            .collect::<Vec<_>>();
+
+        match prefix.as_slice() {
+            [connector] => Ok(*connector),
+            [] => Err(SelectorError::not_found(
+                selector,
+                suggest_host_connector_slugs(&self.connectors, &normalized),
+            )),
+            _ => Err(SelectorError::ambiguous(
+                selector,
+                prefix
+                    .iter()
+                    .map(|connector| connector.slug.clone())
+                    .collect(),
+            )),
+        }
+    }
+}
+
+fn host_connector_slug(summary: &fcp_host::ConnectorSummary) -> String {
+    let raw = summary.id.as_str().to_ascii_lowercase();
+    raw.strip_prefix("fcp.")
+        .unwrap_or(&raw)
+        .split(':')
+        .next()
+        .unwrap_or(raw.as_str())
+        .replace('_', "-")
+}
+
+fn host_connector_aliases(summary: &fcp_host::ConnectorSummary) -> Vec<String> {
+    let raw = summary.id.as_str();
+    let mut aliases = BTreeSet::from([normalize_connector_selector(raw)]);
+
+    if let Some(stripped) = raw.strip_prefix("fcp.") {
+        aliases.insert(normalize_connector_selector(stripped));
+    }
+    if let Some((head, _)) = raw.split_once(':') {
+        aliases.insert(normalize_connector_selector(head));
+        if let Some(stripped) = head.strip_prefix("fcp.") {
+            aliases.insert(normalize_connector_selector(stripped));
+        }
+    }
+    if !summary.name.is_empty() {
+        aliases.insert(normalize_connector_selector(&summary.name));
+    }
+
+    aliases.into_iter().collect()
+}
+
+fn suggest_host_connector_slugs(connectors: &[HostConnectorRecord], selector: &str) -> Vec<String> {
+    let mut candidates = connectors
+        .iter()
+        .map(|connector| {
+            let distance = selector_distance(selector, &connector.slug);
+            (connector.slug.clone(), distance)
+        })
+        .filter(|(slug, distance)| slug.starts_with(selector) || *distance <= 4)
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0)));
+    candidates
+        .into_iter()
+        .map(|(slug, _)| slug)
+        .take(5)
+        .collect()
+}
+
+fn resolve_host_tool<'a>(
+    tools: &'a [HostToolDescriptor],
+    selector: &str,
+) -> Result<&'a HostToolDescriptor, SelectorError> {
+    let normalized = normalize_operation_selector(selector);
+    let exact = tools
+        .iter()
+        .filter(|tool| {
+            host_tool_aliases(tool)
+                .iter()
+                .any(|alias| alias == &normalized)
+        })
+        .collect::<Vec<_>>();
+
+    if exact.len() == 1 {
+        return Ok(exact[0]);
+    }
+    if exact.len() > 1 {
+        return Err(SelectorError::ambiguous(
+            selector,
+            exact.iter().map(|tool| tool.name.clone()).collect(),
+        ));
+    }
+
+    let prefix = tools
+        .iter()
+        .filter(|tool| {
+            host_tool_aliases(tool)
+                .iter()
+                .any(|alias| alias.starts_with(&normalized))
+        })
+        .collect::<Vec<_>>();
+
+    match prefix.as_slice() {
+        [tool] => Ok(*tool),
+        [] => Err(SelectorError::not_found(
+            selector,
+            suggest_host_tool_names(tools, &normalized),
+        )),
+        _ => Err(SelectorError::ambiguous(
+            selector,
+            prefix.iter().map(|tool| tool.name.clone()).collect(),
+        )),
+    }
+}
+
+fn host_tool_aliases(tool: &HostToolDescriptor) -> Vec<String> {
+    let mut aliases = BTreeSet::from([normalize_operation_selector(&tool.name)]);
+    if let Some(local_id) = tool.name.rsplit('.').next() {
+        aliases.insert(normalize_operation_selector(local_id));
+    }
+    aliases.into_iter().collect()
+}
+
+fn suggest_host_tool_names(tools: &[HostToolDescriptor], selector: &str) -> Vec<String> {
+    let mut candidates = tools
+        .iter()
+        .map(|tool| {
+            let distance = selector_distance(selector, &tool.name);
+            (tool.name.clone(), distance)
+        })
+        .filter(|(name, distance)| name.starts_with(selector) || *distance <= 6)
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0)));
+    candidates
+        .into_iter()
+        .map(|(name, _)| name)
+        .take(5)
+        .collect()
+}
+
+fn host_filter_gaps(zone: Option<&str>) -> Vec<Value> {
+    let mut gaps = Vec::new();
+    if let Some(zone) = zone {
+        gaps.push(json!({
+            "field": "filters.zone",
+            "status": "unavailable",
+            "message": format!(
+                "Host discovery does not currently expose supported-zone metadata, so the requested zone filter `{zone}` was not applied."
+            ),
+        }));
+    }
+    gaps
+}
+
+fn host_metadata_gaps(introspection: &HostIntrospectionResponse) -> Vec<Value> {
+    let mut gaps = Vec::new();
+    if introspection.rate_limits.is_none() {
+        gaps.push(json!({
+            "field": "rate_limits",
+            "status": "missing",
+            "message": "Host introspection did not include rate-limit declarations for this connector.",
+        }));
+    }
+    if introspection
+        .tools
+        .iter()
+        .any(|tool| tool.ai_hints.is_none())
+    {
+        gaps.push(json!({
+            "field": "tools[].ai_hints",
+            "status": "partial",
+            "message": "One or more operations are missing AI hints, so CLI guidance is incomplete.",
+        }));
+    }
+    if introspection
+        .tools
+        .iter()
+        .all(|tool| tool.examples.is_empty())
+    {
+        gaps.push(json!({
+            "field": "tools[].examples",
+            "status": "missing",
+            "message": "No operation examples were exposed by host introspection.",
+        }));
+    }
+    gaps
+}
+
+fn host_connector_state_label(health: &fcp_core::ConnectorHealth) -> &'static str {
+    if health.is_healthy() {
+        "ready"
+    } else if health.is_available() {
+        "degraded"
+    } else {
+        "error"
+    }
+}
+
+fn host_tool_summary_entry(tool: &HostToolDescriptor) -> Value {
+    json!({
+        "selector": &tool.name,
+        "canonical_id": &tool.name,
+        "local_id": tool.name.rsplit('.').next().unwrap_or(tool.name.as_str()),
+        "aliases": host_tool_aliases(tool),
+        "summary": &tool.description,
+        "capability": tool.capability.as_str(),
+        "risk_level": risk_level_label(tool.risk_level),
+        "safety_tier": safety_tier_label(tool.safety_tier),
+        "idempotency": idempotency_label(tool.idempotency),
+        "requires_approval": tool.approval_mode.is_some(),
+        "supports_simulate": tool.supports_simulate,
+        "example_count": tool.examples.len(),
+        "rate_limits": tool.rate_limits.clone(),
+    })
+}
+
+fn host_connector_list_entry(connector: &HostConnectorRecord) -> Value {
+    json!({
+        "slug": &connector.slug,
+        "canonical_id": connector.summary.id.as_str(),
+        "name": &connector.summary.name,
+        "description": &connector.summary.description,
+        "version": connector.summary.version.to_string(),
+        "cohort": Value::Null,
+        "categories": connector.summary.categories.clone(),
+        "format": Value::Null,
+        "state": host_connector_state_label(&connector.summary.health),
+        "home_zone": Value::Null,
+        "archetypes": Vec::<String>::new(),
+        "operation_count": connector.summary.tool_count,
+        "max_risk": safety_tier_label(connector.summary.max_safety_tier),
+        "has_events": Value::Null,
+        "next_actions": [
+            format!("fwc show {}", connector.slug),
+            format!("fwc ops {}", connector.slug),
+        ],
+    })
+}
+
+fn host_tool_example_strings(tool: &HostToolDescriptor) -> Vec<String> {
+    tool.examples
+        .iter()
+        .filter_map(|example| serde_json::to_string(&example.input).ok())
+        .collect()
+}
+
+fn host_tool_when_to_use(tool: &HostToolDescriptor) -> String {
+    tool.ai_hints
+        .as_ref()
+        .map(|hints| hints.when_to_use.trim())
+        .filter(|when_to_use| !when_to_use.is_empty())
+        .map(std::borrow::ToOwned::to_owned)
+        .unwrap_or_else(|| "Host introspection did not include `when_to_use` guidance.".to_owned())
+}
+
+fn host_tool_common_mistakes(tool: &HostToolDescriptor) -> Vec<String> {
+    tool.ai_hints
+        .as_ref()
+        .map_or_else(Vec::new, |hints| hints.common_mistakes.clone())
+}
+
+fn host_tool_related(tool: &HostToolDescriptor) -> Vec<String> {
+    tool.ai_hints.as_ref().map_or_else(Vec::new, |hints| {
+        hints.related.iter().map(ToString::to_string).collect()
+    })
+}
+
+fn host_connector_schema_glossary(
+    connector: &HostConnectorInventoryResponse,
+    introspection: &HostIntrospectionResponse,
+    metadata_gaps: &[Value],
+) -> Value {
+    json!({
+        "connector_inventory_fields": [
+            { "field": "connector.id", "type": "connector-id", "description": "Canonical connector identifier exposed by `fcp-host`." },
+            { "field": "connector.name", "type": "string", "description": "Human-readable connector name." },
+            { "field": "connector.description", "type": "string|null", "description": "Operator-facing connector summary." },
+            { "field": "connector.version", "type": "semver", "description": "Installed connector version." },
+            { "field": "connector.categories", "type": "string[]", "description": "Host-side grouping categories for discovery filters." },
+            { "field": "connector.tool_count", "type": "u32", "description": "Number of operation descriptors currently exposed by the connector." },
+            { "field": "connector.max_safety_tier", "type": "safety-tier", "description": "Highest safety tier across the connector's operation set." },
+            { "field": "connector.enabled", "type": "bool", "description": "Whether the connector is enabled for execution." },
+            { "field": "connector.health", "type": "connector-health", "description": "Current merged runtime health reported by the host." },
+            { "field": "connector.last_health_check", "type": "timestamp|null", "description": "Timestamp of the most recent health observation." }
+        ],
+        "tool_descriptor_fields": [
+            { "field": "tools[].name", "type": "string", "description": "Stable operation selector used by `fwc ops/schema/examples`." },
+            { "field": "tools[].description", "type": "string", "description": "One-line operation summary." },
+            { "field": "tools[].input_schema", "type": "json-schema", "description": "Machine-readable input schema for invoke/simulate payloads." },
+            { "field": "tools[].output_schema", "type": "json-schema", "description": "Machine-readable output schema returned by the connector." },
+            { "field": "tools[].capability", "type": "capability-id", "description": "Capability requirement that the host enforces before execution." },
+            { "field": "tools[].risk_level", "type": "risk-level", "description": "Operator-facing risk label for the operation." },
+            { "field": "tools[].safety_tier", "type": "safety-tier", "description": "Safety tier surfaced to agents and policy UX." },
+            { "field": "tools[].idempotency", "type": "idempotency-class", "description": "Retry semantics for the operation." },
+            { "field": "tools[].approval_mode", "type": "approval-mode|null", "description": "Approval requirement when the host requires explicit authorization." },
+            { "field": "tools[].supports_simulate", "type": "bool", "description": "Whether the operation supports host-backed simulate flows." },
+            { "field": "tools[].rate_limits", "type": "string[]", "description": "Rate-limit pools attached to the operation descriptor." },
+            { "field": "tools[].examples", "type": "tool-example[]", "description": "Example inputs surfaced for `fwc examples`." },
+            { "field": "tools[].ai_hints", "type": "agent-hint|null", "description": "Agent guidance including when-to-use, mistakes, and related operations." }
+        ],
+        "introspection_fields": [
+            { "field": "archetype", "type": "connector-archetype", "description": "Primary archetype classification chosen by the host." },
+            { "field": "rate_limits", "type": "rate-limit-declarations|null", "description": "Connector-wide rate-limit declarations returned by host introspection." },
+            { "field": "introspection.events", "type": "event-descriptor[]", "description": "Declared event surfaces from connector introspection." },
+            { "field": "introspection.resource_types", "type": "string[]", "description": "Named resource families exposed by the connector." },
+            { "field": "introspection.auth_caps", "type": "auth-descriptor|null", "description": "Authentication capability metadata surfaced by the connector." },
+            { "field": "introspection.event_caps", "type": "event-caps|null", "description": "Streaming/replay capabilities surfaced by the connector." }
+        ],
+        "sample": {
+            "connector": &connector.connector,
+            "archetype": introspection.archetype,
+            "rate_limits": &introspection.rate_limits,
+            "introspection": &introspection.introspection,
+        },
+        "metadata_gaps": metadata_gaps,
+    })
+}
+
+fn host_operation_resolution_dispatch(
+    command: &str,
+    connector_slug: &str,
+    selector: &str,
+    error: &SelectorError,
+) -> DispatchOutcome {
+    let error_type = match error.kind {
+        SelectorErrorKind::NotFound => "operation-not-found",
+        SelectorErrorKind::Ambiguous => "ambiguous-operation",
+    };
+    let message = match error.kind {
+        SelectorErrorKind::NotFound => {
+            format!("`{selector}` did not match any operation exposed by `{connector_slug}`.")
+        }
+        SelectorErrorKind::Ambiguous => format!(
+            "`{selector}` matches multiple operations on `{connector_slug}`; choose one explicit selector."
+        ),
+    };
+    let mut examples = if error.suggestions.is_empty() {
+        vec![format!("fwc ops {connector_slug}")]
+    } else {
+        error
+            .suggestions
+            .iter()
+            .map(|suggestion| format!("fwc {command} {connector_slug} {suggestion}"))
+            .collect::<Vec<_>>()
+    };
+    examples.push(format!("fwc ops {connector_slug}"));
+
+    discovery_error(
+        command,
+        error_type,
+        message,
+        selector,
+        &error.suggestions,
+        &examples,
+    )
+}
+
+fn list_dispatch_host(args: &ListArgs, host: &str) -> Result<DispatchOutcome> {
+    let client = HostAdminClient::new(host)?;
+    let filter = HostDiscoveryFilter {
+        category: args.category.clone(),
+        ..HostDiscoveryFilter::default()
+    };
+    let (catalog, response) = client.catalog(Some(filter))?;
+    let filter_gaps = host_filter_gaps(args.zone.as_deref());
+    let connectors = catalog
+        .connectors
+        .iter()
+        .map(host_connector_list_entry)
+        .collect::<Vec<_>>();
+
+    Ok(DispatchOutcome {
+        payload: json!({
+            "status": "ok",
+            "command": "list",
+            "source": "host-admin-api",
+            "message": format!("Listed {} connectors from `fcp-host` discovery.", connectors.len()),
+            "filters": {
+                "zone": args.zone.clone(),
+                "category": args.category.clone(),
+            },
+            "filter_gaps": filter_gaps,
+            "registry_version": response.registry_version,
+            "cache": response.cache,
+            "connectors": connectors,
+            "next_actions": [
+                "Use `fwc show <connector> --host <endpoint>` to inspect one connector in detail.",
+                "Use `fwc ops <connector> --host <endpoint>` to enumerate host-backed operations.",
+            ],
+        }),
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn show_dispatch_host(args: &ShowArgs, host: &str) -> Result<DispatchOutcome> {
+    let client = HostAdminClient::new(host)?;
+    let (catalog, _) = client.catalog(None)?;
+    let connector = match catalog.resolve_connector(&args.connector) {
+        Ok(connector) => connector,
+        Err(error) => {
+            return Ok(connector_resolution_dispatch(
+                "show",
+                &args.connector,
+                &error,
+            ));
+        }
+    };
+    let inventory = client.connector(connector.summary.id.as_str())?;
+    let introspection = client.introspect(connector.summary.id.as_str())?;
+    let preview = introspection
+        .tools
+        .iter()
+        .take(8)
+        .map(host_tool_summary_entry)
+        .collect::<Vec<_>>();
+    let preview_truncated = introspection.tools.len() > preview.len();
+    let risky_count = introspection
+        .tools
+        .iter()
+        .filter(|tool| {
+            matches!(
+                safety_tier_label(tool.safety_tier),
+                "risky" | "dangerous" | "critical"
+            )
+        })
+        .count();
+    let example_operation = introspection
+        .tools
+        .first()
+        .map_or_else(|| "<operation>".to_owned(), |tool| tool.name.clone());
+    let metadata_gaps = host_metadata_gaps(&introspection);
+
+    Ok(DispatchOutcome {
+        payload: json!({
+            "status": "ok",
+            "command": "show",
+            "source": "host-admin-api",
+            "message": "Loaded connector detail from `fcp-host` inventory and introspection.",
+            "connector": {
+                "slug": &connector.slug,
+                "canonical_id": inventory.connector.id.as_str(),
+                "name": &inventory.connector.name,
+                "version": inventory.connector.version.to_string(),
+                "description": &inventory.connector.description,
+                "cohort": Value::Null,
+                "categories": inventory.connector.categories.clone(),
+                "format": Value::Null,
+                "state": host_connector_state_label(&inventory.connector.health),
+                "enabled": inventory.connector.enabled,
+                "health": &inventory.connector.health,
+                "last_health_check": inventory.connector.last_health_check,
+                "archetype": introspection.archetype,
+                "operation_count": introspection.tools.len(),
+                "max_risk": safety_tier_label(inventory.connector.max_safety_tier),
+                "has_events": introspection.introspection.event_caps.is_some() || !introspection.introspection.events.is_empty(),
+                "manifest_path": Value::Null,
+            },
+            "rate_limits": introspection.rate_limits,
+            "metadata_gaps": metadata_gaps,
+            "operations": {
+                "preview": preview,
+                "preview_truncated": preview_truncated,
+                "risky_count": risky_count,
+                "safe_count": introspection.tools.len().saturating_sub(risky_count),
+            },
+            "next_actions": [
+                format!("fwc ops {} --host {host}", connector.slug),
+                format!("fwc schema {} {} --host {host}", connector.slug, example_operation),
+                format!("fwc examples {} {} --host {host}", connector.slug, example_operation),
+            ],
+        }),
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn ops_dispatch_host(args: &OpsArgs, host: &str) -> Result<DispatchOutcome> {
+    let client = HostAdminClient::new(host)?;
+    let (catalog, _) = client.catalog(None)?;
+    let connector = match catalog.resolve_connector(&args.connector) {
+        Ok(connector) => connector,
+        Err(error) => {
+            return Ok(connector_resolution_dispatch(
+                "ops",
+                &args.connector,
+                &error,
+            ));
+        }
+    };
+    let introspection = client.introspect(connector.summary.id.as_str())?;
+    let operations = introspection
+        .tools
+        .iter()
+        .filter(|tool| {
+            args.risk_at_most.as_deref().is_none_or(|limit| {
+                risk_rank(risk_level_label(tool.risk_level)) <= risk_rank(limit)
+            })
+        })
+        .map(host_tool_summary_entry)
+        .collect::<Vec<_>>();
+
+    Ok(DispatchOutcome {
+        payload: json!({
+            "status": "ok",
+            "command": "ops",
+            "source": "host-admin-api",
+            "message": format!("Listed {} operations for `{}` from host introspection.", operations.len(), connector.slug),
+            "connector": {
+                "slug": &connector.slug,
+                "canonical_id": connector.summary.id.as_str(),
+                "name": &connector.summary.name,
+            },
+            "filters": {
+                "risk_at_most": args.risk_at_most.clone(),
+            },
+            "metadata_gaps": host_metadata_gaps(&introspection),
+            "operations": operations,
+            "next_actions": [
+                format!("fwc schema {} <operation> --host {host}", connector.slug),
+                format!("fwc examples {} <operation> --host {host}", connector.slug),
+            ],
+        }),
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn schema_dispatch_host(args: &SchemaArgs, host: &str) -> Result<DispatchOutcome> {
+    let client = HostAdminClient::new(host)?;
+    let (catalog, _) = client.catalog(None)?;
+    let connector = match catalog.resolve_connector(&args.connector) {
+        Ok(connector) => connector,
+        Err(error) => {
+            return Ok(connector_resolution_dispatch(
+                "schema",
+                &args.connector,
+                &error,
+            ));
+        }
+    };
+    let inventory = client.connector(connector.summary.id.as_str())?;
+    let introspection = client.introspect(connector.summary.id.as_str())?;
+    let metadata_gaps = host_metadata_gaps(&introspection);
+
+    if let Some(operation_selector) = args.operation.as_deref() {
+        let operation = match resolve_host_tool(&introspection.tools, operation_selector) {
+            Ok(operation) => operation,
+            Err(error) => {
+                return Ok(host_operation_resolution_dispatch(
+                    "schema",
+                    &connector.slug,
+                    operation_selector,
+                    &error,
+                ));
+            }
+        };
+
+        if args.scaffold {
+            let scaffold = schema_nav::scaffold_template(&operation.input_schema);
+            return Ok(DispatchOutcome {
+                payload: json!({
+                    "status": "ok",
+                    "command": "schema",
+                    "source": "host-admin-api",
+                    "scope": "scaffold",
+                    "connector": { "slug": &connector.slug },
+                    "operation": { "selector": &operation.name },
+                    "scaffold": scaffold,
+                }),
+                exit_code: CliExitCode::Success,
+            });
+        }
+
+        let example_strs = if args.examples {
+            host_tool_example_strings(operation)
+        } else {
+            Vec::new()
+        };
+        let mut fields = schema_nav::walk_schema(&operation.input_schema, &example_strs);
+        if args.required_only {
+            fields.retain(|field| field.required);
+        }
+        if let Some(ref field_path) = args.field {
+            fields = schema_nav::filter_by_field(&fields, field_path);
+        }
+
+        return Ok(DispatchOutcome {
+            payload: json!({
+                "status": "ok",
+                "command": "schema",
+                "source": "host-admin-api",
+                "scope": "operation",
+                "message": "Loaded operation schemas from `fcp-host` introspection.",
+                "connector": {
+                    "slug": &connector.slug,
+                    "canonical_id": connector.summary.id.as_str(),
+                    "name": &connector.summary.name,
+                },
+                "operation": {
+                    "requested_selector": operation_selector,
+                    "selector": &operation.name,
+                    "canonical_id": &operation.name,
+                    "aliases": host_tool_aliases(operation),
+                    "summary": &operation.description,
+                    "capability": operation.capability.as_str(),
+                    "risk_level": risk_level_label(operation.risk_level),
+                    "safety_tier": safety_tier_label(operation.safety_tier),
+                    "idempotency": idempotency_label(operation.idempotency),
+                    "approval_mode": &operation.approval_mode,
+                    "supports_simulate": operation.supports_simulate,
+                },
+                "input_schema": &operation.input_schema,
+                "output_schema": &operation.output_schema,
+                "fields": fields,
+                "guidance": {
+                    "when_to_use": host_tool_when_to_use(operation),
+                    "common_mistakes": host_tool_common_mistakes(operation),
+                    "related": host_tool_related(operation),
+                },
+                "metadata_gaps": metadata_gaps,
+                "next_actions": [
+                    format!("fwc examples {} {} --host {host}", connector.slug, operation.name),
+                    format!("fwc schema {} {} --required-only --host {host}", connector.slug, operation.name),
+                    format!("fwc schema {} {} --scaffold --host {host}", connector.slug, operation.name),
+                ],
+            }),
+            exit_code: CliExitCode::Success,
+        });
+    }
+
+    Ok(DispatchOutcome {
+        payload: json!({
+            "status": "ok",
+            "command": "schema",
+            "source": "host-admin-api",
+            "scope": "connector",
+            "message": "Loaded the connector inventory/introspection field glossary from `fcp-host`.",
+            "connector": {
+                "slug": &connector.slug,
+                "canonical_id": connector.summary.id.as_str(),
+                "name": &connector.summary.name,
+            },
+            "schema": host_connector_schema_glossary(&inventory, &introspection, &metadata_gaps),
+            "next_actions": [
+                format!("fwc ops {} --host {host}", connector.slug),
+                format!("fwc schema {} <operation> --host {host}", connector.slug),
+            ],
+        }),
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn examples_dispatch_host(args: &ExampleArgs, host: &str) -> Result<DispatchOutcome> {
+    let client = HostAdminClient::new(host)?;
+    let (catalog, _) = client.catalog(None)?;
+    let connector = match catalog.resolve_connector(&args.connector) {
+        Ok(connector) => connector,
+        Err(error) => {
+            return Ok(connector_resolution_dispatch(
+                "examples",
+                &args.connector,
+                &error,
+            ));
+        }
+    };
+    let introspection = client.introspect(connector.summary.id.as_str())?;
+    let metadata_gaps = host_metadata_gaps(&introspection);
+
+    if let Some(operation_selector) = args.operation.as_deref() {
+        let operation = match resolve_host_tool(&introspection.tools, operation_selector) {
+            Ok(operation) => operation,
+            Err(error) => {
+                return Ok(host_operation_resolution_dispatch(
+                    "examples",
+                    &connector.slug,
+                    operation_selector,
+                    &error,
+                ));
+            }
+        };
+
+        return Ok(DispatchOutcome {
+            payload: json!({
+                "status": "ok",
+                "command": "examples",
+                "source": "host-admin-api",
+                "scope": "operation",
+                "message": "Loaded operation examples from `fcp-host` introspection.",
+                "connector": {
+                    "slug": &connector.slug,
+                    "canonical_id": connector.summary.id.as_str(),
+                    "name": &connector.summary.name,
+                },
+                "operation": {
+                    "requested_selector": operation_selector,
+                    "selector": &operation.name,
+                    "canonical_id": &operation.name,
+                    "aliases": host_tool_aliases(operation),
+                    "when_to_use": host_tool_when_to_use(operation),
+                },
+                "examples": operation.examples.iter().map(|example| {
+                    json!({
+                        "description": &example.description,
+                        "input": &example.input,
+                        "output": &example.output,
+                    })
+                }).collect::<Vec<_>>(),
+                "common_mistakes": host_tool_common_mistakes(operation),
+                "metadata_gaps": metadata_gaps,
+                "next_actions": [
+                    format!("fwc schema {} {} --host {host}", connector.slug, operation.name),
+                    format!("fwc simulate {} {} --file payload.json", connector.slug, operation.name),
+                ],
+            }),
+            exit_code: CliExitCode::Success,
+        });
+    }
+
+    let operation_examples = introspection
+        .tools
+        .iter()
+        .filter(|tool| !tool.examples.is_empty())
+        .take(3)
+        .map(|tool| {
+            json!({
+                "selector": &tool.name,
+                "canonical_id": &tool.name,
+                "when_to_use": host_tool_when_to_use(tool),
+                "example": tool.examples.first().map(|example| example.input.clone()).unwrap_or(Value::Null),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Ok(DispatchOutcome {
+        payload: json!({
+            "status": "ok",
+            "command": "examples",
+            "source": "host-admin-api",
+            "scope": "connector",
+            "message": "Loaded connector-level examples and suggested follow-up commands from `fcp-host`.",
+            "connector": {
+                "slug": &connector.slug,
+                "canonical_id": connector.summary.id.as_str(),
+                "name": &connector.summary.name,
+            },
+            "examples": {
+                "commands": [
+                    format!("fwc show {} --host {host}", connector.slug),
+                    format!("fwc ops {} --host {host}", connector.slug),
+                    format!("fwc schema {} <operation> --host {host}", connector.slug),
+                ],
+                "operations": operation_examples,
+            },
+            "metadata_gaps": metadata_gaps,
+            "next_actions": [
+                format!("fwc ops {} --host {host}", connector.slug),
+                format!("fwc schema {} <operation> --host {host}", connector.slug),
+            ],
+        }),
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn list_dispatch(args: &ListArgs, host: Option<&str>) -> Result<DispatchOutcome> {
+    if let Some(host) = host {
+        return list_dispatch_host(args, host);
+    }
+
     let catalog = DiscoveryCatalog::load()?;
     let connectors = catalog
         .list(args.zone.as_deref(), args.category.as_deref())
@@ -1843,7 +3119,11 @@ fn search_dispatch(args: &SearchArgs) -> Result<DispatchOutcome> {
     })
 }
 
-fn show_dispatch(args: &ShowArgs) -> Result<DispatchOutcome> {
+fn show_dispatch(args: &ShowArgs, host: Option<&str>) -> Result<DispatchOutcome> {
+    if let Some(host) = host {
+        return show_dispatch_host(args, host);
+    }
+
     let catalog = DiscoveryCatalog::load()?;
     let connector = match catalog.resolve_connector(&args.connector) {
         Ok(connector) => connector,
@@ -1922,7 +3202,11 @@ fn show_dispatch(args: &ShowArgs) -> Result<DispatchOutcome> {
     })
 }
 
-fn ops_dispatch(args: &OpsArgs) -> Result<DispatchOutcome> {
+fn ops_dispatch(args: &OpsArgs, host: Option<&str>) -> Result<DispatchOutcome> {
+    if let Some(host) = host {
+        return ops_dispatch_host(args, host);
+    }
+
     let catalog = DiscoveryCatalog::load()?;
     let connector = match catalog.resolve_connector(&args.connector) {
         Ok(connector) => connector,
@@ -1967,7 +3251,11 @@ fn ops_dispatch(args: &OpsArgs) -> Result<DispatchOutcome> {
 }
 
 #[allow(clippy::too_many_lines)]
-fn schema_dispatch(args: &SchemaArgs) -> Result<DispatchOutcome> {
+fn schema_dispatch(args: &SchemaArgs, host: Option<&str>) -> Result<DispatchOutcome> {
+    if let Some(host) = host {
+        return schema_dispatch_host(args, host);
+    }
+
     let catalog = DiscoveryCatalog::load()?;
     let connector = match catalog.resolve_connector(&args.connector) {
         Ok(connector) => connector,
@@ -2115,7 +3403,11 @@ fn schema_dispatch(args: &SchemaArgs) -> Result<DispatchOutcome> {
     })
 }
 
-fn examples_dispatch(args: &ExampleArgs) -> Result<DispatchOutcome> {
+fn examples_dispatch(args: &ExampleArgs, host: Option<&str>) -> Result<DispatchOutcome> {
+    if let Some(host) = host {
+        return examples_dispatch_host(args, host);
+    }
+
     let catalog = DiscoveryCatalog::load()?;
     let connector = match catalog.resolve_connector(&args.connector) {
         Ok(connector) => connector,
@@ -2209,6 +3501,157 @@ fn examples_dispatch(args: &ExampleArgs) -> Result<DispatchOutcome> {
             "next_actions": [
                 format!("fwc ops {}", connector.slug),
                 format!("fwc schema {} <operation>", connector.slug),
+            ],
+        }),
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn status_dispatch(args: &StatusArgs, explicit_host: Option<&str>) -> Result<DispatchOutcome> {
+    let host = resolved_host_or_transport_error("status", explicit_host)?;
+    let client = HostAdminClient::new(&host.endpoint)?;
+    let (catalog, discovery) = client.catalog(None)?;
+    let health = client.health()?;
+
+    if let Some(selector) = args.connector.as_deref() {
+        let connector = match catalog.resolve_connector(selector) {
+            Ok(connector) => connector,
+            Err(error) => return Ok(connector_resolution_dispatch("status", selector, &error)),
+        };
+        let admin = client.connector_status(connector.summary.id.as_str())?;
+        let pin = client.pin_status(connector.summary.id.as_str())?;
+        let rollout = client.rollout_status(connector.summary.id.as_str()).ok();
+
+        return Ok(DispatchOutcome {
+            payload: json!({
+                "status": "ok",
+                "command": "status",
+                "scope": "connector",
+                "source": "host-admin-api",
+                "message": format!("Loaded live connector admin status for `{}` from `fcp-host`.", connector.slug),
+                "connector": {
+                    "slug": &connector.slug,
+                    "canonical_id": connector.summary.id.as_str(),
+                    "name": &connector.summary.name,
+                    "version": connector.summary.version.to_string(),
+                    "enabled": connector.summary.enabled,
+                    "health": &connector.summary.health,
+                },
+                "admin": admin,
+                "pin": pin,
+                "rollout": rollout,
+                "host_health": {
+                    "status": health.status,
+                    "timestamp": health.timestamp,
+                },
+                "registry_version": discovery.registry_version,
+                "next_actions": [
+                    format!("fwc show {} --host {}", connector.slug, host.endpoint),
+                    format!("fwc ops {} --host {}", connector.slug, host.endpoint),
+                    format!("fwc pin {} --to {} --host {}", connector.slug, connector.summary.version, host.endpoint),
+                ],
+            }),
+            exit_code: CliExitCode::Success,
+        });
+    }
+
+    let connector_rows = catalog
+        .connectors
+        .iter()
+        .map(|connector| {
+            json!({
+                "slug": &connector.slug,
+                "canonical_id": connector.summary.id.as_str(),
+                "name": &connector.summary.name,
+                "enabled": connector.summary.enabled,
+                "health": &connector.summary.health,
+                "state": host_connector_state_label(&connector.summary.health),
+                "version": connector.summary.version.to_string(),
+                "tool_count": connector.summary.tool_count,
+                "max_safety_tier": safety_tier_label(connector.summary.max_safety_tier),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Ok(DispatchOutcome {
+        payload: json!({
+            "status": "ok",
+            "command": "status",
+            "scope": "fleet",
+            "source": "host-admin-api",
+            "message": format!("Loaded live fleet status for {} connectors from `fcp-host`.", connector_rows.len()),
+            "host_health": health,
+            "registry_version": discovery.registry_version,
+            "connectors": connector_rows,
+            "next_actions": [
+                format!("fwc status <connector> --host {}", host.endpoint),
+                format!("fwc list --host {}", host.endpoint),
+                format!("fwc show <connector> --host {}", host.endpoint),
+            ],
+        }),
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn pin_dispatch(args: &PinArgs, explicit_host: Option<&str>) -> Result<DispatchOutcome> {
+    let host = resolved_host_or_transport_error("pin", explicit_host)?;
+    let client = HostAdminClient::new(&host.endpoint)?;
+    let (catalog, _) = client.catalog(None)?;
+    let connector = match catalog.resolve_connector(&args.connector) {
+        Ok(connector) => connector,
+        Err(error) => return Ok(connector_resolution_dispatch("pin", &args.connector, &error)),
+    };
+    let version = args.to.parse::<semver::Version>().map_err(|error| {
+        anyhow::anyhow!(
+            "`fwc pin` currently requires an explicit semantic version because `fcp-host` only exposes version pins today: {error}"
+        )
+    })?;
+    let pin = client.pin(connector.summary.id.as_str(), &version)?;
+
+    Ok(DispatchOutcome {
+        payload: json!({
+            "status": "ok",
+            "command": "pin",
+            "source": "host-admin-api",
+            "message": format!("Pinned `{}` to `{}` via `fcp-host`.", connector.slug, version),
+            "connector": {
+                "slug": &connector.slug,
+                "canonical_id": connector.summary.id.as_str(),
+            },
+            "pin": pin,
+            "next_actions": [
+                format!("fwc status {} --host {}", connector.slug, host.endpoint),
+                format!("fwc unpin {} --host {}", connector.slug, host.endpoint),
+            ],
+        }),
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn unpin_dispatch(args: &TargetArgs, explicit_host: Option<&str>) -> Result<DispatchOutcome> {
+    let host = resolved_host_or_transport_error("unpin", explicit_host)?;
+    let client = HostAdminClient::new(&host.endpoint)?;
+    let (catalog, _) = client.catalog(None)?;
+    let connector = match catalog.resolve_connector(&args.connector) {
+        Ok(connector) => connector,
+        Err(error) => return Ok(connector_resolution_dispatch("unpin", &args.connector, &error)),
+    };
+    let pin = client.unpin(connector.summary.id.as_str())?;
+
+    Ok(DispatchOutcome {
+        payload: json!({
+            "status": "ok",
+            "command": "unpin",
+            "source": "host-admin-api",
+            "message": format!("Removed the live rollout pin for `{}`.", connector.slug),
+            "connector": {
+                "slug": &connector.slug,
+                "canonical_id": connector.summary.id.as_str(),
+            },
+            "pin": pin,
+            "next_actions": [
+                format!("fwc status {} --host {}", connector.slug, host.endpoint),
+                format!("fwc pin {} --to <version> --host {}", connector.slug, host.endpoint),
             ],
         }),
         exit_code: CliExitCode::Success,
@@ -2735,7 +4178,336 @@ struct InvokeInputError {
     details: Option<Value>,
 }
 
-fn invoke_dispatch(command: &str, args: &InvokeArgs) -> Result<DispatchOutcome> {
+fn invoke_dispatch(
+    command: &str,
+    args: &InvokeArgs,
+    explicit_host: Option<&str>,
+) -> Result<DispatchOutcome> {
+    if let Some(host) = resolve_host_config(explicit_host)? {
+        return invoke_dispatch_host(command, args, &host);
+    }
+    invoke_dispatch_without_host(command, args)
+}
+
+fn invoke_dispatch_host(
+    command: &str,
+    args: &InvokeArgs,
+    host: &ResolvedHostConfig,
+) -> Result<DispatchOutcome> {
+    let client = HostAdminClient::new(&host.endpoint)?;
+    let (catalog, _) = client.catalog(None)?;
+    let connector = match catalog.resolve_connector(&args.connector) {
+        Ok(connector) => connector,
+        Err(error) => return Ok(connector_resolution_dispatch(command, &args.connector, &error)),
+    };
+    let introspection = client.introspect(connector.summary.id.as_str())?;
+    let operation = match resolve_host_tool(&introspection.tools, &args.operation) {
+        Ok(operation) => operation,
+        Err(error) => {
+            return Ok(host_operation_resolution_dispatch(
+                command,
+                &connector.slug,
+                &args.operation,
+                &error,
+            ));
+        }
+    };
+
+    let prepared = match prepare_invoke_input(command, args, &operation.input_schema) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            return Ok(host_invoke_input_error_dispatch(
+                command, args, connector, operation, error,
+            ));
+        }
+    };
+
+    let validation = validate::validate(&prepared.payload, &operation.input_schema);
+    let valid = validation.is_valid();
+    let validation_errors = validation
+        .errors
+        .iter()
+        .map(|error| {
+            json!({
+                "path": error.path,
+                "message": error.message,
+                "suggestion": error.suggestion,
+            })
+        })
+        .collect::<Vec<_>>();
+    let payload_preview = invoke_payload_preview(&prepared.payload);
+    let payload_json = serde_json::to_string(&prepared.payload)?;
+    let PreparedInvokeInput {
+        payload: prepared_payload,
+        primary_source,
+        sources,
+        binding_count,
+        warnings,
+    } = prepared;
+
+    let zone = resolved_zone(args.zone.as_deref(), host);
+    let zone_id: ZoneId = zone.parse().map_err(|error| {
+        anyhow::anyhow!("`{zone}` is not a valid FCP zone for `{command}`: {error}")
+    })?;
+    let connector_id: ConnectorId = connector.summary.id.as_str().parse().map_err(|error| {
+        anyhow::anyhow!(
+            "host connector id `{}` is not canonical: {error}",
+            connector.summary.id
+        )
+    })?;
+    let operation_id: OperationId = operation.name.parse().map_err(|error| {
+        anyhow::anyhow!("host operation id `{}` is not canonical: {error}", operation.name)
+    })?;
+
+    let mut payload = json!({
+        "status": if valid { "ready" } else { "error" },
+        "command": command,
+        "source": "host-admin-api",
+        "phase": "input-authoring",
+        "message": if valid {
+            format!(
+                "Prepared a live `{command}` request for `{}.{}` against `fcp-host`.",
+                connector.slug, operation.name
+            )
+        } else {
+            format!(
+                "Prepared a live `{command}` request for `{}.{}`, but the payload fails schema validation before host execution.",
+                connector.slug, operation.name
+            )
+        },
+        "connector": {
+            "slug": &connector.slug,
+            "canonical_id": connector.summary.id.as_str(),
+            "name": &connector.summary.name,
+        },
+        "operation": {
+            "requested_selector": &args.operation,
+            "selector": &operation.name,
+            "canonical_id": &operation.name,
+            "summary": &operation.description,
+            "capability": operation.capability.as_str(),
+            "risk_level": risk_level_label(operation.risk_level),
+            "safety_tier": safety_tier_label(operation.safety_tier),
+            "approval_mode": &operation.approval_mode,
+            "supports_simulate": operation.supports_simulate,
+        },
+        "request": {
+            "zone": &zone,
+            "principal": args.principal.clone(),
+            "idempotency_key": args.idempotency_key.clone(),
+            "deadline_ms": args.deadline_ms,
+        },
+        "input_authoring": {
+            "primary_source": primary_source,
+            "sources": sources,
+            "binding_count": binding_count,
+            "warnings": warnings,
+            "payload": &prepared_payload,
+            "payload_preview": payload_preview,
+            "required_template": schema_nav::scaffold_template(&operation.input_schema),
+            "examples": operation.examples.iter().take(2).collect::<Vec<_>>(),
+            "validation": {
+                "valid": valid,
+                "error_count": validation_errors.len(),
+                "errors": validation_errors,
+            },
+        },
+    });
+
+    if !valid {
+        payload["error"] = json!({
+            "type": "invalid-input-payload",
+            "message": format!(
+                "Local schema validation failed for `{}.{}`; the live host call was not attempted.",
+                connector.slug, operation.name
+            ),
+            "recoverable": true,
+        });
+        payload["next_actions"] = json!([
+            format!("fwc schema {} {} --host {}", connector.slug, operation.name, host.endpoint),
+            format!("fwc validate {} {} --input '{}'", connector.slug, operation.name, payload_json),
+            format!("fwc template {} {}", connector.slug, operation.name),
+        ]);
+        return Ok(DispatchOutcome {
+            payload,
+            exit_code: CliExitCode::Validation,
+        });
+    }
+
+    let preflight_request = HostPreflightRequest {
+        connector_id: connector_id.clone(),
+        operation: operation.name.clone(),
+        params: Some(prepared_payload.clone()),
+        principal: args.principal.clone(),
+        zone_id: Some(zone_id.clone()),
+    };
+    let preflight = client.preflight(&preflight_request)?;
+    payload["preflight"] = serde_json::to_value(&preflight)?;
+
+    if command == "simulate" {
+        let history_status = if preflight.allowed {
+            history::OpStatus::Simulated
+        } else {
+            history::OpStatus::Denied
+        };
+        let latency_ms = 0;
+        payload["status"] = json!(if preflight.allowed { "ok" } else { "denied" });
+        payload["phase"] = json!("preflight");
+        payload["message"] = json!(if preflight.allowed {
+            format!(
+                "Evaluated a real preflight for `{}.{}` against live host policy and current connector state.",
+                connector.slug, operation.name
+            )
+        } else {
+            format!(
+                "Live preflight denied `{}.{}` before execution.",
+                connector.slug, operation.name
+            )
+        });
+        payload["next_actions"] = json!(if preflight.allowed {
+            vec![format!(
+                "fwc invoke {} {} --host {} --zone {} --input '{}'",
+                connector.slug, operation.name, host.endpoint, zone, payload_json
+            )]
+        } else {
+            vec![
+                format!("fwc status {} --host {}", connector.slug, host.endpoint),
+                format!("fwc schema {} {} --host {}", connector.slug, operation.name, host.endpoint),
+            ]
+        });
+        let _ = append_history_entry(
+            history_status,
+            connector.summary.id.as_str(),
+            &operation.name,
+            Some(zone.as_str()),
+            &prepared_payload,
+            Some(&serde_json::to_value(&preflight)?),
+            preflight.reason.clone(),
+            args.idempotency_key.as_deref(),
+            latency_ms,
+        );
+        return Ok(DispatchOutcome {
+            payload,
+            exit_code: if preflight.allowed {
+                CliExitCode::Success
+            } else {
+                CliExitCode::PolicyDenied
+            },
+        });
+    }
+
+    if !preflight.allowed {
+        let reason = preflight
+            .reason
+            .clone()
+            .unwrap_or_else(|| "preflight denied invoke request".to_owned());
+        let _ = append_history_entry(
+            history::OpStatus::Denied,
+            connector.summary.id.as_str(),
+            &operation.name,
+            Some(zone.as_str()),
+            &prepared_payload,
+            Some(&serde_json::to_value(&preflight)?),
+            Some(reason.clone()),
+            args.idempotency_key.as_deref(),
+            0,
+        );
+        payload["status"] = json!("denied");
+        payload["phase"] = json!("preflight");
+        payload["message"] = json!(format!(
+            "Live preflight denied `{}.{}` before execution.",
+            connector.slug, operation.name
+        ));
+        payload["error"] = json!({
+            "type": "policy-denied",
+            "message": reason,
+            "recoverable": true,
+        });
+        payload["next_actions"] = json!([
+            format!("fwc status {} --host {}", connector.slug, host.endpoint),
+            format!("fwc simulate {} {} --host {}", connector.slug, operation.name, host.endpoint),
+        ]);
+        return Ok(DispatchOutcome {
+            payload,
+            exit_code: CliExitCode::PolicyDenied,
+        });
+    }
+
+    let request_id = RequestId::random();
+    let invoke_request = InvokeRequest {
+        r#type: "invoke".to_owned(),
+        id: request_id,
+        connector_id,
+        operation: operation_id,
+        zone_id,
+        input: prepared_payload.clone(),
+        capability_token: CapabilityToken::test_token(),
+        holder_proof: None,
+        context: None,
+        idempotency_key: args.idempotency_key.clone(),
+        lease_seq: None,
+        deadline_ms: args.deadline_ms,
+        correlation_id: None,
+        provenance: None,
+        approval_tokens: Vec::new(),
+    };
+    let started_at = std::time::Instant::now();
+    let response = client.invoke(&invoke_request)?;
+    let latency_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let response_value = serde_json::to_value(&response)?;
+    let history_status = match response.status {
+        InvokeStatus::Ok => history::OpStatus::Success,
+        InvokeStatus::Error => history::OpStatus::Error,
+    };
+    let _ = append_history_entry(
+        history_status,
+        connector.summary.id.as_str(),
+        &operation.name,
+        Some(zone.as_str()),
+        &prepared_payload,
+        Some(&response_value),
+        response.error.as_ref().map(ToString::to_string),
+        args.idempotency_key.as_deref(),
+        latency_ms,
+    );
+
+    payload["phase"] = json!("execution");
+    payload["status"] = json!(match response.status {
+        InvokeStatus::Ok => "ok",
+        InvokeStatus::Error => "error",
+    });
+    payload["message"] = json!(match response.status {
+        InvokeStatus::Ok => format!(
+            "Executed `{}.{}` through `fcp-host`.",
+            connector.slug, operation.name
+        ),
+        InvokeStatus::Error => format!(
+            "`fcp-host` ran `{}.{}` and the connector returned an error response.",
+            connector.slug, operation.name
+        ),
+    });
+    payload["response"] = response_value;
+    payload["next_actions"] = json!(match response.status {
+        InvokeStatus::Ok => vec![
+            format!("fwc history --connector {}", connector.slug),
+            format!("fwc status {} --host {}", connector.slug, host.endpoint),
+        ],
+        InvokeStatus::Error => vec![
+            format!("fwc simulate {} {} --host {}", connector.slug, operation.name, host.endpoint),
+            format!("fwc status {} --host {}", connector.slug, host.endpoint),
+        ],
+    });
+
+    Ok(DispatchOutcome {
+        payload,
+        exit_code: match response.status {
+            InvokeStatus::Ok => CliExitCode::Success,
+            InvokeStatus::Error => CliExitCode::Connector,
+        },
+    })
+}
+
+fn invoke_dispatch_without_host(command: &str, args: &InvokeArgs) -> Result<DispatchOutcome> {
     let catalog = DiscoveryCatalog::load()?;
     let connector = match catalog.resolve_connector(&args.connector) {
         Ok(connector) => connector,
@@ -2804,23 +4576,23 @@ fn invoke_dispatch(command: &str, args: &InvokeArgs) -> Result<DispatchOutcome> 
         .cloned()
         .collect::<Vec<_>>();
     let exit_code = if valid {
-        CliExitCode::Success
+        CliExitCode::Transport
     } else {
         CliExitCode::Validation
     };
 
     let mut payload = json!({
-        "status": if valid { "planned" } else { "error" },
+        "status": "error",
         "command": command,
         "phase": "input-authoring",
         "message": if valid {
             format!(
-                "Prepared a schema-aware `{command}` payload preview for `{}.{}`. Host-backed execution is still scaffolded, but the payload is locally valid.",
+                "Prepared a schema-aware `{command}` payload for `{}.{}`, but no live host endpoint is configured so `fwc` refuses to fake execution.",
                 connector.slug, operation.preferred_selector
             )
         } else {
             format!(
-                "Prepared a schema-aware `{command}` payload preview for `{}.{}`, but the payload still fails local schema validation.",
+                "Prepared a schema-aware `{command}` payload for `{}.{}`, but the payload still fails local schema validation and no live host endpoint is configured.",
                 connector.slug, operation.preferred_selector
             )
         },
@@ -2858,12 +4630,9 @@ fn invoke_dispatch(command: &str, args: &InvokeArgs) -> Result<DispatchOutcome> 
         },
         "next_actions": if valid {
             vec![
+                format!("fwc {} {} {} --host <endpoint> --input '{}'", command, connector.slug, operation.preferred_selector, payload_json),
                 format!("fwc schema {} {}", connector.slug, operation.preferred_selector),
-                format!("fwc template {} {}", connector.slug, operation.preferred_selector),
-                format!(
-                    "fwc task bind <task-id> payload_json='{}'",
-                    payload_json
-                ),
+                "Set `FWC_HOST` or `FCP_HOST_ENDPOINT`, or configure an active FCP context.".to_owned(),
             ]
         } else {
             vec![
@@ -2874,18 +4643,76 @@ fn invoke_dispatch(command: &str, args: &InvokeArgs) -> Result<DispatchOutcome> 
         },
     });
 
-    if !valid {
-        payload["error"] = json!({
-            "type": "invalid-input-payload",
-            "message": format!(
-                "Local schema validation failed for `{}.{}`. Fix the reported field errors before host-backed `{command}` execution is enabled.",
+    payload["error"] = json!({
+        "type": if valid { "missing-host-endpoint" } else { "invalid-input-payload" },
+        "message": if valid {
+            format!(
+                "No live host endpoint is configured for `{command}`. `fwc` will not fabricate connector execution."
+            )
+        } else {
+            format!(
+                "Local schema validation failed for `{}.{}` and the live host call was not attempted.",
                 connector.slug, operation.preferred_selector
-            ),
-            "recoverable": true,
-        });
-    }
+            )
+        },
+        "recoverable": true,
+    });
 
     Ok(DispatchOutcome { payload, exit_code })
+}
+
+fn host_invoke_input_error_dispatch(
+    command: &str,
+    args: &InvokeArgs,
+    connector: &HostConnectorRecord,
+    operation: &HostToolDescriptor,
+    error: InvokeInputError,
+) -> DispatchOutcome {
+    let InvokeInputError {
+        error_type,
+        message,
+        next_actions,
+        details,
+    } = error;
+
+    let mut payload = json!({
+        "status": "error",
+        "command": command,
+        "source": "host-admin-api",
+        "phase": "input-authoring",
+        "message": &message,
+        "captures": serde_json::to_value(args).unwrap_or(Value::Null),
+        "connector": {
+            "slug": &connector.slug,
+            "canonical_id": connector.summary.id.as_str(),
+            "name": &connector.summary.name,
+        },
+        "operation": {
+            "requested_selector": &args.operation,
+            "selector": &operation.name,
+            "canonical_id": &operation.name,
+        },
+        "error": {
+            "type": error_type,
+            "message": &message,
+            "recoverable": true,
+        },
+        "input_authoring": {
+            "required_template": schema_nav::scaffold_template(&operation.input_schema),
+            "examples": operation.examples.iter().take(2).collect::<Vec<_>>(),
+            "accepted_sources": ["--input", "--file", "--stdin", "--set path=value"],
+        },
+        "next_actions": next_actions,
+    });
+
+    if let Some(details) = details {
+        payload["error"]["details"] = details;
+    }
+
+    DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Validation,
+    }
 }
 
 fn invoke_input_error_dispatch(
@@ -5585,6 +7412,7 @@ struct PreparedCli {
     corrections: Vec<InputCorrection>,
 }
 
+#[derive(Debug)]
 enum PrepareCliError {
     Clap(clap::Error),
     Structured(DispatchOutcome),
@@ -6537,13 +8365,18 @@ fn enrich_unknown_guide_command(payload: &mut Value, command: Option<&str>) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap as StdBTreeMap;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
     use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::thread;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use super::{
         Cli, CliExitCode, Commands, PrepareCliError, catalog, execute, normalize_args, prepare_cli,
     };
     use clap::CommandFactory;
+    use fcp_core::ConnectorHealth;
     use serde_json::{Value, json};
 
     fn execute_json(args: &[&str]) -> (std::process::ExitCode, Value) {
@@ -6558,6 +8391,265 @@ mod tests {
         let owned_args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
         let outcome = execute(&owned_args).expect("execution should not fail internally");
         (outcome.exit_code, outcome.text)
+    }
+
+    fn spawn_mock_host(
+        routes: StdBTreeMap<String, Value>,
+        expected_requests: usize,
+    ) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("mock host should bind");
+        listener
+            .set_nonblocking(true)
+            .expect("mock host should configure nonblocking accept");
+        let endpoint = format!(
+            "http://{}",
+            listener.local_addr().expect("mock host address")
+        );
+        let responses = routes
+            .into_iter()
+            .map(|(key, value)| {
+                (
+                    key,
+                    serde_json::to_string(&value).expect("mock response should serialize"),
+                )
+            })
+            .collect::<StdBTreeMap<_, _>>();
+
+        let handle = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut served = 0usize;
+
+            while served < expected_requests && Instant::now() < deadline {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(connection) => connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                        continue;
+                    }
+                    Err(error) => panic!("mock host accept failed: {error}"),
+                };
+
+                served += 1;
+                stream
+                    .set_nonblocking(false)
+                    .expect("mock host stream should switch back to blocking mode");
+
+                let mut reader =
+                    BufReader::new(stream.try_clone().expect("mock host should clone socket"));
+                let mut request_line = String::new();
+                reader
+                    .read_line(&mut request_line)
+                    .expect("mock host should read request line");
+                assert!(
+                    !request_line.trim().is_empty(),
+                    "mock host received an empty request line"
+                );
+
+                let mut content_length = 0usize;
+                loop {
+                    let mut header = String::new();
+                    reader
+                        .read_line(&mut header)
+                        .expect("mock host should read headers");
+                    if header == "\r\n" || header.is_empty() {
+                        break;
+                    }
+                    if let Some((name, value)) = header.split_once(':')
+                        && name.eq_ignore_ascii_case("content-length")
+                    {
+                        content_length = value
+                            .trim()
+                            .parse()
+                            .expect("content-length should be numeric");
+                    }
+                }
+
+                if content_length > 0 {
+                    let mut body = vec![0u8; content_length];
+                    reader
+                        .read_exact(&mut body)
+                        .expect("mock host should read request body");
+                }
+
+                let mut parts = request_line.split_whitespace();
+                let method = parts.next().expect("request method should exist");
+                let path = parts.next().expect("request path should exist");
+                let key = format!("{method} {path}");
+                let body = responses.get(&key).unwrap_or_else(|| {
+                    panic!(
+                        "unexpected mock host request `{key}`; expected one of {:?}",
+                        responses.keys().collect::<Vec<_>>()
+                    )
+                });
+
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .expect("mock host should write response");
+                stream.flush().expect("mock host should flush response");
+            }
+
+            assert_eq!(
+                served, expected_requests,
+                "mock host served {served} request(s), expected {expected_requests}"
+            );
+        });
+
+        (endpoint, handle)
+    }
+
+    fn mock_connector_summary_json() -> Value {
+        let health =
+            serde_json::to_value(ConnectorHealth::healthy()).expect("health should serialize");
+        json!({
+            "id": "fcp.github:enterprise:v1",
+            "name": "GitHub Enterprise",
+            "description": "GitHub connector surfaced through fcp-host.",
+            "version": "1.2.3",
+            "categories": ["code", "dev-tools"],
+            "tool_count": 2,
+            "max_safety_tier": "risky",
+            "enabled": true,
+            "health": health,
+            "last_health_check": "2026-03-10T00:00:00Z",
+        })
+    }
+
+    fn mock_tools_json() -> Vec<Value> {
+        vec![
+            json!({
+                "name": "github.create_issue",
+                "description": "Create a GitHub issue in a repository.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "owner": { "type": "string" },
+                        "repo": { "type": "string" },
+                        "title": { "type": "string" },
+                        "body": { "type": "string" }
+                    },
+                    "required": ["owner", "repo", "title"]
+                },
+                "output_schema": {
+                    "type": "object",
+                    "properties": {
+                        "number": { "type": "integer" },
+                        "url": { "type": "string" }
+                    },
+                    "required": ["number"]
+                },
+                "capability": "github.issue_write",
+                "risk_level": "medium",
+                "safety_tier": "risky",
+                "idempotency": "none",
+                "approval_mode": "interactive",
+                "requires_confirmation": true,
+                "idempotent": false,
+                "supports_simulate": true,
+                "rate_limits": ["core"],
+                "examples": [
+                    {
+                        "description": "Minimal issue creation payload.",
+                        "input": {
+                            "owner": "octocat",
+                            "repo": "hello-world",
+                            "title": "Bug report"
+                        },
+                        "output": {
+                            "number": 42,
+                            "url": "https://example.test/issues/42"
+                        }
+                    }
+                ],
+                "ai_hints": {
+                    "when_to_use": "Use this when you need to file a new task or bug in GitHub.",
+                    "common_mistakes": ["Forgetting the repository owner."],
+                    "examples": [],
+                    "related": ["github.get_issue"]
+                }
+            }),
+            json!({
+                "name": "github.get_issue",
+                "description": "Fetch an existing GitHub issue by number.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "owner": { "type": "string" },
+                        "repo": { "type": "string" },
+                        "number": { "type": "integer" }
+                    },
+                    "required": ["owner", "repo", "number"]
+                },
+                "output_schema": {
+                    "type": "object",
+                    "properties": {
+                        "title": { "type": "string" }
+                    }
+                },
+                "capability": "github.issue_read",
+                "risk_level": "low",
+                "safety_tier": "safe",
+                "idempotency": "strict",
+                "requires_confirmation": false,
+                "idempotent": true,
+                "supports_simulate": true,
+                "examples": [
+                    {
+                        "description": "Fetch one issue.",
+                        "input": {
+                            "owner": "octocat",
+                            "repo": "hello-world",
+                            "number": 42
+                        }
+                    }
+                ],
+                "ai_hints": {
+                    "when_to_use": "Use this when you need details about an existing issue.",
+                    "common_mistakes": ["Passing a pull request number instead of an issue number."],
+                    "examples": [],
+                    "related": ["github.create_issue"]
+                }
+            }),
+        ]
+    }
+
+    fn mock_discovery_response_json() -> Value {
+        json!({
+            "connectors": [mock_connector_summary_json()],
+            "registry_version": 7,
+            "supports_streaming": true,
+            "supports_batching": true,
+            "timestamp": "2026-03-10T00:00:00Z"
+        })
+    }
+
+    fn mock_inventory_response_json() -> Value {
+        json!({
+            "connector": mock_connector_summary_json(),
+            "registry_version": 7
+        })
+    }
+
+    fn mock_introspection_response_json() -> Value {
+        json!({
+            "connector": mock_connector_summary_json(),
+            "tools": mock_tools_json(),
+            "rate_limits": {
+                "limits": [],
+                "tool_pool_map": {}
+            },
+            "archetype": "request_response",
+            "introspection": {
+                "operations": [],
+                "events": [],
+                "resource_types": [],
+                "auth_caps": null,
+                "event_caps": null
+            }
+        })
     }
 
     #[test]
@@ -6931,6 +9023,183 @@ mod tests {
 
         assert_eq!(exit_code, CliExitCode::Validation.into());
         assert_eq!(payload["error"]["type"], "connector-not-found");
+    }
+
+    #[test]
+    fn execute_list_with_host_uses_host_discovery_api() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([(
+                "POST /rpc/discover".to_owned(),
+                mock_discovery_response_json(),
+            )]),
+            1,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "list",
+            "--zone",
+            "z:work",
+            "--category",
+            "code",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["filters"]["category"], "code");
+        assert_eq!(payload["filters"]["zone"], "z:work");
+        assert_eq!(payload["connectors"][0]["slug"], "github");
+        assert_eq!(
+            payload["connectors"][0]["canonical_id"],
+            "fcp.github:enterprise:v1"
+        );
+        assert_eq!(payload["filter_gaps"][0]["field"], "filters.zone");
+    }
+
+    #[test]
+    fn execute_show_with_host_uses_inventory_and_introspection() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "GET /rpc/connectors/fcp.github:enterprise:v1".to_owned(),
+                    mock_inventory_response_json(),
+                ),
+                (
+                    "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
+                    mock_introspection_response_json(),
+                ),
+            ]),
+            3,
+        );
+
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "--host", &host, "show", "github"]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["connector"]["slug"], "github");
+        assert_eq!(payload["connector"]["archetype"], "request_response");
+        assert_eq!(payload["connector"]["operation_count"], 2);
+        assert_eq!(
+            payload["operations"]["preview"][0]["selector"],
+            "github.create_issue"
+        );
+        assert_eq!(payload["metadata_gaps"], json!([]));
+    }
+
+    #[test]
+    fn execute_ops_with_host_honors_risk_filter() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
+                    mock_introspection_response_json(),
+                ),
+            ]),
+            2,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "ops",
+            "github",
+            "--risk-at-most",
+            "low",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["operations"].as_array().unwrap().len(), 1);
+        assert_eq!(payload["operations"][0]["selector"], "github.get_issue");
+    }
+
+    #[test]
+    fn execute_schema_and_examples_with_host_resolve_local_operation_selector() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "GET /rpc/connectors/fcp.github:enterprise:v1".to_owned(),
+                    mock_inventory_response_json(),
+                ),
+                (
+                    "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
+                    mock_introspection_response_json(),
+                ),
+            ]),
+            5,
+        );
+
+        let (schema_exit, schema_payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "schema",
+            "github",
+            "create_issue",
+            "--examples",
+        ]);
+        let (examples_exit, examples_payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "examples",
+            "github",
+            "create_issue",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(schema_exit, CliExitCode::Success.into());
+        assert_eq!(schema_payload["source"], "host-admin-api");
+        assert_eq!(
+            schema_payload["operation"]["selector"],
+            "github.create_issue"
+        );
+        assert_eq!(
+            schema_payload["guidance"]["when_to_use"],
+            "Use this when you need to file a new task or bug in GitHub."
+        );
+        assert!(
+            schema_payload["fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|field| field["path"] == "owner"),
+            "expected schema fields to include the required `owner` path"
+        );
+
+        assert_eq!(examples_exit, CliExitCode::Success.into());
+        assert_eq!(examples_payload["source"], "host-admin-api");
+        assert_eq!(
+            examples_payload["operation"]["selector"],
+            "github.create_issue"
+        );
+        assert_eq!(
+            examples_payload["examples"][0]["input"]["title"],
+            "Bug report"
+        );
     }
 
     #[test]

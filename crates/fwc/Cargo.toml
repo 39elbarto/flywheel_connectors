@@ -20,6 +20,7 @@ anyhow.workspace = true
 chrono.workspace = true
 clap = { workspace = true, features = ["derive", "env"] }
 fcp-core.workspace = true
+fcp-host.workspace = true
 fcp-manifest.workspace = true
 handlebars.workspace = true
 jaq-core = "2.2.1"
@@ -31,6 +32,7 @@ base64.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 sha2.workspace = true
+reqwest = { workspace = true, features = ["blocking"] }
 tokio = { version = "1.49", features = ["io-std", "io-util", "macros", "rt"] }
 toml.workspace = true
 toon = { package = "tru", path = "/dp/toon_rust" }

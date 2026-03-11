@@ -983,7 +983,7 @@ pub struct SelectorError {
 }
 
 impl SelectorError {
-    fn not_found(selector: &str, suggestions: Vec<String>) -> Self {
+    pub(crate) fn not_found(selector: &str, suggestions: Vec<String>) -> Self {
         Self {
             kind: SelectorErrorKind::NotFound,
             selector: selector.to_owned(),
@@ -991,7 +991,7 @@ impl SelectorError {
         }
     }
 
-    fn ambiguous(selector: &str, suggestions: Vec<String>) -> Self {
+    pub(crate) fn ambiguous(selector: &str, suggestions: Vec<String>) -> Self {
         Self {
             kind: SelectorErrorKind::Ambiguous,
             selector: selector.to_owned(),
@@ -1062,7 +1062,7 @@ fn parse_approval_mode(label: &str) -> Option<ApprovalMode> {
     }
 }
 
-const fn risk_level_label(level: fcp_core::RiskLevel) -> &'static str {
+pub(crate) const fn risk_level_label(level: fcp_core::RiskLevel) -> &'static str {
     match level {
         fcp_core::RiskLevel::Low => "low",
         fcp_core::RiskLevel::Medium => "medium",
@@ -1071,7 +1071,7 @@ const fn risk_level_label(level: fcp_core::RiskLevel) -> &'static str {
     }
 }
 
-const fn safety_tier_label(tier: fcp_core::SafetyTier) -> &'static str {
+pub(crate) const fn safety_tier_label(tier: fcp_core::SafetyTier) -> &'static str {
     match tier {
         fcp_core::SafetyTier::Safe => "safe",
         fcp_core::SafetyTier::Risky => "risky",
@@ -1081,7 +1081,7 @@ const fn safety_tier_label(tier: fcp_core::SafetyTier) -> &'static str {
     }
 }
 
-const fn idempotency_label(idempotency: fcp_core::IdempotencyClass) -> &'static str {
+pub(crate) const fn idempotency_label(idempotency: fcp_core::IdempotencyClass) -> &'static str {
     match idempotency {
         fcp_core::IdempotencyClass::None => "none",
         fcp_core::IdempotencyClass::BestEffort => "best-effort",
@@ -1169,7 +1169,7 @@ fn pluralize_object(object: &str) -> String {
     }
 }
 
-fn normalize_connector_selector(selector: &str) -> String {
+pub(crate) fn normalize_connector_selector(selector: &str) -> String {
     selector
         .trim()
         .to_lowercase()
@@ -1185,7 +1185,7 @@ fn normalize_zone_selector(selector: &str) -> String {
     selector.trim().to_lowercase()
 }
 
-fn normalize_operation_selector(selector: &str) -> String {
+pub(crate) fn normalize_operation_selector(selector: &str) -> String {
     selector.trim().to_lowercase().replace('-', "_")
 }
 
@@ -1223,7 +1223,7 @@ fn suggest_operation_selectors(operations: &[DiscoveredOperation], selector: &st
         .collect()
 }
 
-fn selector_distance(left: &str, right: &str) -> usize {
+pub(crate) fn selector_distance(left: &str, right: &str) -> usize {
     let right_chars = right.chars().collect::<Vec<_>>();
     let mut costs = (0..=right_chars.len()).collect::<Vec<_>>();
 

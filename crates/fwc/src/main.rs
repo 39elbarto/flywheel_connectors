@@ -99,7 +99,7 @@ mod workflow;
 #[allow(dead_code)]
 mod zone_scope;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -112,21 +112,28 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use fcp_core::{
-    CapabilityToken, ConnectorId, InvokeRequest, InvokeResponse, InvokeStatus, LifecycleStatus,
-    OperationId, RequestId, ZoneId,
+    CapabilityToken, CapabilityUsageKey, ConnectorId, InvokeRequest, InvokeResponse,
+    InvokeStatus, LifecycleStatus, OperationId, RequestId, SafetyTier, ZoneId,
 };
 use fcp_host::{
     BatchInvokeResponse as HostBatchInvokeResponse, BatchOptions as HostBatchOptions, CancelReason,
+    BudgetReportRequest as HostBudgetReportRequest,
+    BudgetReportResponse as HostBudgetReportResponse,
     CancellationRequest as HostCancellationRequest,
     CancellationResponse as HostCancellationResponse, CleanupBehavior,
     ConnectorAdminStatus as HostConnectorAdminStatus,
     ConnectorInventoryResponse as HostConnectorInventoryResponse,
     DiscoveryFilter as HostDiscoveryFilter, DiscoveryResponse as HostDiscoveryResponse,
+    DoctorReport as HostDoctorReport, DoctorRequest as HostDoctorRequest,
     HostHealthResponse, IntrospectionResponse as HostIntrospectionResponse,
     PreflightRequest as HostPreflightRequest, PreflightResponse as HostPreflightResponse,
     ToolDescriptor as HostToolDescriptor,
 };
 use fcp_manifest::ConnectorManifest;
+use fcp_telemetry::{
+    CapabilityRecommendation, CapabilitySuggestionKind, CapabilityUsageAggregate,
+    RecommendationConfig, recommend_capabilities,
+};
 
 use crate::package_cmd::{BuildMetadata as PackageBuildMetadata, PACKAGE_OUTPUT_FILENAME, PackageArgs as PackageBuildArgs, PackageOutput};
 use crate::readiness::{
@@ -171,6 +178,9 @@ Examples:
   fwc show github --template '{{connector.slug}} => {{connector.name}}'
   fwc ops github
   fwc schema github issues.create
+  fwc doctor --zone z:work --host http://127.0.0.1:8787
+  fwc budget --host http://127.0.0.1:8787
+  fwc capabilities report
   fwc config schema github
   fwc simulate github issues.create --file payload.json
   fwc invoke github issues.create --file payload.json
@@ -312,8 +322,17 @@ enum Commands {
     /// Package a connector crate into a distributable artifact bundle.
     Package(package_cmd::PackageArgs),
 
+    /// Diagnose live zone and connector health through `fcp-host`.
+    Doctor(DoctorArgs),
+
     /// Report connector or fleet status.
     Status(StatusArgs),
+
+    /// Report live usage-budget state through `fcp-host`.
+    Budget(BudgetArgs),
+
+    /// Report and recommend capability usage from real execution history.
+    Capabilities(CapabilitiesArgs),
 
     /// Install a connector package.
     Install(InstallArgs),
@@ -745,6 +764,93 @@ struct ExampleArgs {
 struct StatusArgs {
     /// Optional connector id. Omit for fleet status.
     connector: Option<String>,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct DoctorArgs {
+    /// Zone to diagnose.
+    #[arg(long, short = 'z')]
+    zone: String,
+
+    /// Connector ids, aliases, or family names to self-check.
+    #[arg(long, value_name = "CONNECTOR")]
+    connector: Vec<String>,
+
+    /// Force connector self-check execution. Implied when `--connector` is present.
+    #[arg(long, default_value_t = false)]
+    self_check: bool,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct BudgetArgs {
+    /// Optional zone filter. Omit for all configured zones.
+    #[arg(long, short = 'z')]
+    zone: Option<String>,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct CapabilitiesArgs {
+    #[command(subcommand)]
+    command: CapabilitiesCommand,
+}
+
+#[derive(Subcommand, Debug, Serialize)]
+#[serde(tag = "subcommand", content = "args", rename_all = "kebab-case")]
+enum CapabilitiesCommand {
+    /// Report capability usage grouped by zone and connector.
+    Report(CapabilitiesFilterArgs),
+
+    /// Suggest least-privilege capability grants based on execution history.
+    Suggest(CapabilitiesSuggestArgs),
+
+    /// Export raw capability usage aggregates.
+    Export(CapabilitiesFilterArgs),
+}
+
+#[derive(Args, Debug, Serialize)]
+struct CapabilitiesFilterArgs {
+    /// Optional zone filter.
+    #[arg(long, short = 'z')]
+    zone: Option<String>,
+
+    /// Optional connector filter.
+    #[arg(long, short = 'c')]
+    connector: Option<String>,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct CapabilitiesSuggestArgs {
+    /// Optional zone filter.
+    #[arg(long, short = 'z')]
+    zone: Option<String>,
+
+    /// Optional connector filter.
+    #[arg(long, short = 'c')]
+    connector: Option<String>,
+
+    /// Restrict results to one recommendation kind.
+    #[arg(long, value_enum, default_value_t = CapabilitySuggestionFilter::All)]
+    filter: CapabilitySuggestionFilter,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+enum CapabilitySuggestionFilter {
+    All,
+    RemoveUnused,
+    ReviewRisky,
+    Keep,
+}
+
+impl CapabilitySuggestionFilter {
+    const fn matches(self, suggestion: CapabilitySuggestionKind) -> bool {
+        match self {
+            Self::All => true,
+            Self::RemoveUnused => matches!(suggestion, CapabilitySuggestionKind::RemoveUnused),
+            Self::ReviewRisky => matches!(suggestion, CapabilitySuggestionKind::ReviewRisky),
+            Self::Keep => matches!(suggestion, CapabilitySuggestionKind::Keep),
+        }
+    }
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -1971,7 +2077,10 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         Commands::Trace(_) => passthrough_only_dispatch("trace"),
         Commands::Policy(_) => passthrough_only_dispatch("policy"),
         Commands::Package(_) => passthrough_only_dispatch("package"),
+        Commands::Doctor(args) => doctor_dispatch(args, cli.host.as_deref())?,
         Commands::Status(args) => status_dispatch(args, cli.host.as_deref())?,
+        Commands::Budget(args) => budget_dispatch(args, cli.host.as_deref())?,
+        Commands::Capabilities(args) => capabilities_dispatch(args, cli.host.as_deref())?,
         Commands::Install(args) => install_dispatch(args)?,
         Commands::Update(args) => update_dispatch(args)?,
         Commands::Pin(args) => pin_dispatch(args, cli.host.as_deref())?,
@@ -2315,6 +2424,10 @@ impl HostAdminClient {
         self.get_json(&format!("/rpc/introspect/{connector_id}"))
     }
 
+    fn doctor(&self, request: &HostDoctorRequest) -> Result<HostDoctorReport> {
+        self.post_json("/doctor", request)
+    }
+
     fn health(&self) -> Result<HostHealthResponse> {
         self.get_json("/rpc/health")
     }
@@ -2325,6 +2438,13 @@ impl HostAdminClient {
 
     fn preflight(&self, request: &HostPreflightRequest) -> Result<HostPreflightResponse> {
         self.post_json("/rpc/preflight", request)
+    }
+
+    fn budget_report(
+        &self,
+        request: &HostBudgetReportRequest,
+    ) -> Result<HostBudgetReportResponse> {
+        self.post_json("/rpc/budget/report", request)
     }
 
     fn invoke(&self, request: &InvokeRequest) -> Result<InvokeResponse> {
@@ -4040,6 +4160,121 @@ fn examples_dispatch(args: &ExampleArgs, host: Option<&str>) -> Result<DispatchO
     })
 }
 
+fn doctor_dispatch(args: &DoctorArgs, explicit_host: Option<&str>) -> Result<DispatchOutcome> {
+    let Some(host) = resolve_host_config(explicit_host)? else {
+        return Ok(missing_host_dispatch(
+            "doctor",
+            serde_json::to_value(args)?,
+            vec![
+                format!("fwc doctor --zone {} --host <endpoint>", args.zone),
+                "Set `FWC_HOST` or `FCP_HOST_ENDPOINT`, or configure an active FCP context."
+                    .to_owned(),
+            ],
+        ));
+    };
+    if args.self_check && args.connector.is_empty() {
+        return Ok(DispatchOutcome {
+            payload: json!({
+                "status": "error",
+                "command": "doctor",
+                "error": {
+                    "type": "missing-connectors",
+                    "message": "`fwc doctor --self-check` requires at least one `--connector` selector.",
+                    "recoverable": true,
+                },
+                "details": serde_json::to_value(args)?,
+                "next_actions": [
+                    format!("fwc doctor --zone {} --connector <connector> --host {}", args.zone, host.endpoint),
+                    format!("fwc list --host {}", host.endpoint),
+                ],
+            }),
+            exit_code: CliExitCode::Validation,
+        });
+    }
+
+    let zone = match args.zone.parse::<ZoneId>() {
+        Ok(zone) => zone,
+        Err(error) => {
+            return Ok(DispatchOutcome {
+                payload: json!({
+                    "status": "error",
+                    "command": "doctor",
+                    "error": {
+                        "type": "invalid-zone",
+                        "message": format!("`{}` is not a valid zone id: {error}", args.zone),
+                        "recoverable": true,
+                    },
+                    "details": {
+                        "zone": &args.zone,
+                    },
+                    "next_actions": [
+                        format!("fwc doctor --zone z:work --host {}", host.endpoint),
+                        format!("fwc doctor --zone z:project:<name> --host {}", host.endpoint),
+                    ],
+                }),
+                exit_code: CliExitCode::Validation,
+            });
+        }
+    };
+
+    let client = HostAdminClient::new(&host.endpoint)?;
+    let (catalog, _) = client.catalog(None)?;
+    let mut requested_connectors = Vec::new();
+    let mut connector_ids = Vec::new();
+    for selector in &args.connector {
+        let connector = match catalog.resolve_connector(selector) {
+            Ok(connector) => connector,
+            Err(error) => return Ok(connector_resolution_dispatch("doctor", selector, &error)),
+        };
+        requested_connectors.push(json!({
+            "selector": selector,
+            "slug": &connector.slug,
+            "canonical_id": connector.summary.id.as_str(),
+            "name": &connector.summary.name,
+        }));
+        connector_ids.push(connector.summary.id.to_string());
+    }
+
+    let report = client.doctor(&HostDoctorRequest {
+        zone_id: zone.to_string(),
+        connectors: connector_ids,
+        self_check: args.self_check || !args.connector.is_empty(),
+    })?;
+
+    let mut next_actions = vec![format!("fwc status --host {}", host.endpoint)];
+    if let Some(first) = requested_connectors
+        .first()
+        .and_then(|connector| connector.get("slug"))
+        .and_then(Value::as_str)
+    {
+        next_actions.push(format!("fwc show {first} --host {}", host.endpoint));
+        next_actions.push(format!("fwc status {first} --host {}", host.endpoint));
+    } else {
+        next_actions.push(format!("fwc list --host {}", host.endpoint));
+    }
+
+    Ok(DispatchOutcome {
+        payload: json!({
+            "status": "ok",
+            "command": "doctor",
+            "source": "host-admin-api",
+            "message": format!("Loaded a live doctor report for `{}` from `fcp-host`.", report.zone_id),
+            "zone": report.zone_id,
+            "requested_connectors": requested_connectors,
+            "self_check": args.self_check || !args.connector.is_empty(),
+            "summary": {
+                "overall_status": report.overall_status,
+                "check_count": report.checks.len(),
+                "connector_self_check_count": report.connector_self_checks.len(),
+                "is_degraded": report.degraded_mode.is_degraded,
+            },
+            "report": report,
+            "next_actions": next_actions,
+        }),
+        exit_code: CliExitCode::Success,
+    })
+}
+
 fn status_dispatch(args: &StatusArgs, explicit_host: Option<&str>) -> Result<DispatchOutcome> {
     let Some(host) = resolve_host_config(explicit_host)? else {
         return Ok(missing_host_dispatch(
@@ -4134,6 +4369,100 @@ fn status_dispatch(args: &StatusArgs, explicit_host: Option<&str>) -> Result<Dis
                 format!("fwc list --host {}", host.endpoint),
                 format!("fwc show <connector> --host {}", host.endpoint),
             ],
+        }),
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn budget_dispatch(args: &BudgetArgs, explicit_host: Option<&str>) -> Result<DispatchOutcome> {
+    let Some(host) = resolve_host_config(explicit_host)? else {
+        return Ok(missing_host_dispatch(
+            "budget",
+            serde_json::to_value(args)?,
+            vec![
+                "fwc budget --host <endpoint>".to_owned(),
+                "Set `FWC_HOST` or `FCP_HOST_ENDPOINT`, or configure an active FCP context."
+                    .to_owned(),
+            ],
+        ));
+    };
+
+    if let Some(zone) = args.zone.as_deref()
+        && let Err(error) = zone.parse::<ZoneId>()
+    {
+        return Ok(DispatchOutcome {
+            payload: json!({
+                "status": "error",
+                "command": "budget",
+                "error": {
+                    "type": "invalid-zone",
+                    "message": format!("`{zone}` is not a valid zone id: {error}"),
+                    "recoverable": true,
+                },
+                "details": {
+                    "zone": zone,
+                },
+                "next_actions": [
+                    format!("fwc budget --zone z:work --host {}", host.endpoint),
+                    format!("fwc budget --host {}", host.endpoint),
+                ],
+            }),
+            exit_code: CliExitCode::Validation,
+        });
+    }
+
+    let client = HostAdminClient::new(&host.endpoint)?;
+    let report = client.budget_report(&HostBudgetReportRequest {
+        zone_id: args.zone.clone(),
+    })?;
+    let budget_count = report
+        .zones
+        .iter()
+        .map(|zone| zone.budgets.len())
+        .sum::<usize>();
+    let exceeded_count = report
+        .zones
+        .iter()
+        .flat_map(|zone| zone.budgets.iter())
+        .filter(|budget| budget.status == fcp_core::BudgetStatus::Exceeded)
+        .count();
+    let next_actions = args.zone.as_ref().map_or_else(
+        || {
+            vec![
+                format!("fwc status --host {}", host.endpoint),
+                format!("fwc list --host {}", host.endpoint),
+            ]
+        },
+        |zone| {
+            vec![
+                format!("fwc doctor --zone {zone} --host {}", host.endpoint),
+                format!("fwc status --host {}", host.endpoint),
+            ]
+        },
+    );
+
+    Ok(DispatchOutcome {
+        payload: json!({
+            "status": "ok",
+            "command": "budget",
+            "source": "host-admin-api",
+            "message": if report.zones.is_empty() {
+                "No live usage-budget policies are currently configured on `fcp-host`.".to_owned()
+            } else {
+                format!("Loaded live budget snapshots for {} zone(s) from `fcp-host`.", report.zones.len())
+            },
+            "filter": {
+                "zone": &args.zone,
+            },
+            "schema_version": report.schema_version,
+            "generated_at": report.generated_at,
+            "summary": {
+                "zone_count": report.zones.len(),
+                "budget_count": budget_count,
+                "exceeded_count": exceeded_count,
+            },
+            "zones": report.zones,
+            "next_actions": next_actions,
         }),
         exit_code: CliExitCode::Success,
     })
@@ -7028,6 +7357,46 @@ fn invoke_leaf_field_count(value: &Value) -> usize {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static TEST_HISTORY_PATH_OVERRIDE: std::cell::RefCell<Option<PathBuf>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+fn cli_history_store_path() -> Result<PathBuf> {
+    #[cfg(test)]
+    if let Some(path) = TEST_HISTORY_PATH_OVERRIDE.with(|slot| slot.borrow().clone()) {
+        return Ok(path);
+    }
+
+    history::HistoryStore::default_path()
+}
+
+fn cli_history_store() -> Result<history::HistoryStore> {
+    Ok(history::HistoryStore::new(cli_history_store_path()?))
+}
+
+#[cfg(test)]
+struct HistoryPathOverrideGuard;
+
+#[cfg(test)]
+fn install_test_history_path(path: PathBuf) -> HistoryPathOverrideGuard {
+    TEST_HISTORY_PATH_OVERRIDE.with(|slot| {
+        *slot.borrow_mut() = Some(path);
+    });
+    HistoryPathOverrideGuard
+}
+
+#[cfg(test)]
+impl Drop for HistoryPathOverrideGuard {
+    fn drop(&mut self) {
+        TEST_HISTORY_PATH_OVERRIDE.with(|slot| {
+            slot.borrow_mut().take();
+        });
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn append_history_entry(
     status: history::OpStatus,
@@ -7040,8 +7409,7 @@ fn append_history_entry(
     idempotency_key: Option<&str>,
     latency_ms: u64,
 ) -> Result<()> {
-    let store_path = history::HistoryStore::default_path()?;
-    let store = history::HistoryStore::new(store_path);
+    let store = cli_history_store()?;
     let entry = history::HistoryEntry {
         entry_id: RequestId::random().to_string(),
         timestamp: chrono::Utc::now(),
@@ -7449,8 +7817,7 @@ fn cancel_dispatch(args: &CancelArgs, explicit_host: Option<&str>) -> Result<Dis
 
 #[allow(clippy::option_if_let_else)]
 fn history_dispatch(args: &HistoryArgs) -> Result<DispatchOutcome> {
-    let store_path = history::HistoryStore::default_path()?;
-    let store = history::HistoryStore::new(store_path);
+    let store = cli_history_store()?;
 
     // Single entry lookup.
     if let Some(ref entry_id) = args.entry_id {

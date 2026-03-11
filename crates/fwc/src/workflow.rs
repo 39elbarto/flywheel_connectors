@@ -1362,7 +1362,7 @@ mod tests {
         let store = store();
         let task = store
             .create(WorkflowRequest {
-                intent: "disable the slack connector in z:work".to_owned(),
+                intent: "create a GitHub issue titled \"FWC: add workflow macros\"".to_owned(),
                 connector_override: None,
                 zone_override: None,
             })

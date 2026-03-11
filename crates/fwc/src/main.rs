@@ -101,7 +101,7 @@ mod zone_scope;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
@@ -109,6 +109,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum, error::ErrorKind};
 use reqwest::blocking::{Client as BlockingClient, ClientBuilder as BlockingClientBuilder};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 use fcp_core::{
     CapabilityToken, ConnectorId, InvokeRequest, InvokeResponse, InvokeStatus, LifecycleStatus,
@@ -125,7 +126,9 @@ use fcp_host::{
     PreflightRequest as HostPreflightRequest, PreflightResponse as HostPreflightResponse,
     ToolDescriptor as HostToolDescriptor,
 };
+use fcp_manifest::ConnectorManifest;
 
+use crate::package_cmd::{BuildMetadata as PackageBuildMetadata, PACKAGE_OUTPUT_FILENAME, PackageArgs as PackageBuildArgs, PackageOutput};
 use crate::readiness::{
     DiscoveredConnector, DiscoveredOperation, DiscoveryCatalog, SelectorError, SelectorErrorKind,
     idempotency_label, normalize_connector_selector, normalize_operation_selector,
@@ -163,7 +166,7 @@ Examples:
   fwc list
   fwc plan \"create a GitHub issue titled 'FWC: add workflow macros'\"
   fwc explain \"find the Notion page named Roadmap and append this summary\"
-  fwc do \"disable the slack connector in z:work\" --simulate
+  fwc do \"create a GitHub issue titled 'FWC: add workflow macros'\" --simulate
   fwc show github
   fwc show github --template '{{connector.slug}} => {{connector.name}}'
   fwc ops github
@@ -312,25 +315,10 @@ enum Commands {
     /// Report connector or fleet status.
     Status(StatusArgs),
 
-    /// Enable a connector.
-    Enable(TargetArgs),
-
-    /// Disable a connector.
-    Disable(TargetArgs),
-
-    /// Start a connector runtime.
-    Start(TargetArgs),
-
-    /// Stop a connector runtime.
-    Stop(TargetArgs),
-
-    /// Restart a connector runtime.
-    Restart(TargetArgs),
-
     /// Install a connector package.
     Install(InstallArgs),
 
-    /// Update a connector package or channel.
+    /// Update a connector package from a replacement source.
     Update(UpdateArgs),
 
     /// Pin a connector to a specific version or channel.
@@ -353,9 +341,6 @@ enum Commands {
 
     /// Cancel an in-flight connector operation.
     Cancel(CancelArgs),
-
-    /// Read connector logs or event streams.
-    Logs(LogsArgs),
 
     /// Export tool schemas for AI agent runtimes (MCP, Claude, `OpenAI`).
     ///
@@ -391,7 +376,6 @@ enum Commands {
     ///
     /// Every invoke and simulate call is recorded. Query by connector,
     /// status, time range, or entry ID for debugging and replay.
-    #[command(visible_alias = "audit")]
     History(HistoryArgs),
 
     /// Chain two operations: output of A feeds input of B via field mapping.
@@ -429,12 +413,6 @@ enum Commands {
     #[command(name = "batch-file", visible_alias = "batch-ops")]
     BatchFile(BatchFileArgs),
 
-    /// Tail real-time events from one or more connectors.
-    ///
-    /// Streams events in unified format. Use `--all` for all streaming
-    /// connectors or specify a comma-separated list.
-    #[command(visible_alias = "tail")]
-    Events(EventsArgs),
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -551,7 +529,7 @@ struct DoIntentArgs {
     #[arg(long, default_value_t = false)]
     simulate: bool,
 
-    /// Explicitly approve the compiled workflow. The scaffold stays honest and still will not claim host-backed side effects.
+    /// Explicitly approve the compiled workflow so real mutating primitives may run.
     #[arg(long, default_value_t = false)]
     approve: bool,
 }
@@ -816,30 +794,38 @@ struct RolloutRollbackArgs {
 
 #[derive(Args, Debug, Serialize)]
 struct InstallArgs {
-    /// Connector id, alias, or package coordinate.
-    connector: String,
+    /// Package source path, connector crate path, or workspace connector selector.
+    source: String,
 
-    /// Optional version or channel.
+    /// Optional version to require from the resolved package artifact.
     #[arg(long)]
     version: Option<String>,
 
-    /// Verify only and do not activate the connector.
+    /// Verify only and do not write the connector into the managed inventory.
     #[arg(long, default_value_t = false)]
     verify_only: bool,
+
+    /// Connector configuration file consumed by `fcp-host`.
+    #[arg(long, env = "FCP_HOST_CONNECTORS_FILE")]
+    connectors_file: Option<PathBuf>,
 }
 
 #[derive(Args, Debug, Serialize)]
 struct UpdateArgs {
-    /// Connector id, alias, or package coordinate.
+    /// Installed connector id, alias, or family name.
     connector: String,
 
-    /// Optional target version or channel.
+    /// Optional replacement package source path, connector crate path, or workspace connector selector.
     #[arg(long)]
-    to: Option<String>,
+    source: Option<String>,
 
     /// Explain the update plan without applying it.
     #[arg(long, default_value_t = false)]
     dry_run: bool,
+
+    /// Connector configuration file consumed by `fcp-host`.
+    #[arg(long, env = "FCP_HOST_CONNECTORS_FILE")]
+    connectors_file: Option<PathBuf>,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -1003,20 +989,6 @@ struct CancelArgs {
     /// Return partial results if available.
     #[arg(long, default_value_t = false)]
     return_partial: bool,
-}
-
-#[derive(Args, Debug, Serialize)]
-struct LogsArgs {
-    /// Connector id, alias, or family name.
-    connector: String,
-
-    /// Follow log output as it arrives.
-    #[arg(long, default_value_t = false)]
-    follow: bool,
-
-    /// Optional duration like 15m or 1h for historical log windows.
-    #[arg(long)]
-    since: Option<String>,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -1322,24 +1294,6 @@ struct BatchFileArgs {
     /// Default execution zone for operations that do not specify one in the JSONL file.
     #[arg(long)]
     zone: Option<String>,
-}
-
-#[derive(Args, Debug, Serialize)]
-struct EventsArgs {
-    /// Connectors to tail (comma-separated, e.g. `slack,discord`).
-    connectors: Option<String>,
-
-    /// Tail all streaming connectors.
-    #[arg(long)]
-    all: bool,
-
-    /// Include events from this duration ago (e.g. `5m`, `1h`, `30s`).
-    #[arg(long, value_name = "DURATION")]
-    since: Option<String>,
-
-    /// Backpressure buffer size.
-    #[arg(long, default_value_t = 1000)]
-    buffer_size: usize,
 }
 
 fn main() -> ExitCode {
@@ -2018,41 +1972,8 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         Commands::Policy(_) => passthrough_only_dispatch("policy"),
         Commands::Package(_) => passthrough_only_dispatch("package"),
         Commands::Status(args) => status_dispatch(args, cli.host.as_deref())?,
-        Commands::Enable(args) => unavailable_command_dispatch(
-            "enable",
-            args,
-            "No live host admin endpoint exists yet for enable/disable lifecycle control. Use `fwc pin`, `fwc unpin`, `fwc status`, and rollout routes for the currently implemented host-backed controls.",
-        )?,
-        Commands::Disable(args) => unavailable_command_dispatch(
-            "disable",
-            args,
-            "No live host admin endpoint exists yet for enable/disable lifecycle control. Use `fwc pin`, `fwc unpin`, `fwc status`, and rollout routes for the currently implemented host-backed controls.",
-        )?,
-        Commands::Start(args) => unavailable_command_dispatch(
-            "start",
-            args,
-            "No live host admin endpoint exists yet for process start/stop control.",
-        )?,
-        Commands::Stop(args) => unavailable_command_dispatch(
-            "stop",
-            args,
-            "No live host admin endpoint exists yet for process start/stop control.",
-        )?,
-        Commands::Restart(args) => unavailable_command_dispatch(
-            "restart",
-            args,
-            "No live host admin endpoint exists yet for process restart control.",
-        )?,
-        Commands::Install(args) => unavailable_command_dispatch(
-            "install",
-            args,
-            "No live host admin endpoint exists yet for install/verify/update lifecycle control.",
-        )?,
-        Commands::Update(args) => unavailable_command_dispatch(
-            "update",
-            args,
-            "No live host admin endpoint exists yet for install/verify/update lifecycle control.",
-        )?,
+        Commands::Install(args) => install_dispatch(args)?,
+        Commands::Update(args) => update_dispatch(args)?,
         Commands::Pin(args) => pin_dispatch(args, cli.host.as_deref())?,
         Commands::Unpin(args) => unpin_dispatch(args, cli.host.as_deref())?,
         Commands::Rollout(args) => rollout_dispatch(args, cli.host.as_deref())?,
@@ -2060,11 +1981,6 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         Commands::Invoke(args) => invoke_dispatch("invoke", args, cli.host.as_deref())?,
         Commands::Simulate(args) => invoke_dispatch("simulate", args, cli.host.as_deref())?,
         Commands::Cancel(args) => cancel_dispatch(args, cli.host.as_deref())?,
-        Commands::Logs(args) => unavailable_command_dispatch(
-            "logs",
-            args,
-            "No live host log streaming endpoint exists yet.",
-        )?,
         Commands::ExportTools(args) => export_tools_dispatch(args)?,
         Commands::ServeMcp(args) => planned("serve-mcp", args)?,
         Commands::Suggest(args) => suggest_dispatch(args)?,
@@ -2076,11 +1992,6 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         Commands::Recipe(args) => recipe_dispatch(args)?,
         Commands::Map(args) => map_dispatch(args, cli.host.as_deref())?,
         Commands::BatchFile(args) => batch_file_dispatch(args, cli.host.as_deref())?,
-        Commands::Events(args) => unavailable_command_dispatch(
-            "events",
-            args,
-            "No live host event tail endpoint exists yet.",
-        )?,
     };
 
     Ok(outcome)
@@ -2109,30 +2020,6 @@ where
     Ok(DispatchOutcome {
         payload: catalog::planned_payload(command, &serde_json::to_value(args)?),
         exit_code: CliExitCode::Success,
-    })
-}
-
-fn unavailable_command_dispatch<T>(
-    command: &str,
-    args: &T,
-    message: &str,
-) -> Result<DispatchOutcome>
-where
-    T: Serialize,
-{
-    Ok(DispatchOutcome {
-        payload: json!({
-            "status": "error",
-            "command": command,
-            "message": message,
-            "captures": serde_json::to_value(args)?,
-            "error": {
-                "type": "host-endpoint-not-implemented",
-                "message": message,
-                "recoverable": true,
-            },
-        }),
-        exit_code: CliExitCode::Validation,
     })
 }
 
@@ -4840,6 +4727,13 @@ fn write_managed_connector_configs(
         .with_context(|| format!("failed to write connectors file: {}", path.display()))
 }
 
+fn read_managed_connector_configs_allow_missing(path: &PathBuf) -> Result<Vec<ManagedConnectorConfig>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    read_managed_connector_configs(path)
+}
+
 fn resolve_managed_connector<'a>(
     catalog: &'a DiscoveryCatalog,
     configs: &'a [ManagedConnectorConfig],
@@ -4939,6 +4833,557 @@ fn read_json_file(path: &PathBuf) -> Result<Value> {
         .with_context(|| format!("failed to read JSON file: {}", path.display()))?;
     serde_json::from_str(&raw)
         .with_context(|| format!("invalid JSON file: {}", path.display()))
+}
+
+#[derive(Debug)]
+struct PreparedPackageArtifact {
+    package_output: PackageOutput,
+    manifest: ConnectorManifest,
+    build_metadata: PackageBuildMetadata,
+    verification: Vec<Value>,
+    source_description: String,
+}
+
+fn install_dispatch(args: &InstallArgs) -> Result<DispatchOutcome> {
+    let artifact = match prepare_package_artifact(&args.source, args.version.as_deref()) {
+        Ok(artifact) => artifact,
+        Err(error) => {
+            return Ok(DispatchOutcome {
+                payload: json!({
+                    "status": "error",
+                    "command": "install",
+                    "error": {
+                        "type": "invalid-install-source",
+                        "message": error.to_string(),
+                    },
+                    "source": args.source,
+                    "next_actions": [
+                        "Run `fwc package --json` on a connector crate first, or pass a package directory containing package-output.json.".to_owned(),
+                        "Pass a workspace connector selector such as `github` when installing from local source.".to_owned(),
+                    ],
+                }),
+                exit_code: CliExitCode::Validation,
+            });
+        }
+    };
+
+    let candidate = managed_connector_from_artifact(&artifact, None);
+
+    if args.verify_only {
+        return Ok(DispatchOutcome {
+            payload: json!({
+                "status": "ok",
+                "command": "install",
+                "mode": "verify-only",
+                "message": format!(
+                    "Verified install candidate `{}` without mutating host inventory.",
+                    candidate.id
+                ),
+                "source": artifact.source_description,
+                "package": package_output_json(&artifact),
+                "candidate": connector_descriptor_json(&candidate, None),
+                "verification": artifact.verification,
+            }),
+            exit_code: CliExitCode::Success,
+        });
+    }
+
+    let connectors_file = match resolve_connectors_file_path(args.connectors_file.as_ref()) {
+        Ok(path) => path,
+        Err(error) => {
+            return Ok(DispatchOutcome {
+                payload: json!({
+                    "status": "error",
+                    "command": "install",
+                    "error": {
+                        "type": "missing-connectors-file",
+                        "message": error.to_string(),
+                    },
+                    "next_actions": [
+                        "Pass `--connectors-file <path>` or set `FCP_HOST_CONNECTORS_FILE`.".to_owned(),
+                    ],
+                }),
+                exit_code: CliExitCode::Validation,
+            });
+        }
+    };
+
+    let mut configs = read_managed_connector_configs_allow_missing(&connectors_file)?;
+    if let Some(existing) = configs.iter().find(|entry| entry.id == candidate.id) {
+        return Ok(DispatchOutcome {
+            payload: json!({
+                "status": "error",
+                "command": "install",
+                "error": {
+                    "type": "connector-already-installed",
+                    "message": format!(
+                        "Connector `{}` is already present in the managed connectors file. Use `fwc update {}` instead.",
+                        existing.id,
+                        existing.id
+                    ),
+                },
+                "connectors_file": connectors_file.display().to_string(),
+                "existing": connector_descriptor_json(existing, None),
+                "candidate": connector_descriptor_json(&candidate, None),
+                "next_actions": [
+                    format!("fwc update {} --source {}", existing.id, args.source),
+                ],
+            }),
+            exit_code: CliExitCode::Validation,
+        });
+    }
+
+    configs.push(candidate.clone());
+    write_managed_connector_configs(&connectors_file, &configs)?;
+
+    Ok(DispatchOutcome {
+        payload: json!({
+            "status": "ok",
+            "command": "install",
+            "message": format!(
+                "Registered `{}` in the persistent host connector inventory.",
+                candidate.id
+            ),
+            "source": artifact.source_description,
+            "connectors_file": connectors_file.display().to_string(),
+            "package": package_output_json(&artifact),
+            "installed": connector_descriptor_json(&candidate, None),
+            "verification": artifact.verification,
+            "activation": {
+                "inventory_updated": true,
+                "host_restart_required": true,
+                "reason": "fcp-host currently loads the managed connector inventory at startup; there is no live install/reload endpoint yet.",
+            },
+            "next_actions": [
+                "Restart `fcp-host` so it reloads the updated connector inventory.".to_owned(),
+                format!("fwc config doctor {}", candidate.id),
+            ],
+        }),
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn update_dispatch(args: &UpdateArgs) -> Result<DispatchOutcome> {
+    let connectors_file = match resolve_connectors_file_path(args.connectors_file.as_ref()) {
+        Ok(path) => path,
+        Err(error) => {
+            return Ok(DispatchOutcome {
+                payload: json!({
+                    "status": "error",
+                    "command": "update",
+                    "error": {
+                        "type": "missing-connectors-file",
+                        "message": error.to_string(),
+                    },
+                    "next_actions": [
+                        "Pass `--connectors-file <path>` or set `FCP_HOST_CONNECTORS_FILE`.".to_owned(),
+                    ],
+                }),
+                exit_code: CliExitCode::Validation,
+            });
+        }
+    };
+
+    let mut configs = read_managed_connector_configs_allow_missing(&connectors_file)?;
+    let catalog = DiscoveryCatalog::load()?;
+    let resolved = catalog.resolve_connector(&args.connector).ok();
+    let target_index = match find_managed_connector_index(&configs, &args.connector, resolved) {
+        Ok(index) => index,
+        Err(error) => {
+            return Ok(DispatchOutcome {
+                payload: json!({
+                    "status": "error",
+                    "command": "update",
+                    "error": {
+                        "type": "connector-not-installed",
+                        "message": error.to_string(),
+                    },
+                    "connectors_file": connectors_file.display().to_string(),
+                    "next_actions": [
+                        format!("fwc install {}", args.connector),
+                        "Use `fwc config doctor <connector>` to inspect the current managed inventory.".to_owned(),
+                    ],
+                }),
+                exit_code: CliExitCode::Validation,
+            });
+        }
+    };
+
+    let current = configs[target_index].clone();
+    let source = args.source.as_deref().unwrap_or(&args.connector);
+    let artifact = match prepare_package_artifact(source, None) {
+        Ok(artifact) => artifact,
+        Err(error) => {
+            return Ok(DispatchOutcome {
+                payload: json!({
+                    "status": "error",
+                    "command": "update",
+                    "error": {
+                        "type": "invalid-update-source",
+                        "message": error.to_string(),
+                    },
+                    "source": source,
+                    "next_actions": [
+                        "Run `fwc package --json` on a connector crate first, or pass a package directory containing package-output.json.".to_owned(),
+                        "Pass a workspace connector selector such as `github` when updating from local source.".to_owned(),
+                    ],
+                }),
+                exit_code: CliExitCode::Validation,
+            });
+        }
+    };
+
+    if artifact.manifest.connector.id.as_str() != current.id {
+        return Ok(DispatchOutcome {
+            payload: json!({
+                "status": "error",
+                "command": "update",
+                "error": {
+                    "type": "connector-id-mismatch",
+                    "message": format!(
+                        "Update source resolves to `{}`, but the managed connector entry is `{}`.",
+                        artifact.manifest.connector.id,
+                        current.id
+                    ),
+                },
+                "connectors_file": connectors_file.display().to_string(),
+                "current": connector_descriptor_json(&current, None),
+                "package": package_output_json(&artifact),
+            }),
+            exit_code: CliExitCode::Validation,
+        });
+    }
+
+    let updated = managed_connector_from_artifact(&artifact, Some(&current));
+
+    if args.dry_run {
+        return Ok(DispatchOutcome {
+            payload: json!({
+                "status": "ok",
+                "command": "update",
+                "mode": "dry-run",
+                "message": format!(
+                    "Computed a real update plan for `{}` without mutating host inventory.",
+                    current.id
+                ),
+                "source": artifact.source_description,
+                "connectors_file": connectors_file.display().to_string(),
+                "current": connector_descriptor_json(&current, None),
+                "planned": connector_descriptor_json(&updated, None),
+                "package": package_output_json(&artifact),
+                "verification": artifact.verification,
+                "activation": {
+                    "inventory_updated": false,
+                    "host_restart_required": true,
+                },
+            }),
+            exit_code: CliExitCode::Success,
+        });
+    }
+
+    configs[target_index] = updated.clone();
+    write_managed_connector_configs(&connectors_file, &configs)?;
+
+    Ok(DispatchOutcome {
+        payload: json!({
+            "status": "ok",
+            "command": "update",
+            "message": format!(
+                "Updated `{}` in the persistent host connector inventory.",
+                current.id
+            ),
+            "source": artifact.source_description,
+            "connectors_file": connectors_file.display().to_string(),
+            "current": connector_descriptor_json(&current, None),
+            "updated": connector_descriptor_json(&updated, None),
+            "package": package_output_json(&artifact),
+            "verification": artifact.verification,
+            "activation": {
+                "inventory_updated": true,
+                "host_restart_required": true,
+                "reason": "fcp-host currently loads the managed connector inventory at startup; there is no live update/reload endpoint yet.",
+            },
+            "next_actions": [
+                "Restart `fcp-host` so it reloads the updated connector inventory.".to_owned(),
+                format!("fwc status {} --host <endpoint>", current.id),
+            ],
+        }),
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn prepare_package_artifact(
+    source: &str,
+    requested_version: Option<&str>,
+) -> Result<PreparedPackageArtifact> {
+    let (package_output, source_description) = resolve_package_output(source)?;
+    let (manifest, build_metadata, verification) =
+        inspect_package_output(&package_output, requested_version)?;
+    Ok(PreparedPackageArtifact {
+        package_output,
+        manifest,
+        build_metadata,
+        verification,
+        source_description,
+    })
+}
+
+fn resolve_package_output(source: &str) -> Result<(PackageOutput, String)> {
+    let path = PathBuf::from(source);
+    if path.exists() {
+        let output = load_package_output_from_path(&path)?;
+        return Ok((output, path.display().to_string()));
+    }
+
+    let catalog = DiscoveryCatalog::load()?;
+    let connector = catalog.resolve_connector(source).map_err(|error| {
+        anyhow::anyhow!(
+            "`{source}` is neither an existing path nor a known workspace connector selector (kind: {:?}, suggestions: {}).",
+            error.kind,
+            if error.suggestions.is_empty() {
+                "none".to_owned()
+            } else {
+                error.suggestions.join(", ")
+            }
+        )
+    })?;
+    let manifest_path = PathBuf::from(&connector.manifest_path);
+    let crate_path = manifest_path.parent().with_context(|| {
+        format!(
+            "workspace manifest `{}` has no parent directory",
+            manifest_path.display()
+        )
+    })?;
+    let output = package_cmd::package_connector(&PackageBuildArgs {
+        path: crate_path.to_path_buf(),
+        output: None,
+        skip_sbom: false,
+        release: true,
+        cargo_flags: Vec::new(),
+        format: crate::package_cmd::OutputFormat::Human,
+    })?;
+    Ok((output, format!("workspace connector `{}`", connector.slug)))
+}
+
+fn load_package_output_from_path(path: &Path) -> Result<PackageOutput> {
+    if path.is_file() {
+        let file_name = path.file_name().and_then(|value| value.to_str());
+        if file_name != Some(PACKAGE_OUTPUT_FILENAME) {
+            bail!(
+                "file source `{}` must be `{PACKAGE_OUTPUT_FILENAME}`",
+                path.display()
+            );
+        }
+        return read_package_output_metadata(path);
+    }
+
+    if !path.is_dir() {
+        bail!("package source `{}` is not a file or directory", path.display());
+    }
+
+    let metadata_path = path.join(PACKAGE_OUTPUT_FILENAME);
+    if metadata_path.exists() {
+        return read_package_output_metadata(&metadata_path);
+    }
+
+    if path.join("Cargo.toml").exists() {
+        return package_cmd::package_connector(&PackageBuildArgs {
+            path: path.to_path_buf(),
+            output: None,
+            skip_sbom: false,
+            release: true,
+            cargo_flags: Vec::new(),
+            format: crate::package_cmd::OutputFormat::Human,
+        });
+    }
+
+    bail!(
+        "directory `{}` is neither a connector crate nor a packaged connector directory containing `{PACKAGE_OUTPUT_FILENAME}`",
+        path.display()
+    )
+}
+
+fn read_package_output_metadata(path: &Path) -> Result<PackageOutput> {
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read package metadata: {}", path.display()))?;
+    let mut output: PackageOutput = serde_json::from_str(&raw)
+        .with_context(|| format!("invalid package metadata JSON: {}", path.display()))?;
+    let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    output.output_dir = resolve_package_metadata_path(base_dir, &output.output_dir);
+    output.binary_path = resolve_package_metadata_path(base_dir, &output.binary_path);
+    output.manifest_path = resolve_package_metadata_path(base_dir, &output.manifest_path);
+    output.build_metadata_path = resolve_package_metadata_path(base_dir, &output.build_metadata_path);
+    output.sbom_path = output
+        .sbom_path
+        .as_ref()
+        .map(|value| resolve_package_metadata_path(base_dir, value));
+    Ok(output)
+}
+
+fn resolve_package_metadata_path(base_dir: &Path, value: &Path) -> PathBuf {
+    if value.is_absolute() {
+        value.to_path_buf()
+    } else {
+        base_dir.join(value)
+    }
+}
+
+fn inspect_package_output(
+    package_output: &PackageOutput,
+    requested_version: Option<&str>,
+) -> Result<(ConnectorManifest, PackageBuildMetadata, Vec<Value>)> {
+    if !package_output.binary_path.is_file() {
+        bail!(
+            "packaged binary `{}` does not exist",
+            package_output.binary_path.display()
+        );
+    }
+    if !package_output.manifest_path.is_file() {
+        bail!(
+            "packaged manifest `{}` does not exist",
+            package_output.manifest_path.display()
+        );
+    }
+    if !package_output.build_metadata_path.is_file() {
+        bail!(
+            "build metadata `{}` does not exist",
+            package_output.build_metadata_path.display()
+        );
+    }
+
+    let manifest_raw = std::fs::read_to_string(&package_output.manifest_path)
+        .with_context(|| format!("failed to read manifest: {}", package_output.manifest_path.display()))?;
+    let manifest = ConnectorManifest::parse_str(&manifest_raw)
+        .with_context(|| format!("invalid connector manifest: {}", package_output.manifest_path.display()))?;
+
+    let build_metadata_raw = std::fs::read_to_string(&package_output.build_metadata_path).with_context(
+        || {
+            format!(
+                "failed to read build metadata: {}",
+                package_output.build_metadata_path.display()
+            )
+        },
+    )?;
+    let build_metadata: PackageBuildMetadata =
+        serde_json::from_str(&build_metadata_raw).with_context(|| {
+            format!(
+                "invalid build metadata JSON: {}",
+                package_output.build_metadata_path.display()
+            )
+        })?;
+
+    let actual_sha256 = compute_file_sha256(&package_output.binary_path)?;
+    if actual_sha256 != package_output.binary_sha256 {
+        bail!(
+            "package metadata hash mismatch for `{}`: expected {}, found {}",
+            package_output.binary_path.display(),
+            package_output.binary_sha256,
+            actual_sha256
+        );
+    }
+
+    let manifest_connector_id = manifest.connector.id.to_string();
+    let manifest_version = manifest.connector.version.to_string();
+
+    if package_output.connector_id != manifest_connector_id {
+        bail!(
+            "package metadata connector id mismatch: expected `{}`, found `{}` in manifest",
+            package_output.connector_id,
+            manifest_connector_id
+        );
+    }
+
+    if package_output.version != manifest_version {
+        bail!(
+            "package metadata version mismatch: expected `{}`, found `{}` in manifest",
+            package_output.version,
+            manifest_version
+        );
+    }
+
+    if let Some(expected_version) = requested_version
+        && package_output.version != expected_version
+    {
+        bail!(
+            "resolved package version `{}` does not match requested version `{expected_version}`",
+            package_output.version
+        );
+    }
+
+    let verification = vec![
+        json!({
+            "check": "binary-exists",
+            "status": "ok",
+            "detail": package_output.binary_path.display().to_string(),
+        }),
+        json!({
+            "check": "manifest-valid",
+            "status": "ok",
+            "detail": manifest.connector.id.to_string(),
+        }),
+        json!({
+            "check": "build-metadata-valid",
+            "status": "ok",
+            "detail": build_metadata.build_timestamp.clone(),
+        }),
+        json!({
+            "check": "binary-sha256",
+            "status": "ok",
+            "detail": actual_sha256,
+        }),
+        json!({
+            "check": "version",
+            "status": "ok",
+            "detail": manifest_version,
+        }),
+    ];
+
+    Ok((manifest, build_metadata, verification))
+}
+
+fn compute_file_sha256(path: &Path) -> Result<String> {
+    let mut file = std::fs::File::open(path)
+        .with_context(|| format!("failed to open file for hashing: {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher)
+        .with_context(|| format!("failed to hash file: {}", path.display()))?;
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn managed_connector_from_artifact(
+    artifact: &PreparedPackageArtifact,
+    existing: Option<&ManagedConnectorConfig>,
+) -> ManagedConnectorConfig {
+    ManagedConnectorConfig {
+        id: artifact.manifest.connector.id.to_string(),
+        binary: artifact.package_output.binary_path.display().to_string(),
+        name: Some(artifact.manifest.connector.name.clone()),
+        description: Some(artifact.manifest.connector.description.clone()),
+        args: existing.map_or_else(Vec::new, |entry| entry.args.clone()),
+        env: existing.map_or_else(BTreeMap::new, |entry| entry.env.clone()),
+        config: existing.and_then(|entry| entry.config.clone()),
+        categories: existing.map_or_else(Vec::new, |entry| entry.categories.clone()),
+        version: Some(artifact.manifest.connector.version.to_string()),
+    }
+}
+
+fn package_output_json(artifact: &PreparedPackageArtifact) -> Value {
+    json!({
+        "output_dir": artifact.package_output.output_dir.display().to_string(),
+        "binary_path": artifact.package_output.binary_path.display().to_string(),
+        "manifest_path": artifact.package_output.manifest_path.display().to_string(),
+        "build_metadata_path": artifact.package_output.build_metadata_path.display().to_string(),
+        "sbom_path": artifact.package_output.sbom_path.as_ref().map(|path| path.display().to_string()),
+        "connector_id": artifact.package_output.connector_id.clone(),
+        "version": artifact.package_output.version.clone(),
+        "binary_sha256": artifact.package_output.binary_sha256.clone(),
+        "build": {
+            "target_triple": artifact.build_metadata.target_triple.clone(),
+            "profile": artifact.build_metadata.profile.clone(),
+            "git_commit": artifact.build_metadata.git_commit.clone(),
+            "git_dirty": artifact.build_metadata.git_dirty,
+        },
+    })
 }
 
 fn remove_invoke_binding(
@@ -8451,68 +8896,6 @@ fn batch_file_dispatch(
 }
 
 #[allow(dead_code)] // Wired when host integration lands.
-fn events_dispatch(args: &EventsArgs) -> Result<DispatchOutcome> {
-    // Parse connectors.
-    let connectors = if args.all {
-        Vec::new() // Empty = all.
-    } else if let Some(ref s) = args.connectors {
-        event_stream::TailConfig::parse_connectors(s)
-    } else {
-        return Ok(DispatchOutcome {
-            payload: json!({
-                "status": "error",
-                "command": "events",
-                "error": {
-                    "type": "missing-target",
-                    "message": "Specify connectors to tail or use --all.",
-                },
-                "next_actions": [
-                    "fwc events slack",
-                    "fwc events slack,discord",
-                    "fwc events --all",
-                ],
-            }),
-            exit_code: CliExitCode::UnknownCommand,
-        });
-    };
-
-    // Parse since duration.
-    let since_seconds = if let Some(ref since) = args.since {
-        Some(event_stream::parse_since(since).map_err(|e| anyhow::anyhow!("{e}"))?)
-    } else {
-        None
-    };
-
-    let plan = event_stream::TailPlan {
-        connectors: if args.all {
-            vec!["<all streaming connectors>".to_owned()]
-        } else {
-            connectors
-        },
-        all: args.all,
-        since: args.since.clone(),
-        buffer_size: args.buffer_size,
-    };
-
-    Ok(DispatchOutcome {
-        payload: json!({
-            "status": "planned",
-            "command": "events",
-            "message": format!(
-                "Tail plan: {} connector(s){}. \
-                 Execution requires host integration (not yet available).",
-                plan.connectors.len(),
-                since_seconds.map_or_else(String::new, |s| format!(", since {s}s ago")),
-            ),
-            "plan": plan,
-            "next_actions": [
-                "fwc list --streaming",
-            ],
-        }),
-        exit_code: CliExitCode::Success,
-    })
-}
-
 fn connector_list_entry(connector: &DiscoveredConnector) -> Value {
     json!({
         "slug": &connector.slug,
@@ -9075,7 +9458,7 @@ fn task_run_dispatch(args: &TaskIdArgs) -> Result<DispatchOutcome> {
             "command": "task",
             "subcommand": "run",
             "message": if task.approval.workflow {
-                "Ran the approved workflow capsule. External side effects are still scaffold-backed until host-backed execution lands."
+                "Ran the approved workflow capsule and surfaced the live result of each primitive step."
             } else {
                 "Ran the workflow capsule in non-side-effecting mode."
             },
@@ -9177,10 +9560,10 @@ fn intent_do_dispatch(args: &DoIntentArgs) -> Result<DispatchOutcome> {
             payload: json!({
                 "status": compiled.status,
                 "command": "do",
-                "message": "The intent compiler needs clarification before workflow materialization can continue.",
+                "message": "The intent compiler reported a blocking state before workflow materialization can continue.",
                 "error": {
                     "type": "intent-not-ready",
-                    "message": "Resolve the reported ambiguity or missing information before using `fwc do`.",
+                    "message": "Resolve the reported ambiguity, unsupported primitive, or missing information before using `fwc do`.",
                     "recoverable": true,
                     "did_you_mean": compiled
                         .alternative_connectors
@@ -9206,7 +9589,7 @@ fn intent_do_dispatch(args: &DoIntentArgs) -> Result<DispatchOutcome> {
             "status": if approve { "materialized" } else { "simulated" },
             "command": "do",
             "message": if approve {
-                "Materialized the full primitive workflow in approval mode. External side effects are still scaffold-backed in this repo state."
+                "Materialized the full primitive workflow in approval mode and surfaced the live result of each primitive step."
             } else {
                 "Materialized the safe prefix of the primitive workflow and stopped before the first side-effecting step."
             },
@@ -9310,7 +9693,7 @@ fn resolve_message(stop_reason: &str, until_ready: bool) -> &'static str {
             "Resolution could not infer any additional state from the current capsule."
         }
         "iteration-cap" => {
-            "Stopped after multiple resolution passes to avoid looping on scaffold-only state."
+            "Stopped after multiple resolution passes to avoid looping without any new durable resolution progress."
         }
         _ => "Ran a safe resolution pass for the current workflow capsule.",
     }
@@ -9379,7 +9762,6 @@ fn materialize_compiled_steps(
                 "executed_count": executed_steps.len(),
                 "withheld_count": withheld_steps.len(),
                 "stopped_before_side_effect": stopped_before_side_effect,
-                "scaffold_backed": true,
             }));
         }
     }
@@ -9391,7 +9773,6 @@ fn materialize_compiled_steps(
         "executed_count": executed_steps.len(),
         "withheld_count": withheld_steps.len(),
         "stopped_before_side_effect": stopped_before_side_effect,
-        "scaffold_backed": true,
     }))
 }
 
@@ -9605,8 +9986,8 @@ fn prepare_cli(received_args: &[String]) -> std::result::Result<PreparedCli, Pre
                     ErrorDetails {
                         did_you_mean: Vec::new(),
                         examples: vec![
-                            "fwc do \"disable the slack connector in z:work\"".to_owned(),
-                            "fwc do \"disable the slack connector in z:work\" --approve".to_owned(),
+                            "fwc do \"create a GitHub issue titled 'FWC: add workflow macros'\"".to_owned(),
+                            "fwc do \"create a GitHub issue titled 'FWC: add workflow macros'\" --approve".to_owned(),
                         ],
                         next_actions: vec![
                             "Use the default simulation mode to review the workflow safely."
@@ -9970,7 +10351,7 @@ fn parse_failure_dispatch(args: &[String], error: &clap::Error) -> DispatchOutco
                     ErrorDetails {
                         did_you_mean: Vec::new(),
                         examples: vec![
-                            "fwc task \"disable the slack connector in z:work\"".to_owned(),
+                            "fwc task \"create a GitHub issue titled 'FWC: add workflow macros'\"".to_owned(),
                             "fwc task list".to_owned(),
                         ],
                         next_actions: vec![
@@ -10103,7 +10484,7 @@ fn parse_failure_dispatch(args: &[String], error: &clap::Error) -> DispatchOutco
                     .map(String::as_str),
                 workflow::task_subcommands(),
                 vec![
-                    "fwc task \"disable the slack connector in z:work\"".to_owned(),
+                    "fwc task \"create a GitHub issue titled 'FWC: add workflow macros'\"".to_owned(),
                     "fwc task list".to_owned(),
                     "fwc task show <task-id>".to_owned(),
                     "fwc task resolve <task-id> --until ready".to_owned(),
@@ -10825,7 +11206,12 @@ mod tests {
     #[test]
     fn normalize_defaults_task_intent_to_create() {
         let normalized = normalize_args(
-            &["fwc", "task", "disable the slack connector in z:work"].map(str::to_owned),
+            &[
+                "fwc",
+                "task",
+                "create a GitHub issue titled 'FWC: add workflow macros'",
+            ]
+            .map(str::to_owned),
         )
         .expect("task intent should normalize");
 
@@ -10835,17 +11221,17 @@ mod tests {
                 "fwc",
                 "task",
                 "create",
-                "disable the slack connector in z:work"
+                "create a GitHub issue titled 'FWC: add workflow macros'"
             ]
         );
         assert_eq!(normalized.corrections.len(), 1);
         assert_eq!(
             normalized.corrections[0].from,
-            "task 'disable the slack connector in z:work'"
+            "task 'create a GitHub issue titled '\\''FWC: add workflow macros'\\'''"
         );
         assert_eq!(
             normalized.corrections[0].to,
-            "task create 'disable the slack connector in z:work'"
+            "task create 'create a GitHub issue titled '\\''FWC: add workflow macros'\\'''"
         );
     }
 
@@ -11960,7 +12346,7 @@ mod tests {
             "fwc".to_owned(),
             "--json".to_owned(),
             "do".to_owned(),
-            "disable the slack connector in z:work".to_owned(),
+            "create a GitHub issue titled 'FWC: add workflow macros'".to_owned(),
             "--simulate".to_owned(),
             "--approve".to_owned(),
         ];
@@ -12043,40 +12429,6 @@ mod tests {
     }
 
     #[test]
-    fn execute_activate_alias_resolves_to_enable() {
-        let args = vec![
-            "fwc".to_owned(),
-            "--json".to_owned(),
-            "activate".to_owned(),
-            "github".to_owned(),
-        ];
-        let outcome = execute(&args).expect("execution should not fail internally");
-        let payload: Value =
-            serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
-
-        assert_eq!(outcome.exit_code, CliExitCode::Validation.into());
-        assert_eq!(payload["command"], "enable");
-        assert_eq!(payload["error"]["type"], "host-endpoint-not-implemented");
-    }
-
-    #[test]
-    fn execute_upgrade_alias_resolves_to_update() {
-        let args = vec![
-            "fwc".to_owned(),
-            "--json".to_owned(),
-            "upgrade".to_owned(),
-            "slack".to_owned(),
-        ];
-        let outcome = execute(&args).expect("execution should not fail internally");
-        let payload: Value =
-            serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
-
-        assert_eq!(outcome.exit_code, CliExitCode::Validation.into());
-        assert_eq!(payload["command"], "update");
-        assert_eq!(payload["error"]["type"], "host-endpoint-not-implemented");
-    }
-
-    #[test]
     fn execute_preview_alias_resolves_to_simulate() {
         let (host, server) = spawn_mock_host(
             mock_github_host_routes(StdBTreeMap::from([(
@@ -12101,41 +12453,6 @@ mod tests {
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "simulate");
         assert_eq!(payload["phase"], "preflight");
-    }
-
-    #[test]
-    fn execute_tail_alias_resolves_to_logs() {
-        let args = vec![
-            "fwc".to_owned(),
-            "--json".to_owned(),
-            "tail".to_owned(),
-            "github".to_owned(),
-        ];
-        let outcome = execute(&args).expect("execution should not fail internally");
-        let payload: Value =
-            serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
-
-        assert_eq!(outcome.exit_code, CliExitCode::Validation.into());
-        assert_eq!(payload["command"], "logs");
-        assert_eq!(payload["error"]["type"], "host-endpoint-not-implemented");
-    }
-
-    #[test]
-    fn execute_cfg_alias_resolves_to_config() {
-        let args = vec![
-            "fwc".to_owned(),
-            "--json".to_owned(),
-            "cfg".to_owned(),
-            "schema".to_owned(),
-            "github".to_owned(),
-        ];
-        let outcome = execute(&args).expect("execution should not fail internally");
-        let payload: Value =
-            serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
-
-        assert_eq!(outcome.exit_code, CliExitCode::Validation.into());
-        assert_eq!(payload["command"], "config");
-        assert_eq!(payload["error"]["type"], "host-endpoint-not-implemented");
     }
 
     // ── Intent recovery: typo auto-corrections (readonly) ───────────────
@@ -12202,28 +12519,6 @@ mod tests {
     }
 
     // ── Intent recovery: mutating typos are rejected ────────────────────
-
-    #[test]
-    fn execute_enbale_typo_is_rejected_as_ambiguous() {
-        let args = vec![
-            "fwc".to_owned(),
-            "--json".to_owned(),
-            "enbale".to_owned(),
-            "github".to_owned(),
-        ];
-        let outcome = execute(&args).expect("execution should not fail internally");
-        let payload: Value =
-            serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
-
-        assert_eq!(outcome.exit_code, CliExitCode::AmbiguousCorrection.into());
-        assert_eq!(payload["error"]["type"], "ambiguous-typo");
-        assert!(
-            payload["error"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("enable")
-        );
-    }
 
     #[test]
     fn execute_insatll_typo_is_rejected_as_ambiguous() {
@@ -12519,58 +12814,66 @@ mod tests {
 
     #[test]
     fn execute_config_validate_resolves_to_doctor() {
-        let args = vec![
+        let prepared = prepare_cli(&[
             "fwc".to_owned(),
             "--json".to_owned(),
             "config".to_owned(),
             "validate".to_owned(),
             "github".to_owned(),
-        ];
-        let outcome = execute(&args).expect("execution should not fail internally");
-        let payload: Value =
-            serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
+        ])
+        .expect("config alias should parse");
 
-        assert_eq!(outcome.exit_code, CliExitCode::Validation.into());
-        assert_eq!(payload["command"], "config");
-        // The config subcommand is captured inside the serialized args
-        assert_eq!(payload["captures"]["command"]["subcommand"], "doctor");
+        match prepared.cli.command {
+            Commands::Config(super::ConfigArgs {
+                command: super::ConfigCommand::Doctor(super::TargetArgs { connector }),
+                ..
+            }) => assert_eq!(connector, "github"),
+            command => panic!("expected config doctor command, got {command:?}"),
+        }
     }
 
     #[test]
     fn execute_config_show_resolves_to_get() {
-        let args = vec![
+        let prepared = prepare_cli(&[
             "fwc".to_owned(),
             "--json".to_owned(),
             "config".to_owned(),
             "show".to_owned(),
             "github".to_owned(),
-        ];
-        let outcome = execute(&args).expect("execution should not fail internally");
-        let payload: Value =
-            serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
+        ])
+        .expect("config alias should parse");
 
-        assert_eq!(outcome.exit_code, CliExitCode::Validation.into());
-        assert_eq!(payload["command"], "config");
-        assert_eq!(payload["captures"]["command"]["subcommand"], "get");
+        match prepared.cli.command {
+            Commands::Config(super::ConfigArgs {
+                command: super::ConfigCommand::Get(super::TargetArgs { connector }),
+                ..
+            }) => assert_eq!(connector, "github"),
+            command => panic!("expected config get command, got {command:?}"),
+        }
     }
 
     #[test]
     fn execute_config_rm_resolves_to_unset() {
-        let args = vec![
+        let prepared = prepare_cli(&[
             "fwc".to_owned(),
             "--json".to_owned(),
             "config".to_owned(),
             "rm".to_owned(),
             "github".to_owned(),
             "auth.token".to_owned(),
-        ];
-        let outcome = execute(&args).expect("execution should not fail internally");
-        let payload: Value =
-            serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
+        ])
+        .expect("config alias should parse");
 
-        assert_eq!(outcome.exit_code, CliExitCode::Validation.into());
-        assert_eq!(payload["command"], "config");
-        assert_eq!(payload["captures"]["command"]["subcommand"], "unset");
+        match prepared.cli.command {
+            Commands::Config(super::ConfigArgs {
+                command: super::ConfigCommand::Unset(super::ConfigUnsetArgs { connector, key }),
+                ..
+            }) => {
+                assert_eq!(connector, "github");
+                assert_eq!(key, "auth.token");
+            }
+            command => panic!("expected config unset command, got {command:?}"),
+        }
     }
 
     // ── Intent recovery: task subcommand aliases ────────────────────────
@@ -12691,7 +12994,7 @@ mod tests {
                 .map(str::to_owned)
                 .collect(),
             // mutating typo
-            vec!["fwc", "--json", "enbale", "github"]
+            vec!["fwc", "--json", "insatll", "github"]
                 .into_iter()
                 .map(str::to_owned)
                 .collect(),
@@ -12775,8 +13078,6 @@ mod tests {
     #[test]
     fn exit_code_ambiguous_for_mutating_typo() {
         let typos = vec![
-            vec!["fwc", "--json", "enbale", "github"],
-            vec!["fwc", "--json", "disabel", "slack"],
             vec!["fwc", "--json", "insatll", "github"],
             vec!["fwc", "--json", "invoe", "github", "issues.create"],
         ];

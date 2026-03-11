@@ -42,11 +42,6 @@ pub fn command_alias(token: &str) -> Option<&'static str> {
 
         // Lifecycle aliases
         "health" | "state" | "check" | "healthcheck" => Some("status"),
-        "activate" => Some("enable"),
-        "deactivate" | "pause" => Some("disable"),
-        "boot" | "launch" | "up" => Some("start"),
-        "shutdown" | "halt" | "kill" | "down" => Some("stop"),
-        "reboot" | "bounce" => Some("restart"),
         "add" | "setup" => Some("install"),
         "upgrade" => Some("update"),
         "lock" | "freeze" => Some("pin"),
@@ -56,7 +51,6 @@ pub fn command_alias(token: &str) -> Option<&'static str> {
         // Execution aliases
         "call" | "exec" | "send" | "request" | "fire" => Some("invoke"),
         "preview" | "dry-run" | "dryrun" | "dry_run" | "preflight" | "test-run" => Some("simulate"),
-        "log" | "tail" | "events" | "stream" => Some("logs"),
         "pipelines" | "flow" | "flows" => Some("pipeline"),
 
         _ => None,
@@ -105,15 +99,6 @@ pub fn typo_correction(token: &str) -> Option<&'static str> {
         // status typos
         "stauts" | "staus" | "sttaus" | "statsu" => Some("status"),
 
-        // enable/disable typos
-        "enbale" | "enabl" | "enabel" => Some("enable"),
-        "disabel" | "disble" | "disbale" | "diable" => Some("disable"),
-
-        // start/stop/restart typos
-        "statr" | "strat" | "satrt" => Some("start"),
-        "sotp" | "stpo" | "tsop" => Some("stop"),
-        "retart" | "restartt" | "restrat" | "retsart" => Some("restart"),
-
         // install/update typos
         "insatll" | "intall" | "insall" | "isntall" | "instal" => Some("install"),
         "udpate" | "upadte" | "updte" | "upate" | "updaet" => Some("update"),
@@ -124,9 +109,6 @@ pub fn typo_correction(token: &str) -> Option<&'static str> {
         // invoke/simulate typos
         "invoe" | "invoek" | "invokee" | "inoke" | "invke" => Some("invoke"),
         "simlate" | "simualte" | "simulte" | "simulaet" | "simuate" => Some("simulate"),
-
-        // logs typos
-        "lgs" | "lgo" | "lgos" | "losg" => Some("logs"),
 
         // pipeline typos
         "pipleine" | "pipline" | "pipeine" | "pieline" => Some("pipeline"),
@@ -297,11 +279,6 @@ pub fn is_mutating_command(command: &str) -> bool {
     matches!(
         command,
         "invoke"
-            | "enable"
-            | "disable"
-            | "start"
-            | "stop"
-            | "restart"
             | "install"
             | "update"
             | "pin"
@@ -325,7 +302,6 @@ pub fn is_readonly_command(command: &str) -> bool {
             | "examples"
             | "status"
             | "simulate"
-            | "logs"
             | "plan"
             | "explain"
     )
@@ -437,17 +413,17 @@ pub fn is_dangerous_shape(args: &[String]) -> Option<DangerousShape> {
         });
     }
 
-    // `fwc delete <connector>` — no delete command, could mean disable/stop/uninstall
+    // `fwc delete <connector>` — connector removal is not a supported primitive
     if !positional.is_empty()
         && matches!(positional[0], "delete" | "remove" | "uninstall" | "destroy")
     {
         return Some(DangerousShape {
             kind: "destructive-ambiguity",
-            message: "The destructive intent is ambiguous. Choose the specific lifecycle action.",
+            message: "Connector removal is not a supported `fwc` primitive. Choose a supported lifecycle action instead.",
             candidates: vec![
-                "fwc disable <connector>",
-                "fwc stop <connector>",
+                "fwc status <connector>",
                 "fwc unpin <connector>",
+                "fwc update <connector> --source <package-or-dir>",
             ],
         });
     }
@@ -552,37 +528,9 @@ mod tests {
     }
 
     #[test]
-    fn alias_tail_resolves_to_logs() {
-        assert_eq!(command_alias("tail"), Some("logs"));
-    }
-
-    #[test]
     fn alias_configure_resolves_to_config() {
         assert_eq!(command_alias("configure"), Some("config"));
         assert_eq!(command_alias("cfg"), Some("config"));
-    }
-
-    #[test]
-    fn alias_activate_resolves_to_enable() {
-        assert_eq!(command_alias("activate"), Some("enable"));
-    }
-
-    #[test]
-    fn alias_deactivate_resolves_to_disable() {
-        assert_eq!(command_alias("deactivate"), Some("disable"));
-        assert_eq!(command_alias("pause"), Some("disable"));
-    }
-
-    #[test]
-    fn alias_shutdown_resolves_to_stop() {
-        assert_eq!(command_alias("shutdown"), Some("stop"));
-        assert_eq!(command_alias("halt"), Some("stop"));
-        assert_eq!(command_alias("kill"), Some("stop"));
-    }
-
-    #[test]
-    fn alias_bounce_resolves_to_restart() {
-        assert_eq!(command_alias("bounce"), Some("restart"));
     }
 
     #[test]
@@ -656,13 +604,6 @@ mod tests {
     }
 
     #[test]
-    fn alias_log_resolves_to_logs() {
-        assert_eq!(command_alias("log"), Some("logs"));
-        assert_eq!(command_alias("events"), Some("logs"));
-        assert_eq!(command_alias("stream"), Some("logs"));
-    }
-
-    #[test]
     fn canonical_command_returns_none() {
         assert_eq!(command_alias("list"), None);
         assert_eq!(command_alias("show"), None);
@@ -729,31 +670,6 @@ mod tests {
     }
 
     #[test]
-    fn typo_enbale_corrects_to_enable() {
-        assert_eq!(typo_correction("enbale"), Some("enable"));
-    }
-
-    #[test]
-    fn typo_disabel_corrects_to_disable() {
-        assert_eq!(typo_correction("disabel"), Some("disable"));
-    }
-
-    #[test]
-    fn typo_statr_corrects_to_start() {
-        assert_eq!(typo_correction("statr"), Some("start"));
-    }
-
-    #[test]
-    fn typo_sotp_corrects_to_stop() {
-        assert_eq!(typo_correction("sotp"), Some("stop"));
-    }
-
-    #[test]
-    fn typo_retart_corrects_to_restart() {
-        assert_eq!(typo_correction("retart"), Some("restart"));
-    }
-
-    #[test]
     fn typo_taks_corrects_to_task() {
         assert_eq!(typo_correction("taks"), Some("task"));
     }
@@ -761,11 +677,6 @@ mod tests {
     #[test]
     fn typo_paln_corrects_to_plan() {
         assert_eq!(typo_correction("paln"), Some("plan"));
-    }
-
-    #[test]
-    fn typo_lgs_corrects_to_logs() {
-        assert_eq!(typo_correction("lgs"), Some("logs"));
     }
 
     #[test]
@@ -1003,13 +914,6 @@ mod tests {
     }
 
     #[test]
-    fn typo_enable_is_ambiguous() {
-        let res = resolve_command("enbale").unwrap();
-        assert_eq!(res.canonical, "enable");
-        assert_eq!(correction_safety(&res), CorrectionSafety::Ambiguous);
-    }
-
-    #[test]
     fn typo_install_is_ambiguous() {
         let res = resolve_command("insatll").unwrap();
         assert_eq!(res.canonical, "install");
@@ -1021,11 +925,6 @@ mod tests {
     #[test]
     fn invoke_is_mutating() {
         assert!(is_mutating_command("invoke"));
-    }
-
-    #[test]
-    fn enable_is_mutating() {
-        assert!(is_mutating_command("enable"));
     }
 
     #[test]
@@ -1052,8 +951,8 @@ mod tests {
     fn mutating_and_readonly_are_disjoint() {
         let all_commands = [
             "guide", "task", "plan", "explain", "do", "list", "search", "show", "ops", "schema",
-            "examples", "status", "enable", "disable", "start", "stop", "restart", "install",
-            "update", "pin", "unpin", "config", "invoke", "simulate", "logs",
+            "examples", "status", "install", "update", "pin", "unpin", "config", "invoke",
+            "simulate",
         ];
         for cmd in all_commands {
             assert!(
@@ -1110,7 +1009,7 @@ mod tests {
 
     #[test]
     fn closest_matches_exact_prefix() {
-        let candidates = &["list", "logs", "lint", "schema"];
+        let candidates = &["list", "show", "lint", "schema"];
         let matches = closest_matches("li", candidates, 3, 3);
         assert_eq!(matches[0], "list");
         assert!(matches.contains(&"lint"));
@@ -1269,8 +1168,8 @@ mod tests {
     fn all_aliases_resolve_to_known_canonical_commands() {
         let known = [
             "guide", "task", "plan", "explain", "do", "list", "search", "show", "ops", "schema",
-            "examples", "status", "enable", "disable", "start", "stop", "restart", "install",
-            "update", "pin", "unpin", "config", "invoke", "simulate", "logs",
+            "examples", "status", "install", "update", "pin", "unpin", "config", "invoke",
+            "simulate",
         ];
         let test_aliases = [
             "info",
@@ -1280,12 +1179,7 @@ mod tests {
             "preview",
             "dry-run",
             "upgrade",
-            "tail",
             "configure",
-            "activate",
-            "deactivate",
-            "shutdown",
-            "bounce",
             "add",
             "lock",
             "unlock",
@@ -1297,7 +1191,6 @@ mod tests {
             "operations",
             "sample",
             "health",
-            "log",
             "contract",
             "capsule",
             "grep",
@@ -1308,9 +1201,6 @@ mod tests {
             "spec",
             "template",
             "check",
-            "pause",
-            "halt",
-            "kill",
             "setup",
             "freeze",
             "unfreeze",
@@ -1322,8 +1212,6 @@ mod tests {
             "dry_run",
             "preflight",
             "test-run",
-            "events",
-            "stream",
             "taxonomy",
             "capsules",
             "parse",
@@ -1340,11 +1228,6 @@ mod tests {
             "templates",
             "state",
             "healthcheck",
-            "boot",
-            "launch",
-            "up",
-            "down",
-            "reboot",
             "settings",
             "prefs",
             "preferences",
@@ -1369,13 +1252,13 @@ mod tests {
     fn all_typos_resolve_to_known_canonical_commands() {
         let known = [
             "guide", "task", "plan", "explain", "list", "search", "show", "ops", "schema",
-            "examples", "status", "enable", "disable", "start", "stop", "restart", "install",
-            "update", "config", "invoke", "simulate", "logs", "pin", "unpin",
+            "examples", "status", "install", "update", "config", "invoke", "simulate", "pin",
+            "unpin",
         ];
         let test_typos = [
             "gudie", "taks", "paln", "expalin", "lsit", "serach", "shwo", "osp", "schmea",
-            "exmaples", "stauts", "enbale", "disabel", "statr", "sotp", "retart", "insatll",
-            "udpate", "conifg", "invoe", "simlate", "lgs", "pni", "unpni",
+            "exmaples", "stauts", "insatll", "udpate", "conifg", "invoe", "simlate", "pni",
+            "unpni",
         ];
         for typo in test_typos {
             let res = resolve_command(typo);
@@ -1393,9 +1276,7 @@ mod tests {
 
     #[test]
     fn typo_to_readonly_is_safe_auto_correct() {
-        let readonly_typos = [
-            "gudie", "lsit", "serach", "shwo", "osp", "schmea", "exmaples", "stauts", "lgs", "paln",
-        ];
+        let readonly_typos = ["gudie", "lsit", "serach", "shwo", "osp", "schmea", "exmaples", "stauts", "paln"];
         for typo in readonly_typos {
             let res = resolve_command(typo).unwrap();
             assert_eq!(
@@ -1409,9 +1290,7 @@ mod tests {
 
     #[test]
     fn typo_to_mutating_is_ambiguous_auto_correct() {
-        let mutating_typos = [
-            "enbale", "disabel", "statr", "sotp", "retart", "insatll", "udpate", "invoe", "simlate",
-        ];
+        let mutating_typos = ["insatll", "udpate", "invoe", "simlate"];
         for typo in mutating_typos {
             let res = resolve_command(typo).unwrap();
             let safety = correction_safety(&res);

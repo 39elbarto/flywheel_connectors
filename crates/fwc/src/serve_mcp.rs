@@ -1917,7 +1917,12 @@ mod tests {
         let state = sample_state();
         let req = make_request("tools/call", Some(json!({"name": "github.list_issues"})));
         let resp = handle_request(&state, &req);
-        assert!(!resp.is_error());
+        assert!(resp.is_error());
+        let error = resp.error.as_ref().unwrap();
+        assert_eq!(error.code(), INTERNAL_ERROR);
+        let data = error.data.as_ref().unwrap();
+        assert_eq!(data["tool"], "github.list_issues");
+        assert!(data["arguments"].is_null());
     }
 
     // ── handle_request: resources/list ──────────────────────────────
@@ -2210,7 +2215,12 @@ mod tests {
             Some(json!({"name": "github.list_issues", "arguments": null})),
         );
         let resp = handle_request(&state, &req);
-        assert!(!resp.is_error());
+        assert!(resp.is_error());
+        let error = resp.error.as_ref().unwrap();
+        assert_eq!(error.code(), INTERNAL_ERROR);
+        let data = error.data.as_ref().unwrap();
+        assert_eq!(data["tool"], "github.list_issues");
+        assert!(data["arguments"].is_null());
     }
 
     #[test]
@@ -2280,8 +2290,13 @@ mod tests {
         let state = sample_state();
         let raw = r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"github.list_issues","arguments":{"owner":"x"}}}"#;
         let resp = handle_raw(&state, raw);
-        assert!(!resp.is_error());
+        assert!(resp.is_error());
         assert_eq!(resp.id, json!(5));
+        let error = resp.error.as_ref().unwrap();
+        assert_eq!(error.code(), INTERNAL_ERROR);
+        let data = error.data.as_ref().unwrap();
+        assert_eq!(data["tool"], "github.list_issues");
+        assert_eq!(data["arguments"]["owner"], "x");
     }
 
     #[tokio::test]

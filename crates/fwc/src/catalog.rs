@@ -2,8 +2,10 @@ use serde_json::{Value, json};
 
 pub const COMMANDS: &[&str] = &[
     "guide", "task", "plan", "explain", "do", "list", "search", "show", "ops", "schema",
-    "examples", "status", "enable", "disable", "start", "stop", "restart", "install", "update",
-    "pin", "unpin", "config", "invoke", "simulate", "logs", "pipeline", "recipe",
+    "examples", "supply-chain", "audit", "manifest", "net", "trace", "policy", "package",
+    "status", "install", "update", "pin", "unpin", "rollout", "config", "invoke", "simulate",
+    "cancel", "export-tools", "serve-mcp", "suggest", "template", "validate", "history", "pipe",
+    "pipeline", "recipe", "map", "batch-file",
 ];
 
 #[allow(clippy::too_many_lines)]
@@ -100,8 +102,12 @@ pub fn guide_payload(command: Option<&str>) -> Value {
                         "commands": ["list", "search", "show", "ops", "schema", "examples"],
                     },
                     {
+                        "name": "evidence",
+                        "commands": ["supply-chain", "audit", "manifest", "net", "trace", "policy", "package"],
+                    },
+                    {
                         "name": "lifecycle",
-                        "commands": ["status", "enable", "disable", "start", "stop", "restart", "install", "update", "pin", "unpin"],
+                        "commands": ["status", "install", "update", "pin", "unpin", "rollout"],
                     },
                     {
                         "name": "config",
@@ -109,7 +115,7 @@ pub fn guide_payload(command: Option<&str>) -> Value {
                     },
                     {
                         "name": "execution",
-                        "commands": ["simulate", "invoke", "logs", "pipeline", "recipe"],
+                        "commands": ["simulate", "invoke", "cancel", "export-tools", "serve-mcp", "suggest", "template", "validate", "history", "pipe", "pipeline", "recipe", "map", "batch-file"],
                     }
                 ],
                 "phase": {
@@ -163,8 +169,8 @@ pub fn planned_payload(command: &str, captures: &Value) -> Value {
             json!({
                 "status": "planned",
                 "command": command,
-                "phase": "ux-contract-and-scaffold",
-                "message": "This command is scaffolded so the CLI contract is stable before host-backed behavior lands.",
+                "phase": "ux-contract-preview",
+                "message": "This is a structured contract preview for the command surface.",
                 "captures": captures,
                 "contract": contract,
             })
@@ -222,37 +228,66 @@ fn command_contract(command: &str) -> Option<Value> {
             "Return a minimal example request or config snippet for one connector or operation.",
             "Copyable examples that stay small enough for agent reuse.",
         )),
+        "supply-chain" => Some(json!({
+            "family": "evidence",
+            "summary": "Verify or summarize supply-chain evidence for a connector artifact.",
+            "intended_shape": "Artifact-focused verification and reporting driven by real package metadata, attestations, and SBOM material.",
+            "next_beads": ["flywheel_connectors-1pjhh"],
+            "workflow_handoff": ["Use `fwc package` first if you need to generate fresh package metadata before verification."],
+        })),
+        "audit" => Some(json!({
+            "family": "evidence",
+            "summary": "Inspect audit-chain artifacts and reports.",
+            "intended_shape": "Evidence-first audit workflows over retained chain material and host-backed reports.",
+            "next_beads": ["flywheel_connectors-1pjhh"],
+            "workflow_handoff": ["Use `fwc history` for operation-level receipts, or `fwc audit` when you need chain artifacts and verification detail."],
+        })),
+        "manifest" => Some(json!({
+            "family": "evidence",
+            "summary": "Validate, inspect, and repair connector manifests.",
+            "intended_shape": "Manifest-centric verification and repair over real connector metadata.",
+            "next_beads": ["flywheel_connectors-1pjhh"],
+            "workflow_handoff": ["Use `fwc package` after manifest fixes so package metadata reflects the repaired manifest."],
+        })),
+        "net" => Some(json!({
+            "family": "evidence",
+            "summary": "Explain network egress allow and deny decisions for one manifest operation.",
+            "intended_shape": "Focused policy explanation for connector network scope and operation-level egress requirements.",
+            "next_beads": ["flywheel_connectors-1pjhh"],
+            "workflow_handoff": ["Use `fwc manifest` or `fwc policy` when the network explanation reveals a policy mismatch."],
+        })),
+        "trace" => Some(json!({
+            "family": "evidence",
+            "summary": "Replay captured trace artifacts deterministically.",
+            "intended_shape": "Trace-driven debugging and forensics over persisted capture bundles.",
+            "next_beads": ["flywheel_connectors-1pjhh"],
+            "workflow_handoff": ["Use `fwc history` or host-side capture tooling to gather the trace artifact you want to replay."],
+        })),
+        "policy" => Some(json!({
+            "family": "evidence",
+            "summary": "Diff, preview, and manage policy simulations and bundles.",
+            "intended_shape": "Policy review and bundle management rooted in real policy evaluation logic rather than fabricated outcomes.",
+            "next_beads": ["flywheel_connectors-1pjhh"],
+            "workflow_handoff": ["Use `fwc simulate` or `fwc net` when you need operation-specific policy evidence before mutating state."],
+        })),
+        "package" => Some(json!({
+            "family": "evidence",
+            "summary": "Package a connector crate into a distributable artifact bundle.",
+            "intended_shape": "Real build, manifest, SBOM, and metadata generation for connector artifacts.",
+            "next_beads": ["flywheel_connectors-1pjhh"],
+            "workflow_handoff": ["Use `fwc install` or `fwc update` with the generated package output directory once packaging completes."],
+        })),
         "status" => Some(lifecycle_contract(
             "Report desired state, observed runtime state, and current health for one connector or the fleet.",
             "Desired-vs-observed lifecycle summary with audit-aware context.",
         )),
-        "enable" => Some(lifecycle_contract(
-            "Mark a connector as enabled and ready for scheduling or invocation.",
-            "Mutating lifecycle action with clear approval and rollback context.",
-        )),
-        "disable" => Some(lifecycle_contract(
-            "Disable a connector without erasing its configuration or package state.",
-            "Mutating lifecycle action that explains impact before execution.",
-        )),
-        "start" => Some(lifecycle_contract(
-            "Start a connector process or runtime binding.",
-            "Runtime lifecycle action with host-backed status follow-up.",
-        )),
-        "stop" => Some(lifecycle_contract(
-            "Stop a connector process or runtime binding.",
-            "Runtime lifecycle action with impact surfaced before execution.",
-        )),
-        "restart" => Some(lifecycle_contract(
-            "Restart a connector and report whether the host converged to the desired state.",
-            "Runtime lifecycle action plus post-action health confirmation.",
-        )),
         "install" => Some(lifecycle_contract(
-            "Install or verify a connector package with supply-chain policy in view.",
-            "Install/update entrypoint that never hides verification state.",
+            "Install or verify a connector package into the persistent host inventory.",
+            "Real package verification plus connector-inventory mutation without pretending the running host hot-reloaded.",
         )),
         "update" => Some(lifecycle_contract(
-            "Update a connector, with pinning and rollout semantics surfaced explicitly.",
-            "Lifecycle action that keeps desired version and verification evidence visible.",
+            "Update an installed connector entry from a replacement package source.",
+            "Real package verification plus persistent inventory mutation with before/after visibility.",
         )),
         "pin" => Some(lifecycle_contract(
             "Pin a connector to a version or channel.",
@@ -261,6 +296,10 @@ fn command_contract(command: &str) -> Option<Value> {
         "unpin" => Some(lifecycle_contract(
             "Remove a connector pin so managed updates can resume.",
             "Lifecycle state change with clear follow-on status reporting.",
+        )),
+        "rollout" => Some(lifecycle_contract(
+            "Inspect or change connector rollout state.",
+            "Managed rollout workflows with explicit status, canary, and rollback semantics.",
         )),
         "config" => Some(json!({
             "family": "config",
@@ -280,17 +319,53 @@ fn command_contract(command: &str) -> Option<Value> {
             "Preflight or dry-run a connector operation before side effects.",
             "Explain-first execution path for risky or destructive operations.",
         )),
-        "logs" => Some(execution_contract(
-            "Read connector logs or event streams with bounded default output.",
-            "Operational tail/watch surface that does not flood the caller unless explicitly requested.",
+        "cancel" => Some(execution_contract(
+            "Cancel an in-flight connector operation.",
+            "Operation-control surface for result handles and long-running work.",
+        )),
+        "export-tools" => Some(execution_contract(
+            "Export connector operations as tool definitions for agent runtimes.",
+            "Machine-readable MCP, Claude, or OpenAI tool schemas synthesized from real connector introspection.",
+        )),
+        "serve-mcp" => Some(execution_contract(
+            "Serve selected connectors as MCP tools over stdio JSON-RPC.",
+            "Live MCP bridge rooted in real connector discovery and host-backed tool execution.",
+        )),
+        "suggest" => Some(execution_contract(
+            "Suggest relevant connectors and operations from a goal or context description.",
+            "Exploration surface for narrowing connector choice before planning or invocation.",
+        )),
+        "template" => Some(execution_contract(
+            "Generate a fill-in-the-blanks JSON template for an operation.",
+            "Schema-derived request template that helps assemble a valid payload quickly.",
+        )),
+        "validate" => Some(execution_contract(
+            "Validate an input payload against an operation schema before invocation.",
+            "Pre-execution validation with structured fix guidance.",
+        )),
+        "history" => Some(execution_contract(
+            "Browse the append-only operation history.",
+            "Receipt- and replay-oriented view over recorded operation outcomes.",
+        )),
+        "pipe" => Some(execution_contract(
+            "Chain two operations by mapping output fields from one into the next.",
+            "Two-step composition surface for cross-connector execution.",
         )),
         "pipeline" => Some(execution_contract(
             "Load reusable multi-step connector workflows from TOML and validate or plan them.",
-            "Pipeline discovery and planning surface that binds parameters, validates dependencies, and produces deterministic step plans before host-backed execution exists.",
+            "Pipeline discovery and planning surface that binds parameters, validates dependencies, and produces deterministic execution plans.",
         )),
         "recipe" => Some(execution_contract(
             "Browse and plan bundled cross-connector pipeline recipes with starter defaults.",
-            "Built-in recipe library that stays deterministic for listing, inspection, estimate, dry-run, and export before agents customize the exported pipeline TOML.",
+            "Built-in recipe library for deterministic listing, inspection, estimate, dry-run, and export.",
+        )),
+        "map" => Some(execution_contract(
+            "Apply one operation to many inputs in parallel.",
+            "Batch-style execution for repeated operations over JSON arrays or JSONL inputs.",
+        )),
+        "batch-file" => Some(execution_contract(
+            "Execute a JSONL file of heterogeneous operations with dependency ordering.",
+            "File-driven multi-operation execution over real host-backed batch endpoints.",
         )),
         _ => None,
     }
@@ -371,7 +446,7 @@ mod tests {
     }
 
     #[test]
-    fn list_payload_is_scaffolded_not_fake_runtime_state() {
+    fn list_payload_is_contract_preview_not_fake_runtime_state() {
         let captures = serde_json::json!({ "zone": "z:work" });
         let payload = planned_payload("list", &captures);
         assert_eq!(payload["status"], "planned");
@@ -469,10 +544,10 @@ mod tests {
     }
 
     #[test]
-    fn full_guide_has_six_families() {
+    fn full_guide_has_seven_families() {
         let g = guide_payload(None);
         let families = g["families"].as_array().expect("families should be array");
-        assert_eq!(families.len(), 6);
+        assert_eq!(families.len(), 7);
     }
 
     #[test]
@@ -486,6 +561,7 @@ mod tests {
         assert!(names.contains(&"workflow"));
         assert!(names.contains(&"intent"));
         assert!(names.contains(&"discovery"));
+        assert!(names.contains(&"evidence"));
         assert!(names.contains(&"lifecycle"));
         assert!(names.contains(&"config"));
         assert!(names.contains(&"execution"));
@@ -625,7 +701,7 @@ mod tests {
     fn planned_payload_phase_is_ux_contract() {
         let cap = json!({});
         let p = planned_payload("ops", &cap);
-        assert_eq!(p["phase"], "ux-contract-and-scaffold");
+        assert_eq!(p["phase"], "ux-contract-preview");
     }
 
     #[test]
@@ -688,10 +764,7 @@ mod tests {
 
     #[test]
     fn lifecycle_commands_have_lifecycle_family() {
-        for cmd in &[
-            "status", "enable", "disable", "start", "stop", "restart", "install", "update", "pin",
-            "unpin",
-        ] {
+        for cmd in &["status", "install", "update", "pin", "unpin", "rollout"] {
             let p = guide_payload(Some(cmd));
             assert_eq!(
                 p["contract"]["family"], "lifecycle",
@@ -702,12 +775,35 @@ mod tests {
 
     #[test]
     fn execution_commands_have_execution_family() {
-        for cmd in &["invoke", "simulate", "logs", "pipeline", "recipe"] {
+        for cmd in &[
+            "invoke",
+            "simulate",
+            "cancel",
+            "export-tools",
+            "serve-mcp",
+            "suggest",
+            "template",
+            "validate",
+            "history",
+            "pipe",
+            "pipeline",
+            "recipe",
+            "map",
+            "batch-file",
+        ] {
             let p = guide_payload(Some(cmd));
             assert_eq!(
                 p["contract"]["family"], "execution",
                 "{cmd} should be execution family"
             );
+        }
+    }
+
+    #[test]
+    fn evidence_commands_have_evidence_family() {
+        for cmd in &["supply-chain", "audit", "manifest", "net", "trace", "policy", "package"] {
+            let p = guide_payload(Some(cmd));
+            assert_eq!(p["contract"]["family"], "evidence", "{cmd} should be evidence family");
         }
     }
 
@@ -935,18 +1031,8 @@ mod tests {
     }
 
     #[test]
-    fn commands_contains_enable() {
-        assert!(COMMANDS.contains(&"enable"));
-    }
-
-    #[test]
-    fn commands_contains_disable() {
-        assert!(COMMANDS.contains(&"disable"));
-    }
-
-    #[test]
-    fn commands_contains_logs() {
-        assert!(COMMANDS.contains(&"logs"));
+    fn commands_contains_install() {
+        assert!(COMMANDS.contains(&"install"));
     }
 
     #[test]
@@ -971,7 +1057,7 @@ mod tests {
 
     #[test]
     fn commands_count() {
-        assert!(COMMANDS.len() >= 27);
+        assert!(COMMANDS.len() >= 20);
     }
 
     #[test]
@@ -1031,50 +1117,8 @@ mod tests {
     }
 
     #[test]
-    fn guide_for_logs_command() {
-        let p = guide_payload(Some("logs"));
-        assert_eq!(p["status"], "ok");
-        assert_eq!(p["contract"]["family"], "execution");
-    }
-
-    #[test]
     fn guide_for_status_command() {
         let p = guide_payload(Some("status"));
-        assert_eq!(p["status"], "ok");
-        assert_eq!(p["contract"]["family"], "lifecycle");
-    }
-
-    #[test]
-    fn guide_for_enable_command() {
-        let p = guide_payload(Some("enable"));
-        assert_eq!(p["status"], "ok");
-        assert_eq!(p["contract"]["family"], "lifecycle");
-    }
-
-    #[test]
-    fn guide_for_disable_command() {
-        let p = guide_payload(Some("disable"));
-        assert_eq!(p["status"], "ok");
-        assert_eq!(p["contract"]["family"], "lifecycle");
-    }
-
-    #[test]
-    fn guide_for_start_command() {
-        let p = guide_payload(Some("start"));
-        assert_eq!(p["status"], "ok");
-        assert_eq!(p["contract"]["family"], "lifecycle");
-    }
-
-    #[test]
-    fn guide_for_stop_command() {
-        let p = guide_payload(Some("stop"));
-        assert_eq!(p["status"], "ok");
-        assert_eq!(p["contract"]["family"], "lifecycle");
-    }
-
-    #[test]
-    fn guide_for_restart_command() {
-        let p = guide_payload(Some("restart"));
         assert_eq!(p["status"], "ok");
         assert_eq!(p["contract"]["family"], "lifecycle");
     }
@@ -1117,7 +1161,7 @@ mod tests {
     fn planned_payload_has_message() {
         let p = planned_payload("list", &json!({}));
         assert!(p["message"].is_string());
-        assert!(p["message"].as_str().unwrap().contains("scaffold"));
+        assert!(p["message"].as_str().unwrap().contains("contract preview"));
     }
 
     #[test]

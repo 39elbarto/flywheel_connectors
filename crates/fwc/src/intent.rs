@@ -6,7 +6,11 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-const SCAFFOLD_NOTICE: &str = "The plan compiler is real, but primitive command execution is still scaffold-backed in this repo state. `fwc` will never claim that external side effects happened unless host-backed execution is actually wired in.";
+const EXECUTION_NOTICE: &str = "The plan compiler emits concrete `fwc` primitives. A step only succeeds if that primitive is actually implemented and the live host or local state it needs is configured; `fwc` does not fabricate success.";
+
+fn default_execution_notice() -> String {
+    EXECUTION_NOTICE.to_owned()
+}
 
 #[derive(Clone, Copy, Debug)]
 pub enum IntentMode {
@@ -65,13 +69,16 @@ pub struct CompiledIntent {
     pub action: ActionInference,
     pub operation_hint: Option<String>,
     pub missing_information: Vec<String>,
+    #[serde(default)]
+    pub unsupported_reasons: Vec<String>,
     pub ambiguities: Vec<Ambiguity>,
     pub assumptions: Vec<String>,
     pub suggested_command_lines: Vec<String>,
     pub next_actions: Vec<String>,
     pub steps: Vec<CompiledStep>,
     pub explanation: Explanation,
-    pub scaffold_notice: String,
+    #[serde(default = "default_execution_notice")]
+    pub execution_notice: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -158,6 +165,7 @@ struct PlanBuild {
     operation_hint: Option<String>,
     steps: Vec<CompiledStep>,
     missing_information: Vec<String>,
+    unsupported_reasons: Vec<String>,
     ambiguities: Vec<Ambiguity>,
     assumptions: Vec<String>,
     lookup_evidence: Vec<String>,
@@ -211,6 +219,7 @@ pub fn compile(request: &IntentRequest) -> CompiledIntent {
     let status = status_for(
         chosen_connector.is_some(),
         &plan.missing_information,
+        &plan.unsupported_reasons,
         &plan.ambiguities,
     );
     let suggested_command_lines = plan
@@ -253,6 +262,7 @@ pub fn compile(request: &IntentRequest) -> CompiledIntent {
         },
         operation_hint: plan.operation_hint.take(),
         missing_information: plan.missing_information,
+        unsupported_reasons: plan.unsupported_reasons,
         ambiguities: plan.ambiguities,
         assumptions: plan.assumptions,
         suggested_command_lines,
@@ -264,7 +274,7 @@ pub fn compile(request: &IntentRequest) -> CompiledIntent {
             lookup_evidence: plan.lookup_evidence,
             template_reasoning: plan.template_reasoning,
         },
-        scaffold_notice: SCAFFOLD_NOTICE.to_owned(),
+        execution_notice: EXECUTION_NOTICE.to_owned(),
     }
 }
 
@@ -281,11 +291,9 @@ fn build_plan(
     action: &ActionSignals,
 ) -> PlanBuild {
     match action.family {
-        "lifecycle" => {
-            build_lifecycle_plan(request, zone, payload_literal, chosen_connector, action)
-        }
+        "lifecycle" => build_lifecycle_plan(request, zone, payload_literal, chosen_connector, action),
         "config" => build_config_plan(request, zone, payload_literal, chosen_connector, action),
-        "logs" => build_logs_plan(zone, chosen_connector),
+        "unsupported" => build_unsupported_plan(zone, chosen_connector, action),
         "discovery" => build_discovery_plan(request, zone, normalized_intent, chosen_connector),
         _ => build_operation_plan(
             request,
@@ -325,7 +333,7 @@ fn build_lifecycle_plan(
         action.verb, connector.id
     );
     plan.template_reasoning.push(
-        "Lifecycle verbs map directly onto `status` plus the mutating lifecycle command."
+        "Supported lifecycle verbs map onto real `fwc` lifecycle primitives plus a status verification pass."
             .to_owned(),
     );
     plan.steps.push(step(
@@ -384,7 +392,7 @@ fn build_lifecycle_plan(
 
     if matches!(request.mode, IntentMode::DoApprove) {
         plan.assumptions.push(
-            "Approval is explicit, but external side effects remain scaffolded until host-backed execution lands."
+            "Approval is explicit, so `fwc do --approve` will attempt the real mutating lifecycle primitive."
                 .to_owned(),
         );
     }
@@ -505,7 +513,7 @@ fn build_config_plan(
 
     if matches!(request.mode, IntentMode::DoApprove) {
         plan.assumptions.push(
-            "Approval is explicit, but config writes remain scaffold-backed in the current repo state."
+            "Approval is explicit, so `fwc do --approve` will attempt the real config mutation path."
                 .to_owned(),
         );
     }
@@ -513,48 +521,93 @@ fn build_config_plan(
     plan
 }
 
-fn build_logs_plan(zone: Option<&str>, chosen_connector: Option<&ConnectorCandidate>) -> PlanBuild {
+fn build_unsupported_plan(
+    zone: Option<&str>,
+    chosen_connector: Option<&ConnectorCandidate>,
+    action: &ActionSignals,
+) -> PlanBuild {
     let mut plan = PlanBuild::default();
+    let unsupported_reason = match action.verb {
+        "logs" => {
+            "Connector log tailing is not implemented as a real `fwc` primitive yet. Use the closest real evidence surfaces instead."
+        }
+        "disable" | "enable" | "restart" | "start" | "stop" => {
+            "That lifecycle transition is not implemented as a real `fwc` primitive because the host does not yet expose a truthful endpoint for it."
+        }
+        _ => "That intent does not map to a supported real `fwc` primitive.",
+    };
+    plan.unsupported_reasons.push(unsupported_reason.to_owned());
+    plan.template_reasoning.push(
+        "The intent matched a verb that does not currently have a truthful `fwc` primitive, so the compiler switched to an unsupported-intent explanation instead of inventing a command."
+            .to_owned(),
+    );
+
     let Some(connector) = chosen_connector else {
-        "Clarify which connector logs should be inspected.".clone_into(&mut plan.summary);
+        plan.summary = format!("`{}` is not currently a supported real `fwc` primitive.", action.verb);
         plan.missing_information.push(
-            "Name the connector explicitly or pass `--connector <id>` for log inspection."
+            "Name the connector explicitly if you want the compiler to suggest the closest real inspection commands."
                 .to_owned(),
         );
         return plan;
     };
 
-    plan.summary = format!("Plan a log-inspection workflow for `{}`.", connector.id);
-    plan.template_reasoning.push(
-        "Log-oriented words map directly onto the `logs` primitive, with `status` as a useful preflight."
-            .to_owned(),
-    );
+    plan.summary = match action.verb {
+        "logs" => format!(
+            "Connector log tailing is unavailable for `{}`; use the closest real inspection surfaces instead.",
+            connector.id
+        ),
+        _ => format!(
+            "`fwc {}` is unavailable for `{}`; inspect current state and choose a supported lifecycle command instead.",
+            action.verb, connector.id
+        ),
+    };
+
     plan.steps.push(step(
         1,
-        "preflight",
-        "Confirm current connector status before log inspection.".to_owned(),
+        "inspect",
+        "Inspect the connector's current state.".to_owned(),
         vec!["fwc".to_owned(), "status".to_owned(), connector.id.clone()],
         false,
         false,
         vec![],
     ));
-    let mut argv = vec!["fwc".to_owned(), "logs".to_owned(), connector.id.clone()];
-    if zone.is_some() {
-        plan.assumptions.push(
-            "The current `logs` scaffold has no explicit zone flag; captured zone intent must be enforced later by the host layer."
-                .to_owned(),
-        );
+
+    if action.verb == "logs" {
+        plan.steps.push(step(
+            2,
+            "inspect",
+            "Inspect recent operation receipts for the connector.".to_owned(),
+            vec![
+                "fwc".to_owned(),
+                "history".to_owned(),
+                "--connector".to_owned(),
+                connector.id.clone(),
+                "--limit".to_owned(),
+                "20".to_owned(),
+            ],
+            false,
+            false,
+            vec![],
+        ));
+    } else {
+        plan.steps.push(step(
+            2,
+            "inspect",
+            "Inspect connector detail before choosing a supported lifecycle action.".to_owned(),
+            vec!["fwc".to_owned(), "show".to_owned(), connector.id.clone()],
+            false,
+            false,
+            vec![],
+        ));
     }
-    argv.push("--follow".to_owned());
-    plan.steps.push(step(
-        2,
-        "inspect",
-        "Tail the connector logs or event stream.".to_owned(),
-        argv,
-        false,
-        false,
-        vec![],
-    ));
+
+    if let Some(zone) = zone {
+        plan.assumptions.push(format!(
+            "A zone hint (`{zone}`) was captured, but there is no supported primitive for `{}` that can enforce it yet.",
+            action.verb
+        ));
+    }
+
     plan
 }
 
@@ -810,8 +863,10 @@ fn build_operation_plan(
         action.mutating,
         action.mutating,
         vec![
-            "This step remains scaffold-backed today; it is still valuable because it proves the exact primitive command shape."
-                .to_owned(),
+            format!(
+                "This step calls the real `fwc invoke` primitive and will only succeed if the selected host and connector are configured for `{}`.",
+                connector.id
+            ),
         ],
     ));
 
@@ -828,7 +883,7 @@ fn build_operation_plan(
 
     if request.mode.is_approved() {
         plan.assumptions.push(
-            "Approval was explicit, but the final invoke step remains scaffold-backed until host-backed execution is implemented."
+            "Approval is explicit, so `fwc do --approve` will attempt the real side-effecting primitive."
                 .to_owned(),
         );
     }
@@ -907,16 +962,18 @@ fn infer_connector_candidates(
 #[allow(clippy::too_many_lines)]
 fn infer_action(normalized_intent: &str) -> ActionSignals {
     static LIFECYCLE: &[(&str, &str)] = &[
-        ("disable", "disable"),
-        ("enable", "enable"),
-        ("restart", "restart"),
-        ("start", "start"),
-        ("stop", "stop"),
         ("install", "install"),
         ("update", "update"),
         ("pin", "pin"),
         ("unpin", "unpin"),
         ("status", "status"),
+    ];
+    static UNSUPPORTED_LIFECYCLE: &[(&str, &str)] = &[
+        ("disable", "disable"),
+        ("enable", "enable"),
+        ("restart", "restart"),
+        ("start", "start"),
+        ("stop", "stop"),
     ];
     static CONFIG: &[(&str, &str)] = &[
         ("configure", "set"),
@@ -951,7 +1008,7 @@ fn infer_action(normalized_intent: &str) -> ActionSignals {
         ("inspect", "get"),
         ("fetch", "get"),
     ];
-    static LOGS: &[(&str, &str)] = &[
+    static UNSUPPORTED_LOGS: &[(&str, &str)] = &[
         ("logs", "logs"),
         ("log", "logs"),
         ("tail", "logs"),
@@ -970,9 +1027,21 @@ fn infer_action(normalized_intent: &str) -> ActionSignals {
         };
     }
 
-    if let Some((matched, _)) = match_first(normalized_intent, LOGS) {
+    if let Some((matched, verb)) = match_first(normalized_intent, UNSUPPORTED_LIFECYCLE) {
         return ActionSignals {
-            family: "logs",
+            family: "unsupported",
+            verb,
+            resource: Some("connector"),
+            risk: "high",
+            mutating: true,
+            matched_terms: vec![matched.to_owned()],
+            needs_lookup: false,
+        };
+    }
+
+    if let Some((matched, _)) = match_first(normalized_intent, UNSUPPORTED_LOGS) {
+        return ActionSignals {
+            family: "unsupported",
             verb: "logs",
             resource: Some("connector"),
             risk: "low",
@@ -1139,9 +1208,16 @@ fn build_next_actions(
         ));
     }
 
-    if matches!(request.mode, IntentMode::DoApprove) {
+    if status == "unsupported" {
         actions.push(
-            "Approval is explicit, but host-backed execution must land before `fwc` can claim real side effects."
+            "Choose a supported real primitive instead of retrying the same unsupported request."
+                .to_owned(),
+        );
+    }
+
+    if matches!(request.mode, IntentMode::DoApprove) && status != "unsupported" {
+        actions.push(
+            "Approval is explicit, so the next run will attempt the real side-effecting primitive and surface any live host or configuration error directly."
                 .to_owned(),
         );
     }
@@ -1391,10 +1467,13 @@ fn lookup_literal(literals: &ParsedLiterals, action: &ActionSignals) -> Option<S
 fn status_for(
     has_connector: bool,
     missing_information: &[String],
+    unsupported_reasons: &[String],
     ambiguities: &[Ambiguity],
 ) -> String {
     if !ambiguities.is_empty() {
         "ambiguous".to_owned()
+    } else if !unsupported_reasons.is_empty() {
+        "unsupported".to_owned()
     } else if !has_connector || !missing_information.is_empty() {
         "needs-clarification".to_owned()
     } else {
@@ -1897,7 +1976,7 @@ mod tests {
     #[test]
     fn infer_action_lifecycle_disable() {
         let action = infer_action("disable the slack connector");
-        assert_eq!(action.family, "lifecycle");
+        assert_eq!(action.family, "unsupported");
         assert_eq!(action.verb, "disable");
         assert!(action.mutating);
         assert_eq!(action.risk, "high");
@@ -1915,7 +1994,7 @@ mod tests {
     #[test]
     fn infer_action_lifecycle_enable() {
         let action = infer_action("enable the discord connector");
-        assert_eq!(action.family, "lifecycle");
+        assert_eq!(action.family, "unsupported");
         assert_eq!(action.verb, "enable");
         assert!(action.mutating);
     }
@@ -1923,7 +2002,7 @@ mod tests {
     #[test]
     fn infer_action_lifecycle_restart() {
         let action = infer_action("restart the slack connector");
-        assert_eq!(action.family, "lifecycle");
+        assert_eq!(action.family, "unsupported");
         assert_eq!(action.verb, "restart");
         assert!(action.mutating);
     }
@@ -1945,7 +2024,7 @@ mod tests {
     #[test]
     fn infer_action_logs() {
         let action = infer_action("show logs for the github connector");
-        assert_eq!(action.family, "logs");
+        assert_eq!(action.family, "unsupported");
         assert_eq!(action.verb, "logs");
         assert!(!action.mutating);
     }
@@ -1953,7 +2032,7 @@ mod tests {
     #[test]
     fn infer_action_logs_tail() {
         let action = infer_action("tail slack connector output");
-        assert_eq!(action.family, "logs");
+        assert_eq!(action.family, "unsupported");
         assert_eq!(action.verb, "logs");
     }
 
@@ -2466,14 +2545,22 @@ mod tests {
 
     #[test]
     fn status_ready_when_connector_found() {
-        assert_eq!(status_for(true, &[], &[]), "ready");
+        assert_eq!(status_for(true, &[], &[], &[]), "ready");
     }
 
     #[test]
     fn status_needs_clarification_when_missing() {
         assert_eq!(
-            status_for(true, &["need connector name".to_owned()], &[]),
+            status_for(true, &["need connector name".to_owned()], &[], &[]),
             "needs-clarification"
+        );
+    }
+
+    #[test]
+    fn status_unsupported_when_blocked_by_missing_primitive() {
+        assert_eq!(
+            status_for(true, &[], &["unsupported primitive".to_owned()], &[]),
+            "unsupported"
         );
     }
 
@@ -2484,12 +2571,12 @@ mod tests {
             message: "multiple connectors match".to_owned(),
             candidates: vec!["slack".to_owned(), "discord".to_owned()],
         };
-        assert_eq!(status_for(true, &[], &[ambiguity]), "ambiguous");
+        assert_eq!(status_for(true, &[], &[], &[ambiguity]), "ambiguous");
     }
 
     #[test]
     fn status_needs_clarification_no_connector() {
-        assert_eq!(status_for(false, &[], &[]), "needs-clarification");
+        assert_eq!(status_for(false, &[], &[], &[]), "needs-clarification");
     }
 
     // ── connector_evidence / action_evidence ────────────────
@@ -2587,10 +2674,12 @@ mod tests {
     }
 
     #[test]
-    fn compiler_uses_lifecycle_template_for_disable() {
+    fn compiler_marks_disable_as_unsupported() {
         let plan = compile(&request("disable the slack connector in z:work"));
-        assert_eq!(plan.template, "lifecycle");
-        assert_eq!(plan.steps[1].command_line, "fwc disable slack");
+        assert_eq!(plan.template, "unsupported");
+        assert_eq!(plan.status, "unsupported");
+        assert_eq!(plan.steps[0].command_line, "fwc status slack");
+        assert_eq!(plan.steps[1].command_line, "fwc show slack");
         assert_eq!(plan.zone.as_deref(), Some("z:work"));
     }
 
@@ -2609,9 +2698,11 @@ mod tests {
     }
 
     #[test]
-    fn compiler_logs_template_for_tail() {
+    fn compiler_marks_logs_as_unsupported() {
         let plan = compile(&request("tail the github connector logs"));
-        assert_eq!(plan.template, "logs");
+        assert_eq!(plan.template, "unsupported");
+        assert_eq!(plan.status, "unsupported");
+        assert_eq!(plan.steps[1].command_line, "fwc history --connector github --limit 20");
     }
 
     #[test]
@@ -2645,23 +2736,25 @@ mod tests {
     }
 
     #[test]
-    fn compiler_lifecycle_plan_has_status_preflight() {
+    fn compiler_unsupported_restart_plan_has_status_preflight() {
         let plan = compile(&request("restart the github connector"));
-        assert_eq!(plan.template, "lifecycle");
-        assert!(plan.steps.first().is_some_and(|s| s.phase == "preflight"));
+        assert_eq!(plan.template, "unsupported");
+        assert_eq!(plan.status, "unsupported");
+        assert!(plan.steps.first().is_some_and(|s| s.command == "status"));
     }
 
     #[test]
-    fn compiler_lifecycle_plan_has_verify_step() {
+    fn compiler_unsupported_enable_plan_has_show_step() {
         let plan = compile(&request("enable the slack connector"));
-        assert_eq!(plan.template, "lifecycle");
-        assert!(plan.steps.iter().any(|s| s.phase == "verify"));
+        assert_eq!(plan.template, "unsupported");
+        assert_eq!(plan.status, "unsupported");
+        assert!(plan.steps.iter().any(|s| s.command == "show"));
     }
 
     #[test]
-    fn compiler_returns_scaffold_notice() {
+    fn compiler_returns_execution_notice() {
         let plan = compile(&request("create a github issue"));
-        assert!(!plan.scaffold_notice.is_empty());
+        assert!(!plan.execution_notice.is_empty());
     }
 
     #[test]
@@ -2683,12 +2776,10 @@ mod tests {
     }
 
     #[test]
-    fn compiler_no_connector_needs_clarification() {
+    fn compiler_no_connector_unsupported_when_primitive_is_missing() {
         let plan = compile(&request("restart some connector"));
-        // if connector can't be inferred, should flag missing clarification
-        if plan.chosen_connector.is_none() {
-            assert_eq!(plan.status, "needs-clarification");
-        }
+        assert_eq!(plan.status, "unsupported");
+        assert!(plan.chosen_connector.is_none());
     }
 
     #[test]

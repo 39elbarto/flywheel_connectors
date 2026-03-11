@@ -17,19 +17,21 @@ use fcp_async_core::sync::Mutex;
 use fcp_core::{
     AttestationMaterial, AttestationMetadata, AttestationPredicateType, CapabilityToken,
     ConnectorHealth, ConnectorId, CorrelationId, HandshakeRequest, HealthSnapshot, Introspection,
-    InvokeRequest, InvokeResponse, InvokeStatus, LifecycleState, LifecycleStatus, OperationId,
-    RequestId, RollbackRules, RolloutPolicy, SBOM_SIGNED_FIELDS,
+    InvokeRequest, InvokeResponse, InvokeStatus, LifecycleManager, LifecycleRecord, LifecycleState,
+    LifecycleStatus, OperationId, RequestId, RollbackRules, RolloutPolicy, SBOM_SIGNED_FIELDS,
     SUPPLY_CHAIN_ATTESTATION_SIGNED_FIELDS, SbomComponent, SbomDependency, SbomFormat,
     SelfCheckReport, SoftwareBillOfMaterials, SuccessThresholds, SupplyChainAttestation,
-    SupplyChainSignature, TrustRootBinding, VerificationReasonCode, ZoneId,
+    SupplyChainSignature, TransitionReason, TrustRootBinding, VerificationReasonCode, ZoneId,
 };
 use fcp_e2e::{AssertionsSummary, ConnectorProcessRunner, E2eLogEntry, E2eLogger};
 use fcp_host::{
     BatchInvokeResponse, BatchStatus, CancelReason, CancellationOutcome, CancellationRequest,
-    CancellationResponse, CleanupBehavior, ConnectorArchetype, ConnectorInventoryResponse,
-    ConnectorRegistry, ConnectorSummary, DiscoveryEndpoint, DiscoveryResponse, GateOutcome,
-    HostHealthResponse, HostHealthStatus, IntrospectionResponse, OperationResultStatus,
-    PolicyEngine, PreflightRequest, PreflightResponse, RolloutDecision, RolloutOutcome,
+    CancellationResponse, CleanupBehavior, ConnectorAdminStatus, ConnectorArchetype,
+    ConnectorDriftKind, ConnectorInventoryResponse, ConnectorRegistry, ConnectorSummary,
+    DesiredRuntimeState, DiscoveryEndpoint, DiscoveryResponse, GateOutcome, HostAdminStateStore,
+    HostHealthResponse, HostHealthStatus, IntrospectionResponse, ObservedRuntimeState,
+    OperationResultStatus, PolicyEngine, PreflightRequest, PreflightResponse, RecoveryAction,
+    RolloutDecision, RolloutOutcome,
 };
 use fcp_testkit::LogCapture;
 use reqwest::header::{CACHE_CONTROL, ETAG, HeaderMap, HeaderValue, IF_NONE_MATCH, LAST_MODIFIED};
@@ -1742,6 +1744,101 @@ async fn fcp_host_binary_rollout_routes_schedule_and_promote_canary()
     assert_eq!(final_status.version, canary_version);
     assert!(!final_status.auto_promote_pending);
     assert_eq!(final_status.rollback_target_version, Some(previous_version));
+
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn fcp_host_binary_connector_status_route_reports_live_connector_state()
+-> Result<(), Box<dyn std::error::Error>> {
+    let connector_id = ConnectorId::from_static("fcp.test.status-live:utility:1.0.0");
+    let host = HttpHostProcess::spawn(vec![test_connector_config(
+        &connector_id,
+        "Status Live Connector",
+        &["test", "status"],
+    )])
+    .await?;
+    let url = |path: &str| format!("{}{}", host.base_url, path);
+
+    let status: ConnectorAdminStatus = http_get_json(
+        host.client.clone(),
+        url(&format!("/rpc/connectors/{}/status", connector_id.as_str())),
+    )
+    .await?;
+
+    assert_eq!(status.connector_id, connector_id);
+    assert_eq!(status.desired_state, DesiredRuntimeState::Enabled);
+    assert_eq!(status.observed_state, ObservedRuntimeState::Running);
+    assert!(status.lifecycle.is_none());
+    assert!(status.drift.is_none());
+    assert!(status.last_journal_sequence >= 2);
+
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn fcp_host_binary_connector_status_route_reports_missing_persisted_connector_state()
+-> Result<(), Box<dyn std::error::Error>> {
+    let connector_id = ConnectorId::from_static("fcp.test.status-missing:utility:1.0.0");
+    let state_dir = tempfile::tempdir()?;
+    let state_path = state_dir.path().join("lifecycle-state.json");
+    let store = HostAdminStateStore::with_state_path(state_path.clone())?;
+    let mut record = LifecycleRecord::new(connector_id.clone(), semver::Version::new(1, 0, 0));
+    record
+        .transition(
+            LifecycleState::Installing,
+            TransitionReason::InstallComplete,
+        )
+        .expect("pending -> installing");
+    record
+        .transition(
+            LifecycleState::Canary,
+            TransitionReason::NewVersion {
+                from_version: "0.9.0".to_string(),
+                to_version: "1.0.0".to_string(),
+            },
+        )
+        .expect("installing -> canary");
+    store.save(&record).await?;
+    drop(store);
+
+    let state_path_string = state_path.to_string_lossy().into_owned();
+    let host = HttpHostProcess::spawn_with_env(
+        Vec::new(),
+        &[("FCP_HOST_LIFECYCLE_STATE_FILE", state_path_string.as_str())],
+    )
+    .await?;
+    let url = |path: &str| format!("{}{}", host.base_url, path);
+
+    let status: ConnectorAdminStatus = http_get_json(
+        host.client.clone(),
+        url(&format!("/rpc/connectors/{}/status", connector_id.as_str())),
+    )
+    .await?;
+
+    assert_eq!(status.connector_id, connector_id);
+    assert_eq!(status.desired_state, DesiredRuntimeState::Enabled);
+    assert_eq!(status.observed_state, ObservedRuntimeState::Missing);
+    assert_eq!(
+        status
+            .drift
+            .as_ref()
+            .expect("missing persisted connector should report drift")
+            .recovery_action,
+        RecoveryAction::ReinstallConnector
+    );
+    assert_eq!(
+        status
+            .drift
+            .as_ref()
+            .expect("missing persisted connector should report drift")
+            .kind,
+        ConnectorDriftKind::EnabledButMissing
+    );
+    assert_eq!(
+        status.lifecycle.as_ref().map(|lifecycle| lifecycle.state),
+        Some(LifecycleState::Canary)
+    );
 
     Ok(())
 }

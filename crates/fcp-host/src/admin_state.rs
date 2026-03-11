@@ -5,7 +5,7 @@
 //! for later `fwc` lifecycle/config work. The current focus is the storage
 //! shape, monotonic journal semantics, and persistence invariants.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -20,7 +20,7 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{HostError, HostResult};
+use crate::{HostError, HostResult, discovery::ConnectorSummary};
 
 const HOST_ADMIN_STATE_SNAPSHOT_VERSION: u32 = 1;
 const REDACTED_CONFIG_VALUE: &str = "[REDACTED]";
@@ -271,6 +271,253 @@ impl ConnectorAdminState {
     }
 }
 
+const STARTUP_RECONCILIATION_ACTOR: &str = "host-startup-reconcile";
+const STARTUP_RECONCILIATION_STUCK_SECS: i64 = 300;
+
+/// Recommended next action when connector state has drifted from intent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryAction {
+    /// Restart the connector runtime.
+    RestartConnector,
+    /// Repair configuration or health before retrying.
+    RepairConnector,
+    /// Reinstall or restore connector artifacts.
+    ReinstallConnector,
+    /// Finish an in-flight rollout decision.
+    CompleteRollout,
+    /// Disable or uninstall the connector to match policy.
+    DisableConnector,
+    /// Manual operator investigation is required.
+    Investigate,
+}
+
+/// Drift category for desired-versus-observed connector state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectorDriftKind {
+    /// Connector should be enabled but is not running.
+    EnabledButNotRunning,
+    /// Connector should be enabled but the artifact/runtime is missing.
+    EnabledButMissing,
+    /// Connector is enabled but degraded.
+    EnabledButDegraded,
+    /// Connector is disabled but still active.
+    DisabledButRunning,
+    /// Connector should be absent but is still present.
+    UninstalledButPresent,
+    /// Installation appears to be stuck.
+    InstallStuck,
+    /// Canary rollout is overdue for promotion or rollback.
+    CanaryStuck,
+}
+
+/// Human/audit-friendly drift detail.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConnectorDriftStatus {
+    /// Classified drift kind.
+    pub kind: ConnectorDriftKind,
+    /// Suggested recovery action for the operator or agent.
+    pub recovery_action: RecoveryAction,
+    /// Stable human-readable summary.
+    pub message: String,
+}
+
+/// Host-visible connector status after reconciliation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectorAdminStatus {
+    /// Connector identifier.
+    pub connector_id: ConnectorId,
+    /// Desired runtime target.
+    pub desired_state: DesiredRuntimeState,
+    /// Latest observed runtime state.
+    pub observed_state: ObservedRuntimeState,
+    /// Lifecycle/rollout status when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<LifecycleStatus>,
+    /// Optional pinned version.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pinned_version: Option<Version>,
+    /// Active config revision id, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_config_revision_id: Option<u64>,
+    /// Total config revisions tracked for this connector.
+    pub config_revision_count: usize,
+    /// Latest journal sequence touching this connector.
+    pub last_journal_sequence: u64,
+    /// Drift/recovery diagnosis when desired and observed state diverge.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drift: Option<ConnectorDriftStatus>,
+    /// Timestamp when this view was evaluated.
+    pub evaluated_at: DateTime<Utc>,
+}
+
+/// Result row for one connector during startup reconciliation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartupReconciliationEntry {
+    /// Connector identifier.
+    pub connector_id: ConnectorId,
+    /// Whether the connector received a fresh admin-state row.
+    pub created_admin_state: bool,
+    /// Desired runtime state after reconciliation.
+    pub desired_state: DesiredRuntimeState,
+    /// Observed state before reconciliation.
+    pub observed_state_before: ObservedRuntimeState,
+    /// Observed state after reconciliation.
+    pub observed_state_after: ObservedRuntimeState,
+    /// Whether persistence state changed during reconciliation.
+    pub updated: bool,
+    /// Drift classification after reconciliation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drift: Option<ConnectorDriftStatus>,
+}
+
+/// Aggregate startup reconciliation report.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartupReconciliationReport {
+    /// Timestamp of the reconciliation pass.
+    pub reconciled_at: DateTime<Utc>,
+    /// Total tracked connectors after reconciliation.
+    pub tracked_connectors: usize,
+    /// Number of connector admin-state rows created.
+    pub created_connectors: usize,
+    /// Number of observed-state updates applied.
+    pub observed_updates: usize,
+    /// Number of connectors still in drift after reconciliation.
+    pub drifted_connectors: usize,
+    /// Per-connector outcomes.
+    pub entries: Vec<StartupReconciliationEntry>,
+}
+
+const fn desired_state_from_summary(summary: &ConnectorSummary) -> DesiredRuntimeState {
+    if summary.enabled {
+        DesiredRuntimeState::Enabled
+    } else {
+        DesiredRuntimeState::Disabled
+    }
+}
+
+const fn observed_state_from_summary(summary: &ConnectorSummary) -> ObservedRuntimeState {
+    if !summary.enabled {
+        return ObservedRuntimeState::Stopped;
+    }
+
+    match &summary.health {
+        fcp_core::ConnectorHealth::Healthy => ObservedRuntimeState::Running,
+        fcp_core::ConnectorHealth::Degraded { .. } => ObservedRuntimeState::Degraded,
+        fcp_core::ConnectorHealth::Unavailable { .. } => ObservedRuntimeState::Stopped,
+    }
+}
+
+fn install_stuck(record: &LifecycleRecord, now: DateTime<Utc>) -> bool {
+    matches!(
+        record.state,
+        LifecycleState::Pending | LifecycleState::Installing
+    ) && now
+        .signed_duration_since(record.state_changed_at)
+        .num_seconds()
+        >= STARTUP_RECONCILIATION_STUCK_SECS
+}
+
+fn canary_stuck(record: &LifecycleRecord, now: DateTime<Utc>) -> bool {
+    record.state == LifecycleState::Canary && record.canary_expires_in_secs_at(now) == Some(0)
+}
+
+fn connector_drift_status(
+    state: &ConnectorAdminState,
+    now: DateTime<Utc>,
+) -> Option<ConnectorDriftStatus> {
+    if let Some(record) = state.lifecycle.as_ref() {
+        if install_stuck(record, now) {
+            return Some(ConnectorDriftStatus {
+                kind: ConnectorDriftKind::InstallStuck,
+                recovery_action: RecoveryAction::Investigate,
+                message: "connector install/startup has remained pending long enough to require operator investigation".to_string(),
+            });
+        }
+
+        if canary_stuck(record, now) {
+            return Some(ConnectorDriftStatus {
+                kind: ConnectorDriftKind::CanaryStuck,
+                recovery_action: RecoveryAction::CompleteRollout,
+                message: "connector canary has exceeded its maximum duration and needs promotion or rollback".to_string(),
+            });
+        }
+    }
+
+    match state.desired_state {
+        DesiredRuntimeState::Enabled => match state.observed_state {
+            ObservedRuntimeState::Degraded => Some(ConnectorDriftStatus {
+                kind: ConnectorDriftKind::EnabledButDegraded,
+                recovery_action: RecoveryAction::RepairConnector,
+                message: "connector should be enabled but health or self-check results are degraded".to_string(),
+            }),
+            ObservedRuntimeState::Stopped => Some(ConnectorDriftStatus {
+                kind: ConnectorDriftKind::EnabledButNotRunning,
+                recovery_action: RecoveryAction::RestartConnector,
+                message: "connector should be enabled but is not currently running".to_string(),
+            }),
+            ObservedRuntimeState::Missing => Some(ConnectorDriftStatus {
+                kind: ConnectorDriftKind::EnabledButMissing,
+                recovery_action: RecoveryAction::ReinstallConnector,
+                message: "connector should be enabled but no live runtime or artifact was found".to_string(),
+            }),
+            ObservedRuntimeState::Unknown | ObservedRuntimeState::Starting => Some(
+                ConnectorDriftStatus {
+                    kind: ConnectorDriftKind::EnabledButNotRunning,
+                    recovery_action: RecoveryAction::Investigate,
+                    message: "connector should be enabled but the host has not yet observed a stable running state".to_string(),
+                },
+            ),
+            ObservedRuntimeState::Running => None,
+        },
+        DesiredRuntimeState::Disabled => match state.observed_state {
+            ObservedRuntimeState::Running | ObservedRuntimeState::Degraded => {
+                Some(ConnectorDriftStatus {
+                    kind: ConnectorDriftKind::DisabledButRunning,
+                    recovery_action: RecoveryAction::DisableConnector,
+                    message: "connector should be disabled but still appears active".to_string(),
+                })
+            }
+            _ => None,
+        },
+        DesiredRuntimeState::Uninstalled => match state.observed_state {
+            ObservedRuntimeState::Running
+            | ObservedRuntimeState::Degraded
+            | ObservedRuntimeState::Stopped
+            | ObservedRuntimeState::Starting => Some(ConnectorDriftStatus {
+                kind: ConnectorDriftKind::UninstalledButPresent,
+                recovery_action: RecoveryAction::DisableConnector,
+                message: "connector should be uninstalled but host state still shows it present".to_string(),
+            }),
+            ObservedRuntimeState::Unknown | ObservedRuntimeState::Missing => None,
+        },
+        DesiredRuntimeState::Unspecified => None,
+    }
+}
+
+fn connector_admin_status_from_state(
+    connector_id: &ConnectorId,
+    state: &ConnectorAdminState,
+    now: DateTime<Utc>,
+) -> ConnectorAdminStatus {
+    ConnectorAdminStatus {
+        connector_id: connector_id.clone(),
+        desired_state: state.desired_state,
+        observed_state: state.observed_state,
+        lifecycle: state
+            .lifecycle
+            .as_ref()
+            .map(|record| LifecycleStatus::from_record(record, now, false)),
+        pinned_version: state.pinned_version.clone(),
+        active_config_revision_id: state.active_config_revision_id,
+        config_revision_count: state.config_revisions.len(),
+        last_journal_sequence: state.last_journal_sequence,
+        drift: connector_drift_status(state, now),
+        evaluated_at: now,
+    }
+}
+
 /// Entire persisted admin-state snapshot for the host.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostAdminStateSnapshot {
@@ -339,6 +586,148 @@ impl HostAdminStateSnapshot {
         }
         snapshot
     }
+}
+
+fn set_snapshot_desired_state(
+    snapshot: &mut HostAdminStateSnapshot,
+    connector_id: &ConnectorId,
+    desired_state: DesiredRuntimeState,
+    initiated_by: Option<&str>,
+) -> bool {
+    let current = snapshot
+        .connectors
+        .get(connector_id)
+        .map_or(DesiredRuntimeState::Unspecified, |state| {
+            state.desired_state
+        });
+    if current == desired_state {
+        return false;
+    }
+
+    let sequence = snapshot.append_journal(
+        connector_id,
+        AdminStateMutation::DesiredStateSet { desired_state },
+        initiated_by.map(ToOwned::to_owned),
+    );
+    let state = snapshot.connector_state_mut(connector_id);
+    state.desired_state = desired_state;
+    state.last_journal_sequence = sequence;
+    true
+}
+
+fn set_snapshot_observed_state(
+    snapshot: &mut HostAdminStateSnapshot,
+    connector_id: &ConnectorId,
+    observed_state: ObservedRuntimeState,
+    initiated_by: Option<&str>,
+) -> bool {
+    let current = snapshot
+        .connectors
+        .get(connector_id)
+        .map_or(ObservedRuntimeState::Unknown, |state| state.observed_state);
+    if current == observed_state {
+        return false;
+    }
+
+    let sequence = snapshot.append_journal(
+        connector_id,
+        AdminStateMutation::ObservedStateSet { observed_state },
+        initiated_by.map(ToOwned::to_owned),
+    );
+    let state = snapshot.connector_state_mut(connector_id);
+    state.observed_state = observed_state;
+    state.last_journal_sequence = sequence;
+    true
+}
+
+fn reconcile_registered_connector(
+    snapshot: &mut HostAdminStateSnapshot,
+    summary: &ConnectorSummary,
+    now: DateTime<Utc>,
+) -> (StartupReconciliationEntry, bool) {
+    let connector_id = &summary.id;
+    let created_admin_state = !snapshot.connectors.contains_key(connector_id);
+    if created_admin_state {
+        let _ = snapshot.connector_state_mut(connector_id);
+    }
+
+    let observed_state_before = snapshot
+        .connectors
+        .get(connector_id)
+        .map_or(ObservedRuntimeState::Unknown, |state| state.observed_state);
+    let mut updated = false;
+
+    if created_admin_state
+        || snapshot
+            .connectors
+            .get(connector_id)
+            .is_some_and(|state| state.desired_state == DesiredRuntimeState::Unspecified)
+    {
+        updated |= set_snapshot_desired_state(
+            snapshot,
+            connector_id,
+            desired_state_from_summary(summary),
+            Some(STARTUP_RECONCILIATION_ACTOR),
+        );
+    }
+
+    let observed_updated = set_snapshot_observed_state(
+        snapshot,
+        connector_id,
+        observed_state_from_summary(summary),
+        Some(STARTUP_RECONCILIATION_ACTOR),
+    );
+    updated |= observed_updated;
+
+    let state = snapshot
+        .connectors
+        .get(connector_id)
+        .expect("connector state must exist after reconciliation");
+    (
+        StartupReconciliationEntry {
+            connector_id: connector_id.clone(),
+            created_admin_state,
+            desired_state: state.desired_state,
+            observed_state_before,
+            observed_state_after: state.observed_state,
+            updated,
+            drift: connector_drift_status(state, now),
+        },
+        observed_updated,
+    )
+}
+
+fn reconcile_missing_connector(
+    snapshot: &mut HostAdminStateSnapshot,
+    connector_id: &ConnectorId,
+    now: DateTime<Utc>,
+) -> (StartupReconciliationEntry, bool) {
+    let observed_state_before = snapshot
+        .connectors
+        .get(connector_id)
+        .map_or(ObservedRuntimeState::Unknown, |state| state.observed_state);
+    let observed_updated = set_snapshot_observed_state(
+        snapshot,
+        connector_id,
+        ObservedRuntimeState::Missing,
+        Some(STARTUP_RECONCILIATION_ACTOR),
+    );
+    let state = snapshot
+        .connectors
+        .get(connector_id)
+        .expect("persisted connector state should still exist");
+    (
+        StartupReconciliationEntry {
+            connector_id: connector_id.clone(),
+            created_admin_state: false,
+            desired_state: state.desired_state,
+            observed_state_before,
+            observed_state_after: state.observed_state,
+            updated: observed_updated,
+            drift: connector_drift_status(state, now),
+        },
+        observed_updated,
+    )
 }
 
 const fn host_admin_state_snapshot_version() -> u32 {
@@ -630,6 +1019,117 @@ impl HostAdminStateStore {
             .connectors
             .get(connector_id)
             .and_then(|state| state.pinned_version.clone())
+    }
+
+    /// Return a host-facing desired-versus-observed status view for one
+    /// connector.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LifecycleError::NotFound`] when the connector has no persisted
+    /// admin state.
+    pub async fn connector_status(
+        &self,
+        connector_id: &ConnectorId,
+    ) -> Result<ConnectorAdminStatus, LifecycleError> {
+        self.connector_status_at(connector_id, Utc::now()).await
+    }
+
+    async fn connector_status_at(
+        &self,
+        connector_id: &ConnectorId,
+        now: DateTime<Utc>,
+    ) -> Result<ConnectorAdminStatus, LifecycleError> {
+        let state = self.state.read().await;
+        let connector_state =
+            state
+                .connectors
+                .get(connector_id)
+                .ok_or_else(|| LifecycleError::NotFound {
+                    connector_id: connector_id.clone(),
+                })?;
+        Ok(connector_admin_status_from_state(
+            connector_id,
+            connector_state,
+            now,
+        ))
+    }
+
+    /// Reconcile persisted admin state against the currently registered
+    /// connector inventory.
+    ///
+    /// Existing desired state remains authoritative. Startup reconciliation only
+    /// initializes intent for newly discovered connectors and refreshes observed
+    /// runtime state so crashes, missing artifacts, and stuck rollouts surface as
+    /// explicit drift instead of stale snapshots.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the reconciled snapshot cannot be persisted.
+    pub async fn reconcile_registered_connectors(
+        &self,
+        registered: &[ConnectorSummary],
+    ) -> Result<StartupReconciliationReport, LifecycleError> {
+        self.reconcile_registered_connectors_at(registered, Utc::now())
+            .await
+    }
+
+    async fn reconcile_registered_connectors_at(
+        &self,
+        registered: &[ConnectorSummary],
+        now: DateTime<Utc>,
+    ) -> Result<StartupReconciliationReport, LifecycleError> {
+        self.apply_mutation(|snapshot| {
+            let registered_ids: HashSet<ConnectorId> = registered
+                .iter()
+                .map(|summary| summary.id.clone())
+                .collect();
+            let missing_connector_ids: Vec<ConnectorId> = snapshot
+                .connectors
+                .keys()
+                .filter(|connector_id| !registered_ids.contains(*connector_id))
+                .cloned()
+                .collect();
+
+            let mut created_connectors = 0;
+            let mut observed_updates = 0;
+            let mut entries = Vec::with_capacity(registered.len() + missing_connector_ids.len());
+
+            for summary in registered {
+                let (entry, observed_state_changed) =
+                    reconcile_registered_connector(snapshot, summary, now);
+                if entry.created_admin_state {
+                    created_connectors += 1;
+                }
+                if observed_state_changed {
+                    observed_updates += 1;
+                }
+                entries.push(entry);
+            }
+
+            for connector_id in missing_connector_ids {
+                let (entry, observed_state_changed) =
+                    reconcile_missing_connector(snapshot, &connector_id, now);
+                if observed_state_changed {
+                    observed_updates += 1;
+                }
+                entries.push(entry);
+            }
+
+            entries
+                .sort_by(|left, right| left.connector_id.as_str().cmp(right.connector_id.as_str()));
+            let drifted_connectors = entries.iter().filter(|entry| entry.drift.is_some()).count();
+
+            Ok(StartupReconciliationReport {
+                reconciled_at: now,
+                tracked_connectors: snapshot.connectors.len(),
+                created_connectors,
+                observed_updates,
+                drifted_connectors,
+                entries,
+            })
+        })
+        .await
     }
 }
 
@@ -1090,9 +1590,34 @@ const fn is_false(value: &bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{Duration, TimeZone};
+    use fcp_core::{CanaryPolicy, ConnectorHealth};
 
     fn connector_id() -> ConnectorId {
         ConnectorId::from_static("fcp.test.admin-state:utility:1.0.0")
+    }
+
+    fn secondary_connector_id() -> ConnectorId {
+        ConnectorId::from_static("fcp.test.admin-state-secondary:utility:1.0.0")
+    }
+
+    fn connector_summary(
+        connector_id: ConnectorId,
+        enabled: bool,
+        health: ConnectorHealth,
+    ) -> ConnectorSummary {
+        ConnectorSummary {
+            id: connector_id,
+            name: "Test Connector".to_string(),
+            description: Some("Admin-state reconciliation test connector".to_string()),
+            version: Version::new(1, 0, 0),
+            categories: vec!["test".to_string()],
+            tool_count: 1,
+            max_safety_tier: fcp_core::SafetyTier::Safe,
+            enabled,
+            health,
+            last_health_check: Some(Utc::now()),
+        }
     }
 
     fn config_payload(name: &str) -> Value {
@@ -1405,5 +1930,163 @@ mod tests {
         assert_eq!(restored.observed_state, ObservedRuntimeState::Running);
         assert_eq!(restored.pinned_version, Some(version));
         assert!(store.journal(Some(&connector_id)).await.is_empty());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn startup_reconciliation_creates_rows_and_marks_missing_connectors() {
+        let store = HostAdminStateStore::new();
+        let live_connector_id = connector_id();
+        let missing_connector_id = secondary_connector_id();
+
+        store
+            .set_desired_state(
+                &missing_connector_id,
+                DesiredRuntimeState::Enabled,
+                Some("test-suite".to_string()),
+            )
+            .await
+            .expect("desired state should persist");
+        store
+            .set_observed_state(
+                &missing_connector_id,
+                ObservedRuntimeState::Running,
+                Some("test-suite".to_string()),
+            )
+            .await
+            .expect("observed state should persist");
+
+        let registered = vec![connector_summary(
+            live_connector_id.clone(),
+            true,
+            ConnectorHealth::healthy(),
+        )];
+        let now = Utc.with_ymd_and_hms(2026, 3, 10, 23, 45, 0).unwrap();
+        let report = store
+            .reconcile_registered_connectors_at(&registered, now)
+            .await
+            .expect("startup reconciliation should persist");
+
+        assert_eq!(report.tracked_connectors, 2);
+        assert_eq!(report.created_connectors, 1);
+        assert_eq!(report.observed_updates, 2);
+        assert_eq!(report.drifted_connectors, 1);
+
+        let live_entry = report
+            .entries
+            .iter()
+            .find(|entry| entry.connector_id == live_connector_id)
+            .expect("live connector entry");
+        assert!(live_entry.created_admin_state);
+        assert_eq!(live_entry.desired_state, DesiredRuntimeState::Enabled);
+        assert_eq!(
+            live_entry.observed_state_before,
+            ObservedRuntimeState::Unknown
+        );
+        assert_eq!(
+            live_entry.observed_state_after,
+            ObservedRuntimeState::Running
+        );
+        assert!(live_entry.updated);
+        assert!(live_entry.drift.is_none());
+
+        let missing_entry = report
+            .entries
+            .iter()
+            .find(|entry| entry.connector_id == missing_connector_id)
+            .expect("missing connector entry");
+        assert!(!missing_entry.created_admin_state);
+        assert_eq!(missing_entry.desired_state, DesiredRuntimeState::Enabled);
+        assert_eq!(
+            missing_entry.observed_state_before,
+            ObservedRuntimeState::Running
+        );
+        assert_eq!(
+            missing_entry.observed_state_after,
+            ObservedRuntimeState::Missing
+        );
+        assert!(missing_entry.updated);
+        assert_eq!(
+            missing_entry
+                .drift
+                .as_ref()
+                .expect("missing connector should drift")
+                .kind,
+            ConnectorDriftKind::EnabledButMissing
+        );
+
+        let missing_status = store
+            .connector_status_at(&missing_connector_id, now)
+            .await
+            .expect("status should exist after reconciliation");
+        assert_eq!(missing_status.desired_state, DesiredRuntimeState::Enabled);
+        assert_eq!(missing_status.observed_state, ObservedRuntimeState::Missing);
+        assert_eq!(
+            missing_status
+                .drift
+                .as_ref()
+                .expect("missing connector should drift")
+                .recovery_action,
+            RecoveryAction::ReinstallConnector
+        );
+    }
+
+    #[test]
+    fn connector_drift_status_identifies_stuck_install_and_canary() {
+        let now = Utc.with_ymd_and_hms(2026, 3, 10, 23, 50, 0).unwrap();
+        let install_record = LifecycleRecord {
+            connector_id: connector_id(),
+            version: Version::new(1, 0, 0),
+            state: LifecycleState::Installing,
+            deployed_at: now - Duration::minutes(15),
+            state_changed_at: now - Duration::minutes(10),
+            transitions: Vec::new(),
+            health: fcp_core::HealthMetrics::default(),
+            canary_policy: CanaryPolicy::default(),
+            previous_version: None,
+        };
+        let install_state = ConnectorAdminState {
+            lifecycle: Some(install_record),
+            desired_state: DesiredRuntimeState::Enabled,
+            observed_state: ObservedRuntimeState::Starting,
+            pinned_version: None,
+            config_revisions: Vec::new(),
+            active_config_revision_id: None,
+            last_journal_sequence: 0,
+        };
+        let install_drift =
+            connector_drift_status(&install_state, now).expect("install should be stuck");
+        assert_eq!(install_drift.kind, ConnectorDriftKind::InstallStuck);
+        assert_eq!(install_drift.recovery_action, RecoveryAction::Investigate);
+
+        let canary_record = LifecycleRecord {
+            connector_id: secondary_connector_id(),
+            version: Version::new(1, 1, 0),
+            state: LifecycleState::Canary,
+            deployed_at: now - Duration::minutes(30),
+            state_changed_at: now - Duration::minutes(20),
+            transitions: Vec::new(),
+            health: fcp_core::HealthMetrics::default(),
+            canary_policy: CanaryPolicy {
+                max_canary_duration_secs: 60,
+                ..CanaryPolicy::default()
+            },
+            previous_version: Some(Version::new(1, 0, 0)),
+        };
+        let canary_state = ConnectorAdminState {
+            lifecycle: Some(canary_record),
+            desired_state: DesiredRuntimeState::Enabled,
+            observed_state: ObservedRuntimeState::Running,
+            pinned_version: None,
+            config_revisions: Vec::new(),
+            active_config_revision_id: None,
+            last_journal_sequence: 0,
+        };
+        let canary_drift =
+            connector_drift_status(&canary_state, now).expect("canary should be stuck");
+        assert_eq!(canary_drift.kind, ConnectorDriftKind::CanaryStuck);
+        assert_eq!(
+            canary_drift.recovery_action,
+            RecoveryAction::CompleteRollout
+        );
     }
 }

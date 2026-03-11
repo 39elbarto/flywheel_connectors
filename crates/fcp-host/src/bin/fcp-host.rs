@@ -37,13 +37,14 @@ use fcp_core::{
 use fcp_host::{
     BatchExecutor, BatchInvokeRequest, BatchInvokeResponse, BatchOperation, BatchOperationError,
     BatchOptions, BatchStatus, BudgetPolicyEngine, CacheMetadata, CacheValidator,
-    CancellationController, CancellationRequest, CancellationResponse, ConnectorArchetype,
-    ConnectorInventoryResponse, ConnectorRegistry, ConnectorSummary, DiscoveryEndpoint,
-    DiscoveryFilter, DiscoveryResponse, DoctorReport, DoctorRequest, DoctorService, GateOutcome,
-    HostAdminStateStore, HostHealthResponse, HostHealthStatus, IntrospectionResponse,
-    OperationResult, OperationResultStatus, PreflightRequest, PreflightResponse, RequestPriority,
-    ResilienceError, ResilienceLayer, RolloutController, RolloutDecision, RolloutObservation,
-    RolloutOutcome, SafetyTierExt, SupplyChainGate, SupplyChainGateConfig, merge_connector_health,
+    CancellationController, CancellationRequest, CancellationResponse, ConnectorAdminStatus,
+    ConnectorArchetype, ConnectorInventoryResponse, ConnectorRegistry, ConnectorSummary,
+    DiscoveryEndpoint, DiscoveryFilter, DiscoveryResponse, DoctorReport, DoctorRequest,
+    DoctorService, GateOutcome, HostAdminStateStore, HostHealthResponse, HostHealthStatus,
+    IntrospectionResponse, OperationResult, OperationResultStatus, PreflightRequest,
+    PreflightResponse, RequestPriority, ResilienceError, ResilienceLayer, RolloutController,
+    RolloutDecision, RolloutObservation, RolloutOutcome, SafetyTierExt, SupplyChainGate,
+    SupplyChainGateConfig, merge_connector_health,
 };
 use fcp_host::{HostError, HostResult};
 use futures_util::future::join_all;
@@ -618,6 +619,32 @@ async fn rollout_status_response(
     })
 }
 
+fn log_startup_reconciliation(report: &fcp_host::StartupReconciliationReport) {
+    tracing::info!(
+        event = "startup_reconciliation",
+        tracked_connectors = report.tracked_connectors,
+        created_connectors = report.created_connectors,
+        observed_updates = report.observed_updates,
+        drifted_connectors = report.drifted_connectors,
+        "startup reconciliation complete"
+    );
+
+    for entry in &report.entries {
+        if let Some(drift) = entry.drift.as_ref() {
+            tracing::warn!(
+                event = "startup_reconciliation_drift",
+                connector_id = %entry.connector_id,
+                desired_state = ?entry.desired_state,
+                observed_state = ?entry.observed_state_after,
+                drift_kind = ?drift.kind,
+                recovery_action = ?drift.recovery_action,
+                message = %drift.message,
+                "startup reconciliation detected connector drift"
+            );
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RollbackRequest {
@@ -1012,6 +1039,12 @@ async fn async_main() -> HostResult<()> {
         Arc::new(BudgetPolicyEngine::new()),
     ));
     let lifecycle = Arc::new(HostAdminStateStore::from_env()?);
+    let startup_inventory = registry.list().await;
+    let startup_reconciliation = lifecycle
+        .reconcile_registered_connectors(&startup_inventory)
+        .await
+        .map_err(map_lifecycle_host_error)?;
+    log_startup_reconciliation(&startup_reconciliation);
     let rollout = Arc::new(RolloutController::new(
         Arc::clone(&registry),
         Arc::clone(&lifecycle),
@@ -1035,6 +1068,10 @@ async fn async_main() -> HostResult<()> {
         .route("/doctor", post(doctor_handler))
         .route("/rpc/discover", post(discover_handler))
         .route("/rpc/connectors/{connector_id}", get(connector_handler))
+        .route(
+            "/rpc/connectors/{connector_id}/status",
+            get(connector_status_handler),
+        )
         .route("/rpc/introspect/{connector_id}", get(introspect_handler))
         .route("/rpc/invoke", post(invoke_handler))
         .route("/rpc/cancel", post(cancel_handler))
@@ -1233,6 +1270,45 @@ async fn connector_handler(
                 "connector inventory request failed"
             );
             Err(map_host_error(err))
+        }
+    }
+}
+
+async fn connector_status_handler(
+    State(state): State<Arc<AppState>>,
+    Path(connector_id): Path<String>,
+) -> Result<Json<ConnectorAdminStatus>, (StatusCode, String)> {
+    let connector_id = parse_connector_id(&connector_id)?;
+    let started_at = Instant::now();
+    tracing::debug!(
+        event = "connector_status_request",
+        connector_id = %connector_id,
+        "processing connector admin status request"
+    );
+
+    match state.lifecycle.connector_status(&connector_id).await {
+        Ok(status) => {
+            tracing::debug!(
+                event = "connector_status_response",
+                connector_id = %connector_id,
+                desired_state = ?status.desired_state,
+                observed_state = ?status.observed_state,
+                drifted = status.drift.is_some(),
+                duration_ms = started_at.elapsed().as_millis() as u64,
+                "connector admin status request complete"
+            );
+            Ok(Json(status))
+        }
+        Err(err) => {
+            let host_error = map_lifecycle_host_error(err);
+            tracing::warn!(
+                event = "connector_status_error",
+                connector_id = %connector_id,
+                error = %host_error,
+                duration_ms = started_at.elapsed().as_millis() as u64,
+                "connector admin status request failed"
+            );
+            Err(map_host_error(host_error))
         }
     }
 }

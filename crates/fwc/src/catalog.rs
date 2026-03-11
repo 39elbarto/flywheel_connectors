@@ -3181,4 +3181,1101 @@ mod tests {
         assert_eq!(back.command, "invoke");
         assert_eq!(back.acquisition, AuthAcquisitionFlow::Required);
     }
+
+    // ── Truthfulness invariant suite (bead 1g7z0.29.8.4) ─────────────
+    // Deterministic golden fixtures, source-of-truth classification,
+    // live-vs-offline wording, refusal semantics, and envelope stability.
+
+    // ── Source-of-truth classification golden fixtures ─────────────────
+
+    #[test]
+    fn truth_source_serde_roundtrip_all_variants() {
+        let variants = [
+            (CommandTruthSource::LiveHost, "\"live_host\""),
+            (CommandTruthSource::OfflineArtifact, "\"offline_artifact\""),
+            (CommandTruthSource::Hybrid, "\"hybrid\""),
+            (CommandTruthSource::Passthrough, "\"passthrough\""),
+        ];
+        for (src, expected_json) in variants {
+            let json = serde_json::to_string(&src).unwrap();
+            assert_eq!(json, expected_json, "serde for {src:?}");
+            let back: CommandTruthSource = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, src);
+        }
+    }
+
+    #[test]
+    fn execution_mode_serde_roundtrip_all_variants() {
+        let variants = [
+            (CommandExecutionMode::ReadOnly, "\"read_only\""),
+            (CommandExecutionMode::Mutating, "\"mutating\""),
+            (CommandExecutionMode::Simulate, "\"simulate\""),
+            (CommandExecutionMode::Interactive, "\"interactive\""),
+            (CommandExecutionMode::LocalOnly, "\"local_only\""),
+        ];
+        for (mode, expected_json) in variants {
+            let json = serde_json::to_string(&mode).unwrap();
+            assert_eq!(json, expected_json, "serde for {mode:?}");
+            let back: CommandExecutionMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, mode);
+        }
+    }
+
+    #[test]
+    fn host_absent_behavior_serde_roundtrip_all_variants() {
+        let variants = [
+            (HostAbsentBehavior::FailFast, "\"fail_fast\""),
+            (
+                HostAbsentBehavior::DegradedWithWarning,
+                "\"degraded_with_warning\"",
+            ),
+            (HostAbsentBehavior::Unaffected, "\"unaffected\""),
+            (
+                HostAbsentBehavior::PassthroughDependent,
+                "\"passthrough_dependent\"",
+            ),
+        ];
+        for (beh, expected_json) in variants {
+            let json = serde_json::to_string(&beh).unwrap();
+            assert_eq!(json, expected_json, "serde for {beh:?}");
+            let back: HostAbsentBehavior = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, beh);
+        }
+    }
+
+    #[test]
+    fn host_absent_reason_serde_roundtrip_all_variants() {
+        let variants = [
+            (HostAbsentReason::NotConfigured, "\"not-configured\""),
+            (HostAbsentReason::Unreachable, "\"unreachable\""),
+            (HostAbsentReason::Unhealthy, "\"unhealthy\""),
+        ];
+        for (reason, expected_json) in variants {
+            let json = serde_json::to_string(&reason).unwrap();
+            assert_eq!(json, expected_json, "serde for {reason:?}");
+            let back: HostAbsentReason = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, reason);
+        }
+    }
+
+    #[test]
+    fn offline_source_serde_roundtrip_all_variants() {
+        let variants = [
+            (OfflineSource::WorkspaceManifest, "\"workspace-manifest\""),
+            (OfflineSource::LocalCatalog, "\"local-catalog\""),
+            (OfflineSource::LocalHistory, "\"local-history\""),
+            (OfflineSource::StaticContract, "\"static-contract\""),
+            (OfflineSource::Subsystem, "\"subsystem\""),
+        ];
+        for (src, expected_json) in variants {
+            let json = serde_json::to_string(&src).unwrap();
+            assert_eq!(json, expected_json, "serde for {src:?}");
+            let back: OfflineSource = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, src);
+        }
+    }
+
+    #[test]
+    fn workflow_step_reality_serde_roundtrip_all_variants() {
+        let variants = [
+            (WorkflowStepReality::Executed, "\"executed\""),
+            (WorkflowStepReality::Planned, "\"planned\""),
+            (
+                WorkflowStepReality::HostUnavailable,
+                "\"host_unavailable\"",
+            ),
+            (WorkflowStepReality::AuthDenied, "\"auth_denied\""),
+            (WorkflowStepReality::Unsupported, "\"unsupported\""),
+            (WorkflowStepReality::Skipped, "\"skipped\""),
+        ];
+        for (reality, expected_json) in variants {
+            let json = serde_json::to_string(&reality).unwrap();
+            assert_eq!(json, expected_json, "serde for {reality:?}");
+            let back: WorkflowStepReality = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, reality);
+        }
+    }
+
+    #[test]
+    fn workflow_kind_serde_roundtrip_all_variants() {
+        let variants = [
+            (WorkflowKind::LocalTransform, "\"local_transform\""),
+            (
+                WorkflowKind::OrchestratedExecution,
+                "\"orchestrated_execution\"",
+            ),
+        ];
+        for (kind, expected_json) in variants {
+            let json = serde_json::to_string(&kind).unwrap();
+            assert_eq!(json, expected_json, "serde for {kind:?}");
+            let back: WorkflowKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, kind);
+        }
+    }
+
+    // ── Classification matrix golden invariants ────────────────────────
+
+    #[test]
+    fn every_classified_command_exists_in_commands_constant() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            assert!(
+                COMMANDS.contains(&cls.command),
+                "Classified command '{}' not in COMMANDS",
+                cls.command
+            );
+        }
+    }
+
+    #[test]
+    fn no_offline_artifact_command_requires_capability_token() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            if cls.truth_source == CommandTruthSource::OfflineArtifact {
+                assert!(
+                    !cls.requires_capability_token,
+                    "Offline command '{}' should never require a capability token",
+                    cls.command
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_offline_artifact_command_needs_approval() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            if cls.truth_source == CommandTruthSource::OfflineArtifact {
+                assert!(
+                    !cls.may_need_approval,
+                    "Offline command '{}' should never need approval",
+                    cls.command
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn all_offline_artifact_commands_are_unaffected_by_host_absence() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            if cls.truth_source == CommandTruthSource::OfflineArtifact {
+                assert_eq!(
+                    cls.host_absent,
+                    HostAbsentBehavior::Unaffected,
+                    "Offline command '{}' host_absent should be Unaffected",
+                    cls.command
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn all_offline_artifact_commands_are_local_only() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            if cls.truth_source == CommandTruthSource::OfflineArtifact {
+                assert_eq!(
+                    cls.execution_mode,
+                    CommandExecutionMode::LocalOnly,
+                    "Offline command '{}' should be LocalOnly",
+                    cls.command
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn all_live_host_commands_fail_fast_when_host_absent() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            if cls.truth_source == CommandTruthSource::LiveHost {
+                assert_eq!(
+                    cls.host_absent,
+                    HostAbsentBehavior::FailFast,
+                    "Live host command '{}' should FailFast when host absent",
+                    cls.command
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn execution_mutating_live_commands_require_token_or_approval() {
+        // Execution-family mutating commands (invoke, map, batch-file, recipe,
+        // pipeline) must require a capability token or approval. Lifecycle/admin
+        // commands (install, update, config, etc.) are exempt — they're admin ops.
+        let execution_mutating = [
+            "invoke", "map", "batch-file", "recipe", "pipeline",
+        ];
+        for cmd in execution_mutating {
+            let cls = classify_command(cmd).unwrap();
+            assert!(
+                cls.requires_capability_token || cls.may_need_approval,
+                "Execution mutating command '{}' should require token or approval",
+                cls.command
+            );
+        }
+    }
+
+    #[test]
+    fn all_passthrough_commands_are_local_only() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            if cls.truth_source == CommandTruthSource::Passthrough {
+                assert_eq!(
+                    cls.execution_mode,
+                    CommandExecutionMode::LocalOnly,
+                    "Passthrough command '{}' should be LocalOnly",
+                    cls.command
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn all_passthrough_commands_are_passthrough_dependent() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            if cls.truth_source == CommandTruthSource::Passthrough {
+                assert_eq!(
+                    cls.host_absent,
+                    HostAbsentBehavior::PassthroughDependent,
+                    "Passthrough command '{}' host_absent should be PassthroughDependent",
+                    cls.command
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_passthrough_command_requires_token() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            if cls.truth_source == CommandTruthSource::Passthrough {
+                assert!(
+                    !cls.requires_capability_token,
+                    "Passthrough command '{}' should not require token",
+                    cls.command
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn hybrid_commands_are_read_only_or_mutating() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            if cls.truth_source == CommandTruthSource::Hybrid {
+                assert!(
+                    cls.execution_mode == CommandExecutionMode::ReadOnly
+                        || cls.execution_mode == CommandExecutionMode::Mutating,
+                    "Hybrid command '{}' has unexpected mode {:?}",
+                    cls.command,
+                    cls.execution_mode
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_classification_has_non_empty_transport_note() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            assert!(
+                !cls.transport_note.is_empty(),
+                "Command '{}' has empty transport_note",
+                cls.command
+            );
+        }
+    }
+
+    #[test]
+    fn classify_command_returns_none_for_unknown() {
+        assert!(classify_command("nonexistent-xyz").is_none());
+    }
+
+    #[test]
+    fn classify_command_returns_some_for_all_classified() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            let found = classify_command(cls.command);
+            assert!(found.is_some(), "classify_command({}) should find it", cls.command);
+            assert_eq!(found.unwrap().command, cls.command);
+        }
+    }
+
+    // ── Live vs offline wording invariants ─────────────────────────────
+
+    #[test]
+    fn host_absent_error_not_configured_mentions_fcp_host() {
+        let err = host_absent_error("invoke", HostAbsentReason::NotConfigured);
+        assert!(
+            err.message.contains("fcp-host"),
+            "NotConfigured error should mention fcp-host: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn host_absent_error_not_configured_says_will_not_simulate() {
+        let err = host_absent_error("invoke", HostAbsentReason::NotConfigured);
+        assert!(
+            err.message.contains("will not simulate")
+                || err.message.contains("will not fabricate"),
+            "NotConfigured error should state refusal: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn host_absent_error_unreachable_mentions_connection() {
+        let err = host_absent_error("status", HostAbsentReason::Unreachable);
+        assert!(
+            err.message.contains("reach") || err.message.contains("connection"),
+            "Unreachable error should mention connection: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn host_absent_error_unhealthy_mentions_health() {
+        let err = host_absent_error("doctor", HostAbsentReason::Unhealthy);
+        assert!(
+            err.message.contains("unhealthy") || err.message.contains("health"),
+            "Unhealthy error should mention health: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn host_absent_error_for_all_reasons_has_next_actions() {
+        let reasons = [
+            HostAbsentReason::NotConfigured,
+            HostAbsentReason::Unreachable,
+            HostAbsentReason::Unhealthy,
+        ];
+        for reason in reasons {
+            let err = host_absent_error("invoke", reason);
+            assert!(
+                !err.next_actions.is_empty(),
+                "host_absent_error({reason:?}) should have next_actions"
+            );
+        }
+    }
+
+    #[test]
+    fn host_absent_error_not_configured_suggests_host_flag() {
+        let err = host_absent_error("invoke", HostAbsentReason::NotConfigured);
+        assert!(
+            err.next_actions.iter().any(|a| a.contains("--host")),
+            "NotConfigured should suggest --host flag"
+        );
+    }
+
+    #[test]
+    fn host_absent_error_not_configured_suggests_env_var() {
+        let err = host_absent_error("invoke", HostAbsentReason::NotConfigured);
+        assert!(
+            err.next_actions
+                .iter()
+                .any(|a| a.contains("FWC_HOST") || a.contains("FCP_HOST")),
+            "NotConfigured should suggest env var"
+        );
+    }
+
+    #[test]
+    fn host_absent_error_unreachable_suggests_doctor() {
+        let err = host_absent_error("status", HostAbsentReason::Unreachable);
+        assert!(
+            err.next_actions.iter().any(|a| a.contains("doctor")),
+            "Unreachable should suggest doctor check"
+        );
+    }
+
+    #[test]
+    fn host_absent_error_for_hybrid_command_suggests_offline() {
+        let err = host_absent_error("list", HostAbsentReason::NotConfigured);
+        assert!(
+            err.next_actions.iter().any(|a| a.contains("--offline")),
+            "Hybrid command 'list' should suggest --offline alternative"
+        );
+    }
+
+    #[test]
+    fn host_absent_error_for_live_command_does_not_suggest_offline() {
+        let err = host_absent_error("invoke", HostAbsentReason::NotConfigured);
+        assert!(
+            !err.next_actions.iter().any(|a| a.contains("--offline")),
+            "Live command 'invoke' should NOT suggest --offline"
+        );
+    }
+
+    #[test]
+    fn host_absent_error_all_reasons_recoverable() {
+        let reasons = [
+            HostAbsentReason::NotConfigured,
+            HostAbsentReason::Unreachable,
+            HostAbsentReason::Unhealthy,
+        ];
+        for reason in reasons {
+            let err = host_absent_error("invoke", reason);
+            assert!(err.recoverable, "host_absent_error should be recoverable");
+        }
+    }
+
+    // ── Host-absent error payload envelope stability ──────────────────
+
+    #[test]
+    fn host_absent_error_payload_has_stable_envelope() {
+        let err = host_absent_error("invoke", HostAbsentReason::NotConfigured);
+        let payload = host_absent_error_payload(&err);
+        // Verify envelope keys are stable
+        assert_eq!(payload["status"], "error");
+        assert_eq!(payload["command"], "invoke");
+        assert!(payload["error"].is_object());
+        assert!(payload["error"]["type"].is_string());
+        assert!(payload["error"]["reason"].is_string());
+        assert!(payload["error"]["message"].is_string());
+        assert!(payload["error"]["recoverable"].is_boolean());
+        assert!(payload["next_actions"].is_array());
+    }
+
+    #[test]
+    fn host_absent_error_payload_error_type_is_stable() {
+        let not_configured = host_absent_error("invoke", HostAbsentReason::NotConfigured);
+        assert_eq!(
+            host_absent_error_payload(&not_configured)["error"]["type"],
+            "missing-host-endpoint"
+        );
+        let unreachable = host_absent_error("invoke", HostAbsentReason::Unreachable);
+        assert_eq!(
+            host_absent_error_payload(&unreachable)["error"]["type"],
+            "host-unreachable"
+        );
+        let unhealthy = host_absent_error("invoke", HostAbsentReason::Unhealthy);
+        assert_eq!(
+            host_absent_error_payload(&unhealthy)["error"]["type"],
+            "host-unhealthy"
+        );
+    }
+
+    #[test]
+    fn host_absent_error_payload_serde_roundtrip() {
+        let err = host_absent_error("simulate", HostAbsentReason::Unreachable);
+        let val: serde_json::Value = serde_json::to_value(&err).unwrap();
+        assert_eq!(val["command"], "simulate");
+        assert_eq!(val["reason"], "unreachable");
+        assert_eq!(val["exit_code"], 8);
+        assert_eq!(val["error_type"], "host-unreachable");
+    }
+
+    // ── Offline provenance invariants ──────────────────────────────────
+
+    #[test]
+    fn offline_provenance_hybrid_commands_all_have_live_alternative() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            if cls.truth_source == CommandTruthSource::Hybrid {
+                let source = default_offline_source(cls.command);
+                let prov = offline_provenance(cls.command, source);
+                assert!(
+                    prov.live_alternative.is_some(),
+                    "Hybrid '{}' provenance missing live_alternative",
+                    cls.command
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn offline_provenance_for_offline_artifact_has_no_live_alternative() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            if cls.truth_source == CommandTruthSource::OfflineArtifact {
+                let source = default_offline_source(cls.command);
+                let prov = offline_provenance(cls.command, source);
+                assert!(
+                    prov.live_alternative.is_none(),
+                    "Offline-only command '{}' should not have live_alternative",
+                    cls.command
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn offline_provenance_live_alternative_mentions_host_flag() {
+        let prov = offline_provenance("list", OfflineSource::WorkspaceManifest);
+        let alt = prov.live_alternative.as_deref().unwrap();
+        assert!(
+            alt.contains("--host"),
+            "live_alternative should mention --host: {alt}"
+        );
+    }
+
+    #[test]
+    fn offline_provenance_live_alternative_mentions_omit_offline() {
+        let prov = offline_provenance("list", OfflineSource::WorkspaceManifest);
+        let alt = prov.live_alternative.as_deref().unwrap();
+        assert!(
+            alt.contains("omit --offline"),
+            "live_alternative should suggest omitting --offline: {alt}"
+        );
+    }
+
+    #[test]
+    fn offline_provenance_always_marked_offline() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            let source = default_offline_source(cls.command);
+            let prov = offline_provenance(cls.command, source);
+            assert!(
+                prov.offline,
+                "offline_provenance for '{}' should be offline=true",
+                cls.command
+            );
+        }
+    }
+
+    #[test]
+    fn offline_provenance_has_non_empty_caveat() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            let source = default_offline_source(cls.command);
+            let prov = offline_provenance(cls.command, source);
+            assert!(
+                !prov.caveat.is_empty(),
+                "offline_provenance for '{}' should have non-empty caveat",
+                cls.command
+            );
+        }
+    }
+
+    #[test]
+    fn offline_provenance_caveat_varies_by_source() {
+        let manifest_prov = offline_provenance("list", OfflineSource::WorkspaceManifest);
+        let catalog_prov = offline_provenance("list", OfflineSource::LocalCatalog);
+        let history_prov = offline_provenance("history", OfflineSource::LocalHistory);
+        let static_prov = offline_provenance("guide", OfflineSource::StaticContract);
+        let subsystem_prov = offline_provenance("audit", OfflineSource::Subsystem);
+
+        // All caveats should be distinct
+        let caveats = [
+            manifest_prov.caveat,
+            catalog_prov.caveat,
+            history_prov.caveat,
+            static_prov.caveat,
+            subsystem_prov.caveat,
+        ];
+        let unique: std::collections::HashSet<&str> = caveats.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            caveats.len(),
+            "Each offline source should have a distinct caveat"
+        );
+    }
+
+    // ── Offline provenance payload envelope stability ─────────────────
+
+    #[test]
+    fn offline_provenance_payload_has_stable_keys() {
+        let prov = offline_provenance("list", OfflineSource::WorkspaceManifest);
+        let payload = offline_provenance_payload(&prov);
+        assert!(payload["offline"].is_boolean());
+        assert!(payload["source"].is_string());
+        assert!(payload["caveat"].is_string());
+        assert!(payload["live_alternative"].is_string());
+    }
+
+    #[test]
+    fn offline_provenance_payload_omits_live_alternative_when_none() {
+        let prov = offline_provenance("guide", OfflineSource::StaticContract);
+        let payload = offline_provenance_payload(&prov);
+        assert!(payload["offline"].as_bool().unwrap());
+        assert!(payload.get("live_alternative").is_none() || payload["live_alternative"].is_null());
+    }
+
+    #[test]
+    fn offline_provenance_serde_roundtrip() {
+        let prov = offline_provenance("show", OfflineSource::WorkspaceManifest);
+        let val: serde_json::Value = serde_json::to_value(&prov).unwrap();
+        assert_eq!(val["offline"], true);
+        assert_eq!(val["source"], "workspace-manifest");
+        assert!(val["live_alternative"].is_string());
+    }
+
+    // ── Default offline source correctness ────────────────────────────
+
+    #[test]
+    fn default_offline_source_golden_guide_static_contract() {
+        assert_eq!(
+            default_offline_source("guide"),
+            OfflineSource::StaticContract
+        );
+    }
+
+    #[test]
+    fn default_offline_source_golden_history_local_history() {
+        assert_eq!(
+            default_offline_source("history"),
+            OfflineSource::LocalHistory
+        );
+    }
+
+    #[test]
+    fn default_offline_source_golden_pipe_local_history() {
+        assert_eq!(
+            default_offline_source("pipe"),
+            OfflineSource::LocalHistory
+        );
+    }
+
+    #[test]
+    fn default_offline_source_hybrid_commands_are_workspace_manifest() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            if cls.truth_source == CommandTruthSource::Hybrid {
+                assert_eq!(
+                    default_offline_source(cls.command),
+                    OfflineSource::WorkspaceManifest,
+                    "Hybrid command '{}' default source should be WorkspaceManifest",
+                    cls.command
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn default_offline_source_passthrough_commands_are_subsystem() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            if cls.truth_source == CommandTruthSource::Passthrough {
+                assert_eq!(
+                    default_offline_source(cls.command),
+                    OfflineSource::Subsystem,
+                    "Passthrough command '{}' default source should be Subsystem",
+                    cls.command
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn default_offline_source_unknown_command_falls_back_to_local_catalog() {
+        assert_eq!(
+            default_offline_source("nonexistent-xyz"),
+            OfflineSource::LocalCatalog
+        );
+    }
+
+    // ── Refusal semantics ─────────────────────────────────────────────
+
+    #[test]
+    fn command_requires_host_true_for_all_live_commands() {
+        for cmd in live_host_commands() {
+            assert!(
+                command_requires_host(cmd),
+                "command_requires_host({cmd}) should be true"
+            );
+        }
+    }
+
+    #[test]
+    fn command_requires_host_false_for_offline_commands() {
+        for cmd in offline_capable_commands() {
+            // Hybrid commands DO require host by default (fail fast)
+            let cls = classify_command(cmd).unwrap();
+            if cls.truth_source == CommandTruthSource::OfflineArtifact {
+                assert!(
+                    !command_requires_host(cmd),
+                    "OfflineArtifact command {cmd} should not require host"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn command_requires_host_false_for_unknown() {
+        assert!(!command_requires_host("does-not-exist-xyzzy"));
+    }
+
+    #[test]
+    fn hybrid_commands_fail_fast_by_default() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            if cls.truth_source == CommandTruthSource::Hybrid
+                && cls.execution_mode == CommandExecutionMode::ReadOnly
+            {
+                assert_eq!(
+                    cls.host_absent,
+                    HostAbsentBehavior::FailFast,
+                    "Read-only hybrid command '{}' should FailFast by default",
+                    cls.command
+                );
+            }
+        }
+    }
+
+    // ── Workflow truth contract ────────────────────────────────────────
+
+    #[test]
+    fn workflow_kind_pipe_is_local_transform() {
+        assert_eq!(workflow_kind("pipe"), Some(WorkflowKind::LocalTransform));
+    }
+
+    #[test]
+    fn workflow_kind_recipe_is_orchestrated() {
+        assert_eq!(
+            workflow_kind("recipe"),
+            Some(WorkflowKind::OrchestratedExecution)
+        );
+    }
+
+    #[test]
+    fn workflow_kind_pipeline_is_orchestrated() {
+        assert_eq!(
+            workflow_kind("pipeline"),
+            Some(WorkflowKind::OrchestratedExecution)
+        );
+    }
+
+    #[test]
+    fn workflow_kind_unknown_is_none() {
+        assert_eq!(workflow_kind("invoke"), None);
+        assert_eq!(workflow_kind("list"), None);
+        assert_eq!(workflow_kind("nonexistent"), None);
+    }
+
+    #[test]
+    fn workflow_can_proceed_pipe_always_proceeds() {
+        // pipe is local-only, never needs host or token
+        assert!(workflow_can_proceed("pipe", false, false).is_none());
+        assert!(workflow_can_proceed("pipe", true, true).is_none());
+        assert!(workflow_can_proceed("pipe", true, false).is_none());
+        assert!(workflow_can_proceed("pipe", false, true).is_none());
+    }
+
+    #[test]
+    fn workflow_can_proceed_recipe_needs_host() {
+        let result = workflow_can_proceed("recipe", false, true);
+        assert_eq!(result, Some(WorkflowStepReality::HostUnavailable));
+    }
+
+    #[test]
+    fn workflow_can_proceed_recipe_needs_token() {
+        let result = workflow_can_proceed("recipe", true, false);
+        assert_eq!(result, Some(WorkflowStepReality::AuthDenied));
+    }
+
+    #[test]
+    fn workflow_can_proceed_recipe_both_present_ok() {
+        assert!(workflow_can_proceed("recipe", true, true).is_none());
+    }
+
+    #[test]
+    fn workflow_can_proceed_pipeline_needs_host() {
+        let result = workflow_can_proceed("pipeline", false, false);
+        assert_eq!(result, Some(WorkflowStepReality::HostUnavailable));
+    }
+
+    #[test]
+    fn workflow_can_proceed_non_workflow_is_none() {
+        assert!(workflow_can_proceed("invoke", false, false).is_none());
+    }
+
+    // ── Preflight vs simulate labeling ────────────────────────────────
+
+    #[test]
+    fn simulate_command_is_classified_as_simulate_mode() {
+        let cls = classify_command("simulate").unwrap();
+        assert_eq!(cls.execution_mode, CommandExecutionMode::Simulate);
+    }
+
+    #[test]
+    fn invoke_command_is_classified_as_mutating() {
+        let cls = classify_command("invoke").unwrap();
+        assert_eq!(cls.execution_mode, CommandExecutionMode::Mutating);
+    }
+
+    #[test]
+    fn simulate_and_invoke_both_require_live_host() {
+        let sim = classify_command("simulate").unwrap();
+        let inv = classify_command("invoke").unwrap();
+        assert_eq!(sim.truth_source, CommandTruthSource::LiveHost);
+        assert_eq!(inv.truth_source, CommandTruthSource::LiveHost);
+    }
+
+    #[test]
+    fn simulate_requires_token_but_no_approval() {
+        let cls = classify_command("simulate").unwrap();
+        assert!(cls.requires_capability_token);
+        assert!(!cls.may_need_approval);
+    }
+
+    #[test]
+    fn invoke_requires_token_and_approval() {
+        let cls = classify_command("invoke").unwrap();
+        assert!(cls.requires_capability_token);
+        assert!(cls.may_need_approval);
+    }
+
+    // ── Auth acquisition flow golden fixtures ─────────────────────────
+
+    #[test]
+    fn auth_acquisition_flow_golden_json_strings() {
+        let variants = [
+            (AuthAcquisitionFlow::Required, "\"required\""),
+            (AuthAcquisitionFlow::Recommended, "\"recommended\""),
+            (AuthAcquisitionFlow::NotNeeded, "\"not_needed\""),
+        ];
+        for (flow, expected_json) in variants {
+            let json = serde_json::to_string(&flow).unwrap();
+            assert_eq!(json, expected_json, "golden JSON for {flow:?}");
+        }
+    }
+
+    #[test]
+    fn auth_ux_guidance_missing_text_mentions_capabilities_issue() {
+        let guidance = auth_ux_guidance("invoke");
+        assert!(
+            guidance.missing_guidance.contains("capabilities issue"),
+            "Missing guidance should mention `capabilities issue`: {}",
+            guidance.missing_guidance
+        );
+    }
+
+    #[test]
+    fn auth_ux_guidance_denial_text_mentions_revoked() {
+        let guidance = auth_ux_guidance("invoke");
+        assert!(
+            guidance.denial_guidance.contains("revoked")
+                || guidance.denial_guidance.contains("expired"),
+            "Denial guidance should mention token revocation/expiry: {}",
+            guidance.denial_guidance
+        );
+    }
+
+    #[test]
+    fn auth_ux_guidance_for_non_token_command_has_empty_methods() {
+        let guidance = auth_ux_guidance("guide");
+        assert!(guidance.supply_methods.is_empty());
+        assert!(guidance.missing_guidance.is_empty());
+        assert!(guidance.denial_guidance.is_empty());
+    }
+
+    // ── Help text constants ───────────────────────────────────────────
+
+    #[test]
+    fn offline_flag_help_mentions_provenance() {
+        assert!(
+            OFFLINE_FLAG_HELP.contains("provenance"),
+            "OFFLINE_FLAG_HELP should mention provenance"
+        );
+    }
+
+    #[test]
+    fn hybrid_mode_help_mentions_offline() {
+        assert!(
+            HYBRID_MODE_HELP.contains("--offline"),
+            "HYBRID_MODE_HELP should mention --offline flag"
+        );
+    }
+
+    #[test]
+    fn hybrid_mode_help_mentions_live_host() {
+        assert!(
+            HYBRID_MODE_HELP.contains("live host"),
+            "HYBRID_MODE_HELP should mention live host default"
+        );
+    }
+
+    // ── Filter function golden results ────────────────────────────────
+
+    #[test]
+    fn live_host_commands_includes_invoke_simulate_cancel() {
+        let cmds = live_host_commands();
+        assert!(cmds.contains(&"invoke"));
+        assert!(cmds.contains(&"simulate"));
+        assert!(cmds.contains(&"cancel"));
+        assert!(cmds.contains(&"serve-mcp"));
+    }
+
+    #[test]
+    fn live_host_commands_excludes_offline_and_hybrid() {
+        let cmds = live_host_commands();
+        assert!(!cmds.contains(&"guide"));
+        assert!(!cmds.contains(&"pipe"));
+        assert!(!cmds.contains(&"list")); // hybrid, not live-only
+    }
+
+    #[test]
+    fn offline_capable_commands_includes_hybrid_and_offline() {
+        let cmds = offline_capable_commands();
+        // Hybrid commands
+        assert!(cmds.contains(&"list"));
+        assert!(cmds.contains(&"search"));
+        assert!(cmds.contains(&"show"));
+        // Offline-artifact commands
+        assert!(cmds.contains(&"guide"));
+        assert!(cmds.contains(&"history"));
+        assert!(cmds.contains(&"pipe"));
+    }
+
+    #[test]
+    fn offline_capable_commands_excludes_live_only() {
+        let cmds = offline_capable_commands();
+        assert!(!cmds.contains(&"invoke"));
+        assert!(!cmds.contains(&"simulate"));
+        assert!(!cmds.contains(&"install"));
+    }
+
+    #[test]
+    fn auth_required_commands_subset_of_live_host() {
+        let auth = auth_required_commands();
+        let live = live_host_commands();
+        for cmd in &auth {
+            assert!(
+                live.contains(cmd),
+                "Auth-required command {cmd} should be a live-host command"
+            );
+        }
+    }
+
+    // ── Workflow step provenance envelope stability ────────────────────
+
+    #[test]
+    fn workflow_step_provenance_serde_roundtrip_executed() {
+        let prov = super::WorkflowStepProvenance {
+            step_id: "step-1".to_owned(),
+            reality: WorkflowStepReality::Executed,
+            operation: "send_message".to_owned(),
+            connector: "slack:messaging:1.0".to_owned(),
+            receipt_id: Some("rcpt-abc123".to_owned()),
+            refusal_reason: None,
+        };
+        let json_str = serde_json::to_string(&prov).unwrap();
+        let back: super::WorkflowStepProvenance = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(back.step_id, "step-1");
+        assert_eq!(back.reality, WorkflowStepReality::Executed);
+        assert!(back.receipt_id.is_some());
+        assert!(back.refusal_reason.is_none());
+    }
+
+    #[test]
+    fn workflow_step_provenance_serde_roundtrip_refused() {
+        let prov = super::WorkflowStepProvenance {
+            step_id: "step-2".to_owned(),
+            reality: WorkflowStepReality::AuthDenied,
+            operation: "delete_channel".to_owned(),
+            connector: "slack:messaging:1.0".to_owned(),
+            receipt_id: None,
+            refusal_reason: Some("Capability token expired".to_owned()),
+        };
+        let json_str = serde_json::to_string(&prov).unwrap();
+        let back: super::WorkflowStepProvenance = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(back.reality, WorkflowStepReality::AuthDenied);
+        assert!(back.receipt_id.is_none());
+        assert!(back.refusal_reason.is_some());
+    }
+
+    #[test]
+    fn workflow_step_provenance_executed_omits_refusal_reason_in_json() {
+        let prov = super::WorkflowStepProvenance {
+            step_id: "step-1".to_owned(),
+            reality: WorkflowStepReality::Executed,
+            operation: "send_message".to_owned(),
+            connector: "slack:messaging:1.0".to_owned(),
+            receipt_id: Some("rcpt-abc".to_owned()),
+            refusal_reason: None,
+        };
+        let json_str = serde_json::to_string(&prov).unwrap();
+        assert!(
+            !json_str.contains("refusal_reason"),
+            "Executed step should skip_serializing refusal_reason"
+        );
+    }
+
+    #[test]
+    fn workflow_step_provenance_refused_omits_receipt_in_json() {
+        let prov = super::WorkflowStepProvenance {
+            step_id: "step-2".to_owned(),
+            reality: WorkflowStepReality::HostUnavailable,
+            operation: "list_channels".to_owned(),
+            connector: "slack:messaging:1.0".to_owned(),
+            receipt_id: None,
+            refusal_reason: Some("Host unreachable".to_owned()),
+        };
+        let json_str = serde_json::to_string(&prov).unwrap();
+        assert!(
+            !json_str.contains("receipt_id"),
+            "Refused step should skip_serializing receipt_id"
+        );
+    }
+
+    // ── Classification full-matrix serde roundtrip ────────────────────
+
+    #[test]
+    fn command_classification_serde_roundtrip_all() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            let val: serde_json::Value = serde_json::to_value(cls).unwrap();
+            assert_eq!(val["command"], cls.command);
+            assert_eq!(
+                val["requires_capability_token"],
+                cls.requires_capability_token
+            );
+            assert_eq!(val["may_need_approval"], cls.may_need_approval);
+            assert_eq!(val["transport_note"], cls.transport_note);
+            // Verify the enum fields serialize to known strings
+            assert!(val["truth_source"].is_string());
+            assert!(val["execution_mode"].is_string());
+            assert!(val["host_absent"].is_string());
+        }
+    }
+
+    // ── Cross-invariant consistency checks ─────────────────────────────
+
+    #[test]
+    fn no_local_only_command_requires_token() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            if cls.execution_mode == CommandExecutionMode::LocalOnly {
+                assert!(
+                    !cls.requires_capability_token,
+                    "LocalOnly command '{}' should not require token",
+                    cls.command
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn interactive_commands_require_live_host() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            if cls.execution_mode == CommandExecutionMode::Interactive {
+                assert_eq!(
+                    cls.truth_source,
+                    CommandTruthSource::LiveHost,
+                    "Interactive command '{}' must be LiveHost",
+                    cls.command
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn simulate_commands_require_live_host() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            if cls.execution_mode == CommandExecutionMode::Simulate {
+                assert_eq!(
+                    cls.truth_source,
+                    CommandTruthSource::LiveHost,
+                    "Simulate command '{}' must be LiveHost",
+                    cls.command
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn classification_count_matches_at_least_thirty() {
+        // Guard against accidental removal of classifications
+        assert!(
+            COMMAND_CLASSIFICATIONS.len() >= 30,
+            "Expected at least 30 classified commands, got {}",
+            COMMAND_CLASSIFICATIONS.len()
+        );
+    }
+
+    #[test]
+    fn every_classified_command_is_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for cls in COMMAND_CLASSIFICATIONS {
+            assert!(
+                seen.insert(cls.command),
+                "Duplicate classification for '{}'",
+                cls.command
+            );
+        }
+    }
 }

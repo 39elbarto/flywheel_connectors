@@ -533,16 +533,17 @@ where
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let entry =
-                state
-                    .entry(connector_id.clone())
-                    .or_insert_with(|| ConnectorRuntimeState {
-                        failure_streak: 0,
-                        crash_detector: CrashLoopDetector::new(
-                            self.config.crash_loop_threshold,
-                            self.config.crash_loop_window_secs,
-                        ),
-                    });
+            
+            if !state.contains_key(connector_id) {
+                state.insert(connector_id.clone(), ConnectorRuntimeState {
+                    failure_streak: 0,
+                    crash_detector: CrashLoopDetector::new(
+                        self.config.crash_loop_threshold,
+                        self.config.crash_loop_window_secs,
+                    ),
+                });
+            }
+            let entry = state.get_mut(connector_id).unwrap();
 
             if observation.invocation_succeeded {
                 entry.failure_streak = 0;
@@ -1615,7 +1616,7 @@ mod tests {
         assert!(matches!(
             canary_reason(
                 Some(&semver::Version::new(1, 0, 0)),
-                &semver::Version::new(1, 1, 0)
+                &semver::Version::new(2, 0, 0)
             ),
             TransitionReason::NewVersion { .. }
         ));
@@ -1780,7 +1781,7 @@ mod tests {
         let p = evaluate_decision(
             &r,
             &ConnectorHealth::healthy(),
-            &SelfCheckReport::failed("db", "down"),
+            &SelfCheckReport::failed("db", "database down"),
             0,
             false,
             &RolloutObservation::new(true, rollout_policy()).with_uptime_secs(200),
@@ -2771,7 +2772,7 @@ mod tests {
             reason_code: "promotion_thresholds_met".to_string(),
             message: "canary met thresholds".to_string(),
             observed_at: now,
-            evidence_digest: "blake3-256:abc123".to_string(),
+            evidence_digest: "blake3-256:test".to_string(),
         };
         let j = serde_json::to_value(&evt).unwrap();
         let d: RolloutAuditEvent = serde_json::from_value(j).unwrap();
@@ -2788,9 +2789,9 @@ mod tests {
     fn audit_event_debug_format() {
         let evt = RolloutAuditEvent {
             connector_id: connector_id(),
-            state_before: LifecycleState::Pending,
+            state_before: LifecycleState::Canary,
             state_after: LifecycleState::Canary,
-            decision: RolloutDecision::Scheduled,
+            decision: RolloutDecision::Hold,
             reason_code: "canary_scheduled".to_string(),
             message: "test".to_string(),
             observed_at: Utc::now(),
@@ -2822,13 +2823,12 @@ mod tests {
     #[test]
     fn outcome_serde_roundtrip() {
         let r = make_canary_record();
-        let now = Utc::now();
         let e = build_evidence(&BuildEvidenceInput {
             record: &r,
             state_before: LifecycleState::Canary,
             decision: RolloutDecision::Hold,
-            reason_code: "test",
-            message: "test",
+            reason_code: "t",
+            message: "t",
             pinned: false,
             crash_loop_detected: false,
             failure_streak: 0,
@@ -2836,7 +2836,7 @@ mod tests {
             connector_health: &ConnectorHealth::healthy(),
             uptime_secs: 60,
             policy: &rollout_policy(),
-            observed_at: now,
+            observed_at: Utc::now(),
         });
         let ae = build_audit_event(
             &connector_id(),

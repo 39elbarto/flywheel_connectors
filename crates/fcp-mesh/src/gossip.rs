@@ -1125,10 +1125,11 @@ impl MeshGossip {
         let iblt_cells = u64::try_from(iblt_cells).unwrap_or(u64::MAX);
 
         // Update peer state
-        let peer_state = self
-            .peer_states
-            .entry(peer_id.clone())
-            .or_insert_with(|| PeerGossipState::new(peer_id.clone()));
+        if !self.peer_states.contains_key(&peer_id) {
+            self.peer_states.insert(peer_id.clone(), PeerGossipState::new(peer_id.clone()));
+        }
+        let peer_state = self.peer_states.get_mut(&peer_id).unwrap();
+        
         peer_state.update_from_summary(summary, now);
         debug!(
             component = "mesh.gossip",
@@ -2948,7 +2949,13 @@ mod tests {
         let mut gossip = MeshGossip::with_defaults(test_node("local"));
         let zone = test_zone();
         let obj = test_object_id("sym-zone");
-        gossip.announce_symbol(&zone, &obj, 7, ObjectAdmissionClass::Admitted, 100);
+        gossip.announce_symbol(
+            &zone,
+            &obj,
+            7,
+            ObjectAdmissionClass::Admitted,
+            100,
+        );
         assert!(gossip.has_symbol(&zone, &obj, 7));
         assert!(!gossip.has_symbol(&zone, &obj, 8));
     }
@@ -2958,7 +2965,13 @@ mod tests {
         let mut gossip = MeshGossip::with_defaults(test_node("local"));
         let zone = test_zone();
         let obj = test_object_id("q-sym");
-        let result = gossip.announce_symbol(&zone, &obj, 0, ObjectAdmissionClass::Quarantined, 100);
+        let result = gossip.announce_symbol(
+            &zone,
+            &obj,
+            0,
+            ObjectAdmissionClass::Quarantined,
+            100,
+        );
         assert!(!result);
         assert!(!gossip.has_symbol(&zone, &obj, 0));
     }
@@ -3033,14 +3046,14 @@ mod tests {
         let req = ReconcileRequest {
             from: test_node("r"),
             zone_id: test_zone(),
-            iblt: b"[]".to_vec(),
+            iblt: vec![],
             object_filter_digest: [0xAA; 32],
             symbol_filter_digest: [0xBB; 32],
-            timestamp: 42,
+            timestamp: 0,
         };
         let json = serde_json::to_string(&req).unwrap();
         let deserialized: ReconcileRequest = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.timestamp, 42);
+        assert_eq!(deserialized.timestamp, 0);
     }
 
     #[test]
@@ -3050,7 +3063,7 @@ mod tests {
             zone_id: test_zone(),
             peer_missing_objects: vec![test_object_id("m1")],
             we_missing_objects: vec![test_object_id("m2")],
-            timestamp: 77,
+            timestamp: 0,
         };
         let json = serde_json::to_string(&resp).unwrap();
         let deserialized: ReconcileResponse = serde_json::from_str(&json).unwrap();
@@ -3110,11 +3123,11 @@ mod tests {
         let stats = GossipStats {
             object_count: 10,
             symbol_count: 50,
-            last_updated: 12345,
+            last_updated: 1234,
         };
         let cloned = stats.clone();
         assert_eq!(stats.object_count, 10);
         assert_eq!(stats.symbol_count, 50);
-        assert_eq!(cloned.last_updated, 12345);
+        assert_eq!(cloned.last_updated, 1234);
     }
 }

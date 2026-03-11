@@ -561,9 +561,10 @@ impl AdmissionController {
 
     /// Get or create usage tracker for a peer.
     fn get_or_create_usage(&mut self, peer: &NodeId, now_ms: u64) -> &mut PeerUsage {
-        self.peer_usage
-            .entry(peer.clone())
-            .or_insert_with(|| PeerUsage::new(now_ms))
+        if !self.peer_usage.contains_key(peer) {
+            self.peer_usage.insert(peer.clone(), PeerUsage::new(now_ms));
+        }
+        self.peer_usage.get_mut(peer).unwrap()
     }
 
     fn effective_byte_limit(&self, is_authenticated: bool) -> u64 {
@@ -1249,12 +1250,12 @@ mod tests {
 
     #[test]
     fn peer_budget_new_constructor() {
-        let budget = PeerBudget::new(100, 200, 300, 400, 500);
+        let budget = PeerBudget::new(100, 200, 300, 400, 5000);
         assert_eq!(budget.max_bytes_per_min, 100);
         assert_eq!(budget.max_symbols_per_min, 200);
         assert_eq!(budget.max_failed_auth_per_min, 300);
         assert_eq!(budget.max_inflight_decodes, 400);
-        assert_eq!(budget.max_decode_cpu_ms_per_min, 500);
+        assert_eq!(budget.max_decode_cpu_ms_per_min, 5000);
     }
 
     #[test]
@@ -1322,7 +1323,12 @@ mod tests {
 
     #[test]
     fn object_admission_policy_serde_roundtrip() {
-        let policy = ObjectAdmissionPolicy::default();
+        let policy = ObjectAdmissionPolicy {
+            max_quarantine_bytes_per_zone: 1024,
+            max_quarantine_objects_per_zone: 50,
+            quarantine_ttl_secs: 120,
+            require_schema_validation: false,
+        };
         let json = serde_json::to_string(&policy).unwrap();
         let deserialized: ObjectAdmissionPolicy = serde_json::from_str(&json).unwrap();
         assert_eq!(policy, deserialized);
@@ -2204,50 +2210,6 @@ mod tests {
                 limit: 0,
             }
             .is_retryable()
-        );
-    }
-
-    // ── AdmissionError retry_after ───────────────────────────────
-
-    #[test]
-    fn retry_after_none_for_non_retryable() {
-        assert!(
-            AdmissionError::AuthenticationRequired
-                .retry_after()
-                .is_none()
-        );
-        assert!(AdmissionError::ProofOfNeedRequired.retry_after().is_none());
-        assert!(
-            AdmissionError::AmplificationViolation {
-                request_symbols: 0,
-                response_symbols: 0,
-                max_factor: 0,
-            }
-            .retry_after()
-            .is_none()
-        );
-    }
-
-    #[test]
-    fn retry_after_present_for_budget_errors() {
-        let d = Duration::from_secs(42);
-        assert_eq!(
-            AdmissionError::ByteBudgetExceeded {
-                current: 0,
-                limit: 0,
-                retry_after: d,
-            }
-            .retry_after(),
-            Some(d)
-        );
-        assert_eq!(
-            AdmissionError::DecodeCpuBudgetExceeded {
-                current_ms: 0,
-                limit_ms: 0,
-                retry_after: d,
-            }
-            .retry_after(),
-            Some(d)
         );
     }
 

@@ -2685,6 +2685,296 @@ impl HostAdminStateStore {
         .await
     }
 
+    /// Return a point-in-time config snapshot for one connector.
+    ///
+    /// Returns `None` when the connector has no persisted admin state.
+    pub async fn get_config_snapshot(
+        &self,
+        connector_id: &ConnectorId,
+    ) -> Option<ConnectorConfigSnapshot> {
+        let guard = self.state.read().await;
+        let state = guard.connectors.get(connector_id)?;
+        let active_revision = state.active_config_revision();
+        let (current, source) = match active_revision {
+            Some(revision) => (
+                SanitizedConnectorConfig {
+                    payload: revision.payload.clone(),
+                    payload_digest: revision.payload_digest.clone(),
+                    redacted_fields: revision.redacted_fields.clone(),
+                    credential_references: revision.credential_references.clone(),
+                    contains_inline_secrets: revision.contains_inline_secrets,
+                },
+                ConnectorConfigSnapshotSource::ActiveRevision,
+            ),
+            None => (
+                SanitizedConnectorConfig {
+                    payload: Value::Null,
+                    payload_digest: String::new(),
+                    redacted_fields: Vec::new(),
+                    credential_references: Vec::new(),
+                    contains_inline_secrets: false,
+                },
+                ConnectorConfigSnapshotSource::ManagedInventory,
+            ),
+        };
+        Some(ConnectorConfigSnapshot {
+            connector_id: connector_id.clone(),
+            current,
+            source,
+            active_revision_id: state.active_config_revision_id,
+            active_revision: active_revision.cloned(),
+            revision_count: state.config_revisions.len(),
+            last_journal_sequence: state.last_journal_sequence,
+        })
+    }
+
+    /// Return the config revision history for one connector.
+    ///
+    /// Returns `None` when the connector has no persisted admin state.
+    pub async fn config_revisions(
+        &self,
+        connector_id: &ConnectorId,
+    ) -> Option<ConnectorConfigRevisionsResponse> {
+        let guard = self.state.read().await;
+        let state = guard.connectors.get(connector_id)?;
+        Some(ConnectorConfigRevisionsResponse {
+            connector_id: connector_id.clone(),
+            active_revision_id: state.active_config_revision_id,
+            revision_count: state.config_revisions.len(),
+            last_journal_sequence: state.last_journal_sequence,
+            revisions: state.config_revisions.clone(),
+        })
+    }
+
+    /// Validate a candidate config against the current state.
+    ///
+    /// Returns a diff and validation preview without mutating state.
+    /// If `expected_active_revision_id` is provided and does not match,
+    /// the response indicates a stale-revision conflict.
+    pub async fn validate_config(
+        &self,
+        connector_id: &ConnectorId,
+        request: &ConnectorConfigValidateRequest,
+    ) -> Result<ConnectorConfigValidateResponse, LifecycleError> {
+        let guard = self.state.read().await;
+        let state = guard.connectors.get(connector_id).ok_or_else(|| {
+            LifecycleError::NotFound {
+                connector_id: connector_id.clone(),
+            }
+        })?;
+
+        let current_sanitized = current_sanitized_config(state);
+
+        // Optimistic concurrency check.
+        if let Some(expected) = request.expected_active_revision_id {
+            if state.active_config_revision_id != Some(expected) {
+                return Ok(ConnectorConfigValidateResponse {
+                    connector_id: connector_id.clone(),
+                    valid: false,
+                    current_active_revision_id: state.active_config_revision_id,
+                    current: current_sanitized,
+                    candidate: SanitizedConnectorConfig::from_payload(request.payload.clone())?,
+                    diff: Vec::new(),
+                    preview: None,
+                    error: Some(format!(
+                        "stale revision: expected {expected}, found {:?}",
+                        state.active_config_revision_id
+                    )),
+                });
+            }
+        }
+
+        let current_payload = state
+            .active_config_revision()
+            .map_or(&Value::Null, |revision| &revision.payload);
+        let diff = diff_config_values(current_payload, &request.payload);
+        let candidate = SanitizedConnectorConfig::from_payload(request.payload.clone())?;
+
+        Ok(ConnectorConfigValidateResponse {
+            connector_id: connector_id.clone(),
+            valid: true,
+            current_active_revision_id: state.active_config_revision_id,
+            current: current_sanitized,
+            candidate,
+            diff,
+            preview: None,
+            error: None,
+        })
+    }
+
+    /// Apply a candidate config as a new revision with optimistic concurrency.
+    ///
+    /// # Errors
+    ///
+    /// Returns `LifecycleError::NotFound` if the connector is unknown.
+    /// Returns `LifecycleError::Persistence` if `expected_active_revision_id`
+    /// does not match (stale-revision conflict).
+    pub async fn apply_config(
+        &self,
+        connector_id: &ConnectorId,
+        request: &ConnectorConfigApplyRequest,
+    ) -> Result<ConnectorConfigApplyResponse, LifecycleError> {
+        let cid = connector_id.clone();
+        self.apply_mutation(|snapshot| {
+            let state = snapshot
+                .connectors
+                .get(&cid)
+                .ok_or_else(|| LifecycleError::NotFound {
+                    connector_id: cid.clone(),
+                })?;
+
+            // Optimistic concurrency guard.
+            if let Some(expected) = request.expected_active_revision_id {
+                if state.active_config_revision_id != Some(expected) {
+                    return Err(LifecycleError::Persistence {
+                        reason: format!(
+                            "stale revision: expected {expected}, found {:?}",
+                            state.active_config_revision_id,
+                        ),
+                    });
+                }
+            }
+
+            let previous_active_revision_id = state.active_config_revision_id;
+            let previous_payload = state
+                .active_config_revision()
+                .map_or(Value::Null, |revision| revision.payload.clone());
+            let previous = SanitizedConnectorConfig::from_payload(previous_payload.clone())?;
+            let diff = diff_config_values(&previous_payload, &request.payload);
+            let changed = !diff.is_empty();
+
+            let revision_id = snapshot.next_config_revision_id();
+            let revision = ConfigRevisionRecord::new(
+                revision_id,
+                previous_active_revision_id,
+                request.payload.clone(),
+                request.created_by.clone(),
+                request.change_reason.clone(),
+            )?;
+
+            let sequence = snapshot.append_journal(
+                &cid,
+                AdminStateMutation::ConfigRevisionAppended {
+                    revision_id,
+                    payload_digest: revision.payload_digest.clone(),
+                },
+                request.created_by.clone(),
+            );
+
+            let current = SanitizedConnectorConfig::from_payload(request.payload.clone())?;
+
+            let state = snapshot.connector_state_mut(&cid);
+            state.config_revisions.push(revision.clone());
+            state.active_config_revision_id = Some(revision_id);
+            state.last_journal_sequence = sequence;
+
+            Ok(ConnectorConfigApplyResponse {
+                connector_id: cid.clone(),
+                changed,
+                previous_active_revision_id,
+                current_active_revision_id: Some(revision_id),
+                previous: Some(previous),
+                current,
+                diff,
+                revision: Some(revision),
+                apply: None,
+                admin_state: None,
+            })
+        })
+        .await
+    }
+
+    /// Rollback config to a previous revision with optimistic concurrency.
+    ///
+    /// # Errors
+    ///
+    /// Returns `LifecycleError::NotFound` if the connector or target revision
+    /// is unknown.  Returns `LifecycleError::Persistence` if
+    /// `expected_active_revision_id` does not match.
+    pub async fn rollback_config(
+        &self,
+        connector_id: &ConnectorId,
+        request: &ConnectorConfigRollbackRequest,
+    ) -> Result<ConnectorConfigApplyResponse, LifecycleError> {
+        let cid = connector_id.clone();
+        self.apply_mutation(|snapshot| {
+            let state = snapshot
+                .connectors
+                .get(&cid)
+                .ok_or_else(|| LifecycleError::NotFound {
+                    connector_id: cid.clone(),
+                })?;
+
+            // Optimistic concurrency guard.
+            if let Some(expected) = request.expected_active_revision_id {
+                if state.active_config_revision_id != Some(expected) {
+                    return Err(LifecycleError::Persistence {
+                        reason: format!(
+                            "stale revision: expected {expected}, found {:?}",
+                            state.active_config_revision_id,
+                        ),
+                    });
+                }
+            }
+
+            // Find the target revision to roll back to.
+            let target = state
+                .config_revision(request.revision_id)
+                .ok_or_else(|| LifecycleError::NotFound {
+                    connector_id: cid.clone(),
+                })?
+                .clone();
+
+            let previous_active_revision_id = state.active_config_revision_id;
+            let previous_payload = state
+                .active_config_revision()
+                .map_or(Value::Null, |revision| revision.payload.clone());
+            let previous = SanitizedConnectorConfig::from_payload(previous_payload.clone())?;
+            let diff = diff_config_values(&previous_payload, &target.payload);
+            let changed = !diff.is_empty();
+
+            // Create a new revision with the target's payload.
+            let revision_id = snapshot.next_config_revision_id();
+            let revision = ConfigRevisionRecord::new(
+                revision_id,
+                previous_active_revision_id,
+                target.payload.clone(),
+                request.created_by.clone(),
+                request.change_reason.clone(),
+            )?;
+
+            let sequence = snapshot.append_journal(
+                &cid,
+                AdminStateMutation::ConfigRevisionAppended {
+                    revision_id,
+                    payload_digest: revision.payload_digest.clone(),
+                },
+                request.created_by.clone(),
+            );
+
+            let current = SanitizedConnectorConfig::from_payload(target.payload)?;
+
+            let state = snapshot.connector_state_mut(&cid);
+            state.config_revisions.push(revision.clone());
+            state.active_config_revision_id = Some(revision_id);
+            state.last_journal_sequence = sequence;
+
+            Ok(ConnectorConfigApplyResponse {
+                connector_id: cid.clone(),
+                changed,
+                previous_active_revision_id,
+                current_active_revision_id: Some(revision_id),
+                previous: Some(previous),
+                current,
+                diff,
+                revision: Some(revision),
+                apply: None,
+                admin_state: None,
+            })
+        })
+        .await
+    }
+
     /// Pin a specific connector version.
     ///
     /// # Errors
@@ -3989,6 +4279,26 @@ struct SanitizedConfigPayload {
     redacted_fields: Vec<String>,
     credential_references: Vec<CredentialReferenceRecord>,
     contains_inline_secrets: bool,
+}
+
+/// Extract the current sanitized config from a connector's admin state.
+fn current_sanitized_config(state: &ConnectorAdminState) -> SanitizedConnectorConfig {
+    match state.active_config_revision() {
+        Some(revision) => SanitizedConnectorConfig {
+            payload: revision.payload.clone(),
+            payload_digest: revision.payload_digest.clone(),
+            redacted_fields: revision.redacted_fields.clone(),
+            credential_references: revision.credential_references.clone(),
+            contains_inline_secrets: revision.contains_inline_secrets,
+        },
+        None => SanitizedConnectorConfig {
+            payload: Value::Null,
+            payload_digest: String::new(),
+            redacted_fields: Vec::new(),
+            credential_references: Vec::new(),
+            contains_inline_secrets: false,
+        },
+    }
 }
 
 fn sanitize_config_payload(payload: Value) -> SanitizedConfigPayload {
@@ -7342,6 +7652,286 @@ mod tests {
         let rejection =
             validate_artifact_provenance("test:saas:1.0.0", &prov, true, Some(100)).unwrap();
         assert_eq!(rejection.kind, ArtifactRejectionKind::PlaceholderHash);
+    }
+
+    // ── Config RPC methods ─────────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn get_config_snapshot_returns_none_for_unknown_connector() {
+        let store = HostAdminStateStore::new();
+        let cid = connector_id();
+        assert!(store.get_config_snapshot(&cid).await.is_none());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn get_config_snapshot_returns_managed_inventory_when_no_revisions() {
+        let store = HostAdminStateStore::new();
+        let cid = connector_id();
+        // Create an entry by saving a lifecycle record.
+        let record = LifecycleRecord::new(cid.clone(), Version::new(1, 0, 0));
+        store.save(&record).await.expect("save");
+        let snapshot = store.get_config_snapshot(&cid).await.expect("snapshot");
+        assert_eq!(snapshot.source, ConnectorConfigSnapshotSource::ManagedInventory);
+        assert!(snapshot.active_revision_id.is_none());
+        assert!(snapshot.active_revision.is_none());
+        assert_eq!(snapshot.revision_count, 0);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn get_config_snapshot_returns_active_revision_after_append() {
+        let store = HostAdminStateStore::new();
+        let cid = connector_id();
+        let payload = config_payload("prod");
+        store
+            .append_config_revision(&cid, payload.clone(), Some("test".to_owned()), None)
+            .await
+            .expect("append");
+        let snapshot = store.get_config_snapshot(&cid).await.expect("snapshot");
+        assert_eq!(snapshot.source, ConnectorConfigSnapshotSource::ActiveRevision);
+        assert!(snapshot.active_revision_id.is_some());
+        assert!(snapshot.active_revision.is_some());
+        assert_eq!(snapshot.revision_count, 1);
+        assert_eq!(snapshot.current.payload["profile"], "prod");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn config_revisions_returns_none_for_unknown() {
+        let store = HostAdminStateStore::new();
+        let cid = connector_id();
+        assert!(store.config_revisions(&cid).await.is_none());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn config_revisions_returns_history_after_multiple_appends() {
+        let store = HostAdminStateStore::new();
+        let cid = connector_id();
+        store
+            .append_config_revision(&cid, config_payload("v1"), None, None)
+            .await
+            .expect("v1");
+        store
+            .append_config_revision(&cid, config_payload("v2"), None, None)
+            .await
+            .expect("v2");
+        let history = store.config_revisions(&cid).await.expect("history");
+        assert_eq!(history.revision_count, 2);
+        assert_eq!(history.revisions.len(), 2);
+        assert!(history.active_revision_id.is_some());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn validate_config_succeeds_without_concurrency_guard() {
+        let store = HostAdminStateStore::new();
+        let cid = connector_id();
+        store
+            .append_config_revision(&cid, config_payload("v1"), None, None)
+            .await
+            .expect("v1");
+        let request = ConnectorConfigValidateRequest {
+            payload: config_payload("v2"),
+            expected_active_revision_id: None,
+        };
+        let response = store.validate_config(&cid, &request).await.expect("validate");
+        assert!(response.valid);
+        assert!(response.error.is_none());
+        assert!(!response.diff.is_empty());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn validate_config_detects_stale_revision() {
+        let store = HostAdminStateStore::new();
+        let cid = connector_id();
+        store
+            .append_config_revision(&cid, config_payload("v1"), None, None)
+            .await
+            .expect("v1");
+        let request = ConnectorConfigValidateRequest {
+            payload: config_payload("v2"),
+            expected_active_revision_id: Some(999), // wrong revision
+        };
+        let response = store.validate_config(&cid, &request).await.expect("validate");
+        assert!(!response.valid);
+        assert!(response.error.is_some());
+        assert!(response.error.unwrap().contains("stale"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn validate_config_fails_for_unknown_connector() {
+        let store = HostAdminStateStore::new();
+        let cid = connector_id();
+        let request = ConnectorConfigValidateRequest {
+            payload: config_payload("v1"),
+            expected_active_revision_id: None,
+        };
+        let result = store.validate_config(&cid, &request).await;
+        assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn apply_config_creates_new_revision() {
+        let store = HostAdminStateStore::new();
+        let cid = connector_id();
+        store
+            .append_config_revision(&cid, config_payload("v1"), None, None)
+            .await
+            .expect("v1");
+        let request = ConnectorConfigApplyRequest {
+            payload: config_payload("v2"),
+            expected_active_revision_id: None,
+            created_by: Some("test-suite".to_owned()),
+            change_reason: Some("upgrade".to_owned()),
+        };
+        let response = store.apply_config(&cid, &request).await.expect("apply");
+        assert!(response.changed);
+        assert!(response.previous.is_some());
+        assert!(response.revision.is_some());
+        assert_eq!(response.current.payload["profile"], "v2");
+        assert!(response.current_active_revision_id.is_some());
+        // Verify revision count increased.
+        let snapshot = store.get_config_snapshot(&cid).await.expect("snapshot");
+        assert_eq!(snapshot.revision_count, 2);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn apply_config_rejects_stale_revision() {
+        let store = HostAdminStateStore::new();
+        let cid = connector_id();
+        store
+            .append_config_revision(&cid, config_payload("v1"), None, None)
+            .await
+            .expect("v1");
+        let request = ConnectorConfigApplyRequest {
+            payload: config_payload("v2"),
+            expected_active_revision_id: Some(999),
+            created_by: None,
+            change_reason: None,
+        };
+        let result = store.apply_config(&cid, &request).await;
+        assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn rollback_config_reverts_to_target_revision() {
+        let store = HostAdminStateStore::new();
+        let cid = connector_id();
+        let rev1 = store
+            .append_config_revision(&cid, config_payload("v1"), None, None)
+            .await
+            .expect("v1");
+        store
+            .append_config_revision(&cid, config_payload("v2"), None, None)
+            .await
+            .expect("v2");
+        // Rollback to v1.
+        let request = ConnectorConfigRollbackRequest {
+            revision_id: rev1.revision_id,
+            expected_active_revision_id: None,
+            created_by: Some("rollback-test".to_owned()),
+            change_reason: Some("reverting".to_owned()),
+        };
+        let response = store.rollback_config(&cid, &request).await.expect("rollback");
+        assert!(response.changed);
+        assert_eq!(response.current.payload["profile"], "v1");
+        // Rollback creates a new revision (3rd total).
+        let snapshot = store.get_config_snapshot(&cid).await.expect("snapshot");
+        assert_eq!(snapshot.revision_count, 3);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn rollback_config_fails_for_unknown_revision() {
+        let store = HostAdminStateStore::new();
+        let cid = connector_id();
+        store
+            .append_config_revision(&cid, config_payload("v1"), None, None)
+            .await
+            .expect("v1");
+        let request = ConnectorConfigRollbackRequest {
+            revision_id: 999,
+            expected_active_revision_id: None,
+            created_by: None,
+            change_reason: None,
+        };
+        let result = store.rollback_config(&cid, &request).await;
+        assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn apply_config_no_diff_still_creates_revision() {
+        let store = HostAdminStateStore::new();
+        let cid = connector_id();
+        let payload = config_payload("same");
+        store
+            .append_config_revision(&cid, payload.clone(), None, None)
+            .await
+            .expect("first");
+        let request = ConnectorConfigApplyRequest {
+            payload,
+            expected_active_revision_id: None,
+            created_by: None,
+            change_reason: None,
+        };
+        let response = store.apply_config(&cid, &request).await.expect("apply");
+        // No material change but revision still created.
+        assert!(!response.changed);
+        assert!(response.revision.is_some());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn validate_config_no_diff_returns_valid() {
+        let store = HostAdminStateStore::new();
+        let cid = connector_id();
+        let payload = config_payload("same");
+        store
+            .append_config_revision(&cid, payload.clone(), None, None)
+            .await
+            .expect("first");
+        let request = ConnectorConfigValidateRequest {
+            payload,
+            expected_active_revision_id: None,
+        };
+        let response = store.validate_config(&cid, &request).await.expect("validate");
+        assert!(response.valid);
+        assert!(response.diff.is_empty());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn apply_config_with_correct_expected_revision_succeeds() {
+        let store = HostAdminStateStore::new();
+        let cid = connector_id();
+        let rev1 = store
+            .append_config_revision(&cid, config_payload("v1"), None, None)
+            .await
+            .expect("v1");
+        let request = ConnectorConfigApplyRequest {
+            payload: config_payload("v2"),
+            expected_active_revision_id: Some(rev1.revision_id),
+            created_by: None,
+            change_reason: None,
+        };
+        let response = store.apply_config(&cid, &request).await.expect("apply");
+        assert!(response.changed);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn rollback_config_rejects_stale_revision_guard() {
+        let store = HostAdminStateStore::new();
+        let cid = connector_id();
+        let rev1 = store
+            .append_config_revision(&cid, config_payload("v1"), None, None)
+            .await
+            .expect("v1");
+        store
+            .append_config_revision(&cid, config_payload("v2"), None, None)
+            .await
+            .expect("v2");
+        let request = ConnectorConfigRollbackRequest {
+            revision_id: rev1.revision_id,
+            expected_active_revision_id: Some(999), // wrong
+            created_by: None,
+            change_reason: None,
+        };
+        let result = store.rollback_config(&cid, &request).await;
+        assert!(result.is_err());
     }
 }
 

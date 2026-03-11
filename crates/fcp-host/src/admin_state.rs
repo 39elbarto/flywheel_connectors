@@ -2269,11 +2269,9 @@ impl Default for HostAdminStateSnapshot {
 
 impl HostAdminStateSnapshot {
     fn connector_state_mut(&mut self, connector_id: &ConnectorId) -> &mut ConnectorAdminState {
-        if !self.connectors.contains_key(connector_id) {
-            self.connectors
-                .insert(connector_id.clone(), ConnectorAdminState::default());
-        }
-        self.connectors.get_mut(connector_id).unwrap()
+        self.connectors
+            .entry(connector_id.clone())
+            .or_default()
     }
 
     const fn next_config_revision_id(&mut self) -> u64 {

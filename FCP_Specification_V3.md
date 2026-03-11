@@ -5545,17 +5545,23 @@ Representative reference-surface inventory:
 
 | Surface | Expected Responsibilities |
 |---------|---------------------------|
-| `fcp-core` | identifiers, zone model, provenance, receipts, checkpoints, revocation, leases |
+| `fcp-kernel` | execution context, budgets, outcomes, cancellation, drain, restart, and supervision vocabulary |
+| `fcp-policy` | zone model, provenance, capability narrowing, approvals, secret-use rules, and decision evaluation |
+| `fcp-evidence` | receipts, checkpoints, revocation, audit-chain artifacts, and evidence-bundle schemas |
 | `fcp-crypto` | canonical hashing, Ed25519, X25519, HPKE, COSE, key-id derivation, zeroization helpers |
 | `fcp-cbor` | deterministic CBOR encode or decode and schema binding helpers |
+| `fcp-manifest` | connector declarations, interface-hash inputs, provisioning-recipe schemas, isolation intent |
 | `fcp-protocol` | FCPC, FCPS, session negotiation, replay windows, `SymbolEnvelope` encode or decode |
-| `fcp-sdk` | connector app contract, runtime context, state helpers, operation declarations |
+| `fcp-sdk` | connector app contract, archetype helpers, state adapters, operation and resource declarations |
+| `fcp-host` | activation planning, supervision, admin or control-plane truth, operator-facing evidence retrieval |
 | `fcp-conformance` | schemas, interop harnesses, vectors, transcript fixtures, explain assertions |
 | `fcp-testkit` | deterministic mocks, approval or token builders, replay fixtures, evidence assertions |
 | `fcp-cli` | `explain`, `doctor`, audit views, repair and verification operator workflows |
 
-The SDK surface MUST NOT depend on compatibility shims for legacy runtime models. The reference stack
-should expose the FCP3-native concepts directly.
+Connector-facing SDK surfaces MUST NOT require direct reach-through into host internals or legacy
+compatibility buckets in order to express steady-state FCP3 behavior. The reference stack SHOULD
+expose the FCP3-native concepts directly and treat any temporary compatibility scaffolding as
+quarantined cutover machinery rather than part of the long-term authoring contract.
 
 ### Appendix E: Conformance Checklist
 
@@ -5564,10 +5570,13 @@ should expose the FCP3-native concepts directly.
 - [ ] Manifest is extractable without execution.
 - [ ] Operations, events, and resources are declared explicitly.
 - [ ] Safety tier, approval mode, and idempotency are declared per operation.
+- [ ] Long-lived work is modeled as a supervised connector app, not an ad-hoc background task.
 - [ ] No canonical durable state required for failover is hidden in process memory.
 - [ ] Health, introspection, and shutdown surfaces are implemented.
 - [ ] Secrets are not logged or persisted by default.
+- [ ] Provisioning flows declare human prompts, resumability, and evidence outputs explicitly.
 - [ ] Replayable streams define cursor or sequence semantics.
+- [ ] Connector examples and docs do not assume newline-delimited JSON-RPC or stdio-only ABI semantics.
 - [ ] Risky and dangerous decisions are explainable by durable evidence.
 
 **Host implementation checklist:**
@@ -5577,9 +5586,18 @@ should expose the FCP3-native concepts directly.
 - [ ] FCPC framing, replay, cancellation, and drain semantics are enforced.
 - [ ] Supply-chain policy is verified before activation.
 - [ ] Leases and checkpoints are validated before failover or resume.
+- [ ] Admin/control surfaces are the source of truth for operator CLIs and automation.
 - [ ] Evidence bundles can be retrieved for risky and dangerous actions.
 - [ ] Structured logs and stable reason codes are emitted.
+- [ ] No steady-state conformance claim depends on compatibility shims or translator paths.
 - [ ] Deterministic and replayable conformance tests exist.
+
+**Conformance packaging checklist:**
+
+- [ ] Conformance profiles and supported execution forms are declared explicitly.
+- [ ] Golden vectors, transcript fixtures, and evidence-bundle examples ship with the implementation.
+- [ ] Operator-facing `explain`, `doctor`, and replay surfaces are covered by stable schemas or snapshots.
+- [ ] Reference examples reinforce FCP3-only behavior instead of compatibility-era host/connector relationships.
 
 ### Appendix F: Golden Vector Categories
 
@@ -5925,8 +5943,13 @@ trusted_builders = ["github-actions", "internal-ci"]
 | Dangerous invoke | Lease or equivalent exclusive control where required | Logs + receipts + lease objects |
 | Replayable streams | Ack/nack and resume semantics | E2E transcript |
 | Failover | Checkpoint + resume with replay safety | E2E transcript + receipts |
+| Supervision | Restart, drain, and finalize behavior are explicit and bounded | Runtime harness + evidence transcript |
+| Connector ABI | Framed FCPC/FCPS surfaces, not newline JSON-RPC fallback | Transcript fixtures + parser tests |
+| Provisioning | Host-mediated, resumable, auditable setup flows | Mock OAuth/webhook E2E + audit bundle |
 | Revocation | Freshness checked before high-safety actions | Adversarial tests |
 | Supply chain | Manifest, digest, attestations, transparency policy | Verification logs |
+| Admin-plane truth | `explain`, `doctor`, and repair views reflect host-owned state | CLI snapshot + host integration tests |
+| Compatibility-free surface | No required steady-state translator or shim path | Architecture review + negative tests |
 | Explainability | Stable reason codes and evidence retrieval | Explain surface tests |
 | Offline behavior | Repair and pre-staging policy where claimed | Coverage evaluation logs |
 
@@ -6543,6 +6566,29 @@ Round-trip requirements:
    golden expectation.
 4. The inventory SHOULD make it obvious which artifacts are normative interoperability surfaces and
    which are informative examples.
+
+### Appendix AL: V3-Only Implementation Phases
+
+These phases are guidance for building the FCP3 platform without drifting back toward dual-stack or
+compatibility-first execution. Each phase SHOULD leave the repository in a state where new work can
+land on the FCP3 surface directly.
+
+| Phase | Primary Goal | Expected Outputs | Exit Criteria |
+|-------|--------------|------------------|---------------|
+| 1. Semantic Lock | Freeze the execution, policy, evidence, and crate-boundary vocabulary | stable section terminology, crate graph appendix, conformance artifact inventory | contributors can place a concept in one long-term owner without guessing |
+| 2. Durable/Wire Realignment | Align protocol, manifest, store, mesh, and registry contracts to the locked vocabulary | FCPC/FCPS schemas, manifest examples, artifact verification and mirror contracts, replay semantics | no new feature work needs to be expressed through legacy runtime abstractions |
+| 3. Host/SDK Convergence | Make host orchestration and connector-author surfaces describe the same reality | host admin/control schemas, SDK app contract, archetype helpers, provisioning session flows | a connector author and an operator can describe one execution without translating mental models |
+| 4. Connector/Operator Adoption | Move connector families, CLIs, and evidence tooling onto the host-backed FCP3 surfaces | migrated connector examples, operator transcripts, replay/debug bundles, updated reference workflows | examples and docs no longer teach compatibility-era behavior as normal |
+| 5. Cutover and Proof | Delete temporary quarantine surfaces and ship the final conformance story | removed shims, final profiles, golden vectors, interoperability artifacts, aligned docs | the implementation can claim FCP3 without requiring translators, compatibility buckets, or migration-only scaffolding |
+
+Phase rules:
+
+1. A phase is not complete if its examples still teach superseded behavior as if it were a valid
+   long-term pattern.
+2. Temporary quarantine crates or helpers MUST have an explicit deletion target before the next
+   phase begins.
+3. Verification artifacts, example transcripts, and operator evidence SHOULD evolve alongside the
+   phase outputs rather than being deferred to the end.
 
 ## 16. Summary
 

@@ -5,7 +5,7 @@
 //! for later `fwc` lifecycle/config work. The current focus is the storage
 //! shape, monotonic journal semantics, and persistence invariants.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -24,6 +24,100 @@ use crate::{HostError, HostResult, discovery::ConnectorSummary};
 
 const HOST_ADMIN_STATE_SNAPSHOT_VERSION: u32 = 1;
 const REDACTED_CONFIG_VALUE: &str = "[REDACTED]";
+
+/// Canonical connector inventory entry persisted and applied by the host.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ManagedConnectorConfig {
+    /// Canonical connector identifier.
+    pub id: String,
+    /// Executable path for the connector binary.
+    pub binary: String,
+    /// Optional display name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Optional description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Additional argv entries passed to the connector subprocess.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    /// Connector-specific environment overrides.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+    /// Optional persisted config payload forwarded to `configure`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<Value>,
+    /// Optional category labels surfaced by discovery.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub categories: Vec<String>,
+    /// Optional explicit semantic version override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
+/// Live connector inventory mutation kind handled by the host admin plane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectorInventoryMutationKind {
+    /// Add a new connector to the managed inventory.
+    Install,
+    /// Replace an existing connector entry in the managed inventory.
+    Update,
+}
+
+/// Host admin API request for a live connector inventory mutation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectorInventoryMutationRequest {
+    /// Requested mutation kind.
+    pub kind: ConnectorInventoryMutationKind,
+    /// Preview the mutation against the live host inventory without persisting or applying it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dry_run: bool,
+    /// Connector entry to persist and apply.
+    pub connector: ManagedConnectorConfig,
+}
+
+/// Result of reconciling the live subprocess registry to a new inventory.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectorInventoryApplyReport {
+    /// Connector identifiers newly added to the live registry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub added: Vec<String>,
+    /// Connector identifiers whose subprocess/config was refreshed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub updated: Vec<String>,
+    /// Connector identifiers removed from the live registry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed: Vec<String>,
+    /// Connector identifiers left unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unchanged: Vec<String>,
+    /// New registry version visible to cache-aware clients.
+    pub registry_version: u64,
+}
+
+/// Host admin API response after persisting and applying an inventory mutation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectorInventoryMutationResponse {
+    /// Requested mutation kind.
+    pub kind: ConnectorInventoryMutationKind,
+    /// Whether this response is a preview only.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dry_run: bool,
+    /// Managed connectors file written by the host.
+    pub connectors_file: String,
+    /// Previous connector entry when this was an update.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous: Option<ManagedConnectorConfig>,
+    /// Current persisted connector entry.
+    pub current: ManagedConnectorConfig,
+    /// Total connector count after the mutation.
+    pub inventory_size: usize,
+    /// Live registry reconciliation summary.
+    pub apply: ConnectorInventoryApplyReport,
+    /// Admin-state reconciliation summary after the live registry changed.
+    pub admin_state: StartupReconciliationReport,
+}
 
 /// Desired connector runtime state persisted by the host admin plane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

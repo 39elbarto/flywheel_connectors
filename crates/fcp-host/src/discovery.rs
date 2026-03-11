@@ -15,9 +15,9 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use fcp_async_core::sync::RwLock;
 use fcp_core::{
-    AgentHint, ApprovalMode, CapabilityId, ConnectorHealth, ConnectorId, IdempotencyClass,
-    Introspection, OperationInfo, RateLimitDeclarations, RiskLevel, SafetyTier, SelfCheckReport,
-    UsageBudgetSnapshot, ZoneId,
+    AgentHint, ApprovalMode, ApprovalToken, CapabilityId, CapabilityToken, ConnectorHealth,
+    ConnectorId, IdempotencyClass, Introspection, OperationInfo, RateLimitDeclarations, RequestId,
+    RiskLevel, SafetyTier, SelfCheckReport, UsageBudgetSnapshot, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -582,6 +582,56 @@ pub struct PreflightRequest {
     /// Zone the operation would execute in.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub zone_id: Option<ZoneId>,
+}
+
+/// External preflight request sent to `fcp-host`.
+///
+/// Extends the internal budget-only [`PreflightRequest`] with the real
+/// authorization material needed for truthful preflight checks.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostPreflightRequest {
+    /// Planned request id. Reused by the subsequent invoke so exact-scope
+    /// approval tokens can bind preflight and execution to the same request.
+    pub request_id: RequestId,
+
+    /// Target connector.
+    pub connector_id: ConnectorId,
+
+    /// Operation to check.
+    pub operation: String,
+
+    /// Proposed input parameters.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub params: Option<serde_json::Value>,
+
+    /// Principal making the request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub principal: Option<String>,
+
+    /// Zone the operation would execute in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub zone_id: Option<ZoneId>,
+
+    /// Capability token authorizing the request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capability_token: Option<CapabilityToken>,
+
+    /// Approval tokens authorizing elevated or explicitly approved execution.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub approval_tokens: Vec<ApprovalToken>,
+}
+
+impl HostPreflightRequest {
+    #[must_use]
+    pub fn budget_request(&self) -> PreflightRequest {
+        PreflightRequest {
+            connector_id: self.connector_id.clone(),
+            operation: self.operation.clone(),
+            params: self.params.clone(),
+            principal: self.principal.clone(),
+            zone_id: self.zone_id.clone(),
+        }
+    }
 }
 
 /// Response from preflight check.

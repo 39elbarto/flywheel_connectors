@@ -1,12 +1,13 @@
 //! Minimal fcp-host HTTP server with discovery and doctor endpoints.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
 #[cfg(unix)]
 use std::path::Path as FsPath;
 use std::path::PathBuf;
 use std::pin::pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use asupersync_tokio_compat::hyper_bridge::AsupersyncExecutor;
@@ -21,30 +22,40 @@ use axum::{
     },
     routing::{get, post},
 };
+use base64::Engine;
 use chrono::{DateTime, Utc};
 use fcp_async_core::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use fcp_async_core::net::TcpListener;
 #[cfg(unix)]
 use fcp_async_core::net::UnixListener;
 use fcp_async_core::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use fcp_async_core::sync::Mutex;
+use fcp_async_core::sync::{Mutex, RwLock};
 use fcp_async_core::task::{self, JoinHandle};
 use fcp_core::{
-    ConnectorHealth, ConnectorId, HealthSnapshot, Introspection, InvokeRequest, InvokeResponse,
-    LifecycleError, LifecycleManager, LifecycleState, LifecycleStatus, RequestId, RolloutPolicy,
-    SafetyTier, SelfCheckReport, SoftwareBillOfMaterials, SupplyChainAttestation,
+    ApprovalMode, ApprovalToken, CapabilityVerifier, ConnectorHealth, ConnectorId, Decision,
+    DecisionReceiptPolicy, HealthSnapshot, InstanceId, Introspection, InvokeRequest,
+    InvokeResponse, LifecycleError, LifecycleManager, LifecycleState, LifecycleStatus,
+    ObjectHeader, PolicySimulationInput, Provenance, RequestId, RolloutPolicy, SafetyTier,
+    SelfCheckReport, SoftwareBillOfMaterials, SupplyChainAttestation, TransportMode, ZoneId,
+    ZonePolicyObject, ZoneTransportPolicy, simulate_policy_decision,
+};
+use fcp_crypto::{
+    canonicalize::to_deterministic_cbor,
+    ed25519::{Ed25519Signature, Ed25519VerifyingKey, PUBLIC_KEY_SIZE},
 };
 use fcp_host::{
     BatchExecutor, BatchInvokeRequest, BatchInvokeResponse, BatchOperation, BatchOperationError,
     BatchOptions, BatchStatus, BudgetPolicyEngine, BudgetReportRequest, BudgetReportResponse,
-    CacheMetadata, CacheValidator,
-    CancellationController, CancellationRequest, CancellationResponse, ConnectorAdminStatus,
-    ConnectorArchetype, ConnectorInventoryResponse, ConnectorRegistry, ConnectorSummary,
-    DiscoveryEndpoint, DiscoveryFilter, DiscoveryResponse, DoctorReport, DoctorRequest,
-    DoctorService, GateOutcome, HostAdminStateStore, HostHealthResponse, HostHealthStatus,
-    IntrospectionResponse, OperationResult, OperationResultStatus, PreflightRequest,
-    PreflightResponse, RequestPriority, ResilienceError, ResilienceLayer, RolloutController,
-    RolloutDecision, RolloutObservation, RolloutOutcome, SafetyTierExt, SupplyChainGate,
+    CacheMetadata, CacheValidator, CancellationController, CancellationRequest,
+    CancellationResponse, ConnectorAdminStatus, ConnectorArchetype, ConnectorInventoryApplyReport,
+    ConnectorInventoryMutationKind, ConnectorInventoryMutationRequest,
+    ConnectorInventoryMutationResponse, ConnectorInventoryResponse, ConnectorRegistry,
+    ConnectorSummary, DiscoveryEndpoint, DiscoveryFilter, DiscoveryResponse, DoctorReport,
+    DoctorRequest, DoctorService, GateOutcome, HostAdminStateStore, HostHealthResponse,
+    HostHealthStatus, HostPreflightRequest, IntrospectionResponse, ManagedConnectorConfig,
+    OperationResult, OperationResultStatus, PreflightRequest, PreflightResponse, RequestPriority,
+    ResilienceError, ResilienceLayer, RolloutController, RolloutDecision, RolloutObservation,
+    RolloutOutcome, SafetyTierExt, StartupReconciliationReport, SupplyChainGate,
     SupplyChainGateConfig, merge_connector_health,
 };
 use fcp_host::{HostError, HostResult};
@@ -61,25 +72,7 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 #[cfg(test)]
 use fcp_core::{LifecycleRecord, TransitionReason};
 
-#[derive(Debug, Deserialize)]
-struct ConnectorConfig {
-    id: String,
-    binary: String,
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    description: Option<String>,
-    #[serde(default)]
-    args: Vec<String>,
-    #[serde(default)]
-    env: HashMap<String, String>,
-    #[serde(default)]
-    config: Option<serde_json::Value>,
-    #[serde(default)]
-    categories: Vec<String>,
-    #[serde(default)]
-    version: Option<String>,
-}
+type ConnectorConfig = ManagedConnectorConfig;
 
 struct SubprocessConnector {
     summary: ConnectorSummary,
@@ -226,9 +219,44 @@ impl SubprocessConnector {
 
 #[derive(Clone)]
 struct SubprocessRegistry {
-    connectors: HashMap<ConnectorId, Arc<SubprocessConnector>>,
-    _resilience: Arc<ResilienceLayer>,
-    version: u64,
+    state: Arc<RwLock<RegistryState>>,
+    resilience: Arc<ResilienceLayer>,
+    version: Arc<AtomicU64>,
+}
+
+struct RegistryEntry {
+    config: ConnectorConfig,
+    connector: Arc<SubprocessConnector>,
+}
+
+#[derive(Default)]
+struct RegistryState {
+    connectors: HashMap<ConnectorId, RegistryEntry>,
+}
+
+struct PreparedRegistryApply {
+    next_configs: HashMap<ConnectorId, ConnectorConfig>,
+    replacement_entries: HashMap<ConnectorId, RegistryEntry>,
+    added: Vec<String>,
+    updated: Vec<String>,
+    removed: Vec<String>,
+    unchanged: Vec<String>,
+}
+
+impl PreparedRegistryApply {
+    fn changed(&self) -> bool {
+        !(self.added.is_empty() && self.updated.is_empty() && self.removed.is_empty())
+    }
+
+    fn report(&self, registry_version: u64) -> ConnectorInventoryApplyReport {
+        ConnectorInventoryApplyReport {
+            added: self.added.clone(),
+            updated: self.updated.clone(),
+            removed: self.removed.clone(),
+            unchanged: self.unchanged.clone(),
+            registry_version,
+        }
+    }
 }
 
 impl SubprocessRegistry {
@@ -236,22 +264,169 @@ impl SubprocessRegistry {
         let resilience = Arc::new(ResilienceLayer::default());
         let mut map = HashMap::new();
         for config in configs {
-            let connector = SubprocessConnector::spawn(config, Arc::clone(&resilience)).await?;
-            map.insert(connector.summary.id.clone(), Arc::new(connector));
+            let connector_id: ConnectorId = config.id.parse().map_err(|err| {
+                HostError::InvalidFilter(format!("invalid connector id '{}': {err}", config.id))
+            })?;
+            if map.contains_key(&connector_id) {
+                return Err(HostError::InvalidFilter(format!(
+                    "duplicate connector id in managed inventory: {connector_id}"
+                )));
+            }
+            let connector = Arc::new(
+                SubprocessConnector::spawn(config.clone(), Arc::clone(&resilience)).await?,
+            );
+            map.insert(connector_id, RegistryEntry { config, connector });
         }
         Ok(Self {
-            connectors: map,
-            _resilience: resilience,
-            version: 1,
+            state: Arc::new(RwLock::new(RegistryState { connectors: map })),
+            resilience,
+            version: Arc::new(AtomicU64::new(1)),
         })
+    }
+
+    async fn inventory(&self) -> Vec<ConnectorConfig> {
+        let state = self.state.read().await;
+        state
+            .connectors
+            .values()
+            .map(|entry| entry.config.clone())
+            .collect()
+    }
+
+    async fn prepare_configs(
+        &self,
+        configs: Vec<ConnectorConfig>,
+    ) -> HostResult<PreparedRegistryApply> {
+        let current_configs = {
+            let state = self.state.read().await;
+            state
+                .connectors
+                .iter()
+                .map(|(id, entry)| (id.clone(), entry.config.clone()))
+                .collect::<HashMap<_, _>>()
+        };
+
+        let mut next_configs = HashMap::new();
+        for config in configs {
+            let connector_id: ConnectorId = config.id.parse().map_err(|err| {
+                HostError::InvalidFilter(format!("invalid connector id '{}': {err}", config.id))
+            })?;
+            if next_configs.insert(connector_id.clone(), config).is_some() {
+                return Err(HostError::InvalidFilter(format!(
+                    "duplicate connector id in managed inventory: {connector_id}"
+                )));
+            }
+        }
+
+        let mut replacement_entries = HashMap::new();
+        let mut added = Vec::new();
+        let mut updated = Vec::new();
+        let mut unchanged = Vec::new();
+
+        for (connector_id, config) in &next_configs {
+            match current_configs.get(connector_id) {
+                Some(current) if current == config => {
+                    unchanged.push(connector_id.to_string());
+                }
+                Some(_) => {
+                    let connector = Arc::new(
+                        SubprocessConnector::spawn(config.clone(), Arc::clone(&self.resilience))
+                            .await?,
+                    );
+                    replacement_entries.insert(
+                        connector_id.clone(),
+                        RegistryEntry {
+                            config: config.clone(),
+                            connector,
+                        },
+                    );
+                    updated.push(connector_id.to_string());
+                }
+                None => {
+                    let connector = Arc::new(
+                        SubprocessConnector::spawn(config.clone(), Arc::clone(&self.resilience))
+                            .await?,
+                    );
+                    replacement_entries.insert(
+                        connector_id.clone(),
+                        RegistryEntry {
+                            config: config.clone(),
+                            connector,
+                        },
+                    );
+                    added.push(connector_id.to_string());
+                }
+            }
+        }
+
+        let removed = current_configs
+            .keys()
+            .filter(|connector_id| !next_configs.contains_key(*connector_id))
+            .map(std::string::ToString::to_string)
+            .collect::<Vec<_>>();
+
+        Ok(PreparedRegistryApply {
+            next_configs,
+            replacement_entries,
+            added,
+            updated,
+            removed,
+            unchanged,
+        })
+    }
+
+    async fn preview_configs(
+        &self,
+        configs: Vec<ConnectorConfig>,
+    ) -> HostResult<ConnectorInventoryApplyReport> {
+        let prepared = self.prepare_configs(configs).await?;
+        Ok(prepared.report(self.version.load(Ordering::SeqCst)))
+    }
+
+    async fn apply_configs(
+        &self,
+        configs: Vec<ConnectorConfig>,
+    ) -> HostResult<ConnectorInventoryApplyReport> {
+        let mut prepared = self.prepare_configs(configs).await?;
+        let changed = prepared.changed();
+
+        let mut state = self.state.write().await;
+        let mut current_entries = std::mem::take(&mut state.connectors);
+        let mut next_entries = HashMap::new();
+        let next_configs = std::mem::take(&mut prepared.next_configs);
+        for (connector_id, _config) in next_configs {
+            if let Some(entry) = prepared.replacement_entries.remove(&connector_id) {
+                next_entries.insert(connector_id, entry);
+            } else if let Some(existing) = current_entries.remove(&connector_id) {
+                next_entries.insert(connector_id, existing);
+            } else {
+                return Err(HostError::Internal(format!(
+                    "registry apply prepared no entry for connector {connector_id}"
+                )));
+            }
+        }
+        state.connectors = next_entries;
+        drop(state);
+
+        let registry_version = if changed {
+            self.version.fetch_add(1, Ordering::SeqCst) + 1
+        } else {
+            self.version.load(Ordering::SeqCst)
+        };
+
+        Ok(prepared.report(registry_version))
     }
 
     async fn invoke(&self, request: InvokeRequest) -> HostResult<InvokeResponse> {
         let connector_id = request.connector_id.clone();
-        let connector = self
-            .connectors
-            .get(&connector_id)
-            .ok_or_else(|| HostError::ConnectorNotFound(connector_id.to_string()))?;
+        let connector = {
+            let state = self.state.read().await;
+            state
+                .connectors
+                .get(&connector_id)
+                .map(|entry| Arc::clone(&entry.connector))
+        }
+        .ok_or_else(|| HostError::ConnectorNotFound(connector_id.to_string()))?;
         connector.invoke(request).await
     }
 }
@@ -259,40 +434,68 @@ impl SubprocessRegistry {
 #[async_trait::async_trait]
 impl ConnectorRegistry for SubprocessRegistry {
     async fn list(&self) -> Vec<ConnectorSummary> {
+        let connectors = {
+            let state = self.state.read().await;
+            state
+                .connectors
+                .values()
+                .map(|entry| Arc::clone(&entry.connector))
+                .collect::<Vec<_>>()
+        };
         let mut results = Vec::new();
-        for connector in self.connectors.values() {
+        for connector in connectors {
             results.push(connector.summary_snapshot().await);
         }
         results
     }
 
     async fn get(&self, id: &ConnectorId) -> Option<ConnectorSummary> {
-        let connector = self.connectors.get(id)?;
+        let connector = {
+            let state = self.state.read().await;
+            state
+                .connectors
+                .get(id)
+                .map(|entry| Arc::clone(&entry.connector))
+        }?;
         Some(connector.summary_snapshot().await)
     }
 
     async fn get_introspection(&self, id: &ConnectorId) -> Option<Introspection> {
-        let connector = self.connectors.get(id)?;
+        let connector = {
+            let state = self.state.read().await;
+            state
+                .connectors
+                .get(id)
+                .map(|entry| Arc::clone(&entry.connector))
+        }?;
         connector.introspect().await.ok()
     }
 
     async fn get_archetype(&self, id: &ConnectorId) -> Option<ConnectorArchetype> {
-        self.connectors.get(id)?;
+        let state = self.state.read().await;
+        state.connectors.get(id)?;
         Some(ConnectorArchetype::RequestResponse)
     }
 
     async fn get_rate_limits(&self, id: &ConnectorId) -> Option<fcp_core::RateLimitDeclarations> {
-        self.connectors.get(id)?;
+        let state = self.state.read().await;
+        state.connectors.get(id)?;
         Some(fcp_core::RateLimitDeclarations::default())
     }
 
     async fn self_check(&self, id: &ConnectorId) -> Option<SelfCheckReport> {
-        let connector = self.connectors.get(id)?;
+        let connector = {
+            let state = self.state.read().await;
+            state
+                .connectors
+                .get(id)
+                .map(|entry| Arc::clone(&entry.connector))
+        }?;
         connector.self_check().await.ok()
     }
 
     fn version(&self) -> u64 {
-        self.version
+        self.version.load(Ordering::SeqCst)
     }
 }
 
@@ -307,7 +510,7 @@ impl ConnectorProcessRunner {
     async fn spawn(
         command: &str,
         args: &[String],
-        env: &HashMap<String, String>,
+        env: &BTreeMap<String, String>,
     ) -> std::io::Result<Self> {
         let mut cmd = Command::new(command);
         cmd.args(args)
@@ -463,7 +666,353 @@ struct AppState {
     lifecycle: Arc<HostAdminStateStore>,
     rollout: Arc<RolloutController<SubprocessRegistry, HostAdminStateStore>>,
     supply_chain: Arc<SupplyChainGate>,
+    capability_verifying_key: Option<Ed25519VerifyingKey>,
+    approval_verifying_key: Option<Ed25519VerifyingKey>,
+    connectors_file: Option<PathBuf>,
     started_at: Instant,
+}
+
+#[derive(Debug, Clone)]
+struct VerifiedLiveRequest {
+    principal: String,
+    approval_required: bool,
+    safety_tier: SafetyTier,
+}
+
+fn parse_public_key_str(raw: &str, source: &str) -> HostResult<Option<Ed25519VerifyingKey>> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    let bytes = hex::decode(trimmed)
+        .or_else(|_| base64::engine::general_purpose::STANDARD.decode(trimmed))
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(trimmed))
+        .map_err(|error| {
+            HostError::InvalidFilter(format!(
+                "{source} must be hex or base64 encoded Ed25519 public key material: {error}"
+            ))
+        })?;
+    parse_public_key_bytes(&bytes, source)
+}
+
+fn parse_public_key_bytes(bytes: &[u8], source: &str) -> HostResult<Option<Ed25519VerifyingKey>> {
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    if bytes.len() != PUBLIC_KEY_SIZE {
+        return Err(HostError::InvalidFilter(format!(
+            "{source} must be {PUBLIC_KEY_SIZE} bytes, got {}",
+            bytes.len()
+        )));
+    }
+
+    let mut raw = [0u8; PUBLIC_KEY_SIZE];
+    raw.copy_from_slice(bytes);
+    Ed25519VerifyingKey::from_bytes(&raw)
+        .map(Some)
+        .map_err(|error| {
+            HostError::InvalidFilter(format!("invalid Ed25519 public key in {source}: {error}"))
+        })
+}
+
+fn resolve_verifying_key(
+    inline_env: &str,
+    file_env: &str,
+) -> HostResult<Option<Ed25519VerifyingKey>> {
+    let inline = std::env::var(inline_env).ok();
+    let file = std::env::var(file_env).ok();
+
+    if inline
+        .as_ref()
+        .is_some_and(|value| !value.trim().is_empty())
+        && file.as_ref().is_some_and(|value| !value.trim().is_empty())
+    {
+        return Err(HostError::InvalidFilter(format!(
+            "set either {inline_env} or {file_env}, not both"
+        )));
+    }
+
+    if let Some(raw) = inline {
+        return parse_public_key_str(&raw, inline_env);
+    }
+    if let Some(path) = file {
+        let bytes = std::fs::read(&path).map_err(|error| {
+            HostError::InvalidFilter(format!("failed to read {file_env}='{path}': {error}"))
+        })?;
+        if let Ok(text) = std::str::from_utf8(&bytes)
+            && let Ok(parsed) = parse_public_key_str(text, file_env)
+        {
+            return Ok(parsed);
+        }
+        return parse_public_key_bytes(&bytes, file_env);
+    }
+
+    Ok(None)
+}
+
+fn host_runtime_policy(zone_id: ZoneId) -> ZonePolicyObject {
+    ZonePolicyObject {
+        header: ObjectHeader {
+            schema: fcp_cbor::SchemaId::new(
+                "fcp.core",
+                "ZonePolicyObject",
+                semver::Version::new(1, 0, 0),
+            ),
+            zone_id: zone_id.clone(),
+            created_at: u64::try_from(Utc::now().timestamp()).unwrap_or(0),
+            provenance: Provenance::new(zone_id.clone()),
+            refs: Vec::new(),
+            foreign_refs: Vec::new(),
+            ttl_secs: None,
+            placement: None,
+        },
+        zone_id,
+        principal_allow: Vec::new(),
+        principal_deny: Vec::new(),
+        connector_allow: Vec::new(),
+        connector_deny: Vec::new(),
+        capability_allow: Vec::new(),
+        capability_deny: Vec::new(),
+        capability_ceiling: Vec::new(),
+        transport_policy: ZoneTransportPolicy {
+            allow_lan: true,
+            allow_derp: true,
+            allow_funnel: true,
+        },
+        decision_receipts: DecisionReceiptPolicy::default(),
+        usage_budget: None,
+        requires_posture: None,
+    }
+}
+
+fn invoke_request_from_preflight(request: &HostPreflightRequest) -> HostResult<InvokeRequest> {
+    let capability_token = request.capability_token.clone().ok_or_else(|| {
+        HostError::PreflightFailed("capability token is required for live preflight".to_string())
+    })?;
+    let zone_id = request.zone_id.clone().ok_or_else(|| {
+        HostError::PreflightFailed("zone_id is required for live preflight".to_string())
+    })?;
+    let operation = request.operation.parse().map_err(|error| {
+        HostError::InvalidFilter(format!(
+            "invalid preflight operation '{}': {error}",
+            request.operation
+        ))
+    })?;
+
+    Ok(InvokeRequest {
+        r#type: "invoke".to_owned(),
+        id: request.request_id.clone(),
+        connector_id: request.connector_id.clone(),
+        operation,
+        zone_id,
+        input: request.params.clone().unwrap_or(serde_json::Value::Null),
+        capability_token,
+        holder_proof: None,
+        context: None,
+        idempotency_key: None,
+        lease_seq: None,
+        deadline_ms: None,
+        correlation_id: None,
+        provenance: None,
+        approval_tokens: request.approval_tokens.clone(),
+    })
+}
+
+fn request_input_hash(input: &serde_json::Value) -> HostResult<[u8; 32]> {
+    let bytes = to_deterministic_cbor(input).map_err(|error| {
+        HostError::Internal(format!("failed to canonicalize input payload: {error}"))
+    })?;
+    Ok(*blake3::hash(&bytes).as_bytes())
+}
+
+fn approval_token_signing_bytes(token: &ApprovalToken) -> HostResult<Vec<u8>> {
+    let mut unsigned = token.clone();
+    unsigned.signature = None;
+    fcp_cbor::to_canonical_cbor(&unsigned).map_err(|error| {
+        HostError::Internal(format!("failed to canonicalize approval token: {error}"))
+    })
+}
+
+fn verify_approval_tokens(
+    tokens: &[ApprovalToken],
+    verifying_key: Option<&Ed25519VerifyingKey>,
+) -> HostResult<()> {
+    if tokens.is_empty() {
+        return Ok(());
+    }
+    let key = verifying_key.ok_or_else(|| {
+        HostError::PreflightFailed(
+            "approval tokens were supplied, but FCP_HOST_APPROVAL_PUBLIC_KEY[_FILE] is not configured"
+                .to_string(),
+        )
+    })?;
+
+    for token in tokens {
+        let signature = token.signature.as_ref().ok_or_else(|| {
+            HostError::PreflightFailed(format!(
+                "approval token `{}` is unsigned and cannot be verified",
+                token.token_id
+            ))
+        })?;
+        let signature = Ed25519Signature::try_from_slice(signature).map_err(|error| {
+            HostError::PreflightFailed(format!(
+                "approval token `{}` has an invalid signature: {error}",
+                token.token_id
+            ))
+        })?;
+        let bytes = approval_token_signing_bytes(token)?;
+        key.verify(&bytes, &signature).map_err(|error| {
+            HostError::PreflightFailed(format!(
+                "approval token `{}` failed signature verification: {error}",
+                token.token_id
+            ))
+        })?;
+    }
+
+    Ok(())
+}
+
+async fn verify_live_request(
+    state: &AppState,
+    request: &InvokeRequest,
+    principal_override: Option<&str>,
+) -> HostResult<VerifiedLiveRequest> {
+    let introspection = state.discovery.introspect(&request.connector_id).await?;
+    let tool = introspection
+        .tools
+        .iter()
+        .find(|tool| tool.name == request.operation.as_str())
+        .ok_or_else(|| {
+            HostError::InvalidFilter(format!(
+                "connector `{}` does not expose operation `{}`",
+                request.connector_id, request.operation
+            ))
+        })?;
+
+    let capability_key = state.capability_verifying_key.as_ref().ok_or_else(|| {
+        HostError::PreflightFailed(
+            "FCP_HOST_CAPABILITY_PUBLIC_KEY[_FILE] is not configured, so live auth checks cannot be verified"
+                .to_string(),
+        )
+    })?;
+    let verifier = CapabilityVerifier::new(
+        capability_key.to_bytes(),
+        request.zone_id.clone(),
+        InstanceId::new(),
+    );
+    let claims = verifier
+        .verify(
+            &request.capability_token,
+            &tool.capability,
+            &request.operation,
+            &[],
+        )
+        .map_err(|error| {
+            HostError::PreflightFailed(format!("capability token rejected: {error}"))
+        })?;
+
+    let principal = claims.get_subject().ok_or_else(|| {
+        HostError::PreflightFailed(
+            "capability token is missing the subject claim required for live execution".to_string(),
+        )
+    })?;
+    if let Some(expected) = principal_override
+        && expected != principal
+    {
+        return Err(HostError::PreflightFailed(format!(
+            "request principal `{expected}` does not match capability token subject `{principal}`"
+        )));
+    }
+
+    verify_approval_tokens(
+        &request.approval_tokens,
+        state.approval_verifying_key.as_ref(),
+    )?;
+
+    let approval_required = tool
+        .approval_mode
+        .is_some_and(|mode| !matches!(mode, ApprovalMode::None));
+    let request_input_hash = request_input_hash(&request.input)?;
+    let receipt = simulate_policy_decision(&PolicySimulationInput {
+        zone_policy: host_runtime_policy(request.zone_id.clone()),
+        invoke_request: request.clone(),
+        transport: TransportMode::Lan,
+        checkpoint_fresh: true,
+        revocation_fresh: true,
+        execution_approval_required: approval_required,
+        sanitizer_receipts: Vec::new(),
+        related_object_ids: Vec::new(),
+        request_object_id: None,
+        request_input_hash: Some(request_input_hash),
+        safety_tier: tool.safety_tier,
+        principal: Some(principal.to_owned()),
+        capability_id: Some(tool.capability.to_string()),
+        provenance_record: None,
+        now_ms: None,
+        posture_attestation: None,
+    })
+    .map_err(|error| HostError::PreflightFailed(format!("policy evaluation failed: {error}")))?;
+
+    if receipt.decision == Decision::Deny {
+        return Err(HostError::PreflightFailed(format!(
+            "policy denied live request: {}",
+            receipt.reason_code
+        )));
+    }
+
+    Ok(VerifiedLiveRequest {
+        principal: principal.to_owned(),
+        approval_required,
+        safety_tier: tool.safety_tier,
+    })
+}
+
+fn preflight_response_from_error(error: HostError) -> PreflightResponse {
+    let reason = error.to_string();
+    let mut response = PreflightResponse::denied(&reason);
+    response.reason = Some(reason);
+    response
+}
+
+async fn evaluate_live_preflight(
+    state: &AppState,
+    request: &InvokeRequest,
+    principal_override: Option<&str>,
+) -> PreflightResponse {
+    let mut response = state
+        .discovery
+        .preflight(PreflightRequest {
+            connector_id: request.connector_id.clone(),
+            operation: request.operation.to_string(),
+            params: Some(request.input.clone()),
+            principal: principal_override.map(ToOwned::to_owned),
+            zone_id: Some(request.zone_id.clone()),
+        })
+        .await;
+    if !response.allowed {
+        return response;
+    }
+
+    match verify_live_request(state, request, principal_override).await {
+        Ok(verified) => {
+            tracing::debug!(
+                event = "live_request_verified",
+                connector_id = %request.connector_id,
+                operation = %request.operation,
+                principal = %verified.principal,
+                approval_required = verified.approval_required,
+                safety_tier = ?verified.safety_tier,
+                "live request auth verified"
+            );
+            response
+        }
+        Err(error) => {
+            response.allowed = false;
+            response.reason = Some(error.to_string());
+            response
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -766,28 +1315,127 @@ enum BindTarget {
     Unix(PathBuf),
 }
 
-fn load_connector_configs() -> HostResult<Vec<ConnectorConfig>> {
-    let payload = if let Ok(path) = std::env::var("FCP_HOST_CONNECTORS_FILE") {
-        if path.trim().is_empty() {
-            None
+struct LoadedConnectorConfigs {
+    configs: Vec<ConnectorConfig>,
+    connectors_file: Option<PathBuf>,
+}
+
+fn resolve_connectors_file_path() -> HostResult<Option<PathBuf>> {
+    match std::env::var("FCP_HOST_CONNECTORS_FILE") {
+        Ok(raw) if raw.trim().is_empty() => Ok(None),
+        Ok(raw) => Ok(Some(PathBuf::from(raw))),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(HostError::Internal(
+            "FCP_HOST_CONNECTORS_FILE contains non-unicode data".to_string(),
+        )),
+    }
+}
+
+fn read_connector_configs_file(path: &std::path::Path) -> HostResult<Vec<ConnectorConfig>> {
+    let raw = std::fs::read_to_string(path).map_err(|err| {
+        HostError::Internal(format!(
+            "failed to read connectors file '{}': {err}",
+            path.display()
+        ))
+    })?;
+    serde_json::from_str(&raw)
+        .map_err(|err| HostError::InvalidFilter(format!("invalid connector config json: {err}")))
+}
+
+fn write_connector_configs_file(
+    path: &std::path::Path,
+    configs: &[ConnectorConfig],
+) -> HostResult<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| {
+            HostError::Internal(format!(
+                "failed to create connectors file parent '{}': {err}",
+                parent.display()
+            ))
+        })?;
+    }
+
+    let encoded = serde_json::to_string_pretty(configs).map_err(|err| {
+        HostError::Internal(format!(
+            "failed to serialize connector inventory for '{}': {err}",
+            path.display()
+        ))
+    })?;
+    std::fs::write(path, format!("{encoded}\n")).map_err(|err| {
+        HostError::Internal(format!(
+            "failed to write connectors file '{}': {err}",
+            path.display()
+        ))
+    })
+}
+
+fn merge_connector_update(
+    existing: &ConnectorConfig,
+    incoming: &ConnectorConfig,
+) -> ConnectorConfig {
+    ConnectorConfig {
+        id: existing.id.clone(),
+        binary: incoming.binary.clone(),
+        name: incoming.name.clone().or_else(|| existing.name.clone()),
+        description: incoming
+            .description
+            .clone()
+            .or_else(|| existing.description.clone()),
+        args: if incoming.args.is_empty() {
+            existing.args.clone()
         } else {
-            Some(std::fs::read_to_string(path).map_err(|err| {
-                HostError::Internal(format!("failed to read FCP_HOST_CONNECTORS_FILE: {err}"))
-            })?)
-        }
+            incoming.args.clone()
+        },
+        env: if incoming.env.is_empty() {
+            existing.env.clone()
+        } else {
+            incoming.env.clone()
+        },
+        config: incoming.config.clone().or_else(|| existing.config.clone()),
+        categories: if incoming.categories.is_empty() {
+            existing.categories.clone()
+        } else {
+            incoming.categories.clone()
+        },
+        version: incoming
+            .version
+            .clone()
+            .or_else(|| existing.version.clone()),
+    }
+}
+
+fn load_connector_configs() -> HostResult<LoadedConnectorConfigs> {
+    let connectors_file = resolve_connectors_file_path()?;
+    let payload = if let Some(path) = connectors_file.as_ref() {
+        Some(std::fs::read_to_string(path).map_err(|err| {
+            HostError::Internal(format!(
+                "failed to read connectors file '{}': {err}",
+                path.display()
+            ))
+        })?)
     } else {
         std::env::var("FCP_HOST_CONNECTORS").ok()
     };
 
     let Some(raw) = payload else {
-        return Ok(Vec::new());
+        return Ok(LoadedConnectorConfigs {
+            configs: Vec::new(),
+            connectors_file,
+        });
     };
     if raw.trim().is_empty() {
-        return Ok(Vec::new());
+        return Ok(LoadedConnectorConfigs {
+            configs: Vec::new(),
+            connectors_file,
+        });
     }
 
-    serde_json::from_str(&raw)
-        .map_err(|err| HostError::InvalidFilter(format!("invalid connector config json: {err}")))
+    let configs = serde_json::from_str(&raw)
+        .map_err(|err| HostError::InvalidFilter(format!("invalid connector config json: {err}")))?;
+    Ok(LoadedConnectorConfigs {
+        configs,
+        connectors_file,
+    })
 }
 
 fn resolve_self_check_timeout() -> HostResult<Option<Duration>> {
@@ -1025,13 +1673,22 @@ fn init_tracing() {
 
 async fn async_main() -> HostResult<()> {
     let bind_target = resolve_bind_target()?;
+    let capability_verifying_key = resolve_verifying_key(
+        "FCP_HOST_CAPABILITY_PUBLIC_KEY",
+        "FCP_HOST_CAPABILITY_PUBLIC_KEY_FILE",
+    )?;
+    let approval_verifying_key = resolve_verifying_key(
+        "FCP_HOST_APPROVAL_PUBLIC_KEY",
+        "FCP_HOST_APPROVAL_PUBLIC_KEY_FILE",
+    )?
+    .or_else(|| capability_verifying_key.clone());
 
-    let configs = load_connector_configs()?;
-    if configs.is_empty() {
+    let loaded_configs = load_connector_configs()?;
+    if loaded_configs.configs.is_empty() {
         tracing::warn!("no connectors configured; doctor self-checks will fail");
     }
 
-    let registry = Arc::new(SubprocessRegistry::from_configs(configs).await?);
+    let registry = Arc::new(SubprocessRegistry::from_configs(loaded_configs.configs).await?);
     let doctor = match resolve_self_check_timeout()? {
         Some(timeout) => DoctorService::with_timeout(Arc::clone(&registry), timeout),
         None => DoctorService::new(Arc::clone(&registry)),
@@ -1065,6 +1722,9 @@ async fn async_main() -> HostResult<()> {
         lifecycle,
         rollout,
         supply_chain,
+        capability_verifying_key,
+        approval_verifying_key,
+        connectors_file: loaded_configs.connectors_file,
         started_at: Instant::now(),
     });
 
@@ -1075,6 +1735,10 @@ async fn async_main() -> HostResult<()> {
         .route(
             "/rpc/connectors/{connector_id}/status",
             get(connector_status_handler),
+        )
+        .route(
+            "/rpc/connectors/apply",
+            post(connector_inventory_apply_handler),
         )
         .route("/rpc/introspect/{connector_id}", get(introspect_handler))
         .route("/rpc/invoke", post(invoke_handler))
@@ -1353,14 +2017,155 @@ async fn connector_status_handler(
     }
 }
 
+async fn connector_inventory_apply_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<ConnectorInventoryMutationRequest>,
+) -> Result<Json<ConnectorInventoryMutationResponse>, (StatusCode, String)> {
+    let connector_id = request.connector.id.clone();
+    let started_at = Instant::now();
+    tracing::debug!(
+        event = "connector_inventory_apply_request",
+        connector_id = %connector_id,
+        kind = ?request.kind,
+        "processing live connector inventory mutation"
+    );
+
+    let connectors_file = state.connectors_file.clone().ok_or_else(|| {
+        map_host_error(HostError::Unavailable(
+            "live connector inventory mutation requires FCP_HOST_CONNECTORS_FILE to be configured"
+                .to_string(),
+        ))
+    })?;
+
+    let previous_configs = read_connector_configs_file(&connectors_file).map_err(map_host_error)?;
+    let mut next_configs = previous_configs.clone();
+    let previous = previous_configs
+        .iter()
+        .find(|entry| entry.id == request.connector.id)
+        .cloned();
+
+    match request.kind {
+        ConnectorInventoryMutationKind::Install => {
+            if previous.is_some() {
+                return Err(map_host_error(HostError::InvalidFilter(format!(
+                    "connector '{}' is already present in the managed inventory",
+                    request.connector.id
+                ))));
+            }
+            next_configs.push(request.connector.clone());
+        }
+        ConnectorInventoryMutationKind::Update => {
+            let target_index = next_configs
+                .iter()
+                .position(|entry| entry.id == request.connector.id)
+                .ok_or_else(|| {
+                    map_host_error(HostError::ConnectorNotFound(request.connector.id.clone()))
+                })?;
+            let merged = merge_connector_update(&next_configs[target_index], &request.connector);
+            next_configs[target_index] = merged;
+        }
+    }
+
+    let (apply, current_inventory, current, admin_state) = if request.dry_run {
+        let preview = state
+            .registry
+            .preview_configs(next_configs.clone())
+            .await
+            .map_err(map_host_error)?;
+        let current = next_configs
+            .iter()
+            .find(|entry| entry.id == request.connector.id)
+            .cloned()
+            .ok_or_else(|| {
+                map_host_error(HostError::Internal(format!(
+                    "connector '{}' was missing from the preview inventory",
+                    request.connector.id
+                )))
+            })?;
+        (preview, next_configs.clone(), current, None)
+    } else {
+        write_connector_configs_file(&connectors_file, &next_configs).map_err(map_host_error)?;
+        let apply = match state.registry.apply_configs(next_configs.clone()).await {
+            Ok(report) => report,
+            Err(err) => {
+                let rollback_result =
+                    write_connector_configs_file(&connectors_file, &previous_configs);
+                let rollback_note = match rollback_result {
+                    Ok(()) => "connectors file rolled back".to_string(),
+                    Err(rollback_err) => {
+                        format!("connectors file rollback also failed: {}", rollback_err)
+                    }
+                };
+                return Err(map_host_error(HostError::Internal(format!(
+                    "failed to apply live connector inventory mutation for '{}': {err}; {rollback_note}",
+                    request.connector.id
+                ))));
+            }
+        };
+
+        let current_inventory = state.registry.inventory().await;
+        let current = current_inventory
+            .iter()
+            .find(|entry| entry.id == request.connector.id)
+            .cloned()
+            .ok_or_else(|| {
+                map_host_error(HostError::Internal(format!(
+                    "connector '{}' was missing from the live registry immediately after apply",
+                    request.connector.id
+                )))
+            })?;
+        let admin_state = state
+            .lifecycle
+            .reconcile_registered_connectors(&state.registry.list().await)
+            .await
+            .map_err(map_lifecycle_host_error)
+            .map_err(map_host_error)?;
+        (apply, current_inventory, current, Some(admin_state))
+    };
+
+    tracing::info!(
+        event = "connector_inventory_apply_response",
+        connector_id = %connector_id,
+        kind = ?request.kind,
+        dry_run = request.dry_run,
+        registry_version = apply.registry_version,
+        inventory_size = current_inventory.len(),
+        duration_ms = started_at.elapsed().as_millis() as u64,
+        "live connector inventory mutation complete"
+    );
+
+    Ok(Json(ConnectorInventoryMutationResponse {
+        kind: request.kind,
+        dry_run: request.dry_run,
+        connectors_file: connectors_file.display().to_string(),
+        previous,
+        current,
+        inventory_size: current_inventory.len(),
+        apply,
+        admin_state: admin_state.unwrap_or_else(|| StartupReconciliationReport {
+            reconciled_at: Utc::now(),
+            tracked_connectors: current_inventory.len(),
+            created_connectors: 0,
+            observed_updates: 0,
+            drifted_connectors: 0,
+            entries: Vec::new(),
+        }),
+    }))
+}
+
 async fn preflight_handler(
     State(state): State<Arc<AppState>>,
-    Json(request): Json<PreflightRequest>,
+    Json(request): Json<HostPreflightRequest>,
 ) -> Json<PreflightResponse> {
     let connector_id = request.connector_id.clone();
     let operation = request.operation.clone();
     let started_at = Instant::now();
-    let response = state.discovery.preflight(request).await;
+    let response = match invoke_request_from_preflight(&request) {
+        Ok(invoke_request) => {
+            evaluate_live_preflight(&state, &invoke_request, request.principal.as_deref()).await
+        }
+        Err(error) => preflight_response_from_error(error),
+    };
     tracing::info!(
         event = "preflight_check",
         connector_id = %connector_id,
@@ -1415,8 +2220,6 @@ async fn invoke_handler(
 
     let connector_id = request.connector_id.clone();
     let operation = request.operation.clone();
-    let zone_id = request.zone_id.clone();
-    let input = request.input.clone();
     let correlation_id = request
         .correlation_id
         .as_ref()
@@ -1433,16 +2236,7 @@ async fn invoke_handler(
         "processing invoke request"
     );
 
-    let preflight = state
-        .discovery
-        .preflight(PreflightRequest {
-            connector_id: connector_id.clone(),
-            operation: operation.to_string(),
-            params: Some(input),
-            principal: None,
-            zone_id: Some(zone_id),
-        })
-        .await;
+    let preflight = evaluate_live_preflight(&state, &request, None).await;
     if !preflight.allowed {
         let reason = preflight
             .reason
@@ -1623,16 +2417,7 @@ async fn execute_batch_operation(
         };
     }
 
-    let preflight = state
-        .discovery
-        .preflight(PreflightRequest {
-            connector_id: request.connector_id.clone(),
-            operation: request.operation.to_string(),
-            params: Some(request.input.clone()),
-            principal: None,
-            zone_id: Some(request.zone_id.clone()),
-        })
-        .await;
+    let preflight = evaluate_live_preflight(&state, &request, None).await;
 
     if !preflight.allowed {
         let reason = preflight
@@ -2288,9 +3073,9 @@ mod tests {
     use chrono::TimeZone;
     use fcp_core::OperationId;
 
-    fn compiled_test_connector_binary() -> std::path::PathBuf {
+    fn maybe_compiled_test_connector_binary() -> Option<std::path::PathBuf> {
         if let Some(path) = option_env!("CARGO_BIN_EXE_fcp-test-connector") {
-            return std::path::PathBuf::from(path);
+            return Some(std::path::PathBuf::from(path));
         }
 
         let current_exe = std::env::current_exe().expect("current test executable path");
@@ -2304,12 +3089,13 @@ mod tests {
             "fcp-test-connector{}",
             std::env::consts::EXE_SUFFIX
         ));
-        assert!(
-            candidate.exists(),
-            "expected compiled fcp-test-connector at {}",
-            candidate.display()
-        );
-        candidate
+        candidate.exists().then_some(candidate)
+    }
+
+    fn compiled_test_connector_binary() -> std::path::PathBuf {
+        maybe_compiled_test_connector_binary().unwrap_or_else(|| {
+            panic!("expected compiled fcp-test-connector alongside the current test executable")
+        })
     }
 
     fn subprocess_test_connector_config(connector_id: &str) -> ConnectorConfig {
@@ -2319,7 +3105,7 @@ mod tests {
             name: Some("Test Connector".to_string()),
             description: Some("Subprocess test connector".to_string()),
             args: Vec::new(),
-            env: HashMap::from([(
+            env: BTreeMap::from([(
                 "FCP_TEST_CONNECTOR_ID".to_string(),
                 connector_id.to_string(),
             )]),
@@ -2335,7 +3121,7 @@ mod tests {
         let mut runner = ConnectorProcessRunner::spawn(
             &binary.display().to_string(),
             &[],
-            &HashMap::from([(
+            &BTreeMap::from([(
                 "FCP_TEST_CONNECTOR_ID".to_string(),
                 "fcp.test.runner:utility:1.0.0".to_string(),
             )]),
@@ -2465,6 +3251,45 @@ mod tests {
         .await
         .expect("registry introspection should not hang");
         assert!(introspection.is_some());
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn subprocess_registry_apply_configs_reconciles_live_inventory() {
+        if maybe_compiled_test_connector_binary().is_none() {
+            eprintln!("compiled fcp-test-connector missing; skipping live registry apply test");
+            return;
+        }
+        let first_id = ConnectorId::from_static("fcp.test.registry-apply-one:utility:1.0.0");
+        let second_id = ConnectorId::from_static("fcp.test.registry-apply-two:utility:1.0.0");
+        let registry = SubprocessRegistry::from_configs(vec![subprocess_test_connector_config(
+            first_id.as_str(),
+        )])
+        .await
+        .expect("registry construction should succeed");
+
+        let add_report = registry
+            .apply_configs(vec![
+                subprocess_test_connector_config(first_id.as_str()),
+                subprocess_test_connector_config(second_id.as_str()),
+            ])
+            .await
+            .expect("registry apply should succeed");
+        assert!(add_report.added.iter().any(|id| id == second_id.as_str()));
+        assert_eq!(registry.list().await.len(), 2);
+
+        let remove_report = registry
+            .apply_configs(vec![subprocess_test_connector_config(second_id.as_str())])
+            .await
+            .expect("registry removal should succeed");
+        assert!(
+            remove_report
+                .removed
+                .iter()
+                .any(|id| id == first_id.as_str())
+        );
+        let remaining = registry.list().await;
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, second_id);
     }
 
     // ── parse_bind_target: TCP ──
@@ -2877,37 +3702,35 @@ mod tests {
 
     // ── SubprocessRegistry version() ──
 
+    fn empty_registry(version: u64) -> SubprocessRegistry {
+        SubprocessRegistry {
+            state: Arc::new(RwLock::new(RegistryState::default())),
+            resilience: Arc::new(ResilienceLayer::default()),
+            version: Arc::new(AtomicU64::new(version)),
+        }
+    }
+
     #[test]
     fn subprocess_registry_version() {
-        let registry = SubprocessRegistry {
-            connectors: HashMap::new(),
-            _resilience: Arc::new(ResilienceLayer::default()),
-            version: 42,
-        };
+        let registry = empty_registry(42);
         assert_eq!(registry.version(), 42);
     }
 
     #[test]
     fn subprocess_registry_clone() {
-        let registry = SubprocessRegistry {
-            connectors: HashMap::new(),
-            _resilience: Arc::new(ResilienceLayer::default()),
-            version: 7,
-        };
+        let registry = empty_registry(7);
         let cloned = registry.clone();
         assert_eq!(cloned.version(), 7);
-        assert!(cloned.connectors.is_empty());
+        let inventory =
+            fcp_async_core::runtime::block_on_sync(cloned.inventory()).expect("inventory query");
+        assert!(inventory.is_empty());
     }
 
     // ── AppState clone ──
 
     #[fcp_async_core::runtime::test]
     async fn app_state_clone_preserves_started_at() {
-        let registry = Arc::new(SubprocessRegistry {
-            connectors: HashMap::new(),
-            _resilience: Arc::new(ResilienceLayer::default()),
-            version: 1,
-        });
+        let registry = Arc::new(empty_registry(1));
         let doctor = DoctorService::new(Arc::clone(&registry));
         let budget = Arc::new(BudgetPolicyEngine::new());
         let discovery = Arc::new(DiscoveryEndpoint::new(
@@ -2928,6 +3751,9 @@ mod tests {
             lifecycle,
             rollout,
             supply_chain: Arc::new(SupplyChainGate::default()),
+            capability_verifying_key: None,
+            approval_verifying_key: None,
+            connectors_file: None,
             started_at: Instant::now(),
         };
         let cloned = state.clone();
@@ -2961,7 +3787,7 @@ mod tests {
             name: None,
             description: None,
             args: vec![],
-            env: HashMap::new(),
+            env: BTreeMap::new(),
             config: None,
             categories: vec![],
             version: None,

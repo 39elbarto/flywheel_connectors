@@ -11,6 +11,7 @@ use fcp_core::{
     BudgetEnforcement, BudgetStatus, FcpError, UsageBudgetPolicy, UsageBudgetSnapshot,
     UsageBudgetUsage, UsageMetric, UsageMetricKind, ZoneId,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::{PolicyEngine, PreflightRequest, PreflightResponse};
 

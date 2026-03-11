@@ -502,7 +502,7 @@ async fn introspect_reader_produces_correct_tool_descriptors() {
         assert_eq!(tool.idempotency, IdempotencyClass::Strict);
         assert!(tool.idempotent); // Strict → idempotent
         assert!(!tool.requires_confirmation); // No approval required
-        assert!(tool.supports_simulate);
+        assert!(!tool.supports_simulate);
         assert!(tool.approval_mode.is_none());
     }
 }
@@ -1903,6 +1903,7 @@ fn preflight_response_serde_roundtrip() {
 #[test]
 fn connector_archetype_all_variants_serde() {
     let archetypes = [
+        (ConnectorArchetype::Unknown, "\"unknown\""),
         (ConnectorArchetype::RequestResponse, "\"request_response\""),
         (ConnectorArchetype::Streaming, "\"streaming\""),
         (ConnectorArchetype::Bidirectional, "\"bidirectional\""),
@@ -2429,10 +2430,10 @@ fn tool_descriptor_supports_simulate_across_tiers() {
     for tier in tiers {
         let op = make_op("op", RiskLevel::Low, tier, IdempotencyClass::Strict, None);
         let tool = ToolDescriptor::from(&op);
-        // Default is true for all tiers
+        // Tier alone does not prove live simulate support.
         assert!(
-            tool.supports_simulate,
-            "supports_simulate should default to true for tier {tier:?}"
+            !tool.supports_simulate,
+            "supports_simulate should remain false without explicit host evidence for tier {tier:?}"
         );
     }
 }

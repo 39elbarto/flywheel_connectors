@@ -47,17 +47,23 @@ use fcp_host::{
     BatchExecutor, BatchInvokeRequest, BatchInvokeResponse, BatchOperation, BatchOperationError,
     BatchOptions, BatchStatus, BudgetPolicyEngine, BudgetReportRequest, BudgetReportResponse,
     CacheMetadata, CacheValidator, CancellationController, CancellationRequest,
-    CancellationResponse, ConnectorAdminStatus, ConnectorArchetype, ConnectorInventoryApplyReport,
+    CancellationResponse, ConfigRevisionRecord, ConnectorAdminState, ConnectorAdminStatus,
+    ConnectorArchetype, ConnectorConfigApplyRequest, ConnectorConfigApplyResponse,
+    ConnectorConfigDiffRequest, ConnectorConfigDiffResponse, ConnectorConfigRevisionsResponse,
+    ConnectorConfigRollbackRequest, ConnectorConfigSnapshot, ConnectorConfigSnapshotSource,
+    ConnectorConfigValidateRequest, ConnectorConfigValidateResponse, ConnectorInventoryApplyReport,
     ConnectorInventoryMutationKind, ConnectorInventoryMutationRequest,
     ConnectorInventoryMutationResponse, ConnectorInventoryResponse, ConnectorRegistry,
     ConnectorSummary, DiscoveryEndpoint, DiscoveryFilter, DiscoveryResponse, DoctorReport,
-    DoctorRequest, DoctorService, GateOutcome, HostAdminStateStore, HostHealthResponse,
-    HostHealthStatus, HostPreflightRequest, IntrospectionResponse, ManagedConnectorConfig,
-    JournalQueryRequest, JournalQueryResponse, LifecycleTransitionRequest,
-    LifecycleTransitionResponse, OperationResult, OperationResultStatus, PreflightRequest,
-    PreflightResponse, RequestPriority, ResilienceError, ResilienceLayer, RolloutController,
-    RolloutDecision, RolloutObservation, RolloutOutcome, SafetyTierExt,
-    StartupReconciliationReport, SupplyChainGate, SupplyChainGateConfig, merge_connector_health,
+    DoctorRequest, DoctorService, EventAcknowledgeRequest, EventAcknowledgeResponse,
+    EventQueryRequest, EventQueryResponse, GateOutcome, HostAdminStateStore, HostHealthResponse,
+    HostHealthStatus, HostPreflightRequest, IntrospectionResponse, JournalQueryRequest,
+    JournalQueryResponse, LifecycleTransitionRequest, LifecycleTransitionResponse, LogQueryRequest,
+    LogQueryResponse, ManagedConnectorConfig, OperationResult, OperationResultStatus,
+    PreflightRequest, PreflightResponse, RequestPriority, ResilienceError, ResilienceLayer,
+    RolloutController, RolloutDecision, RolloutObservation, RolloutOutcome, SafetyTierExt,
+    SanitizedConnectorConfig, StartupReconciliationReport, SupplyChainGate, SupplyChainGateConfig,
+    diff_sanitized_config_values, merge_connector_health,
 };
 use fcp_host::{HostError, HostResult};
 use futures_util::future::join_all;
@@ -66,7 +72,7 @@ use hyper_util::{
     server::conn::auto::Builder as HyperConnectionBuilder, service::TowerToHyperService,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use tower::ServiceExt;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -1735,6 +1741,34 @@ async fn async_main() -> HostResult<()> {
             get(connector_status_handler),
         )
         .route(
+            "/rpc/connectors/{connector_id}/config",
+            get(connector_config_snapshot_handler),
+        )
+        .route(
+            "/rpc/connectors/{connector_id}/config/revisions",
+            get(connector_config_revisions_handler),
+        )
+        .route(
+            "/rpc/connectors/{connector_id}/config/revisions/{revision_id}",
+            get(connector_config_revision_handler),
+        )
+        .route(
+            "/rpc/connectors/{connector_id}/config/diff",
+            post(connector_config_diff_handler),
+        )
+        .route(
+            "/rpc/connectors/{connector_id}/config/validate",
+            post(connector_config_validate_handler),
+        )
+        .route(
+            "/rpc/connectors/{connector_id}/config/apply",
+            post(connector_config_apply_handler),
+        )
+        .route(
+            "/rpc/connectors/{connector_id}/config/rollback",
+            post(connector_config_rollback_handler),
+        )
+        .route(
             "/rpc/connectors/apply",
             post(connector_inventory_apply_handler),
         )
@@ -1773,6 +1807,13 @@ async fn async_main() -> HostResult<()> {
         .route(
             "/rpc/admin/journal/{connector_id}",
             get(journal_connector_handler),
+        )
+        // ── Logs, events, and receipt RPCs ──
+        .route("/rpc/admin/logs", post(log_query_handler))
+        .route("/rpc/admin/events", post(event_query_handler))
+        .route(
+            "/rpc/admin/events/acknowledge",
+            post(event_acknowledge_handler),
         )
         .with_state(state);
 
@@ -2159,6 +2200,579 @@ async fn connector_inventory_apply_handler(
             entries: Vec::new(),
         }),
     }))
+}
+
+#[derive(Debug, Clone)]
+struct ConnectorConfigContext {
+    raw_payload: Value,
+    current: SanitizedConnectorConfig,
+    connector_state: Option<ConnectorAdminState>,
+}
+
+fn connector_config_payload(config: &ConnectorConfig) -> Value {
+    config.config.clone().unwrap_or_else(|| json!({}))
+}
+
+fn normalize_connector_config_payload(payload: Value) -> Option<Value> {
+    match payload {
+        Value::Object(map) if map.is_empty() => None,
+        other => Some(other),
+    }
+}
+
+fn find_connector_inventory_entry<'a>(
+    inventory: &'a [ConnectorConfig],
+    connector_id: &ConnectorId,
+) -> Option<&'a ConnectorConfig> {
+    inventory
+        .iter()
+        .find(|entry| entry.id == connector_id.as_str())
+}
+
+async fn load_connector_config_context(
+    state: &AppState,
+    connector_id: &ConnectorId,
+) -> Result<ConnectorConfigContext, HostError> {
+    let inventory = state.registry.inventory().await;
+    let inventory_entry = find_connector_inventory_entry(&inventory, connector_id)
+        .cloned()
+        .ok_or_else(|| HostError::ConnectorNotFound(connector_id.to_string()))?;
+    let raw_payload = connector_config_payload(&inventory_entry);
+    let current = SanitizedConnectorConfig::from_payload(raw_payload.clone())
+        .map_err(map_lifecycle_host_error)?;
+    let connector_state = state.lifecycle.connector_state(connector_id).await;
+    Ok(ConnectorConfigContext {
+        raw_payload,
+        current,
+        connector_state,
+    })
+}
+
+fn current_config_revision_id(context: &ConnectorConfigContext) -> Option<u64> {
+    context
+        .connector_state
+        .as_ref()
+        .and_then(|state| state.active_config_revision_id)
+}
+
+fn current_config_snapshot_source(
+    context: &ConnectorConfigContext,
+) -> ConnectorConfigSnapshotSource {
+    if context
+        .connector_state
+        .as_ref()
+        .and_then(ConnectorAdminState::active_config_revision)
+        .is_some_and(|revision| revision.payload_digest == context.current.payload_digest)
+    {
+        ConnectorConfigSnapshotSource::ActiveRevision
+    } else {
+        ConnectorConfigSnapshotSource::ManagedInventory
+    }
+}
+
+fn connector_config_snapshot_from_context(
+    connector_id: &ConnectorId,
+    context: &ConnectorConfigContext,
+) -> ConnectorConfigSnapshot {
+    let (active_revision_id, active_revision, revision_count, last_journal_sequence) = context
+        .connector_state
+        .as_ref()
+        .map_or((None, None, 0, 0), |state| {
+            (
+                state.active_config_revision_id,
+                state.active_config_revision().cloned(),
+                state.config_revisions.len(),
+                state.last_journal_sequence,
+            )
+        });
+    ConnectorConfigSnapshot {
+        connector_id: connector_id.clone(),
+        current: context.current.clone(),
+        source: current_config_snapshot_source(context),
+        active_revision_id,
+        active_revision,
+        revision_count,
+        last_journal_sequence,
+    }
+}
+
+fn connector_config_revisions_from_context(
+    connector_id: &ConnectorId,
+    context: &ConnectorConfigContext,
+) -> ConnectorConfigRevisionsResponse {
+    let (active_revision_id, revision_count, last_journal_sequence, revisions) = context
+        .connector_state
+        .as_ref()
+        .map_or((None, 0, 0, Vec::new()), |state| {
+            (
+                state.active_config_revision_id,
+                state.config_revisions.len(),
+                state.last_journal_sequence,
+                state.config_revisions.clone(),
+            )
+        });
+    ConnectorConfigRevisionsResponse {
+        connector_id: connector_id.clone(),
+        active_revision_id,
+        revision_count,
+        last_journal_sequence,
+        revisions,
+    }
+}
+
+fn find_config_revision(
+    context: &ConnectorConfigContext,
+    connector_id: &ConnectorId,
+    revision_id: u64,
+) -> Result<ConfigRevisionRecord, HostError> {
+    context
+        .connector_state
+        .as_ref()
+        .and_then(|state| state.config_revision(revision_id))
+        .cloned()
+        .ok_or_else(|| {
+            HostError::InvalidFilter(format!(
+                "config revision '{revision_id}' was not found for connector '{connector_id}'"
+            ))
+        })
+}
+
+fn ensure_expected_config_revision(
+    connector_id: &ConnectorId,
+    expected: Option<u64>,
+    current: Option<u64>,
+) -> Result<(), HostError> {
+    match (expected, current) {
+        (Some(expected), Some(current)) if expected != current => {
+            Err(HostError::InvalidFilter(format!(
+                "connector '{connector_id}' is at config revision {current}, expected {expected}"
+            )))
+        }
+        (Some(expected), None) => Err(HostError::InvalidFilter(format!(
+            "connector '{connector_id}' has no active config revision, expected {expected}"
+        ))),
+        _ => Ok(()),
+    }
+}
+
+fn next_inventory_with_config(
+    mut inventory: Vec<ConnectorConfig>,
+    connector_id: &ConnectorId,
+    payload: Value,
+) -> Result<Vec<ConnectorConfig>, HostError> {
+    let entry = inventory
+        .iter_mut()
+        .find(|entry| entry.id == connector_id.as_str())
+        .ok_or_else(|| HostError::ConnectorNotFound(connector_id.to_string()))?;
+    entry.config = normalize_connector_config_payload(payload);
+    Ok(inventory)
+}
+
+async fn rollback_connector_inventory(
+    state: &AppState,
+    connectors_file: &PathBuf,
+    previous_configs: &[ConnectorConfig],
+) -> String {
+    let file_note = match write_connector_configs_file(connectors_file, previous_configs) {
+        Ok(()) => "connectors file rolled back".to_string(),
+        Err(err) => format!("connectors file rollback also failed: {err}"),
+    };
+    let registry_note = match state
+        .registry
+        .apply_configs(previous_configs.to_vec())
+        .await
+    {
+        Ok(_) => "live registry rolled back".to_string(),
+        Err(err) => format!("live registry rollback also failed: {err}"),
+    };
+    format!("{file_note}; {registry_note}")
+}
+
+async fn apply_connector_config_payload(
+    state: &AppState,
+    connector_id: &ConnectorId,
+    payload: Value,
+    expected_active_revision_id: Option<u64>,
+    created_by: Option<String>,
+    change_reason: Option<String>,
+) -> Result<ConnectorConfigApplyResponse, HostError> {
+    let current_context = load_connector_config_context(state, connector_id).await?;
+    ensure_expected_config_revision(
+        connector_id,
+        expected_active_revision_id,
+        current_config_revision_id(&current_context),
+    )?;
+
+    let candidate = SanitizedConnectorConfig::from_payload(payload.clone())
+        .map_err(map_lifecycle_host_error)?;
+    let diff = diff_sanitized_config_values(&current_context.raw_payload, &payload)
+        .map_err(map_lifecycle_host_error)?;
+    if diff.is_empty() && candidate.payload_digest == current_context.current.payload_digest {
+        return Ok(ConnectorConfigApplyResponse {
+            connector_id: connector_id.clone(),
+            changed: false,
+            previous_active_revision_id: current_config_revision_id(&current_context),
+            current_active_revision_id: current_config_revision_id(&current_context),
+            previous: None,
+            current: current_context.current.clone(),
+            diff,
+            revision: None,
+            apply: None,
+            admin_state: None,
+        });
+    }
+
+    let connectors_file = state.connectors_file.clone().ok_or_else(|| {
+        HostError::Unavailable(
+            "live connector config mutation requires FCP_HOST_CONNECTORS_FILE to be configured"
+                .to_string(),
+        )
+    })?;
+    let previous_configs = read_connector_configs_file(&connectors_file)?;
+    let next_configs = next_inventory_with_config(previous_configs.clone(), connector_id, payload)?;
+
+    write_connector_configs_file(&connectors_file, &next_configs)?;
+    let apply = match state.registry.apply_configs(next_configs).await {
+        Ok(report) => report,
+        Err(err) => {
+            let rollback_note =
+                rollback_connector_inventory(state, &connectors_file, &previous_configs).await;
+            return Err(HostError::Internal(format!(
+                "failed to apply live connector config mutation for '{connector_id}': {err}; {rollback_note}"
+            )));
+        }
+    };
+
+    let current_inventory = state.registry.inventory().await;
+    let current_entry = find_connector_inventory_entry(&current_inventory, connector_id)
+        .cloned()
+        .ok_or_else(|| {
+            HostError::Internal(format!(
+                "connector '{connector_id}' was missing from the live registry immediately after config apply"
+            ))
+        })?;
+    let current_payload = connector_config_payload(&current_entry);
+    let current = SanitizedConnectorConfig::from_payload(current_payload.clone())
+        .map_err(map_lifecycle_host_error)?;
+    let revision = match state
+        .lifecycle
+        .append_config_revision(
+            connector_id,
+            current_payload.clone(),
+            created_by,
+            change_reason,
+        )
+        .await
+    {
+        Ok(revision) => revision,
+        Err(err) => {
+            let rollback_note =
+                rollback_connector_inventory(state, &connectors_file, &previous_configs).await;
+            return Err(HostError::Internal(format!(
+                "failed to persist config revision for '{connector_id}': {}; {rollback_note}",
+                map_lifecycle_host_error(err)
+            )));
+        }
+    };
+    let admin_state = state
+        .lifecycle
+        .reconcile_registered_connectors(&state.registry.list().await)
+        .await
+        .map_err(map_lifecycle_host_error)?;
+    let diff = diff_sanitized_config_values(&current_context.raw_payload, &current_payload)
+        .map_err(map_lifecycle_host_error)?;
+
+    Ok(ConnectorConfigApplyResponse {
+        connector_id: connector_id.clone(),
+        changed: true,
+        previous_active_revision_id: current_config_revision_id(&current_context),
+        current_active_revision_id: Some(revision.revision_id),
+        previous: Some(current_context.current),
+        current,
+        diff,
+        revision: Some(revision),
+        apply: Some(apply),
+        admin_state: Some(admin_state),
+    })
+}
+
+async fn connector_config_snapshot_handler(
+    State(state): State<Arc<AppState>>,
+    Path(connector_id): Path<String>,
+) -> Result<Json<ConnectorConfigSnapshot>, (StatusCode, String)> {
+    let connector_id = parse_connector_id(&connector_id)?;
+    let started_at = Instant::now();
+    tracing::debug!(
+        event = "connector_config_snapshot_request",
+        connector_id = %connector_id,
+        "processing connector config snapshot request"
+    );
+    let context = load_connector_config_context(&state, &connector_id)
+        .await
+        .map_err(map_host_error)?;
+    let response = connector_config_snapshot_from_context(&connector_id, &context);
+    tracing::debug!(
+        event = "connector_config_snapshot_response",
+        connector_id = %connector_id,
+        source = ?response.source,
+        revision_count = response.revision_count,
+        duration_ms = started_at.elapsed().as_millis() as u64,
+        "connector config snapshot request complete"
+    );
+    Ok(Json(response))
+}
+
+async fn connector_config_revisions_handler(
+    State(state): State<Arc<AppState>>,
+    Path(connector_id): Path<String>,
+) -> Result<Json<ConnectorConfigRevisionsResponse>, (StatusCode, String)> {
+    let connector_id = parse_connector_id(&connector_id)?;
+    let started_at = Instant::now();
+    tracing::debug!(
+        event = "connector_config_revisions_request",
+        connector_id = %connector_id,
+        "processing connector config revision history request"
+    );
+    let context = load_connector_config_context(&state, &connector_id)
+        .await
+        .map_err(map_host_error)?;
+    let response = connector_config_revisions_from_context(&connector_id, &context);
+    tracing::debug!(
+        event = "connector_config_revisions_response",
+        connector_id = %connector_id,
+        revision_count = response.revision_count,
+        duration_ms = started_at.elapsed().as_millis() as u64,
+        "connector config revision history request complete"
+    );
+    Ok(Json(response))
+}
+
+async fn connector_config_revision_handler(
+    State(state): State<Arc<AppState>>,
+    Path((connector_id, revision_id)): Path<(String, u64)>,
+) -> Result<Json<ConfigRevisionRecord>, (StatusCode, String)> {
+    let connector_id = parse_connector_id(&connector_id)?;
+    let started_at = Instant::now();
+    tracing::debug!(
+        event = "connector_config_revision_request",
+        connector_id = %connector_id,
+        revision_id,
+        "processing connector config revision request"
+    );
+    let context = load_connector_config_context(&state, &connector_id)
+        .await
+        .map_err(map_host_error)?;
+    let response =
+        find_config_revision(&context, &connector_id, revision_id).map_err(map_host_error)?;
+    tracing::debug!(
+        event = "connector_config_revision_response",
+        connector_id = %connector_id,
+        revision_id,
+        duration_ms = started_at.elapsed().as_millis() as u64,
+        "connector config revision request complete"
+    );
+    Ok(Json(response))
+}
+
+async fn connector_config_diff_handler(
+    State(state): State<Arc<AppState>>,
+    Path(connector_id): Path<String>,
+    Json(request): Json<ConnectorConfigDiffRequest>,
+) -> Result<Json<ConnectorConfigDiffResponse>, (StatusCode, String)> {
+    let connector_id = parse_connector_id(&connector_id)?;
+    let started_at = Instant::now();
+    tracing::debug!(
+        event = "connector_config_diff_request",
+        connector_id = %connector_id,
+        revision_id = ?request.revision_id,
+        "processing connector config diff request"
+    );
+    let context = load_connector_config_context(&state, &connector_id)
+        .await
+        .map_err(map_host_error)?;
+    let (base_revision_id, base, base_payload) = if let Some(revision_id) = request.revision_id {
+        let revision =
+            find_config_revision(&context, &connector_id, revision_id).map_err(map_host_error)?;
+        (
+            Some(revision_id),
+            SanitizedConnectorConfig::from(&revision),
+            revision.payload,
+        )
+    } else {
+        (
+            match current_config_snapshot_source(&context) {
+                ConnectorConfigSnapshotSource::ActiveRevision => {
+                    current_config_revision_id(&context)
+                }
+                ConnectorConfigSnapshotSource::ManagedInventory => None,
+            },
+            context.current.clone(),
+            context.raw_payload.clone(),
+        )
+    };
+    let candidate = SanitizedConnectorConfig::from_payload(request.payload.clone())
+        .map_err(map_lifecycle_host_error)
+        .map_err(map_host_error)?;
+    let entries = diff_sanitized_config_values(&base_payload, &request.payload)
+        .map_err(map_lifecycle_host_error)
+        .map_err(map_host_error)?;
+    let response = ConnectorConfigDiffResponse {
+        connector_id: connector_id.clone(),
+        base_revision_id,
+        base,
+        candidate,
+        changed: !entries.is_empty(),
+        entries,
+    };
+    tracing::debug!(
+        event = "connector_config_diff_response",
+        connector_id = %connector_id,
+        changed = response.changed,
+        entry_count = response.entries.len(),
+        duration_ms = started_at.elapsed().as_millis() as u64,
+        "connector config diff request complete"
+    );
+    Ok(Json(response))
+}
+
+async fn connector_config_validate_handler(
+    State(state): State<Arc<AppState>>,
+    Path(connector_id): Path<String>,
+    Json(request): Json<ConnectorConfigValidateRequest>,
+) -> Result<Json<ConnectorConfigValidateResponse>, (StatusCode, String)> {
+    let connector_id = parse_connector_id(&connector_id)?;
+    let started_at = Instant::now();
+    tracing::debug!(
+        event = "connector_config_validate_request",
+        connector_id = %connector_id,
+        "processing connector config validation request"
+    );
+    let context = load_connector_config_context(&state, &connector_id)
+        .await
+        .map_err(map_host_error)?;
+    ensure_expected_config_revision(
+        &connector_id,
+        request.expected_active_revision_id,
+        current_config_revision_id(&context),
+    )
+    .map_err(map_host_error)?;
+    let candidate = SanitizedConnectorConfig::from_payload(request.payload.clone())
+        .map_err(map_lifecycle_host_error)
+        .map_err(map_host_error)?;
+    let diff = diff_sanitized_config_values(&context.raw_payload, &request.payload)
+        .map_err(map_lifecycle_host_error)
+        .map_err(map_host_error)?;
+    let preview_inventory = next_inventory_with_config(
+        state.registry.inventory().await,
+        &connector_id,
+        request.payload,
+    )
+    .map_err(map_host_error)?;
+    let (valid, preview, error) = match state.registry.preview_configs(preview_inventory).await {
+        Ok(preview) => (true, Some(preview), None),
+        Err(err) => (false, None, Some(err.to_string())),
+    };
+    let response = ConnectorConfigValidateResponse {
+        connector_id: connector_id.clone(),
+        valid,
+        current_active_revision_id: current_config_revision_id(&context),
+        current: context.current,
+        candidate,
+        diff,
+        preview,
+        error,
+    };
+    tracing::debug!(
+        event = "connector_config_validate_response",
+        connector_id = %connector_id,
+        valid,
+        duration_ms = started_at.elapsed().as_millis() as u64,
+        "connector config validation request complete"
+    );
+    Ok(Json(response))
+}
+
+async fn connector_config_apply_handler(
+    State(state): State<Arc<AppState>>,
+    Path(connector_id): Path<String>,
+    Json(request): Json<ConnectorConfigApplyRequest>,
+) -> Result<Json<ConnectorConfigApplyResponse>, (StatusCode, String)> {
+    let connector_id = parse_connector_id(&connector_id)?;
+    let started_at = Instant::now();
+    tracing::debug!(
+        event = "connector_config_apply_request",
+        connector_id = %connector_id,
+        "processing connector config apply request"
+    );
+    let response = apply_connector_config_payload(
+        &state,
+        &connector_id,
+        request.payload,
+        request.expected_active_revision_id,
+        request.created_by,
+        request.change_reason,
+    )
+    .await
+    .map_err(map_host_error)?;
+    tracing::info!(
+        event = "connector_config_apply_response",
+        connector_id = %connector_id,
+        changed = response.changed,
+        current_active_revision_id = ?response.current_active_revision_id,
+        duration_ms = started_at.elapsed().as_millis() as u64,
+        "connector config apply request complete"
+    );
+    Ok(Json(response))
+}
+
+async fn connector_config_rollback_handler(
+    State(state): State<Arc<AppState>>,
+    Path(connector_id): Path<String>,
+    Json(request): Json<ConnectorConfigRollbackRequest>,
+) -> Result<Json<ConnectorConfigApplyResponse>, (StatusCode, String)> {
+    let connector_id = parse_connector_id(&connector_id)?;
+    let started_at = Instant::now();
+    tracing::debug!(
+        event = "connector_config_rollback_request",
+        connector_id = %connector_id,
+        revision_id = request.revision_id,
+        "processing connector config rollback request"
+    );
+    let context = load_connector_config_context(&state, &connector_id)
+        .await
+        .map_err(map_host_error)?;
+    let revision = find_config_revision(&context, &connector_id, request.revision_id)
+        .map_err(map_host_error)?;
+    if !revision.is_replayable() {
+        return Err(map_host_error(HostError::InvalidFilter(format!(
+            "config revision '{}' for connector '{}' contains redacted inline secrets and cannot be replayed safely",
+            request.revision_id, connector_id
+        ))));
+    }
+    let response = apply_connector_config_payload(
+        &state,
+        &connector_id,
+        revision.payload.clone(),
+        request.expected_active_revision_id,
+        request.created_by,
+        request.change_reason.or_else(|| {
+            Some(format!(
+                "rollback to config revision {}",
+                request.revision_id
+            ))
+        }),
+    )
+    .await
+    .map_err(map_host_error)?;
+    tracing::info!(
+        event = "connector_config_rollback_response",
+        connector_id = %connector_id,
+        revision_id = request.revision_id,
+        current_active_revision_id = ?response.current_active_revision_id,
+        duration_ms = started_at.elapsed().as_millis() as u64,
+        "connector config rollback request complete"
+    );
+    Ok(Json(response))
 }
 
 async fn preflight_handler(
@@ -2967,6 +3581,34 @@ async fn async_main() -> HostResult<()> {
             get(connector_status_handler),
         )
         .route(
+            "/rpc/connectors/{connector_id}/config",
+            get(connector_config_snapshot_handler),
+        )
+        .route(
+            "/rpc/connectors/{connector_id}/config/revisions",
+            get(connector_config_revisions_handler),
+        )
+        .route(
+            "/rpc/connectors/{connector_id}/config/revisions/{revision_id}",
+            get(connector_config_revision_handler),
+        )
+        .route(
+            "/rpc/connectors/{connector_id}/config/diff",
+            post(connector_config_diff_handler),
+        )
+        .route(
+            "/rpc/connectors/{connector_id}/config/validate",
+            post(connector_config_validate_handler),
+        )
+        .route(
+            "/rpc/connectors/{connector_id}/config/apply",
+            post(connector_config_apply_handler),
+        )
+        .route(
+            "/rpc/connectors/{connector_id}/config/rollback",
+            post(connector_config_rollback_handler),
+        )
+        .route(
             "/rpc/connectors/apply",
             post(connector_inventory_apply_handler),
         )
@@ -3005,6 +3647,13 @@ async fn async_main() -> HostResult<()> {
         .route(
             "/rpc/admin/journal/{connector_id}",
             get(journal_connector_handler),
+        )
+        // ── Logs, events, and receipt RPCs ──
+        .route("/rpc/admin/logs", post(log_query_handler))
+        .route("/rpc/admin/events", post(event_query_handler))
+        .route(
+            "/rpc/admin/events/acknowledge",
+            post(event_acknowledge_handler),
         )
         .with_state(state);
 
@@ -4328,6 +4977,47 @@ async fn journal_connector_handler(
     Json(state.lifecycle.query_journal(&request).await)
 }
 
+// ── Log, event, and receipt handlers ────────────────────────────────────────
+
+async fn log_query_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<LogQueryRequest>,
+) -> Json<LogQueryResponse> {
+    tracing::debug!(
+        event = "log_query_request",
+        connector_id = ?request.connector_id,
+        min_severity = ?request.min_severity,
+        "processing log query"
+    );
+    Json(state.lifecycle.query_logs(&request).await)
+}
+
+async fn event_query_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<EventQueryRequest>,
+) -> Json<EventQueryResponse> {
+    tracing::debug!(
+        event = "event_query_request",
+        connector_id = ?request.connector_id,
+        kind = ?request.kind,
+        unacknowledged_only = request.unacknowledged_only,
+        "processing event query"
+    );
+    Json(state.lifecycle.query_events(&request).await)
+}
+
+async fn event_acknowledge_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<EventAcknowledgeRequest>,
+) -> Json<EventAcknowledgeResponse> {
+    tracing::debug!(
+        event = "event_acknowledge_request",
+        count = request.event_ids.len(),
+        "processing event acknowledgement"
+    );
+    Json(state.lifecycle.acknowledge_events(&request).await)
+}
+
 fn parse_connector_id(raw: &str) -> Result<ConnectorId, (StatusCode, String)> {
     raw.parse().map_err(|err| {
         map_host_error(HostError::InvalidFilter(format!(
@@ -4566,8 +5256,8 @@ mod tests {
         let registry = fcp_async_core::time::timeout(
             Duration::from_secs(2),
             SubprocessRegistry::from_configs(vec![subprocess_test_connector_config(
-            connector_id.as_str(),
-        )]),
+                connector_id.as_str(),
+            )]),
         )
         .await
         .expect("registry construction should not hang")
@@ -5130,6 +5820,59 @@ mod tests {
         let dbg = format!("{config:?}");
         assert!(dbg.contains("ConnectorConfig"));
         assert!(dbg.contains("fcp.test:echo:1.0.0"));
+    }
+
+    #[test]
+    fn normalize_connector_config_payload_omits_empty_objects() {
+        assert_eq!(normalize_connector_config_payload(json!({})), None);
+        assert_eq!(
+            normalize_connector_config_payload(json!({"profile": "work"})),
+            Some(json!({"profile": "work"}))
+        );
+    }
+
+    #[test]
+    fn current_config_snapshot_source_prefers_active_revision_when_digest_matches() {
+        let revision = ConfigRevisionRecord {
+            revision_id: 7,
+            previous_revision_id: Some(6),
+            created_at: Utc::now(),
+            created_by: Some("operator".to_string()),
+            change_reason: Some("update".to_string()),
+            payload: json!({"profile": "work"}),
+            payload_digest: SanitizedConnectorConfig::from_payload(json!({"profile": "work"}))
+                .expect("sanitized digest")
+                .payload_digest,
+            redacted_fields: Vec::new(),
+            credential_references: Vec::new(),
+            contains_inline_secrets: false,
+        };
+        let context = ConnectorConfigContext {
+            raw_payload: json!({"profile": "work"}),
+            current: SanitizedConnectorConfig::from_payload(json!({"profile": "work"}))
+                .expect("sanitized current"),
+            connector_state: Some(ConnectorAdminState {
+                config_revisions: vec![revision.clone()],
+                active_config_revision_id: Some(revision.revision_id),
+                ..ConnectorAdminState::default()
+            }),
+        };
+
+        assert_eq!(
+            current_config_snapshot_source(&context),
+            ConnectorConfigSnapshotSource::ActiveRevision
+        );
+    }
+
+    #[test]
+    fn ensure_expected_config_revision_rejects_mismatch() {
+        let connector_id = ConnectorId::from_static("fcp.test:config-check:utility:1.0.0");
+        let err = ensure_expected_config_revision(&connector_id, Some(11), Some(12))
+            .expect_err("mismatch should be rejected");
+        assert!(
+            err.to_string()
+                .contains("is at config revision 12, expected 11")
+        );
     }
 
     #[fcp_async_core::runtime::test]

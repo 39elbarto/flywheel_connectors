@@ -31,9 +31,9 @@ use fcp_host::{
     CancellationResponse, CleanupBehavior, ConnectorAdminStatus, ConnectorArchetype,
     ConnectorDriftKind, ConnectorInventoryResponse, ConnectorRegistry, ConnectorSummary,
     DesiredRuntimeState, DiscoveryEndpoint, DiscoveryResponse, GateOutcome, HostAdminStateStore,
-    HostHealthResponse, HostHealthStatus, HostPreflightRequest,
-    IntrospectionResponse, ObservedRuntimeState, OperationResultStatus, PolicyEngine,
-    PreflightRequest, PreflightResponse, RecoveryAction, RolloutDecision, RolloutOutcome,
+    HostHealthResponse, HostHealthStatus, HostPreflightRequest, IntrospectionResponse,
+    ObservedRuntimeState, OperationResultStatus, PolicyEngine, PreflightRequest, PreflightResponse,
+    RecoveryAction, RolloutDecision, RolloutOutcome,
 };
 use fcp_testkit::LogCapture;
 use reqwest::header::{CACHE_CONTROL, ETAG, HeaderMap, HeaderValue, IF_NONE_MATCH, LAST_MODIFIED};
@@ -1316,10 +1316,12 @@ async fn fcp_host_binary_preflight_route_denies_missing_capability_token()
     .await?;
 
     assert!(!denied.allowed);
-    assert!(denied
-        .reason
-        .as_deref()
-        .is_some_and(|reason| reason.contains("capability token is required")));
+    assert!(
+        denied
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("capability token is required"))
+    );
 
     Ok(())
 }
@@ -1483,7 +1485,8 @@ async fn fcp_host_binary_batch_route_executes_multiple_invokes()
     .await?;
     let url = |path: &str| format!("{}{path}", host.base_url);
 
-    let (mut first_request, _) = build_invoke_request(connector_id.clone(), &capability_signing_key);
+    let (mut first_request, _) =
+        build_invoke_request(connector_id.clone(), &capability_signing_key);
     first_request.input = json!({ "message": "first" });
     let (mut second_request, _) =
         build_invoke_request(connector_id.clone(), &capability_signing_key);

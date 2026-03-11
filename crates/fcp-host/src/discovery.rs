@@ -329,6 +329,8 @@ impl ConnectorInventoryResponse {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConnectorArchetype {
+    /// Runtime does not have authoritative archetype metadata.
+    Unknown,
     /// Request-response (REST, GraphQL).
     RequestResponse,
     /// Streaming (WebSocket, SSE).
@@ -483,7 +485,8 @@ impl From<&OperationInfo> for ToolDescriptor {
                 op.idempotency,
                 fcp_core::IdempotencyClass::Strict | fcp_core::IdempotencyClass::BestEffort
             ),
-            supports_simulate: true, // Assume all support simulate by default
+            // OperationInfo alone does not prove live simulate support.
+            supports_simulate: false,
             latency_hint: None,
             rate_limits: op.rate_limit.as_ref().map_or_else(Vec::new, |rl| {
                 rl.pool_name
@@ -1008,7 +1011,7 @@ where
             .registry
             .get_archetype(connector_id)
             .await
-            .unwrap_or(ConnectorArchetype::RequestResponse);
+            .unwrap_or(ConnectorArchetype::Unknown);
 
         let rate_limits = self.registry.get_rate_limits(connector_id).await;
 
@@ -1150,7 +1153,11 @@ impl DiscoveryCache {
         }
     }
 
-    fn cache_metadata<T: Serialize>(&self, payload: &T, last_modified: DateTime<Utc>) -> CacheMetadata {
+    fn cache_metadata<T: Serialize>(
+        &self,
+        payload: &T,
+        last_modified: DateTime<Utc>,
+    ) -> CacheMetadata {
         let ttl_seconds = self.ttl.as_secs().min(u64::from(u32::MAX)) as u32;
         CacheMetadata::strong(payload, last_modified, ttl_seconds, Some(ttl_seconds))
     }
@@ -1513,6 +1520,7 @@ mod tests {
     #[test]
     fn connector_archetype_serialization() {
         for archetype in [
+            ConnectorArchetype::Unknown,
             ConnectorArchetype::RequestResponse,
             ConnectorArchetype::Streaming,
             ConnectorArchetype::Bidirectional,
@@ -2198,7 +2206,7 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
-    async fn discovery_endpoint_defaults_archetype() {
+    async fn discovery_endpoint_marks_missing_archetype_unknown() {
         let calls = Arc::new(AtomicUsize::new(0));
         let summary = make_summary(
             "default-arch",
@@ -2212,7 +2220,7 @@ mod tests {
         let endpoint = DiscoveryEndpoint::new(Arc::new(registry), Arc::new(AllowPolicy));
 
         let response = endpoint.introspect(&summary.id).await.unwrap();
-        assert_eq!(response.archetype, ConnectorArchetype::RequestResponse);
+        assert_eq!(response.archetype, ConnectorArchetype::Unknown);
     }
 
     #[fcp_async_core::runtime::test]
@@ -2686,7 +2694,7 @@ mod tests {
         assert_eq!(tool.idempotency, IdempotencyClass::Strict);
         assert!(tool.requires_confirmation);
         assert!(tool.idempotent); // Strict => idempotent
-        assert!(tool.supports_simulate);
+        assert!(!tool.supports_simulate);
         assert!(tool.ai_hints.is_some());
     }
 
@@ -3419,6 +3427,7 @@ mod tests {
     #[test]
     fn connector_archetype_serde_roundtrip_all() {
         let archetypes = [
+            ConnectorArchetype::Unknown,
             ConnectorArchetype::RequestResponse,
             ConnectorArchetype::Streaming,
             ConnectorArchetype::Bidirectional,
@@ -3434,6 +3443,10 @@ mod tests {
 
     #[test]
     fn connector_archetype_snake_case_names() {
+        assert_eq!(
+            serde_json::to_string(&ConnectorArchetype::Unknown).unwrap(),
+            "\"unknown\""
+        );
         assert_eq!(
             serde_json::to_string(&ConnectorArchetype::RequestResponse).unwrap(),
             "\"request_response\""

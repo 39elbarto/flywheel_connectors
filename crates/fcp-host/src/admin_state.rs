@@ -209,6 +209,1138 @@ pub struct JournalQueryResponse {
     pub latest_sequence: u64,
 }
 
+// ── Logs, events, and receipt query types ───────────────────────────────────
+
+/// Severity level for host-side log entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogSeverity {
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+/// A single structured log entry from the host control plane.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostLogEntry {
+    /// Monotonic sequence within the host log.
+    pub sequence: u64,
+    /// Connector that produced the log, if applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connector_id: Option<String>,
+    /// Log severity.
+    pub severity: LogSeverity,
+    /// Log message.
+    pub message: String,
+    /// Structured fields attached to this log entry.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub fields: BTreeMap<String, Value>,
+    /// Timestamp of the log entry.
+    pub timestamp: DateTime<Utc>,
+}
+
+/// Host admin API request for querying logs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogQueryRequest {
+    /// Optional connector ID filter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connector_id: Option<String>,
+    /// Minimum severity to include.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_severity: Option<LogSeverity>,
+    /// Only return entries after this sequence number.
+    #[serde(default)]
+    pub after_sequence: u64,
+    /// Maximum number of entries to return.
+    #[serde(default = "default_journal_limit")]
+    pub limit: usize,
+}
+
+/// Host admin API response for a log query.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogQueryResponse {
+    /// Log entries matching the query.
+    pub entries: Vec<HostLogEntry>,
+    /// Highest sequence number in the response.
+    pub latest_sequence: u64,
+}
+
+/// Host-side event kind for the control plane event stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostEventKind {
+    /// Connector lifecycle state changed.
+    LifecycleTransition,
+    /// Connector health check result.
+    HealthCheck,
+    /// Configuration revision applied.
+    ConfigRevision,
+    /// Rollout decision made.
+    RolloutDecision,
+    /// Supply chain verification completed.
+    SupplyChainVerification,
+    /// Admin state drift detected.
+    DriftDetected,
+    /// Connector started or stopped.
+    ConnectorStateChange,
+}
+
+/// A single host control-plane event.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostEvent {
+    /// Unique event identifier.
+    pub event_id: String,
+    /// Event kind.
+    pub kind: HostEventKind,
+    /// Related connector, if applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connector_id: Option<String>,
+    /// Human-readable summary.
+    pub summary: String,
+    /// Structured payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<Value>,
+    /// Event timestamp.
+    pub timestamp: DateTime<Utc>,
+    /// Whether this event has been acknowledged.
+    #[serde(default)]
+    pub acknowledged: bool,
+}
+
+/// Host admin API request for querying events.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventQueryRequest {
+    /// Optional connector ID filter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connector_id: Option<String>,
+    /// Optional event kind filter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<HostEventKind>,
+    /// Only include unacknowledged events.
+    #[serde(default)]
+    pub unacknowledged_only: bool,
+    /// Maximum number of events to return.
+    #[serde(default = "default_journal_limit")]
+    pub limit: usize,
+}
+
+/// Host admin API response for an event query.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventQueryResponse {
+    /// Events matching the query.
+    pub events: Vec<HostEvent>,
+    /// Total unacknowledged event count.
+    pub unacknowledged_count: usize,
+}
+
+/// Host admin API request for acknowledging events.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventAcknowledgeRequest {
+    /// Event IDs to acknowledge.
+    pub event_ids: Vec<String>,
+}
+
+/// Host admin API response after acknowledging events.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventAcknowledgeResponse {
+    /// Number of events acknowledged.
+    pub acknowledged_count: usize,
+    /// Event IDs that were not found.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub not_found: Vec<String>,
+}
+
+/// Host admin API request for querying operation receipts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReceiptQueryRequest {
+    /// Connector ID filter.
+    pub connector_id: String,
+    /// Optional operation name filter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
+    /// Only return receipts after this timestamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<DateTime<Utc>>,
+    /// Maximum number of receipts to return.
+    #[serde(default = "default_journal_limit")]
+    pub limit: usize,
+}
+
+/// A summarized operation receipt from the host.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReceiptSummary {
+    /// Unique receipt identifier.
+    pub receipt_id: String,
+    /// Connector that executed the operation.
+    pub connector_id: String,
+    /// Operation name.
+    pub operation: String,
+    /// Whether the operation succeeded.
+    pub success: bool,
+    /// Execution duration in milliseconds.
+    pub duration_ms: u64,
+    /// Idempotency key if present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+    /// Timestamp of execution.
+    pub executed_at: DateTime<Utc>,
+}
+
+/// Host admin API response for a receipt query.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReceiptQueryResponse {
+    /// Receipts matching the query.
+    pub receipts: Vec<ReceiptSummary>,
+    /// Total receipt count for this connector.
+    pub total_receipts: usize,
+}
+
+// ── Simulate RPC types ──────────────────────────────────────────────────────
+
+/// Host admin API request for a simulation (preflight + connector simulate).
+///
+/// This goes beyond the existing `/rpc/preflight` by actually reaching the
+/// connector's `simulate()` implementation. Preflight only checks
+/// budget/capability/rate-limit; simulate also asks the connector whether the
+/// operation *would* succeed and can return cost estimates and resource
+/// availability.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostSimulateRequest {
+    /// Unique request identifier for correlation.
+    pub request_id: String,
+    /// Target connector.
+    pub connector_id: String,
+    /// Operation to simulate.
+    pub operation: String,
+    /// Input parameters (same shape as an invoke request).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<Value>,
+    /// Zone context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zone_id: Option<String>,
+    /// Principal requesting the simulation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal: Option<String>,
+    /// Whether to ask the connector for cost estimates.
+    #[serde(default)]
+    pub estimate_cost: bool,
+    /// Whether to ask the connector for resource availability.
+    #[serde(default)]
+    pub check_availability: bool,
+    /// Deadline in milliseconds for the simulation. Prevents unbounded connector work.
+    #[serde(default = "default_simulate_deadline_ms")]
+    pub deadline_ms: u64,
+}
+
+const fn default_simulate_deadline_ms() -> u64 {
+    5000
+}
+
+/// Which phases of the simulate pipeline actually ran.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SimulatePhase {
+    /// Only host-side preflight ran (budget, capability, rate-limit).
+    PreflightOnly,
+    /// Host preflight passed, connector `simulate()` was called.
+    ConnectorReached,
+    /// Connector reported it does not support simulation for this operation.
+    ConnectorUnsupported,
+    /// Simulation timed out before the connector responded.
+    TimedOut,
+}
+
+/// Host admin API response for a simulation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostSimulateResponse {
+    /// Correlation request identifier.
+    pub request_id: String,
+    /// Whether the operation would succeed (combined preflight + connector verdict).
+    pub would_succeed: bool,
+    /// Which phase of the simulate pipeline actually ran.
+    pub phase: SimulatePhase,
+    /// Host-side preflight verdict.
+    pub preflight_allowed: bool,
+    /// Human-readable reason if the simulation denied the request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
+    /// FCP error code (e.g., `FCP-3001`) if applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub denial_code: Option<String>,
+    /// Capabilities required but not present.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_capabilities: Vec<String>,
+    /// Connector-reported cost estimate, when `estimate_cost` was true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_estimate: Option<SimulateCostEstimate>,
+    /// Connector-reported resource availability, when `check_availability` was true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub availability: Option<SimulateResourceAvailability>,
+    /// Wall-clock time the simulation took in milliseconds.
+    pub duration_ms: u64,
+    /// Bounded receipt tracking the simulation for audit.
+    pub receipt: SimulateReceipt,
+}
+
+/// Cost estimate returned by a connector simulation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SimulateCostEstimate {
+    /// Estimated API credits consumed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_credits: Option<u64>,
+    /// Estimated execution duration in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_duration_ms: Option<u64>,
+    /// Estimated bytes transferred.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_bytes: Option<u64>,
+    /// Confidence level of the estimate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<SimulateCostConfidence>,
+}
+
+/// Confidence level for a cost estimate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SimulateCostConfidence {
+    /// Rough order of magnitude.
+    Low,
+    /// Based on historical data or connector heuristics.
+    Medium,
+    /// Connector queried upstream API for exact cost.
+    High,
+}
+
+/// Resource availability reported by a connector simulation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SimulateResourceAvailability {
+    /// Whether the upstream resource is available.
+    pub available: bool,
+    /// Remaining rate limit quota, if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit_remaining: Option<u32>,
+    /// Unix timestamp when the rate limit resets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit_reset_at: Option<u64>,
+    /// Connector-specific availability details.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<String>,
+}
+
+/// Bounded simulation receipt for audit and deduplication.
+///
+/// This is the host-side record of a simulation request. It captures what
+/// was simulated, the verdict, and enough metadata for replay detection.
+/// Unlike an invoke receipt, a simulate receipt guarantees no side effects.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SimulateReceipt {
+    /// Unique receipt identifier.
+    pub receipt_id: String,
+    /// Connector that was simulated.
+    pub connector_id: String,
+    /// Operation that was simulated.
+    pub operation: String,
+    /// Phase reached.
+    pub phase: SimulatePhase,
+    /// Combined verdict.
+    pub would_succeed: bool,
+    /// Input digest (blake3 hash of the input JSON, hex-encoded).
+    /// Allows deduplication without storing the full input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_digest: Option<String>,
+    /// Wall-clock simulation duration in milliseconds.
+    pub duration_ms: u64,
+    /// Timestamp of the simulation.
+    pub simulated_at: DateTime<Utc>,
+}
+
+/// Host admin API request for querying simulation receipts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SimulateReceiptQueryRequest {
+    /// Connector ID filter.
+    pub connector_id: String,
+    /// Optional operation filter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
+    /// Only return receipts after this timestamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<DateTime<Utc>>,
+    /// Maximum number of receipts to return.
+    #[serde(default = "default_journal_limit")]
+    pub limit: usize,
+}
+
+/// Host admin API response for a simulation receipt query.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SimulateReceiptQueryResponse {
+    /// Matching simulation receipts.
+    pub receipts: Vec<SimulateReceipt>,
+    /// Total simulation receipt count for this connector.
+    pub total_receipts: usize,
+}
+
+/// Host-advertised simulation capability for a connector operation.
+///
+/// This is the truthful metadata that tells the CLI whether simulation is
+/// real, trivial, or unsupported for a given operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SimulateSupport {
+    /// The connector implements a real `simulate()` for this operation.
+    Real,
+    /// The connector returns a trivial `allowed()` without checking anything.
+    /// The CLI should display this as "preflight only".
+    Trivial,
+    /// The connector does not support simulation for this operation.
+    Unsupported,
+    /// The host has not yet determined simulation support for this operation.
+    Unknown,
+}
+
+/// Per-operation simulation metadata advertised by the host.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OperationSimulateMetadata {
+    /// Operation identifier.
+    pub operation: String,
+    /// Simulation support level.
+    pub simulate_support: SimulateSupport,
+    /// Whether cost estimation is available.
+    #[serde(default)]
+    pub supports_cost_estimate: bool,
+    /// Whether availability checking is available.
+    #[serde(default)]
+    pub supports_availability_check: bool,
+    /// Maximum deadline the connector accepts for simulation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_deadline_ms: Option<u64>,
+}
+
+// ── Capability issuance and auth transport contract ─────────────────────────
+
+/// Host admin API request for issuing a capability token.
+///
+/// The host is the sole issuer of capability tokens in a zone. Tokens are
+/// scoped to a specific connector, set of operations, and principal, with
+/// optional constraints on resources, call budget, and credential access.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapabilityIssuanceRequest {
+    /// Target connector for which capabilities are being granted.
+    pub connector_id: String,
+    /// Zone within which the token is valid.
+    pub zone_id: String,
+    /// Principal receiving the capability.
+    pub principal_id: String,
+    /// Allowed operations. Empty means all operations under the connector.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operations: Vec<String>,
+    /// Token time-to-live in seconds. Defaults to 3600 (1 hour).
+    #[serde(default = "default_token_ttl_secs")]
+    pub ttl_secs: u64,
+    /// Optional not-before delay in seconds (deferred activation).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_before_delay_secs: Option<u64>,
+    /// If set, the token requires a holder proof from this node for replay resistance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holder_node: Option<String>,
+    /// Maximum delegation depth. 0 means the token cannot be delegated.
+    #[serde(default)]
+    pub max_delegation_depth: u32,
+    /// Optional resource allow list (URI patterns).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resource_allow: Vec<String>,
+    /// Optional resource deny list (URI patterns).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resource_deny: Vec<String>,
+    /// Optional call budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_calls: Option<u32>,
+    /// Optional byte budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<u64>,
+    /// Allowed credential IDs for secretless egress.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credential_allow: Vec<String>,
+    /// Preview the issuance without signing. Returns the redacted inspection
+    /// but no raw token.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dry_run: bool,
+}
+
+const fn default_token_ttl_secs() -> u64 {
+    3600
+}
+
+/// Host admin API response after issuing a capability token.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapabilityIssuanceResponse {
+    /// Whether this was a preview only.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dry_run: bool,
+    /// Unique token identifier (CWT `cti` claim, hex-encoded).
+    pub token_id: String,
+    /// Raw `COSE_Sign1` token bytes, base64-encoded.
+    /// Absent when `dry_run` is true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_cbor_b64: Option<String>,
+    /// Redaction-safe inspection of the issued token.
+    pub inspection: CapabilityTokenInspection,
+    /// Journal sequence recording this issuance.
+    pub journal_sequence: u64,
+    /// Timestamp of issuance.
+    pub issued_at: DateTime<Utc>,
+}
+
+/// Redaction-safe view of a capability token's claims.
+///
+/// All fields are derived from the token's CWT claims. Sensitive material
+/// (signing key, raw COSE bytes) is never exposed here. This type is safe
+/// for CLI rendering, audit logs, and diagnostics.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapabilityTokenInspection {
+    /// Token identifier (CWT `cti` claim, hex-encoded).
+    pub token_id: String,
+    /// Issuer identity.
+    pub issuer: String,
+    /// Subject (principal receiving the capability).
+    pub subject: String,
+    /// Audience (connector or zone scope).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audience: Option<String>,
+    /// Zone this token is valid within.
+    pub zone_id: String,
+    /// Capability ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability_id: Option<String>,
+    /// Allowed operations.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operations: Vec<String>,
+    /// Holder node binding. When present, requests must include a holder proof.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holder_node: Option<String>,
+    /// Maximum delegation depth remaining.
+    pub delegation_depth: u32,
+    /// Issued-at timestamp (RFC 3339).
+    pub issued_at: DateTime<Utc>,
+    /// Not-before timestamp (RFC 3339), if deferred.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_before: Option<DateTime<Utc>>,
+    /// Expiration timestamp (RFC 3339).
+    pub expires_at: DateTime<Utc>,
+    /// Whether the token is currently valid (not expired and past nbf).
+    pub currently_valid: bool,
+    /// Seconds remaining until expiry, or 0 if expired.
+    pub seconds_remaining: u64,
+    /// Resource allow patterns.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resource_allow: Vec<String>,
+    /// Resource deny patterns.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resource_deny: Vec<String>,
+    /// Call budget, if constrained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_calls: Option<u32>,
+    /// Byte budget, if constrained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<u64>,
+    /// Credential IDs allowed for secretless egress.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credential_allow: Vec<String>,
+}
+
+/// Host admin API request for inspecting a capability token without verifying its signature.
+///
+/// This is a read-only operation that extracts the token's claims into a
+/// redaction-safe form for CLI display and diagnostics.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapabilityTokenInspectRequest {
+    /// Raw `COSE_Sign1` token bytes, base64-encoded.
+    pub token_cbor_b64: String,
+}
+
+/// Host admin API request for verifying a capability token against the host's key ring.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapabilityTokenVerifyRequest {
+    /// Raw `COSE_Sign1` token bytes, base64-encoded.
+    pub token_cbor_b64: String,
+    /// Operation being requested (for scope checking).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    /// Connector being targeted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connector_id: Option<String>,
+}
+
+/// Host admin API response for a capability token verification.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct CapabilityTokenVerifyResponse {
+    /// Whether the token's cryptographic signature is valid.
+    pub signature_valid: bool,
+    /// Whether the token is within its validity window.
+    pub temporally_valid: bool,
+    /// Whether the token's scope covers the requested operation/connector.
+    pub scope_valid: bool,
+    /// Combined validity: all three checks pass.
+    pub valid: bool,
+    /// Redaction-safe inspection of the token.
+    pub inspection: CapabilityTokenInspection,
+    /// Human-readable rejection reasons, if any.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rejection_reasons: Vec<String>,
+}
+
+/// Structured auth envelope that the CLI carries in live requests.
+///
+/// This is the "transport contract" — the exact shape of auth data that `fwc`
+/// must supply in every live request to `fcp-host`. The host verifies each
+/// field independently.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LiveRequestAuth {
+    /// `COSE_Sign1` capability token (base64-encoded CBOR).
+    pub capability_token_b64: String,
+    /// Holder proof binding the token to this request, preventing replay.
+    /// Required when the token's `holder_node` claim is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holder_proof: Option<LiveRequestHolderProof>,
+    /// Approval tokens authorizing elevated, declassified, or specifically
+    /// approved operations. Each approval is independently verified.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub approval_tokens: Vec<LiveRequestApprovalToken>,
+}
+
+/// Holder proof as transported in a live request.
+///
+/// The holder signs `"FCP2-HOLDER-PROOF-V1" || len(request_id) || request_id ||
+/// len(operation_id) || operation_id || len(token_jti) || token_jti` to bind
+/// the token to this specific request, preventing replay.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LiveRequestHolderProof {
+    /// Ed25519 signature (hex-encoded, 128 hex chars / 64 bytes).
+    pub signature_hex: String,
+    /// Node ID of the holder (must match the token's `holder_node` claim).
+    pub holder_node: String,
+}
+
+/// Approval token as transported in a live request.
+///
+/// Approval tokens authorize specific actions that exceed the base capability
+/// token's grants: elevations, declassifications, and execution-scoped
+/// approvals for dangerous operations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LiveRequestApprovalToken {
+    /// Unique approval token ID.
+    pub token_id: String,
+    /// Issuer of the approval.
+    pub issuer: String,
+    /// Zone this approval is valid within.
+    pub zone_id: String,
+    /// Approval scope kind: `elevation`, `declassification`, or `execution`.
+    pub scope_kind: String,
+    /// Scope payload (varies by kind).
+    pub scope: Value,
+    /// Token expiration (Unix epoch ms).
+    pub expires_at_ms: u64,
+    /// Optional `COSE_Sign1` signature (base64-encoded).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature_b64: Option<String>,
+}
+
+// ── Structured auth denial types ────────────────────────────────────────────
+// These types are returned by preflight, invoke, batch, and simulate when
+// auth verification fails. They carry enough detail for the CLI to render
+// actionable remediation.
+
+/// Why an auth check failed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthDenialKind {
+    /// No capability token was provided.
+    MissingToken,
+    /// Token could not be parsed or decoded.
+    MalformedToken,
+    /// Token signature is invalid or unverifiable.
+    InvalidSignature,
+    /// Token is expired or not yet valid.
+    TemporallyInvalid,
+    /// Token does not grant the requested operation.
+    InsufficientScope,
+    /// Token does not cover the target connector.
+    WrongConnector,
+    /// Token has been revoked by the host.
+    Revoked,
+    /// Holder proof is required but missing or invalid.
+    HolderProofFailed,
+    /// An approval token is required but not provided.
+    MissingApproval,
+    /// An approval token is present but invalid, expired, or wrong scope.
+    InvalidApproval,
+}
+
+/// Structured denial envelope returned by auth-gated RPC paths.
+///
+/// This type provides enough information for the CLI to:
+/// 1. Display a clear, specific error message
+/// 2. Suggest remediation steps
+/// 3. Allow agents to branch on the denial kind
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthDenial {
+    /// The RPC path that was denied (e.g., "invoke", "simulate", "batch").
+    pub rpc: String,
+    /// The kind of denial.
+    pub kind: AuthDenialKind,
+    /// Human-readable denial message.
+    pub message: String,
+    /// Token inspection (if the token could be parsed at all).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inspection: Option<CapabilityTokenInspection>,
+    /// Remediation hints ordered from most to least likely to help.
+    pub remediation: Vec<String>,
+    /// Unique denial ID for audit trail correlation.
+    pub denial_id: String,
+    /// When the denial was issued.
+    pub denied_at: DateTime<Utc>,
+}
+
+/// Build an `AuthDenial` from a verify response that failed.
+impl AuthDenial {
+    /// Create a denial from a failed verification.
+    #[must_use]
+    pub fn from_verify_failure(
+        rpc: &str,
+        verify: &CapabilityTokenVerifyResponse,
+    ) -> Self {
+        let kind = if !verify.signature_valid {
+            AuthDenialKind::InvalidSignature
+        } else if !verify.temporally_valid {
+            AuthDenialKind::TemporallyInvalid
+        } else if !verify.scope_valid {
+            AuthDenialKind::InsufficientScope
+        } else if verify.rejection_reasons.iter().any(|r| r.contains("revoked")) {
+            AuthDenialKind::Revoked
+        } else {
+            AuthDenialKind::InsufficientScope
+        };
+
+        let message = if verify.rejection_reasons.is_empty() {
+            format!("{rpc}: auth verification failed")
+        } else {
+            format!("{rpc}: {}", verify.rejection_reasons.join("; "))
+        };
+
+        let mut remediation = Vec::new();
+        match kind {
+            AuthDenialKind::TemporallyInvalid => {
+                remediation.push("Re-issue the capability token (the current one is expired or not yet valid)".to_owned());
+                remediation.push("Check system clock synchronization between host and client".to_owned());
+            }
+            AuthDenialKind::InsufficientScope => {
+                remediation.push("Request a token with the correct operation scope".to_owned());
+                remediation.push("Check that the token covers the target connector and operation".to_owned());
+            }
+            AuthDenialKind::Revoked => {
+                remediation.push("Request a new capability token (the previous one was revoked)".to_owned());
+            }
+            AuthDenialKind::InvalidSignature => {
+                remediation.push("Ensure the token was issued by a trusted authority".to_owned());
+                remediation.push("The token may have been tampered with or corrupted".to_owned());
+            }
+            _ => {}
+        }
+
+        Self {
+            rpc: rpc.to_owned(),
+            kind,
+            message,
+            inspection: Some(verify.inspection.clone()),
+            remediation,
+            denial_id: format!(
+                "denial-{}-{}",
+                rpc,
+                Utc::now().timestamp_millis()
+            ),
+            denied_at: Utc::now(),
+        }
+    }
+
+    /// Create a denial for a missing token.
+    #[must_use]
+    pub fn missing_token(rpc: &str) -> Self {
+        Self {
+            rpc: rpc.to_owned(),
+            kind: AuthDenialKind::MissingToken,
+            message: format!(
+                "{rpc}: a capability token is required but none was provided"
+            ),
+            inspection: None,
+            remediation: vec![
+                format!("Issue a capability token: `fwc capabilities issue --connector <id> --operation {rpc}`"),
+                "Pass the token via --capability-token or FWC_CAPABILITY_TOKEN".to_owned(),
+            ],
+            denial_id: format!(
+                "denial-{}-{}",
+                rpc,
+                Utc::now().timestamp_millis()
+            ),
+            denied_at: Utc::now(),
+        }
+    }
+
+    /// Create a denial for a malformed token that could not be parsed.
+    #[must_use]
+    pub fn malformed_token(rpc: &str, parse_error: &str) -> Self {
+        Self {
+            rpc: rpc.to_owned(),
+            kind: AuthDenialKind::MalformedToken,
+            message: format!(
+                "{rpc}: capability token could not be parsed: {parse_error}"
+            ),
+            inspection: None,
+            remediation: vec![
+                "Ensure the token is a valid base64-encoded COSE_Sign1 structure".to_owned(),
+                "Re-issue the token if it was corrupted".to_owned(),
+            ],
+            denial_id: format!(
+                "denial-{}-{}",
+                rpc,
+                Utc::now().timestamp_millis()
+            ),
+            denied_at: Utc::now(),
+        }
+    }
+
+    /// Create a denial for a missing or invalid holder proof.
+    #[must_use]
+    pub fn holder_proof_failed(rpc: &str, reason: &str) -> Self {
+        Self {
+            rpc: rpc.to_owned(),
+            kind: AuthDenialKind::HolderProofFailed,
+            message: format!(
+                "{rpc}: holder proof verification failed: {reason}"
+            ),
+            inspection: None,
+            remediation: vec![
+                "Include a valid holder proof matching the token's holder_node claim".to_owned(),
+                "Sign the request binding with the holder's Ed25519 key".to_owned(),
+            ],
+            denial_id: format!(
+                "denial-{}-{}",
+                rpc,
+                Utc::now().timestamp_millis()
+            ),
+            denied_at: Utc::now(),
+        }
+    }
+
+    /// Create a denial for a missing approval token.
+    #[must_use]
+    pub fn missing_approval(rpc: &str, required_scope: &str) -> Self {
+        Self {
+            rpc: rpc.to_owned(),
+            kind: AuthDenialKind::MissingApproval,
+            message: format!(
+                "{rpc}: this operation requires an approval token with scope '{required_scope}'"
+            ),
+            inspection: None,
+            remediation: vec![
+                format!("Request an approval token with scope '{required_scope}'"),
+                "Pass approval tokens via --approval-token".to_owned(),
+            ],
+            denial_id: format!(
+                "denial-{}-{}",
+                rpc,
+                Utc::now().timestamp_millis()
+            ),
+            denied_at: Utc::now(),
+        }
+    }
+}
+
+// ── Artifact provenance and install source validation ────────────────────────
+// These types enforce that only real, provenance-verified artifacts can be
+// installed on the live runtime path.
+
+/// What kind of artifact source was provided for install/update.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactSourceKind {
+    /// A real registry artifact with full provenance.
+    Registry,
+    /// A local file path (development/staging).
+    LocalPath,
+    /// A remote URL (direct download).
+    RemoteUrl,
+    /// An inline WASM blob (embedded in the request).
+    InlineBlob,
+}
+
+/// Provenance evidence attached to an artifact for install/update.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactProvenance {
+    /// Source kind.
+    pub source_kind: ArtifactSourceKind,
+    /// Source URI or path.
+    pub source_uri: String,
+    /// Blake3 hash of the artifact bytes (hex-encoded).
+    pub content_hash: String,
+    /// Whether the hash was verified by the host.
+    pub hash_verified: bool,
+    /// Optional supply-chain signature (base64-encoded).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature_b64: Option<String>,
+    /// Whether a valid supply-chain signature was verified.
+    #[serde(default)]
+    pub signature_verified: bool,
+    /// The manifest version from the artifact's embedded metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_version: Option<String>,
+    /// Size of the artifact in bytes.
+    pub size_bytes: u64,
+}
+
+/// Why an artifact was rejected by the host's provenance gates.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactRejectionKind {
+    /// The artifact has a placeholder hash (e.g., `PLACEHOLDER_HASH`).
+    PlaceholderHash,
+    /// The artifact has a zero-length or empty content hash.
+    EmptyHash,
+    /// The content hash does not match the actual artifact bytes.
+    HashMismatch,
+    /// The artifact is a known demo/stub bundle (synthetic identity).
+    DemoBundle,
+    /// The artifact has no embedded manifest or an invalid manifest.
+    InvalidManifest,
+    /// The supply-chain signature is missing when policy requires it.
+    MissingSignature,
+    /// The supply-chain signature failed verification.
+    InvalidSignature,
+    /// The artifact exceeds the maximum allowed size.
+    OversizedArtifact,
+    /// The source URI is not allowed by the host's install policy.
+    DisallowedSource,
+}
+
+/// Structured rejection envelope for artifact install/update failures.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactRejection {
+    /// The connector being installed/updated.
+    pub connector_id: String,
+    /// The kind of rejection.
+    pub kind: ArtifactRejectionKind,
+    /// Human-readable rejection message.
+    pub message: String,
+    /// Provenance details of the rejected artifact (if available).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<ArtifactProvenance>,
+    /// Remediation hints.
+    pub remediation: Vec<String>,
+    /// Policy gate that triggered the rejection.
+    pub policy_gate: String,
+}
+
+/// Known placeholder hashes that must be rejected on the live install path.
+pub const KNOWN_PLACEHOLDER_HASHES: &[&str] = &[
+    "PLACEHOLDER_HASH",
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", // SHA-256 of empty
+    "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262", // Blake3 of empty
+];
+
+/// Check whether a hash looks like a placeholder or demo hash.
+#[must_use]
+pub fn is_placeholder_hash(hash: &str) -> bool {
+    if hash.is_empty() {
+        return true;
+    }
+    let normalized = hash.trim().to_lowercase();
+    KNOWN_PLACEHOLDER_HASHES
+        .iter()
+        .any(|p| normalized == p.to_lowercase())
+}
+
+/// Validate an artifact's provenance before allowing install/update.
+///
+/// Returns `None` if the artifact passes all gates, or `Some(rejection)` if
+/// it should be rejected.
+#[must_use]
+pub fn validate_artifact_provenance(
+    connector_id: &str,
+    provenance: &ArtifactProvenance,
+    require_signature: bool,
+    max_size_bytes: Option<u64>,
+) -> Option<ArtifactRejection> {
+    // Gate 1: Placeholder hash
+    if is_placeholder_hash(&provenance.content_hash) {
+        return Some(ArtifactRejection {
+            connector_id: connector_id.to_owned(),
+            kind: ArtifactRejectionKind::PlaceholderHash,
+            message: format!(
+                "Artifact for '{}' has a placeholder hash '{}'. \
+                 Real artifacts must have computed content hashes.",
+                connector_id, provenance.content_hash
+            ),
+            provenance: Some(provenance.clone()),
+            remediation: vec![
+                "Build the connector with `fwc package` to compute a real content hash".to_owned(),
+                "Use `with_computed_hash()` in tests to generate valid hashes".to_owned(),
+            ],
+            policy_gate: "provenance.hash.no_placeholder".to_owned(),
+        });
+    }
+
+    // Gate 2: Hash verification
+    if !provenance.hash_verified {
+        return Some(ArtifactRejection {
+            connector_id: connector_id.to_owned(),
+            kind: ArtifactRejectionKind::HashMismatch,
+            message: format!(
+                "Artifact for '{connector_id}' has an unverified content hash. \
+                 The host could not confirm the hash matches the artifact bytes."
+            ),
+            provenance: Some(provenance.clone()),
+            remediation: vec![
+                "Ensure the artifact is not corrupted during transfer".to_owned(),
+                "Re-download or re-package the connector".to_owned(),
+            ],
+            policy_gate: "provenance.hash.verified".to_owned(),
+        });
+    }
+
+    // Gate 3: Signature required but missing
+    if require_signature && provenance.signature_b64.is_none() {
+        return Some(ArtifactRejection {
+            connector_id: connector_id.to_owned(),
+            kind: ArtifactRejectionKind::MissingSignature,
+            message: format!(
+                "Artifact for '{connector_id}' has no supply-chain signature. \
+                 This host's policy requires signed artifacts."
+            ),
+            provenance: Some(provenance.clone()),
+            remediation: vec![
+                "Sign the artifact with `fwc package --sign`".to_owned(),
+                "Contact your supply-chain administrator for signing keys".to_owned(),
+            ],
+            policy_gate: "provenance.signature.required".to_owned(),
+        });
+    }
+
+    // Gate 4: Signature present but invalid
+    if provenance.signature_b64.is_some() && !provenance.signature_verified {
+        return Some(ArtifactRejection {
+            connector_id: connector_id.to_owned(),
+            kind: ArtifactRejectionKind::InvalidSignature,
+            message: format!(
+                "Artifact for '{connector_id}' has an invalid supply-chain signature."
+            ),
+            provenance: Some(provenance.clone()),
+            remediation: vec![
+                "Re-sign the artifact with a trusted key".to_owned(),
+                "The artifact may have been modified after signing".to_owned(),
+            ],
+            policy_gate: "provenance.signature.valid".to_owned(),
+        });
+    }
+
+    // Gate 5: Size limit
+    if let Some(max) = max_size_bytes.filter(|&max| provenance.size_bytes > max) {
+        return Some(ArtifactRejection {
+            connector_id: connector_id.to_owned(),
+            kind: ArtifactRejectionKind::OversizedArtifact,
+            message: format!(
+                "Artifact for '{connector_id}' is {} bytes, exceeding the {max} byte limit.",
+                provenance.size_bytes
+            ),
+            provenance: Some(provenance.clone()),
+            remediation: vec![
+                "Optimize the connector binary size".to_owned(),
+                "Request a size limit increase from the host administrator".to_owned(),
+            ],
+            policy_gate: "provenance.size.max".to_owned(),
+        });
+    }
+
+    None
+}
+
+/// Summary of an issued token tracked by the host for revocation and audit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssuedTokenRecord {
+    /// Token identifier (hex-encoded CWT `cti`).
+    pub token_id: String,
+    /// Connector the token is scoped to.
+    pub connector_id: String,
+    /// Principal that received the token.
+    pub principal_id: String,
+    /// Zone the token is valid within.
+    pub zone_id: String,
+    /// Token creation timestamp.
+    pub issued_at: DateTime<Utc>,
+    /// Token expiration timestamp.
+    pub expires_at: DateTime<Utc>,
+    /// Whether the token has been revoked.
+    #[serde(default)]
+    pub revoked: bool,
+    /// Revocation reason, if revoked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revocation_reason: Option<String>,
+    /// Revocation timestamp, if revoked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
+/// Host admin API request for revoking a previously issued token.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenRevocationRequest {
+    /// Token identifier to revoke.
+    pub token_id: String,
+    /// Reason for revocation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Host admin API response after revoking a token.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenRevocationResponse {
+    /// Whether the token was found and revoked.
+    pub revoked: bool,
+    /// Token identifier.
+    pub token_id: String,
+    /// Human-readable message.
+    pub message: String,
+    /// Journal sequence recording this revocation.
+    pub journal_sequence: u64,
+}
+
+/// Host admin API request for listing issued tokens.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssuedTokenQueryRequest {
+    /// Optional connector ID filter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connector_id: Option<String>,
+    /// Optional principal ID filter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal_id: Option<String>,
+    /// Only include active (non-revoked, non-expired) tokens.
+    #[serde(default)]
+    pub active_only: bool,
+    /// Maximum number of tokens to return.
+    #[serde(default = "default_journal_limit")]
+    pub limit: usize,
+}
+
+/// Host admin API response for a token query.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssuedTokenQueryResponse {
+    /// Matching token records.
+    pub tokens: Vec<IssuedTokenRecord>,
+    /// Total number of tracked tokens.
+    pub total_tokens: usize,
+    /// Number of currently active tokens.
+    pub active_count: usize,
+}
+
 /// Desired connector runtime state persisted by the host admin plane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -322,6 +1454,12 @@ impl ConfigRevisionRecord {
             credential_references: sanitized_payload.credential_references,
             contains_inline_secrets: sanitized_payload.contains_inline_secrets,
         })
+    }
+
+    /// Whether this recorded revision can be safely replayed back into the host.
+    #[must_use]
+    pub const fn is_replayable(&self) -> bool {
+        !self.contains_inline_secrets
     }
 }
 
@@ -595,6 +1733,32 @@ pub fn diff_config_values(before: &Value, after: &Value) -> Vec<ConfigDiffEntry>
     entries
 }
 
+/// Compute a path-level diff while redacting any inline secret values.
+///
+/// The raw payloads are still compared first, so secret rotations remain
+/// visible as changed paths even though the returned values are sanitized.
+///
+/// # Errors
+///
+/// Returns an error if any changed value cannot be serialized during
+/// sanitization.
+pub fn diff_sanitized_config_values(
+    before: &Value,
+    after: &Value,
+) -> Result<Vec<ConfigDiffEntry>, LifecycleError> {
+    diff_config_values(before, after)
+        .into_iter()
+        .map(|entry| {
+            Ok(ConfigDiffEntry {
+                path: entry.path.clone(),
+                kind: entry.kind,
+                before: sanitize_diff_value(&entry.path, entry.before)?,
+                after: sanitize_diff_value(&entry.path, entry.after)?,
+            })
+        })
+        .collect()
+}
+
 fn diff_config_values_inner(
     path: &str,
     before: Option<&Value>,
@@ -641,6 +1805,26 @@ fn diff_config_values_inner(
         }),
         (None, None) => {}
     }
+}
+
+fn sanitize_diff_value(path: &str, value: Option<Value>) -> Result<Option<Value>, LifecycleError> {
+    value
+        .map(|value| sanitize_diff_value_inner(path, value))
+        .transpose()
+}
+
+fn sanitize_diff_value_inner(path: &str, value: Value) -> Result<Value, LifecycleError> {
+    if path != "/" {
+        let key = path.rsplit('/').next().unwrap_or_default();
+        if should_redact_config_key(key) {
+            return Ok(Value::String(REDACTED_CONFIG_VALUE.to_string()));
+        }
+        if is_credential_reference_key(key) {
+            return Ok(value);
+        }
+    }
+
+    SanitizedConnectorConfig::from_payload(value).map(|value| value.payload)
 }
 
 fn config_diff_path(path: &str) -> String {
@@ -779,6 +1963,14 @@ impl ConnectorAdminState {
     #[must_use]
     pub fn active_config_revision(&self) -> Option<&ConfigRevisionRecord> {
         let revision_id = self.active_config_revision_id?;
+        self.config_revisions
+            .iter()
+            .find(|revision| revision.revision_id == revision_id)
+    }
+
+    /// Return a specific config revision by id, if present.
+    #[must_use]
+    pub fn config_revision(&self, revision_id: u64) -> Option<&ConfigRevisionRecord> {
         self.config_revisions
             .iter()
             .find(|revision| revision.revision_id == revision_id)
@@ -1050,6 +2242,20 @@ pub struct HostAdminStateSnapshot {
     next_config_revision_id: u64,
     #[serde(default = "initial_journal_sequence")]
     next_journal_sequence: u64,
+    #[serde(default)]
+    events: Vec<HostEvent>,
+    #[serde(default)]
+    next_event_sequence: u64,
+    #[serde(default)]
+    logs: Vec<HostLogEntry>,
+    #[serde(default)]
+    next_log_sequence: u64,
+    #[serde(default)]
+    issued_tokens: Vec<IssuedTokenRecord>,
+    #[serde(default)]
+    next_token_sequence: u64,
+    #[serde(default)]
+    simulate_receipts: Vec<SimulateReceipt>,
 }
 
 impl Default for HostAdminStateSnapshot {
@@ -1060,6 +2266,13 @@ impl Default for HostAdminStateSnapshot {
             journal: Vec::new(),
             next_config_revision_id: initial_revision_id(),
             next_journal_sequence: initial_journal_sequence(),
+            events: Vec::new(),
+            next_event_sequence: 1,
+            logs: Vec::new(),
+            next_log_sequence: 1,
+            issued_tokens: Vec::new(),
+            next_token_sequence: 1,
+            simulate_receipts: Vec::new(),
         }
     }
 }
@@ -1726,6 +2939,689 @@ impl HostAdminStateStore {
             entries: filtered,
             total_entries,
             latest_sequence,
+        }
+    }
+
+    /// Append a log entry to the host log buffer.
+    pub async fn append_log(
+        &self,
+        connector_id: Option<&str>,
+        severity: LogSeverity,
+        message: String,
+        fields: BTreeMap<String, Value>,
+    ) {
+        self.apply_mutation(|snapshot| {
+            let seq = snapshot.next_log_sequence;
+            snapshot.next_log_sequence += 1;
+            snapshot.logs.push(HostLogEntry {
+                sequence: seq,
+                connector_id: connector_id.map(String::from),
+                severity,
+                message,
+                fields,
+                timestamp: Utc::now(),
+            });
+            Ok(())
+        })
+        .await
+        .ok();
+    }
+
+    /// Query host logs with optional filtering.
+    pub async fn query_logs(&self, request: &LogQueryRequest) -> LogQueryResponse {
+        let state = self.state.read().await;
+        let severity_ord = |s: &LogSeverity| match s {
+            LogSeverity::Debug => 0,
+            LogSeverity::Info => 1,
+            LogSeverity::Warn => 2,
+            LogSeverity::Error => 3,
+        };
+        let min_ord = request.min_severity.as_ref().map_or(0, severity_ord);
+
+        let entries: Vec<HostLogEntry> = state
+            .logs
+            .iter()
+            .filter(|e| e.sequence > request.after_sequence)
+            .filter(|e| {
+                request
+                    .connector_id
+                    .as_ref()
+                    .is_none_or(|cid| e.connector_id.as_deref() == Some(cid.as_str()))
+            })
+            .filter(|e| severity_ord(&e.severity) >= min_ord)
+            .take(request.limit)
+            .cloned()
+            .collect();
+        let latest_sequence = entries.last().map_or(0, |e| e.sequence);
+        LogQueryResponse {
+            entries,
+            latest_sequence,
+        }
+    }
+
+    /// Emit a host control-plane event.
+    pub async fn emit_event(
+        &self,
+        kind: HostEventKind,
+        connector_id: Option<&str>,
+        summary: String,
+        payload: Option<Value>,
+    ) {
+        self.apply_mutation(|snapshot| {
+            let seq = snapshot.next_event_sequence;
+            snapshot.next_event_sequence += 1;
+            snapshot.events.push(HostEvent {
+                event_id: format!("evt-{seq}"),
+                kind,
+                connector_id: connector_id.map(String::from),
+                summary,
+                payload,
+                timestamp: Utc::now(),
+                acknowledged: false,
+            });
+            Ok(())
+        })
+        .await
+        .ok();
+    }
+
+    /// Query host events with optional filtering.
+    pub async fn query_events(&self, request: &EventQueryRequest) -> EventQueryResponse {
+        let state = self.state.read().await;
+        let events: Vec<HostEvent> = state
+            .events
+            .iter()
+            .filter(|e| {
+                request
+                    .connector_id
+                    .as_ref()
+                    .is_none_or(|cid| e.connector_id.as_deref() == Some(cid.as_str()))
+            })
+            .filter(|e| request.kind.is_none_or(|k| e.kind == k))
+            .filter(|e| !request.unacknowledged_only || !e.acknowledged)
+            .take(request.limit)
+            .cloned()
+            .collect();
+        let unacknowledged_count = state.events.iter().filter(|e| !e.acknowledged).count();
+        EventQueryResponse {
+            events,
+            unacknowledged_count,
+        }
+    }
+
+    /// Acknowledge events by ID.
+    pub async fn acknowledge_events(
+        &self,
+        request: &EventAcknowledgeRequest,
+    ) -> EventAcknowledgeResponse {
+        let mut acknowledged_count = 0;
+        let mut not_found = Vec::new();
+
+        self.apply_mutation(|snapshot| {
+            for event_id in &request.event_ids {
+                if let Some(event) = snapshot.events.iter_mut().find(|e| e.event_id == *event_id) {
+                    if !event.acknowledged {
+                        event.acknowledged = true;
+                        acknowledged_count += 1;
+                    }
+                } else {
+                    not_found.push(event_id.clone());
+                }
+            }
+            Ok(())
+        })
+        .await
+        .ok();
+
+        EventAcknowledgeResponse {
+            acknowledged_count,
+            not_found,
+        }
+    }
+
+    // ── Capability issuance and token management ────────────────────────────
+
+    /// Issue a new capability token.
+    ///
+    /// The host generates a `COSE_Sign1` token signed with the provided signing key,
+    /// records the issuance in the journal, and tracks the token for revocation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if token construction or persistence fails.
+    #[allow(clippy::too_many_lines)]
+    pub async fn issue_capability_token(
+        &self,
+        request: &CapabilityIssuanceRequest,
+        signing_key: &fcp_crypto::ed25519::Ed25519SigningKey,
+    ) -> Result<CapabilityIssuanceResponse, LifecycleError> {
+        let now = Utc::now();
+        let ttl = i64::try_from(request.ttl_secs).unwrap_or(3600);
+        let expires = now + chrono::Duration::seconds(ttl);
+        let not_before = request
+            .not_before_delay_secs
+            .map(|delay| now + chrono::Duration::seconds(i64::try_from(delay).unwrap_or(0)));
+
+        // Generate token ID from timestamp + hash of request fields.
+        let token_id_bytes: [u8; 16] = {
+            let mut buf = [0u8; 16];
+            let ts = now.timestamp_nanos_opt().unwrap_or(0);
+            buf[..8].copy_from_slice(&ts.to_le_bytes());
+            let digest = hash(
+                format!("{}:{}:{}", request.connector_id, request.principal_id, ts).as_bytes(),
+            );
+            buf[8..16].copy_from_slice(&digest.as_bytes()[..8]);
+            buf
+        };
+        let token_id_hex = hex::encode(token_id_bytes);
+
+        // Build CWT claims.
+        let issuer_id = format!("host:{}", signing_key.key_id());
+        let mut claims = fcp_crypto::cose::CwtClaims::new()
+            .issuer(&issuer_id)
+            .subject(&request.principal_id)
+            .audience(&request.connector_id)
+            .zone_id(&request.zone_id)
+            .issued_at(now)
+            .expiration(expires)
+            .token_id(&token_id_bytes)
+            .principal_id(&request.principal_id);
+
+        if let Some(nbf) = not_before {
+            claims = claims.not_before(nbf);
+        }
+
+        if !request.operations.is_empty() {
+            let ops_refs: Vec<&str> = request.operations.iter().map(String::as_str).collect();
+            claims = claims.operations(&ops_refs);
+        }
+
+        if let Some(ref holder) = request.holder_node {
+            claims = claims.holder_node(holder);
+        }
+
+        claims = claims.custom(
+            fcp_crypto::cose::fcp2_claims::DELEGATION_DEPTH,
+            ciborium::Value::Integer(request.max_delegation_depth.into()),
+        );
+
+        // Build redaction-safe inspection.
+        let inspection = CapabilityTokenInspection {
+            token_id: token_id_hex.clone(),
+            issuer: issuer_id.clone(),
+            subject: request.principal_id.clone(),
+            audience: Some(request.connector_id.clone()),
+            zone_id: request.zone_id.clone(),
+            capability_id: None,
+            operations: request.operations.clone(),
+            holder_node: request.holder_node.clone(),
+            delegation_depth: request.max_delegation_depth,
+            issued_at: now,
+            not_before,
+            expires_at: expires,
+            currently_valid: not_before.is_none_or(|nbf| now >= nbf) && now < expires,
+            seconds_remaining: u64::try_from((expires - now).num_seconds().max(0)).unwrap_or(0),
+            resource_allow: request.resource_allow.clone(),
+            resource_deny: request.resource_deny.clone(),
+            max_calls: request.max_calls,
+            max_bytes: request.max_bytes,
+            credential_allow: request.credential_allow.clone(),
+        };
+
+        // Sign the token (unless dry run).
+        let token_cbor_b64 = if request.dry_run {
+            None
+        } else {
+            let cose_token =
+                fcp_crypto::cose::CoseToken::sign(signing_key, &claims).map_err(|e| {
+                    LifecycleError::Persistence {
+                        reason: format!("failed to sign capability token: {e}"),
+                    }
+                })?;
+            let cbor_bytes = cose_token
+                .to_cbor()
+                .map_err(|e| LifecycleError::Persistence {
+                    reason: format!("failed to serialize capability token: {e}"),
+                })?;
+            Some(base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                &cbor_bytes,
+            ))
+        };
+
+        // Record in journal and token registry.
+        let auth_connector_id = ConnectorId::from_static("fcp.auth:utility:1.0.0");
+        let journal_sequence = self
+            .apply_mutation(|snapshot| {
+                let seq = snapshot.append_journal(
+                    &auth_connector_id,
+                    AdminStateMutation::DesiredStateSet {
+                        desired_state: DesiredRuntimeState::Enabled,
+                    },
+                    Some(format!("token_issue:{token_id_hex}")),
+                );
+
+                if !request.dry_run {
+                    snapshot.issued_tokens.push(IssuedTokenRecord {
+                        token_id: token_id_hex.clone(),
+                        connector_id: request.connector_id.clone(),
+                        principal_id: request.principal_id.clone(),
+                        zone_id: request.zone_id.clone(),
+                        issued_at: now,
+                        expires_at: expires,
+                        revoked: false,
+                        revocation_reason: None,
+                        revoked_at: None,
+                    });
+                    snapshot.next_token_sequence = snapshot.next_token_sequence.saturating_add(1);
+                }
+
+                Ok(seq)
+            })
+            .await?;
+
+        Ok(CapabilityIssuanceResponse {
+            dry_run: request.dry_run,
+            token_id: token_id_hex,
+            token_cbor_b64,
+            inspection,
+            journal_sequence,
+            issued_at: now,
+        })
+    }
+
+    /// Inspect a capability token's claims without verifying its signature.
+    ///
+    /// Parses the base64-encoded `COSE_Sign1` token and extracts a redaction-safe
+    /// view of its CWT claims.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the token cannot be parsed.
+    pub fn inspect_capability_token(
+        token_cbor_b64: &str,
+    ) -> Result<CapabilityTokenInspection, LifecycleError> {
+        let cbor_bytes =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, token_cbor_b64)
+                .map_err(|e| LifecycleError::Persistence {
+                    reason: format!("invalid base64 in capability token: {e}"),
+                })?;
+
+        let cose_token = fcp_crypto::cose::CoseToken::from_cbor(&cbor_bytes).map_err(|e| {
+            LifecycleError::Persistence {
+                reason: format!("invalid COSE token: {e}"),
+            }
+        })?;
+
+        let claims = cose_token
+            .claims_unverified()
+            .map_err(|e| LifecycleError::Persistence {
+                reason: format!("failed to parse token claims: {e}"),
+            })?;
+
+        let now = Utc::now();
+        let iat_ts = claims
+            .get(fcp_crypto::cose::cwt_claims::IAT)
+            .and_then(|v| match v {
+                ciborium::Value::Integer(i) => i64::try_from(*i).ok(),
+                _ => None,
+            });
+        let issued_at = iat_ts
+            .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
+            .unwrap_or(now);
+
+        let expires_at = claims
+            .get_expiration()
+            .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
+            .unwrap_or(now);
+
+        let not_before = claims
+            .get_not_before()
+            .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0));
+
+        let currently_valid = not_before.is_none_or(|nbf| now >= nbf) && now < expires_at;
+        let seconds_remaining = u64::try_from((expires_at - now).num_seconds().max(0)).unwrap_or(0);
+
+        let token_id = claims.get_jti().map(hex::encode).unwrap_or_default();
+
+        let operations = claims
+            .get(fcp_crypto::cose::fcp2_claims::OPERATIONS)
+            .and_then(|v| match v {
+                ciborium::Value::Array(arr) => Some(
+                    arr.iter()
+                        .filter_map(|item| match item {
+                            ciborium::Value::Text(s) => Some(s.clone()),
+                            _ => None,
+                        })
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .unwrap_or_default();
+
+        let delegation_depth = claims
+            .get(fcp_crypto::cose::fcp2_claims::DELEGATION_DEPTH)
+            .and_then(|v| match v {
+                ciborium::Value::Integer(i) => u32::try_from(i64::try_from(*i).unwrap_or(0)).ok(),
+                _ => None,
+            })
+            .unwrap_or(0);
+
+        Ok(CapabilityTokenInspection {
+            token_id,
+            issuer: claims.get_issuer().unwrap_or("unknown").to_string(),
+            subject: claims.get_subject().unwrap_or("unknown").to_string(),
+            audience: claims
+                .get(fcp_crypto::cose::cwt_claims::AUD)
+                .and_then(|v| match v {
+                    ciborium::Value::Text(s) => Some(s.clone()),
+                    _ => None,
+                }),
+            zone_id: claims.get_zone_id().unwrap_or("unknown").to_string(),
+            capability_id: claims.get_capability_id().map(String::from),
+            operations,
+            holder_node: claims.get_holder_node().map(String::from),
+            delegation_depth,
+            issued_at,
+            not_before,
+            expires_at,
+            currently_valid,
+            seconds_remaining,
+            resource_allow: Vec::new(),
+            resource_deny: Vec::new(),
+            max_calls: None,
+            max_bytes: None,
+            credential_allow: Vec::new(),
+        })
+    }
+
+    /// Verify a capability token against the host's state.
+    ///
+    /// Performs three independent checks:
+    /// 1. **Signature**: Attempts to parse the `COSE_Sign1` structure (full
+    ///    cryptographic verification requires the issuer's public key, which
+    ///    this method does not currently resolve — `signature_valid` reflects
+    ///    structural validity only).
+    /// 2. **Temporal**: Is the token currently within its not-before/expiration window?
+    /// 3. **Scope**: If an `operation_id` or `connector_id` is provided, does the
+    ///    token's grant cover them?
+    ///
+    /// Additionally checks the host's revocation ledger — a structurally valid
+    /// token that has been revoked is reported as invalid.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the token cannot be parsed at all.
+    pub async fn verify_capability_token(
+        &self,
+        request: &CapabilityTokenVerifyRequest,
+    ) -> Result<CapabilityTokenVerifyResponse, LifecycleError> {
+        let inspection = Self::inspect_capability_token(&request.token_cbor_b64)?;
+        let mut rejection_reasons = Vec::new();
+
+        // 1. Structural validity (parsing succeeded = structurally valid)
+        let signature_valid = true;
+
+        // 2. Temporal validity
+        let temporally_valid = inspection.currently_valid;
+        if !temporally_valid {
+            if inspection.seconds_remaining == 0 {
+                rejection_reasons.push(format!(
+                    "Token expired at {}",
+                    inspection.expires_at
+                ));
+            }
+            if let Some(nbf) = inspection.not_before {
+                let now = Utc::now();
+                if now < nbf {
+                    rejection_reasons.push(format!(
+                        "Token not yet valid (not-before: {nbf})"
+                    ));
+                }
+            }
+        }
+
+        // 3. Scope validity
+        let scope_valid = Self::check_scope_validity(
+            &inspection,
+            request.operation_id.as_deref(),
+            request.connector_id.as_deref(),
+            &mut rejection_reasons,
+        );
+
+        // 4. Revocation check
+        let revoked = self.is_token_revoked(&inspection.token_id).await;
+        if revoked {
+            rejection_reasons.push(format!(
+                "Token {} has been revoked",
+                inspection.token_id
+            ));
+        }
+
+        let valid = signature_valid && temporally_valid && scope_valid && !revoked;
+
+        Ok(CapabilityTokenVerifyResponse {
+            signature_valid,
+            temporally_valid,
+            scope_valid,
+            valid,
+            inspection,
+            rejection_reasons,
+        })
+    }
+
+    /// Check whether a token's scope covers the requested operation and connector.
+    fn check_scope_validity(
+        inspection: &CapabilityTokenInspection,
+        operation_id: Option<&str>,
+        connector_id: Option<&str>,
+        rejection_reasons: &mut Vec<String>,
+    ) -> bool {
+        let mut scope_ok = true;
+
+        if let Some(op) = operation_id.filter(|op| {
+            !inspection.operations.is_empty()
+                && !inspection.operations.iter().any(|o| o == *op || o == "*")
+        }) {
+            scope_ok = false;
+            rejection_reasons.push(format!(
+                "Token does not grant operation '{op}'. Granted: [{}]",
+                inspection.operations.join(", ")
+            ));
+        }
+
+        if let Some(cid) = connector_id {
+            // The token's audience or subject should match the connector
+            let audience_match = inspection
+                .audience
+                .as_deref()
+                .is_some_and(|aud| aud == cid || aud == "*");
+            let subject_match = inspection.subject == cid || inspection.subject == "*";
+
+            if !audience_match && !subject_match {
+                scope_ok = false;
+                rejection_reasons.push(format!(
+                    "Token not scoped for connector '{cid}'. \
+                     Subject: '{}', Audience: {:?}",
+                    inspection.subject,
+                    inspection.audience
+                ));
+            }
+        }
+
+        scope_ok
+    }
+
+    /// Check whether a token has been revoked in the host's ledger.
+    async fn is_token_revoked(&self, token_id: &str) -> bool {
+        if token_id.is_empty() {
+            return false;
+        }
+        let state = self.state.read().await;
+        state
+            .issued_tokens
+            .iter()
+            .any(|t| t.token_id == token_id && t.revoked)
+    }
+
+    /// Revoke a previously issued token by its ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if persistence fails.
+    pub async fn revoke_token(
+        &self,
+        request: &TokenRevocationRequest,
+    ) -> Result<TokenRevocationResponse, LifecycleError> {
+        let now = Utc::now();
+        let auth_connector_id = ConnectorId::from_static("fcp.auth:utility:1.0.0");
+        let mut was_revoked = false;
+
+        let journal_sequence = self
+            .apply_mutation(|snapshot| {
+                if let Some(record) = snapshot
+                    .issued_tokens
+                    .iter_mut()
+                    .find(|t| t.token_id == request.token_id && !t.revoked)
+                {
+                    record.revoked = true;
+                    record.revocation_reason.clone_from(&request.reason);
+                    record.revoked_at = Some(now);
+                    was_revoked = true;
+                }
+
+                Ok(snapshot.append_journal(
+                    &auth_connector_id,
+                    AdminStateMutation::DesiredStateSet {
+                        desired_state: DesiredRuntimeState::Disabled,
+                    },
+                    Some(format!("token_revoke:{}", request.token_id)),
+                ))
+            })
+            .await?;
+
+        let message = if was_revoked {
+            format!("Token {} revoked", request.token_id)
+        } else {
+            format!("Token {} not found or already revoked", request.token_id)
+        };
+
+        Ok(TokenRevocationResponse {
+            revoked: was_revoked,
+            token_id: request.token_id.clone(),
+            message,
+            journal_sequence,
+        })
+    }
+
+    /// Query issued token records.
+    pub async fn query_issued_tokens(
+        &self,
+        request: &IssuedTokenQueryRequest,
+    ) -> IssuedTokenQueryResponse {
+        let snapshot = self.state.read().await;
+        let now = Utc::now();
+
+        let tokens: Vec<IssuedTokenRecord> = snapshot
+            .issued_tokens
+            .iter()
+            .filter(|t| {
+                request
+                    .connector_id
+                    .as_ref()
+                    .is_none_or(|cid| t.connector_id == *cid)
+            })
+            .filter(|t| {
+                request
+                    .principal_id
+                    .as_ref()
+                    .is_none_or(|pid| t.principal_id == *pid)
+            })
+            .filter(|t| {
+                if request.active_only {
+                    !t.revoked && t.expires_at > now
+                } else {
+                    true
+                }
+            })
+            .take(request.limit)
+            .cloned()
+            .collect();
+
+        let total_tokens = snapshot.issued_tokens.len();
+        let active_count = snapshot
+            .issued_tokens
+            .iter()
+            .filter(|t| !t.revoked && t.expires_at > now)
+            .count();
+
+        IssuedTokenQueryResponse {
+            tokens,
+            total_tokens,
+            active_count,
+        }
+    }
+
+    // ── Simulate receipt tracking ───────────────────────────────────────────
+
+    /// Record a simulation receipt in the admin state.
+    ///
+    /// Called by the host after routing a simulate request to a connector (or
+    /// after preflight denies the request).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if persistence fails.
+    pub async fn record_simulate_receipt(
+        &self,
+        receipt: SimulateReceipt,
+    ) -> Result<u64, LifecycleError> {
+        let auth_connector_id = ConnectorId::from_static("fcp.simulate:utility:1.0.0");
+        self.apply_mutation(|snapshot| {
+            let seq = snapshot.append_journal(
+                &auth_connector_id,
+                AdminStateMutation::DesiredStateSet {
+                    desired_state: DesiredRuntimeState::Enabled,
+                },
+                Some(format!("simulate_receipt:{}", receipt.receipt_id)),
+            );
+            snapshot.simulate_receipts.push(receipt);
+            Ok(seq)
+        })
+        .await
+    }
+
+    /// Query simulation receipts.
+    pub async fn query_simulate_receipts(
+        &self,
+        request: &SimulateReceiptQueryRequest,
+    ) -> SimulateReceiptQueryResponse {
+        let snapshot = self.state.read().await;
+
+        let receipts: Vec<SimulateReceipt> = snapshot
+            .simulate_receipts
+            .iter()
+            .filter(|r| r.connector_id == request.connector_id)
+            .filter(|r| {
+                request
+                    .operation
+                    .as_ref()
+                    .is_none_or(|op| r.operation == *op)
+            })
+            .filter(|r| request.after.is_none_or(|after| r.simulated_at > after))
+            .take(request.limit)
+            .cloned()
+            .collect();
+
+        let total_receipts = snapshot
+            .simulate_receipts
+            .iter()
+            .filter(|r| r.connector_id == request.connector_id)
+            .count();
+
+        SimulateReceiptQueryResponse {
+            receipts,
+            total_receipts,
         }
     }
 
@@ -2540,6 +4436,47 @@ mod tests {
         assert!(export_text.contains(&credential_id.to_string()));
     }
 
+    #[test]
+    fn diff_sanitized_config_values_redacts_secrets_without_hiding_changes() {
+        let before = serde_json::json!({
+            "profile": "work",
+            "access_token": "super-secret-access-token",
+            "nested": {
+                "client_secret": "ultra-secret-client-secret",
+                "safe": "alpha"
+            }
+        });
+        let after = serde_json::json!({
+            "profile": "work",
+            "access_token": "rotated-access-token",
+            "nested": {
+                "client_secret": "second-client-secret",
+                "safe": "beta"
+            }
+        });
+
+        let diff = diff_sanitized_config_values(&before, &after).expect("diff should sanitize");
+
+        assert!(diff.iter().any(|entry| {
+            entry.path == "/access_token"
+                && entry.kind == ConfigDiffKind::Changed
+                && entry.before == Some(Value::String(REDACTED_CONFIG_VALUE.to_string()))
+                && entry.after == Some(Value::String(REDACTED_CONFIG_VALUE.to_string()))
+        }));
+        assert!(diff.iter().any(|entry| {
+            entry.path == "/nested/client_secret"
+                && entry.kind == ConfigDiffKind::Changed
+                && entry.before == Some(Value::String(REDACTED_CONFIG_VALUE.to_string()))
+                && entry.after == Some(Value::String(REDACTED_CONFIG_VALUE.to_string()))
+        }));
+        assert!(diff.iter().any(|entry| {
+            entry.path == "/nested/safe"
+                && entry.kind == ConfigDiffKind::Changed
+                && entry.before == Some(Value::String("alpha".to_string()))
+                && entry.after == Some(Value::String("beta".to_string()))
+        }));
+    }
+
     #[fcp_async_core::runtime::test]
     async fn store_loads_legacy_lifecycle_snapshot_and_projects_runtime_state() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2797,7 +4734,12 @@ mod tests {
     #[test]
     fn lifecycle_action_deserializes_all_variants() {
         let actions = [
-            "enable", "disable", "restart", "reload", "uninstall", "promote",
+            "enable",
+            "disable",
+            "restart",
+            "reload",
+            "uninstall",
+            "promote",
         ];
         for action in actions {
             let json = format!("\"{action}\"");
@@ -2851,10 +4793,7 @@ mod tests {
         let parsed: LifecycleTransitionResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.connector_id, "fcp.test:echo:1.0.0");
         assert_eq!(parsed.action, LifecycleAction::Enable);
-        assert_eq!(
-            parsed.previous_desired_state,
-            DesiredRuntimeState::Disabled
-        );
+        assert_eq!(parsed.previous_desired_state, DesiredRuntimeState::Disabled);
         assert_eq!(parsed.current_desired_state, DesiredRuntimeState::Enabled);
         assert_eq!(parsed.journal_sequence, 42);
     }
@@ -2874,10 +4813,7 @@ mod tests {
     fn journal_query_request_with_filter() {
         let json = r#"{"connector_id":"fcp.test:echo:1.0.0","after_sequence":10,"limit":50}"#;
         let req: JournalQueryRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            req.connector_id.as_deref(),
-            Some("fcp.test:echo:1.0.0")
-        );
+        assert_eq!(req.connector_id.as_deref(), Some("fcp.test:echo:1.0.0"));
         assert_eq!(req.after_sequence, 10);
         assert_eq!(req.limit, 50);
     }
@@ -2900,17 +4836,13 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn lifecycle_transition_enable_dry_run() {
-        let store = HostAdminStateStore::in_memory();
+        let store = HostAdminStateStore::new();
         let connector_id = ConnectorId::from_static("fcp.test:echo:1.0.0");
-        let summaries = [ConnectorSummary {
-            id: connector_id.clone(),
-            name: Some("Echo".to_string()),
-            description: None,
-            version: semver::Version::new(1, 0, 0),
-            health: ConnectorHealth::Unknown,
-            categories: Vec::new(),
-            tool_count: 0,
-        }];
+        let summaries = [connector_summary(
+            connector_id.clone(),
+            true,
+            ConnectorHealth::healthy(),
+        )];
         store
             .reconcile_registered_connectors(&summaries)
             .await
@@ -2933,17 +4865,13 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn lifecycle_transition_enable_persists() {
-        let store = HostAdminStateStore::in_memory();
+        let store = HostAdminStateStore::new();
         let connector_id = ConnectorId::from_static("fcp.test:echo:1.0.0");
-        let summaries = [ConnectorSummary {
-            id: connector_id.clone(),
-            name: Some("Echo".to_string()),
-            description: None,
-            version: semver::Version::new(1, 0, 0),
-            health: ConnectorHealth::Unknown,
-            categories: Vec::new(),
-            tool_count: 0,
-        }];
+        let summaries = [connector_summary(
+            connector_id.clone(),
+            true,
+            ConnectorHealth::healthy(),
+        )];
         store
             .reconcile_registered_connectors(&summaries)
             .await
@@ -2969,17 +4897,13 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn lifecycle_transition_disable() {
-        let store = HostAdminStateStore::in_memory();
+        let store = HostAdminStateStore::new();
         let connector_id = ConnectorId::from_static("fcp.test:echo:1.0.0");
-        let summaries = [ConnectorSummary {
-            id: connector_id.clone(),
-            name: Some("Echo".to_string()),
-            description: None,
-            version: semver::Version::new(1, 0, 0),
-            health: ConnectorHealth::Unknown,
-            categories: Vec::new(),
-            tool_count: 0,
-        }];
+        let summaries = [connector_summary(
+            connector_id.clone(),
+            true,
+            ConnectorHealth::healthy(),
+        )];
         store
             .reconcile_registered_connectors(&summaries)
             .await
@@ -3020,17 +4944,13 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn lifecycle_transition_uninstall() {
-        let store = HostAdminStateStore::in_memory();
+        let store = HostAdminStateStore::new();
         let connector_id = ConnectorId::from_static("fcp.test:echo:1.0.0");
-        let summaries = [ConnectorSummary {
-            id: connector_id.clone(),
-            name: Some("Echo".to_string()),
-            description: None,
-            version: semver::Version::new(1, 0, 0),
-            health: ConnectorHealth::Unknown,
-            categories: Vec::new(),
-            tool_count: 0,
-        }];
+        let summaries = [connector_summary(
+            connector_id.clone(),
+            true,
+            ConnectorHealth::healthy(),
+        )];
         store
             .reconcile_registered_connectors(&summaries)
             .await
@@ -3054,17 +4974,13 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn lifecycle_transition_restart_sets_enabled() {
-        let store = HostAdminStateStore::in_memory();
+        let store = HostAdminStateStore::new();
         let connector_id = ConnectorId::from_static("fcp.test:echo:1.0.0");
-        let summaries = [ConnectorSummary {
-            id: connector_id.clone(),
-            name: Some("Echo".to_string()),
-            description: None,
-            version: semver::Version::new(1, 0, 0),
-            health: ConnectorHealth::Unknown,
-            categories: Vec::new(),
-            tool_count: 0,
-        }];
+        let summaries = [connector_summary(
+            connector_id.clone(),
+            true,
+            ConnectorHealth::healthy(),
+        )];
         store
             .reconcile_registered_connectors(&summaries)
             .await
@@ -3086,17 +5002,13 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn lifecycle_transition_reload_sets_enabled() {
-        let store = HostAdminStateStore::in_memory();
+        let store = HostAdminStateStore::new();
         let connector_id = ConnectorId::from_static("fcp.test:echo:1.0.0");
-        let summaries = [ConnectorSummary {
-            id: connector_id.clone(),
-            name: Some("Echo".to_string()),
-            description: None,
-            version: semver::Version::new(1, 0, 0),
-            health: ConnectorHealth::Unknown,
-            categories: Vec::new(),
-            tool_count: 0,
-        }];
+        let summaries = [connector_summary(
+            connector_id.clone(),
+            true,
+            ConnectorHealth::healthy(),
+        )];
         store
             .reconcile_registered_connectors(&summaries)
             .await
@@ -3118,7 +5030,7 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn lifecycle_transition_not_found() {
-        let store = HostAdminStateStore::in_memory();
+        let store = HostAdminStateStore::new();
         let connector_id = ConnectorId::from_static("fcp.test:ghost:1.0.0");
         let request = LifecycleTransitionRequest {
             action: LifecycleAction::Enable,
@@ -3136,7 +5048,7 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn query_journal_empty() {
-        let store = HostAdminStateStore::in_memory();
+        let store = HostAdminStateStore::new();
         let request = JournalQueryRequest {
             connector_id: None,
             after_sequence: 0,
@@ -3150,17 +5062,13 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn query_journal_after_transitions() {
-        let store = HostAdminStateStore::in_memory();
+        let store = HostAdminStateStore::new();
         let connector_id = ConnectorId::from_static("fcp.test:echo:1.0.0");
-        let summaries = [ConnectorSummary {
-            id: connector_id.clone(),
-            name: Some("Echo".to_string()),
-            description: None,
-            version: semver::Version::new(1, 0, 0),
-            health: ConnectorHealth::Unknown,
-            categories: Vec::new(),
-            tool_count: 0,
-        }];
+        let summaries = [connector_summary(
+            connector_id.clone(),
+            true,
+            ConnectorHealth::healthy(),
+        )];
         store
             .reconcile_registered_connectors(&summaries)
             .await
@@ -3202,28 +5110,12 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn query_journal_with_connector_filter() {
-        let store = HostAdminStateStore::in_memory();
+        let store = HostAdminStateStore::new();
         let c1 = ConnectorId::from_static("fcp.test:alpha:1.0.0");
         let c2 = ConnectorId::from_static("fcp.test:beta:1.0.0");
         let summaries = [
-            ConnectorSummary {
-                id: c1.clone(),
-                name: Some("Alpha".to_string()),
-                description: None,
-                version: semver::Version::new(1, 0, 0),
-                health: ConnectorHealth::Unknown,
-                categories: Vec::new(),
-                tool_count: 0,
-            },
-            ConnectorSummary {
-                id: c2.clone(),
-                name: Some("Beta".to_string()),
-                description: None,
-                version: semver::Version::new(1, 0, 0),
-                health: ConnectorHealth::Unknown,
-                categories: Vec::new(),
-                tool_count: 0,
-            },
+            connector_summary(c1.clone(), true, ConnectorHealth::healthy()),
+            connector_summary(c2.clone(), true, ConnectorHealth::healthy()),
         ];
         store
             .reconcile_registered_connectors(&summaries)
@@ -3266,17 +5158,13 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn query_journal_respects_after_sequence() {
-        let store = HostAdminStateStore::in_memory();
+        let store = HostAdminStateStore::new();
         let connector_id = ConnectorId::from_static("fcp.test:echo:1.0.0");
-        let summaries = [ConnectorSummary {
-            id: connector_id.clone(),
-            name: Some("Echo".to_string()),
-            description: None,
-            version: semver::Version::new(1, 0, 0),
-            health: ConnectorHealth::Unknown,
-            categories: Vec::new(),
-            tool_count: 0,
-        }];
+        let summaries = [connector_summary(
+            connector_id.clone(),
+            true,
+            ConnectorHealth::healthy(),
+        )];
         store
             .reconcile_registered_connectors(&summaries)
             .await
@@ -3324,17 +5212,13 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn query_journal_respects_limit() {
-        let store = HostAdminStateStore::in_memory();
+        let store = HostAdminStateStore::new();
         let connector_id = ConnectorId::from_static("fcp.test:echo:1.0.0");
-        let summaries = [ConnectorSummary {
-            id: connector_id.clone(),
-            name: Some("Echo".to_string()),
-            description: None,
-            version: semver::Version::new(1, 0, 0),
-            health: ConnectorHealth::Unknown,
-            categories: Vec::new(),
-            tool_count: 0,
-        }];
+        let summaries = [connector_summary(
+            connector_id.clone(),
+            true,
+            ConnectorHealth::healthy(),
+        )];
         store
             .reconcile_registered_connectors(&summaries)
             .await
@@ -3395,6 +5279,2058 @@ mod tests {
             lifecycle_action_target(LifecycleAction::Promote),
             DesiredRuntimeState::Enabled
         );
+    }
+
+    // ── LogSeverity serde ──
+
+    #[test]
+    fn log_severity_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&LogSeverity::Debug).unwrap(),
+            r#""debug""#
+        );
+        assert_eq!(
+            serde_json::to_string(&LogSeverity::Error).unwrap(),
+            r#""error""#
+        );
+    }
+
+    #[test]
+    fn host_log_entry_roundtrip() {
+        let entry = HostLogEntry {
+            sequence: 1,
+            connector_id: Some("fcp.test:echo:1.0.0".to_string()),
+            severity: LogSeverity::Info,
+            message: "connector started".to_string(),
+            fields: BTreeMap::new(),
+            timestamp: Utc::now(),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let parsed: HostLogEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.sequence, 1);
+        assert_eq!(parsed.severity, LogSeverity::Info);
+    }
+
+    #[test]
+    fn log_query_request_defaults() {
+        let json = r#"{}"#;
+        let req: LogQueryRequest = serde_json::from_str(json).unwrap();
+        assert!(req.connector_id.is_none());
+        assert!(req.min_severity.is_none());
+        assert_eq!(req.after_sequence, 0);
+        assert_eq!(req.limit, 100);
+    }
+
+    // ── HostEventKind serde ──
+
+    #[test]
+    fn host_event_kind_serializes_all_variants() {
+        let kinds = [
+            HostEventKind::LifecycleTransition,
+            HostEventKind::HealthCheck,
+            HostEventKind::ConfigRevision,
+            HostEventKind::RolloutDecision,
+            HostEventKind::SupplyChainVerification,
+            HostEventKind::DriftDetected,
+            HostEventKind::ConnectorStateChange,
+        ];
+        for kind in kinds {
+            let json = serde_json::to_string(&kind).unwrap();
+            let parsed: HostEventKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, kind);
+        }
+    }
+
+    #[test]
+    fn host_event_roundtrip() {
+        let event = HostEvent {
+            event_id: "evt-1".to_string(),
+            kind: HostEventKind::LifecycleTransition,
+            connector_id: Some("fcp.test:echo:1.0.0".to_string()),
+            summary: "enabled".to_string(),
+            payload: Some(serde_json::json!({"state": "enabled"})),
+            timestamp: Utc::now(),
+            acknowledged: false,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: HostEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.event_id, "evt-1");
+        assert!(!parsed.acknowledged);
+    }
+
+    #[test]
+    fn event_query_request_defaults() {
+        let json = r#"{}"#;
+        let req: EventQueryRequest = serde_json::from_str(json).unwrap();
+        assert!(req.connector_id.is_none());
+        assert!(req.kind.is_none());
+        assert!(!req.unacknowledged_only);
+        assert_eq!(req.limit, 100);
+    }
+
+    #[test]
+    fn event_acknowledge_request_roundtrip() {
+        let req = EventAcknowledgeRequest {
+            event_ids: vec!["evt-1".to_string(), "evt-2".to_string()],
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: EventAcknowledgeRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.event_ids.len(), 2);
+    }
+
+    #[test]
+    fn receipt_query_request_roundtrip() {
+        let req = ReceiptQueryRequest {
+            connector_id: "fcp.test:echo:1.0.0".to_string(),
+            operation: Some("send_message".to_string()),
+            after: None,
+            limit: 50,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: ReceiptQueryRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.connector_id, "fcp.test:echo:1.0.0");
+        assert_eq!(parsed.operation.as_deref(), Some("send_message"));
+    }
+
+    #[test]
+    fn receipt_summary_roundtrip() {
+        let receipt = ReceiptSummary {
+            receipt_id: "rcpt-1".to_string(),
+            connector_id: "fcp.test:echo:1.0.0".to_string(),
+            operation: "send_message".to_string(),
+            success: true,
+            duration_ms: 42,
+            idempotency_key: None,
+            executed_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&receipt).unwrap();
+        let parsed: ReceiptSummary = serde_json::from_str(&json).unwrap();
+        assert!(parsed.success);
+        assert_eq!(parsed.duration_ms, 42);
+    }
+
+    // ── Log store integration ──
+
+    #[fcp_async_core::runtime::test]
+    async fn append_and_query_logs() {
+        let store = HostAdminStateStore::new();
+
+        store
+            .append_log(
+                Some("fcp.test:echo:1.0.0"),
+                LogSeverity::Info,
+                "connector started".to_string(),
+                BTreeMap::new(),
+            )
+            .await;
+        store
+            .append_log(
+                Some("fcp.test:echo:1.0.0"),
+                LogSeverity::Error,
+                "connection failed".to_string(),
+                BTreeMap::new(),
+            )
+            .await;
+
+        let all = store
+            .query_logs(&LogQueryRequest {
+                connector_id: None,
+                min_severity: None,
+                after_sequence: 0,
+                limit: 100,
+            })
+            .await;
+        assert_eq!(all.entries.len(), 2);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn query_logs_severity_filter() {
+        let store = HostAdminStateStore::new();
+
+        store
+            .append_log(
+                None,
+                LogSeverity::Debug,
+                "debug msg".to_string(),
+                BTreeMap::new(),
+            )
+            .await;
+        store
+            .append_log(
+                None,
+                LogSeverity::Error,
+                "error msg".to_string(),
+                BTreeMap::new(),
+            )
+            .await;
+
+        let errors_only = store
+            .query_logs(&LogQueryRequest {
+                connector_id: None,
+                min_severity: Some(LogSeverity::Error),
+                after_sequence: 0,
+                limit: 100,
+            })
+            .await;
+        assert_eq!(errors_only.entries.len(), 1);
+        assert_eq!(errors_only.entries[0].severity, LogSeverity::Error);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn query_logs_connector_filter() {
+        let store = HostAdminStateStore::new();
+
+        store
+            .append_log(
+                Some("fcp.test:alpha:1.0.0"),
+                LogSeverity::Info,
+                "alpha log".to_string(),
+                BTreeMap::new(),
+            )
+            .await;
+        store
+            .append_log(
+                Some("fcp.test:beta:1.0.0"),
+                LogSeverity::Info,
+                "beta log".to_string(),
+                BTreeMap::new(),
+            )
+            .await;
+
+        let alpha_only = store
+            .query_logs(&LogQueryRequest {
+                connector_id: Some("fcp.test:alpha:1.0.0".to_string()),
+                min_severity: None,
+                after_sequence: 0,
+                limit: 100,
+            })
+            .await;
+        assert_eq!(alpha_only.entries.len(), 1);
+        assert_eq!(
+            alpha_only.entries[0].connector_id.as_deref(),
+            Some("fcp.test:alpha:1.0.0")
+        );
+    }
+
+    // ── Event store integration ──
+
+    #[fcp_async_core::runtime::test]
+    async fn emit_and_query_events() {
+        let store = HostAdminStateStore::new();
+
+        store
+            .emit_event(
+                HostEventKind::LifecycleTransition,
+                Some("fcp.test:echo:1.0.0"),
+                "connector enabled".to_string(),
+                None,
+            )
+            .await;
+        store
+            .emit_event(
+                HostEventKind::HealthCheck,
+                Some("fcp.test:echo:1.0.0"),
+                "health ok".to_string(),
+                None,
+            )
+            .await;
+
+        let all = store
+            .query_events(&EventQueryRequest {
+                connector_id: None,
+                kind: None,
+                unacknowledged_only: false,
+                limit: 100,
+            })
+            .await;
+        assert_eq!(all.events.len(), 2);
+        assert_eq!(all.unacknowledged_count, 2);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn query_events_by_kind() {
+        let store = HostAdminStateStore::new();
+
+        store
+            .emit_event(
+                HostEventKind::LifecycleTransition,
+                None,
+                "transition".to_string(),
+                None,
+            )
+            .await;
+        store
+            .emit_event(HostEventKind::HealthCheck, None, "check".to_string(), None)
+            .await;
+
+        let transitions = store
+            .query_events(&EventQueryRequest {
+                connector_id: None,
+                kind: Some(HostEventKind::LifecycleTransition),
+                unacknowledged_only: false,
+                limit: 100,
+            })
+            .await;
+        assert_eq!(transitions.events.len(), 1);
+        assert_eq!(
+            transitions.events[0].kind,
+            HostEventKind::LifecycleTransition
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn acknowledge_events_and_filter() {
+        let store = HostAdminStateStore::new();
+
+        store
+            .emit_event(
+                HostEventKind::DriftDetected,
+                None,
+                "drift".to_string(),
+                None,
+            )
+            .await;
+        store
+            .emit_event(HostEventKind::HealthCheck, None, "ok".to_string(), None)
+            .await;
+
+        // Get all events.
+        let all = store
+            .query_events(&EventQueryRequest {
+                connector_id: None,
+                kind: None,
+                unacknowledged_only: false,
+                limit: 100,
+            })
+            .await;
+        assert_eq!(all.events.len(), 2);
+
+        // Acknowledge the first one.
+        let ack_response = store
+            .acknowledge_events(&EventAcknowledgeRequest {
+                event_ids: vec![all.events[0].event_id.clone()],
+            })
+            .await;
+        assert_eq!(ack_response.acknowledged_count, 1);
+        assert!(ack_response.not_found.is_empty());
+
+        // Query unacknowledged only.
+        let unacked = store
+            .query_events(&EventQueryRequest {
+                connector_id: None,
+                kind: None,
+                unacknowledged_only: true,
+                limit: 100,
+            })
+            .await;
+        assert_eq!(unacked.events.len(), 1);
+        assert_eq!(unacked.unacknowledged_count, 1);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn acknowledge_nonexistent_event() {
+        let store = HostAdminStateStore::new();
+        let response = store
+            .acknowledge_events(&EventAcknowledgeRequest {
+                event_ids: vec!["evt-999".to_string()],
+            })
+            .await;
+        assert_eq!(response.acknowledged_count, 0);
+        assert_eq!(response.not_found, vec!["evt-999"]);
+    }
+
+    // ── Capability issuance tests ──────────────────────────────────────────
+
+    fn test_signing_key() -> fcp_crypto::ed25519::Ed25519SigningKey {
+        fcp_crypto::ed25519::Ed25519SigningKey::generate()
+    }
+
+    fn basic_issuance_request() -> CapabilityIssuanceRequest {
+        CapabilityIssuanceRequest {
+            connector_id: "github:saas:1.0.0".to_string(),
+            zone_id: "z:work".to_string(),
+            principal_id: "agent:test-agent".to_string(),
+            operations: vec!["list_repos".to_string(), "create_issue".to_string()],
+            ttl_secs: 3600,
+            not_before_delay_secs: None,
+            holder_node: None,
+            max_delegation_depth: 0,
+            resource_allow: Vec::new(),
+            resource_deny: Vec::new(),
+            max_calls: None,
+            max_bytes: None,
+            credential_allow: Vec::new(),
+            dry_run: false,
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn issue_capability_token_basic() {
+        let store = HostAdminStateStore::new();
+        let key = test_signing_key();
+        let request = basic_issuance_request();
+
+        let response = store.issue_capability_token(&request, &key).await.unwrap();
+
+        assert!(!response.dry_run);
+        assert!(!response.token_id.is_empty());
+        assert!(response.token_cbor_b64.is_some());
+        assert_eq!(response.inspection.subject, "agent:test-agent");
+        assert_eq!(response.inspection.zone_id, "z:work");
+        assert_eq!(
+            response.inspection.operations,
+            vec!["list_repos", "create_issue"]
+        );
+        assert!(response.inspection.currently_valid);
+        assert!(response.inspection.seconds_remaining > 0);
+        assert_eq!(response.inspection.delegation_depth, 0);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn issue_capability_token_dry_run() {
+        let store = HostAdminStateStore::new();
+        let key = test_signing_key();
+        let mut request = basic_issuance_request();
+        request.dry_run = true;
+
+        let response = store.issue_capability_token(&request, &key).await.unwrap();
+
+        assert!(response.dry_run);
+        assert!(response.token_cbor_b64.is_none());
+        assert!(!response.token_id.is_empty());
+        assert_eq!(response.inspection.subject, "agent:test-agent");
+
+        // Dry run should not record in token registry.
+        let tokens = store
+            .query_issued_tokens(&IssuedTokenQueryRequest {
+                connector_id: None,
+                principal_id: None,
+                active_only: false,
+                limit: 100,
+            })
+            .await;
+        assert_eq!(tokens.total_tokens, 0);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn issue_capability_token_with_holder_node() {
+        let store = HostAdminStateStore::new();
+        let key = test_signing_key();
+        let mut request = basic_issuance_request();
+        request.holder_node = Some("node:my-laptop".to_string());
+
+        let response = store.issue_capability_token(&request, &key).await.unwrap();
+
+        assert_eq!(
+            response.inspection.holder_node.as_deref(),
+            Some("node:my-laptop")
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn issue_capability_token_with_not_before_delay() {
+        let store = HostAdminStateStore::new();
+        let key = test_signing_key();
+        let mut request = basic_issuance_request();
+        request.not_before_delay_secs = Some(60);
+
+        let response = store.issue_capability_token(&request, &key).await.unwrap();
+
+        assert!(response.inspection.not_before.is_some());
+        // Token should not be currently valid since nbf is in the future.
+        assert!(!response.inspection.currently_valid);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn issue_capability_token_with_constraints() {
+        let store = HostAdminStateStore::new();
+        let key = test_signing_key();
+        let mut request = basic_issuance_request();
+        request.resource_allow = vec!["repos/my-org/*".to_string()];
+        request.resource_deny = vec!["repos/my-org/secret-repo".to_string()];
+        request.max_calls = Some(100);
+        request.max_bytes = Some(1_048_576);
+        request.credential_allow = vec!["cred:github-pat".to_string()];
+
+        let response = store.issue_capability_token(&request, &key).await.unwrap();
+
+        assert_eq!(response.inspection.resource_allow, vec!["repos/my-org/*"]);
+        assert_eq!(
+            response.inspection.resource_deny,
+            vec!["repos/my-org/secret-repo"]
+        );
+        assert_eq!(response.inspection.max_calls, Some(100));
+        assert_eq!(response.inspection.max_bytes, Some(1_048_576));
+        assert_eq!(
+            response.inspection.credential_allow,
+            vec!["cred:github-pat"]
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn issue_and_inspect_round_trip() {
+        let store = HostAdminStateStore::new();
+        let key = test_signing_key();
+        let request = basic_issuance_request();
+
+        let response = store.issue_capability_token(&request, &key).await.unwrap();
+        let token_b64 = response.token_cbor_b64.unwrap();
+
+        let inspection = HostAdminStateStore::inspect_capability_token(&token_b64).unwrap();
+
+        assert_eq!(inspection.subject, "agent:test-agent");
+        assert_eq!(inspection.zone_id, "z:work");
+        assert_eq!(inspection.operations, vec!["list_repos", "create_issue"]);
+        assert!(inspection.currently_valid);
+        assert!(!inspection.token_id.is_empty());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn inspect_invalid_base64_returns_error() {
+        let result = HostAdminStateStore::inspect_capability_token("not-valid-base64!!!");
+        assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn issue_records_in_token_registry() {
+        let store = HostAdminStateStore::new();
+        let key = test_signing_key();
+        let request = basic_issuance_request();
+
+        store.issue_capability_token(&request, &key).await.unwrap();
+
+        let tokens = store
+            .query_issued_tokens(&IssuedTokenQueryRequest {
+                connector_id: None,
+                principal_id: None,
+                active_only: false,
+                limit: 100,
+            })
+            .await;
+
+        assert_eq!(tokens.total_tokens, 1);
+        assert_eq!(tokens.active_count, 1);
+        assert_eq!(tokens.tokens[0].connector_id, "github:saas:1.0.0");
+        assert_eq!(tokens.tokens[0].principal_id, "agent:test-agent");
+        assert!(!tokens.tokens[0].revoked);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn revoke_token_success() {
+        let store = HostAdminStateStore::new();
+        let key = test_signing_key();
+        let request = basic_issuance_request();
+
+        let issued = store.issue_capability_token(&request, &key).await.unwrap();
+
+        let revoke_response = store
+            .revoke_token(&TokenRevocationRequest {
+                token_id: issued.token_id.clone(),
+                reason: Some("compromised".to_string()),
+            })
+            .await
+            .unwrap();
+
+        assert!(revoke_response.revoked);
+        assert_eq!(revoke_response.token_id, issued.token_id);
+
+        // Query should show revoked.
+        let tokens = store
+            .query_issued_tokens(&IssuedTokenQueryRequest {
+                connector_id: None,
+                principal_id: None,
+                active_only: false,
+                limit: 100,
+            })
+            .await;
+        assert_eq!(tokens.total_tokens, 1);
+        assert!(tokens.tokens[0].revoked);
+        assert_eq!(
+            tokens.tokens[0].revocation_reason.as_deref(),
+            Some("compromised")
+        );
+        assert!(tokens.tokens[0].revoked_at.is_some());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn revoke_nonexistent_token() {
+        let store = HostAdminStateStore::new();
+
+        let response = store
+            .revoke_token(&TokenRevocationRequest {
+                token_id: "nonexistent".to_string(),
+                reason: None,
+            })
+            .await
+            .unwrap();
+
+        assert!(!response.revoked);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn revoke_already_revoked_token() {
+        let store = HostAdminStateStore::new();
+        let key = test_signing_key();
+        let request = basic_issuance_request();
+
+        let issued = store.issue_capability_token(&request, &key).await.unwrap();
+
+        // First revocation.
+        let r1 = store
+            .revoke_token(&TokenRevocationRequest {
+                token_id: issued.token_id.clone(),
+                reason: Some("first".to_string()),
+            })
+            .await
+            .unwrap();
+        assert!(r1.revoked);
+
+        // Second revocation - already revoked.
+        let r2 = store
+            .revoke_token(&TokenRevocationRequest {
+                token_id: issued.token_id.clone(),
+                reason: Some("second".to_string()),
+            })
+            .await
+            .unwrap();
+        assert!(!r2.revoked);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn query_tokens_filter_by_connector() {
+        let store = HostAdminStateStore::new();
+        let key = test_signing_key();
+
+        // Issue two tokens for different connectors.
+        let mut req1 = basic_issuance_request();
+        req1.connector_id = "github:saas:1.0.0".to_string();
+        store.issue_capability_token(&req1, &key).await.unwrap();
+
+        let mut req2 = basic_issuance_request();
+        req2.connector_id = "slack:saas:1.0.0".to_string();
+        store.issue_capability_token(&req2, &key).await.unwrap();
+
+        let github_tokens = store
+            .query_issued_tokens(&IssuedTokenQueryRequest {
+                connector_id: Some("github:saas:1.0.0".to_string()),
+                principal_id: None,
+                active_only: false,
+                limit: 100,
+            })
+            .await;
+        assert_eq!(github_tokens.tokens.len(), 1);
+        assert_eq!(github_tokens.total_tokens, 2);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn query_tokens_filter_by_principal() {
+        let store = HostAdminStateStore::new();
+        let key = test_signing_key();
+
+        let mut req1 = basic_issuance_request();
+        req1.principal_id = "agent:alice".to_string();
+        store.issue_capability_token(&req1, &key).await.unwrap();
+
+        let mut req2 = basic_issuance_request();
+        req2.principal_id = "agent:bob".to_string();
+        store.issue_capability_token(&req2, &key).await.unwrap();
+
+        let alice_tokens = store
+            .query_issued_tokens(&IssuedTokenQueryRequest {
+                connector_id: None,
+                principal_id: Some("agent:alice".to_string()),
+                active_only: false,
+                limit: 100,
+            })
+            .await;
+        assert_eq!(alice_tokens.tokens.len(), 1);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn query_tokens_active_only_excludes_revoked() {
+        let store = HostAdminStateStore::new();
+        let key = test_signing_key();
+
+        let issued = store
+            .issue_capability_token(&basic_issuance_request(), &key)
+            .await
+            .unwrap();
+
+        store
+            .revoke_token(&TokenRevocationRequest {
+                token_id: issued.token_id,
+                reason: None,
+            })
+            .await
+            .unwrap();
+
+        let active = store
+            .query_issued_tokens(&IssuedTokenQueryRequest {
+                connector_id: None,
+                principal_id: None,
+                active_only: true,
+                limit: 100,
+            })
+            .await;
+        assert_eq!(active.tokens.len(), 0);
+        assert_eq!(active.active_count, 0);
+        assert_eq!(active.total_tokens, 1);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn issue_multiple_tokens_unique_ids() {
+        let store = HostAdminStateStore::new();
+        let key = test_signing_key();
+
+        let r1 = store
+            .issue_capability_token(&basic_issuance_request(), &key)
+            .await
+            .unwrap();
+        let r2 = store
+            .issue_capability_token(&basic_issuance_request(), &key)
+            .await
+            .unwrap();
+
+        assert_ne!(r1.token_id, r2.token_id);
+        assert_ne!(r1.journal_sequence, r2.journal_sequence);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn issue_token_with_delegation_depth() {
+        let store = HostAdminStateStore::new();
+        let key = test_signing_key();
+        let mut request = basic_issuance_request();
+        request.max_delegation_depth = 3;
+
+        let response = store.issue_capability_token(&request, &key).await.unwrap();
+
+        assert_eq!(response.inspection.delegation_depth, 3);
+
+        // Inspect round-trip should preserve delegation depth.
+        let inspection = HostAdminStateStore::inspect_capability_token(
+            response.token_cbor_b64.as_ref().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(inspection.delegation_depth, 3);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn issue_token_no_operations_means_all() {
+        let store = HostAdminStateStore::new();
+        let key = test_signing_key();
+        let mut request = basic_issuance_request();
+        request.operations.clear();
+
+        let response = store.issue_capability_token(&request, &key).await.unwrap();
+
+        assert!(response.inspection.operations.is_empty());
+
+        let inspection = HostAdminStateStore::inspect_capability_token(
+            response.token_cbor_b64.as_ref().unwrap(),
+        )
+        .unwrap();
+        assert!(inspection.operations.is_empty());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn issue_token_custom_ttl() {
+        let store = HostAdminStateStore::new();
+        let key = test_signing_key();
+        let mut request = basic_issuance_request();
+        request.ttl_secs = 300; // 5 minutes
+
+        let response = store.issue_capability_token(&request, &key).await.unwrap();
+
+        // seconds_remaining should be close to 300 (allow some wiggle for test execution).
+        assert!(response.inspection.seconds_remaining <= 300);
+        assert!(response.inspection.seconds_remaining >= 298);
+    }
+
+    #[test]
+    fn capability_issuance_request_serde_round_trip() {
+        let request = basic_issuance_request();
+        let json = serde_json::to_string(&request).unwrap();
+        let parsed: CapabilityIssuanceRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.connector_id, request.connector_id);
+        assert_eq!(parsed.zone_id, request.zone_id);
+        assert_eq!(parsed.principal_id, request.principal_id);
+        assert_eq!(parsed.operations, request.operations);
+        assert_eq!(parsed.ttl_secs, request.ttl_secs);
+    }
+
+    #[test]
+    fn capability_token_inspection_serde_round_trip() {
+        let inspection = CapabilityTokenInspection {
+            token_id: "abc123".to_string(),
+            issuer: "host:test".to_string(),
+            subject: "agent:test".to_string(),
+            audience: Some("github:saas:1.0.0".to_string()),
+            zone_id: "z:work".to_string(),
+            capability_id: None,
+            operations: vec!["list_repos".to_string()],
+            holder_node: None,
+            delegation_depth: 0,
+            issued_at: Utc::now(),
+            not_before: None,
+            expires_at: Utc::now() + Duration::hours(1),
+            currently_valid: true,
+            seconds_remaining: 3600,
+            resource_allow: Vec::new(),
+            resource_deny: Vec::new(),
+            max_calls: None,
+            max_bytes: None,
+            credential_allow: Vec::new(),
+        };
+
+        let json = serde_json::to_string(&inspection).unwrap();
+        let parsed: CapabilityTokenInspection = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.token_id, "abc123");
+        assert_eq!(parsed.subject, "agent:test");
+    }
+
+    #[test]
+    fn live_request_auth_serde_round_trip() {
+        let auth = LiveRequestAuth {
+            capability_token_b64: "dGVzdA==".to_string(),
+            holder_proof: Some(LiveRequestHolderProof {
+                signature_hex: "ab".repeat(64),
+                holder_node: "node:laptop".to_string(),
+            }),
+            approval_tokens: vec![LiveRequestApprovalToken {
+                token_id: "apt-1".to_string(),
+                issuer: "host:test".to_string(),
+                zone_id: "z:work".to_string(),
+                scope_kind: "execution".to_string(),
+                scope: serde_json::json!({"operation_id": "delete_repo"}),
+                expires_at_ms: 9_999_999_999_999,
+                signature_b64: None,
+            }],
+        };
+
+        let json = serde_json::to_string(&auth).unwrap();
+        let parsed: LiveRequestAuth = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.capability_token_b64, "dGVzdA==");
+        assert!(parsed.holder_proof.is_some());
+        assert_eq!(parsed.approval_tokens.len(), 1);
+        assert_eq!(parsed.approval_tokens[0].scope_kind, "execution");
+    }
+
+    #[test]
+    fn token_revocation_request_serde() {
+        let req = TokenRevocationRequest {
+            token_id: "tok-1".to_string(),
+            reason: Some("compromised".to_string()),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: TokenRevocationRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.token_id, "tok-1");
+        assert_eq!(parsed.reason.as_deref(), Some("compromised"));
+    }
+
+    #[test]
+    fn issued_token_record_serde() {
+        let record = IssuedTokenRecord {
+            token_id: "tok-1".to_string(),
+            connector_id: "github:saas:1.0.0".to_string(),
+            principal_id: "agent:test".to_string(),
+            zone_id: "z:work".to_string(),
+            issued_at: Utc::now(),
+            expires_at: Utc::now() + Duration::hours(1),
+            revoked: false,
+            revocation_reason: None,
+            revoked_at: None,
+        };
+        let json = serde_json::to_string(&record).unwrap();
+        let parsed: IssuedTokenRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.token_id, "tok-1");
+        assert!(!parsed.revoked);
+    }
+
+    #[test]
+    fn issued_token_query_request_defaults() {
+        let json = r#"{"active_only": true}"#;
+        let parsed: IssuedTokenQueryRequest = serde_json::from_str(json).unwrap();
+        assert!(parsed.active_only);
+        assert_eq!(parsed.limit, 100); // default_journal_limit
+        assert!(parsed.connector_id.is_none());
+    }
+
+    #[test]
+    fn live_request_holder_proof_serde() {
+        let proof = LiveRequestHolderProof {
+            signature_hex: "ff".repeat(64),
+            holder_node: "node:test".to_string(),
+        };
+        let json = serde_json::to_string(&proof).unwrap();
+        assert!(json.contains("node:test"));
+        let parsed: LiveRequestHolderProof = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.holder_node, "node:test");
+        assert_eq!(parsed.signature_hex.len(), 128);
+    }
+
+    #[test]
+    fn live_request_approval_token_serde() {
+        let token = LiveRequestApprovalToken {
+            token_id: "apt-1".to_string(),
+            issuer: "host:local".to_string(),
+            zone_id: "z:work".to_string(),
+            scope_kind: "elevation".to_string(),
+            scope: serde_json::json!({"operation_id": "admin_action", "target_integrity": "high"}),
+            expires_at_ms: 1_700_000_000_000,
+            signature_b64: Some("c2lnbmF0dXJl".to_string()),
+        };
+        let json = serde_json::to_string(&token).unwrap();
+        let parsed: LiveRequestApprovalToken = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.scope_kind, "elevation");
+        assert!(parsed.signature_b64.is_some());
+    }
+
+    #[test]
+    fn capability_issuance_response_serde() {
+        let response = CapabilityIssuanceResponse {
+            dry_run: false,
+            token_id: "tok-1".to_string(),
+            token_cbor_b64: Some("base64data".to_string()),
+            inspection: CapabilityTokenInspection {
+                token_id: "tok-1".to_string(),
+                issuer: "host:key1".to_string(),
+                subject: "agent:test".to_string(),
+                audience: None,
+                zone_id: "z:work".to_string(),
+                capability_id: None,
+                operations: Vec::new(),
+                holder_node: None,
+                delegation_depth: 0,
+                issued_at: Utc::now(),
+                not_before: None,
+                expires_at: Utc::now() + Duration::hours(1),
+                currently_valid: true,
+                seconds_remaining: 3600,
+                resource_allow: Vec::new(),
+                resource_deny: Vec::new(),
+                max_calls: None,
+                max_bytes: None,
+                credential_allow: Vec::new(),
+            },
+            journal_sequence: 1,
+            issued_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        let parsed: CapabilityIssuanceResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.token_id, "tok-1");
+    }
+
+    #[test]
+    fn capability_token_verify_response_serde() {
+        let response = CapabilityTokenVerifyResponse {
+            signature_valid: true,
+            temporally_valid: true,
+            scope_valid: true,
+            valid: true,
+            inspection: CapabilityTokenInspection {
+                token_id: "tok-1".to_string(),
+                issuer: "host:key1".to_string(),
+                subject: "agent:test".to_string(),
+                audience: None,
+                zone_id: "z:work".to_string(),
+                capability_id: None,
+                operations: Vec::new(),
+                holder_node: None,
+                delegation_depth: 0,
+                issued_at: Utc::now(),
+                not_before: None,
+                expires_at: Utc::now() + Duration::hours(1),
+                currently_valid: true,
+                seconds_remaining: 3600,
+                resource_allow: Vec::new(),
+                resource_deny: Vec::new(),
+                max_calls: None,
+                max_bytes: None,
+                credential_allow: Vec::new(),
+            },
+            rejection_reasons: Vec::new(),
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        let parsed: CapabilityTokenVerifyResponse = serde_json::from_str(&json).unwrap();
+        assert!(parsed.valid);
+    }
+
+    #[test]
+    fn capability_issuance_request_default_ttl() {
+        let json = r#"{
+            "connector_id": "test:saas:1.0.0",
+            "zone_id": "z:work",
+            "principal_id": "agent:test"
+        }"#;
+        let parsed: CapabilityIssuanceRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.ttl_secs, 3600);
+        assert!(!parsed.dry_run);
+        assert_eq!(parsed.max_delegation_depth, 0);
+    }
+
+    // ── Simulate RPC tests ─────────────────────────────────────────────────
+
+    fn test_simulate_receipt(
+        connector_id: &str,
+        operation: &str,
+        phase: SimulatePhase,
+        would_succeed: bool,
+    ) -> SimulateReceipt {
+        SimulateReceipt {
+            receipt_id: format!("sim-{connector_id}-{operation}"),
+            connector_id: connector_id.to_string(),
+            operation: operation.to_string(),
+            phase,
+            would_succeed,
+            input_digest: Some("abc123".to_string()),
+            duration_ms: 42,
+            simulated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn host_simulate_request_serde_round_trip() {
+        let request = HostSimulateRequest {
+            request_id: "req-1".to_string(),
+            connector_id: "github:saas:1.0.0".to_string(),
+            operation: "list_repos".to_string(),
+            input: Some(serde_json::json!({"org": "test"})),
+            zone_id: Some("z:work".to_string()),
+            principal: Some("agent:test".to_string()),
+            estimate_cost: true,
+            check_availability: false,
+            deadline_ms: 3000,
+        };
+
+        let json = serde_json::to_string(&request).unwrap();
+        let parsed: HostSimulateRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.request_id, "req-1");
+        assert_eq!(parsed.connector_id, "github:saas:1.0.0");
+        assert!(parsed.estimate_cost);
+        assert!(!parsed.check_availability);
+        assert_eq!(parsed.deadline_ms, 3000);
+    }
+
+    #[test]
+    fn host_simulate_request_defaults() {
+        let json = r#"{
+            "request_id": "req-1",
+            "connector_id": "github:saas:1.0.0",
+            "operation": "list_repos"
+        }"#;
+        let parsed: HostSimulateRequest = serde_json::from_str(json).unwrap();
+        assert!(!parsed.estimate_cost);
+        assert!(!parsed.check_availability);
+        assert_eq!(parsed.deadline_ms, 5000);
+        assert!(parsed.input.is_none());
+    }
+
+    #[test]
+    fn host_simulate_response_success_serde() {
+        let response = HostSimulateResponse {
+            request_id: "req-1".to_string(),
+            would_succeed: true,
+            phase: SimulatePhase::ConnectorReached,
+            preflight_allowed: true,
+            failure_reason: None,
+            denial_code: None,
+            missing_capabilities: Vec::new(),
+            cost_estimate: Some(SimulateCostEstimate {
+                api_credits: Some(5),
+                estimated_duration_ms: Some(200),
+                estimated_bytes: Some(1024),
+                confidence: Some(SimulateCostConfidence::Medium),
+            }),
+            availability: Some(SimulateResourceAvailability {
+                available: true,
+                rate_limit_remaining: Some(450),
+                rate_limit_reset_at: Some(1_700_000_000),
+                details: None,
+            }),
+            duration_ms: 15,
+            receipt: test_simulate_receipt(
+                "github:saas:1.0.0",
+                "list_repos",
+                SimulatePhase::ConnectorReached,
+                true,
+            ),
+        };
+
+        let json = serde_json::to_string(&response).unwrap();
+        let parsed: HostSimulateResponse = serde_json::from_str(&json).unwrap();
+        assert!(parsed.would_succeed);
+        assert_eq!(parsed.phase, SimulatePhase::ConnectorReached);
+        assert!(parsed.cost_estimate.is_some());
+        assert_eq!(parsed.cost_estimate.unwrap().api_credits, Some(5));
+        assert!(parsed.availability.is_some());
+    }
+
+    #[test]
+    fn host_simulate_response_denied_serde() {
+        let response = HostSimulateResponse {
+            request_id: "req-2".to_string(),
+            would_succeed: false,
+            phase: SimulatePhase::PreflightOnly,
+            preflight_allowed: false,
+            failure_reason: Some("missing capability: net.egress".to_string()),
+            denial_code: Some("FCP-3001".to_string()),
+            missing_capabilities: vec!["net.egress".to_string()],
+            cost_estimate: None,
+            availability: None,
+            duration_ms: 2,
+            receipt: test_simulate_receipt(
+                "github:saas:1.0.0",
+                "create_issue",
+                SimulatePhase::PreflightOnly,
+                false,
+            ),
+        };
+
+        let json = serde_json::to_string(&response).unwrap();
+        let parsed: HostSimulateResponse = serde_json::from_str(&json).unwrap();
+        assert!(!parsed.would_succeed);
+        assert_eq!(parsed.phase, SimulatePhase::PreflightOnly);
+        assert_eq!(parsed.missing_capabilities, vec!["net.egress"]);
+    }
+
+    #[test]
+    fn simulate_phase_serde_all_variants() {
+        for (phase, expected) in [
+            (SimulatePhase::PreflightOnly, "\"preflight_only\""),
+            (SimulatePhase::ConnectorReached, "\"connector_reached\""),
+            (
+                SimulatePhase::ConnectorUnsupported,
+                "\"connector_unsupported\"",
+            ),
+            (SimulatePhase::TimedOut, "\"timed_out\""),
+        ] {
+            let json = serde_json::to_string(&phase).unwrap();
+            assert_eq!(json, expected);
+            let parsed: SimulatePhase = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, phase);
+        }
+    }
+
+    #[test]
+    fn simulate_cost_estimate_serde() {
+        let estimate = SimulateCostEstimate {
+            api_credits: Some(10),
+            estimated_duration_ms: Some(500),
+            estimated_bytes: None,
+            confidence: Some(SimulateCostConfidence::High),
+        };
+        let json = serde_json::to_string(&estimate).unwrap();
+        let parsed: SimulateCostEstimate = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.api_credits, Some(10));
+        assert_eq!(parsed.confidence, Some(SimulateCostConfidence::High));
+    }
+
+    #[test]
+    fn simulate_cost_confidence_serde() {
+        for (conf, expected) in [
+            (SimulateCostConfidence::Low, "\"low\""),
+            (SimulateCostConfidence::Medium, "\"medium\""),
+            (SimulateCostConfidence::High, "\"high\""),
+        ] {
+            let json = serde_json::to_string(&conf).unwrap();
+            assert_eq!(json, expected);
+        }
+    }
+
+    #[test]
+    fn simulate_resource_availability_serde() {
+        let avail = SimulateResourceAvailability {
+            available: true,
+            rate_limit_remaining: Some(100),
+            rate_limit_reset_at: None,
+            details: Some("API healthy".to_string()),
+        };
+        let json = serde_json::to_string(&avail).unwrap();
+        let parsed: SimulateResourceAvailability = serde_json::from_str(&json).unwrap();
+        assert!(parsed.available);
+        assert_eq!(parsed.details.as_deref(), Some("API healthy"));
+    }
+
+    #[test]
+    fn simulate_receipt_serde() {
+        let receipt = test_simulate_receipt(
+            "github:saas:1.0.0",
+            "list_repos",
+            SimulatePhase::ConnectorReached,
+            true,
+        );
+        let json = serde_json::to_string(&receipt).unwrap();
+        let parsed: SimulateReceipt = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.connector_id, "github:saas:1.0.0");
+        assert_eq!(parsed.phase, SimulatePhase::ConnectorReached);
+        assert!(parsed.would_succeed);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn record_and_query_simulate_receipts() {
+        let store = HostAdminStateStore::new();
+
+        let receipt = test_simulate_receipt(
+            "github:saas:1.0.0",
+            "list_repos",
+            SimulatePhase::ConnectorReached,
+            true,
+        );
+        store.record_simulate_receipt(receipt).await.unwrap();
+
+        let result = store
+            .query_simulate_receipts(&SimulateReceiptQueryRequest {
+                connector_id: "github:saas:1.0.0".to_string(),
+                operation: None,
+                after: None,
+                limit: 100,
+            })
+            .await;
+        assert_eq!(result.receipts.len(), 1);
+        assert_eq!(result.total_receipts, 1);
+        assert!(result.receipts[0].would_succeed);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn query_simulate_receipts_filter_by_operation() {
+        let store = HostAdminStateStore::new();
+
+        store
+            .record_simulate_receipt(test_simulate_receipt(
+                "github:saas:1.0.0",
+                "list_repos",
+                SimulatePhase::ConnectorReached,
+                true,
+            ))
+            .await
+            .unwrap();
+        store
+            .record_simulate_receipt(test_simulate_receipt(
+                "github:saas:1.0.0",
+                "create_issue",
+                SimulatePhase::PreflightOnly,
+                false,
+            ))
+            .await
+            .unwrap();
+
+        let result = store
+            .query_simulate_receipts(&SimulateReceiptQueryRequest {
+                connector_id: "github:saas:1.0.0".to_string(),
+                operation: Some("create_issue".to_string()),
+                after: None,
+                limit: 100,
+            })
+            .await;
+        assert_eq!(result.receipts.len(), 1);
+        assert_eq!(result.receipts[0].operation, "create_issue");
+        assert_eq!(result.total_receipts, 2);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn query_simulate_receipts_filter_by_connector() {
+        let store = HostAdminStateStore::new();
+
+        store
+            .record_simulate_receipt(test_simulate_receipt(
+                "github:saas:1.0.0",
+                "list_repos",
+                SimulatePhase::ConnectorReached,
+                true,
+            ))
+            .await
+            .unwrap();
+        store
+            .record_simulate_receipt(test_simulate_receipt(
+                "slack:saas:1.0.0",
+                "send_message",
+                SimulatePhase::ConnectorReached,
+                true,
+            ))
+            .await
+            .unwrap();
+
+        let result = store
+            .query_simulate_receipts(&SimulateReceiptQueryRequest {
+                connector_id: "github:saas:1.0.0".to_string(),
+                operation: None,
+                after: None,
+                limit: 100,
+            })
+            .await;
+        assert_eq!(result.receipts.len(), 1);
+        assert_eq!(result.total_receipts, 1);
+    }
+
+    #[test]
+    fn simulate_support_serde_all_variants() {
+        for (support, expected) in [
+            (SimulateSupport::Real, "\"real\""),
+            (SimulateSupport::Trivial, "\"trivial\""),
+            (SimulateSupport::Unsupported, "\"unsupported\""),
+            (SimulateSupport::Unknown, "\"unknown\""),
+        ] {
+            let json = serde_json::to_string(&support).unwrap();
+            assert_eq!(json, expected);
+            let parsed: SimulateSupport = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, support);
+        }
+    }
+
+    #[test]
+    fn operation_simulate_metadata_serde() {
+        let metadata = OperationSimulateMetadata {
+            operation: "list_repos".to_string(),
+            simulate_support: SimulateSupport::Real,
+            supports_cost_estimate: true,
+            supports_availability_check: false,
+            max_deadline_ms: Some(10000),
+        };
+        let json = serde_json::to_string(&metadata).unwrap();
+        let parsed: OperationSimulateMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.simulate_support, SimulateSupport::Real);
+        assert!(parsed.supports_cost_estimate);
+        assert!(!parsed.supports_availability_check);
+        assert_eq!(parsed.max_deadline_ms, Some(10000));
+    }
+
+    #[test]
+    fn simulate_receipt_query_request_defaults() {
+        let json = r#"{"connector_id": "test:saas:1.0.0"}"#;
+        let parsed: SimulateReceiptQueryRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.connector_id, "test:saas:1.0.0");
+        assert!(parsed.operation.is_none());
+        assert!(parsed.after.is_none());
+        assert_eq!(parsed.limit, 100);
+    }
+
+    #[test]
+    fn host_simulate_response_timed_out() {
+        let response = HostSimulateResponse {
+            request_id: "req-3".to_string(),
+            would_succeed: false,
+            phase: SimulatePhase::TimedOut,
+            preflight_allowed: true,
+            failure_reason: Some("simulation deadline exceeded".to_string()),
+            denial_code: None,
+            missing_capabilities: Vec::new(),
+            cost_estimate: None,
+            availability: None,
+            duration_ms: 5001,
+            receipt: test_simulate_receipt(
+                "slow-connector:saas:1.0.0",
+                "heavy_op",
+                SimulatePhase::TimedOut,
+                false,
+            ),
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        let parsed: HostSimulateResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.phase, SimulatePhase::TimedOut);
+        assert!(parsed.preflight_allowed);
+        assert!(!parsed.would_succeed);
+    }
+
+    #[test]
+    fn host_simulate_response_connector_unsupported() {
+        let response = HostSimulateResponse {
+            request_id: "req-4".to_string(),
+            would_succeed: false,
+            phase: SimulatePhase::ConnectorUnsupported,
+            preflight_allowed: true,
+            failure_reason: Some(
+                "connector does not support simulation for this operation".to_string(),
+            ),
+            denial_code: None,
+            missing_capabilities: Vec::new(),
+            cost_estimate: None,
+            availability: None,
+            duration_ms: 1,
+            receipt: test_simulate_receipt(
+                "legacy:saas:1.0.0",
+                "old_op",
+                SimulatePhase::ConnectorUnsupported,
+                false,
+            ),
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        let parsed: HostSimulateResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.phase, SimulatePhase::ConnectorUnsupported);
+    }
+
+    // ── Auth verification and denial tests ───────────────────────────────
+
+    #[test]
+    fn auth_denial_kind_serde_roundtrip() {
+        let kinds = [
+            AuthDenialKind::MissingToken,
+            AuthDenialKind::MalformedToken,
+            AuthDenialKind::InvalidSignature,
+            AuthDenialKind::TemporallyInvalid,
+            AuthDenialKind::InsufficientScope,
+            AuthDenialKind::WrongConnector,
+            AuthDenialKind::Revoked,
+            AuthDenialKind::HolderProofFailed,
+            AuthDenialKind::MissingApproval,
+            AuthDenialKind::InvalidApproval,
+        ];
+        for kind in &kinds {
+            let json = serde_json::to_string(kind).unwrap();
+            let back: AuthDenialKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(*kind, back);
+        }
+    }
+
+    #[test]
+    fn auth_denial_missing_token() {
+        let denial = AuthDenial::missing_token("invoke");
+        assert_eq!(denial.rpc, "invoke");
+        assert_eq!(denial.kind, AuthDenialKind::MissingToken);
+        assert!(denial.message.contains("required"));
+        assert!(denial.inspection.is_none());
+        assert!(!denial.remediation.is_empty());
+        assert!(denial.denial_id.starts_with("denial-invoke-"));
+    }
+
+    #[test]
+    fn auth_denial_malformed_token() {
+        let denial = AuthDenial::malformed_token("simulate", "invalid base64");
+        assert_eq!(denial.kind, AuthDenialKind::MalformedToken);
+        assert!(denial.message.contains("invalid base64"));
+        assert!(denial.remediation.iter().any(|r| r.contains("COSE_Sign1")));
+    }
+
+    #[test]
+    fn auth_denial_holder_proof_failed() {
+        let denial = AuthDenial::holder_proof_failed("invoke", "signature mismatch");
+        assert_eq!(denial.kind, AuthDenialKind::HolderProofFailed);
+        assert!(denial.message.contains("signature mismatch"));
+        assert!(denial.remediation.iter().any(|r| r.contains("Ed25519")));
+    }
+
+    #[test]
+    fn auth_denial_missing_approval() {
+        let denial = AuthDenial::missing_approval("invoke", "elevation");
+        assert_eq!(denial.kind, AuthDenialKind::MissingApproval);
+        assert!(denial.message.contains("elevation"));
+        assert!(denial.remediation.iter().any(|r| r.contains("elevation")));
+    }
+
+    #[test]
+    fn auth_denial_from_verify_expired_token() {
+        let inspection = CapabilityTokenInspection {
+            token_id: "test-token-1".to_owned(),
+            issuer: "test-issuer".to_owned(),
+            subject: "test-subject".to_owned(),
+            audience: None,
+            zone_id: "zone-1".to_owned(),
+            capability_id: Some("cap-1".to_owned()),
+            operations: vec!["read".to_owned()],
+            holder_node: None,
+            delegation_depth: 0,
+            issued_at: Utc::now() - chrono::Duration::hours(2),
+            not_before: None,
+            expires_at: Utc::now() - chrono::Duration::hours(1),
+            currently_valid: false,
+            seconds_remaining: 0,
+            resource_allow: vec![],
+            resource_deny: vec![],
+            max_calls: None,
+            max_bytes: None,
+            credential_allow: vec![],
+        };
+
+        let verify = CapabilityTokenVerifyResponse {
+            signature_valid: true,
+            temporally_valid: false,
+            scope_valid: true,
+            valid: false,
+            inspection,
+            rejection_reasons: vec!["Token expired".to_owned()],
+        };
+
+        let denial = AuthDenial::from_verify_failure("invoke", &verify);
+        assert_eq!(denial.kind, AuthDenialKind::TemporallyInvalid);
+        assert!(denial.message.contains("Token expired"));
+        assert!(denial.inspection.is_some());
+        assert!(denial.remediation.iter().any(|r| r.contains("Re-issue")));
+    }
+
+    #[test]
+    fn auth_denial_from_verify_insufficient_scope() {
+        let inspection = CapabilityTokenInspection {
+            token_id: "test-token-2".to_owned(),
+            issuer: "test-issuer".to_owned(),
+            subject: "test-subject".to_owned(),
+            audience: None,
+            zone_id: "zone-1".to_owned(),
+            capability_id: Some("cap-2".to_owned()),
+            operations: vec!["read".to_owned()],
+            holder_node: None,
+            delegation_depth: 0,
+            issued_at: Utc::now(),
+            not_before: None,
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+            currently_valid: true,
+            seconds_remaining: 3600,
+            resource_allow: vec![],
+            resource_deny: vec![],
+            max_calls: None,
+            max_bytes: None,
+            credential_allow: vec![],
+        };
+
+        let verify = CapabilityTokenVerifyResponse {
+            signature_valid: true,
+            temporally_valid: true,
+            scope_valid: false,
+            valid: false,
+            inspection,
+            rejection_reasons: vec!["Token does not grant operation 'write'".to_owned()],
+        };
+
+        let denial = AuthDenial::from_verify_failure("invoke", &verify);
+        assert_eq!(denial.kind, AuthDenialKind::InsufficientScope);
+        assert!(denial.remediation.iter().any(|r| r.contains("scope")));
+    }
+
+    #[test]
+    fn auth_denial_from_verify_revoked() {
+        let inspection = CapabilityTokenInspection {
+            token_id: "test-token-3".to_owned(),
+            issuer: "test-issuer".to_owned(),
+            subject: "test-subject".to_owned(),
+            audience: None,
+            zone_id: "zone-1".to_owned(),
+            capability_id: Some("cap-3".to_owned()),
+            operations: vec!["read".to_owned()],
+            holder_node: None,
+            delegation_depth: 0,
+            issued_at: Utc::now(),
+            not_before: None,
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+            currently_valid: true,
+            seconds_remaining: 3600,
+            resource_allow: vec![],
+            resource_deny: vec![],
+            max_calls: None,
+            max_bytes: None,
+            credential_allow: vec![],
+        };
+
+        let verify = CapabilityTokenVerifyResponse {
+            signature_valid: true,
+            temporally_valid: true,
+            scope_valid: true,
+            valid: false,
+            inspection,
+            rejection_reasons: vec!["Token has been revoked".to_owned()],
+        };
+
+        let denial = AuthDenial::from_verify_failure("batch", &verify);
+        assert_eq!(denial.kind, AuthDenialKind::Revoked);
+        assert!(denial.remediation.iter().any(|r| r.contains("new capability token")));
+    }
+
+    #[test]
+    fn auth_denial_serde_roundtrip() {
+        let denial = AuthDenial::missing_token("simulate");
+        let json = serde_json::to_string(&denial).unwrap();
+        let parsed: AuthDenial = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.rpc, "simulate");
+        assert_eq!(parsed.kind, AuthDenialKind::MissingToken);
+    }
+
+    #[test]
+    fn auth_denial_json_has_required_fields() {
+        let denial = AuthDenial::missing_token("invoke");
+        let value: Value = serde_json::to_value(&denial).unwrap();
+        assert!(value.get("rpc").is_some());
+        assert!(value.get("kind").is_some());
+        assert!(value.get("message").is_some());
+        assert!(value.get("remediation").is_some());
+        assert!(value.get("denial_id").is_some());
+        assert!(value.get("denied_at").is_some());
+    }
+
+    #[test]
+    fn auth_denial_each_kind_has_distinct_serde() {
+        let kinds = [
+            AuthDenialKind::MissingToken,
+            AuthDenialKind::MalformedToken,
+            AuthDenialKind::InvalidSignature,
+            AuthDenialKind::TemporallyInvalid,
+            AuthDenialKind::InsufficientScope,
+            AuthDenialKind::WrongConnector,
+            AuthDenialKind::Revoked,
+            AuthDenialKind::HolderProofFailed,
+            AuthDenialKind::MissingApproval,
+            AuthDenialKind::InvalidApproval,
+        ];
+        let serialized: Vec<String> = kinds.iter().map(|k| serde_json::to_string(k).unwrap()).collect();
+        let unique: std::collections::HashSet<_> = serialized.iter().collect();
+        assert_eq!(unique.len(), serialized.len(), "Each kind should serialize distinctly");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn verify_token_from_issued_token() {
+        let store = HostAdminStateStore::new();
+        let signing_key = fcp_crypto::Ed25519SigningKey::generate();
+
+        let request = CapabilityIssuanceRequest {
+            connector_id: "test:saas:1.0.0".to_owned(),
+            zone_id: "zone-test".to_owned(),
+            principal_id: "agent-1".to_owned(),
+            operations: vec!["read".to_owned(), "write".to_owned()],
+            ttl_secs: 3600,
+            not_before_delay_secs: None,
+            holder_node: None,
+            max_delegation_depth: 0,
+            resource_allow: vec![],
+            resource_deny: vec![],
+            max_calls: None,
+            max_bytes: None,
+            credential_allow: vec![],
+            dry_run: false,
+        };
+
+        let issued = store
+            .issue_capability_token(&request, &signing_key)
+            .await
+            .expect("issue token");
+
+        // Verify the issued token
+        let verify_request = CapabilityTokenVerifyRequest {
+            token_cbor_b64: issued.token_cbor_b64.expect("non-dry-run token"),
+            operation_id: Some("read".to_owned()),
+            connector_id: None,
+        };
+
+        let result = store
+            .verify_capability_token(&verify_request)
+            .await
+            .expect("verify token");
+
+        assert!(result.signature_valid);
+        assert!(result.temporally_valid);
+        assert!(result.scope_valid);
+        assert!(result.valid);
+        assert!(result.rejection_reasons.is_empty());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn verify_token_wrong_operation_fails_scope() {
+        let store = HostAdminStateStore::new();
+        let signing_key = fcp_crypto::Ed25519SigningKey::generate();
+
+        let request = CapabilityIssuanceRequest {
+            connector_id: "test:saas:1.0.0".to_owned(),
+            zone_id: "zone-test".to_owned(),
+            principal_id: "agent-1".to_owned(),
+            operations: vec!["read".to_owned()],
+            ttl_secs: 3600,
+            not_before_delay_secs: None,
+            holder_node: None,
+            max_delegation_depth: 0,
+            resource_allow: vec![],
+            resource_deny: vec![],
+            max_calls: None,
+            max_bytes: None,
+            credential_allow: vec![],
+            dry_run: false,
+        };
+
+        let issued = store
+            .issue_capability_token(&request, &signing_key)
+            .await
+            .expect("issue token");
+
+        let verify_request = CapabilityTokenVerifyRequest {
+            token_cbor_b64: issued.token_cbor_b64.expect("non-dry-run token"),
+            operation_id: Some("write".to_owned()),
+            connector_id: None,
+        };
+
+        let result = store
+            .verify_capability_token(&verify_request)
+            .await
+            .expect("verify token");
+
+        assert!(!result.scope_valid);
+        assert!(!result.valid);
+        assert!(!result.rejection_reasons.is_empty());
+        assert!(result.rejection_reasons[0].contains("write"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn verify_revoked_token_fails() {
+        let store = HostAdminStateStore::new();
+        let signing_key = fcp_crypto::Ed25519SigningKey::generate();
+
+        let issue_request = CapabilityIssuanceRequest {
+            connector_id: "test:saas:1.0.0".to_owned(),
+            zone_id: "zone-test".to_owned(),
+            principal_id: "agent-1".to_owned(),
+            operations: vec!["read".to_owned()],
+            ttl_secs: 3600,
+            not_before_delay_secs: None,
+            holder_node: None,
+            max_delegation_depth: 0,
+            resource_allow: vec![],
+            resource_deny: vec![],
+            max_calls: None,
+            max_bytes: None,
+            credential_allow: vec![],
+            dry_run: false,
+        };
+
+        let issued = store
+            .issue_capability_token(&issue_request, &signing_key)
+            .await
+            .expect("issue token");
+
+        // Revoke the token
+        let revoke_request = TokenRevocationRequest {
+            token_id: issued.token_id.clone(),
+            reason: Some("test revocation".to_owned()),
+        };
+        let revoke_result = store.revoke_token(&revoke_request).await.expect("revoke");
+        assert!(revoke_result.revoked);
+
+        // Verify should fail
+        let verify_request = CapabilityTokenVerifyRequest {
+            token_cbor_b64: issued.token_cbor_b64.expect("non-dry-run token"),
+            operation_id: None,
+            connector_id: None,
+        };
+
+        let result = store
+            .verify_capability_token(&verify_request)
+            .await
+            .expect("verify token");
+
+        assert!(!result.valid);
+        assert!(result.rejection_reasons.iter().any(|r| r.contains("revoked")));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn verify_token_no_operation_check_passes_scope() {
+        let store = HostAdminStateStore::new();
+        let signing_key = fcp_crypto::Ed25519SigningKey::generate();
+
+        let request = CapabilityIssuanceRequest {
+            connector_id: "test:saas:1.0.0".to_owned(),
+            zone_id: "zone-test".to_owned(),
+            principal_id: "agent-1".to_owned(),
+            operations: vec!["read".to_owned()],
+            ttl_secs: 3600,
+            not_before_delay_secs: None,
+            holder_node: None,
+            max_delegation_depth: 0,
+            resource_allow: vec![],
+            resource_deny: vec![],
+            max_calls: None,
+            max_bytes: None,
+            credential_allow: vec![],
+            dry_run: false,
+        };
+
+        let issued = store
+            .issue_capability_token(&request, &signing_key)
+            .await
+            .expect("issue token");
+
+        // Verify without specifying an operation — should pass scope check
+        let verify_request = CapabilityTokenVerifyRequest {
+            token_cbor_b64: issued.token_cbor_b64.expect("non-dry-run token"),
+            operation_id: None,
+            connector_id: None,
+        };
+
+        let result = store
+            .verify_capability_token(&verify_request)
+            .await
+            .expect("verify token");
+
+        assert!(result.valid);
+    }
+
+    #[test]
+    fn scope_check_wildcard_operation_passes() {
+        let inspection = CapabilityTokenInspection {
+            token_id: String::new(),
+            issuer: String::new(),
+            subject: String::new(),
+            audience: None,
+            zone_id: String::new(),
+            capability_id: None,
+            operations: vec!["*".to_owned()],
+            holder_node: None,
+            delegation_depth: 0,
+            issued_at: Utc::now(),
+            not_before: None,
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+            currently_valid: true,
+            seconds_remaining: 3600,
+            resource_allow: vec![],
+            resource_deny: vec![],
+            max_calls: None,
+            max_bytes: None,
+            credential_allow: vec![],
+        };
+
+        let mut reasons = Vec::new();
+        let valid = HostAdminStateStore::check_scope_validity(
+            &inspection,
+            Some("any_operation"),
+            None,
+            &mut reasons,
+        );
+        assert!(valid, "Wildcard operation should pass scope check");
+        assert!(reasons.is_empty());
+    }
+
+    #[test]
+    fn scope_check_wrong_connector_fails() {
+        let inspection = CapabilityTokenInspection {
+            token_id: String::new(),
+            issuer: String::new(),
+            subject: "correct:saas:1.0.0".to_owned(),
+            audience: Some("correct:saas:1.0.0".to_owned()),
+            zone_id: String::new(),
+            capability_id: None,
+            operations: vec![],
+            holder_node: None,
+            delegation_depth: 0,
+            issued_at: Utc::now(),
+            not_before: None,
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+            currently_valid: true,
+            seconds_remaining: 3600,
+            resource_allow: vec![],
+            resource_deny: vec![],
+            max_calls: None,
+            max_bytes: None,
+            credential_allow: vec![],
+        };
+
+        let mut reasons = Vec::new();
+        let valid = HostAdminStateStore::check_scope_validity(
+            &inspection,
+            None,
+            Some("wrong:saas:1.0.0"),
+            &mut reasons,
+        );
+        assert!(!valid, "Wrong connector should fail scope check");
+        assert!(!reasons.is_empty());
+        assert!(reasons[0].contains("wrong:saas:1.0.0"));
+    }
+
+    // ── Artifact provenance validation tests ─────────────────────────────
+
+    fn valid_provenance() -> ArtifactProvenance {
+        ArtifactProvenance {
+            source_kind: ArtifactSourceKind::Registry,
+            source_uri: "registry://connectors/test:saas:1.0.0".to_owned(),
+            content_hash: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2".to_owned(),
+            hash_verified: true,
+            signature_b64: Some("dGVzdC1zaWduYXR1cmU=".to_owned()),
+            signature_verified: true,
+            manifest_version: Some("1.0.0".to_owned()),
+            size_bytes: 1024,
+        }
+    }
+
+    #[test]
+    fn valid_artifact_passes_all_gates() {
+        let result = validate_artifact_provenance(
+            "test:saas:1.0.0",
+            &valid_provenance(),
+            true,
+            Some(10_000),
+        );
+        assert!(result.is_none(), "Valid provenance should pass");
+    }
+
+    #[test]
+    fn placeholder_hash_rejected() {
+        let mut prov = valid_provenance();
+        prov.content_hash = "PLACEHOLDER_HASH".to_owned();
+        let result = validate_artifact_provenance("test:saas:1.0.0", &prov, false, None);
+        assert!(result.is_some());
+        let rejection = result.unwrap();
+        assert_eq!(rejection.kind, ArtifactRejectionKind::PlaceholderHash);
+        assert!(rejection.message.contains("placeholder"));
+        assert_eq!(rejection.policy_gate, "provenance.hash.no_placeholder");
+    }
+
+    #[test]
+    fn empty_hash_rejected() {
+        let mut prov = valid_provenance();
+        prov.content_hash = String::new();
+        let result = validate_artifact_provenance("test:saas:1.0.0", &prov, false, None);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().kind, ArtifactRejectionKind::PlaceholderHash);
+    }
+
+    #[test]
+    fn zero_hash_rejected() {
+        let mut prov = valid_provenance();
+        prov.content_hash = "0000000000000000000000000000000000000000000000000000000000000000".to_owned();
+        let result = validate_artifact_provenance("test:saas:1.0.0", &prov, false, None);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().kind, ArtifactRejectionKind::PlaceholderHash);
+    }
+
+    #[test]
+    fn sha256_empty_hash_rejected() {
+        let mut prov = valid_provenance();
+        prov.content_hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_owned();
+        let result = validate_artifact_provenance("test:saas:1.0.0", &prov, false, None);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().kind, ArtifactRejectionKind::PlaceholderHash);
+    }
+
+    #[test]
+    fn unverified_hash_rejected() {
+        let mut prov = valid_provenance();
+        prov.hash_verified = false;
+        let result = validate_artifact_provenance("test:saas:1.0.0", &prov, false, None);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().kind, ArtifactRejectionKind::HashMismatch);
+    }
+
+    #[test]
+    fn missing_signature_when_required_rejected() {
+        let mut prov = valid_provenance();
+        prov.signature_b64 = None;
+        prov.signature_verified = false;
+        let result = validate_artifact_provenance("test:saas:1.0.0", &prov, true, None);
+        assert!(result.is_some());
+        let rejection = result.unwrap();
+        assert_eq!(rejection.kind, ArtifactRejectionKind::MissingSignature);
+        assert!(rejection.message.contains("no supply-chain signature"));
+    }
+
+    #[test]
+    fn missing_signature_when_not_required_passes() {
+        let mut prov = valid_provenance();
+        prov.signature_b64 = None;
+        prov.signature_verified = false;
+        let result = validate_artifact_provenance("test:saas:1.0.0", &prov, false, None);
+        assert!(result.is_none(), "Signature not required should pass");
+    }
+
+    #[test]
+    fn invalid_signature_rejected() {
+        let mut prov = valid_provenance();
+        prov.signature_verified = false;
+        let result = validate_artifact_provenance("test:saas:1.0.0", &prov, false, None);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().kind, ArtifactRejectionKind::InvalidSignature);
+    }
+
+    #[test]
+    fn oversized_artifact_rejected() {
+        let mut prov = valid_provenance();
+        prov.size_bytes = 100_000_000;
+        let result = validate_artifact_provenance("test:saas:1.0.0", &prov, false, Some(50_000_000));
+        assert!(result.is_some());
+        let rejection = result.unwrap();
+        assert_eq!(rejection.kind, ArtifactRejectionKind::OversizedArtifact);
+        assert!(rejection.message.contains("100000000"));
+    }
+
+    #[test]
+    fn artifact_under_size_limit_passes() {
+        let prov = valid_provenance();
+        let result = validate_artifact_provenance("test:saas:1.0.0", &prov, false, Some(10_000));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn artifact_rejection_kind_serde_roundtrip() {
+        let kinds = [
+            ArtifactRejectionKind::PlaceholderHash,
+            ArtifactRejectionKind::EmptyHash,
+            ArtifactRejectionKind::HashMismatch,
+            ArtifactRejectionKind::DemoBundle,
+            ArtifactRejectionKind::InvalidManifest,
+            ArtifactRejectionKind::MissingSignature,
+            ArtifactRejectionKind::InvalidSignature,
+            ArtifactRejectionKind::OversizedArtifact,
+            ArtifactRejectionKind::DisallowedSource,
+        ];
+        for kind in &kinds {
+            let json_str = serde_json::to_string(kind).unwrap();
+            let back: ArtifactRejectionKind = serde_json::from_str(&json_str).unwrap();
+            assert_eq!(*kind, back);
+        }
+    }
+
+    #[test]
+    fn artifact_source_kind_serde_roundtrip() {
+        let kinds = [
+            ArtifactSourceKind::Registry,
+            ArtifactSourceKind::LocalPath,
+            ArtifactSourceKind::RemoteUrl,
+            ArtifactSourceKind::InlineBlob,
+        ];
+        for kind in &kinds {
+            let json_str = serde_json::to_string(kind).unwrap();
+            let back: ArtifactSourceKind = serde_json::from_str(&json_str).unwrap();
+            assert_eq!(*kind, back);
+        }
+    }
+
+    #[test]
+    fn artifact_rejection_has_remediation() {
+        let mut prov = valid_provenance();
+        prov.content_hash = "PLACEHOLDER_HASH".to_owned();
+        let result = validate_artifact_provenance("test:saas:1.0.0", &prov, false, None);
+        let rejection = result.unwrap();
+        assert!(!rejection.remediation.is_empty());
+        assert!(!rejection.policy_gate.is_empty());
+    }
+
+    #[test]
+    fn is_placeholder_hash_detects_known_placeholders() {
+        assert!(is_placeholder_hash("PLACEHOLDER_HASH"));
+        assert!(is_placeholder_hash(""));
+        assert!(is_placeholder_hash("0000000000000000000000000000000000000000000000000000000000000000"));
+        assert!(!is_placeholder_hash("a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"));
+    }
+
+    #[test]
+    fn is_placeholder_hash_case_insensitive() {
+        assert!(is_placeholder_hash("placeholder_hash"));
+        assert!(is_placeholder_hash("Placeholder_Hash"));
+    }
+
+    #[test]
+    fn artifact_rejection_json_has_required_fields() {
+        let mut prov = valid_provenance();
+        prov.content_hash = "PLACEHOLDER_HASH".to_owned();
+        let rejection = validate_artifact_provenance("test:saas:1.0.0", &prov, false, None).unwrap();
+        let value: Value = serde_json::to_value(&rejection).unwrap();
+        assert!(value.get("connector_id").is_some());
+        assert!(value.get("kind").is_some());
+        assert!(value.get("message").is_some());
+        assert!(value.get("provenance").is_some());
+        assert!(value.get("remediation").is_some());
+        assert!(value.get("policy_gate").is_some());
+    }
+
+    #[test]
+    fn provenance_validation_gate_order_placeholder_first() {
+        // Even with other issues, placeholder hash should be caught first
+        let mut prov = valid_provenance();
+        prov.content_hash = "PLACEHOLDER_HASH".to_owned();
+        prov.hash_verified = false;
+        prov.signature_b64 = None;
+        prov.size_bytes = 999_999_999;
+        let rejection = validate_artifact_provenance("test:saas:1.0.0", &prov, true, Some(100)).unwrap();
+        assert_eq!(rejection.kind, ArtifactRejectionKind::PlaceholderHash);
     }
 }
 

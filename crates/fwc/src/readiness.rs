@@ -315,6 +315,174 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for ProvenanceMetadataField<T> {
     }
 }
 
+// ── Metadata state representation ───────────────────────────────────────
+// Defines how each `MetadataField` state is rendered across CLI output,
+// JSON envelopes, log entries, and follow-up guidance.  This ensures every
+// consumer speaks the same vocabulary and agents/users never confuse
+// "unknown" with "unsupported" or "unavailable."
+
+/// Presentation attributes for a single metadata state.
+///
+/// Downstream rendering (CLI, JSON, MCP export, TOON) should use these
+/// values instead of hard-coding state-specific strings.  This makes the
+/// vocabulary stable and testable.
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct MetadataStateRepr {
+    /// Machine-readable status tag (matches `MetadataField::status_tag()`).
+    pub status: &'static str,
+    /// One-word CLI symbol suitable for table columns (e.g. "?" for unknown).
+    pub cli_symbol: &'static str,
+    /// Terminal label for human-readable output (e.g. "unknown").
+    pub cli_label: &'static str,
+    /// Suggested ANSI color name for CLI rendering.
+    pub cli_color: &'static str,
+    /// Short explanation shown in `--verbose` or `--json` output.
+    pub explanation: &'static str,
+    /// Whether agents should treat this state as actionable (i.e. the
+    /// situation might change if the user takes some step).
+    pub actionable: bool,
+    /// Follow-up guidance lines.  Empty for terminal states like "known".
+    pub guidance: &'static [&'static str],
+}
+
+/// Canonical representations for every `MetadataField` state.
+///
+/// Indexed by status tag, this table is the single source of truth for
+/// how metadata states appear to users and agents.
+#[allow(dead_code)]
+pub const METADATA_STATE_REPRS: &[MetadataStateRepr] = &[
+    MetadataStateRepr {
+        status: "known",
+        cli_symbol: "✓",
+        cli_label: "known",
+        cli_color: "green",
+        explanation: "A verified value is available.",
+        actionable: false,
+        guidance: &[],
+    },
+    MetadataStateRepr {
+        status: "unknown",
+        cli_symbol: "?",
+        cli_label: "unknown",
+        cli_color: "yellow",
+        explanation: "No trustworthy signal is available yet. The host may still be loading or the first query has not returned.",
+        actionable: true,
+        guidance: &[
+            "Wait for the host to complete initial discovery.",
+            "Use `fwc doctor` to check connectivity.",
+            "Query the host directly with `--host <endpoint>`.",
+        ],
+    },
+    MetadataStateRepr {
+        status: "unsupported",
+        cli_symbol: "✗",
+        cli_label: "unsupported",
+        cli_color: "red",
+        explanation: "The connector definitively does not implement this surface.",
+        actionable: false,
+        guidance: &[
+            "Check if a newer connector version adds this capability.",
+            "Use `fwc ops <connector>` to see what is available.",
+        ],
+    },
+    MetadataStateRepr {
+        status: "unavailable",
+        cli_symbol: "!",
+        cli_label: "unavailable",
+        cli_color: "red",
+        explanation: "The surface should exist but is temporarily unreachable (host down, timeout, transient error).",
+        actionable: true,
+        guidance: &[
+            "Check that `fcp-host` is running and reachable.",
+            "Retry the command once the host is available.",
+            "Use `--offline` to inspect local artifacts instead.",
+        ],
+    },
+    MetadataStateRepr {
+        status: "not-applicable",
+        cli_symbol: "–",
+        cli_label: "n/a",
+        cli_color: "dim",
+        explanation: "This surface is not relevant for this connector archetype.",
+        actionable: false,
+        guidance: &[],
+    },
+];
+
+/// Look up the canonical representation for a status tag.
+#[allow(dead_code)]
+#[must_use]
+pub fn metadata_state_repr(status_tag: &str) -> Option<&'static MetadataStateRepr> {
+    METADATA_STATE_REPRS.iter().find(|r| r.status == status_tag)
+}
+
+/// Look up the representation for a `MetadataField` value.
+#[allow(dead_code)]
+#[must_use]
+pub fn field_repr<T>(field: &MetadataField<T>) -> &'static MetadataStateRepr {
+    metadata_state_repr(field.status_tag())
+        .expect("every MetadataField variant has a representation")
+}
+
+/// Format a `MetadataField` for CLI display: "symbol label" (e.g. "? unknown").
+#[allow(dead_code)]
+#[must_use]
+pub fn format_field_cli<T>(field: &MetadataField<T>) -> String {
+    let repr = field_repr(field);
+    format!("{} {}", repr.cli_symbol, repr.cli_label)
+}
+
+/// Format a `MetadataField` for log output: "status=unknown explanation=..."
+#[allow(dead_code)]
+#[must_use]
+pub fn format_field_log<T>(field: &MetadataField<T>) -> String {
+    let repr = field_repr(field);
+    format!("status={} explanation=\"{}\"", repr.status, repr.explanation)
+}
+
+/// Build a JSON representation of a `MetadataField`'s state metadata
+/// (status, explanation, actionable, guidance) without the value itself.
+#[allow(dead_code)]
+#[must_use]
+pub fn field_state_json<T>(field: &MetadataField<T>) -> serde_json::Value {
+    let repr = field_repr(field);
+    serde_json::json!({
+        "status": repr.status,
+        "explanation": repr.explanation,
+        "actionable": repr.actionable,
+        "guidance": repr.guidance,
+        "cli_symbol": repr.cli_symbol,
+        "cli_label": repr.cli_label,
+    })
+}
+
+/// Format a `ProvenanceMetadataField` for CLI display, including provenance.
+#[allow(dead_code)]
+#[must_use]
+pub fn format_provenance_field_cli<T>(field: &ProvenanceMetadataField<T>) -> String {
+    let repr = field_repr(&field.field);
+    format!(
+        "{} {} ({})",
+        repr.cli_symbol,
+        repr.cli_label,
+        field.provenance.tag()
+    )
+}
+
+/// Format a `ProvenanceMetadataField` for log output with provenance.
+#[allow(dead_code)]
+#[must_use]
+pub fn format_provenance_field_log<T>(field: &ProvenanceMetadataField<T>) -> String {
+    let repr = field_repr(&field.field);
+    format!(
+        "status={} provenance={} explanation=\"{}\"",
+        repr.status,
+        field.provenance.tag(),
+        repr.explanation
+    )
+}
+
 // ── Command availability semantics ──────────────────────────────────────
 
 /// Distinct semantic state for any command outcome that makes the source
@@ -7133,5 +7301,337 @@ output_schema = { type = "object" }
         let json = serde_json::to_value(&summary).unwrap();
         assert_eq!(json["archetypes"]["status"], "known");
         assert_eq!(json["archetypes"]["value"][0], "request-response");
+    }
+
+    // ── Metadata state representation tests ──────────────────────────────
+
+    #[test]
+    fn repr_table_covers_all_metadata_field_variants() {
+        // Every MetadataField variant must have a representation
+        let fields: Vec<MetadataField<()>> = vec![
+            MetadataField::Known(()),
+            MetadataField::Unknown,
+            MetadataField::Unsupported,
+            MetadataField::Unavailable,
+            MetadataField::NotApplicable,
+        ];
+        for field in &fields {
+            let tag = field.status_tag();
+            assert!(
+                metadata_state_repr(tag).is_some(),
+                "No representation for status tag '{tag}'"
+            );
+        }
+    }
+
+    #[test]
+    fn repr_table_has_exactly_five_entries() {
+        assert_eq!(METADATA_STATE_REPRS.len(), 5);
+    }
+
+    #[test]
+    fn repr_status_tags_are_unique() {
+        let tags: Vec<&str> = METADATA_STATE_REPRS.iter().map(|r| r.status).collect();
+        let unique: std::collections::HashSet<&str> = tags.iter().copied().collect();
+        assert_eq!(tags.len(), unique.len(), "Duplicate status tags");
+    }
+
+    #[test]
+    fn repr_cli_symbols_are_nonempty() {
+        for repr in METADATA_STATE_REPRS {
+            assert!(!repr.cli_symbol.is_empty(), "Empty CLI symbol for '{}'", repr.status);
+        }
+    }
+
+    #[test]
+    fn repr_cli_labels_are_nonempty() {
+        for repr in METADATA_STATE_REPRS {
+            assert!(!repr.cli_label.is_empty(), "Empty CLI label for '{}'", repr.status);
+        }
+    }
+
+    #[test]
+    fn repr_cli_colors_are_nonempty() {
+        for repr in METADATA_STATE_REPRS {
+            assert!(!repr.cli_color.is_empty(), "Empty CLI color for '{}'", repr.status);
+        }
+    }
+
+    #[test]
+    fn repr_explanations_are_nonempty() {
+        for repr in METADATA_STATE_REPRS {
+            assert!(!repr.explanation.is_empty(), "Empty explanation for '{}'", repr.status);
+        }
+    }
+
+    #[test]
+    fn repr_known_is_not_actionable() {
+        let repr = metadata_state_repr("known").unwrap();
+        assert!(!repr.actionable);
+        assert!(repr.guidance.is_empty());
+    }
+
+    #[test]
+    fn repr_unknown_is_actionable_with_guidance() {
+        let repr = metadata_state_repr("unknown").unwrap();
+        assert!(repr.actionable);
+        assert!(!repr.guidance.is_empty());
+    }
+
+    #[test]
+    fn repr_unsupported_is_not_actionable() {
+        let repr = metadata_state_repr("unsupported").unwrap();
+        assert!(!repr.actionable);
+    }
+
+    #[test]
+    fn repr_unavailable_is_actionable_with_guidance() {
+        let repr = metadata_state_repr("unavailable").unwrap();
+        assert!(repr.actionable);
+        assert!(!repr.guidance.is_empty());
+    }
+
+    #[test]
+    fn repr_not_applicable_is_not_actionable() {
+        let repr = metadata_state_repr("not-applicable").unwrap();
+        assert!(!repr.actionable);
+        assert!(repr.guidance.is_empty());
+    }
+
+    #[test]
+    fn repr_unknown_tag_returns_none() {
+        assert!(metadata_state_repr("bogus").is_none());
+    }
+
+    // -- field_repr tests --
+
+    #[test]
+    fn field_repr_known() {
+        let repr = field_repr(&MetadataField::Known(42));
+        assert_eq!(repr.status, "known");
+        assert_eq!(repr.cli_symbol, "✓");
+    }
+
+    #[test]
+    fn field_repr_unknown() {
+        let repr = field_repr::<i32>(&MetadataField::Unknown);
+        assert_eq!(repr.status, "unknown");
+        assert_eq!(repr.cli_symbol, "?");
+    }
+
+    #[test]
+    fn field_repr_unsupported() {
+        let repr = field_repr::<i32>(&MetadataField::Unsupported);
+        assert_eq!(repr.status, "unsupported");
+        assert_eq!(repr.cli_symbol, "✗");
+    }
+
+    #[test]
+    fn field_repr_unavailable() {
+        let repr = field_repr::<i32>(&MetadataField::Unavailable);
+        assert_eq!(repr.status, "unavailable");
+        assert_eq!(repr.cli_symbol, "!");
+    }
+
+    #[test]
+    fn field_repr_not_applicable() {
+        let repr = field_repr::<i32>(&MetadataField::NotApplicable);
+        assert_eq!(repr.status, "not-applicable");
+        assert_eq!(repr.cli_symbol, "–");
+    }
+
+    // -- format_field_cli tests --
+
+    #[test]
+    fn format_cli_known() {
+        let s = format_field_cli(&MetadataField::Known("hello"));
+        assert_eq!(s, "✓ known");
+    }
+
+    #[test]
+    fn format_cli_unknown() {
+        let s = format_field_cli::<i32>(&MetadataField::Unknown);
+        assert_eq!(s, "? unknown");
+    }
+
+    #[test]
+    fn format_cli_unsupported() {
+        let s = format_field_cli::<i32>(&MetadataField::Unsupported);
+        assert_eq!(s, "✗ unsupported");
+    }
+
+    #[test]
+    fn format_cli_unavailable() {
+        let s = format_field_cli::<i32>(&MetadataField::Unavailable);
+        assert_eq!(s, "! unavailable");
+    }
+
+    #[test]
+    fn format_cli_not_applicable() {
+        let s = format_field_cli::<i32>(&MetadataField::NotApplicable);
+        assert_eq!(s, "– n/a");
+    }
+
+    // -- format_field_log tests --
+
+    #[test]
+    fn format_log_known() {
+        let s = format_field_log(&MetadataField::Known(42));
+        assert!(s.starts_with("status=known"));
+        assert!(s.contains("explanation="));
+    }
+
+    #[test]
+    fn format_log_unknown() {
+        let s = format_field_log::<i32>(&MetadataField::Unknown);
+        assert!(s.starts_with("status=unknown"));
+        assert!(s.contains("No trustworthy signal"));
+    }
+
+    #[test]
+    fn format_log_unavailable() {
+        let s = format_field_log::<i32>(&MetadataField::Unavailable);
+        assert!(s.starts_with("status=unavailable"));
+        assert!(s.contains("temporarily unreachable"));
+    }
+
+    // -- field_state_json tests --
+
+    #[test]
+    fn field_state_json_known() {
+        let json = field_state_json(&MetadataField::Known(42));
+        assert_eq!(json["status"], "known");
+        assert_eq!(json["actionable"], false);
+        assert_eq!(json["cli_symbol"], "✓");
+        assert!(json["guidance"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn field_state_json_unknown() {
+        let json = field_state_json::<i32>(&MetadataField::Unknown);
+        assert_eq!(json["status"], "unknown");
+        assert_eq!(json["actionable"], true);
+        assert!(!json["guidance"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn field_state_json_unsupported() {
+        let json = field_state_json::<i32>(&MetadataField::Unsupported);
+        assert_eq!(json["status"], "unsupported");
+        assert_eq!(json["actionable"], false);
+    }
+
+    #[test]
+    fn field_state_json_unavailable() {
+        let json = field_state_json::<i32>(&MetadataField::Unavailable);
+        assert_eq!(json["status"], "unavailable");
+        assert_eq!(json["actionable"], true);
+    }
+
+    #[test]
+    fn field_state_json_not_applicable() {
+        let json = field_state_json::<i32>(&MetadataField::NotApplicable);
+        assert_eq!(json["status"], "not-applicable");
+        assert_eq!(json["cli_label"], "n/a");
+    }
+
+    // -- Provenance formatting tests --
+
+    #[test]
+    fn format_provenance_cli_known_declared() {
+        let f = ProvenanceMetadataField::known(42, MetadataProvenance::DeclaredByConnector);
+        let s = format_provenance_field_cli(&f);
+        assert_eq!(s, "✓ known (declared-by-connector)");
+    }
+
+    #[test]
+    fn format_provenance_cli_unknown_unattributed() {
+        let f = ProvenanceMetadataField::<i32>::unknown(MetadataProvenance::Unattributed);
+        let s = format_provenance_field_cli(&f);
+        assert_eq!(s, "? unknown (unattributed)");
+    }
+
+    #[test]
+    fn format_provenance_log_known_observed() {
+        let f = ProvenanceMetadataField::known(42, MetadataProvenance::ObservedByHost);
+        let s = format_provenance_field_log(&f);
+        assert!(s.contains("status=known"));
+        assert!(s.contains("provenance=observed-by-host"));
+    }
+
+    #[test]
+    fn format_provenance_log_unsupported() {
+        let f = ProvenanceMetadataField::<i32>::unsupported(MetadataProvenance::DeclaredByConnector);
+        let s = format_provenance_field_log(&f);
+        assert!(s.contains("status=unsupported"));
+        assert!(s.contains("provenance=declared-by-connector"));
+    }
+
+    // -- Cross-cutting representation invariants --
+
+    #[test]
+    fn repr_serializes_to_stable_json() {
+        for repr in METADATA_STATE_REPRS {
+            let json: serde_json::Value = serde_json::to_value(repr).unwrap();
+            // Every repr must serialize with these keys
+            assert_eq!(json["status"], repr.status);
+            assert_eq!(json["cli_symbol"], repr.cli_symbol);
+            assert_eq!(json["cli_label"], repr.cli_label);
+            assert_eq!(json["cli_color"], repr.cli_color);
+            assert_eq!(json["actionable"], repr.actionable);
+            assert!(json["guidance"].is_array(), "guidance must be an array for '{}'", repr.status);
+        }
+    }
+
+    #[test]
+    fn repr_actionable_states_have_guidance() {
+        for repr in METADATA_STATE_REPRS {
+            if repr.actionable {
+                assert!(
+                    !repr.guidance.is_empty(),
+                    "Actionable state '{}' must have guidance",
+                    repr.status
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn repr_non_actionable_terminal_states_no_guidance() {
+        // "known" and "not-applicable" are terminal — no guidance needed
+        for tag in ["known", "not-applicable"] {
+            let repr = metadata_state_repr(tag).unwrap();
+            assert!(!repr.actionable);
+            assert!(repr.guidance.is_empty(), "Terminal state '{tag}' should have empty guidance");
+        }
+    }
+
+    #[test]
+    fn repr_cli_symbols_are_distinct() {
+        let symbols: Vec<&str> = METADATA_STATE_REPRS.iter().map(|r| r.cli_symbol).collect();
+        let unique: std::collections::HashSet<&str> = symbols.iter().copied().collect();
+        assert_eq!(symbols.len(), unique.len(), "Duplicate CLI symbols");
+    }
+
+    #[test]
+    fn repr_all_states_have_stable_json_output() {
+        // Verify the JSON shape is consistent across all states
+        let fields: Vec<MetadataField<i32>> = vec![
+            MetadataField::Known(42),
+            MetadataField::Unknown,
+            MetadataField::Unsupported,
+            MetadataField::Unavailable,
+            MetadataField::NotApplicable,
+        ];
+        for field in &fields {
+            let json = field_state_json(field);
+            // All must have these keys
+            assert!(json.get("status").is_some(), "Missing 'status'");
+            assert!(json.get("explanation").is_some(), "Missing 'explanation'");
+            assert!(json.get("actionable").is_some(), "Missing 'actionable'");
+            assert!(json.get("guidance").is_some(), "Missing 'guidance'");
+            assert!(json.get("cli_symbol").is_some(), "Missing 'cli_symbol'");
+            assert!(json.get("cli_label").is_some(), "Missing 'cli_label'");
+        }
     }
 }

@@ -4278,4 +4278,294 @@ mod tests {
             );
         }
     }
+
+    // ── Truthfulness invariant tests (1g7z0.29.8.4) ─────────────────
+
+    #[test]
+    fn truthfulness_live_host_commands_always_fail_fast_when_absent() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            if cls.truth_source == CommandTruthSource::LiveHost {
+                assert_eq!(
+                    cls.host_absent,
+                    HostAbsentBehavior::FailFast,
+                    "LiveHost command '{}' must FailFast when host absent",
+                    cls.command
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn truthfulness_offline_commands_are_unaffected_by_host_absence() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            if cls.truth_source == CommandTruthSource::OfflineArtifact {
+                assert_eq!(
+                    cls.host_absent,
+                    HostAbsentBehavior::Unaffected,
+                    "OfflineArtifact command '{}' must be Unaffected by host absence",
+                    cls.command
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn truthfulness_offline_commands_never_require_capability_tokens() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            if cls.truth_source == CommandTruthSource::OfflineArtifact {
+                assert!(
+                    !cls.requires_capability_token,
+                    "OfflineArtifact command '{}' should not require capability token",
+                    cls.command
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn truthfulness_offline_commands_never_need_approval() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            if cls.truth_source == CommandTruthSource::OfflineArtifact {
+                assert!(
+                    !cls.may_need_approval,
+                    "OfflineArtifact command '{}' should not need approval",
+                    cls.command
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn truthfulness_offline_commands_are_local_only_or_readonly() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            if cls.truth_source == CommandTruthSource::OfflineArtifact {
+                assert!(
+                    matches!(
+                        cls.execution_mode,
+                        CommandExecutionMode::LocalOnly | CommandExecutionMode::ReadOnly
+                    ),
+                    "OfflineArtifact command '{}' should be LocalOnly or ReadOnly, got {:?}",
+                    cls.command,
+                    cls.execution_mode
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn truthfulness_mutating_live_commands_have_non_empty_transport_notes() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            if cls.truth_source == CommandTruthSource::LiveHost
+                && matches!(cls.execution_mode, CommandExecutionMode::Mutating)
+            {
+                assert!(
+                    !cls.transport_note.is_empty(),
+                    "Mutating LiveHost command '{}' must have a transport note",
+                    cls.command
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn truthfulness_commands_requiring_cap_token_are_always_live_host() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            if cls.requires_capability_token {
+                assert_eq!(
+                    cls.truth_source,
+                    CommandTruthSource::LiveHost,
+                    "Command '{}' requires cap token but is {:?} (must be LiveHost)",
+                    cls.command,
+                    cls.truth_source
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn truthfulness_all_commands_have_transport_notes() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            assert!(
+                !cls.transport_note.is_empty(),
+                "Command '{}' has empty transport note",
+                cls.command
+            );
+        }
+    }
+
+    #[test]
+    fn truthfulness_truth_source_serde_round_trip() {
+        let sources = [
+            CommandTruthSource::LiveHost,
+            CommandTruthSource::OfflineArtifact,
+            CommandTruthSource::Hybrid,
+            CommandTruthSource::Passthrough,
+        ];
+        for src in sources {
+            let json = serde_json::to_string(&src).unwrap();
+            let back: CommandTruthSource = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, src);
+        }
+    }
+
+    #[test]
+    fn truthfulness_execution_mode_serde_round_trip() {
+        let modes = [
+            CommandExecutionMode::ReadOnly,
+            CommandExecutionMode::Mutating,
+            CommandExecutionMode::Simulate,
+            CommandExecutionMode::Interactive,
+            CommandExecutionMode::LocalOnly,
+        ];
+        for mode in modes {
+            let json = serde_json::to_string(&mode).unwrap();
+            let back: CommandExecutionMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, mode);
+        }
+    }
+
+    #[test]
+    fn truthfulness_host_absent_behavior_serde_round_trip() {
+        let behaviors = [
+            HostAbsentBehavior::FailFast,
+            HostAbsentBehavior::DegradedWithWarning,
+            HostAbsentBehavior::Unaffected,
+            HostAbsentBehavior::PassthroughDependent,
+        ];
+        for b in behaviors {
+            let json = serde_json::to_string(&b).unwrap();
+            let back: HostAbsentBehavior = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, b);
+        }
+    }
+
+    #[test]
+    fn truthfulness_classify_command_known_commands_match_matrix() {
+        // Every command in the classification matrix must be resolvable.
+        for cls in COMMAND_CLASSIFICATIONS {
+            let found = classify_command(cls.command);
+            assert!(
+                found.is_some(),
+                "classify_command('{}') returned None but is in COMMAND_CLASSIFICATIONS",
+                cls.command
+            );
+            let found = found.unwrap();
+            assert_eq!(found.truth_source, cls.truth_source);
+            assert_eq!(found.execution_mode, cls.execution_mode);
+        }
+    }
+
+    #[test]
+    fn truthfulness_classify_command_unknown_returns_none() {
+        assert!(classify_command("nonexistent-command-xyz").is_none());
+    }
+
+    #[test]
+    fn truthfulness_command_requires_host_is_consistent_with_matrix() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            let requires = command_requires_host(cls.command);
+            match cls.truth_source {
+                CommandTruthSource::LiveHost => {
+                    assert!(
+                        requires,
+                        "LiveHost command '{}' should require host",
+                        cls.command
+                    );
+                }
+                CommandTruthSource::OfflineArtifact => {
+                    assert!(
+                        !requires,
+                        "OfflineArtifact command '{}' should not require host",
+                        cls.command
+                    );
+                }
+                _ => {} // Hybrid/Passthrough can go either way
+            }
+        }
+    }
+
+    #[test]
+    fn truthfulness_live_host_commands_list_matches_matrix() {
+        let live = live_host_commands();
+        for cls in COMMAND_CLASSIFICATIONS {
+            if cls.truth_source == CommandTruthSource::LiveHost {
+                assert!(
+                    live.contains(&cls.command),
+                    "LiveHost command '{}' missing from live_host_commands()",
+                    cls.command
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn truthfulness_offline_capable_commands_list_matches_matrix() {
+        let offline = offline_capable_commands();
+        for cls in COMMAND_CLASSIFICATIONS {
+            if cls.truth_source == CommandTruthSource::OfflineArtifact {
+                assert!(
+                    offline.contains(&cls.command),
+                    "OfflineArtifact command '{}' missing from offline_capable_commands()",
+                    cls.command
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn truthfulness_auth_required_commands_subset_of_live_host() {
+        let auth = auth_required_commands();
+        for cmd in &auth {
+            let cls = classify_command(cmd);
+            assert!(
+                cls.is_some(),
+                "auth_required command '{}' not in classification matrix",
+                cmd
+            );
+            let cls = cls.unwrap();
+            assert!(
+                cls.requires_capability_token || cls.may_need_approval,
+                "auth_required command '{}' has neither cap token nor approval requirement",
+                cmd
+            );
+        }
+    }
+
+    #[test]
+    fn truthfulness_host_absent_error_is_informative() {
+        let reasons = [
+            HostAbsentReason::NotConfigured,
+            HostAbsentReason::Unreachable,
+            HostAbsentReason::Unhealthy,
+        ];
+        for reason in reasons {
+            let err = host_absent_error("test-cmd", reason);
+            assert!(!err.message.is_empty(), "host_absent_error for {:?} has empty message", reason);
+            assert!(!err.next_actions.is_empty(), "host_absent_error for {:?} has no next_actions", reason);
+        }
+    }
+
+    #[test]
+    fn truthfulness_host_absent_error_payload_is_structured() {
+        let err = host_absent_error("invoke", HostAbsentReason::Unreachable);
+        let payload = host_absent_error_payload(&err);
+        assert!(payload["error"].is_object());
+        assert!(payload["command"].is_string());
+    }
+
+    #[test]
+    fn truthfulness_offline_provenance_includes_source() {
+        let prov = offline_provenance("list", OfflineSource::WorkspaceManifest);
+        assert!(!prov.caveat.is_empty());
+        assert!(prov.offline);
+    }
+
+    #[test]
+    fn truthfulness_offline_provenance_payload_has_required_shape() {
+        let prov = offline_provenance("list", OfflineSource::WorkspaceManifest);
+        let payload = offline_provenance_payload(&prov);
+        assert_eq!(payload["offline"], true);
+        assert!(payload["source"].is_string());
+        assert!(payload["caveat"].is_string());
+    }
 }

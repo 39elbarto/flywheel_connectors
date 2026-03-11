@@ -24,6 +24,56 @@ use serde_json::Value;
 
 // ── Metadata field truthfulness ─────────────────────────────────────────
 
+/// Where a metadata value originated.
+///
+/// Provenance makes it mechanically impossible to confuse a manifest
+/// declaration with a live runtime observation.  Downstream consumers
+/// (MCP export, workflow engine, discovery UI) can use this to decide
+/// how much weight to give a value.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MetadataProvenance {
+    /// The connector's own manifest declared this value.
+    DeclaredByConnector,
+    /// The host observed or computed this value at runtime.
+    ObservedByHost,
+    /// Measured during actual execution (latency, throughput, etc.).
+    MeasuredAtRuntime,
+    /// Inferred from policy rules, zone settings, or configuration.
+    InferredFromPolicy,
+    /// Origin is not tracked (legacy code path or test fixture).
+    Unattributed,
+}
+
+impl MetadataProvenance {
+    /// Machine-readable tag for JSON output.
+    pub const fn tag(self) -> &'static str {
+        match self {
+            Self::DeclaredByConnector => "declared-by-connector",
+            Self::ObservedByHost => "observed-by-host",
+            Self::MeasuredAtRuntime => "measured-at-runtime",
+            Self::InferredFromPolicy => "inferred-from-policy",
+            Self::Unattributed => "unattributed",
+        }
+    }
+
+    /// Human-readable explanation of this provenance source.
+    pub const fn explanation(self) -> &'static str {
+        match self {
+            Self::DeclaredByConnector => "Value declared by the connector manifest.",
+            Self::ObservedByHost => "Value observed or computed by the host at runtime.",
+            Self::MeasuredAtRuntime => "Value measured during actual execution.",
+            Self::InferredFromPolicy => "Value inferred from policy or configuration.",
+            Self::Unattributed => "Origin is not tracked.",
+        }
+    }
+
+    /// Whether this source is considered authoritative for live operations.
+    pub const fn is_authoritative(self) -> bool {
+        matches!(self, Self::ObservedByHost | Self::MeasuredAtRuntime)
+    }
+}
+
 /// Explicit metadata-field wrapper that distinguishes between "we have a
 /// value", "we have not queried yet", "the connector does not implement
 /// this surface", and "the data should exist but is temporarily
@@ -127,6 +177,141 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for MetadataField<T> {
                 "unknown MetadataField status: {other}"
             ))),
         }
+    }
+}
+
+// ── Provenance-tracking metadata field ──────────────────────────────────
+
+/// A metadata field paired with its provenance — where the value
+/// came from.  This is the full-fidelity wrapper that downstream
+/// consumers (MCP export, workflow engine, discovery UI) should use
+/// when the origin of a value matters for trust decisions.
+///
+/// Serialises as `{ "status": "...", "provenance": "...", "value": ... }`.
+#[derive(Clone, Debug)]
+pub struct ProvenanceMetadataField<T> {
+    /// The metadata field state and optional value.
+    pub field: MetadataField<T>,
+    /// Where this metadata originated.
+    pub provenance: MetadataProvenance,
+}
+
+impl<T> ProvenanceMetadataField<T> {
+    /// Create a new provenance-tracked field.
+    pub const fn new(field: MetadataField<T>, provenance: MetadataProvenance) -> Self {
+        Self { field, provenance }
+    }
+
+    /// Convenience: create a `Known` field with provenance.
+    pub const fn known(value: T, provenance: MetadataProvenance) -> Self {
+        Self {
+            field: MetadataField::Known(value),
+            provenance,
+        }
+    }
+
+    /// Convenience: create an `Unknown` field with provenance.
+    pub const fn unknown(provenance: MetadataProvenance) -> Self {
+        Self {
+            field: MetadataField::Unknown,
+            provenance,
+        }
+    }
+
+    /// Convenience: create an `Unsupported` field with provenance.
+    pub const fn unsupported(provenance: MetadataProvenance) -> Self {
+        Self {
+            field: MetadataField::Unsupported,
+            provenance,
+        }
+    }
+
+    /// Returns `true` when a verified value is present.
+    pub fn is_known(&self) -> bool {
+        self.field.is_known()
+    }
+
+    /// Borrow the inner value if `Known`.
+    pub fn as_known(&self) -> Option<&T> {
+        self.field.as_known()
+    }
+
+    /// Map the inner value when `Known`, preserving provenance and state.
+    pub fn map<U, F: FnOnce(T) -> U>(self, f: F) -> ProvenanceMetadataField<U> {
+        ProvenanceMetadataField {
+            field: self.field.map(f),
+            provenance: self.provenance,
+        }
+    }
+
+    /// Whether the provenance source is considered authoritative.
+    pub const fn is_authoritative(&self) -> bool {
+        self.provenance.is_authoritative()
+    }
+
+    /// Strip provenance, returning just the field.
+    pub fn into_field(self) -> MetadataField<T> {
+        self.field
+    }
+
+    /// Upgrade a bare `MetadataField` with `Unattributed` provenance.
+    pub const fn from_unattributed(field: MetadataField<T>) -> Self {
+        Self {
+            field,
+            provenance: MetadataProvenance::Unattributed,
+        }
+    }
+}
+
+impl<T: Serialize> Serialize for ProvenanceMetadataField<T> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("status", self.field.status_tag())?;
+        map.serialize_entry("provenance", self.provenance.tag())?;
+        if let MetadataField::Known(value) = &self.field {
+            map.serialize_entry("value", value)?;
+        }
+        map.end()
+    }
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for ProvenanceMetadataField<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Raw<V> {
+            status: String,
+            provenance: Option<String>,
+            value: Option<V>,
+        }
+        let raw = Raw::<T>::deserialize(deserializer)?;
+        let field = match raw.status.as_str() {
+            "known" => raw.value.map(MetadataField::Known).ok_or_else(|| {
+                serde::de::Error::custom("ProvenanceMetadataField status 'known' requires a value")
+            })?,
+            "unknown" => MetadataField::Unknown,
+            "unsupported" => MetadataField::Unsupported,
+            "unavailable" => MetadataField::Unavailable,
+            "not-applicable" => MetadataField::NotApplicable,
+            other => {
+                return Err(serde::de::Error::custom(format!(
+                    "unknown ProvenanceMetadataField status: {other}"
+                )));
+            }
+        };
+        let provenance = match raw.provenance.as_deref() {
+            Some("declared-by-connector") => MetadataProvenance::DeclaredByConnector,
+            Some("observed-by-host") => MetadataProvenance::ObservedByHost,
+            Some("measured-at-runtime") => MetadataProvenance::MeasuredAtRuntime,
+            Some("inferred-from-policy") => MetadataProvenance::InferredFromPolicy,
+            Some("unattributed") | None => MetadataProvenance::Unattributed,
+            Some(other) => {
+                return Err(serde::de::Error::custom(format!(
+                    "unknown provenance: {other}"
+                )));
+            }
+        };
+        Ok(Self { field, provenance })
     }
 }
 
@@ -3216,6 +3401,283 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // ── MetadataProvenance ────────────────────────────────────────────
+
+    #[test]
+    fn provenance_tag_matches_serde_variant() {
+        let cases = [
+            (MetadataProvenance::DeclaredByConnector, "declared-by-connector"),
+            (MetadataProvenance::ObservedByHost, "observed-by-host"),
+            (MetadataProvenance::MeasuredAtRuntime, "measured-at-runtime"),
+            (MetadataProvenance::InferredFromPolicy, "inferred-from-policy"),
+            (MetadataProvenance::Unattributed, "unattributed"),
+        ];
+        for (variant, expected_tag) in &cases {
+            assert_eq!(variant.tag(), *expected_tag, "tag mismatch for {variant:?}");
+            let json = serde_json::to_value(variant).unwrap();
+            assert_eq!(json.as_str().unwrap(), *expected_tag);
+        }
+    }
+
+    #[test]
+    fn provenance_round_trip_all_variants() {
+        let variants = [
+            MetadataProvenance::DeclaredByConnector,
+            MetadataProvenance::ObservedByHost,
+            MetadataProvenance::MeasuredAtRuntime,
+            MetadataProvenance::InferredFromPolicy,
+            MetadataProvenance::Unattributed,
+        ];
+        for variant in variants {
+            let json = serde_json::to_string(&variant).unwrap();
+            let back: MetadataProvenance = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, variant);
+        }
+    }
+
+    #[test]
+    fn provenance_authoritative_only_for_host_and_runtime() {
+        assert!(!MetadataProvenance::DeclaredByConnector.is_authoritative());
+        assert!(MetadataProvenance::ObservedByHost.is_authoritative());
+        assert!(MetadataProvenance::MeasuredAtRuntime.is_authoritative());
+        assert!(!MetadataProvenance::InferredFromPolicy.is_authoritative());
+        assert!(!MetadataProvenance::Unattributed.is_authoritative());
+    }
+
+    #[test]
+    fn provenance_explanation_non_empty() {
+        let variants = [
+            MetadataProvenance::DeclaredByConnector,
+            MetadataProvenance::ObservedByHost,
+            MetadataProvenance::MeasuredAtRuntime,
+            MetadataProvenance::InferredFromPolicy,
+            MetadataProvenance::Unattributed,
+        ];
+        for variant in variants {
+            assert!(
+                !variant.explanation().is_empty(),
+                "empty explanation for {variant:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn provenance_equality_and_hash() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(MetadataProvenance::DeclaredByConnector);
+        set.insert(MetadataProvenance::ObservedByHost);
+        set.insert(MetadataProvenance::DeclaredByConnector); // duplicate
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn provenance_clone() {
+        let p = MetadataProvenance::MeasuredAtRuntime;
+        let cloned = p;
+        assert_eq!(p, cloned);
+    }
+
+    // ── ProvenanceMetadataField ───────────────────────────────────────
+
+    #[test]
+    fn provenance_field_known_serializes_with_provenance() {
+        let field = ProvenanceMetadataField::known(
+            vec!["request-response".to_owned()],
+            MetadataProvenance::DeclaredByConnector,
+        );
+        let json = serde_json::to_value(&field).unwrap();
+        assert_eq!(json["status"], "known");
+        assert_eq!(json["provenance"], "declared-by-connector");
+        assert_eq!(json["value"][0], "request-response");
+    }
+
+    #[test]
+    fn provenance_field_unknown_serializes_without_value() {
+        let field: ProvenanceMetadataField<String> =
+            ProvenanceMetadataField::unknown(MetadataProvenance::ObservedByHost);
+        let json = serde_json::to_value(&field).unwrap();
+        assert_eq!(json["status"], "unknown");
+        assert_eq!(json["provenance"], "observed-by-host");
+        assert!(json.get("value").is_none());
+    }
+
+    #[test]
+    fn provenance_field_unsupported_with_provenance() {
+        let field: ProvenanceMetadataField<i32> =
+            ProvenanceMetadataField::unsupported(MetadataProvenance::DeclaredByConnector);
+        let json = serde_json::to_value(&field).unwrap();
+        assert_eq!(json["status"], "unsupported");
+        assert_eq!(json["provenance"], "declared-by-connector");
+    }
+
+    #[test]
+    fn provenance_field_known_round_trip() {
+        let field = ProvenanceMetadataField::known(42_u32, MetadataProvenance::MeasuredAtRuntime);
+        let json = serde_json::to_string(&field).unwrap();
+        let back: ProvenanceMetadataField<u32> = serde_json::from_str(&json).unwrap();
+        assert!(back.is_known());
+        assert_eq!(*back.as_known().unwrap(), 42);
+        assert_eq!(back.provenance, MetadataProvenance::MeasuredAtRuntime);
+    }
+
+    #[test]
+    fn provenance_field_unknown_round_trip() {
+        let field: ProvenanceMetadataField<String> =
+            ProvenanceMetadataField::unknown(MetadataProvenance::InferredFromPolicy);
+        let json = serde_json::to_string(&field).unwrap();
+        let back: ProvenanceMetadataField<String> = serde_json::from_str(&json).unwrap();
+        assert!(!back.is_known());
+        assert_eq!(back.field.status_tag(), "unknown");
+        assert_eq!(back.provenance, MetadataProvenance::InferredFromPolicy);
+    }
+
+    #[test]
+    fn provenance_field_unavailable_round_trip() {
+        let field = ProvenanceMetadataField::new(
+            MetadataField::<f64>::Unavailable,
+            MetadataProvenance::ObservedByHost,
+        );
+        let json = serde_json::to_string(&field).unwrap();
+        let back: ProvenanceMetadataField<f64> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.field.status_tag(), "unavailable");
+        assert_eq!(back.provenance, MetadataProvenance::ObservedByHost);
+    }
+
+    #[test]
+    fn provenance_field_not_applicable_round_trip() {
+        let field = ProvenanceMetadataField::new(
+            MetadataField::<bool>::NotApplicable,
+            MetadataProvenance::DeclaredByConnector,
+        );
+        let json = serde_json::to_string(&field).unwrap();
+        let back: ProvenanceMetadataField<bool> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.field.status_tag(), "not-applicable");
+        assert_eq!(back.provenance, MetadataProvenance::DeclaredByConnector);
+    }
+
+    #[test]
+    fn provenance_field_map_preserves_provenance() {
+        let field = ProvenanceMetadataField::known(42_i32, MetadataProvenance::MeasuredAtRuntime);
+        let mapped = field.map(|v| v.to_string());
+        assert_eq!(mapped.as_known().unwrap(), "42");
+        assert_eq!(mapped.provenance, MetadataProvenance::MeasuredAtRuntime);
+    }
+
+    #[test]
+    fn provenance_field_map_unknown_preserves_state_and_provenance() {
+        let field: ProvenanceMetadataField<i32> =
+            ProvenanceMetadataField::unknown(MetadataProvenance::ObservedByHost);
+        let mapped = field.map(|v| v.to_string());
+        assert_eq!(mapped.field.status_tag(), "unknown");
+        assert_eq!(mapped.provenance, MetadataProvenance::ObservedByHost);
+    }
+
+    #[test]
+    fn provenance_field_is_authoritative() {
+        let host = ProvenanceMetadataField::known(1, MetadataProvenance::ObservedByHost);
+        let manifest = ProvenanceMetadataField::known(1, MetadataProvenance::DeclaredByConnector);
+        let runtime = ProvenanceMetadataField::known(1, MetadataProvenance::MeasuredAtRuntime);
+        let policy = ProvenanceMetadataField::known(1, MetadataProvenance::InferredFromPolicy);
+        let unattr = ProvenanceMetadataField::known(1, MetadataProvenance::Unattributed);
+
+        assert!(host.is_authoritative());
+        assert!(!manifest.is_authoritative());
+        assert!(runtime.is_authoritative());
+        assert!(!policy.is_authoritative());
+        assert!(!unattr.is_authoritative());
+    }
+
+    #[test]
+    fn provenance_field_into_field_strips_provenance() {
+        let pf = ProvenanceMetadataField::known(99_u32, MetadataProvenance::ObservedByHost);
+        let field = pf.into_field();
+        assert!(field.is_known());
+        assert_eq!(*field.as_known().unwrap(), 99);
+    }
+
+    #[test]
+    fn provenance_field_from_unattributed() {
+        let bare = MetadataField::Known("hello".to_owned());
+        let pf = ProvenanceMetadataField::from_unattributed(bare);
+        assert!(pf.is_known());
+        assert_eq!(pf.provenance, MetadataProvenance::Unattributed);
+    }
+
+    #[test]
+    fn provenance_field_missing_provenance_defaults_to_unattributed() {
+        // Legacy JSON without provenance field
+        let legacy = json!({"status": "known", "value": 42});
+        let field: ProvenanceMetadataField<i32> = serde_json::from_value(legacy).unwrap();
+        assert!(field.is_known());
+        assert_eq!(*field.as_known().unwrap(), 42);
+        assert_eq!(field.provenance, MetadataProvenance::Unattributed);
+    }
+
+    #[test]
+    fn provenance_field_rejects_invalid_provenance() {
+        let bad = json!({"status": "known", "provenance": "magic", "value": 1});
+        let result: std::result::Result<ProvenanceMetadataField<i32>, _> =
+            serde_json::from_value(bad);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn provenance_field_rejects_known_without_value() {
+        let bad = json!({"status": "known", "provenance": "observed-by-host"});
+        let result: std::result::Result<ProvenanceMetadataField<String>, _> =
+            serde_json::from_value(bad);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn provenance_field_rejects_invalid_status() {
+        let bad = json!({"status": "banana", "provenance": "unattributed"});
+        let result: std::result::Result<ProvenanceMetadataField<String>, _> =
+            serde_json::from_value(bad);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn provenance_field_nested_json_value() {
+        let schema = json!({"type": "object", "properties": {"key": {"type": "string"}}});
+        let field = ProvenanceMetadataField::known(schema, MetadataProvenance::DeclaredByConnector);
+        let json = serde_json::to_value(&field).unwrap();
+        assert_eq!(json["status"], "known");
+        assert_eq!(json["provenance"], "declared-by-connector");
+        assert_eq!(json["value"]["type"], "object");
+
+        let back: ProvenanceMetadataField<Value> = serde_json::from_value(json).unwrap();
+        assert_eq!(back.as_known().unwrap()["type"], "object");
+    }
+
+    #[test]
+    fn provenance_field_all_status_provenance_combinations() {
+        let statuses: Vec<MetadataField<i32>> = vec![
+            MetadataField::Known(1),
+            MetadataField::Unknown,
+            MetadataField::Unsupported,
+            MetadataField::Unavailable,
+            MetadataField::NotApplicable,
+        ];
+        let provenances = [
+            MetadataProvenance::DeclaredByConnector,
+            MetadataProvenance::ObservedByHost,
+            MetadataProvenance::MeasuredAtRuntime,
+            MetadataProvenance::InferredFromPolicy,
+            MetadataProvenance::Unattributed,
+        ];
+        for status in &statuses {
+            for prov in &provenances {
+                let pf = ProvenanceMetadataField::new(status.clone(), *prov);
+                let json = serde_json::to_string(&pf).unwrap();
+                let back: ProvenanceMetadataField<i32> = serde_json::from_str(&json).unwrap();
+                assert_eq!(back.field.status_tag(), pf.field.status_tag());
+                assert_eq!(back.provenance, *prov);
+            }
+        }
+    }
+
     // ── CommandAvailability ─────────────────────────────────────────────
 
     #[test]
@@ -6282,5 +6744,394 @@ output_schema = { type = "object" }
                 .map(|check| check.status),
             Some(DescriptorStatus::NotYetMeasured)
         );
+    }
+
+    // ── Truthfulness invariant tests (1g7z0.29.8.4) ─────────────────
+
+    #[test]
+    fn truthfulness_metadata_field_never_leaks_value_when_non_known() {
+        // Invariant: non-Known variants must NEVER serialize a "value" key.
+        let non_known: Vec<MetadataField<String>> = vec![
+            MetadataField::Unknown,
+            MetadataField::Unsupported,
+            MetadataField::Unavailable,
+            MetadataField::NotApplicable,
+        ];
+        for field in non_known {
+            let json = serde_json::to_value(&field).unwrap();
+            assert!(
+                json.get("value").is_none(),
+                "non-Known variant {:?} leaked a value key",
+                field.status_tag()
+            );
+        }
+    }
+
+    #[test]
+    fn truthfulness_metadata_field_known_always_has_value() {
+        let field = MetadataField::Known("test".to_owned());
+        let json = serde_json::to_value(&field).unwrap();
+        assert!(json.get("value").is_some(), "Known variant missing value");
+    }
+
+    #[test]
+    fn truthfulness_metadata_field_status_tags_are_stable_strings() {
+        // Snapshot invariant: these exact strings must never change because
+        // downstream consumers (MCP export, logs, agent output) depend on them.
+        assert_eq!(MetadataField::Known(0).status_tag(), "known");
+        assert_eq!(MetadataField::<()>::Unknown.status_tag(), "unknown");
+        assert_eq!(MetadataField::<()>::Unsupported.status_tag(), "unsupported");
+        assert_eq!(MetadataField::<()>::Unavailable.status_tag(), "unavailable");
+        assert_eq!(
+            MetadataField::<()>::NotApplicable.status_tag(),
+            "not-applicable"
+        );
+    }
+
+    #[test]
+    fn truthfulness_provenance_tags_are_stable_strings() {
+        // Snapshot invariant: provenance tags must never change.
+        assert_eq!(
+            MetadataProvenance::DeclaredByConnector.tag(),
+            "declared-by-connector"
+        );
+        assert_eq!(
+            MetadataProvenance::ObservedByHost.tag(),
+            "observed-by-host"
+        );
+        assert_eq!(
+            MetadataProvenance::MeasuredAtRuntime.tag(),
+            "measured-at-runtime"
+        );
+        assert_eq!(
+            MetadataProvenance::InferredFromPolicy.tag(),
+            "inferred-from-policy"
+        );
+        assert_eq!(MetadataProvenance::Unattributed.tag(), "unattributed");
+    }
+
+    #[test]
+    fn truthfulness_availability_tags_are_stable_strings() {
+        // Snapshot invariant: availability tags are part of the public contract.
+        assert_eq!(CommandAvailability::LiveRuntime.tag(), "live-runtime");
+        assert_eq!(
+            CommandAvailability::OfflineArtifact.tag(),
+            "offline-artifact"
+        );
+        assert_eq!(CommandAvailability::Unsupported.tag(), "unsupported");
+        assert_eq!(CommandAvailability::Planned.tag(), "planned");
+        assert_eq!(CommandAvailability::Unavailable.tag(), "unavailable");
+        assert_eq!(CommandAvailability::Denied.tag(), "denied");
+        assert_eq!(CommandAvailability::Unknown.tag(), "unknown");
+    }
+
+    #[test]
+    fn truthfulness_only_live_runtime_is_authoritative() {
+        // Invariant: no offline or degraded state may claim authority.
+        let non_authoritative = [
+            CommandAvailability::OfflineArtifact,
+            CommandAvailability::Unsupported,
+            CommandAvailability::Planned,
+            CommandAvailability::Unavailable,
+            CommandAvailability::Denied,
+            CommandAvailability::Unknown,
+        ];
+        for avail in &non_authoritative {
+            assert!(
+                !avail.is_authoritative(),
+                "{:?} should not be authoritative",
+                avail
+            );
+        }
+        assert!(CommandAvailability::LiveRuntime.is_authoritative());
+    }
+
+    #[test]
+    fn truthfulness_envelope_offline_never_claims_authoritative() {
+        let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "list");
+        assert!(!envelope.authoritative);
+        assert!(envelope.explanation.contains("offline"));
+    }
+
+    #[test]
+    fn truthfulness_envelope_live_is_authoritative() {
+        let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "invoke");
+        assert!(envelope.authoritative);
+    }
+
+    #[test]
+    fn truthfulness_envelope_planned_is_not_authoritative() {
+        let envelope = CommandEnvelope::new(CommandAvailability::Planned, "batch");
+        assert!(!envelope.authoritative);
+        assert!(envelope.explanation.contains("planned") || envelope.explanation.contains("not yet"));
+    }
+
+    #[test]
+    fn truthfulness_envelope_unknown_is_not_authoritative_but_recoverable() {
+        let envelope = CommandEnvelope::new(CommandAvailability::Unknown, "show");
+        assert!(!envelope.authoritative);
+        assert!(envelope.recoverable);
+    }
+
+    #[test]
+    fn truthfulness_envelope_unsupported_is_not_recoverable() {
+        let envelope = CommandEnvelope::new(CommandAvailability::Unsupported, "stream");
+        assert!(!envelope.recoverable);
+    }
+
+    #[test]
+    fn truthfulness_envelope_denied_is_recoverable() {
+        let envelope = CommandEnvelope::new(CommandAvailability::Denied, "invoke");
+        assert!(envelope.recoverable);
+    }
+
+    #[test]
+    fn truthfulness_envelope_inject_into_payload() {
+        let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "list");
+        let mut payload = json!({"connectors": []});
+        envelope.inject_into(&mut payload);
+
+        let avail = &payload["availability"];
+        assert_eq!(avail["availability"], "offline-artifact");
+        assert_eq!(avail["authoritative"], false);
+        assert_eq!(avail["command"], "list");
+        assert!(avail["next_actions"].is_array());
+    }
+
+    #[test]
+    fn truthfulness_envelope_next_actions_non_empty_for_degraded_states() {
+        let degraded = [
+            CommandAvailability::OfflineArtifact,
+            CommandAvailability::Unsupported,
+            CommandAvailability::Planned,
+            CommandAvailability::Unavailable,
+            CommandAvailability::Denied,
+            CommandAvailability::Unknown,
+        ];
+        for avail in &degraded {
+            let envelope = CommandEnvelope::new(avail.clone(), "test-cmd");
+            assert!(
+                !envelope.next_actions.is_empty(),
+                "{:?} should suggest remediation actions",
+                avail
+            );
+        }
+    }
+
+    #[test]
+    fn truthfulness_envelope_live_runtime_has_no_next_actions() {
+        let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "invoke");
+        assert!(envelope.next_actions.is_empty());
+    }
+
+    #[test]
+    fn truthfulness_provenance_metadata_field_preserves_provenance_through_map() {
+        let original = ProvenanceMetadataField::known(100_u32, MetadataProvenance::ObservedByHost);
+        let mapped = original.map(|v| v * 2);
+        assert_eq!(*mapped.as_known().unwrap(), 200);
+        assert_eq!(mapped.provenance, MetadataProvenance::ObservedByHost);
+    }
+
+    #[test]
+    fn truthfulness_provenance_metadata_field_from_unattributed_is_honest() {
+        let bare = MetadataField::Known("data".to_owned());
+        let pf = ProvenanceMetadataField::from_unattributed(bare);
+        assert_eq!(pf.provenance, MetadataProvenance::Unattributed);
+        assert!(!pf.is_authoritative());
+    }
+
+    #[test]
+    fn truthfulness_metadata_field_from_option_none_is_unknown_not_fabricated() {
+        // Invariant: converting None to MetadataField must produce Unknown,
+        // never a fabricated default value.
+        let field: MetadataField<Vec<String>> = MetadataField::from_option(None);
+        assert_eq!(field.status_tag(), "unknown");
+        assert!(field.as_known().is_none());
+    }
+
+    #[test]
+    fn truthfulness_exit_codes_partition_correctly() {
+        // Invariant: success states (0), validation (5), policy (6), transport (8)
+        // must be consistent and non-overlapping in semantics.
+        assert_eq!(CommandAvailability::LiveRuntime.exit_code_u8(), 0);
+        assert_eq!(CommandAvailability::OfflineArtifact.exit_code_u8(), 0);
+        assert_eq!(CommandAvailability::Planned.exit_code_u8(), 0);
+        assert_eq!(CommandAvailability::Unsupported.exit_code_u8(), 5);
+        assert_eq!(CommandAvailability::Denied.exit_code_u8(), 6);
+        assert_eq!(CommandAvailability::Unavailable.exit_code_u8(), 8);
+        assert_eq!(CommandAvailability::Unknown.exit_code_u8(), 8);
+    }
+
+    #[test]
+    fn truthfulness_readiness_level_values_are_exhaustive() {
+        // Snapshot: all readiness levels round-trip correctly.
+        let levels = [
+            ReadinessLevel::Ready,
+            ReadinessLevel::PartiallyReady,
+            ReadinessLevel::NotReady,
+        ];
+        for level in levels {
+            let json = serde_json::to_value(level).unwrap();
+            let back: ReadinessLevel = serde_json::from_value(json).unwrap();
+            assert_eq!(back, level);
+        }
+    }
+
+    #[test]
+    fn truthfulness_gap_severity_ordering_is_consistent() {
+        // Invariant: blocking > degraded > cosmetic in semantic weight.
+        let blocking = json!("blocking");
+        let degraded = json!("degraded");
+        let cosmetic = json!("cosmetic");
+        let b: GapSeverity = serde_json::from_value(blocking).unwrap();
+        let d: GapSeverity = serde_json::from_value(degraded).unwrap();
+        let c: GapSeverity = serde_json::from_value(cosmetic).unwrap();
+        assert_eq!(b, GapSeverity::Blocking);
+        assert_eq!(d, GapSeverity::Degraded);
+        assert_eq!(c, GapSeverity::Cosmetic);
+    }
+
+    #[test]
+    fn truthfulness_metadata_field_serialization_shape_is_stable() {
+        // Snapshot: the JSON shape must be exactly {status, value?}
+        let known = serde_json::to_value(MetadataField::Known(42)).unwrap();
+        let obj = known.as_object().unwrap();
+        assert!(obj.contains_key("status"));
+        assert!(obj.contains_key("value"));
+        assert_eq!(obj.len(), 2, "Known should have exactly 2 keys");
+
+        let unknown = serde_json::to_value(MetadataField::<i32>::Unknown).unwrap();
+        let obj = unknown.as_object().unwrap();
+        assert!(obj.contains_key("status"));
+        assert_eq!(obj.len(), 1, "Unknown should have exactly 1 key");
+    }
+
+    #[test]
+    fn truthfulness_provenance_field_serialization_shape_is_stable() {
+        // Snapshot: the JSON shape must be exactly {status, provenance, value?}
+        let known = serde_json::to_value(ProvenanceMetadataField::known(
+            42,
+            MetadataProvenance::ObservedByHost,
+        ))
+        .unwrap();
+        let obj = known.as_object().unwrap();
+        assert!(obj.contains_key("status"));
+        assert!(obj.contains_key("provenance"));
+        assert!(obj.contains_key("value"));
+        assert_eq!(obj.len(), 3, "Known provenance field should have exactly 3 keys");
+
+        let unknown = serde_json::to_value(ProvenanceMetadataField::<i32>::unknown(
+            MetadataProvenance::Unattributed,
+        ))
+        .unwrap();
+        let obj = unknown.as_object().unwrap();
+        assert!(obj.contains_key("status"));
+        assert!(obj.contains_key("provenance"));
+        assert_eq!(obj.len(), 2, "Unknown provenance field should have exactly 2 keys");
+    }
+
+    #[test]
+    fn truthfulness_all_availability_variants_have_explanations() {
+        let variants = [
+            CommandAvailability::LiveRuntime,
+            CommandAvailability::OfflineArtifact,
+            CommandAvailability::Unsupported,
+            CommandAvailability::Planned,
+            CommandAvailability::Unavailable,
+            CommandAvailability::Denied,
+            CommandAvailability::Unknown,
+        ];
+        for variant in &variants {
+            assert!(
+                !variant.explanation().is_empty(),
+                "{:?} has empty explanation",
+                variant
+            );
+        }
+    }
+
+    #[test]
+    fn truthfulness_envelope_serialization_includes_all_required_fields() {
+        let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "invoke");
+        let json = serde_json::to_value(&envelope).unwrap();
+        let obj = json.as_object().unwrap();
+
+        let required_keys = [
+            "availability",
+            "command",
+            "authoritative",
+            "explanation",
+            "recoverable",
+            "next_actions",
+        ];
+        for key in &required_keys {
+            assert!(obj.contains_key(*key), "envelope missing required key: {key}");
+        }
+    }
+
+    #[test]
+    fn truthfulness_connector_detail_metadata_fields_are_typed() {
+        // Verify that ConnectorDetail uses MetadataField, not raw Option.
+        let detail = ConnectorDetail {
+            summary: ConnectorSummary {
+                id: "test:fcp2:1.0".to_owned(),
+                name: "Test".to_owned(),
+                archetypes: MetadataField::Unknown,
+                version: "1.0.0".to_owned(),
+                description: "Test connector".to_owned(),
+                state: ConnectorState::Unknown,
+                operation_count: 0,
+                max_risk: "low".to_owned(),
+                has_events: false,
+            },
+            operations: vec![],
+            config_schema: MetadataField::Unknown,
+            health: MetadataField::NotApplicable,
+            rate_limits: MetadataField::Unsupported,
+        };
+
+        // All metadata fields should serialize with explicit status tags
+        let json = serde_json::to_value(&detail).unwrap();
+        assert_eq!(json["config_schema"]["status"], "unknown");
+        assert_eq!(json["health"]["status"], "not-applicable");
+        assert_eq!(json["rate_limits"]["status"], "unsupported");
+        assert_eq!(json["summary"]["archetypes"]["status"], "unknown");
+    }
+
+    #[test]
+    fn truthfulness_connector_summary_archetypes_unknown_serialization() {
+        let summary = ConnectorSummary {
+            id: "test:fcp2:1.0".to_owned(),
+            name: "Test".to_owned(),
+            archetypes: MetadataField::Unknown,
+            version: "1.0.0".to_owned(),
+            description: "test".to_owned(),
+            state: ConnectorState::Unknown,
+            operation_count: 5,
+            max_risk: "low".to_owned(),
+            has_events: false,
+        };
+        let json = serde_json::to_value(&summary).unwrap();
+        // The archetypes field must show "unknown", NOT an empty array
+        assert_eq!(json["archetypes"]["status"], "unknown");
+        assert!(json["archetypes"].get("value").is_none());
+    }
+
+    #[test]
+    fn truthfulness_connector_summary_archetypes_known_serialization() {
+        let summary = ConnectorSummary {
+            id: "test:fcp2:1.0".to_owned(),
+            name: "Test".to_owned(),
+            archetypes: MetadataField::Known(vec!["request-response".to_owned()]),
+            version: "1.0.0".to_owned(),
+            description: "test".to_owned(),
+            state: ConnectorState::Unknown,
+            operation_count: 5,
+            max_risk: "low".to_owned(),
+            has_events: false,
+        };
+        let json = serde_json::to_value(&summary).unwrap();
+        assert_eq!(json["archetypes"]["status"], "known");
+        assert_eq!(json["archetypes"]["value"][0], "request-response");
     }
 }

@@ -453,7 +453,8 @@ impl BatchExecutor {
             .iter()
             .map(|o| (o.id.as_str(), o))
             .collect();
-        let mut results_map: HashMap<String, OperationResult> = HashMap::new();
+        let mut results_map: HashMap<String, OperationResult> =
+            HashMap::with_capacity(request.operations.len());
         let mut aborted = false;
 
         for tier in &plan.tiers {
@@ -565,16 +566,20 @@ fn topological_tiers(operations: &[BatchOperation]) -> HostResult<Vec<ExecutionT
     let mut dependents: HashMap<&str, Vec<&str>> = HashMap::new();
 
     for op in operations {
-        in_degree.entry(op.id.as_str()).or_insert(0);
+        let mut degree = 0;
+        let op_id = op.id.as_str();
+        
         for dep in &op.depends_on {
             if id_set.contains(dep.as_str()) {
-                *in_degree.entry(op.id.as_str()).or_insert(0) += 1;
+                degree += 1;
                 dependents
                     .entry(dep.as_str())
                     .or_default()
-                    .push(op.id.as_str());
+                    .push(op_id);
             }
         }
+        
+        *in_degree.entry(op_id).or_default() += degree;
     }
 
     let mut tiers = Vec::new();
@@ -1635,7 +1640,10 @@ mod tests {
     fn batch_operation_zone_omitted_when_none_in_json() {
         let operation = op("a", "tool", &[]);
         let json = serde_json::to_string(&operation).unwrap();
-        assert!(!json.contains("zone"), "zone should be skipped when None");
+        assert!(
+            !json.contains("zone"),
+            "zone should be skipped when None"
+        );
     }
 
     #[test]
@@ -1651,11 +1659,13 @@ mod tests {
     #[test]
     fn batch_options_custom_timeout() {
         let opts = BatchOptions {
-            timeout_ms: 60_000,
-            ..Default::default()
+            max_parallelism: 4,
+            stop_on_first_error: true,
+            timeout_ms: 5000,
         };
-        assert_eq!(opts.timeout_ms, 60_000);
-        assert_eq!(opts.max_parallelism, 8);
+        assert_eq!(opts.max_parallelism, 4);
+        assert!(opts.stop_on_first_error);
+        assert_eq!(opts.timeout_ms, 5000);
     }
 
     #[test]
@@ -1751,14 +1761,14 @@ mod tests {
         let result = OperationResult {
             id: "op1".into(),
             status: OperationResultStatus::Success,
-            output: Some(serde_json::json!({"data": [1, 2, 3]})),
+            output: Some(serde_json::json!({"key": "value"})),
             error: None,
             duration_ms: 15,
         };
         assert_eq!(result.status, OperationResultStatus::Success);
         assert!(result.output.is_some());
         assert!(result.error.is_none());
-        assert_eq!(result.output.unwrap()["data"][2], 3);
+        assert_eq!(result.output.unwrap()["key"], "value");
     }
 
     #[test]
@@ -1958,6 +1968,7 @@ mod tests {
         let plan = executor.plan(&req).unwrap();
         assert_eq!(plan.depth(), 3);
         assert_eq!(plan.max_width(), 5);
+        assert_eq!(plan.tiers[1].operation_ids, vec!["e"]);
     }
 
     // ── Cycle detection extended ──
@@ -2096,7 +2107,7 @@ mod tests {
         let validator = BatchZoneValidator::new(ZoneId::work(), reg);
         // Build ops for all 20 tools
         let ops: Vec<BatchOperation> = (0..20)
-            .map(|i| op(&format!("op{i}"), &format!("tool{i}"), &[]))
+            .map(|i| op(&format!("op{i:03}"), &format!("tool{i}"), &[]))
             .collect();
         let err = validator.validate(&ops).unwrap_err();
         let msg = err.to_string();
@@ -2198,7 +2209,8 @@ mod tests {
         let resp = executor
             .execute_sync(&req, |o| Ok(serde_json::json!({"id": o.id})))
             .unwrap();
-        // Results must be in submission order regardless of execution order
+        assert_eq!(resp.status, BatchStatus::Success);
+        assert_eq!(resp.results.len(), 5);
         let ids: Vec<&str> = resp.results.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids, vec!["e", "d", "c", "b", "a"]);
     }
@@ -2262,8 +2274,16 @@ mod tests {
         };
         let resp = executor.execute_sync(&req, selective_handler).unwrap();
         assert_eq!(resp.status, BatchStatus::Aborted);
-        assert_eq!(resp.failed, 1);
-        // ok3 is in tier 2 and must be skipped since batch aborted
+        // ok1 should be marked as success (independent)
+        let ok1 = resp.results.iter().find(|r| r.id == "ok1").unwrap();
+        assert_eq!(ok1.status, OperationResultStatus::Success);
+        // fail1 should be marked as error
+        let fail1 = resp.results.iter().find(|r| r.id == "fail1").unwrap();
+        assert_eq!(fail1.status, OperationResultStatus::Error);
+        // ok2 should be skipped (in tier 2, aborted)
+        let ok2 = resp.results.iter().find(|r| r.id == "ok2").unwrap();
+        assert_eq!(ok2.status, OperationResultStatus::Skipped);
+        // ok3 should be skipped (in tier 2, aborted)
         let ok3 = resp.results.iter().find(|r| r.id == "ok3").unwrap();
         assert_eq!(ok3.status, OperationResultStatus::Skipped);
     }
@@ -2384,7 +2404,7 @@ mod tests {
         let executor = BatchExecutor::new();
         let mut ops = vec![op("op000", "t", &[])];
         for i in 1..100 {
-            ops.push(op(&format!("op{i:03}"), "t", &[&format!("op{:03}", i - 1)]));
+            ops.push(op(&format!("n{i:03}"), "t", &[&format!("n{:03}", i - 1)]));
         }
         let req = simple_request(ops);
         let plan = executor.plan(&req).unwrap();

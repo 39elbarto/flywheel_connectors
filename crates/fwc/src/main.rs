@@ -3512,45 +3512,48 @@ fn show_dispatch_host(args: &ShowArgs, host: &str) -> Result<DispatchOutcome> {
         .map_or_else(|| "<operation>".to_owned(), |tool| tool.name.clone());
     let metadata_gaps = host_metadata_gaps(&introspection);
 
+    let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "show");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "show",
+        "source": "host-admin-api",
+        "message": "Loaded connector detail from `fcp-host` inventory and introspection.",
+        "connector": {
+            "slug": &connector.slug,
+            "canonical_id": inventory.connector.id.as_str(),
+            "name": &inventory.connector.name,
+            "version": inventory.connector.version.to_string(),
+            "description": &inventory.connector.description,
+            "cohort": Value::Null,
+            "categories": &inventory.connector.categories,
+            "format": Value::Null,
+            "state": host_connector_state_label(&inventory.connector.health),
+            "enabled": inventory.connector.enabled,
+            "health": &inventory.connector.health,
+            "last_health_check": inventory.connector.last_health_check,
+            "archetype": introspection.archetype,
+            "operation_count": introspection.tools.len(),
+            "max_risk": safety_tier_label(inventory.connector.max_safety_tier),
+            "has_events": introspection.introspection.event_caps.is_some() || !introspection.introspection.events.is_empty(),
+            "manifest_path": Value::Null,
+        },
+        "rate_limits": introspection.rate_limits,
+        "metadata_gaps": metadata_gaps,
+        "operations": {
+            "preview": preview,
+            "preview_truncated": preview_truncated,
+            "risky_count": risky_count,
+            "safe_count": introspection.tools.len().saturating_sub(risky_count),
+        },
+        "next_actions": [
+            format!("fwc ops {} --host {host}", connector.slug),
+            format!("fwc schema {} {} --host {host}", connector.slug, example_operation),
+            format!("fwc examples {} {} --host {host}", connector.slug, example_operation),
+        ],
+    });
+    envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
-        payload: json!({
-            "status": "ok",
-            "command": "show",
-            "source": "host-admin-api",
-            "message": "Loaded connector detail from `fcp-host` inventory and introspection.",
-            "connector": {
-                "slug": &connector.slug,
-                "canonical_id": inventory.connector.id.as_str(),
-                "name": &inventory.connector.name,
-                "version": inventory.connector.version.to_string(),
-                "description": &inventory.connector.description,
-                "cohort": Value::Null,
-                "categories": &inventory.connector.categories,
-                "format": Value::Null,
-                "state": host_connector_state_label(&inventory.connector.health),
-                "enabled": inventory.connector.enabled,
-                "health": &inventory.connector.health,
-                "last_health_check": inventory.connector.last_health_check,
-                "archetype": introspection.archetype,
-                "operation_count": introspection.tools.len(),
-                "max_risk": safety_tier_label(inventory.connector.max_safety_tier),
-                "has_events": introspection.introspection.event_caps.is_some() || !introspection.introspection.events.is_empty(),
-                "manifest_path": Value::Null,
-            },
-            "rate_limits": introspection.rate_limits,
-            "metadata_gaps": metadata_gaps,
-            "operations": {
-                "preview": preview,
-                "preview_truncated": preview_truncated,
-                "risky_count": risky_count,
-                "safe_count": introspection.tools.len().saturating_sub(risky_count),
-            },
-            "next_actions": [
-                format!("fwc ops {} --host {host}", connector.slug),
-                format!("fwc schema {} {} --host {host}", connector.slug, example_operation),
-                format!("fwc examples {} {} --host {host}", connector.slug, example_operation),
-            ],
-        }),
+        payload,
         exit_code: CliExitCode::Success,
     })
 }
@@ -3580,27 +3583,30 @@ fn ops_dispatch_host(args: &OpsArgs, host: &str) -> Result<DispatchOutcome> {
         .map(host_tool_summary_entry)
         .collect::<Vec<_>>();
 
+    let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "ops");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "ops",
+        "source": "host-admin-api",
+        "message": format!("Listed {} operations for `{}` from host introspection.", operations.len(), connector.slug),
+        "connector": {
+            "slug": &connector.slug,
+            "canonical_id": connector.summary.id.as_str(),
+            "name": &connector.summary.name,
+        },
+        "filters": {
+            "risk_at_most": args.risk_at_most.clone(),
+        },
+        "metadata_gaps": host_metadata_gaps(&introspection),
+        "operations": operations,
+        "next_actions": [
+            format!("fwc schema {} <operation> --host {host}", connector.slug),
+            format!("fwc examples {} <operation> --host {host}", connector.slug),
+        ],
+    });
+    envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
-        payload: json!({
-            "status": "ok",
-            "command": "ops",
-            "source": "host-admin-api",
-            "message": format!("Listed {} operations for `{}` from host introspection.", operations.len(), connector.slug),
-            "connector": {
-                "slug": &connector.slug,
-                "canonical_id": connector.summary.id.as_str(),
-                "name": &connector.summary.name,
-            },
-            "filters": {
-                "risk_at_most": args.risk_at_most.clone(),
-            },
-            "metadata_gaps": host_metadata_gaps(&introspection),
-            "operations": operations,
-            "next_actions": [
-                format!("fwc schema {} <operation> --host {host}", connector.slug),
-                format!("fwc examples {} <operation> --host {host}", connector.slug),
-            ],
-        }),
+        payload,
         exit_code: CliExitCode::Success,
     })
 }
@@ -3638,8 +3644,8 @@ fn schema_dispatch_host(args: &SchemaArgs, host: &str) -> Result<DispatchOutcome
 
         if args.scaffold {
             let scaffold = schema_nav::scaffold_template(&operation.input_schema);
-            return Ok(DispatchOutcome {
-                payload: json!({
+            let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "schema");
+            let mut payload = json!({
                     "status": "ok",
                     "command": "schema",
                     "source": "host-admin-api",
@@ -3647,7 +3653,10 @@ fn schema_dispatch_host(args: &SchemaArgs, host: &str) -> Result<DispatchOutcome
                     "connector": { "slug": &connector.slug },
                     "operation": { "selector": &operation.name },
                     "scaffold": scaffold,
-                }),
+                });
+            envelope.inject_into(&mut payload);
+            return Ok(DispatchOutcome {
+                payload,
                 exit_code: CliExitCode::Success,
             });
         }
@@ -3665,8 +3674,8 @@ fn schema_dispatch_host(args: &SchemaArgs, host: &str) -> Result<DispatchOutcome
             fields = schema_nav::filter_by_field(&fields, field_path);
         }
 
-        return Ok(DispatchOutcome {
-            payload: json!({
+        let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "schema");
+        let mut payload = json!({
                 "status": "ok",
                 "command": "schema",
                 "source": "host-admin-api",
@@ -3704,13 +3713,16 @@ fn schema_dispatch_host(args: &SchemaArgs, host: &str) -> Result<DispatchOutcome
                     format!("fwc schema {} {} --required-only --host {host}", connector.slug, operation.name),
                     format!("fwc schema {} {} --scaffold --host {host}", connector.slug, operation.name),
                 ],
-            }),
+            });
+        envelope.inject_into(&mut payload);
+        return Ok(DispatchOutcome {
+            payload,
             exit_code: CliExitCode::Success,
         });
     }
 
-    Ok(DispatchOutcome {
-        payload: json!({
+    let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "schema");
+    let mut payload = json!({
             "status": "ok",
             "command": "schema",
             "source": "host-admin-api",
@@ -3726,7 +3738,10 @@ fn schema_dispatch_host(args: &SchemaArgs, host: &str) -> Result<DispatchOutcome
                 format!("fwc ops {} --host {host}", connector.slug),
                 format!("fwc schema {} <operation> --host {host}", connector.slug),
             ],
-        }),
+        });
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
         exit_code: CliExitCode::Success,
     })
 }
@@ -3761,8 +3776,8 @@ fn examples_dispatch_host(args: &ExampleArgs, host: &str) -> Result<DispatchOutc
             }
         };
 
-        return Ok(DispatchOutcome {
-            payload: json!({
+        let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "examples");
+        let mut payload = json!({
                 "status": "ok",
                 "command": "examples",
                 "source": "host-admin-api",
@@ -3793,7 +3808,10 @@ fn examples_dispatch_host(args: &ExampleArgs, host: &str) -> Result<DispatchOutc
                     format!("fwc schema {} {} --host {host}", connector.slug, operation.name),
                     format!("fwc simulate {} {} --file payload.json", connector.slug, operation.name),
                 ],
-            }),
+            });
+        envelope.inject_into(&mut payload);
+        return Ok(DispatchOutcome {
+            payload,
             exit_code: CliExitCode::Success,
         });
     }
@@ -3816,8 +3834,8 @@ fn examples_dispatch_host(args: &ExampleArgs, host: &str) -> Result<DispatchOutc
         })
         .collect::<Vec<_>>();
 
-    Ok(DispatchOutcome {
-        payload: json!({
+    let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "examples");
+    let mut payload = json!({
             "status": "ok",
             "command": "examples",
             "source": "host-admin-api",
@@ -3841,7 +3859,10 @@ fn examples_dispatch_host(args: &ExampleArgs, host: &str) -> Result<DispatchOutc
                 format!("fwc ops {} --host {host}", connector.slug),
                 format!("fwc schema {} <operation> --host {host}", connector.slug),
             ],
-        }),
+        });
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
         exit_code: CliExitCode::Success,
     })
 }
@@ -3922,44 +3943,50 @@ fn context_dispatch(args: &ContextArgs) -> Result<DispatchOutcome> {
                 })
                 .collect::<Vec<_>>();
 
+            let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "context");
+            let mut payload = json!({
+                "status": "ok",
+                "command": "context",
+                "subcommand": "list",
+                "config_path": path.display().to_string(),
+                "current_context": &config.current_context,
+                "contexts": contexts,
+                "next_actions": [
+                    "fwc context current".to_owned(),
+                    "fwc context use <name>".to_owned(),
+                    "fwc context create <name> --endpoint <endpoint>".to_owned(),
+                ],
+            });
+            envelope.inject_into(&mut payload);
             Ok(DispatchOutcome {
-                payload: json!({
-                    "status": "ok",
-                    "command": "context",
-                    "subcommand": "list",
-                    "config_path": path.display().to_string(),
-                    "current_context": &config.current_context,
-                    "contexts": contexts,
-                    "next_actions": [
-                        "fwc context current".to_owned(),
-                        "fwc context use <name>".to_owned(),
-                        "fwc context create <name> --endpoint <endpoint>".to_owned(),
-                    ],
-                }),
+                payload,
                 exit_code: CliExitCode::Success,
             })
         }
         ContextCommand::Current => {
             let (path, config) = load_context_config()?;
+            let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "context");
+            let mut payload = json!({
+                "status": "ok",
+                "command": "context",
+                "subcommand": "current",
+                "config_path": path.display().to_string(),
+                "current_context": &config.current_context,
+                "context": config.contexts.get(&config.current_context).map_or(Value::Null, |context| json!({
+                    "name": &config.current_context,
+                    "endpoint": &context.endpoint,
+                    "default_zone": &context.default_zone,
+                    "node_identity": context.node_identity.as_ref().map(|path| path.display().to_string()),
+                    "config_overrides": &context.config_overrides,
+                })),
+                "next_actions": [
+                    "fwc context list".to_owned(),
+                    "fwc list".to_owned(),
+                ],
+            });
+            envelope.inject_into(&mut payload);
             Ok(DispatchOutcome {
-                payload: json!({
-                    "status": "ok",
-                    "command": "context",
-                    "subcommand": "current",
-                    "config_path": path.display().to_string(),
-                    "current_context": &config.current_context,
-                    "context": config.contexts.get(&config.current_context).map_or(Value::Null, |context| json!({
-                        "name": &config.current_context,
-                        "endpoint": &context.endpoint,
-                        "default_zone": &context.default_zone,
-                        "node_identity": context.node_identity.as_ref().map(|path| path.display().to_string()),
-                        "config_overrides": &context.config_overrides,
-                    })),
-                    "next_actions": [
-                        "fwc context list".to_owned(),
-                        "fwc list".to_owned(),
-                    ],
-                }),
+                payload,
                 exit_code: CliExitCode::Success,
             })
         }
@@ -3987,19 +4014,22 @@ fn context_dispatch(args: &ContextArgs) -> Result<DispatchOutcome> {
             }
             config.current_context.clone_from(&args.name);
             save_context_config(&path, &config)?;
+            let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "context");
+            let mut payload = json!({
+                "status": "ok",
+                "command": "context",
+                "subcommand": "use",
+                "message": format!("Switched the active context to `{}`.", args.name),
+                "config_path": path.display().to_string(),
+                "current_context": &config.current_context,
+                "next_actions": [
+                    "fwc context current".to_owned(),
+                    "fwc list".to_owned(),
+                ],
+            });
+            envelope.inject_into(&mut payload);
             Ok(DispatchOutcome {
-                payload: json!({
-                    "status": "ok",
-                    "command": "context",
-                    "subcommand": "use",
-                    "message": format!("Switched the active context to `{}`.", args.name),
-                    "config_path": path.display().to_string(),
-                    "current_context": &config.current_context,
-                    "next_actions": [
-                        "fwc context current".to_owned(),
-                        "fwc list".to_owned(),
-                    ],
-                }),
+                payload,
                 exit_code: CliExitCode::Success,
             })
         }
@@ -4037,26 +4067,29 @@ fn context_dispatch(args: &ContextArgs) -> Result<DispatchOutcome> {
                 config.current_context.clone_from(&args.name);
             }
             save_context_config(&path, &config)?;
+            let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "context");
+            let mut payload = json!({
+                "status": "ok",
+                "command": "context",
+                "subcommand": "create",
+                "message": format!("Created context `{}`.", args.name),
+                "config_path": path.display().to_string(),
+                "context": {
+                    "name": &args.name,
+                    "endpoint": &args.endpoint,
+                    "default_zone": &args.zone,
+                    "node_identity": args.identity.as_ref().map(|path| path.display().to_string()),
+                    "set_current": args.set_current,
+                },
+                "current_context": &config.current_context,
+                "next_actions": [
+                    "fwc context list".to_owned(),
+                    format!("fwc context use {}", args.name),
+                ],
+            });
+            envelope.inject_into(&mut payload);
             Ok(DispatchOutcome {
-                payload: json!({
-                    "status": "ok",
-                    "command": "context",
-                    "subcommand": "create",
-                    "message": format!("Created context `{}`.", args.name),
-                    "config_path": path.display().to_string(),
-                    "context": {
-                        "name": &args.name,
-                        "endpoint": &args.endpoint,
-                        "default_zone": &args.zone,
-                        "node_identity": args.identity.as_ref().map(|path| path.display().to_string()),
-                        "set_current": args.set_current,
-                    },
-                    "current_context": &config.current_context,
-                    "next_actions": [
-                        "fwc context list".to_owned(),
-                        format!("fwc context use {}", args.name),
-                    ],
-                }),
+                payload,
                 exit_code: CliExitCode::Success,
             })
         }
@@ -4105,18 +4138,21 @@ fn context_dispatch(args: &ContextArgs) -> Result<DispatchOutcome> {
             }
             config.contexts.remove(&args.name);
             save_context_config(&path, &config)?;
+            let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "context");
+            let mut payload = json!({
+                "status": "ok",
+                "command": "context",
+                "subcommand": "delete",
+                "message": format!("Deleted context `{}`.", args.name),
+                "config_path": path.display().to_string(),
+                "current_context": &config.current_context,
+                "next_actions": [
+                    "fwc context list".to_owned(),
+                ],
+            });
+            envelope.inject_into(&mut payload);
             Ok(DispatchOutcome {
-                payload: json!({
-                    "status": "ok",
-                    "command": "context",
-                    "subcommand": "delete",
-                    "message": format!("Deleted context `{}`.", args.name),
-                    "config_path": path.display().to_string(),
-                    "current_context": &config.current_context,
-                    "next_actions": [
-                        "fwc context list".to_owned(),
-                    ],
-                }),
+                payload,
                 exit_code: CliExitCode::Success,
             })
         }
@@ -4167,19 +4203,22 @@ fn context_dispatch(args: &ContextArgs) -> Result<DispatchOutcome> {
                 config.current_context.clone_from(&args.new_name);
             }
             save_context_config(&path, &config)?;
+            let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "context");
+            let mut payload = json!({
+                "status": "ok",
+                "command": "context",
+                "subcommand": "rename",
+                "message": format!("Renamed context `{}` to `{}`.", args.old_name, args.new_name),
+                "config_path": path.display().to_string(),
+                "current_context": &config.current_context,
+                "next_actions": [
+                    "fwc context list".to_owned(),
+                    "fwc context current".to_owned(),
+                ],
+            });
+            envelope.inject_into(&mut payload);
             Ok(DispatchOutcome {
-                payload: json!({
-                    "status": "ok",
-                    "command": "context",
-                    "subcommand": "rename",
-                    "message": format!("Renamed context `{}` to `{}`.", args.old_name, args.new_name),
-                    "config_path": path.display().to_string(),
-                    "current_context": &config.current_context,
-                    "next_actions": [
-                        "fwc context list".to_owned(),
-                        "fwc context current".to_owned(),
-                    ],
-                }),
+                payload,
                 exit_code: CliExitCode::Success,
             })
         }
@@ -4231,25 +4270,28 @@ fn search_dispatch_host(args: &SearchArgs, host: &str) -> Result<DispatchOutcome
     .flatten()
     .collect();
 
+    let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "search");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "search",
+        "source": "host-admin-api",
+        "mode": "live-introspection",
+        "message": format!("Found {} live matching operations ({} shown).", total, json_results.len()),
+        "query": &args.query,
+        "filters": active_filters,
+        "filter_gaps": filter_gaps,
+        "metadata_gaps": metadata_gaps,
+        "total_results": total,
+        "results": json_results,
+        "next_actions": [
+            "Use `fwc show <connector> --host <endpoint>` to inspect a connector in more detail.",
+            "Use `fwc schema <connector> <operation> --host <endpoint>` for the live input/output schema.",
+            "Add --capability, --risk, --safety, or --idempotent flags to narrow results.",
+        ],
+    });
+    envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
-        payload: json!({
-            "status": "ok",
-            "command": "search",
-            "source": "host-admin-api",
-            "mode": "live-introspection",
-            "message": format!("Found {} live matching operations ({} shown).", total, json_results.len()),
-            "query": &args.query,
-            "filters": active_filters,
-            "filter_gaps": filter_gaps,
-            "metadata_gaps": metadata_gaps,
-            "total_results": total,
-            "results": json_results,
-            "next_actions": [
-                "Use `fwc show <connector> --host <endpoint>` to inspect a connector in more detail.",
-                "Use `fwc schema <connector> <operation> --host <endpoint>` for the live input/output schema.",
-                "Add --capability, --risk, --safety, or --idempotent flags to narrow results.",
-            ],
-        }),
+        payload,
         exit_code: CliExitCode::Success,
     })
 }
@@ -4325,23 +4367,26 @@ fn search_dispatch(args: &SearchArgs, host: Option<&str>) -> Result<DispatchOutc
     .flatten()
     .collect();
 
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "search");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "search",
+        "source": "workspace-manifests",
+        "mode": "offline-artifact",
+        "message": format!("Found {} matching operations ({} shown).", total, json_results.len()),
+        "query": &args.query,
+        "filters": active_filters,
+        "total_results": total,
+        "results": json_results,
+        "next_actions": [
+            "Use `fwc show <connector> --offline` to inspect a connector in more detail.",
+            "Use `fwc schema <connector> <operation> --offline` for the input/output schema.",
+            "Add --capability, --risk, --safety, --idempotent flags to narrow results.",
+        ],
+    });
+    envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
-        payload: json!({
-            "status": "ok",
-            "command": "search",
-            "source": "workspace-manifests",
-            "mode": "offline-artifact",
-            "message": format!("Found {} matching operations ({} shown).", total, json_results.len()),
-            "query": &args.query,
-            "filters": active_filters,
-            "total_results": total,
-            "results": json_results,
-            "next_actions": [
-                "Use `fwc show <connector> --offline` to inspect a connector in more detail.",
-                "Use `fwc schema <connector> <operation> --offline` for the input/output schema.",
-                "Add --capability, --risk, --safety, --idempotent flags to narrow results.",
-            ],
-        }),
+        payload,
         exit_code: CliExitCode::Success,
     })
 }
@@ -4402,46 +4447,49 @@ fn show_dispatch(args: &ShowArgs, host: Option<&str>) -> Result<DispatchOutcome>
     let slug = connector.slug.clone();
     let summary = &connector.detail.summary;
 
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "show");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "show",
+        "source": "workspace-manifests",
+        "mode": "offline-artifact",
+        "message": "Loaded connector detail from the workspace manifest.",
+        "connector": {
+            "slug": &slug,
+            "canonical_id": &summary.id,
+            "name": &summary.name,
+            "version": &summary.version,
+            "description": &summary.description,
+            "cohort": &connector.cohort,
+            "format": &connector.runtime_format,
+            "state": summary.state,
+            "state_model": connector.state_model.as_known().cloned(),
+            "archetypes": summary.archetypes.as_known().cloned(),
+            "operation_count": summary.operation_count,
+            "max_risk": &summary.max_risk,
+            "has_events": summary.has_events,
+            "manifest_path": &connector.manifest_path,
+        },
+        "zones": connector.zones.clone(),
+        "capabilities": connector.capabilities.clone(),
+        "rate_limits": connector.detail.rate_limits.as_known().cloned(),
+        "shared_descriptor": connector.shared_descriptor(),
+        "operations": {
+            "preview": preview,
+            "preview_truncated": preview_truncated,
+            "risky_count": risky_count,
+            "safe_count": connector.operations.len().saturating_sub(risky_count),
+        },
+        "next_actions": [
+            format!("fwc ops {slug} --offline"),
+            format!("fwc schema {slug} {example_operation} --offline"),
+            format!("fwc examples {slug} {example_operation} --offline"),
+            format!("fwc config schema {slug}"),
+        ],
+    });
+    envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
-        payload: json!({
-            "status": "ok",
-            "command": "show",
-            "source": "workspace-manifests",
-            "mode": "offline-artifact",
-            "message": "Loaded connector detail from the workspace manifest.",
-            "connector": {
-                "slug": &slug,
-                "canonical_id": &summary.id,
-                "name": &summary.name,
-                "version": &summary.version,
-                "description": &summary.description,
-                "cohort": &connector.cohort,
-                "format": &connector.runtime_format,
-                "state": summary.state,
-                "state_model": connector.state_model.as_known().cloned(),
-                "archetypes": summary.archetypes.as_known().cloned(),
-                "operation_count": summary.operation_count,
-                "max_risk": &summary.max_risk,
-                "has_events": summary.has_events,
-                "manifest_path": &connector.manifest_path,
-            },
-            "zones": connector.zones.clone(),
-            "capabilities": connector.capabilities.clone(),
-            "rate_limits": connector.detail.rate_limits.as_known().cloned(),
-            "shared_descriptor": connector.shared_descriptor(),
-            "operations": {
-                "preview": preview,
-                "preview_truncated": preview_truncated,
-                "risky_count": risky_count,
-                "safe_count": connector.operations.len().saturating_sub(risky_count),
-            },
-            "next_actions": [
-                format!("fwc ops {slug} --offline"),
-                format!("fwc schema {slug} {example_operation} --offline"),
-                format!("fwc examples {slug} {example_operation} --offline"),
-                format!("fwc config schema {slug}"),
-            ],
-        }),
+        payload,
         exit_code: CliExitCode::Success,
     })
 }
@@ -4489,27 +4537,30 @@ fn ops_dispatch(args: &OpsArgs, host: Option<&str>) -> Result<DispatchOutcome> {
         .map(operation_summary_entry)
         .collect::<Vec<_>>();
 
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "ops");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "ops",
+        "source": "workspace-manifests",
+        "mode": "offline-artifact",
+        "message": format!("Listed {} operations for `{slug}`.", operations.len()),
+        "connector": {
+            "slug": &slug,
+            "canonical_id": &connector.detail.summary.id,
+            "name": &connector.detail.summary.name,
+        },
+        "filters": {
+            "risk_at_most": args.risk_at_most.clone(),
+        },
+        "operations": operations,
+        "next_actions": [
+            format!("fwc schema {slug} <operation> --offline"),
+            format!("fwc examples {slug} <operation> --offline"),
+        ],
+    });
+    envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
-        payload: json!({
-            "status": "ok",
-            "command": "ops",
-            "source": "workspace-manifests",
-            "mode": "offline-artifact",
-            "message": format!("Listed {} operations for `{slug}`.", operations.len()),
-            "connector": {
-                "slug": &slug,
-                "canonical_id": &connector.detail.summary.id,
-                "name": &connector.detail.summary.name,
-            },
-            "filters": {
-                "risk_at_most": args.risk_at_most.clone(),
-            },
-            "operations": operations,
-            "next_actions": [
-                format!("fwc schema {slug} <operation> --offline"),
-                format!("fwc examples {slug} <operation> --offline"),
-            ],
-        }),
+        payload,
         exit_code: CliExitCode::Success,
     })
 }
@@ -4572,17 +4623,20 @@ fn schema_dispatch(args: &SchemaArgs, host: Option<&str>) -> Result<DispatchOutc
         // ── Deep navigator mode ────────────────────────────────────
         if args.scaffold {
             let scaffold = schema_nav::scaffold_template(&operation.input_schema);
+            let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "schema");
+            let mut payload = json!({
+                "status": "ok",
+                "command": "schema",
+                "source": "workspace-manifests",
+                "mode": "offline-artifact",
+                "scope": "scaffold",
+                "connector": { "slug": &connector.slug },
+                "operation": { "selector": &operation.preferred_selector },
+                "scaffold": scaffold,
+            });
+            envelope.inject_into(&mut payload);
             return Ok(DispatchOutcome {
-                payload: json!({
-                    "status": "ok",
-                    "command": "schema",
-                    "source": "workspace-manifests",
-                    "mode": "offline-artifact",
-                    "scope": "scaffold",
-                    "connector": { "slug": &connector.slug },
-                    "operation": { "selector": &operation.preferred_selector },
-                    "scaffold": scaffold,
-                }),
+                payload,
                 exit_code: CliExitCode::Success,
             });
         }
@@ -4604,93 +4658,102 @@ fn schema_dispatch(args: &SchemaArgs, host: Option<&str>) -> Result<DispatchOutc
 
         // When any navigator flag is active, return the annotated field listing.
         if args.required_only || args.field.is_some() || args.examples {
+            let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "schema");
+            let mut payload = json!({
+                "status": "ok",
+                "command": "schema",
+                "source": "workspace-manifests",
+                "mode": "offline-artifact",
+                "scope": "fields",
+                "connector": {
+                    "slug": &connector.slug,
+                    "canonical_id": &connector.detail.summary.id,
+                },
+                "operation": {
+                    "selector": &operation.preferred_selector,
+                    "canonical_id": &operation.actual_id,
+                },
+                "field_count": fields.len(),
+                "fields": fields,
+                "next_actions": [
+                    format!("fwc schema {} {} --scaffold --offline", connector.slug, operation.preferred_selector),
+                ],
+            });
+            envelope.inject_into(&mut payload);
             return Ok(DispatchOutcome {
-                payload: json!({
-                    "status": "ok",
-                    "command": "schema",
-                    "source": "workspace-manifests",
-                    "mode": "offline-artifact",
-                    "scope": "fields",
-                    "connector": {
-                        "slug": &connector.slug,
-                        "canonical_id": &connector.detail.summary.id,
-                    },
-                    "operation": {
-                        "selector": &operation.preferred_selector,
-                        "canonical_id": &operation.actual_id,
-                    },
-                    "field_count": fields.len(),
-                    "fields": fields,
-                    "next_actions": [
-                        format!("fwc schema {} {} --scaffold --offline", connector.slug, operation.preferred_selector),
-                    ],
-                }),
+                payload,
                 exit_code: CliExitCode::Success,
             });
         }
 
         // ── Default: full schema view ────────────────────────────────
-        return Ok(DispatchOutcome {
-            payload: json!({
-                "status": "ok",
-                "command": "schema",
-                "source": "workspace-manifests",
-                "mode": "offline-artifact",
-                "scope": "operation",
-                "message": "Loaded one operation schema from the connector manifest.",
-                "connector": {
-                    "slug": &connector.slug,
-                    "canonical_id": &connector.detail.summary.id,
-                    "name": &connector.detail.summary.name,
-                },
-                "operation": {
-                    "requested_selector": operation_selector,
-                    "selector": &operation.preferred_selector,
-                    "canonical_id": &operation.actual_id,
-                    "aliases": operation.aliases.clone(),
-                    "summary": &operation.summary.summary,
-                    "capability": &operation.summary.capability,
-                    "risk_level": &operation.summary.risk_level,
-                    "safety_tier": &operation.summary.safety_tier,
-                    "approval_mode": &operation.approval_mode,
-                },
-                "input_schema": operation.input_schema.clone(),
-                "output_schema": operation.output_schema.clone(),
-                "guidance": {
-                    "when_to_use": &operation.when_to_use,
-                    "common_mistakes": operation.common_mistakes.clone(),
-                    "related": operation.related.clone(),
-                },
-                "next_actions": [
-                    format!("fwc examples {} {} --offline", connector.slug, operation.preferred_selector),
-                    format!("fwc schema {} {} --required-only --offline", connector.slug, operation.preferred_selector),
-                    format!("fwc schema {} {} --scaffold --offline", connector.slug, operation.preferred_selector),
-                    format!("fwc simulate {} {} --file payload.json", connector.slug, operation.preferred_selector),
-                ],
-            }),
-            exit_code: CliExitCode::Success,
-        });
-    }
-
-    Ok(DispatchOutcome {
-        payload: json!({
+        let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "schema");
+        let mut payload = json!({
             "status": "ok",
             "command": "schema",
             "source": "workspace-manifests",
             "mode": "offline-artifact",
-            "scope": "connector",
-            "message": "Loaded the connector contract schema from the manifest.",
+            "scope": "operation",
+            "message": "Loaded one operation schema from the connector manifest.",
             "connector": {
                 "slug": &connector.slug,
                 "canonical_id": &connector.detail.summary.id,
                 "name": &connector.detail.summary.name,
             },
-            "schema": connector.connector_schema.clone(),
+            "operation": {
+                "requested_selector": operation_selector,
+                "selector": &operation.preferred_selector,
+                "canonical_id": &operation.actual_id,
+                "aliases": operation.aliases.clone(),
+                "summary": &operation.summary.summary,
+                "capability": &operation.summary.capability,
+                "risk_level": &operation.summary.risk_level,
+                "safety_tier": &operation.summary.safety_tier,
+                "approval_mode": &operation.approval_mode,
+            },
+            "input_schema": operation.input_schema.clone(),
+            "output_schema": operation.output_schema.clone(),
+            "guidance": {
+                "when_to_use": &operation.when_to_use,
+                "common_mistakes": operation.common_mistakes.clone(),
+                "related": operation.related.clone(),
+            },
             "next_actions": [
-                format!("fwc ops {} --offline", connector.slug),
-                format!("fwc config schema {}", connector.slug),
+                format!("fwc examples {} {} --offline", connector.slug, operation.preferred_selector),
+                format!("fwc schema {} {} --required-only --offline", connector.slug, operation.preferred_selector),
+                format!("fwc schema {} {} --scaffold --offline", connector.slug, operation.preferred_selector),
+                format!("fwc simulate {} {} --file payload.json", connector.slug, operation.preferred_selector),
             ],
-        }),
+        });
+        envelope.inject_into(&mut payload);
+        return Ok(DispatchOutcome {
+            payload,
+            exit_code: CliExitCode::Success,
+        });
+    }
+
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "schema");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "schema",
+        "source": "workspace-manifests",
+        "mode": "offline-artifact",
+        "scope": "connector",
+        "message": "Loaded the connector contract schema from the manifest.",
+        "connector": {
+            "slug": &connector.slug,
+            "canonical_id": &connector.detail.summary.id,
+            "name": &connector.detail.summary.name,
+        },
+        "schema": connector.connector_schema.clone(),
+        "next_actions": [
+            format!("fwc ops {} --offline", connector.slug),
+            format!("fwc config schema {}", connector.slug),
+        ],
+    });
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
         exit_code: CliExitCode::Success,
     })
 }
@@ -4745,33 +4808,36 @@ fn examples_dispatch(args: &ExampleArgs, host: Option<&str>) -> Result<DispatchO
             }
         };
 
+        let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "examples");
+        let mut payload = json!({
+            "status": "ok",
+            "command": "examples",
+            "source": "workspace-manifests",
+            "mode": "offline-artifact",
+            "scope": "operation",
+            "message": "Loaded operation examples from the connector manifest.",
+            "connector": {
+                "slug": &connector.slug,
+                "canonical_id": &connector.detail.summary.id,
+                "name": &connector.detail.summary.name,
+            },
+            "operation": {
+                "requested_selector": operation_selector,
+                "selector": &operation.preferred_selector,
+                "canonical_id": &operation.actual_id,
+                "aliases": operation.aliases.clone(),
+                "when_to_use": &operation.when_to_use,
+            },
+            "examples": operation.examples.clone(),
+            "common_mistakes": operation.common_mistakes.clone(),
+            "next_actions": [
+                format!("fwc schema {} {} --offline", connector.slug, operation.preferred_selector),
+                format!("fwc simulate {} {} --file payload.json", connector.slug, operation.preferred_selector),
+            ],
+        });
+        envelope.inject_into(&mut payload);
         return Ok(DispatchOutcome {
-            payload: json!({
-                "status": "ok",
-                "command": "examples",
-                "source": "workspace-manifests",
-                "mode": "offline-artifact",
-                "scope": "operation",
-                "message": "Loaded operation examples from the connector manifest.",
-                "connector": {
-                    "slug": &connector.slug,
-                    "canonical_id": &connector.detail.summary.id,
-                    "name": &connector.detail.summary.name,
-                },
-                "operation": {
-                    "requested_selector": operation_selector,
-                    "selector": &operation.preferred_selector,
-                    "canonical_id": &operation.actual_id,
-                    "aliases": operation.aliases.clone(),
-                    "when_to_use": &operation.when_to_use,
-                },
-                "examples": operation.examples.clone(),
-                "common_mistakes": operation.common_mistakes.clone(),
-                "next_actions": [
-                    format!("fwc schema {} {} --offline", connector.slug, operation.preferred_selector),
-                    format!("fwc simulate {} {} --file payload.json", connector.slug, operation.preferred_selector),
-                ],
-            }),
+            payload,
             exit_code: CliExitCode::Success,
         });
     }
@@ -4791,32 +4857,35 @@ fn examples_dispatch(args: &ExampleArgs, host: Option<&str>) -> Result<DispatchO
         })
         .collect::<Vec<_>>();
 
-    Ok(DispatchOutcome {
-        payload: json!({
-            "status": "ok",
-            "command": "examples",
-            "source": "workspace-manifests",
-            "mode": "offline-artifact",
-            "scope": "connector",
-            "message": "Loaded connector-level examples and suggested follow-up commands.",
-            "connector": {
-                "slug": &connector.slug,
-                "canonical_id": &connector.detail.summary.id,
-                "name": &connector.detail.summary.name,
-            },
-            "examples": {
-                "commands": [
-                    format!("fwc show {} --offline", connector.slug),
-                    format!("fwc ops {} --offline", connector.slug),
-                    format!("fwc config schema {}", connector.slug),
-                ],
-                "operations": operation_examples,
-            },
-            "next_actions": [
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "examples");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "examples",
+        "source": "workspace-manifests",
+        "mode": "offline-artifact",
+        "scope": "connector",
+        "message": "Loaded connector-level examples and suggested follow-up commands.",
+        "connector": {
+            "slug": &connector.slug,
+            "canonical_id": &connector.detail.summary.id,
+            "name": &connector.detail.summary.name,
+        },
+        "examples": {
+            "commands": [
+                format!("fwc show {} --offline", connector.slug),
                 format!("fwc ops {} --offline", connector.slug),
-                format!("fwc schema {} <operation> --offline", connector.slug),
+                format!("fwc config schema {}", connector.slug),
             ],
-        }),
+            "operations": operation_examples,
+        },
+        "next_actions": [
+            format!("fwc ops {} --offline", connector.slug),
+            format!("fwc schema {} <operation> --offline", connector.slug),
+        ],
+    });
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
         exit_code: CliExitCode::Success,
     })
 }
@@ -4916,24 +4985,27 @@ fn doctor_dispatch(args: &DoctorArgs, explicit_host: Option<&str>) -> Result<Dis
         next_actions.push(format!("fwc list --host {}", host.endpoint));
     }
 
+    let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "doctor");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "doctor",
+        "source": "host-admin-api",
+        "message": format!("Loaded a live doctor report for `{}` from `fcp-host`.", report.zone_id),
+        "zone": report.zone_id,
+        "requested_connectors": requested_connectors,
+        "self_check": args.self_check || !args.connector.is_empty(),
+        "summary": {
+            "overall_status": report.overall_status,
+            "check_count": report.checks.len(),
+            "connector_self_check_count": report.connector_self_checks.len(),
+            "is_degraded": report.degraded_mode.is_degraded,
+        },
+        "report": report,
+        "next_actions": next_actions,
+    });
+    envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
-        payload: json!({
-            "status": "ok",
-            "command": "doctor",
-            "source": "host-admin-api",
-            "message": format!("Loaded a live doctor report for `{}` from `fcp-host`.", report.zone_id),
-            "zone": report.zone_id,
-            "requested_connectors": requested_connectors,
-            "self_check": args.self_check || !args.connector.is_empty(),
-            "summary": {
-                "overall_status": report.overall_status,
-                "check_count": report.checks.len(),
-                "connector_self_check_count": report.connector_self_checks.len(),
-                "is_degraded": report.degraded_mode.is_degraded,
-            },
-            "report": report,
-            "next_actions": next_actions,
-        }),
+        payload,
         exit_code: CliExitCode::Success,
     })
 }
@@ -4966,8 +5038,8 @@ fn status_dispatch(args: &StatusArgs, explicit_host: Option<&str>) -> Result<Dis
         let pin = client.pin_status(connector.summary.id.as_str())?;
         let rollout = client.rollout_status(connector.summary.id.as_str()).ok();
 
-        return Ok(DispatchOutcome {
-            payload: json!({
+        let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "status");
+        let mut payload = json!({
                 "status": "ok",
                 "command": "status",
                 "scope": "connector",
@@ -4994,7 +5066,10 @@ fn status_dispatch(args: &StatusArgs, explicit_host: Option<&str>) -> Result<Dis
                     format!("fwc ops {} --host {}", connector.slug, host.endpoint),
                     format!("fwc pin {} --to {} --host {}", connector.slug, connector.summary.version, host.endpoint),
                 ],
-            }),
+            });
+        envelope.inject_into(&mut payload);
+        return Ok(DispatchOutcome {
+            payload,
             exit_code: CliExitCode::Success,
         });
     }
@@ -5017,8 +5092,8 @@ fn status_dispatch(args: &StatusArgs, explicit_host: Option<&str>) -> Result<Dis
         })
         .collect::<Vec<_>>();
 
-    Ok(DispatchOutcome {
-        payload: json!({
+    let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "status");
+    let mut payload = json!({
             "status": "ok",
             "command": "status",
             "scope": "fleet",
@@ -5032,7 +5107,10 @@ fn status_dispatch(args: &StatusArgs, explicit_host: Option<&str>) -> Result<Dis
                 format!("fwc list --host {}", host.endpoint),
                 format!("fwc show <connector> --host {}", host.endpoint),
             ],
-        }),
+        });
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
         exit_code: CliExitCode::Success,
     })
 }
@@ -5104,8 +5182,8 @@ fn budget_dispatch(args: &BudgetArgs, explicit_host: Option<&str>) -> Result<Dis
         },
     );
 
-    Ok(DispatchOutcome {
-        payload: json!({
+    let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "budget");
+    let mut payload = json!({
             "status": "ok",
             "command": "budget",
             "source": "host-admin-api",
@@ -5126,7 +5204,10 @@ fn budget_dispatch(args: &BudgetArgs, explicit_host: Option<&str>) -> Result<Dis
             },
             "zones": report.zones,
             "next_actions": next_actions,
-        }),
+        });
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
         exit_code: CliExitCode::Success,
     })
 }
@@ -5168,8 +5249,8 @@ fn pin_dispatch(args: &PinArgs, explicit_host: Option<&str>) -> Result<DispatchO
     })?;
     let pin = client.pin(connector.summary.id.as_str(), &version)?;
 
-    Ok(DispatchOutcome {
-        payload: json!({
+    let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "pin");
+    let mut payload = json!({
             "status": "ok",
             "command": "pin",
             "source": "host-admin-api",
@@ -5183,7 +5264,10 @@ fn pin_dispatch(args: &PinArgs, explicit_host: Option<&str>) -> Result<DispatchO
                 format!("fwc status {} --host {}", connector.slug, host.endpoint),
                 format!("fwc unpin {} --host {}", connector.slug, host.endpoint),
             ],
-        }),
+        });
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
         exit_code: CliExitCode::Success,
     })
 }
@@ -5216,8 +5300,8 @@ fn unpin_dispatch(args: &TargetArgs, explicit_host: Option<&str>) -> Result<Disp
     };
     let pin = client.unpin(connector.summary.id.as_str())?;
 
-    Ok(DispatchOutcome {
-        payload: json!({
+    let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "unpin");
+    let mut payload = json!({
             "status": "ok",
             "command": "unpin",
             "source": "host-admin-api",
@@ -5231,7 +5315,10 @@ fn unpin_dispatch(args: &TargetArgs, explicit_host: Option<&str>) -> Result<Disp
                 format!("fwc status {} --host {}", connector.slug, host.endpoint),
                 format!("fwc pin {} --to <version> --host {}", connector.slug, host.endpoint),
             ],
-        }),
+        });
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
         exit_code: CliExitCode::Success,
     })
 }
@@ -5299,8 +5386,8 @@ fn rollout_dispatch(args: &RolloutArgs, explicit_host: Option<&str>) -> Result<D
             };
             let outcome = client.schedule_rollout(&schedule)?;
 
-            Ok(DispatchOutcome {
-                payload: json!({
+            let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "rollout");
+            let mut payload = json!({
                     "status": "ok",
                     "command": "rollout",
                     "subcommand": "set",
@@ -5321,7 +5408,10 @@ fn rollout_dispatch(args: &RolloutArgs, explicit_host: Option<&str>) -> Result<D
                         format!("fwc rollout status {} --host {}", connector.slug, host.endpoint),
                         format!("fwc status {} --host {}", connector.slug, host.endpoint),
                     ],
-                }),
+                });
+            envelope.inject_into(&mut payload);
+            Ok(DispatchOutcome {
+                payload,
                 exit_code: CliExitCode::Success,
             })
         }
@@ -5339,8 +5429,8 @@ fn rollout_dispatch(args: &RolloutArgs, explicit_host: Option<&str>) -> Result<D
             let pin = client.pin_status(connector.summary.id.as_str())?;
             let rollout = client.rollout_status(connector.summary.id.as_str())?;
 
-            Ok(DispatchOutcome {
-                payload: json!({
+            let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "rollout");
+            let mut payload = json!({
                     "status": "ok",
                     "command": "rollout",
                     "subcommand": "status",
@@ -5356,7 +5446,10 @@ fn rollout_dispatch(args: &RolloutArgs, explicit_host: Option<&str>) -> Result<D
                         format!("fwc status {} --host {}", connector.slug, host.endpoint),
                         format!("fwc rollout rollback {} --to <version> --host {}", connector.slug, host.endpoint),
                     ],
-                }),
+                });
+            envelope.inject_into(&mut payload);
+            Ok(DispatchOutcome {
+                payload,
                 exit_code: CliExitCode::Success,
             })
         }
@@ -5378,8 +5471,8 @@ fn rollout_dispatch(args: &RolloutArgs, explicit_host: Option<&str>) -> Result<D
             })?;
             let response = client.rollback(connector.summary.id.as_str(), &version)?;
 
-            Ok(DispatchOutcome {
-                payload: json!({
+            let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "rollout");
+            let mut payload = json!({
                     "status": "ok",
                     "command": "rollout",
                     "subcommand": "rollback",
@@ -5397,7 +5490,10 @@ fn rollout_dispatch(args: &RolloutArgs, explicit_host: Option<&str>) -> Result<D
                         format!("fwc rollout status {} --host {}", connector.slug, host.endpoint),
                         format!("fwc status {} --host {}", connector.slug, host.endpoint),
                     ],
-                }),
+                });
+            envelope.inject_into(&mut payload);
+            Ok(DispatchOutcome {
+                payload,
                 exit_code: CliExitCode::Success,
             })
         }
@@ -5441,8 +5537,8 @@ fn config_dispatch(args: &ConfigArgs) -> Result<DispatchOutcome> {
                 });
             };
 
-            Ok(DispatchOutcome {
-                payload: json!({
+            let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "config");
+            let mut payload = json!({
                     "status": "ok",
                     "command": "config",
                     "subcommand": "schema",
@@ -5453,7 +5549,10 @@ fn config_dispatch(args: &ConfigArgs) -> Result<DispatchOutcome> {
                     },
                     "connectors_file": connectors_file.display().to_string(),
                     "schema": schema,
-                }),
+                });
+            envelope.inject_into(&mut payload);
+            Ok(DispatchOutcome {
+                payload,
                 exit_code: CliExitCode::Success,
             })
         }
@@ -5461,8 +5560,8 @@ fn config_dispatch(args: &ConfigArgs) -> Result<DispatchOutcome> {
             let configs = read_managed_connector_configs(&connectors_file)?;
             let (entry, resolved) =
                 resolve_managed_connector(&catalog, &configs, &target.connector)?;
-            Ok(DispatchOutcome {
-                payload: json!({
+            let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "config");
+            let mut payload = json!({
                     "status": "ok",
                     "command": "config",
                     "subcommand": "get",
@@ -5470,7 +5569,10 @@ fn config_dispatch(args: &ConfigArgs) -> Result<DispatchOutcome> {
                     "connector": connector_descriptor_json(&entry, resolved),
                     "connectors_file": connectors_file.display().to_string(),
                     "config": entry.config.clone().unwrap_or_else(|| json!({})),
-                }),
+                });
+            envelope.inject_into(&mut payload);
+            Ok(DispatchOutcome {
+                payload,
                 exit_code: CliExitCode::Success,
             })
         }
@@ -5506,8 +5608,8 @@ fn config_dispatch(args: &ConfigArgs) -> Result<DispatchOutcome> {
             write_managed_connector_configs(&connectors_file, &configs)?;
             let entry = &configs[index];
 
-            Ok(DispatchOutcome {
-                payload: json!({
+            let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "config");
+            let mut payload = json!({
                     "status": "ok",
                     "command": "config",
                     "subcommand": "set",
@@ -5516,7 +5618,10 @@ fn config_dispatch(args: &ConfigArgs) -> Result<DispatchOutcome> {
                     "connectors_file": connectors_file.display().to_string(),
                     "updated_path": set_args.key,
                     "config": config_value,
-                }),
+                });
+            envelope.inject_into(&mut payload);
+            Ok(DispatchOutcome {
+                payload,
                 exit_code: CliExitCode::Success,
             })
         }
@@ -5548,8 +5653,8 @@ fn config_dispatch(args: &ConfigArgs) -> Result<DispatchOutcome> {
             write_managed_connector_configs(&connectors_file, &configs)?;
             let entry = &configs[index];
 
-            Ok(DispatchOutcome {
-                payload: json!({
+            let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "config");
+            let mut payload = json!({
                     "status": "ok",
                     "command": "config",
                     "subcommand": "unset",
@@ -5558,7 +5663,10 @@ fn config_dispatch(args: &ConfigArgs) -> Result<DispatchOutcome> {
                     "connectors_file": connectors_file.display().to_string(),
                     "updated_path": unset_args.key,
                     "config": config_value,
-                }),
+                });
+            envelope.inject_into(&mut payload);
+            Ok(DispatchOutcome {
+                payload,
                 exit_code: CliExitCode::Success,
             })
         }
@@ -5588,8 +5696,8 @@ fn config_dispatch(args: &ConfigArgs) -> Result<DispatchOutcome> {
             write_managed_connector_configs(&connectors_file, &configs)?;
             let entry = &configs[index];
 
-            Ok(DispatchOutcome {
-                payload: json!({
+            let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "config");
+            let mut payload = json!({
                     "status": "ok",
                     "command": "config",
                     "subcommand": "import",
@@ -5598,7 +5706,10 @@ fn config_dispatch(args: &ConfigArgs) -> Result<DispatchOutcome> {
                     "connectors_file": connectors_file.display().to_string(),
                     "input_file": import_path.display().to_string(),
                     "config": imported,
-                }),
+                });
+            envelope.inject_into(&mut payload);
+            Ok(DispatchOutcome {
+                payload,
                 exit_code: CliExitCode::Success,
             })
         }
@@ -5610,8 +5721,8 @@ fn config_dispatch(args: &ConfigArgs) -> Result<DispatchOutcome> {
             if let Some(path) = &file_args.file {
                 write_json_file(path, &config_value)?;
             }
-            Ok(DispatchOutcome {
-                payload: json!({
+            let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "config");
+            let mut payload = json!({
                     "status": "ok",
                     "command": "config",
                     "subcommand": "export",
@@ -5620,7 +5731,10 @@ fn config_dispatch(args: &ConfigArgs) -> Result<DispatchOutcome> {
                     "connectors_file": connectors_file.display().to_string(),
                     "output_file": file_args.file.as_ref().map(|path| path.display().to_string()),
                     "config": config_value,
-                }),
+                });
+            envelope.inject_into(&mut payload);
+            Ok(DispatchOutcome {
+                payload,
                 exit_code: CliExitCode::Success,
             })
         }
@@ -5643,8 +5757,8 @@ fn config_dispatch(args: &ConfigArgs) -> Result<DispatchOutcome> {
                 CliExitCode::Validation
             };
 
-            Ok(DispatchOutcome {
-                payload: json!({
+            let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "config");
+            let mut payload = json!({
                     "status": status,
                     "command": "config",
                     "subcommand": "doctor",
@@ -5685,7 +5799,12 @@ fn config_dispatch(args: &ConfigArgs) -> Result<DispatchOutcome> {
                     "errors": validation_errors,
                     "config": config_value,
                     "schema": schema,
-                }),
+                });
+            if exit_code.is_success() {
+                envelope.inject_into(&mut payload);
+            }
+            Ok(DispatchOutcome {
+                payload,
                 exit_code,
             })
         }
@@ -5862,8 +5981,8 @@ fn install_dispatch(args: &InstallArgs, explicit_host: Option<&str>) -> Result<D
     let candidate = managed_connector_from_artifact(&artifact, None);
 
     if args.verify_only {
-        return Ok(DispatchOutcome {
-            payload: json!({
+        let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "install");
+        let mut payload = json!({
                 "status": "ok",
                 "command": "install",
                 "mode": "verify-only",
@@ -5875,7 +5994,10 @@ fn install_dispatch(args: &InstallArgs, explicit_host: Option<&str>) -> Result<D
                 "package": package_output_json(&artifact),
                 "candidate": connector_descriptor_json(&candidate, None),
                 "verification": artifact.verification,
-            }),
+            });
+        envelope.inject_into(&mut payload);
+        return Ok(DispatchOutcome {
+            payload,
             exit_code: CliExitCode::Success,
         });
     }
@@ -5948,8 +6070,8 @@ fn install_dispatch(args: &InstallArgs, explicit_host: Option<&str>) -> Result<D
         });
     }
 
-    Ok(DispatchOutcome {
-        payload: json!({
+    let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "install");
+    let mut payload = json!({
             "status": "ok",
             "command": "install",
             "message": format!(
@@ -5983,7 +6105,10 @@ fn install_dispatch(args: &InstallArgs, explicit_host: Option<&str>) -> Result<D
                 format!("fwc status {} --host {}", candidate.id, host.endpoint),
                 format!("fwc show {} --host {}", candidate.id, host.endpoint),
             ],
-        }),
+        });
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
         exit_code: CliExitCode::Success,
     })
 }
@@ -6096,8 +6221,8 @@ fn update_dispatch(args: &UpdateArgs, explicit_host: Option<&str>) -> Result<Dis
         }
     };
 
-    Ok(DispatchOutcome {
-        payload: json!({
+    let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "update");
+    let mut payload = json!({
             "status": "ok",
             "command": "update",
             "mode": if applied.dry_run { "dry-run" } else { "apply" },
@@ -6134,7 +6259,10 @@ fn update_dispatch(args: &UpdateArgs, explicit_host: Option<&str>) -> Result<Dis
                 format!("fwc status {} --host {}", target_connector_id, host.endpoint),
                 format!("fwc show {} --host {}", target_connector_id, host.endpoint),
             ],
-        }),
+        });
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
         exit_code: CliExitCode::Success,
     })
 }
@@ -6536,8 +6664,8 @@ fn export_tools_dispatch(args: &ExportToolsArgs, host: Option<&str>) -> Result<D
     if let Some(path) = &args.output {
         let content = serde_json::to_string_pretty(&tools_json)?;
         std::fs::write(path, &content)?;
-        return Ok(DispatchOutcome {
-            payload: json!({
+        let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "export-tools");
+        let mut payload = json!({
                 "status": "ok",
                 "command": "export-tools",
                 "source": "workspace-manifests",
@@ -6550,13 +6678,16 @@ fn export_tools_dispatch(args: &ExportToolsArgs, host: Option<&str>) -> Result<D
                 "tool_count": tool_count,
                 "connector_count": connector_count,
                 "output_file": path.display().to_string(),
-            }),
+            });
+        envelope.inject_into(&mut payload);
+        return Ok(DispatchOutcome {
+            payload,
             exit_code: CliExitCode::Success,
         });
     }
 
-    Ok(DispatchOutcome {
-        payload: json!({
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "export-tools");
+    let mut payload = json!({
             "status": "ok",
             "command": "export-tools",
             "source": "workspace-manifests",
@@ -6574,7 +6705,10 @@ fn export_tools_dispatch(args: &ExportToolsArgs, host: Option<&str>) -> Result<D
                 "Filter by risk: fwc export-tools --offline --format mcp --risk-max medium",
                 "One connector: fwc export-tools --offline --format claude github",
             ],
-        }),
+        });
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
         exit_code: CliExitCode::Success,
     })
 }
@@ -6637,8 +6771,8 @@ fn export_tools_dispatch_host(args: &ExportToolsArgs, host: &str) -> Result<Disp
     if let Some(path) = &args.output {
         let content = serde_json::to_string_pretty(&tools_json)?;
         std::fs::write(path, &content)?;
-        return Ok(DispatchOutcome {
-            payload: json!({
+        let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "export-tools");
+        let mut payload = json!({
                 "status": "ok",
                 "command": "export-tools",
                 "source": "host-admin-api",
@@ -6653,13 +6787,16 @@ fn export_tools_dispatch_host(args: &ExportToolsArgs, host: &str) -> Result<Disp
                 "connector_count": connector_count,
                 "metadata_gaps": metadata_gaps,
                 "output_file": path.display().to_string(),
-            }),
+            });
+        envelope.inject_into(&mut payload);
+        return Ok(DispatchOutcome {
+            payload,
             exit_code: CliExitCode::Success,
         });
     }
 
-    Ok(DispatchOutcome {
-        payload: json!({
+    let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "export-tools");
+    let mut payload = json!({
             "status": "ok",
             "command": "export-tools",
             "source": "host-admin-api",
@@ -6677,7 +6814,10 @@ fn export_tools_dispatch_host(args: &ExportToolsArgs, host: &str) -> Result<Disp
                 format!("Use `fwc serve-mcp --host {host}` to expose the same live inventory over MCP."),
                 format!("Use `fwc ops <connector> --host {host}` to inspect one connector before exporting again."),
             ],
-        }),
+        });
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
         exit_code: CliExitCode::Success,
     })
 }
@@ -6751,8 +6891,8 @@ fn suggest_dispatch_host(args: &SuggestArgs, host: &str) -> Result<DispatchOutco
         }
         suggestions.truncate(args.limit);
 
-        return Ok(DispatchOutcome {
-            payload: json!({
+        let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "suggest");
+        let mut payload = json!({
                 "status": "ok",
                 "command": "suggest",
                 "source": "host-admin-api",
@@ -6773,7 +6913,10 @@ fn suggest_dispatch_host(args: &SuggestArgs, host: &str) -> Result<DispatchOutco
                     format!("fwc schema {} <operation> --host {host}", source_connector),
                     "Use `fwc suggest --goal '<next intent>' --host <endpoint>` for goal-directed search.".to_owned(),
                 ],
-            }),
+            });
+        envelope.inject_into(&mut payload);
+        return Ok(DispatchOutcome {
+            payload,
             exit_code: CliExitCode::Success,
         });
     }
@@ -6799,8 +6942,8 @@ fn suggest_dispatch_host(args: &SuggestArgs, host: &str) -> Result<DispatchOutco
         let results = search::search_operations(&all_connectors, goal, &filters);
         let json_results = search::results_to_json(&results, args.limit);
 
-        return Ok(DispatchOutcome {
-            payload: json!({
+        let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "suggest");
+        let mut payload = json!({
                 "status": "ok",
                 "command": "suggest",
                 "source": "host-admin-api",
@@ -6814,7 +6957,10 @@ fn suggest_dispatch_host(args: &SuggestArgs, host: &str) -> Result<DispatchOutco
                     "Use `fwc schema <connector> <operation> --host <endpoint>` to see the live input/output schema.",
                     "Use `fwc simulate <connector> <operation> --host <endpoint> --file payload.json` to test safely.",
                 ],
-            }),
+            });
+        envelope.inject_into(&mut payload);
+        return Ok(DispatchOutcome {
+            payload,
             exit_code: CliExitCode::Success,
         });
     }
@@ -6852,8 +6998,8 @@ fn suggest_dispatch_host(args: &SuggestArgs, host: &str) -> Result<DispatchOutco
                 })
             })
             .collect();
-        return Ok(DispatchOutcome {
-            payload: json!({
+        let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "suggest");
+        let mut payload = json!({
                 "status": "ok",
                 "command": "suggest",
                 "source": "host-admin-api",
@@ -6869,7 +7015,10 @@ fn suggest_dispatch_host(args: &SuggestArgs, host: &str) -> Result<DispatchOutco
                     "Use `fwc suggest --goal '<intent>' --host <endpoint>` for goal-directed search.",
                     "Use `fwc search '<query>' --host <endpoint>` for keyword-based live search.",
                 ],
-            }),
+            });
+        envelope.inject_into(&mut payload);
+        return Ok(DispatchOutcome {
+            payload,
             exit_code: CliExitCode::Success,
         });
     }
@@ -6880,8 +7029,8 @@ fn suggest_dispatch_host(args: &SuggestArgs, host: &str) -> Result<DispatchOutco
     }
     flat.truncate(args.limit);
 
-    Ok(DispatchOutcome {
-        payload: json!({
+    let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "suggest");
+    let mut payload = json!({
             "status": "ok",
             "command": "suggest",
             "source": "host-admin-api",
@@ -6901,7 +7050,10 @@ fn suggest_dispatch_host(args: &SuggestArgs, host: &str) -> Result<DispatchOutco
                 "Use `fwc suggest --grouped --host <endpoint>` to see operations grouped by action family.",
                 "Use `fwc suggest --connector <name> --host <endpoint>` to narrow to one connector.",
             ],
-        }),
+        });
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
         exit_code: CliExitCode::Success,
     })
 }
@@ -6948,8 +7100,8 @@ fn suggest_dispatch(args: &SuggestArgs, host: Option<&str>) -> Result<DispatchOu
         let results = search::search_operations(catalog.connectors(), goal, &filters);
         let json_results = search::results_to_json(&results, args.limit);
 
-        return Ok(DispatchOutcome {
-            payload: json!({
+        let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "suggest");
+        let mut payload = json!({
                 "status": "ok",
                 "command": "suggest",
                 "source": "workspace-manifests",
@@ -6962,7 +7114,10 @@ fn suggest_dispatch(args: &SuggestArgs, host: Option<&str>) -> Result<DispatchOu
                     "Use `fwc schema <connector> <operation> --offline` to see input/output schema.",
                     "Use `fwc simulate <connector> <operation> --file payload.json` to test safely.",
                 ],
-            }),
+            });
+        envelope.inject_into(&mut payload);
+        return Ok(DispatchOutcome {
+            payload,
             exit_code: CliExitCode::Success,
         });
     }
@@ -7013,8 +7168,8 @@ fn suggest_dispatch(args: &SuggestArgs, host: Option<&str>) -> Result<DispatchOu
                 })
             })
             .collect();
-        return Ok(DispatchOutcome {
-            payload: json!({
+        let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "suggest");
+        let mut payload = json!({
                 "status": "ok",
                 "command": "suggest",
                 "source": "workspace-manifests",
@@ -7029,7 +7184,10 @@ fn suggest_dispatch(args: &SuggestArgs, host: Option<&str>) -> Result<DispatchOu
                     "Use `fwc suggest --goal '<intent>' --offline` for goal-directed search.",
                     "Use `fwc search '<query>' --offline` for keyword-based search.",
                 ],
-            }),
+            });
+        envelope.inject_into(&mut payload);
+        return Ok(DispatchOutcome {
+            payload,
             exit_code: CliExitCode::Success,
         });
     }
@@ -7039,8 +7197,8 @@ fn suggest_dispatch(args: &SuggestArgs, host: Option<&str>) -> Result<DispatchOu
     }
     flat.truncate(args.limit);
 
-    Ok(DispatchOutcome {
-        payload: json!({
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "suggest");
+    let mut payload = json!({
             "status": "ok",
             "command": "suggest",
             "source": "workspace-manifests",
@@ -7059,7 +7217,10 @@ fn suggest_dispatch(args: &SuggestArgs, host: Option<&str>) -> Result<DispatchOu
                 "Use `fwc suggest --grouped --offline` to see operations grouped by action family.",
                 "Use `fwc suggest --connector <name> --offline` to narrow to one connector.",
             ],
-        }),
+        });
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
         exit_code: CliExitCode::Success,
     })
 }
@@ -7211,36 +7372,40 @@ fn template_dispatch_host(args: &TemplateArgs, host: &str) -> Result<DispatchOut
     let template_json =
         template::generate_template(&operation.input_schema, args.required_only, &fill);
 
+    let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "template");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "template",
+        "source": "host-admin-api",
+        "mode": "live-introspection",
+        "message": format!(
+            "Generated {} live template for `{}.{}`.",
+            if args.required_only { "required-only" } else { "full" },
+            connector.slug,
+            operation.name,
+        ),
+        "connector": {
+            "slug": &connector.slug,
+            "canonical_id": connector.summary.id.as_str(),
+        },
+        "operation": {
+            "selector": &operation.name,
+            "canonical_id": &operation.name,
+            "summary": &operation.description,
+        },
+        "metadata_gaps": host_metadata_gaps(&introspection),
+        "template": template_json,
+        "fill_applied": !fill.is_empty(),
+        "required_only": args.required_only,
+        "next_actions": [
+            format!("fwc schema {} {} --host {host}", connector.slug, operation.name),
+            format!("fwc simulate {} {} --host {host} --file payload.json", connector.slug, operation.name),
+        ],
+    });
+    envelope.inject_into(&mut payload);
+
     Ok(DispatchOutcome {
-        payload: json!({
-            "status": "ok",
-            "command": "template",
-            "source": "host-admin-api",
-            "mode": "live-introspection",
-            "message": format!(
-                "Generated {} live template for `{}.{}`.",
-                if args.required_only { "required-only" } else { "full" },
-                connector.slug,
-                operation.name,
-            ),
-            "connector": {
-                "slug": &connector.slug,
-                "canonical_id": connector.summary.id.as_str(),
-            },
-            "operation": {
-                "selector": &operation.name,
-                "canonical_id": &operation.name,
-                "summary": &operation.description,
-            },
-            "metadata_gaps": host_metadata_gaps(&introspection),
-            "template": template_json,
-            "fill_applied": !fill.is_empty(),
-            "required_only": args.required_only,
-            "next_actions": [
-                format!("fwc schema {} {} --host {host}", connector.slug, operation.name),
-                format!("fwc simulate {} {} --host {host} --file payload.json", connector.slug, operation.name),
-            ],
-        }),
+        payload,
         exit_code: CliExitCode::Success,
     })
 }
@@ -7307,35 +7472,39 @@ fn template_dispatch(args: &TemplateArgs, host: Option<&str>) -> Result<Dispatch
     let template_json =
         template::generate_template(&operation.input_schema, args.required_only, &fill);
 
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "template");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "template",
+        "source": "workspace-manifests",
+        "mode": "offline-artifact",
+        "message": format!(
+            "Generated {} template for `{}.{}`.",
+            if args.required_only { "required-only" } else { "full" },
+            connector.slug,
+            operation.preferred_selector,
+        ),
+        "connector": {
+            "slug": &connector.slug,
+            "canonical_id": &connector.detail.summary.id,
+        },
+        "operation": {
+            "selector": &operation.preferred_selector,
+            "canonical_id": &operation.actual_id,
+            "summary": &operation.summary.summary,
+        },
+        "template": template_json,
+        "fill_applied": !fill.is_empty(),
+        "required_only": args.required_only,
+        "next_actions": [
+            format!("fwc schema {} {} --offline", connector.slug, operation.preferred_selector),
+            format!("fwc simulate {} {} --file payload.json", connector.slug, operation.preferred_selector),
+        ],
+    });
+    envelope.inject_into(&mut payload);
+
     Ok(DispatchOutcome {
-        payload: json!({
-            "status": "ok",
-            "command": "template",
-            "source": "workspace-manifests",
-            "mode": "offline-artifact",
-            "message": format!(
-                "Generated {} template for `{}.{}`.",
-                if args.required_only { "required-only" } else { "full" },
-                connector.slug,
-                operation.preferred_selector,
-            ),
-            "connector": {
-                "slug": &connector.slug,
-                "canonical_id": &connector.detail.summary.id,
-            },
-            "operation": {
-                "selector": &operation.preferred_selector,
-                "canonical_id": &operation.actual_id,
-                "summary": &operation.summary.summary,
-            },
-            "template": template_json,
-            "fill_applied": !fill.is_empty(),
-            "required_only": args.required_only,
-            "next_actions": [
-                format!("fwc schema {} {} --offline", connector.slug, operation.preferred_selector),
-                format!("fwc simulate {} {} --file payload.json", connector.slug, operation.preferred_selector),
-            ],
-        }),
+        payload,
         exit_code: CliExitCode::Success,
     })
 }
@@ -7393,22 +7562,26 @@ fn validate_dispatch_host(args: &ValidateArgs, host: &str) -> Result<DispatchOut
 
     let result = validate::validate(&input, &operation.input_schema);
     if result.is_valid() {
+        let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "validate");
+        let mut payload = json!({
+            "status": "ok",
+            "command": "validate",
+            "source": "host-admin-api",
+            "mode": "live-introspection",
+            "message": format!("Input is valid for live `{}`.`{}`.", connector.slug, operation.name),
+            "connector": &connector.slug,
+            "operation": &operation.name,
+            "valid": true,
+            "metadata_gaps": host_metadata_gaps(&introspection),
+            "next_actions": [
+                format!("fwc simulate {} {} --host {host} --input '...'", connector.slug, operation.name),
+                format!("fwc invoke {} {} --host {host} --input '...'", connector.slug, operation.name),
+            ],
+        });
+        envelope.inject_into(&mut payload);
+
         Ok(DispatchOutcome {
-            payload: json!({
-                "status": "ok",
-                "command": "validate",
-                "source": "host-admin-api",
-                "mode": "live-introspection",
-                "message": format!("Input is valid for live `{}`.`{}`.", connector.slug, operation.name),
-                "connector": &connector.slug,
-                "operation": &operation.name,
-                "valid": true,
-                "metadata_gaps": host_metadata_gaps(&introspection),
-                "next_actions": [
-                    format!("fwc simulate {} {} --host {host} --input '...'", connector.slug, operation.name),
-                    format!("fwc invoke {} {} --host {host} --input '...'", connector.slug, operation.name),
-                ],
-            }),
+            payload,
             exit_code: CliExitCode::Success,
         })
     } else {
@@ -7532,24 +7705,28 @@ fn validate_dispatch(args: &ValidateArgs, host: Option<&str>) -> Result<Dispatch
     let result = validate::validate(&input, &operation.input_schema);
 
     if result.is_valid() {
+        let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "validate");
+        let mut payload = json!({
+            "status": "ok",
+            "command": "validate",
+            "source": "workspace-manifests",
+            "mode": "offline-artifact",
+            "message": format!(
+                "Input is valid for `{}.{}`.",
+                connector.slug, operation.preferred_selector
+            ),
+            "connector": &connector.slug,
+            "operation": &operation.preferred_selector,
+            "valid": true,
+            "next_actions": [
+                format!("fwc simulate {} {} --input '...'", connector.slug, operation.preferred_selector),
+                format!("fwc invoke {} {} --input '...'", connector.slug, operation.preferred_selector),
+            ],
+        });
+        envelope.inject_into(&mut payload);
+
         Ok(DispatchOutcome {
-            payload: json!({
-                "status": "ok",
-                "command": "validate",
-                "source": "workspace-manifests",
-                "mode": "offline-artifact",
-                "message": format!(
-                    "Input is valid for `{}.{}`.",
-                    connector.slug, operation.preferred_selector
-                ),
-                "connector": &connector.slug,
-                "operation": &operation.preferred_selector,
-                "valid": true,
-                "next_actions": [
-                    format!("fwc simulate {} {} --input '...'", connector.slug, operation.preferred_selector),
-                    format!("fwc invoke {} {} --input '...'", connector.slug, operation.preferred_selector),
-                ],
-            }),
+            payload,
             exit_code: CliExitCode::Success,
         })
     } else {
@@ -8010,6 +8187,7 @@ fn invoke_dispatch_host(
             },
         },
     });
+    let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "invoke");
 
     if !valid {
         payload["error"] = json!({
@@ -8095,6 +8273,9 @@ fn invoke_dispatch_host(
             args.idempotency_key.as_deref(),
             latency_ms,
         );
+        if preflight.allowed {
+            envelope.inject_into(&mut payload);
+        }
         return Ok(DispatchOutcome {
             payload,
             exit_code: if preflight.allowed {
@@ -8212,6 +8393,9 @@ fn invoke_dispatch_host(
         ],
     });
 
+    if matches!(response.status, InvokeStatus::Ok) {
+        envelope.inject_into(&mut payload);
+    }
     Ok(DispatchOutcome {
         payload,
         exit_code: match response.status {
@@ -9415,8 +9599,8 @@ fn cancel_dispatch(args: &CancelArgs, explicit_host: Option<&str>) -> Result<Dis
         CliExitCode::Success
     };
 
-    Ok(DispatchOutcome {
-        payload: json!({
+    let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "cancel");
+    let mut payload = json!({
             "status": if exit_code.is_success() { "ok" } else { "error" },
             "command": "cancel",
             "source": "host-admin-api",
@@ -9430,7 +9614,12 @@ fn cancel_dispatch(args: &CancelArgs, explicit_host: Option<&str>) -> Result<Dis
                 format!("fwc history --status error --limit 10"),
                 format!("fwc status --host {}", host.endpoint),
             ],
-        }),
+        });
+    if exit_code.is_success() {
+        envelope.inject_into(&mut payload);
+    }
+    Ok(DispatchOutcome {
+        payload,
         exit_code,
     })
 }
@@ -9457,13 +9646,16 @@ fn history_dispatch(args: &HistoryArgs) -> Result<DispatchOutcome> {
                 })
             },
             |entry| {
+                let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "history");
+                let mut payload = json!({
+                    "status": "ok",
+                    "command": "history",
+                    "scope": "entry",
+                    "entry": entry,
+                });
+                envelope.inject_into(&mut payload);
                 Ok(DispatchOutcome {
-                    payload: json!({
-                        "status": "ok",
-                        "command": "history",
-                        "scope": "entry",
-                        "entry": entry,
-                    }),
+                    payload,
                     exit_code: CliExitCode::Success,
                 })
             },
@@ -9486,27 +9678,30 @@ fn history_dispatch(args: &HistoryArgs) -> Result<DispatchOutcome> {
     let entries = store.query(&filter)?;
     let total = store.count()?;
 
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "history");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "history",
+        "scope": "list",
+        "total_entries": total,
+        "returned": entries.len(),
+        "filter": {
+            "connector": args.connector,
+            "status": args.status,
+            "since": args.since,
+            "limit": args.limit,
+        },
+        "entries": entries,
+        "next_actions": [
+            "fwc history <entry_id>",
+            "fwc history --connector github",
+            "fwc history --status error",
+            "fwc history --since 1h",
+        ],
+    });
+    envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
-        payload: json!({
-            "status": "ok",
-            "command": "history",
-            "scope": "list",
-            "total_entries": total,
-            "returned": entries.len(),
-            "filter": {
-                "connector": args.connector,
-                "status": args.status,
-                "since": args.since,
-                "limit": args.limit,
-            },
-            "entries": entries,
-            "next_actions": [
-                "fwc history <entry_id>",
-                "fwc history --connector github",
-                "fwc history --status error",
-                "fwc history --since 1h",
-            ],
-        }),
+        payload,
         exit_code: CliExitCode::Success,
     })
 }
@@ -9689,6 +9884,9 @@ fn capabilities_dispatch(
         _ => unreachable!("subcommand normalized above"),
     };
 
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "capabilities");
+    let mut payload = payload;
+    envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
         exit_code: CliExitCode::Success,

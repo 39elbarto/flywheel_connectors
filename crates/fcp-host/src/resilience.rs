@@ -318,8 +318,8 @@ impl ResilienceLayer {
 
     /// Ensure a connector has initialized resilience state.
     pub fn ensure_connector(&self, connector_id: &ConnectorId) {
-        let _ = self.connector_state(connector_id);
-        self.health_router.ensure_connector(connector_id);
+        let mut entries = lock_unpoisoned(&self.health_router.entries);
+        entries.entry(connector_id.clone()).or_insert_with(|| HealthEntry::new(&self.config.health));
     }
 
     /// Override the manual base load used by the shedder.
@@ -985,19 +985,13 @@ impl HealthRouter {
 
     fn ensure_connector(&self, connector_id: &ConnectorId) {
         let mut entries = lock_unpoisoned(&self.entries);
-        if !entries.contains_key(connector_id) {
-            entries.insert(connector_id.clone(), HealthEntry::new(&self.config));
-        }
+        entries.entry(connector_id.clone()).or_insert_with(|| HealthEntry::new(&self.config));
     }
 
     fn can_route(&self, connector_id: &ConnectorId) -> RoutingDecision {
         let mut entries = lock_unpoisoned(&self.entries);
         let decision = {
-            if !entries.contains_key(connector_id) {
-                entries.insert(connector_id.clone(), HealthEntry::new(&self.config));
-            }
-            let entry = entries.get_mut(connector_id).unwrap();
-
+            let entry = entries.entry(connector_id.clone()).or_insert_with(|| HealthEntry::new(&self.config));
             match &entry.status {
                 ConnectorHealth::Healthy => RoutingDecision::Allow,
                 ConnectorHealth::Degraded { reason } => RoutingDecision::AllowDegraded {
@@ -1026,10 +1020,7 @@ impl HealthRouter {
     fn record_success(&self, connector_id: &ConnectorId, latency: Duration) {
         let mut entries = lock_unpoisoned(&self.entries);
         {
-            if !entries.contains_key(connector_id) {
-                entries.insert(connector_id.clone(), HealthEntry::new(&self.config));
-            }
-            let entry = entries.get_mut(connector_id).unwrap();
+            let entry = entries.entry(connector_id.clone()).or_insert_with(|| HealthEntry::new(&self.config));
 
             entry.consecutive_failures = 0;
             entry.consecutive_successes = entry.consecutive_successes.saturating_add(1);
@@ -1043,10 +1034,7 @@ impl HealthRouter {
     fn record_failure(&self, connector_id: &ConnectorId, reason: &str) {
         let mut entries = lock_unpoisoned(&self.entries);
         {
-            if !entries.contains_key(connector_id) {
-                entries.insert(connector_id.clone(), HealthEntry::new(&self.config));
-            }
-            let entry = entries.get_mut(connector_id).unwrap();
+            let entry = entries.entry(connector_id.clone()).or_insert_with(|| HealthEntry::new(&self.config));
 
             entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
             entry.consecutive_successes = 0;
@@ -1059,10 +1047,7 @@ impl HealthRouter {
     fn record_timeout(&self, connector_id: &ConnectorId, timeout: Duration, latency: Duration) {
         let mut entries = lock_unpoisoned(&self.entries);
         {
-            if !entries.contains_key(connector_id) {
-                entries.insert(connector_id.clone(), HealthEntry::new(&self.config));
-            }
-            let entry = entries.get_mut(connector_id).unwrap();
+            let entry = entries.entry(connector_id.clone()).or_insert_with(|| HealthEntry::new(&self.config));
 
             entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
             entry.consecutive_successes = 0;
@@ -2005,7 +1990,7 @@ mod tests {
 
     #[test]
     fn open_without_opened_until_transitions_to_half_open() {
-        // This tests the edge case where opened_until is None in Open state
+        // This tests the edge case where opened_until is None in Open State
         // We need to manually construct this scenario
         let cb = CircuitBreaker::new(CircuitBreakerConfig::default());
         {
@@ -2393,9 +2378,9 @@ mod tests {
             full_shed_threshold_per_mille: 1_000,
             sheddable_priorities: vec![RequestPriority::Low],
         });
-        // At load=500/1000, base_probability=500, Low factor=1000
-        // final_probability = (500*1000)/1000 = 500
-        // Over 1000 calls, ~500 should be shed
+        // At load=500/1000, threshold=800, full=1000
+        // base_probability = (500-800)*1000 / (1000-800) = -300*1000/200 = 0
+        // final = 0 * 1000 / 1000 = 0
         let mut shed_count = 0;
         for _ in 0..1_000 {
             if shedder.should_shed(RequestPriority::Low, 500) {

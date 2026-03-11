@@ -789,6 +789,234 @@ By default, this command queries the live host. Pass `--offline` to explicitly \
 use workspace manifests instead. Offline results include provenance markers \
 and a caveat that the data may not reflect current host state.";
 
+// ── Runtime truth boundary and offline-mode contract ────────────────────────
+// Defines the resolved runtime mode for every command invocation. Each dispatch
+// path must resolve a RuntimeMode BEFORE doing any work, so there is a single
+// place that decides whether the invocation is live, offline, degraded, or
+// refused. No command may silently switch modes.
+
+/// The resolved runtime mode for one command invocation.
+///
+/// Dispatch code resolves this once at the top of every handler and threads it
+/// through the rest of the call. The mode is immutable for the lifetime of the
+/// invocation — no mid-flight fallback is permitted.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeMode {
+    /// The command is running against a live, reachable host.
+    /// Output is authoritative and may cause side effects.
+    Live,
+    /// The command is explicitly running in offline mode (user passed --offline
+    /// or the command is inherently offline). Output is from local artifacts.
+    ExplicitOffline,
+    /// The command would prefer a live host but none is configured or reachable.
+    /// The classification says `DegradedWithWarning`, so we proceed with local
+    /// data and attach visible provenance caveats.
+    DegradedOffline,
+    /// The command cannot proceed because it requires a host that is absent.
+    /// Dispatch must produce a `HostAbsentError` and stop.
+    Refused,
+}
+
+impl RuntimeMode {
+    /// Whether this mode produces authoritative output.
+    #[must_use]
+    pub fn is_authoritative(self) -> bool {
+        matches!(self, Self::Live)
+    }
+
+    /// Whether this mode uses local/artifact data.
+    #[must_use]
+    pub fn is_offline(self) -> bool {
+        matches!(self, Self::ExplicitOffline | Self::DegradedOffline)
+    }
+
+    /// Whether this mode indicates the command should not execute.
+    #[must_use]
+    pub fn is_refused(self) -> bool {
+        matches!(self, Self::Refused)
+    }
+
+    /// Whether the output needs an offline provenance marker.
+    #[must_use]
+    pub fn needs_provenance_marker(self) -> bool {
+        matches!(self, Self::ExplicitOffline | Self::DegradedOffline)
+    }
+
+    /// Whether the output needs a degradation warning.
+    #[must_use]
+    pub fn needs_degradation_warning(self) -> bool {
+        matches!(self, Self::DegradedOffline)
+    }
+
+    /// Machine-readable tag for embedding in output payloads.
+    #[must_use]
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::Live => "live",
+            Self::ExplicitOffline => "explicit-offline",
+            Self::DegradedOffline => "degraded-offline",
+            Self::Refused => "refused",
+        }
+    }
+}
+
+/// The inputs to runtime-mode resolution. Callers construct this from CLI args
+/// and environment, then pass it to [`resolve_runtime_mode`].
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct RuntimeContext {
+    /// The command being invoked.
+    pub command: String,
+    /// Whether the user passed `--offline`.
+    pub offline_flag: bool,
+    /// Whether a host endpoint was resolved (from args, env, or context file).
+    pub host_resolved: bool,
+    /// Whether the resolved host is actually reachable (only meaningful when
+    /// `host_resolved` is true).
+    pub host_reachable: bool,
+}
+
+/// Resolve the runtime mode for a command invocation.
+///
+/// This is the single decision point. Every dispatch handler must call this
+/// before doing any work. The result is deterministic given the inputs.
+#[allow(dead_code)]
+#[must_use]
+pub fn resolve_runtime_mode(ctx: &RuntimeContext) -> RuntimeMode {
+    let cls = classify_command(&ctx.command);
+
+    // Unknown commands default to Refused (let the parser handle the error).
+    let cls = match cls {
+        Some(c) => c,
+        None => return RuntimeMode::Refused,
+    };
+
+    // If the user explicitly requested offline mode:
+    if ctx.offline_flag {
+        return match cls.truth_source {
+            // Hybrid and OfflineArtifact commands support offline.
+            CommandTruthSource::Hybrid | CommandTruthSource::OfflineArtifact => {
+                RuntimeMode::ExplicitOffline
+            }
+            // LiveHost commands cannot go offline — refuse.
+            CommandTruthSource::LiveHost => RuntimeMode::Refused,
+            // Passthrough commands delegate to subsystem — treat as offline.
+            CommandTruthSource::Passthrough => RuntimeMode::ExplicitOffline,
+        };
+    }
+
+    // No offline flag — check host availability.
+    match cls.host_absent {
+        HostAbsentBehavior::Unaffected => {
+            // Command doesn't need a host. If one is present, still use offline
+            // semantics since the command is inherently local.
+            RuntimeMode::ExplicitOffline
+        }
+        HostAbsentBehavior::FailFast => {
+            // Command requires a live host.
+            if ctx.host_resolved && ctx.host_reachable {
+                RuntimeMode::Live
+            } else {
+                RuntimeMode::Refused
+            }
+        }
+        HostAbsentBehavior::DegradedWithWarning => {
+            // Command prefers live but can degrade.
+            if ctx.host_resolved && ctx.host_reachable {
+                RuntimeMode::Live
+            } else {
+                RuntimeMode::DegradedOffline
+            }
+        }
+        HostAbsentBehavior::PassthroughDependent => {
+            // Subsystem decides — if host is available use it, otherwise degrade.
+            if ctx.host_resolved && ctx.host_reachable {
+                RuntimeMode::Live
+            } else {
+                RuntimeMode::DegradedOffline
+            }
+        }
+    }
+}
+
+/// Resolved boundary that a dispatch handler receives after mode resolution.
+///
+/// Bundles the mode with the pre-computed provenance and envelope metadata
+/// the handler needs to build its response.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct RuntimeBoundary {
+    /// The resolved runtime mode.
+    pub mode: RuntimeMode,
+    /// The command being dispatched.
+    pub command: String,
+    /// If offline, the provenance marker to attach.
+    pub offline_provenance: Option<OfflineProvenance>,
+    /// If refused, the structured error.
+    pub refusal: Option<HostAbsentError>,
+}
+
+/// Build a complete [`RuntimeBoundary`] from a [`RuntimeContext`].
+///
+/// This is the top-level entry point for dispatch handlers.
+#[allow(dead_code)]
+#[must_use]
+pub fn resolve_boundary(ctx: &RuntimeContext) -> RuntimeBoundary {
+    let mode = resolve_runtime_mode(ctx);
+
+    let offline_prov = if mode.needs_provenance_marker() {
+        let source = default_offline_source(&ctx.command);
+        Some(offline_provenance(&ctx.command, source))
+    } else {
+        None
+    };
+
+    let refusal = if mode.is_refused() {
+        let reason = if !ctx.host_resolved {
+            HostAbsentReason::NotConfigured
+        } else {
+            HostAbsentReason::Unreachable
+        };
+        Some(host_absent_error(&ctx.command, reason))
+    } else {
+        None
+    };
+
+    RuntimeBoundary {
+        mode,
+        command: ctx.command.clone(),
+        offline_provenance: offline_prov,
+        refusal,
+    }
+}
+
+/// Validate that a command's classification and resolved mode are consistent.
+///
+/// Returns `None` if consistent, or `Some(explanation)` if there is a mismatch.
+/// This is a debug/test helper, not a runtime gate.
+#[allow(dead_code)]
+#[must_use]
+pub fn validate_mode_consistency(command: &str, mode: RuntimeMode) -> Option<String> {
+    let cls = classify_command(command)?;
+
+    match (cls.truth_source, mode) {
+        // LiveHost commands must be Live or Refused — never offline.
+        (CommandTruthSource::LiveHost, RuntimeMode::ExplicitOffline)
+        | (CommandTruthSource::LiveHost, RuntimeMode::DegradedOffline) => {
+            Some(format!(
+                "Command '{command}' is LiveHost but resolved to offline mode"
+            ))
+        }
+        // OfflineArtifact commands should never be Live.
+        (CommandTruthSource::OfflineArtifact, RuntimeMode::Live) => Some(format!(
+            "Command '{command}' is OfflineArtifact but resolved to Live mode"
+        )),
+        _ => None,
+    }
+}
+
 // ── Auth UX contract ─────────────────────────────────────────────────────────
 // These types define how the CLI should guide users/agents through capability
 // token acquisition, attachment, denial, and remediation on live auth-gated
@@ -1482,12 +1710,13 @@ mod tests {
     use super::{
         AuthAcquisitionFlow, COMMAND_CLASSIFICATIONS, COMMANDS, CommandExecutionMode,
         CommandTruthSource, HYBRID_MODE_HELP, HostAbsentBehavior, HostAbsentReason,
-        OFFLINE_FLAG_HELP, OfflineSource, WorkflowKind, WorkflowStepReality,
-        auth_required_commands, auth_ux_guidance, check_auth_requirement, classify_command,
-        command_requires_host, default_offline_source, guide_payload, host_absent_error,
-        host_absent_error_payload, live_host_commands, offline_capable_commands,
-        offline_provenance, offline_provenance_payload, planned_payload, workflow_can_proceed,
-        workflow_kind,
+        OFFLINE_FLAG_HELP, OfflineSource, RuntimeContext, RuntimeMode, WorkflowKind,
+        WorkflowStepReality, auth_required_commands, auth_ux_guidance, check_auth_requirement,
+        classify_command, command_requires_host, default_offline_source, guide_payload,
+        host_absent_error, host_absent_error_payload, live_host_commands,
+        offline_capable_commands, offline_provenance, offline_provenance_payload, planned_payload,
+        resolve_boundary, resolve_runtime_mode, validate_mode_consistency,
+        workflow_can_proceed, workflow_kind,
     };
     use serde_json::json;
 
@@ -4567,5 +4796,430 @@ mod tests {
         assert_eq!(payload["offline"], true);
         assert!(payload["source"].is_string());
         assert!(payload["caveat"].is_string());
+    }
+
+    // ── Runtime truth boundary tests ──────────────────────────────────────
+
+    fn ctx(command: &str, offline: bool, resolved: bool, reachable: bool) -> RuntimeContext {
+        RuntimeContext {
+            command: command.to_owned(),
+            offline_flag: offline,
+            host_resolved: resolved,
+            host_reachable: reachable,
+        }
+    }
+
+    // -- RuntimeMode tag stability --
+
+    #[test]
+    fn runtime_mode_tags_are_stable() {
+        assert_eq!(RuntimeMode::Live.tag(), "live");
+        assert_eq!(RuntimeMode::ExplicitOffline.tag(), "explicit-offline");
+        assert_eq!(RuntimeMode::DegradedOffline.tag(), "degraded-offline");
+        assert_eq!(RuntimeMode::Refused.tag(), "refused");
+    }
+
+    #[test]
+    fn runtime_mode_live_is_authoritative() {
+        assert!(RuntimeMode::Live.is_authoritative());
+    }
+
+    #[test]
+    fn runtime_mode_offline_is_not_authoritative() {
+        assert!(!RuntimeMode::ExplicitOffline.is_authoritative());
+        assert!(!RuntimeMode::DegradedOffline.is_authoritative());
+    }
+
+    #[test]
+    fn runtime_mode_refused_is_not_authoritative() {
+        assert!(!RuntimeMode::Refused.is_authoritative());
+    }
+
+    #[test]
+    fn runtime_mode_offline_variants_are_offline() {
+        assert!(RuntimeMode::ExplicitOffline.is_offline());
+        assert!(RuntimeMode::DegradedOffline.is_offline());
+    }
+
+    #[test]
+    fn runtime_mode_live_is_not_offline() {
+        assert!(!RuntimeMode::Live.is_offline());
+    }
+
+    #[test]
+    fn runtime_mode_refused_is_not_offline() {
+        assert!(!RuntimeMode::Refused.is_offline());
+    }
+
+    #[test]
+    fn runtime_mode_only_refused_is_refused() {
+        assert!(RuntimeMode::Refused.is_refused());
+        assert!(!RuntimeMode::Live.is_refused());
+        assert!(!RuntimeMode::ExplicitOffline.is_refused());
+        assert!(!RuntimeMode::DegradedOffline.is_refused());
+    }
+
+    #[test]
+    fn runtime_mode_provenance_marker_needed_for_offline() {
+        assert!(RuntimeMode::ExplicitOffline.needs_provenance_marker());
+        assert!(RuntimeMode::DegradedOffline.needs_provenance_marker());
+        assert!(!RuntimeMode::Live.needs_provenance_marker());
+        assert!(!RuntimeMode::Refused.needs_provenance_marker());
+    }
+
+    #[test]
+    fn runtime_mode_degradation_warning_only_for_degraded() {
+        assert!(RuntimeMode::DegradedOffline.needs_degradation_warning());
+        assert!(!RuntimeMode::ExplicitOffline.needs_degradation_warning());
+        assert!(!RuntimeMode::Live.needs_degradation_warning());
+        assert!(!RuntimeMode::Refused.needs_degradation_warning());
+    }
+
+    // -- RuntimeMode serde round-trip --
+
+    #[test]
+    fn runtime_mode_serde_roundtrip() {
+        for mode in [
+            RuntimeMode::Live,
+            RuntimeMode::ExplicitOffline,
+            RuntimeMode::DegradedOffline,
+            RuntimeMode::Refused,
+        ] {
+            let json = serde_json::to_string(&mode).unwrap();
+            let back: RuntimeMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(mode, back);
+        }
+    }
+
+    // -- resolve_runtime_mode: offline-first commands --
+
+    #[test]
+    fn resolve_offline_command_without_host_is_explicit_offline() {
+        // guide is OfflineArtifact, Unaffected
+        let mode = resolve_runtime_mode(&ctx("guide", false, false, false));
+        assert_eq!(mode, RuntimeMode::ExplicitOffline);
+    }
+
+    #[test]
+    fn resolve_offline_command_with_host_is_still_explicit_offline() {
+        // Even with host present, inherently-offline commands stay offline
+        let mode = resolve_runtime_mode(&ctx("guide", false, true, true));
+        assert_eq!(mode, RuntimeMode::ExplicitOffline);
+    }
+
+    #[test]
+    fn resolve_offline_command_with_offline_flag_is_explicit_offline() {
+        let mode = resolve_runtime_mode(&ctx("guide", true, false, false));
+        assert_eq!(mode, RuntimeMode::ExplicitOffline);
+    }
+
+    // -- resolve_runtime_mode: live-host commands --
+
+    #[test]
+    fn resolve_live_command_with_host_is_live() {
+        // invoke is LiveHost, FailFast
+        let mode = resolve_runtime_mode(&ctx("invoke", false, true, true));
+        assert_eq!(mode, RuntimeMode::Live);
+    }
+
+    #[test]
+    fn resolve_live_command_without_host_is_refused() {
+        let mode = resolve_runtime_mode(&ctx("invoke", false, false, false));
+        assert_eq!(mode, RuntimeMode::Refused);
+    }
+
+    #[test]
+    fn resolve_live_command_with_unreachable_host_is_refused() {
+        let mode = resolve_runtime_mode(&ctx("invoke", false, true, false));
+        assert_eq!(mode, RuntimeMode::Refused);
+    }
+
+    #[test]
+    fn resolve_live_command_with_offline_flag_is_refused() {
+        // Cannot force a LiveHost command offline
+        let mode = resolve_runtime_mode(&ctx("invoke", true, false, false));
+        assert_eq!(mode, RuntimeMode::Refused);
+    }
+
+    // -- resolve_runtime_mode: hybrid commands --
+
+    #[test]
+    fn resolve_hybrid_failfast_command_with_host_is_live() {
+        // list is Hybrid + FailFast (requires host or explicit --offline)
+        let mode = resolve_runtime_mode(&ctx("list", false, true, true));
+        assert_eq!(mode, RuntimeMode::Live);
+    }
+
+    #[test]
+    fn resolve_hybrid_failfast_command_without_host_is_refused() {
+        // list is Hybrid + FailFast — no silent degradation
+        let mode = resolve_runtime_mode(&ctx("list", false, false, false));
+        assert_eq!(mode, RuntimeMode::Refused);
+    }
+
+    #[test]
+    fn resolve_hybrid_failfast_command_with_offline_flag_is_explicit_offline() {
+        let mode = resolve_runtime_mode(&ctx("list", true, false, false));
+        assert_eq!(mode, RuntimeMode::ExplicitOffline);
+    }
+
+    #[test]
+    fn resolve_hybrid_failfast_command_with_offline_flag_ignores_host() {
+        // Even if host is available, --offline takes precedence
+        let mode = resolve_runtime_mode(&ctx("list", true, true, true));
+        assert_eq!(mode, RuntimeMode::ExplicitOffline);
+    }
+
+    #[test]
+    fn resolve_hybrid_degraded_command_with_host_is_live() {
+        // do is Hybrid + DegradedWithWarning
+        let mode = resolve_runtime_mode(&ctx("do", false, true, true));
+        assert_eq!(mode, RuntimeMode::Live);
+    }
+
+    #[test]
+    fn resolve_hybrid_degraded_command_without_host_degrades() {
+        let mode = resolve_runtime_mode(&ctx("do", false, false, false));
+        assert_eq!(mode, RuntimeMode::DegradedOffline);
+    }
+
+    #[test]
+    fn resolve_hybrid_degraded_command_with_offline_flag_is_explicit_offline() {
+        let mode = resolve_runtime_mode(&ctx("do", true, false, false));
+        assert_eq!(mode, RuntimeMode::ExplicitOffline);
+    }
+
+    // -- resolve_runtime_mode: unknown commands --
+
+    #[test]
+    fn resolve_unknown_command_is_refused() {
+        let mode = resolve_runtime_mode(&ctx("nonexistent", false, true, true));
+        assert_eq!(mode, RuntimeMode::Refused);
+    }
+
+    // -- resolve_runtime_mode: every classified command has a mode --
+
+    #[test]
+    fn every_classified_command_resolves_to_a_mode_with_live_host() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            let mode = resolve_runtime_mode(&ctx(cls.command, false, true, true));
+            assert_ne!(
+                mode,
+                RuntimeMode::Refused,
+                "Command '{}' should not be Refused when host is live",
+                cls.command
+            );
+        }
+    }
+
+    #[test]
+    fn offline_first_commands_resolve_offline_even_without_host() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            if cls.host_absent == HostAbsentBehavior::Unaffected {
+                let mode = resolve_runtime_mode(&ctx(cls.command, false, false, false));
+                assert_eq!(
+                    mode,
+                    RuntimeMode::ExplicitOffline,
+                    "Unaffected command '{}' should be ExplicitOffline without host",
+                    cls.command
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fail_fast_commands_refuse_without_host() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            if cls.host_absent == HostAbsentBehavior::FailFast {
+                let mode = resolve_runtime_mode(&ctx(cls.command, false, false, false));
+                assert_eq!(
+                    mode,
+                    RuntimeMode::Refused,
+                    "FailFast command '{}' should be Refused without host",
+                    cls.command
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn degraded_commands_degrade_without_host() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            if cls.host_absent == HostAbsentBehavior::DegradedWithWarning {
+                let mode = resolve_runtime_mode(&ctx(cls.command, false, false, false));
+                assert_eq!(
+                    mode,
+                    RuntimeMode::DegradedOffline,
+                    "DegradedWithWarning command '{}' should degrade without host",
+                    cls.command
+                );
+            }
+        }
+    }
+
+    // -- resolve_boundary tests --
+
+    #[test]
+    fn boundary_live_has_no_provenance_or_refusal() {
+        let b = resolve_boundary(&ctx("invoke", false, true, true));
+        assert_eq!(b.mode, RuntimeMode::Live);
+        assert!(b.offline_provenance.is_none());
+        assert!(b.refusal.is_none());
+    }
+
+    #[test]
+    fn boundary_offline_has_provenance_no_refusal() {
+        let b = resolve_boundary(&ctx("list", true, false, false));
+        assert_eq!(b.mode, RuntimeMode::ExplicitOffline);
+        assert!(b.offline_provenance.is_some());
+        assert!(b.refusal.is_none());
+    }
+
+    #[test]
+    fn boundary_degraded_has_provenance_no_refusal() {
+        // "do" is Hybrid + DegradedWithWarning
+        let b = resolve_boundary(&ctx("do", false, false, false));
+        assert_eq!(b.mode, RuntimeMode::DegradedOffline);
+        assert!(b.offline_provenance.is_some());
+        assert!(b.refusal.is_none());
+    }
+
+    #[test]
+    fn boundary_refused_has_refusal_no_provenance() {
+        let b = resolve_boundary(&ctx("invoke", false, false, false));
+        assert_eq!(b.mode, RuntimeMode::Refused);
+        assert!(b.offline_provenance.is_none());
+        assert!(b.refusal.is_some());
+    }
+
+    #[test]
+    fn boundary_hybrid_failfast_refused_without_host() {
+        // list is Hybrid + FailFast — must refuse without host when no --offline
+        let b = resolve_boundary(&ctx("list", false, false, false));
+        assert_eq!(b.mode, RuntimeMode::Refused);
+        assert!(b.refusal.is_some());
+    }
+
+    #[test]
+    fn boundary_refusal_reason_not_configured_when_no_host() {
+        let b = resolve_boundary(&ctx("invoke", false, false, false));
+        let err = b.refusal.unwrap();
+        assert_eq!(err.reason, HostAbsentReason::NotConfigured);
+    }
+
+    #[test]
+    fn boundary_refusal_reason_unreachable_when_host_down() {
+        let b = resolve_boundary(&ctx("invoke", false, true, false));
+        let err = b.refusal.unwrap();
+        assert_eq!(err.reason, HostAbsentReason::Unreachable);
+    }
+
+    #[test]
+    fn boundary_offline_provenance_matches_default_source() {
+        let b = resolve_boundary(&ctx("list", true, false, false));
+        let prov = b.offline_provenance.unwrap();
+        assert!(prov.offline);
+        assert_eq!(prov.source, OfflineSource::WorkspaceManifest);
+    }
+
+    #[test]
+    fn boundary_command_is_preserved() {
+        let b = resolve_boundary(&ctx("show", false, true, true));
+        assert_eq!(b.command, "show");
+    }
+
+    // -- validate_mode_consistency --
+
+    #[test]
+    fn consistency_live_host_command_in_offline_mode_is_inconsistent() {
+        let err = validate_mode_consistency("invoke", RuntimeMode::ExplicitOffline);
+        assert!(err.is_some());
+    }
+
+    #[test]
+    fn consistency_live_host_command_in_live_mode_is_consistent() {
+        let err = validate_mode_consistency("invoke", RuntimeMode::Live);
+        assert!(err.is_none());
+    }
+
+    #[test]
+    fn consistency_offline_command_in_live_mode_is_inconsistent() {
+        let err = validate_mode_consistency("guide", RuntimeMode::Live);
+        assert!(err.is_some());
+    }
+
+    #[test]
+    fn consistency_offline_command_in_offline_mode_is_consistent() {
+        let err = validate_mode_consistency("guide", RuntimeMode::ExplicitOffline);
+        assert!(err.is_none());
+    }
+
+    #[test]
+    fn consistency_hybrid_command_in_live_or_offline_is_consistent() {
+        assert!(validate_mode_consistency("list", RuntimeMode::Live).is_none());
+        assert!(validate_mode_consistency("list", RuntimeMode::ExplicitOffline).is_none());
+        assert!(validate_mode_consistency("list", RuntimeMode::DegradedOffline).is_none());
+    }
+
+    #[test]
+    fn consistency_unknown_command_returns_none() {
+        // Unknown commands return None (no classification to validate against)
+        assert!(validate_mode_consistency("nonexistent", RuntimeMode::Live).is_none());
+    }
+
+    // -- Cross-cutting: no silent mode switches --
+
+    #[test]
+    fn no_command_resolves_live_when_host_absent_and_offline_flag_not_set() {
+        // Critical invariant: without a host, nothing should claim to be Live
+        for cls in COMMAND_CLASSIFICATIONS {
+            let mode = resolve_runtime_mode(&ctx(cls.command, false, false, false));
+            assert_ne!(
+                mode,
+                RuntimeMode::Live,
+                "Command '{}' resolved Live without a host — silent fallback!",
+                cls.command
+            );
+        }
+    }
+
+    #[test]
+    fn no_live_host_command_resolves_offline_even_with_flag() {
+        // LiveHost commands must refuse --offline, not silently switch
+        for cls in COMMAND_CLASSIFICATIONS {
+            if cls.truth_source == CommandTruthSource::LiveHost {
+                let mode = resolve_runtime_mode(&ctx(cls.command, true, false, false));
+                assert_eq!(
+                    mode,
+                    RuntimeMode::Refused,
+                    "LiveHost command '{}' accepted --offline flag instead of refusing",
+                    cls.command
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn resolved_mode_is_always_consistent_with_classification() {
+        // For every command, every possible context, the resolved mode must be
+        // consistent with the classification.
+        for cls in COMMAND_CLASSIFICATIONS {
+            for offline in [false, true] {
+                for resolved in [false, true] {
+                    for reachable in [false, true] {
+                        let mode =
+                            resolve_runtime_mode(&ctx(cls.command, offline, resolved, reachable));
+                        let err = validate_mode_consistency(cls.command, mode);
+                        assert!(
+                            err.is_none(),
+                            "Inconsistency for '{}' (offline={offline}, resolved={resolved}, \
+                             reachable={reachable}): {mode:?} — {}",
+                            cls.command,
+                            err.unwrap()
+                        );
+                    }
+                }
+            }
+        }
     }
 }

@@ -7891,6 +7891,608 @@ fn history_dispatch(args: &HistoryArgs) -> Result<DispatchOutcome> {
     })
 }
 
+#[derive(Clone, Debug)]
+struct CapabilityOperationMetadata {
+    connector_slug: String,
+    capability_id: fcp_core::CapabilityId,
+    risk_tier: SafetyTier,
+}
+
+#[derive(Debug, Default)]
+struct CapabilityAggregationResult {
+    aggregates: Vec<CapabilityUsageAggregate>,
+    total_entries: usize,
+    skipped_simulated: usize,
+    unresolved_entry_count: usize,
+    unresolved_samples: Vec<Value>,
+}
+
+fn capabilities_dispatch(
+    args: &CapabilitiesArgs,
+    explicit_host: Option<&str>,
+) -> Result<DispatchOutcome> {
+    let host = resolve_host_config(explicit_host)?;
+    let host_client = host
+        .as_ref()
+        .map(|resolved| HostAdminClient::new(&resolved.endpoint))
+        .transpose()?;
+    let manifest_catalog = DiscoveryCatalog::load()?;
+    let mut source_gaps = Vec::new();
+    let host_catalog = if let (Some(resolved), Some(client)) = (host.as_ref(), host_client.as_ref())
+    {
+        match client.catalog(None) {
+            Ok((catalog, _)) => Some(catalog),
+            Err(error) => {
+                source_gaps.push(json!({
+                    "source": "host-admin-api",
+                    "status": "unavailable",
+                    "message": format!(
+                        "Failed to load live connector metadata from `{}`; falling back to manifest-backed metadata: {error}",
+                        resolved.endpoint
+                    ),
+                }));
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let (subcommand, zone_filter_arg, connector_filter_arg, suggestion_filter) = match &args.command
+    {
+        CapabilitiesCommand::Report(filters) => (
+            "report",
+            filters.zone.clone(),
+            filters.connector.clone(),
+            CapabilitySuggestionFilter::All,
+        ),
+        CapabilitiesCommand::Suggest(args) => (
+            "suggest",
+            args.zone.clone(),
+            args.connector.clone(),
+            args.filter,
+        ),
+        CapabilitiesCommand::Export(filters) => (
+            "export",
+            filters.zone.clone(),
+            filters.connector.clone(),
+            CapabilitySuggestionFilter::All,
+        ),
+    };
+    let filters = CapabilitiesFilterArgs {
+        zone: zone_filter_arg,
+        connector: connector_filter_arg,
+    };
+    let command_name = format!("capabilities {subcommand}");
+
+    let zone_filter = match filters.zone.as_deref() {
+        Some(zone) => match zone.parse::<ZoneId>() {
+            Ok(zone_id) => Some(zone_id.to_string()),
+            Err(error) => {
+                return Ok(DispatchOutcome {
+                    payload: json!({
+                        "status": "error",
+                        "command": "capabilities",
+                        "subcommand": subcommand,
+                        "error": {
+                            "type": "invalid-zone",
+                            "message": format!("`{zone}` is not a valid zone id: {error}"),
+                            "recoverable": true,
+                        },
+                        "details": {
+                            "zone": zone,
+                        },
+                        "next_actions": [
+                            "fwc capabilities report --zone z:work".to_owned(),
+                            "fwc capabilities suggest --zone z:project:<name>".to_owned(),
+                        ],
+                    }),
+                    exit_code: CliExitCode::Validation,
+                });
+            }
+        },
+        None => None,
+    };
+
+    let store = cli_history_store()?;
+    let history_path = cli_history_store_path()?;
+    let mut history_filter = history::HistoryFilter::new();
+    history_filter.limit = usize::MAX;
+    let mut entries = store.query(&history_filter)?;
+
+    let connector_filter = filters
+        .connector
+        .as_deref()
+        .map(|selector| {
+            resolve_capability_connector_filter(
+                &command_name,
+                selector,
+                host_catalog.as_ref(),
+                &manifest_catalog,
+                &entries,
+            )
+        })
+        .transpose()?;
+
+    if let Some(zone) = zone_filter.as_deref() {
+        entries.retain(|entry| entry.zone.as_deref() == Some(zone));
+    }
+    if let Some(connector_id) = connector_filter.as_deref() {
+        entries.retain(|entry| entry.connector_id == *connector_id);
+    }
+
+    let unique_connector_ids = entries
+        .iter()
+        .map(|entry| entry.connector_id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut operation_metadata = local_capability_metadata_map(&manifest_catalog);
+    if let Some(client) = host_client.as_ref() {
+        operation_metadata.extend(host_capability_metadata_map(
+            client,
+            &unique_connector_ids,
+            &mut source_gaps,
+        ));
+    }
+
+    let aggregation = aggregate_capability_usage(&entries, &operation_metadata);
+    let now = u64::try_from(chrono::Utc::now().timestamp()).unwrap_or(0);
+    let recommendation_report =
+        recommend_capabilities(&aggregation.aggregates, now, RecommendationConfig::default());
+
+    let payload = match subcommand {
+        "report" => capability_report_payload(
+            &aggregation,
+            &recommendation_report,
+            &source_gaps,
+            &history_path,
+            &filters,
+            &operation_metadata,
+        ),
+        "suggest" => capability_suggest_payload(
+            &aggregation,
+            &recommendation_report,
+            suggestion_filter,
+            &source_gaps,
+            &history_path,
+            &filters,
+        ),
+        "export" => capability_export_payload(
+            &aggregation,
+            &recommendation_report,
+            &source_gaps,
+            &history_path,
+            &filters,
+        ),
+        _ => unreachable!("subcommand normalized above"),
+    };
+
+    Ok(DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn resolve_capability_connector_filter(
+    command: &str,
+    selector: &str,
+    host_catalog: Option<&HostConnectorCatalog>,
+    manifest_catalog: &DiscoveryCatalog,
+    history_entries: &[history::HistoryEntry],
+) -> Result<String, DispatchOutcome> {
+    if let Some(catalog) = host_catalog
+        && let Ok(connector) = catalog.resolve_connector(selector)
+    {
+        return Ok(connector.summary.id.to_string());
+    }
+    if let Ok(connector) = manifest_catalog.resolve_connector(selector) {
+        return Ok(connector.detail.summary.id.clone());
+    }
+    if history_entries.iter().any(|entry| entry.connector_id == selector) {
+        return Ok(selector.to_owned());
+    }
+    if let Some(catalog) = host_catalog
+        && let Err(error) = catalog.resolve_connector(selector)
+    {
+        return Err(connector_resolution_dispatch(command, selector, &error));
+    }
+    match manifest_catalog.resolve_connector(selector) {
+        Ok(connector) => Ok(connector.detail.summary.id.clone()),
+        Err(error) => Err(connector_resolution_dispatch(command, selector, &error)),
+    }
+}
+
+fn local_capability_metadata_map(
+    manifest_catalog: &DiscoveryCatalog,
+) -> HashMap<(String, String), CapabilityOperationMetadata> {
+    let mut metadata = HashMap::new();
+    for connector in manifest_catalog.connectors() {
+        for operation in &connector.operations {
+            let info = operation.operation_info();
+            metadata.insert(
+                (connector.detail.summary.id.clone(), operation.actual_id.clone()),
+                CapabilityOperationMetadata {
+                    connector_slug: connector.slug.clone(),
+                    capability_id: info.capability,
+                    risk_tier: info.safety_tier,
+                },
+            );
+        }
+    }
+    metadata
+}
+
+fn host_capability_metadata_map(
+    client: &HostAdminClient,
+    connector_ids: &BTreeSet<String>,
+    source_gaps: &mut Vec<Value>,
+) -> HashMap<(String, String), CapabilityOperationMetadata> {
+    let mut metadata = HashMap::new();
+    for connector_id in connector_ids {
+        match client.introspect(connector_id) {
+            Ok(introspection) => {
+                let connector_slug = host_connector_slug(&introspection.connector);
+                for tool in introspection.tools {
+                    metadata.insert(
+                        (connector_id.clone(), tool.name.clone()),
+                        CapabilityOperationMetadata {
+                            connector_slug: connector_slug.clone(),
+                            capability_id: tool.capability,
+                            risk_tier: tool.safety_tier,
+                        },
+                    );
+                }
+            }
+            Err(error) => source_gaps.push(json!({
+                "source": "host-admin-api",
+                "status": "partial",
+                "connector_id": connector_id,
+                "message": format!(
+                    "Failed to load live operation metadata for `{connector_id}` from `fcp-host`; using manifest metadata when available: {error}"
+                ),
+            })),
+        }
+    }
+    metadata
+}
+
+fn aggregate_capability_usage(
+    entries: &[history::HistoryEntry],
+    operation_metadata: &HashMap<(String, String), CapabilityOperationMetadata>,
+) -> CapabilityAggregationResult {
+    let mut aggregates = HashMap::<CapabilityUsageKey, CapabilityUsageAggregate>::new();
+    let mut unresolved_samples = Vec::new();
+    let mut unresolved_entry_count = 0usize;
+    let mut skipped_simulated = 0usize;
+
+    for entry in entries {
+        if entry.status == history::OpStatus::Simulated {
+            skipped_simulated += 1;
+            continue;
+        }
+
+        let Some(zone) = entry.zone.as_deref() else {
+            unresolved_entry_count += 1;
+            if unresolved_samples.len() < 10 {
+                unresolved_samples.push(json!({
+                    "entry_id": &entry.entry_id,
+                    "connector_id": &entry.connector_id,
+                    "operation_id": &entry.operation_id,
+                    "reason": "missing-zone",
+                }));
+            }
+            continue;
+        };
+        let Ok(zone_id) = zone.parse::<ZoneId>() else {
+            unresolved_entry_count += 1;
+            if unresolved_samples.len() < 10 {
+                unresolved_samples.push(json!({
+                    "entry_id": &entry.entry_id,
+                    "connector_id": &entry.connector_id,
+                    "operation_id": &entry.operation_id,
+                    "reason": "invalid-zone",
+                    "zone": zone,
+                }));
+            }
+            continue;
+        };
+        let Ok(connector_id) = entry.connector_id.parse::<ConnectorId>() else {
+            unresolved_entry_count += 1;
+            if unresolved_samples.len() < 10 {
+                unresolved_samples.push(json!({
+                    "entry_id": &entry.entry_id,
+                    "connector_id": &entry.connector_id,
+                    "operation_id": &entry.operation_id,
+                    "reason": "invalid-connector-id",
+                }));
+            }
+            continue;
+        };
+        let Some(metadata) = operation_metadata.get(&(entry.connector_id.clone(), entry.operation_id.clone())) else {
+            unresolved_entry_count += 1;
+            if unresolved_samples.len() < 10 {
+                unresolved_samples.push(json!({
+                    "entry_id": &entry.entry_id,
+                    "connector_id": &entry.connector_id,
+                    "operation_id": &entry.operation_id,
+                    "reason": "unresolved-operation-metadata",
+                }));
+            }
+            continue;
+        };
+
+        let key = CapabilityUsageKey::new(
+            zone_id,
+            connector_id,
+            metadata.capability_id.clone(),
+        );
+        let occurred_at = u64::try_from(entry.timestamp.timestamp()).unwrap_or(0);
+        let aggregate = aggregates
+            .entry(key.clone())
+            .or_insert_with(|| CapabilityUsageAggregate {
+                key,
+                total: 0,
+                allowed: 0,
+                denied: 0,
+                errors: 0,
+                first_seen: occurred_at,
+                last_seen: occurred_at,
+                last_risk_tier: metadata.risk_tier,
+            });
+        aggregate.total = aggregate.total.saturating_add(1);
+        aggregate.first_seen = aggregate.first_seen.min(occurred_at);
+        aggregate.last_seen = aggregate.last_seen.max(occurred_at);
+        aggregate.last_risk_tier = metadata.risk_tier;
+
+        match entry.status {
+            history::OpStatus::Success => {
+                aggregate.allowed = aggregate.allowed.saturating_add(1);
+            }
+            history::OpStatus::Denied => {
+                aggregate.denied = aggregate.denied.saturating_add(1);
+            }
+            history::OpStatus::Error
+            | history::OpStatus::Timeout
+            | history::OpStatus::RateLimited => {
+                aggregate.errors = aggregate.errors.saturating_add(1);
+            }
+            history::OpStatus::Simulated => {}
+        }
+    }
+
+    let mut aggregates = aggregates.into_values().collect::<Vec<_>>();
+    aggregates.sort_by(|left, right| {
+        (
+            left.key.zone_id.as_str(),
+            left.key.connector_id.as_str(),
+            left.key.capability_id.as_str(),
+        )
+            .cmp(&(
+                right.key.zone_id.as_str(),
+                right.key.connector_id.as_str(),
+                right.key.capability_id.as_str(),
+            ))
+    });
+
+    CapabilityAggregationResult {
+        total_entries: entries.len(),
+        aggregates,
+        skipped_simulated,
+        unresolved_entry_count,
+        unresolved_samples,
+    }
+}
+
+fn capability_report_payload(
+    aggregation: &CapabilityAggregationResult,
+    recommendation_report: &fcp_telemetry::CapabilityRecommendationReport,
+    source_gaps: &[Value],
+    history_path: &Path,
+    filters: &CapabilitiesFilterArgs,
+    operation_metadata: &HashMap<(String, String), CapabilityOperationMetadata>,
+) -> Value {
+    let recommendation_lookup = recommendation_report
+        .recommendations
+        .iter()
+        .map(|recommendation| {
+            (
+                (
+                    recommendation.key.zone_id.to_string(),
+                    recommendation.key.connector_id.to_string(),
+                    recommendation.key.capability_id.to_string(),
+                ),
+                recommendation,
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let mut aggregates_by_zone = BTreeMap::<String, Vec<&CapabilityUsageAggregate>>::new();
+    for aggregate in &aggregation.aggregates {
+        aggregates_by_zone
+            .entry(aggregate.key.zone_id.to_string())
+            .or_default()
+            .push(aggregate);
+    }
+
+    let zones = aggregates_by_zone
+        .into_iter()
+        .map(|(zone_id, aggregates)| {
+            let mut connector_ids = BTreeSet::new();
+            let mut remove_unused = 0usize;
+            let mut review_risky = 0usize;
+            let mut keep = 0usize;
+            let capabilities = aggregates
+                .iter()
+                .map(|aggregate| {
+                    connector_ids.insert(aggregate.key.connector_id.to_string());
+                    let recommendation = recommendation_lookup.get(&(
+                        aggregate.key.zone_id.to_string(),
+                        aggregate.key.connector_id.to_string(),
+                        aggregate.key.capability_id.to_string(),
+                    ));
+                    if let Some(recommendation) = recommendation {
+                        match recommendation.suggestion {
+                            CapabilitySuggestionKind::RemoveUnused => remove_unused += 1,
+                            CapabilitySuggestionKind::ReviewRisky => review_risky += 1,
+                            CapabilitySuggestionKind::Keep => keep += 1,
+                        }
+                    }
+                    let connector_slug = operation_metadata
+                        .iter()
+                        .find_map(|((connector_id, _), metadata)| {
+                            (connector_id == aggregate.key.connector_id.as_str())
+                                .then(|| metadata.connector_slug.clone())
+                        });
+                    json!({
+                        "connector_id": aggregate.key.connector_id.as_str(),
+                        "connector_slug": connector_slug,
+                        "capability_id": aggregate.key.capability_id.as_str(),
+                        "total": aggregate.total,
+                        "allowed": aggregate.allowed,
+                        "denied": aggregate.denied,
+                        "errors": aggregate.errors,
+                        "first_seen": aggregate.first_seen,
+                        "last_seen": aggregate.last_seen,
+                        "risk_tier": safety_tier_label(aggregate.last_risk_tier),
+                        "suggestion": recommendation.map(|value| value.suggestion),
+                        "reason_code": recommendation.map(|value| value.reason_code.clone()),
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            let total = aggregates.iter().map(|aggregate| aggregate.total).sum::<u64>();
+            let allowed = aggregates.iter().map(|aggregate| aggregate.allowed).sum::<u64>();
+            let denied = aggregates.iter().map(|aggregate| aggregate.denied).sum::<u64>();
+            let errors = aggregates.iter().map(|aggregate| aggregate.errors).sum::<u64>();
+
+            json!({
+                "zone_id": zone_id,
+                "totals": {
+                    "capability_count": capabilities.len(),
+                    "connector_count": connector_ids.len(),
+                    "invocation_count": total,
+                    "allowed": allowed,
+                    "denied": denied,
+                    "errors": errors,
+                    "remove_unused": remove_unused,
+                    "review_risky": review_risky,
+                    "keep": keep,
+                },
+                "capabilities": capabilities,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    json!({
+        "status": "ok",
+        "command": "capabilities",
+        "subcommand": "report",
+        "source": "history-log",
+        "message": "Built a truthful capability-usage report from recorded `fwc` execution history and current connector metadata.",
+        "history_path": history_path.display().to_string(),
+        "filters": {
+            "zone": &filters.zone,
+            "connector": &filters.connector,
+        },
+        "summary": {
+            "history_entries_considered": aggregation.total_entries,
+            "aggregate_count": aggregation.aggregates.len(),
+            "zone_count": zones.len(),
+            "invocation_count": aggregation.aggregates.iter().map(|aggregate| aggregate.total).sum::<u64>(),
+            "allowed": aggregation.aggregates.iter().map(|aggregate| aggregate.allowed).sum::<u64>(),
+            "denied": aggregation.aggregates.iter().map(|aggregate| aggregate.denied).sum::<u64>(),
+            "errors": aggregation.aggregates.iter().map(|aggregate| aggregate.errors).sum::<u64>(),
+            "skipped_simulated": aggregation.skipped_simulated,
+            "unresolved_entries": aggregation.unresolved_entry_count,
+        },
+        "recommendation_summary": recommendation_report.summary(),
+        "risk_summaries": &recommendation_report.risk_summaries,
+        "zones": zones,
+        "metadata_gaps": source_gaps,
+        "unresolved_samples": &aggregation.unresolved_samples,
+        "next_actions": [
+            "fwc capabilities suggest".to_owned(),
+            "fwc capabilities export".to_owned(),
+            "fwc history --status denied".to_owned(),
+        ],
+    })
+}
+
+fn capability_suggest_payload(
+    aggregation: &CapabilityAggregationResult,
+    recommendation_report: &fcp_telemetry::CapabilityRecommendationReport,
+    suggestion_filter: CapabilitySuggestionFilter,
+    source_gaps: &[Value],
+    history_path: &Path,
+    filters: &CapabilitiesFilterArgs,
+) -> Value {
+    let recommendations = recommendation_report
+        .recommendations
+        .iter()
+        .filter(|recommendation| suggestion_filter.matches(recommendation.suggestion))
+        .cloned()
+        .collect::<Vec<CapabilityRecommendation>>();
+
+    json!({
+        "status": "ok",
+        "command": "capabilities",
+        "subcommand": "suggest",
+        "source": "history-log",
+        "message": "Generated least-privilege capability recommendations from recorded `fwc` execution history.",
+        "history_path": history_path.display().to_string(),
+        "filters": {
+            "zone": &filters.zone,
+            "connector": &filters.connector,
+            "suggestion": suggestion_filter,
+        },
+        "summary": recommendation_report.summary(),
+        "risk_summaries": &recommendation_report.risk_summaries,
+        "recommendations": recommendations,
+        "metadata_gaps": source_gaps,
+        "supporting_stats": {
+            "history_entries_considered": aggregation.total_entries,
+            "aggregate_count": aggregation.aggregates.len(),
+            "skipped_simulated": aggregation.skipped_simulated,
+            "unresolved_entries": aggregation.unresolved_entry_count,
+        },
+        "unresolved_samples": &aggregation.unresolved_samples,
+        "next_actions": [
+            "fwc capabilities report".to_owned(),
+            "fwc capabilities export".to_owned(),
+        ],
+    })
+}
+
+fn capability_export_payload(
+    aggregation: &CapabilityAggregationResult,
+    recommendation_report: &fcp_telemetry::CapabilityRecommendationReport,
+    source_gaps: &[Value],
+    history_path: &Path,
+    filters: &CapabilitiesFilterArgs,
+) -> Value {
+    json!({
+        "status": "ok",
+        "command": "capabilities",
+        "subcommand": "export",
+        "source": "history-log",
+        "message": "Exported raw capability usage aggregates derived from recorded `fwc` execution history.",
+        "history_path": history_path.display().to_string(),
+        "filters": {
+            "zone": &filters.zone,
+            "connector": &filters.connector,
+        },
+        "summary": {
+            "history_entries_considered": aggregation.total_entries,
+            "aggregate_count": aggregation.aggregates.len(),
+            "skipped_simulated": aggregation.skipped_simulated,
+            "unresolved_entries": aggregation.unresolved_entry_count,
+        },
+        "aggregates": &aggregation.aggregates,
+        "recommendation_summary": recommendation_report.summary(),
+        "risk_summaries": &recommendation_report.risk_summaries,
+        "metadata_gaps": source_gaps,
+        "unresolved_samples": &aggregation.unresolved_samples,
+    })
+}
+
 fn pipe_dispatch(args: &PipeArgs) -> Result<DispatchOutcome> {
     // Parse the mapping spec.
     let spec = if let Some(ref map_expr) = args.map {

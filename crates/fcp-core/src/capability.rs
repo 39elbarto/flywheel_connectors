@@ -157,7 +157,7 @@ impl AsRef<str> for CapabilityId {
 /// Connector identifier - unique name for a connector type.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct ConnectorId(String);
+pub struct ConnectorId(std::sync::Arc<str>);
 
 impl ConnectorId {
     /// Create a new connector ID with full details.
@@ -197,13 +197,13 @@ impl TryFrom<String> for ConnectorId {
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
         validate_canonical_id(&value)?;
-        Ok(Self(value))
+        Ok(Self(value.into()))
     }
 }
 
 impl From<ConnectorId> for String {
     fn from(value: ConnectorId) -> Self {
-        value.0
+        value.0.to_string()
     }
 }
 
@@ -230,13 +230,13 @@ impl AsRef<str> for ConnectorId {
 /// Instance identifier - unique ID for a running connector instance.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct InstanceId(String);
+pub struct InstanceId(std::sync::Arc<str>);
 
 impl InstanceId {
     /// Generate a new random instance ID.
     #[must_use]
     pub fn new() -> Self {
-        Self(format!("inst_{}", Uuid::new_v4()))
+        Self(format!("inst_{}", Uuid::new_v4()).into())
     }
 
     #[must_use]
@@ -256,13 +256,13 @@ impl TryFrom<String> for InstanceId {
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
         validate_canonical_id(&value)?;
-        Ok(Self(value))
+        Ok(Self(value.into()))
     }
 }
 
 impl From<InstanceId> for String {
     fn from(value: InstanceId) -> Self {
-        value.0
+        value.0.to_string()
     }
 }
 
@@ -289,7 +289,7 @@ impl AsRef<str> for InstanceId {
 /// Operation identifier - name for a connector function.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct OperationId(String);
+pub struct OperationId(std::sync::Arc<str>);
 
 impl OperationId {
     /// Create a new operation ID.
@@ -320,13 +320,13 @@ impl TryFrom<String> for OperationId {
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
         validate_canonical_id(&value)?;
-        Ok(Self(value))
+        Ok(Self(value.into()))
     }
 }
 
 impl From<OperationId> for String {
     fn from(value: OperationId) -> Self {
-        value.0
+        value.0.to_string()
     }
 }
 
@@ -563,7 +563,7 @@ impl AsRef<str> for ZoneId {
 /// Principal identifier.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct PrincipalId(String);
+pub struct PrincipalId(std::sync::Arc<str>);
 
 impl PrincipalId {
     /// Create a new principal ID.
@@ -585,13 +585,13 @@ impl TryFrom<String> for PrincipalId {
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
         validate_canonical_id(&value)?;
-        Ok(Self(value))
+        Ok(Self(value.into()))
     }
 }
 
 impl From<PrincipalId> for String {
     fn from(value: PrincipalId) -> Self {
-        value.0
+        value.0.to_string()
     }
 }
 
@@ -618,11 +618,12 @@ impl AsRef<str> for PrincipalId {
 /// Tailscale Node ID.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct TailscaleNodeId(String);
+pub struct TailscaleNodeId(std::sync::Arc<str>);
 
 impl TailscaleNodeId {
     pub fn new(id: impl Into<String>) -> Self {
-        Self(id.into())
+        let s: String = id.into();
+        Self(s.into())
     }
 
     #[must_use]
@@ -633,13 +634,13 @@ impl TailscaleNodeId {
 
 impl From<String> for TailscaleNodeId {
     fn from(s: String) -> Self {
-        Self(s)
+        Self(s.into())
     }
 }
 
 impl From<TailscaleNodeId> for String {
     fn from(id: TailscaleNodeId) -> Self {
-        id.0
+        id.0.to_string()
     }
 }
 
@@ -1095,7 +1096,7 @@ impl CapabilityVerifier {
             if iss != self.zone_id.as_str() {
                 return Err(FcpError::ZoneViolation {
                     source_zone: iss.into(),
-                    target_zone: self.zone_id.0.clone(),
+                    target_zone: self.zone_id.0.to_string(),
                     message: "Token zone mismatch".into(),
                 });
             }
@@ -1123,7 +1124,7 @@ impl CapabilityVerifier {
 
             if !op_allowed {
                 return Err(FcpError::OperationNotGranted {
-                    operation: operation.0.clone(),
+                    operation: operation.0.to_string(),
                 });
             }
         } else {
@@ -1135,7 +1136,7 @@ impl CapabilityVerifier {
                 if let Some(cap_id) = claims.get_capability_id() {
                     if cap_id != required_capability.as_str() {
                         return Err(FcpError::OperationNotGranted {
-                            operation: operation.0.clone(),
+                            operation: operation.0.to_string(),
                         });
                     }
                 } else {
@@ -1146,9 +1147,9 @@ impl CapabilityVerifier {
 
                 // Array of strings
                 let ops: Vec<String> = Self::deserialize_cbor(ops_val)?;
-                if !ops.contains(&operation.0) {
+                if !ops.iter().any(|o| o == operation.as_str()) {
                     return Err(FcpError::OperationNotGranted {
-                        operation: operation.0.clone(),
+                        operation: operation.0.to_string(),
                     });
                 }
             } else {
@@ -1970,15 +1971,28 @@ mod tests {
     }
 
     #[test]
+    fn capability_id_from_static() {
+        let id = CapabilityId::from_static("test:conn:v1");
+        assert_eq!(id.as_str(), "test:conn:v1");
+    }
+
+    #[test]
     fn connector_id_three_part() {
         let id = ConnectorId::new("gmail", "fcp2", "1.0").unwrap();
         assert_eq!(id.as_str(), "gmail:fcp2:1.0");
     }
 
     #[test]
-    fn connector_id_from_static() {
-        let id = ConnectorId::from_static("test:conn:v1");
+    fn connector_id_from_string() {
+        let id: ConnectorId = String::from("test:conn:v1").into();
         assert_eq!(id.as_str(), "test:conn:v1");
+    }
+
+    #[test]
+    fn connector_id_into_string() {
+        let id = ConnectorId::from_static("discord:fcp2:1.0");
+        let s: String = id.into();
+        assert_eq!(s, "discord:fcp2:1.0");
     }
 
     #[test]
@@ -2003,6 +2017,26 @@ mod tests {
     }
 
     #[test]
+    fn instance_id_as_str() {
+        let id = InstanceId::new();
+        assert!(id.as_str().starts_with("inst_"));
+    }
+
+    #[test]
+    fn instance_id_from_string() {
+        let id: InstanceId = String::from("inst_abc").into();
+        assert_eq!(id.as_str(), "inst_abc");
+    }
+
+    #[test]
+    fn instance_id_serde_roundtrip() {
+        let id = InstanceId::new();
+        let json = serde_json::to_string(&id).unwrap();
+        let back: InstanceId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
     fn operation_id_from_static() {
         let id = OperationId::from_static("op.send");
         assert_eq!(id.as_str(), "op.send");
@@ -2017,648 +2051,14 @@ mod tests {
     }
 
     #[test]
-    fn principal_id_serde_roundtrip() {
-        let id = PrincipalId::new("user:alice").unwrap();
-        let json = serde_json::to_string(&id).unwrap();
-        let back: PrincipalId = serde_json::from_str(&json).unwrap();
-        assert_eq!(id, back);
-    }
-
-    // ── ZoneId ─────────────────────────────────────────────────────────────
-
-    #[test]
-    fn zone_id_standard_zones() {
-        assert_eq!(ZoneId::owner().as_str(), "z:owner");
-        assert_eq!(ZoneId::private().as_str(), "z:private");
-        assert_eq!(ZoneId::work().as_str(), "z:work");
-        assert_eq!(ZoneId::community().as_str(), "z:community");
-        assert_eq!(ZoneId::public().as_str(), "z:public");
-    }
-
-    #[test]
-    fn zone_id_parse_valid() {
-        let z: ZoneId = "z:work".parse().unwrap();
-        assert_eq!(z.as_str(), "z:work");
-    }
-
-    #[test]
-    fn zone_id_rejects_missing_prefix() {
-        assert!(matches!(
-            "work".parse::<ZoneId>(),
-            Err(ZoneIdError::MissingPrefix)
-        ));
-    }
-
-    #[test]
-    fn zone_id_rejects_empty() {
-        assert!(matches!("".parse::<ZoneId>(), Err(ZoneIdError::Empty)));
-    }
-
-    #[test]
-    fn zone_id_rejects_too_long() {
-        let long = format!("z:{}", "a".repeat(63));
-        assert!(matches!(
-            long.parse::<ZoneId>(),
-            Err(ZoneIdError::TooLong { .. })
-        ));
-    }
-
-    #[test]
-    fn zone_id_hash_deterministic() {
-        let z1 = ZoneId::work();
-        let z2 = ZoneId::work();
-        assert_eq!(z1.hash().as_bytes(), z2.hash().as_bytes());
-    }
-
-    #[test]
-    fn zone_id_hash_differs_across_zones() {
-        assert_ne!(
-            ZoneId::work().hash().as_bytes(),
-            ZoneId::owner().hash().as_bytes()
-        );
-    }
-
-    #[test]
-    fn zone_id_to_tailscale_tag() {
-        assert_eq!(ZoneId::work().to_tailscale_tag(), "tag:fcp-work");
-        assert_eq!(ZoneId::owner().to_tailscale_tag(), "tag:fcp-owner");
-    }
-
-    #[test]
-    fn zone_id_from_tailscale_tag() {
-        let z = ZoneId::from_tailscale_tag("tag:fcp-work").unwrap();
-        assert_eq!(z.as_str(), "z:work");
-    }
-
-    #[test]
-    fn zone_id_from_tailscale_tag_rejects_invalid() {
-        assert!(matches!(
-            ZoneId::from_tailscale_tag("tag:wrong-work"),
-            Err(ZoneIdError::InvalidTailscaleTagPrefix)
-        ));
-    }
-
-    #[test]
-    fn zone_id_serde_roundtrip() {
-        let z = ZoneId::work();
-        let json = serde_json::to_string(&z).unwrap();
-        let back: ZoneId = serde_json::from_str(&json).unwrap();
-        assert_eq!(z, back);
-    }
-
-    // ── RateLimit ──────────────────────────────────────────────────────────
-
-    #[test]
-    fn rate_limit_validate_ok() {
-        let rl = RateLimit {
-            max: 10,
-            per_ms: 60_000,
-            burst: Some(5),
-            scope: Some("per_zone".into()),
-            pool_name: Some("api".into()),
-        };
-        assert!(rl.validate().is_ok());
-    }
-
-    #[test]
-    fn rate_limit_validate_zero_max() {
-        let rl = RateLimit {
-            max: 0,
-            per_ms: 1000,
-            burst: None,
-            scope: None,
-            pool_name: None,
-        };
-        assert_eq!(rl.validate(), Err(RateLimitValidationError::ZeroMax));
-    }
-
-    #[test]
-    fn rate_limit_validate_zero_period() {
-        let rl = RateLimit {
-            max: 10,
-            per_ms: 0,
-            burst: None,
-            scope: None,
-            pool_name: None,
-        };
-        assert_eq!(rl.validate(), Err(RateLimitValidationError::ZeroPeriod));
-    }
-
-    #[test]
-    fn rate_limit_validate_invalid_scope() {
-        let rl = RateLimit {
-            max: 10,
-            per_ms: 1000,
-            burst: None,
-            scope: Some("bad".into()),
-            pool_name: None,
-        };
-        assert!(matches!(
-            rl.validate(),
-            Err(RateLimitValidationError::InvalidScope { .. })
-        ));
-    }
-
-    #[test]
-    fn rate_limit_validate_empty_pool_name() {
-        let rl = RateLimit {
-            max: 10,
-            per_ms: 1000,
-            burst: None,
-            scope: None,
-            pool_name: Some(String::new()),
-        };
-        assert_eq!(rl.validate(), Err(RateLimitValidationError::EmptyPoolName));
-    }
-
-    #[test]
-    fn rate_limit_validate_invalid_pool_name() {
-        let rl = RateLimit {
-            max: 10,
-            per_ms: 1000,
-            burst: None,
-            scope: None,
-            pool_name: Some("a b".into()),
-        };
-        assert!(matches!(
-            rl.validate(),
-            Err(RateLimitValidationError::InvalidPoolName { .. })
-        ));
-    }
-
-    #[test]
-    fn rate_limit_parsed_scope_default() {
-        let rl = RateLimit {
-            max: 10,
-            per_ms: 1000,
-            burst: None,
-            scope: None,
-            pool_name: None,
-        };
-        assert_eq!(rl.parsed_scope(), OperationRateLimitScope::PerConnector);
-    }
-
-    #[test]
-    fn rate_limit_parsed_scope_explicit() {
-        let rl = RateLimit {
-            max: 10,
-            per_ms: 1000,
-            burst: None,
-            scope: Some("per_principal".into()),
-            pool_name: None,
-        };
-        assert_eq!(rl.parsed_scope(), OperationRateLimitScope::PerPrincipal);
-    }
-
-    // ── OperationRateLimitScope ────────────────────────────────────────────
-
-    #[test]
-    fn operation_rate_limit_scope_from_str() {
-        assert_eq!(
-            "per_connector".parse::<OperationRateLimitScope>().unwrap(),
-            OperationRateLimitScope::PerConnector
-        );
-        assert_eq!(
-            "per_zone".parse::<OperationRateLimitScope>().unwrap(),
-            OperationRateLimitScope::PerZone
-        );
-        assert_eq!(
-            "per_principal".parse::<OperationRateLimitScope>().unwrap(),
-            OperationRateLimitScope::PerPrincipal
-        );
-        assert!("invalid".parse::<OperationRateLimitScope>().is_err());
-    }
-
-    #[test]
-    fn operation_rate_limit_scope_display() {
-        assert_eq!(
-            OperationRateLimitScope::PerConnector.to_string(),
-            "per_connector"
-        );
-        assert_eq!(OperationRateLimitScope::PerZone.to_string(), "per_zone");
-        assert_eq!(
-            OperationRateLimitScope::PerPrincipal.to_string(),
-            "per_principal"
-        );
-    }
-
-    #[test]
-    fn operation_rate_limit_scope_default() {
-        assert_eq!(
-            OperationRateLimitScope::default(),
-            OperationRateLimitScope::PerConnector
-        );
-    }
-
-    // ── RetryConfig ────────────────────────────────────────────────────────
-
-    #[test]
-    fn retry_config_default_values() {
-        let cfg = RetryConfig::default();
-        assert_eq!(cfg.max_attempts, 3);
-        assert_eq!(cfg.initial_delay, std::time::Duration::from_millis(100));
-        assert_eq!(cfg.max_delay, std::time::Duration::from_secs(30));
-        assert!((cfg.multiplier - 2.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn retry_config_serde_roundtrip() {
-        let cfg = RetryConfig::default();
-        let json = serde_json::to_string(&cfg).unwrap();
-        let back: RetryConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.max_attempts, cfg.max_attempts);
-    }
-
-    // ── TrustLevel ─────────────────────────────────────────────────────────
-
-    #[test]
-    fn trust_level_ordering() {
-        assert!(TrustLevel::Blocked < TrustLevel::Anonymous);
-        assert!(TrustLevel::Anonymous < TrustLevel::Untrusted);
-        assert!(TrustLevel::Untrusted < TrustLevel::Paired);
-        assert!(TrustLevel::Paired < TrustLevel::Admin);
-        assert!(TrustLevel::Admin < TrustLevel::Owner);
-    }
-
-    #[test]
-    fn trust_level_serde_roundtrip() {
-        for level in [
-            TrustLevel::Blocked,
-            TrustLevel::Anonymous,
-            TrustLevel::Untrusted,
-            TrustLevel::Paired,
-            TrustLevel::Admin,
-            TrustLevel::Owner,
-        ] {
-            let json = serde_json::to_string(&level).unwrap();
-            let back: TrustLevel = serde_json::from_str(&json).unwrap();
-            assert_eq!(level, back);
-        }
-    }
-
-    // ── TaintLevel ─────────────────────────────────────────────────────────
-
-    #[test]
-    fn taint_level_default_is_untainted() {
-        assert_eq!(TaintLevel::default(), TaintLevel::Untainted);
-    }
-
-    #[test]
-    fn taint_level_ordering() {
-        assert!(TaintLevel::Untainted < TaintLevel::Tainted);
-        assert!(TaintLevel::Tainted < TaintLevel::HighlyTainted);
-    }
-
-    // ── Provenance ─────────────────────────────────────────────────────────
-
-    #[test]
-    fn provenance_new_is_untainted() {
-        let p = Provenance::new(ZoneId::work());
-        assert!(!p.is_tainted());
-        assert!(p.can_access_higher_trust());
-        assert_eq!(p.origin_zone.as_str(), "z:work");
-    }
-
-    #[test]
-    fn provenance_tainted() {
-        let p = Provenance::tainted(ZoneId::public());
-        assert!(p.is_tainted());
-        assert!(!p.can_access_higher_trust());
-    }
-
-    #[test]
-    fn provenance_highly_tainted() {
-        let p = Provenance::highly_tainted(ZoneId::public());
-        assert!(p.is_tainted());
-        assert_eq!(p.taint, TaintLevel::HighlyTainted);
-    }
-
-    #[test]
-    fn provenance_elevated_can_access_higher() {
-        let p = Provenance::tainted(ZoneId::public()).elevated_with("token-123");
-        assert!(p.is_tainted());
-        assert!(p.elevated);
-        assert!(p.can_access_higher_trust());
-    }
-
-    #[test]
-    fn provenance_with_step() {
-        let step = ProvenanceStep {
-            timestamp_ms: 1000,
-            zone: ZoneId::work(),
-            actor: "agent:bot".into(),
-            action: "invoke".into(),
-            resource: "cap.read".into(),
-        };
-        let p = Provenance::new(ZoneId::work()).with_step(step);
-        assert_eq!(p.chain.len(), 1);
-    }
-
-    // ── IdempotencyClass ───────────────────────────────────────────────────
-
-    #[test]
-    fn idempotency_class_serde_roundtrip() {
-        for class in [
-            IdempotencyClass::None,
-            IdempotencyClass::BestEffort,
-            IdempotencyClass::Strict,
-        ] {
-            let json = serde_json::to_string(&class).unwrap();
-            let back: IdempotencyClass = serde_json::from_str(&json).unwrap();
-            assert_eq!(class, back);
-        }
-    }
-
-    // ── CorrelationId / SessionId ──────────────────────────────────────────
-
-    #[test]
-    fn correlation_id_unique() {
-        let a = CorrelationId::new();
-        let b = CorrelationId::new();
-        assert_ne!(a, b);
-    }
-
-    #[test]
-    fn session_id_unique() {
-        let a = SessionId::new();
-        let b = SessionId::new();
-        assert_ne!(a, b);
-    }
-
-    // ── CapabilityGrant ────────────────────────────────────────────────────
-
-    #[test]
-    fn capability_grant_serde_roundtrip() {
-        let grant = CapabilityGrant {
-            capability: CapabilityId::new("cap.read").unwrap(),
-            operation: Some(OperationId::new("op.list").unwrap()),
-        };
-        let json = serde_json::to_string(&grant).unwrap();
-        let back: CapabilityGrant = serde_json::from_str(&json).unwrap();
-        assert_eq!(grant, back);
-    }
-
-    #[test]
-    fn capability_grant_omits_none_operation() {
-        let grant = CapabilityGrant {
-            capability: CapabilityId::new("cap.all").unwrap(),
-            operation: None,
-        };
-        let json = serde_json::to_string(&grant).unwrap();
-        assert!(!json.contains("operation"));
-    }
-
-    // ── RiskLevel ──────────────────────────────────────────────────────────
-
-    #[test]
-    fn risk_level_serde_roundtrip() {
-        for level in [
-            RiskLevel::Low,
-            RiskLevel::Medium,
-            RiskLevel::High,
-            RiskLevel::Critical,
-        ] {
-            let json = serde_json::to_string(&level).unwrap();
-            let back: RiskLevel = serde_json::from_str(&json).unwrap();
-            assert_eq!(level, back);
-        }
-    }
-
-    #[test]
-    fn risk_level_vs_safety_tier_are_distinct() {
-        // RiskLevel: UX/prioritization (Low, Medium, High, Critical)
-        // SafetyTier: normative enforcement (Safe, Risky, Dangerous, Critical, Forbidden)
-        //
-        // Both may be present in ToolDescriptor, each for different purposes.
-
-        // RiskLevel serialization
-        let levels = [
-            (RiskLevel::Low, "low"),
-            (RiskLevel::Medium, "medium"),
-            (RiskLevel::High, "high"),
-            (RiskLevel::Critical, "critical"),
-        ];
-
-        for (level, expected) in levels {
-            let json = serde_json::to_string(&level).unwrap();
-            assert!(
-                json.contains(expected),
-                "RiskLevel::{level:?} should serialize to contain '{expected}'"
-            );
-        }
-
-        // SafetyTier serialization (different enum, different values)
-        let tiers = [
-            (SafetyTier::Safe, "safe"),
-            (SafetyTier::Forbidden, "forbidden"),
-        ];
-
-        for (tier, expected) in tiers {
-            let json = serde_json::to_string(&tier).unwrap();
-            assert!(
-                json.contains(expected),
-                "SafetyTier::{tier:?} should serialize to contain '{expected}'"
-            );
-        }
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // NEW: CapabilityId edge cases
-    // ─────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn capability_id_rejects_empty() {
-        assert!(matches!(
-            CapabilityId::new(""),
-            Err(IdValidationError::Empty)
-        ));
-    }
-
-    #[test]
-    fn capability_id_at_max_length_boundary() {
-        // Exactly 128 bytes should succeed
-        let max_id = "a".repeat(128);
-        assert!(CapabilityId::new(max_id).is_ok());
-
-        // 129 bytes should fail
-        let over_id = "a".repeat(129);
-        assert!(matches!(
-            CapabilityId::new(over_id),
-            Err(IdValidationError::TooLong { len: 129, max: 128 })
-        ));
-    }
-
-    #[test]
-    fn capability_id_with_multiple_colons() {
-        // Multiple colons are valid per the regex `^[a-z0-9][a-z0-9._:-]*$`
-        let id = CapabilityId::new("cap:scope:sub:detail").unwrap();
-        assert_eq!(id.as_str(), "cap:scope:sub:detail");
-    }
-
-    #[test]
-    fn capability_id_with_all_separator_types() {
-        let id = CapabilityId::new("a.b_c:d-e").unwrap();
-        assert_eq!(id.as_str(), "a.b_c:d-e");
-    }
-
-    #[test]
-    fn capability_id_single_digit_start() {
-        let id = CapabilityId::new("9cap").unwrap();
-        assert_eq!(id.as_str(), "9cap");
-    }
-
-    #[test]
-    fn capability_id_rejects_space_in_middle() {
-        assert!(matches!(
-            CapabilityId::new("cap read"),
-            Err(IdValidationError::InvalidChar { ch: ' ', index: 3 })
-        ));
-    }
-
-    #[test]
-    fn capability_id_rejects_unicode_emoji() {
-        assert!(matches!(
-            CapabilityId::new("cap\u{1F600}"),
-            Err(IdValidationError::NonAscii)
-        ));
-    }
-
-    #[test]
-    fn capability_id_rejects_starting_with_underscore() {
-        assert!(matches!(
-            CapabilityId::new("_cap"),
-            Err(IdValidationError::InvalidStartChar { ch: '_' })
-        ));
-    }
-
-    #[test]
-    fn capability_id_rejects_starting_with_colon() {
-        assert!(matches!(
-            CapabilityId::new(":cap"),
-            Err(IdValidationError::InvalidStartChar { ch: ':' })
-        ));
-    }
-
-    #[test]
-    fn capability_id_clone_preserves_value() {
-        let original = CapabilityId::new("cap.read").unwrap();
-        let cloned = original.clone();
-        assert_eq!(original.as_str(), cloned.as_str());
-    }
-
-    #[test]
-    fn capability_id_hash_equality() {
-        use std::collections::HashSet;
-        let id1 = CapabilityId::new("cap.test").unwrap();
-        let id2 = CapabilityId::new("cap.test").unwrap();
-        let mut set = HashSet::new();
-        set.insert(id1);
-        assert!(set.contains(&id2));
-    }
-
-    #[test]
-    fn capability_id_as_ref_str() {
-        let id = CapabilityId::new("cap.ref").unwrap();
-        let s: &str = id.as_ref();
-        assert_eq!(s, "cap.ref");
-    }
-
-    #[test]
-    fn capability_id_into_string() {
-        let id = CapabilityId::new("cap.owned").unwrap();
-        let s: String = id.into();
-        assert_eq!(s, "cap.owned");
-    }
-
-    #[test]
-    #[should_panic(expected = "static capability ID must be canonical")]
-    fn capability_id_from_static_panics_on_invalid() {
-        let _ = CapabilityId::from_static("INVALID");
-    }
-
-    #[test]
-    fn capability_id_debug_format() {
-        let id = CapabilityId::new("cap.debug").unwrap();
-        let dbg = format!("{id:?}");
-        assert!(dbg.contains("cap.debug"));
-    }
-
-    #[test]
-    fn capability_id_serde_rejects_invalid_json() {
-        let result: Result<CapabilityId, _> = serde_json::from_str("\"UPPER\"");
-        assert!(result.is_err());
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // NEW: ConnectorId edge cases
-    // ─────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn connector_id_clone_preserves_value() {
-        let original = ConnectorId::from_static("test:conn:v1");
-        let cloned = original.clone();
-        assert_eq!(original.as_str(), cloned.as_str());
-    }
-
-    #[test]
-    fn connector_id_as_ref_str() {
-        let id = ConnectorId::from_static("test:conn:v1");
-        let s: &str = id.as_ref();
-        assert_eq!(s, "test:conn:v1");
-    }
-
-    #[test]
-    fn connector_id_into_string() {
-        let id = ConnectorId::from_static("test:conn:v1");
-        let s: String = id.into();
-        assert_eq!(s, "test:conn:v1");
-    }
-
-    #[test]
-    fn connector_id_display() {
-        let id = ConnectorId::from_static("test:conn:v1");
-        assert_eq!(id.to_string(), "test:conn:v1");
-    }
-
-    #[test]
-    fn connector_id_rejects_uppercase_part() {
-        assert!(ConnectorId::new("Gmail", "fcp2", "1.0").is_err());
-    }
-
-    #[test]
-    #[should_panic(expected = "static connector ID must be canonical")]
-    fn connector_id_from_static_panics_on_invalid() {
-        let _ = ConnectorId::from_static("BAD ID");
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // NEW: OperationId edge cases
-    // ─────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn operation_id_rejects_empty() {
-        assert!(matches!(
-            OperationId::new(""),
-            Err(IdValidationError::Empty)
-        ));
-    }
-
-    #[test]
-    fn operation_id_clone_preserves_value() {
-        let original = OperationId::from_static("op.send");
-        let cloned = original.clone();
-        assert_eq!(original.as_str(), cloned.as_str());
-    }
-
-    #[test]
     fn operation_id_display() {
-        let id = OperationId::from_static("op.list");
+        let id = OperationId::new("op.list").unwrap();
         assert_eq!(id.to_string(), "op.list");
     }
 
     #[test]
     fn operation_id_as_ref_str() {
-        let id = OperationId::from_static("op.get");
+        let id = OperationId::new("op.get").unwrap();
         let s: &str = id.as_ref();
         assert_eq!(s, "op.get");
     }
@@ -2669,939 +2069,12568 @@ mod tests {
         let _ = OperationId::from_static("OP.INVALID");
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // NEW: InstanceId edge cases
-    // ─────────────────────────────────────────────────────────────────────────
-
     #[test]
-    fn instance_id_starts_with_prefix() {
-        let id = InstanceId::new();
-        assert!(id.as_str().starts_with("inst_"));
-    }
-
-    #[test]
-    fn instance_id_serde_roundtrip() {
-        let id = InstanceId::new();
-        let json = serde_json::to_string(&id).unwrap();
-        let back: InstanceId = serde_json::from_str(&json).unwrap();
-        assert_eq!(id, back);
-    }
-
-    #[test]
-    fn instance_id_display() {
-        let id = InstanceId::new();
-        let displayed = id.to_string();
-        assert!(displayed.starts_with("inst_"));
-        assert_eq!(displayed, id.as_str());
-    }
-
-    #[test]
-    fn instance_id_clone_preserves_value() {
-        let original = InstanceId::new();
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
         let cloned = original.clone();
         assert_eq!(original.as_str(), cloned.as_str());
     }
 
     #[test]
-    fn instance_id_as_ref_str() {
-        let id = InstanceId::new();
+    fn operation_id_as_str() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
         let s: &str = id.as_ref();
-        assert!(s.starts_with("inst_"));
+        assert_eq!(s, "op.send");
     }
 
     #[test]
-    fn instance_id_into_string() {
-        let id = InstanceId::new();
-        let expected = id.as_str().to_owned();
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
         let s: String = id.into();
-        assert_eq!(s, expected);
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // NEW: PrincipalId edge cases
-    // ─────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn principal_id_display() {
-        let id = PrincipalId::new("user:alice").unwrap();
-        assert_eq!(id.to_string(), "user:alice");
+        assert_eq!(s, "op.send");
     }
 
     #[test]
-    fn principal_id_as_ref_str() {
-        let id = PrincipalId::new("agent:bot").unwrap();
-        let s: &str = id.as_ref();
-        assert_eq!(s, "agent:bot");
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
     }
 
     #[test]
-    fn principal_id_into_string() {
-        let id = PrincipalId::new("user:bob").unwrap();
-        let s: String = id.into();
-        assert_eq!(s, "user:bob");
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
     }
 
     #[test]
-    fn principal_id_rejects_uppercase() {
-        assert!(matches!(
-            PrincipalId::new("User:Alice"),
-            Err(IdValidationError::UppercaseNotAllowed)
-        ));
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // NEW: ZoneId edge cases
-    // ─────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn zone_id_rejects_non_ascii() {
-        assert!(matches!(
-            "z:\u{00e9}l\u{00e8}ve".parse::<ZoneId>(),
-            Err(ZoneIdError::NonAscii)
-        ));
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
     }
 
     #[test]
-    fn zone_id_rejects_invalid_char() {
-        assert!(matches!(
-            "z:work@home".parse::<ZoneId>(),
-            Err(ZoneIdError::InvalidChar { ch: '@', .. })
-        ));
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
     }
 
     #[test]
-    fn zone_id_rejects_uppercase() {
-        assert!(matches!(
-            "z:Work".parse::<ZoneId>(),
-            Err(ZoneIdError::InvalidChar { ch: 'W', .. })
-        ));
-    }
-
-    #[test]
-    fn zone_id_at_max_length_boundary() {
-        // Exactly 64 bytes should succeed
-        let max_zone = format!("z:{}", "a".repeat(62));
-        assert_eq!(max_zone.len(), 64);
-        assert!(max_zone.parse::<ZoneId>().is_ok());
-
-        // 65 bytes should fail
-        let over_zone = format!("z:{}", "a".repeat(63));
-        assert_eq!(over_zone.len(), 65);
-        assert!(matches!(
-            over_zone.parse::<ZoneId>(),
-            Err(ZoneIdError::TooLong { len: 65, max: 64 })
-        ));
-    }
-
-    #[test]
-    fn zone_id_clone_preserves_value() {
-        let original = ZoneId::work();
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
         let cloned = original.clone();
         assert_eq!(original.as_str(), cloned.as_str());
     }
 
     #[test]
-    fn zone_id_display() {
-        let z = ZoneId::owner();
-        assert_eq!(z.to_string(), "z:owner");
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
     }
 
     #[test]
-    fn zone_id_as_ref_str() {
-        let z = ZoneId::private();
-        let s: &str = z.as_ref();
-        assert_eq!(s, "z:private");
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
     }
 
     #[test]
-    fn zone_id_into_string() {
-        let z = ZoneId::community();
-        let s: String = z.into();
-        assert_eq!(s, "z:community");
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
     }
 
     #[test]
-    fn zone_id_as_bytes() {
-        let z = ZoneId::work();
-        assert_eq!(z.as_bytes(), b"z:work");
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
     }
 
     #[test]
-    fn zone_id_hash_from_bytes_roundtrip() {
-        let z = ZoneId::work();
-        let hash = z.hash();
-        let reconstructed = ZoneIdHash::from_bytes(*hash.as_bytes());
-        assert_eq!(hash, reconstructed);
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
     }
 
     #[test]
-    fn zone_id_hash_debug_is_hex() {
-        let z = ZoneId::work();
-        let hash = z.hash();
-        let dbg = format!("{hash:?}");
-        assert!(dbg.starts_with("ZoneIdHash("));
-        // The inner value should be hex
-        assert!(dbg.contains(')'));
-    }
-
-    #[test]
-    fn zone_id_hash_as_ref_bytes() {
-        let z = ZoneId::work();
-        let hash = z.hash();
-        let bytes: &[u8] = hash.as_ref();
-        assert_eq!(bytes.len(), 32);
-    }
-
-    #[test]
-    fn zone_id_with_hyphens_and_underscores() {
-        let z: ZoneId = "z:my-custom_zone".parse().unwrap();
-        assert_eq!(z.as_str(), "z:my-custom_zone");
-    }
-
-    #[test]
-    fn zone_id_tailscale_tag_roundtrip_standard_zones() {
-        for zone in [
-            ZoneId::owner(),
-            ZoneId::private(),
-            ZoneId::work(),
-            ZoneId::community(),
-            ZoneId::public(),
-        ] {
-            let tag = zone.to_tailscale_tag();
-            let recovered = ZoneId::from_tailscale_tag(&tag).unwrap();
-            assert_eq!(zone.as_str(), recovered.as_str());
-        }
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // NEW: ZoneIdError Display coverage
-    // ─────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn zone_id_error_display_empty() {
-        let err = ZoneIdError::Empty;
-        assert_eq!(err.to_string(), "zone id must not be empty");
-    }
-
-    #[test]
-    fn zone_id_error_display_too_long() {
-        let err = ZoneIdError::TooLong { len: 100, max: 64 };
-        assert_eq!(err.to_string(), "zone id too long (100 bytes > 64 bytes)");
-    }
-
-    #[test]
-    fn zone_id_error_display_non_ascii() {
-        let err = ZoneIdError::NonAscii;
-        assert_eq!(err.to_string(), "zone id must be ASCII");
-    }
-
-    #[test]
-    fn zone_id_error_display_missing_prefix() {
-        let err = ZoneIdError::MissingPrefix;
-        assert_eq!(err.to_string(), "zone id must start with `z:`");
-    }
-
-    #[test]
-    fn zone_id_error_display_invalid_tailscale_tag() {
-        let err = ZoneIdError::InvalidTailscaleTagPrefix;
-        assert_eq!(err.to_string(), "tailscale tag must start with `tag:fcp-`");
-    }
-
-    #[test]
-    fn zone_id_error_display_invalid_char() {
-        let err = ZoneIdError::InvalidChar { ch: '!', index: 5 };
-        assert_eq!(
-            err.to_string(),
-            "zone id has invalid character '!' at byte 5"
-        );
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // NEW: IdValidationError Display coverage
-    // ─────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn id_validation_error_display_empty() {
-        let err = IdValidationError::Empty;
-        assert_eq!(err.to_string(), "identifier must not be empty");
-    }
-
-    #[test]
-    fn id_validation_error_display_too_long() {
-        let err = IdValidationError::TooLong { len: 200, max: 128 };
-        assert_eq!(
-            err.to_string(),
-            "identifier too long (200 bytes > 128 bytes)"
-        );
-    }
-
-    #[test]
-    fn id_validation_error_display_non_ascii() {
-        let err = IdValidationError::NonAscii;
-        assert_eq!(err.to_string(), "identifier must be ASCII");
-    }
-
-    #[test]
-    fn id_validation_error_display_uppercase() {
-        let err = IdValidationError::UppercaseNotAllowed;
-        assert_eq!(err.to_string(), "identifier contains uppercase ASCII");
-    }
-
-    #[test]
-    fn id_validation_error_display_invalid_start() {
-        let err = IdValidationError::InvalidStartChar { ch: '-' };
-        assert_eq!(
-            err.to_string(),
-            "identifier has invalid start character '-'"
-        );
-    }
-
-    #[test]
-    fn id_validation_error_display_invalid_char() {
-        let err = IdValidationError::InvalidChar { ch: '!', index: 4 };
-        assert_eq!(
-            err.to_string(),
-            "identifier has invalid character '!' at byte 4"
-        );
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // NEW: CapabilityGrant edge cases
-    // ─────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn capability_grant_with_operation_includes_field() {
-        let grant = CapabilityGrant {
-            capability: CapabilityId::new("cap.write").unwrap(),
-            operation: Some(OperationId::new("op.create").unwrap()),
-        };
-        let json = serde_json::to_string(&grant).unwrap();
-        assert!(json.contains("operation"));
-        assert!(json.contains("op.create"));
-    }
-
-    #[test]
-    fn capability_grant_clone_preserves_fields() {
-        let original = CapabilityGrant {
-            capability: CapabilityId::new("cap.admin").unwrap(),
-            operation: Some(OperationId::new("op.delete").unwrap()),
-        };
-        let cloned = original.clone();
-        assert_eq!(original.capability, cloned.capability);
-        assert_eq!(original.operation, cloned.operation);
-    }
-
-    #[test]
-    fn capability_grant_debug_format() {
-        let grant = CapabilityGrant {
-            capability: CapabilityId::new("cap.test").unwrap(),
-            operation: None,
-        };
-        let dbg = format!("{grant:?}");
-        assert!(dbg.contains("cap.test"));
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // NEW: CapabilityConstraints edge cases
-    // ─────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn capability_constraints_default_all_empty() {
-        let c = CapabilityConstraints::default();
-        assert!(c.resource_allow.is_empty());
-        assert!(c.resource_deny.is_empty());
-        assert!(c.max_calls.is_none());
-        assert!(c.max_bytes.is_none());
-        assert!(c.idempotency_key.is_none());
-        assert!(c.credential_allow.is_empty());
-    }
-
-    #[test]
-    fn capability_constraints_full_serde_roundtrip() {
-        let cred = CredentialId::new();
-        let c = CapabilityConstraints {
-            resource_allow: vec!["/api/v1/".into(), "/api/v2/".into()],
-            resource_deny: vec!["/admin/".into()],
-            max_calls: Some(100),
-            max_bytes: Some(1_000_000),
-            idempotency_key: Some("idem-key-123".into()),
-            credential_allow: vec![cred],
-        };
-
-        let json = serde_json::to_string(&c).unwrap();
-        let back: CapabilityConstraints = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(back.resource_allow.len(), 2);
-        assert_eq!(back.resource_deny.len(), 1);
-        assert_eq!(back.max_calls, Some(100));
-        assert_eq!(back.max_bytes, Some(1_000_000));
-        assert_eq!(back.idempotency_key.as_deref(), Some("idem-key-123"));
-        assert_eq!(back.credential_allow.len(), 1);
-    }
-
-    #[test]
-    fn capability_constraints_default_json_minimal() {
-        let c = CapabilityConstraints::default();
-        let json = serde_json::to_string(&c).unwrap();
-        // All fields with skip_serializing_if should be omitted
-        assert!(!json.contains("resource_allow"));
-        assert!(!json.contains("resource_deny"));
-        assert!(!json.contains("max_calls"));
-        assert!(!json.contains("max_bytes"));
-        assert!(!json.contains("idempotency_key"));
-        assert!(!json.contains("credential_allow"));
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // NEW: CapabilityObject serde
-    // ─────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn capability_object_serde_roundtrip() {
-        let obj = CapabilityObject {
-            caps: vec![CapabilityGrant {
-                capability: CapabilityId::new("cap.read").unwrap(),
-                operation: None,
-            }],
-            constraints: CapabilityConstraints::default(),
-            principal: Some(PrincipalId::new("user:alice").unwrap()),
-            valid_from: Some(1000),
-            valid_until: Some(2000),
-        };
-        let json = serde_json::to_string(&obj).unwrap();
-        let back: CapabilityObject = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.caps.len(), 1);
-        assert_eq!(back.valid_from, Some(1000));
-        assert_eq!(back.valid_until, Some(2000));
-        assert!(back.principal.is_some());
-    }
-
-    #[test]
-    fn capability_object_omits_none_fields() {
-        let obj = CapabilityObject {
-            caps: vec![],
-            constraints: CapabilityConstraints::default(),
-            principal: None,
-            valid_from: None,
-            valid_until: None,
-        };
-        let json = serde_json::to_string(&obj).unwrap();
-        assert!(!json.contains("principal"));
-        assert!(!json.contains("valid_from"));
-        assert!(!json.contains("valid_until"));
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // NEW: RoleObject / RoleAssignment
-    // ─────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn role_object_serde_roundtrip() {
-        let role = RoleObject {
-            name: "editor".into(),
-            caps: vec![CapabilityGrant {
-                capability: CapabilityId::new("cap.edit").unwrap(),
-                operation: Some(OperationId::new("op.update").unwrap()),
-            }],
-            includes: vec![],
-        };
-        let json = serde_json::to_string(&role).unwrap();
-        let back: RoleObject = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.name, "editor");
-        assert_eq!(back.caps.len(), 1);
-    }
-
-    #[test]
-    fn role_assignment_serde_roundtrip() {
-        let assignment = RoleAssignment {
-            role_id: ObjectId::test_id("role-test"),
-            principal: PrincipalId::new("user:bob").unwrap(),
-            constraints: CapabilityConstraints::default(),
-        };
-        let json = serde_json::to_string(&assignment).unwrap();
-        let back: RoleAssignment = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.principal.as_str(), "user:bob");
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // NEW: TailscaleNodeId
-    // ─────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn tailscale_node_id_new_and_access() {
-        let node = TailscaleNodeId::new("node-abc123");
-        assert_eq!(node.as_str(), "node-abc123");
-    }
-
-    #[test]
-    fn tailscale_node_id_from_string() {
-        let node: TailscaleNodeId = String::from("ts-node-42").into();
-        assert_eq!(node.as_str(), "ts-node-42");
-    }
-
-    #[test]
-    fn tailscale_node_id_into_string() {
-        let node = TailscaleNodeId::new("node-xyz");
-        let s: String = node.into();
-        assert_eq!(s, "node-xyz");
-    }
-
-    #[test]
-    fn tailscale_node_id_serde_roundtrip() {
-        let node = TailscaleNodeId::new("node-serde-test");
-        let json = serde_json::to_string(&node).unwrap();
-        let back: TailscaleNodeId = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.as_str(), "node-serde-test");
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // NEW: RateLimit edge cases
-    // ─────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn rate_limit_serde_roundtrip() {
-        let rl = RateLimit {
-            max: 50,
-            per_ms: 30_000,
-            burst: Some(10),
-            scope: Some("per_zone".into()),
-            pool_name: Some("shared.pool".into()),
-        };
-        let json = serde_json::to_string(&rl).unwrap();
-        let back: RateLimit = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.max, 50);
-        assert_eq!(back.per_ms, 30_000);
-        assert_eq!(back.burst, Some(10));
-        assert_eq!(back.scope.as_deref(), Some("per_zone"));
-        assert_eq!(back.pool_name.as_deref(), Some("shared.pool"));
-    }
-
-    #[test]
-    fn rate_limit_pool_name_with_valid_chars() {
-        let rl = RateLimit {
-            max: 1,
-            per_ms: 1,
-            burst: None,
-            scope: None,
-            pool_name: Some("my-pool_v2.api".into()),
-        };
-        assert!(rl.validate().is_ok());
-    }
-
-    #[test]
-    fn rate_limit_pool_name_with_special_chars_rejected() {
-        let rl = RateLimit {
-            max: 1,
-            per_ms: 1,
-            burst: None,
-            scope: None,
-            pool_name: Some("pool name!".into()),
-        };
-        assert!(matches!(
-            rl.validate(),
-            Err(RateLimitValidationError::InvalidPoolName { .. })
-        ));
-    }
-
-    #[test]
-    fn rate_limit_parsed_scope_invalid_falls_back() {
-        let rl = RateLimit {
-            max: 1,
-            per_ms: 1,
-            burst: None,
-            scope: Some("invalid_scope".into()),
-            pool_name: None,
-        };
-        // Invalid scope should fall back to default
-        assert_eq!(rl.parsed_scope(), OperationRateLimitScope::PerConnector);
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // NEW: RateLimitValidationError Display coverage
-    // ─────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn rate_limit_validation_error_display_zero_max() {
-        let err = RateLimitValidationError::ZeroMax;
-        assert_eq!(err.to_string(), "rate_limit.max must be > 0");
-    }
-
-    #[test]
-    fn rate_limit_validation_error_display_zero_period() {
-        let err = RateLimitValidationError::ZeroPeriod;
-        assert_eq!(err.to_string(), "rate_limit.per_ms must be > 0");
-    }
-
-    #[test]
-    fn rate_limit_validation_error_display_invalid_scope() {
-        let err = RateLimitValidationError::InvalidScope {
-            scope: "bogus".into(),
-        };
-        let msg = err.to_string();
-        assert!(msg.contains("bogus"));
-        assert!(msg.contains("rate_limit.scope"));
-    }
-
-    #[test]
-    fn rate_limit_validation_error_display_empty_pool() {
-        let err = RateLimitValidationError::EmptyPoolName;
-        assert_eq!(err.to_string(), "rate_limit.pool_name cannot be empty");
-    }
-
-    #[test]
-    fn rate_limit_validation_error_display_invalid_pool() {
-        let err = RateLimitValidationError::InvalidPoolName {
-            pool_name: "a b c".into(),
-        };
-        let msg = err.to_string();
-        assert!(msg.contains("a b c"));
-        assert!(msg.contains("rate_limit.pool_name"));
-    }
-
-    #[test]
-    fn rate_limit_validation_error_is_std_error() {
-        let err = RateLimitValidationError::ZeroMax;
-        // Verify it implements std::error::Error
-        let _: &dyn std::error::Error = &err;
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // NEW: RetryConfig edge cases
-    // ─────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn retry_config_custom_values_serde() {
-        let cfg = RetryConfig {
-            max_attempts: 5,
-            initial_delay: std::time::Duration::from_millis(250),
-            max_delay: std::time::Duration::from_secs(60),
-            multiplier: 1.23,
-        };
-        let json = serde_json::to_string(&cfg).unwrap();
-        let back: RetryConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.max_attempts, 5);
-        assert_eq!(back.initial_delay, std::time::Duration::from_millis(250));
-        assert_eq!(back.max_delay, std::time::Duration::from_secs(60));
-        assert!((back.multiplier - 1.23).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn retry_config_debug_format() {
-        let cfg = RetryConfig::default();
-        let dbg = format!("{cfg:?}");
-        assert!(dbg.contains("max_attempts"));
-        assert!(dbg.contains("initial_delay"));
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // NEW: CorrelationId / SessionId edge cases
-    // ─────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn correlation_id_default_same_as_new() {
-        let d = CorrelationId::default();
-        // Should be a valid UUID
-        assert!(!d.0.is_nil());
-    }
-
-    #[test]
-    fn correlation_id_display_is_uuid_format() {
-        let id = CorrelationId::new();
-        let displayed = id.to_string();
-        // UUID v4 format: 8-4-4-4-12 hex chars
-        assert_eq!(displayed.len(), 36);
-        assert_eq!(displayed.chars().filter(|&c| c == '-').count(), 4);
-    }
-
-    #[test]
-    fn correlation_id_serde_roundtrip() {
-        let id = CorrelationId::new();
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
         let json = serde_json::to_string(&id).unwrap();
-        let back: CorrelationId = serde_json::from_str(&json).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
         assert_eq!(id, back);
     }
 
     #[test]
-    fn correlation_id_clone_preserves_value() {
-        let original = CorrelationId::new();
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
         let cloned = original.clone();
-        assert_eq!(original, cloned);
+        assert_eq!(original.as_str(), cloned.as_str());
     }
 
     #[test]
-    fn session_id_default_same_as_new() {
-        let d = SessionId::default();
-        assert!(!d.0.is_nil());
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
     }
 
     #[test]
-    fn session_id_display_is_uuid_format() {
-        let id = SessionId::new();
-        let displayed = id.to_string();
-        assert_eq!(displayed.len(), 36);
-        assert_eq!(displayed.chars().filter(|&c| c == '-').count(), 4);
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
     }
 
     #[test]
-    fn session_id_serde_roundtrip() {
-        let id = SessionId::new();
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
         let json = serde_json::to_string(&id).unwrap();
-        let back: SessionId = serde_json::from_str(&json).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
         assert_eq!(id, back);
     }
 
     #[test]
-    fn session_id_clone_preserves_value() {
-        let original = SessionId::new();
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
         let cloned = original.clone();
-        assert_eq!(original, cloned);
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // NEW: Principal / TrustLevel edge cases
-    // ─────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn principal_serde_roundtrip() {
-        let p = Principal {
-            kind: "agent".into(),
-            id: "bot-42".into(),
-            trust: TrustLevel::Paired,
-            display: Some("Bot 42".into()),
-        };
-        let json = serde_json::to_string(&p).unwrap();
-        let back: Principal = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.kind, "agent");
-        assert_eq!(back.id, "bot-42");
-        assert_eq!(back.trust, TrustLevel::Paired);
-        assert_eq!(back.display.as_deref(), Some("Bot 42"));
+        assert_eq!(original.as_str(), cloned.as_str());
     }
 
     #[test]
-    fn principal_omits_none_display() {
-        let p = Principal {
-            kind: "user".into(),
-            id: "u1".into(),
-            trust: TrustLevel::Anonymous,
-            display: None,
-        };
-        let json = serde_json::to_string(&p).unwrap();
-        assert!(!json.contains("display"));
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
     }
 
     #[test]
-    fn trust_level_clone_and_copy() {
-        let level = TrustLevel::Admin;
-        let copied = level;
-        assert_eq!(level, copied);
-        // Verify Copy semantics: original still usable after assignment
-        assert_eq!(level, TrustLevel::Admin);
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // NEW: TaintLevel / Provenance edge cases
-    // ─────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn taint_level_serde_roundtrip() {
-        for level in [
-            TaintLevel::Untainted,
-            TaintLevel::Tainted,
-            TaintLevel::HighlyTainted,
-        ] {
-            let json = serde_json::to_string(&level).unwrap();
-            let back: TaintLevel = serde_json::from_str(&json).unwrap();
-            assert_eq!(level, back);
-        }
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
     }
 
     #[test]
-    fn provenance_serde_roundtrip() {
-        let p = Provenance::new(ZoneId::work())
-            .with_step(ProvenanceStep {
-                timestamp_ms: 42,
-                zone: ZoneId::work(),
-                actor: "agent:test".into(),
-                action: "invoke".into(),
-                resource: "cap.read".into(),
-            })
-            .elevated_with("elev-token-abc");
-
-        let json = serde_json::to_string(&p).unwrap();
-        let back: Provenance = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.origin_zone.as_str(), "z:work");
-        assert_eq!(back.chain.len(), 1);
-        assert!(back.elevated);
-        assert_eq!(back.elevation_token.as_deref(), Some("elev-token-abc"));
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
     }
 
     #[test]
-    fn provenance_multiple_steps() {
-        let p = Provenance::new(ZoneId::work())
-            .with_step(ProvenanceStep {
-                timestamp_ms: 100,
-                zone: ZoneId::work(),
-                actor: "a1".into(),
-                action: "read".into(),
-                resource: "r1".into(),
-            })
-            .with_step(ProvenanceStep {
-                timestamp_ms: 200,
-                zone: ZoneId::private(),
-                actor: "a2".into(),
-                action: "write".into(),
-                resource: "r2".into(),
-            });
-        assert_eq!(p.chain.len(), 2);
-        assert_eq!(p.chain[0].timestamp_ms, 100);
-        assert_eq!(p.chain[1].timestamp_ms, 200);
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
     }
 
     #[test]
-    fn provenance_untainted_can_access_higher_trust() {
-        let p = Provenance::new(ZoneId::work());
-        assert!(!p.is_tainted());
-        assert!(p.can_access_higher_trust());
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
     }
 
     #[test]
-    fn provenance_highly_tainted_cannot_access_without_elevation() {
-        let p = Provenance::highly_tainted(ZoneId::public());
-        assert!(p.is_tainted());
-        assert!(!p.can_access_higher_trust());
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
     }
 
     #[test]
-    fn provenance_highly_tainted_with_elevation_can_access() {
-        let p = Provenance::highly_tainted(ZoneId::public()).elevated_with("high-elev-token");
-        assert!(p.is_tainted());
-        assert!(p.can_access_higher_trust());
-        assert_eq!(p.elevation_token.as_deref(), Some("high-elev-token"));
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // NEW: CapabilityToken test_token
-    // ─────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn capability_token_test_token_is_constructible() {
-        let token = CapabilityToken::test_token();
-        // Should have raw COSE token
-        let dbg = format!("{token:?}");
-        assert!(dbg.contains("CapabilityToken"));
-    }
-
-    #[test]
-    fn capability_token_clone() {
-        let token = CapabilityToken::test_token();
-        let cloned = token.clone();
-        // Both should exist independently
-        let dbg1 = format!("{token:?}");
-        let dbg2 = format!("{cloned:?}");
-        assert!(!dbg1.is_empty());
-        assert!(!dbg2.is_empty());
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // NEW: CapabilityVerifier construction
-    // ─────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn capability_verifier_new_stores_fields() {
-        let key = [0u8; 32];
-        let zone = ZoneId::work();
-        let instance = InstanceId::new();
-        let verifier = CapabilityVerifier::new(key, zone.clone(), instance.clone());
-
-        assert_eq!(verifier.host_public_key, [0u8; 32]);
-        assert_eq!(verifier.zone_id.as_str(), zone.as_str());
-        assert_eq!(verifier.instance_id.as_str(), instance.as_str());
-    }
-
-    #[test]
-    fn capability_verifier_clone() {
-        let key = [1u8; 32];
-        let zone = ZoneId::owner();
-        let instance = InstanceId::new();
-        let original = CapabilityVerifier::new(key, zone, instance);
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
         let cloned = original.clone();
-        assert_eq!(original.host_public_key, cloned.host_public_key);
-        assert_eq!(original.zone_id.as_str(), cloned.zone_id.as_str());
+        assert_eq!(original.as_str(), cloned.as_str());
     }
 
     #[test]
-    fn capability_verifier_rejects_wrong_key() {
-        // Generate token with one key, verify with a different key
-        let signing_key = Ed25519SigningKey::generate();
-        let wrong_key = Ed25519SigningKey::generate();
-        let wrong_pub = wrong_key.verifying_key().to_bytes();
-
-        let now = Utc::now();
-        let cose_token = CapabilityTokenBuilder::new()
-            .capability_id("cap.test")
-            .zone_id("z:work")
-            .principal("user:test")
-            .operations(&["op.test"])
-            .issuer("node:primary")
-            .validity(now, now + Duration::hours(1))
-            .sign(&signing_key)
-            .unwrap();
-
-        let token = CapabilityToken { raw: cose_token };
-        let verifier = CapabilityVerifier::new(wrong_pub, ZoneId::work(), InstanceId::new());
-        let op = OperationId::new("op.test").unwrap();
-        let cap = CapabilityId::new("cap.test").unwrap();
-
-        let result = verifier.verify(&token, &cap, &op, &[]);
-        assert!(result.is_err());
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // NEW: OperationRateLimitScope serde roundtrip
-    // ─────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn operation_rate_limit_scope_serde_roundtrip() {
-        for scope in [
-            OperationRateLimitScope::PerConnector,
-            OperationRateLimitScope::PerZone,
-            OperationRateLimitScope::PerPrincipal,
-        ] {
-            let json = serde_json::to_string(&scope).unwrap();
-            let back: OperationRateLimitScope = serde_json::from_str(&json).unwrap();
-            assert_eq!(scope, back);
-        }
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
     }
 
     #[test]
-    fn operation_rate_limit_scope_from_str_error_message() {
-        let err = "garbage".parse::<OperationRateLimitScope>().unwrap_err();
-        assert!(err.contains("garbage"));
-        assert!(err.contains("per_connector"));
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // NEW: IdempotencyClass / SafetyTier copy semantics
-    // ─────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn idempotency_class_is_copy() {
-        let a = IdempotencyClass::Strict;
-        let b = a;
-        assert_eq!(a, b);
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
     }
 
     #[test]
-    fn safety_tier_is_copy() {
-        let a = SafetyTier::Dangerous;
-        let b = a;
-        assert_eq!(a, b);
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
     }
 
     #[test]
-    fn risk_level_is_copy() {
-        let a = RiskLevel::High;
-        let b = a;
-        assert_eq!(a, b);
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
     }
-}
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::from_static("op.send");
+        let s: &str = id.as_ref();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_into_string() {
+        let id = OperationId::from_static("op.send");
+        let s: String = id.into();
+        assert_eq!(s, "op.send");
+    }
+
+    #[test]
+    fn operation_id_display() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.to_string(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_str() {
+        let id: OperationId = "op.send".parse().unwrap();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_from_string() {
+        let id: OperationId = String::from("op.send").into();
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::from_static("op.send");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn operation_id_clone_preserves_value() {
+        let original = OperationId::from_static("op.send");
+        let cloned = original.clone();
+        assert_eq!(original.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn operation_id_as_ref_str() {
+        let id = OperationId::

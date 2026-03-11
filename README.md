@@ -716,18 +716,18 @@ Owner policy can enforce:
 
 | Metric | Target (p50/p99) | How Measured |
 |--------|------------------|--------------|
-| Cold start (connector activate) | < 100ms / < 500ms | `fcp bench connector-activate` |
-| Local invoke latency (same node) | < 2ms / < 10ms | `fcp bench invoke-local` |
-| Tailnet invoke latency (LAN) | < 20ms / < 100ms | `fcp bench invoke-mesh --path=direct` |
-| Tailnet invoke latency (DERP) | < 150ms / < 500ms | `fcp bench invoke-mesh --path=derp` |
-| Symbol reconstruction (1MB) | < 50ms / < 250ms | `fcp bench raptorq --size=1mb` |
-| Secret reconstruction (k-of-n) | < 150ms / < 750ms | `fcp bench secrets --k=3 --n=5` |
+| Cold start (connector activate) | < 100ms / < 500ms | Host-backed connector activation benchmark harness |
+| Local invoke latency (same node) | < 2ms / < 10ms | Host-backed local invoke scenario |
+| Tailnet invoke latency (LAN) | < 20ms / < 100ms | Mesh invoke benchmark on direct path |
+| Tailnet invoke latency (DERP) | < 150ms / < 500ms | Mesh invoke benchmark on DERP path |
+| Symbol reconstruction (1MB) | < 50ms / < 250ms | RaptorQ benchmark harness |
+| Secret reconstruction (k-of-n) | < 150ms / < 750ms | Secret reconstruction benchmark harness |
 | Memory overhead | < 10MB per connector | Sandbox limits |
 | CPU overhead | < 1% idle | Event-driven architecture |
 
 ### Benchmarks
 
-The reference implementation ships a `fcp bench` suite that produces machine-readable results (JSON) for regression tracking.
+Benchmarking lives in host-backed scenarios and dedicated harnesses. The only supported connector CLI is `fwc`; the retired `fcp` binary is not a benchmark surface.
 
 ---
 
@@ -736,20 +736,21 @@ The reference implementation ships a `fcp bench` suite that produces machine-rea
 FCP is designed to be *operable* without disabling security. The CLI exposes the core safety/availability loops:
 
 ```bash
-# Explain why an operation was denied (DecisionReceipt-backed)
-fcp explain --request <objectid>
+# Inspect the active host context and connector inventory
+fwc context current
+fwc list
 
-# Show revocation/checkpoint freshness and degraded mode state
-fcp doctor --zone z:private
+# Inspect one connector and its operation schema
+fwc show github
+fwc schema github issues.create --required-only
 
-# Show offline availability SLOs and symbol coverage by placement policy
-fcp repair status --zone z:work
+# Run a real preflight against live host state, then invoke for real
+fwc simulate github issues.create --file payload.json
+fwc invoke github issues.create --file payload.json
 
-# Fix manifest interface hash + lint defaults
-fcp manifest fix ./connectors/myconnector/manifest.toml --check
-
-# Tail audit events (per zone) with trace correlation
-fcp audit tail --zone z:owner
+# Check live connector status and recent execution history
+fwc status github
+fwc history --connector github --limit 20
 ```
 
 Key principle: **if you can't explain a denial or quantify offline availability, the system isn't finished.**
@@ -791,6 +792,14 @@ Delivers the core safety story ("zones + explicit authority + auditable operatio
 
 ---
 
+## Canonical CLI
+
+`fwc` is the only canonical Flywheel connectors CLI.
+
+- `fwc` is the supported operator and agent surface for connector discovery, schema inspection, lifecycle control, simulation, invocation, batching, history, and context management.
+- The `fcp` binary is retired. The `crates/fcp-cli` crate remains only as a hard-stop migration shim that exits and tells callers to use `fwc`.
+- Runtime-facing `fwc` commands must either hit live `fcp-host` state or fail explicitly. They must not fabricate connector execution, simulated inventory, or placeholder results.
+
 ## Project Structure
 
 ```
@@ -816,8 +825,8 @@ flywheel_connectors/
 │   ├── fcp-conformance/       # Golden vectors, schema checks, interop tooling
 │   ├── fcp-testkit/           # Shared test harnesses, fixtures, and mock infrastructure
 │   ├── fcp-e2e/               # End-to-end compliance and host-backed scenarios
-│   ├── fcp-cli/               # FCP2 developer/operator CLI (`fcp`)
-│   └── fwc/                   # Agent-first standalone connectors CLI (`fwc`)
+│   ├── fcp-cli/               # Temporary retirement shim that exits and points callers at `fwc`
+│   └── fwc/                   # Sole supported Flywheel connectors CLI
 │
 ├── connectors/            # Individual connector implementations
 │   ├── twitter/
@@ -842,13 +851,14 @@ The workspace already clusters into a few clear responsibility bands:
 |------|----------------|------------------|
 | **Semantic core** | `fcp-core`, `fcp-cbor`, `fcp-crypto`, `fcp-manifest`, `fcp-audit` | Authority model, canonical encoding, cryptographic primitives, manifests, receipts, and shared domain types |
 | **Durable mesh/data plane** | `fcp-protocol`, `fcp-store`, `fcp-raptorq`, `fcp-tailscale`, `fcp-mesh` | FCPC/FCPS framing, symbol/object handling, repair, routing, admission, gossip, leases, and mesh identity |
-| **Host/operator surfaces** | `fcp-host`, `fcp-cli`, `fwc` | Node-local orchestration, admin/doctor/discovery/invoke surfaces, operator UX, and agent-facing CLI flows |
+| **Host/operator surfaces** | `fcp-host`, `fwc` | Node-local orchestration, admin/discovery/invoke/status surfaces, and the single supported operator/agent CLI |
 | **Connector authoring/runtime helpers** | `fcp-sdk`, `fcp-streaming`, `fcp-oauth`, `fcp-graphql`, `fcp-google-discovery`, `fcp-ratelimit`, `fcp-bootstrap`, `fcp-telemetry` | Connector contracts, streaming/polling supervision, provider helpers, retries, provisioning, and observability |
 | **Evidence and test harnesses** | `fcp-conformance`, `fcp-testkit`, `fcp-e2e` | Golden vectors, schema validation, reusable fixtures, and end-to-end compliance coverage |
 
 That split is useful because it shows what is already coherent versus what is still transitional.
 `fcp-core` is carrying much of the long-lived semantic vocabulary. `fcp-host` is already the
-node-local orchestration boundary. `fwc` is growing into the agent-first operational surface.
+node-local orchestration boundary. `fwc` is now the canonical operational surface.
+`fcp-cli` still exists in the tree only as a dead-end retirement shim and must not regain live behavior.
 The remaining ambiguity is mostly around runtime substrate and where the final FCP3 kernel line
 should be drawn.
 
@@ -862,12 +872,12 @@ The FCP3 re-foundation is converging on a stricter "one concept, one home" rule:
 | **Mesh + object substrate** | `fcp-mesh`, `fcp-store`, `fcp-raptorq`, `fcp-tailscale` | Placement, repair, checkpoint sync, admission, object durability, and symbol transport stay together as the mesh/object plane rather than being re-implemented inside host or SDK code |
 | **Host / supervision** | `fcp-host` | Activation, lifecycle, rollout, health, policy compilation, admin RPC, explain/doctor surfaces, and execution placement belong to the host as a supervised root application |
 | **Connector SDK** | `fcp-sdk`, `fcp-streaming`, `fcp-oauth`, `fcp-graphql`, `fcp-google-discovery` | Connector-facing ergonomics, typed I/O helpers, streaming/polling/webhook utilities, and shared provider tooling belong in the SDK/helper layer, not in the kernel |
-| **Tooling and evidence surfaces** | `fcp-cli`, `fwc`, `fcp-conformance`, `fcp-testkit`, `fcp-e2e`, `fcp-telemetry` | Operator UX, agent UX, conformance, replayable evidence, and harnesses stay outside the kernel and host so they can evolve without smearing core semantics |
+| **Tooling and evidence surfaces** | `fwc`, `fcp-conformance`, `fcp-testkit`, `fcp-e2e`, `fcp-telemetry` | Operator UX, agent UX, conformance, replayable evidence, and harnesses stay outside the kernel and host so they can evolve without smearing core semantics |
 
 The main transitional or quarantine surfaces are:
 
 - `fcp-async-core` and the Tokio compatibility bridge, which exist to keep the current code running while the runtime model is being pulled toward an Asupersync-native kernel.
-- Duplicate operator surfaces across `fcp` and `fwc`, which are useful today but should not become two competing homes for the same lifecycle or invoke semantics.
+- The retired `fcp` binary shim, which exists only to redirect callers to `fwc` and must not regain connector semantics.
 - Connector/runtime patterns that still assume newline JSON-RPC over stdio or request-local execution rather than the long-term supervised application model described in `FCP_Specification_V3.md`.
 
 Put differently: FCP3 should keep the strong domain model and mesh/evidence work already present in

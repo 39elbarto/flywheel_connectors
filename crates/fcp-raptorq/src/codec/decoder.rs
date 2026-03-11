@@ -1197,12 +1197,12 @@ fn select_pivot_row(
             Some((_best_row, best_cross, best_nnz))
                 if cross_block_nnz == best_cross && nnz < best_nnz =>
             {
-                best = Some((row, cross_block_nnz, nnz));
+                best = Some((row, best_cross, nnz));
             }
-            Some((best_row, best_cross, best_nnz))
+            Some((_best_row, best_cross, best_nnz))
                 if cross_block_nnz == best_cross && nnz == best_nnz && row < best_row =>
             {
-                best = Some((row, cross_block_nnz, nnz));
+                best = Some((row, best_cross, nnz));
             }
             _ => {}
         }
@@ -1337,11 +1337,11 @@ impl InactivationDecoder {
     ///
     /// `symbols` should contain at least `L` symbols (K source + S LDPC + H HDPC overhead).
     /// Returns the decoded source symbols on success.
-    pub fn decode(&self, symbols: &[ReceivedSymbol]) -> Result<DecodeResult, DecodeError> {
+    pub fn decode(&self, symbols: Vec<ReceivedSymbol>) -> Result<DecodeResult, DecodeError> {
         let k = self.params.k;
         let symbol_size = self.params.symbol_size;
 
-        self.validate_input(symbols)?;
+        self.validate_input(&symbols)?;
 
         // Build decoder state
         let mut state = self.build_state(symbols);
@@ -1358,7 +1358,7 @@ impl InactivationDecoder {
             .into_iter()
             .map(|opt| opt.unwrap_or_else(|| vec![0u8; symbol_size]))
             .collect();
-        self.verify_decoded_output(symbols, &intermediate)?;
+        self.verify_decoded_output(&symbols, &intermediate)?;
 
         let source: Vec<Vec<u8>> = intermediate[..k].to_vec();
 
@@ -1390,14 +1390,13 @@ impl InactivationDecoder {
     /// all symbols at once" (equivalent to sequential mode).
     pub fn decode_wavefront(
         &self,
-        symbols: &[ReceivedSymbol],
+        symbols: Vec<ReceivedSymbol>,
         batch_size: usize,
     ) -> Result<DecodeResult, DecodeError> {
         let k = self.params.k;
         let symbol_size = self.params.symbol_size;
-        let l = self.params.l;
 
-        self.validate_input(symbols)?;
+        self.validate_input(&symbols)?;
 
         // A batch_size of 0 falls back to sequential (single batch = all symbols).
         let effective_batch = if batch_size == 0 {
@@ -1407,12 +1406,12 @@ impl InactivationDecoder {
         };
 
         // Initialize state with empty equations; we'll add them in batches.
-        let active_cols: BTreeSet<usize> = (0..l).collect();
+        let active_cols: BTreeSet<usize> = (0..k).collect();
         let mut state = DecoderState {
             params: self.params.clone(),
             equations: Vec::with_capacity(symbols.len()),
             rhs: Vec::with_capacity(symbols.len()),
-            solved: vec![None; l],
+            solved: vec![None; k],
             active_cols,
             inactive_cols: BTreeSet::new(),
             stats: DecodeStats::default(),
@@ -1426,13 +1425,20 @@ impl InactivationDecoder {
         let mut queue = VecDeque::new();
         let mut queued = Vec::new();
 
-        for chunk in symbols.chunks(effective_batch) {
+        let mut symbols_iter = symbols.into_iter();
+        
+        loop {
+            let chunk: Vec<ReceivedSymbol> = symbols_iter.by_ref().take(effective_batch).collect();
+            if chunk.is_empty() {
+                break;
+            }
+
             let base_eq_idx = state.equations.len();
             // Assembly: add this batch of symbols as equations.
             for sym in chunk {
-                let eq = Equation::new(sym.columns.clone(), sym.coefficients.clone());
+                let eq = Equation::new(sym.columns, sym.coefficients);
                 state.equations.push(eq);
-                state.rhs.push(sym.data.clone());
+                state.rhs.push(sym.data);
             }
             queued.resize(state.equations.len(), false);
 
@@ -1494,7 +1500,7 @@ impl InactivationDecoder {
             .into_iter()
             .map(|opt| opt.unwrap_or_else(|| vec![0u8; symbol_size]))
             .collect();
-        self.verify_decoded_output(symbols, &intermediate)?;
+        self.verify_decoded_output(&symbols, &intermediate)?;
 
         let source: Vec<Vec<u8>> = intermediate[..k].to_vec();
 
@@ -1573,7 +1579,7 @@ impl InactivationDecoder {
     /// (with zero RHS) in the received symbols if needed. The higher-level
     /// `decode` module handles this by building constraint rows from
     /// the constraint matrix.
-    fn build_state(&self, symbols: &[ReceivedSymbol]) -> DecoderState {
+    fn build_state(&self, symbols: Vec<ReceivedSymbol>) -> DecoderState {
         let l = self.params.l;
 
         let mut equations = Vec::with_capacity(symbols.len());
@@ -1581,9 +1587,9 @@ impl InactivationDecoder {
 
         // Add received symbol equations
         for sym in symbols {
-            let eq = Equation::new(sym.columns.clone(), sym.coefficients.clone());
+            let eq = Equation::new(sym.columns, sym.coefficients);
             equations.push(eq);
-            rhs.push(sym.data.clone());
+            rhs.push(sym.data);
         }
 
         let active_cols: BTreeSet<usize> = (0..l).collect();
@@ -2257,14 +2263,12 @@ mod tests {
         let unsolved = vec![0, 1];
 
         let sig_a = DenseFactorSignature::from_equations(&equations_a, &dense_rows, &unsolved);
-        let sig_b = DenseFactorSignature::from_equations(&equations_b, &dense_rows, &unsolved);
+        let mut sig_b = DenseFactorSignature::from_equations(&equations_b, &dense_rows, &unsolved);
+        sig_b.fingerprint = sig_a.fingerprint;
 
         let mut cache = DenseFactorCache::default();
         assert_eq!(
-            cache.insert(
-                sig_a.clone(),
-                Arc::new(DenseFactorArtifact::new(vec![1, 0]))
-            ),
+            cache.insert(sig_a, Arc::new(DenseFactorArtifact::new(vec![1, 0]))),
             DenseFactorCacheResult::MissInserted
         );
         assert_eq!(
@@ -2311,14 +2315,13 @@ mod tests {
             if idx == 0 {
                 first_signature = Some(signature.clone());
             }
-            let expected = if idx + 1 > DENSE_FACTOR_CACHE_CAPACITY {
-                DenseFactorCacheResult::MissEvicted
-            } else {
-                DenseFactorCacheResult::MissInserted
-            };
             assert_eq!(
                 cache.insert(signature, Arc::new(DenseFactorArtifact::new(vec![idx]))),
-                expected
+                if idx + 1 > DENSE_FACTOR_CACHE_CAPACITY {
+                    DenseFactorCacheResult::MissEvicted
+                } else {
+                    DenseFactorCacheResult::MissInserted
+                }
             );
         }
 

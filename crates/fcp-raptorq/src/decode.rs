@@ -162,7 +162,7 @@ impl RaptorQDecoder {
             symbols.push(ReceivedSymbol::source(esi as u32, vec![0u8; symbol_size]));
         }
 
-        match decoder.decode(&symbols) {
+        match decoder.decode(symbols) {
             Ok(result) => {
                 // Reconstruct payload from first K source symbols
                 let mut payload = Vec::with_capacity(transfer_len);

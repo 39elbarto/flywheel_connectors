@@ -13822,6 +13822,32 @@ mod tests {
         })
     }
 
+    fn mock_tool_descriptor_json(
+        name: &str,
+        capability: &str,
+        risk_level: &str,
+        safety_tier: &str,
+        idempotency: &str,
+        approval_mode: Option<&str>,
+        input_schema: Value,
+        output_schema: Value,
+    ) -> Value {
+        json!({
+            "name": name,
+            "description": format!("Mock descriptor for {name}."),
+            "input_schema": input_schema,
+            "output_schema": output_schema,
+            "capability": capability,
+            "risk_level": risk_level,
+            "safety_tier": safety_tier,
+            "idempotency": idempotency,
+            "approval_mode": approval_mode,
+            "requires_confirmation": approval_mode.is_some(),
+            "idempotent": matches!(idempotency, "strict" | "best_effort"),
+            "supports_simulate": true,
+        })
+    }
+
     fn mock_preflight_response_json(allowed: bool) -> Value {
         serde_json::to_value(if allowed {
             HostPreflightResponse::allowed()
@@ -16651,33 +16677,127 @@ default = "#general"
         )
         .unwrap();
 
+        let capability_token = test_capability_token_arg();
+        let github_connector = mock_connector_summary_custom_json(
+            "fcp.github:enterprise:v1",
+            "GitHub Enterprise",
+            1,
+            "safe",
+        );
+        let slack_connector =
+            mock_connector_summary_custom_json("fcp.slack:team:v1", "Slack Team", 1, "risky");
+        let github_search_tool = mock_tool_descriptor_json(
+            "github.search_issues",
+            "github.read",
+            "low",
+            "safe",
+            "strict",
+            None,
+            json!({
+                "type": "object",
+                "properties": {
+                    "owner": { "type": "string" },
+                    "repo": { "type": "string" }
+                },
+                "required": ["owner", "repo"]
+            }),
+            json!({
+                "type": "object",
+                "properties": {
+                    "issues": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": { "type": "string" }
+                            }
+                        }
+                    }
+                }
+            }),
+        );
+        let slack_post_tool = mock_tool_descriptor_json(
+            "slack.post_message",
+            "slack.post_message",
+            "medium",
+            "risky",
+            "none",
+            Some("interactive"),
+            json!({
+                "type": "object",
+                "properties": {
+                    "channel": { "type": "string" },
+                    "text": { "type": "string" }
+                },
+                "required": ["channel", "text"]
+            }),
+            json!({
+                "type": "object",
+                "properties": {
+                    "ok": { "type": "boolean" }
+                }
+            }),
+        );
+        let (host, server) = spawn_mock_host_sequence(vec![
+            (
+                "POST /rpc/discover".to_owned(),
+                mock_discovery_response_with_connectors(vec![
+                    github_connector.clone(),
+                    slack_connector.clone(),
+                ]),
+            ),
+            (
+                "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
+                mock_introspection_response_with_tools(
+                    github_connector,
+                    vec![github_search_tool],
+                ),
+            ),
+            (
+                "GET /rpc/introspect/fcp.slack:team:v1".to_owned(),
+                mock_introspection_response_with_tools(slack_connector, vec![slack_post_tool]),
+            ),
+            (
+                "POST /rpc/preflight".to_owned(),
+                mock_preflight_response_json(true),
+            ),
+            (
+                "POST /rpc/invoke".to_owned(),
+                mock_invoke_response_json(json!({
+                    "issues": [
+                        { "title": "Bug report" }
+                    ]
+                })),
+            ),
+            (
+                "POST /rpc/preflight".to_owned(),
+                mock_preflight_response_json(true),
+            ),
+        ]);
         let path_str = path.display().to_string();
         let (exit_code, payload) = execute_json(&[
             "fwc",
             "--json",
+            "--host",
+            &host,
             "pipeline",
             "dry-run",
             &path_str,
+            "--capability-token",
+            &capability_token,
             "--param",
             "owner=octocat",
             "--param",
             "repo=hello-world",
         ]);
 
+        server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Success.into());
-        assert_eq!(payload["status"], "planned");
+        assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["command"], "pipeline");
+        assert_eq!(payload["subcommand"], "dry-run");
+        assert_eq!(payload["source"], "host-admin-api");
         assert_eq!(payload["plan"]["execution_order"][0], "fetch");
-        assert_eq!(payload["plan"]["steps"][0]["input"]["owner"], "octocat");
-        assert_eq!(payload["plan"]["steps"][0]["input"]["repo"], "hello-world");
-        assert_eq!(payload["plan"]["steps"][1]["input"]["channel"], "#general");
-        assert_eq!(
-            payload["plan"]["steps"][1]["unresolved_templates"][0],
-            "steps.fetch.output.issues | length"
-        );
-        assert_eq!(
-            payload["plan"]["steps"][1]["condition"],
-            "{{steps.fetch.output.issues | length}} > 0"
-        );
         assert_eq!(payload["estimate"]["estimated_api_calls"]["min"], 1);
         assert_eq!(payload["estimate"]["estimated_api_calls"]["max"], 2);
         assert_eq!(payload["estimate"]["risk_assessment"]["level"], "medium");
@@ -16692,6 +16812,58 @@ default = "#general"
             payload["estimate"]["required_approvals"][0]["step_id"],
             "notify"
         );
+        assert_eq!(payload["execution"]["executed_steps"], 1);
+        assert_eq!(payload["execution"]["preflight_only_steps"], 1);
+        assert_eq!(payload["execution"]["skipped_steps"], 0);
+        assert_eq!(payload["execution"]["blocked_steps"], 0);
+        assert_eq!(payload["execution"]["outputs"]["fetch"]["issues"][0]["title"], "Bug report");
+        let steps = payload["execution"]["steps"]
+            .as_array()
+            .expect("execution steps should be present");
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0]["id"], "fetch");
+        assert_eq!(steps[0]["mode"], "dry-run-read");
+        assert_eq!(steps[0]["input"]["owner"], "octocat");
+        assert_eq!(steps[0]["input"]["repo"], "hello-world");
+        assert_eq!(steps[0]["response"]["result"]["issues"][0]["title"], "Bug report");
+        assert_eq!(steps[1]["id"], "notify");
+        assert_eq!(steps[1]["status"], "ok");
+        assert_eq!(steps[1]["mode"], "preflight");
+        assert_eq!(steps[1]["input"]["channel"], "#general");
+        assert_eq!(steps[1]["input"]["text"], "New issues: 1");
+        assert_eq!(steps[1]["condition"]["allowed"], true);
+    }
+
+    #[test]
+    fn execute_pipeline_dry_run_requires_live_host() {
+        let root = std::env::temp_dir().join(format!(
+            "fwc-pipeline-dry-run-no-host-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("notify.toml");
+        std::fs::write(
+            &path,
+            r#"
+[pipeline]
+name = "notify-on-new-issues"
+
+[[steps]]
+id = "fetch"
+operation = "github.search_issues"
+"#,
+        )
+        .unwrap();
+
+        let path_str = path.display().to_string();
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "pipeline", "dry-run", &path_str]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "pipeline");
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
+        assert_eq!(payload["details"]["subcommand"], "dry-run");
     }
 
     #[test]
@@ -16758,12 +16930,74 @@ operation = "github.not_a_real_operation"
         )
         .unwrap();
 
+        let capability_token = test_capability_token_arg();
+        let github_connector = mock_connector_summary_custom_json(
+            "fcp.github:enterprise:v1",
+            "GitHub Enterprise",
+            1,
+            "safe",
+        );
+        let github_search_tool = mock_tool_descriptor_json(
+            "github.search_issues",
+            "github.read",
+            "low",
+            "safe",
+            "strict",
+            None,
+            json!({
+                "type": "object",
+                "properties": {
+                    "owner": { "type": "string" },
+                    "repo": { "type": "string" }
+                },
+                "required": ["owner", "repo"]
+            }),
+            json!({
+                "type": "object",
+                "properties": {
+                    "issues": {
+                        "type": "array",
+                        "items": { "type": "object" }
+                    }
+                }
+            }),
+        );
+        let (host, server) = spawn_mock_host_sequence(vec![
+            (
+                "POST /rpc/discover".to_owned(),
+                mock_discovery_response_with_connectors(vec![github_connector.clone()]),
+            ),
+            (
+                "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
+                mock_introspection_response_with_tools(
+                    github_connector,
+                    vec![github_search_tool],
+                ),
+            ),
+        ]);
         let path_str = path.display().to_string();
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "pipeline", "dry-run", &path_str]);
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "pipeline",
+            "dry-run",
+            &path_str,
+            "--capability-token",
+            &capability_token,
+        ]);
 
+        server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Validation.into());
-        assert_eq!(payload["error"]["type"], "pipeline-operation-not-found");
+        assert_eq!(payload["command"], "pipeline");
+        assert_eq!(payload["error"]["type"], "operation-not-found");
+        assert_eq!(payload["error"]["selector"], "not_a_real_operation");
+        assert!(
+            payload["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("github"))
+        );
     }
 
     #[test]
@@ -16865,6 +17099,151 @@ depends_on = ["missing"]
 
     #[test]
     fn execute_recipe_dry_run_uses_bundled_defaults() {
+        let capability_token = test_capability_token_arg();
+        let github_connector = mock_connector_summary_custom_json(
+            "fcp.github:enterprise:v1",
+            "GitHub Enterprise",
+            1,
+            "safe",
+        );
+        let slack_connector =
+            mock_connector_summary_custom_json("fcp.slack:team:v1", "Slack Team", 1, "risky");
+        let github_get_pr_tool = mock_tool_descriptor_json(
+            "github.get_pull_request",
+            "github.read",
+            "low",
+            "safe",
+            "strict",
+            None,
+            json!({
+                "type": "object",
+                "properties": {
+                    "owner": { "type": "string" },
+                    "repo": { "type": "string" },
+                    "pull_number": { "type": "integer" }
+                },
+                "required": ["owner", "repo", "pull_number"]
+            }),
+            json!({
+                "type": "object",
+                "properties": {
+                    "pull_request": {
+                        "type": "object",
+                        "properties": {
+                            "title": { "type": "string" }
+                        }
+                    }
+                }
+            }),
+        );
+        let slack_post_tool = mock_tool_descriptor_json(
+            "slack.post_message",
+            "slack.post_message",
+            "medium",
+            "risky",
+            "none",
+            Some("interactive"),
+            json!({
+                "type": "object",
+                "properties": {
+                    "channel": { "type": "string" },
+                    "text": { "type": "string" }
+                },
+                "required": ["channel", "text"]
+            }),
+            json!({
+                "type": "object",
+                "properties": {
+                    "ok": { "type": "boolean" }
+                }
+            }),
+        );
+        let (host, server) = spawn_mock_host_sequence(vec![
+            (
+                "POST /rpc/discover".to_owned(),
+                mock_discovery_response_with_connectors(vec![
+                    github_connector.clone(),
+                    slack_connector.clone(),
+                ]),
+            ),
+            (
+                "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
+                mock_introspection_response_with_tools(
+                    github_connector,
+                    vec![github_get_pr_tool],
+                ),
+            ),
+            (
+                "GET /rpc/introspect/fcp.slack:team:v1".to_owned(),
+                mock_introspection_response_with_tools(slack_connector, vec![slack_post_tool]),
+            ),
+            (
+                "POST /rpc/preflight".to_owned(),
+                mock_preflight_response_json(true),
+            ),
+            (
+                "POST /rpc/invoke".to_owned(),
+                mock_invoke_response_json(json!({
+                    "pull_request": {
+                        "title": "Review the concurrency fix"
+                    }
+                })),
+            ),
+            (
+                "POST /rpc/preflight".to_owned(),
+                mock_preflight_response_json(true),
+            ),
+        ]);
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "recipe",
+            "dry-run",
+            "github-pr-review-notify",
+            "--capability-token",
+            &capability_token,
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["command"], "recipe");
+        assert_eq!(payload["subcommand"], "dry-run");
+        assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["recipe"], "github-pr-review-notify");
+        assert_eq!(payload["estimate"]["estimated_api_calls"]["summary"], "~2 API calls");
+        assert_eq!(payload["execution"]["executed_steps"], 1);
+        assert_eq!(payload["execution"]["preflight_only_steps"], 1);
+        assert_eq!(
+            payload["execution"]["outputs"]["fetch"]["pull_request"]["title"],
+            "Review the concurrency fix"
+        );
+        let steps = payload["execution"]["steps"]
+            .as_array()
+            .expect("execution steps should be present");
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0]["id"], "fetch");
+        assert_eq!(steps[0]["mode"], "dry-run-read");
+        assert_eq!(steps[0]["input"]["owner"], "octocat");
+        assert_eq!(steps[0]["input"]["repo"], "hello-world");
+        assert_eq!(steps[0]["input"]["pull_number"], 1);
+        assert_eq!(
+            steps[0]["response"]["result"]["pull_request"]["title"],
+            "Review the concurrency fix"
+        );
+        assert_eq!(steps[1]["id"], "notify");
+        assert_eq!(steps[1]["mode"], "preflight");
+        assert_eq!(steps[1]["input"]["channel"], "C01234567");
+        assert_eq!(
+            steps[1]["input"]["text"],
+            "PR review requested for octocat/hello-world#1: Review the concurrency fix"
+        );
+    }
+
+    #[test]
+    fn execute_recipe_dry_run_requires_live_host() {
         let (exit_code, payload) = execute_json(&[
             "fwc",
             "--json",
@@ -16873,19 +17252,11 @@ depends_on = ["missing"]
             "github-pr-review-notify",
         ]);
 
-        assert_eq!(exit_code, CliExitCode::Success.into());
-        assert_eq!(payload["status"], "planned");
+        assert_eq!(exit_code, CliExitCode::Transport.into());
         assert_eq!(payload["command"], "recipe");
-        assert_eq!(payload["subcommand"], "dry-run");
-        assert_eq!(payload["recipe"], "github-pr-review-notify");
-        assert_eq!(payload["plan"]["steps"][0]["input"]["owner"], "octocat");
-        assert_eq!(payload["plan"]["steps"][0]["input"]["repo"], "hello-world");
-        assert_eq!(payload["plan"]["steps"][0]["input"]["pull_number"], "1");
-        assert_eq!(payload["plan"]["steps"][1]["input"]["channel"], "C01234567");
-        assert_eq!(
-            payload["estimate"]["estimated_api_calls"]["summary"],
-            "~2 API calls"
-        );
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
+        assert_eq!(payload["details"]["subcommand"], "dry-run");
+        assert_eq!(payload["details"]["recipe"], "github-pr-review-notify");
     }
 
     #[test]

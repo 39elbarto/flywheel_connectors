@@ -53,10 +53,11 @@ use fcp_host::{
     ConnectorSummary, DiscoveryEndpoint, DiscoveryFilter, DiscoveryResponse, DoctorReport,
     DoctorRequest, DoctorService, GateOutcome, HostAdminStateStore, HostHealthResponse,
     HostHealthStatus, HostPreflightRequest, IntrospectionResponse, ManagedConnectorConfig,
-    OperationResult, OperationResultStatus, PreflightRequest, PreflightResponse, RequestPriority,
-    ResilienceError, ResilienceLayer, RolloutController, RolloutDecision, RolloutObservation,
-    RolloutOutcome, SafetyTierExt, StartupReconciliationReport, SupplyChainGate,
-    SupplyChainGateConfig, merge_connector_health,
+    JournalQueryRequest, JournalQueryResponse, LifecycleTransitionRequest,
+    LifecycleTransitionResponse, OperationResult, OperationResultStatus, PreflightRequest,
+    PreflightResponse, RequestPriority, ResilienceError, ResilienceLayer, RolloutController,
+    RolloutDecision, RolloutObservation, RolloutOutcome, SafetyTierExt,
+    StartupReconciliationReport, SupplyChainGate, SupplyChainGateConfig, merge_connector_health,
 };
 use fcp_host::{HostError, HostResult};
 use futures_util::future::join_all;
@@ -1186,7 +1187,7 @@ fn log_startup_reconciliation(report: &fcp_host::StartupReconciliationReport) {
                 event = "startup_reconciliation_drift",
                 connector_id = %entry.connector_id,
                 desired_state = ?entry.desired_state,
-                observed_state = ?entry.observed_state_after,
+                observed_state_after = ?entry.observed_state_after,
                 drift_kind = ?drift.kind,
                 recovery_action = ?drift.recovery_action,
                 message = %drift.message,
@@ -1483,8 +1484,1237 @@ fn resolve_supply_chain_gate_config() -> HostResult<SupplyChainGateConfig> {
         }
         policy.min_slsa_level = min_slsa_level;
     }
-    if let Some(trusted_builders) = read_env_csv("FCP_HOST_SUPPLY_CHAIN_TRUSTED_BUILDERS") {
-        policy.trusted_builders = trusted_builders;
+    if let Some(allow_unsigned) = read_env_bool("FCP_HOST_SUPPLY_CHAIN_ALLOW_UNSIGNED")? {
+        policy.allow_unsigned = allow_unsigned;
+    }
+    if let Some(require_digest_match) = read_env_bool("FCP_HOST_SUPPLY_CHAIN_REQUIRE_DIGEST_MATCH")?
+    {
+        policy.require_digest_match = require_digest_match;
+    }
+
+    Ok(config)
+}
+
+fn read_env_bool(name: &str) -> HostResult<Option<bool>> {
+    let raw = match std::env::var(name) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    parse_env_bool(name, trimmed).map(Some)
+}
+
+fn parse_env_bool(name: &str, raw: &str) -> HostResult<bool> {
+    if raw.eq_ignore_ascii_case("true")
+        || raw.eq_ignore_ascii_case("yes")
+        || raw.eq_ignore_ascii_case("on")
+        || raw == "1"
+    {
+        Ok(true)
+    } else if raw.eq_ignore_ascii_case("false")
+        || raw.eq_ignore_ascii_case("no")
+        || raw.eq_ignore_ascii_case("off")
+        || raw == "0"
+    {
+        Ok(false)
+    } else {
+        Err(HostError::InvalidFilter(format!(
+            "invalid boolean value for {name}: {raw}"
+        )))
+    }
+}
+
+fn read_env_u8(name: &str) -> HostResult<Option<u8>> {
+    let raw = match std::env::var(name) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let parsed = trimmed
+        .parse()
+        .map_err(|err| HostError::InvalidFilter(format!("invalid {name}: {err}")))?;
+    Ok(Some(parsed))
+}
+
+fn read_env_usize(name: &str) -> HostResult<Option<usize>> {
+    let raw = match std::env::var(name) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let parsed = trimmed
+        .parse()
+        .map_err(|err| HostError::InvalidFilter(format!("invalid {name}: {err}")))?;
+    Ok(Some(parsed))
+}
+
+fn read_env_csv(name: &str) -> Option<Vec<String>> {
+    std::env::var(name).ok().map(|raw| {
+        raw.split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(ToOwned::to_owned)
+            .collect()
+    })
+}
+
+fn resolve_bind_target() -> HostResult<BindTarget> {
+    let raw = std::env::var("FCP_HOST_BIND").unwrap_or_else(|_| "127.0.0.1:9090".to_string());
+    parse_bind_target(&raw)
+}
+
+fn parse_bind_target(raw: &str) -> HostResult<BindTarget> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(HostError::Internal(
+            "FCP_HOST_BIND cannot be empty".to_string(),
+        ));
+    }
+
+    #[cfg(unix)]
+    {
+        if let Some(path) = trimmed.strip_prefix("unix://") {
+            return parse_unix_bind_target(path, raw);
+        }
+
+        if trimmed.starts_with('/') {
+            return parse_unix_bind_target(trimmed, raw);
+        }
+    }
+
+    #[cfg(not(unix))]
+    if trimmed.starts_with("unix://") {
+        return Err(HostError::Internal(format!(
+            "unix sockets are not supported on this platform: {raw}"
+        )));
+    }
+
+    parse_tcp_bind_target(trimmed, raw)
+}
+
+fn parse_tcp_bind_target(addr: &str, raw: &str) -> HostResult<BindTarget> {
+    let target = addr.strip_prefix("tcp://").unwrap_or(addr);
+    let socket_addr = target
+        .parse()
+        .map_err(|err| HostError::Internal(format!("invalid bind address '{raw}': {err}")))?;
+    Ok(BindTarget::Tcp(socket_addr))
+}
+
+#[cfg(unix)]
+fn parse_unix_bind_target(path: &str, raw: &str) -> HostResult<BindTarget> {
+    if path.trim().is_empty() {
+        return Err(HostError::Internal(format!(
+            "unix socket path in FCP_HOST_BIND cannot be empty: {raw}"
+        )));
+    }
+    Ok(BindTarget::Unix(PathBuf::from(path)))
+}
+
+#[cfg(unix)]
+fn prepare_unix_socket_path(path: &FsPath) -> HostResult<()> {
+    if path.exists() {
+        return Err(HostError::Internal(format!(
+            "unix socket path already exists: {}. Remove it manually before starting fcp-host",
+            path.display()
+        )));
+    }
+
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(|err| {
+            HostError::Internal(format!(
+                "failed to create unix socket parent directory '{}': {err}",
+                parent.display()
+            ))
+        })?;
+    }
+
+    Ok(())
+}
+
+fn main() -> HostResult<()> {
+    init_tracing();
+    match fcp_async_core::runtime::block_on_sync(async_main()) {
+        Ok(result) => result,
+        Err(err) => Err(HostError::Internal(format!(
+            "runtime bootstrap failed: {err}"
+        ))),
+    }
+}
+
+fn init_tracing() {
+    tracing_subscriber::registry()
+        .with(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("info,fcp_host=debug")),
+        )
+        .with(
+            tracing_subscriber::fmt::layer()
+                .json()
+                .flatten_event(true)
+                .with_ansi(false)
+                .with_current_span(false)
+                .with_writer(std::io::stderr),
+        )
+        .init();
+}
+
+async fn async_main() -> HostResult<()> {
+    let bind_target = resolve_bind_target()?;
+    let capability_verifying_key = resolve_verifying_key(
+        "FCP_HOST_CAPABILITY_PUBLIC_KEY",
+        "FCP_HOST_CAPABILITY_PUBLIC_KEY_FILE",
+    )?;
+    let approval_verifying_key = resolve_verifying_key(
+        "FCP_HOST_APPROVAL_PUBLIC_KEY",
+        "FCP_HOST_APPROVAL_PUBLIC_KEY_FILE",
+    )?
+    .or_else(|| capability_verifying_key.clone());
+
+    let loaded_configs = load_connector_configs()?;
+    if loaded_configs.configs.is_empty() {
+        tracing::warn!("no connectors configured; doctor self-checks will fail");
+    }
+
+    let registry = Arc::new(SubprocessRegistry::from_configs(loaded_configs.configs).await?);
+    let doctor = match resolve_self_check_timeout()? {
+        Some(timeout) => DoctorService::with_timeout(Arc::clone(&registry), timeout),
+        None => DoctorService::new(Arc::clone(&registry)),
+    };
+    let budget = Arc::new(BudgetPolicyEngine::new());
+    let discovery = Arc::new(DiscoveryEndpoint::new(
+        Arc::clone(&registry),
+        Arc::clone(&budget),
+    ));
+    let lifecycle = Arc::new(HostAdminStateStore::from_env()?);
+    let startup_inventory = registry.list().await;
+    let startup_reconciliation = lifecycle
+        .reconcile_registered_connectors(&startup_inventory)
+        .await
+        .map_err(map_lifecycle_host_error)?;
+    log_startup_reconciliation(&startup_reconciliation);
+    let rollout = Arc::new(RolloutController::new(
+        Arc::clone(&registry),
+        Arc::clone(&lifecycle),
+    ));
+    let supply_chain = Arc::new(SupplyChainGate::with_config(
+        resolve_supply_chain_gate_config()?,
+    ));
+    let cancellation = Arc::new(CancellationController::new());
+    let state = Arc::new(AppState {
+        registry,
+        doctor,
+        budget,
+        discovery,
+        cancellation,
+        lifecycle,
+        rollout,
+        supply_chain,
+        capability_verifying_key,
+        approval_verifying_key,
+        connectors_file: loaded_configs.connectors_file,
+        started_at: Instant::now(),
+    });
+
+    let app = Router::new()
+        .route("/doctor", post(doctor_handler))
+        .route("/rpc/discover", post(discover_handler))
+        .route("/rpc/connectors/{connector_id}", get(connector_handler))
+        .route(
+            "/rpc/connectors/{connector_id}/status",
+            get(connector_status_handler),
+        )
+        .route(
+            "/rpc/connectors/apply",
+            post(connector_inventory_apply_handler),
+        )
+        .route("/rpc/introspect/{connector_id}", get(introspect_handler))
+        .route("/rpc/invoke", post(invoke_handler))
+        .route("/rpc/cancel", post(cancel_handler))
+        .route("/rpc/operations/cancel", post(cancel_handler))
+        .route("/rpc/batch", post(batch_invoke_handler))
+        .route("/rpc/batch-invoke", post(batch_invoke_handler))
+        .route("/rpc/preflight", post(preflight_handler))
+        .route("/rpc/budget/report", post(budget_report_handler))
+        .route(
+            "/rpc/supply-chain/verify",
+            post(supply_chain_verify_handler),
+        )
+        .route("/rpc/health", get(health_handler))
+        .route(
+            "/rpc/rollout/pin/{connector_id}",
+            get(rollout_pin_status_handler)
+                .put(rollout_pin_handler)
+                .delete(rollout_unpin_handler),
+        )
+        .route("/rpc/rollout/schedule", post(rollout_schedule_handler))
+        .route("/rpc/rollout/evaluate", post(rollout_evaluate_handler))
+        .route(
+            "/rpc/rollout/rollback",
+            post(rollout_manual_rollback_handler),
+        )
+        .route("/rpc/rollout/{connector_id}", get(rollout_status_handler))
+        // ── Lifecycle transition and journal RPCs ──
+        .route(
+            "/rpc/lifecycle/{connector_id}",
+            post(lifecycle_transition_handler).get(lifecycle_record_handler),
+        )
+        .route("/rpc/admin/journal", post(journal_query_handler))
+        .route(
+            "/rpc/admin/journal/{connector_id}",
+            get(journal_connector_handler),
+        )
+        .with_state(state);
+
+    match bind_target {
+        BindTarget::Tcp(addr) => {
+            let listener = TcpListener::bind(addr)
+                .await
+                .map_err(|err| HostError::Internal(format!("tcp bind error: {err}")))?;
+            tracing::info!(transport = "tcp", %addr, "fcp-host listening");
+            serve_tcp(listener, app).await?;
+        }
+        #[cfg(unix)]
+        BindTarget::Unix(path) => {
+            prepare_unix_socket_path(&path)?;
+            let listener = UnixListener::bind(&path)
+                .await
+                .map_err(|err| HostError::Internal(format!("unix bind error: {err}")))?;
+            tracing::info!(
+                transport = "unix",
+                socket_path = %path.display(),
+                "fcp-host listening"
+            );
+            serve_unix(listener, app).await?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn doctor_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<DoctorRequest>,
+) -> Result<Json<DoctorReport>, (StatusCode, String)> {
+    let started_at = Instant::now();
+    tracing::debug!(
+        event = "doctor_request",
+        zone_id = %request.zone_id,
+        connector_count = request.connectors.len(),
+        self_check = request.self_check,
+        "processing doctor request"
+    );
+    match state.doctor.handle(request).await {
+        Ok(report) => {
+            tracing::debug!(
+                event = "doctor_response",
+                overall_status = ?report.overall_status,
+                duration_ms = started_at.elapsed().as_millis() as u64,
+                "doctor request complete"
+            );
+            Ok(Json(report))
+        }
+        Err(err) => {
+            tracing::warn!(
+                event = "doctor_error",
+                error = %err,
+                duration_ms = started_at.elapsed().as_millis() as u64,
+                "doctor request failed"
+            );
+            Err(map_host_error(err))
+        }
+    }
+}
+
+async fn budget_report_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<BudgetReportRequest>,
+) -> Result<Json<BudgetReportResponse>, (StatusCode, String)> {
+    let started_at = Instant::now();
+    tracing::debug!(
+        event = "budget_report_request",
+        zone_id = request.zone_id.as_deref().unwrap_or("*"),
+        "processing budget report request"
+    );
+
+    let zone_filter = request
+        .zone_id
+        .as_deref()
+        .map(|zone_id| {
+            zone_id.parse().map_err(|err| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("invalid zone_id '{zone_id}': {err}"),
+                )
+            })
+        })
+        .transpose()?;
+
+    let report = state.budget.report(zone_filter.as_ref()).await;
+    tracing::debug!(
+        event = "budget_report_response",
+        zone_count = report.zones.len(),
+        duration_ms = started_at.elapsed().as_millis() as u64,
+        "budget report request complete"
+    );
+
+    Ok(Json(report))
+}
+
+async fn discover_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<DiscoverPayload>,
+) -> (HeaderMap, Json<DiscoveryResponse>) {
+    let (filter, request_validator) = payload.into_parts();
+    let cache_validator = merge_cache_validator(request_validator, &headers);
+    let started_at = Instant::now();
+    tracing::debug!(
+        event = "discover_request",
+        filter = ?filter,
+        "processing discovery request"
+    );
+    let result = state
+        .discovery
+        .discover_query(filter, cache_validator)
+        .await;
+    let cache_hit = result.cache_hit;
+    let response = result.response;
+    tracing::debug!(
+        event = "discover_response",
+        connector_count = response.connectors.len(),
+        registry_version = response.registry_version,
+        cache_hit,
+        duration_ms = started_at.elapsed().as_millis() as u64,
+        "discovery request complete"
+    );
+    let response_headers = cache_headers(response.cache.as_ref());
+    (response_headers, Json(response))
+}
+
+async fn introspect_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(connector_id): Path<String>,
+) -> Result<(HeaderMap, Json<IntrospectionResponse>), (StatusCode, String)> {
+    let connector_id = parse_connector_id(&connector_id)?;
+    let cache_validator = cache_validator_from_headers(&headers);
+    let started_at = Instant::now();
+    tracing::debug!(
+        event = "introspect_request",
+        connector_id = %connector_id,
+        "processing introspection request"
+    );
+    match state
+        .discovery
+        .introspect_with_cache(&connector_id, cache_validator)
+        .await
+    {
+        Ok(response) => {
+            tracing::debug!(
+                event = "introspect_response",
+                connector_id = %connector_id,
+                tool_count = response.tools.len(),
+                duration_ms = started_at.elapsed().as_millis() as u64,
+                "introspection request complete"
+            );
+            let response_headers = cache_headers(response.cache.as_ref());
+            Ok((response_headers, Json(response)))
+        }
+        Err(err) => {
+            tracing::warn!(
+                event = "introspect_error",
+                connector_id = %connector_id,
+                error = %err,
+                duration_ms = started_at.elapsed().as_millis() as u64,
+                "introspection request failed"
+            );
+            Err(map_host_error(err))
+        }
+    }
+}
+
+async fn connector_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(connector_id): Path<String>,
+) -> Result<(HeaderMap, Json<ConnectorInventoryResponse>), (StatusCode, String)> {
+    let connector_id = parse_connector_id(&connector_id)?;
+    let cache_validator = cache_validator_from_headers(&headers);
+    let started_at = Instant::now();
+    tracing::debug!(
+        event = "connector_request",
+        connector_id = %connector_id,
+        "processing connector inventory request"
+    );
+    match state
+        .discovery
+        .connector_with_cache(&connector_id, cache_validator)
+        .await
+    {
+        Ok(response) => {
+            tracing::debug!(
+                event = "connector_response",
+                connector_id = %connector_id,
+                registry_version = response.registry_version,
+                duration_ms = started_at.elapsed().as_millis() as u64,
+                "connector inventory request complete"
+            );
+            let response_headers = cache_headers(response.cache.as_ref());
+            Ok((response_headers, Json(response)))
+        }
+        Err(err) => {
+            tracing::warn!(
+                event = "connector_error",
+                connector_id = %connector_id,
+                error = %err,
+                duration_ms = started_at.elapsed().as_millis() as u64,
+                "connector inventory request failed"
+            );
+            Err(map_host_error(err))
+        }
+    }
+}
+
+async fn connector_status_handler(
+    State(state): State<Arc<AppState>>,
+    Path(connector_id): Path<String>,
+) -> Result<Json<ConnectorAdminStatus>, (StatusCode, String)> {
+    let connector_id = parse_connector_id(&connector_id)?;
+    let started_at = Instant::now();
+    tracing::debug!(
+        event = "connector_status_request",
+        connector_id = %connector_id,
+        "processing connector admin status request"
+    );
+
+    match state.lifecycle.connector_status(&connector_id).await {
+        Ok(status) => {
+            tracing::debug!(
+                event = "connector_status_response",
+                connector_id = %connector_id,
+                desired_state = ?status.desired_state,
+                observed_state = ?status.observed_state,
+                drifted = status.drift.is_some(),
+                duration_ms = started_at.elapsed().as_millis() as u64,
+                "connector admin status request complete"
+            );
+            Ok(Json(status))
+        }
+        Err(err) => {
+            let host_error = map_lifecycle_host_error(err);
+            tracing::warn!(
+                event = "connector_status_error",
+                connector_id = %connector_id,
+                error = %host_error,
+                duration_ms = started_at.elapsed().as_millis() as u64,
+                "connector admin status request failed"
+            );
+            Err(map_host_error(host_error))
+        }
+    }
+}
+
+async fn connector_inventory_apply_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<ConnectorInventoryMutationRequest>,
+) -> Result<Json<ConnectorInventoryMutationResponse>, (StatusCode, String)> {
+    let connector_id = request.connector.id.clone();
+    let started_at = Instant::now();
+    tracing::debug!(
+        event = "connector_inventory_apply_request",
+        connector_id = %connector_id,
+        kind = ?request.kind,
+        "processing live connector inventory mutation"
+    );
+
+    let connectors_file = state.connectors_file.clone().ok_or_else(|| {
+        map_host_error(HostError::Unavailable(
+            "live connector inventory mutation requires FCP_HOST_CONNECTORS_FILE to be configured"
+                .to_string(),
+        ))
+    })?;
+
+    let previous_configs = read_connector_configs_file(&connectors_file).map_err(map_host_error)?;
+    let mut next_configs = previous_configs.clone();
+    let previous = previous_configs
+        .iter()
+        .find(|entry| entry.id == request.connector.id)
+        .cloned();
+
+    match request.kind {
+        ConnectorInventoryMutationKind::Install => {
+            if previous.is_some() {
+                return Err(map_host_error(HostError::InvalidFilter(format!(
+                    "connector '{}' is already present in the managed inventory",
+                    request.connector.id
+                ))));
+            }
+            next_configs.push(request.connector.clone());
+        }
+        ConnectorInventoryMutationKind::Update => {
+            let target_index = next_configs
+                .iter()
+                .position(|entry| entry.id == request.connector.id)
+                .ok_or_else(|| {
+                    map_host_error(HostError::ConnectorNotFound(request.connector.id.clone()))
+                })?;
+            let merged = merge_connector_update(&next_configs[target_index], &request.connector);
+            next_configs[target_index] = merged;
+        }
+    }
+
+    let (apply, current_inventory, current, admin_state) = if request.dry_run {
+        let preview = state
+            .registry
+            .preview_configs(next_configs.clone())
+            .await
+            .map_err(map_host_error)?;
+        let current = next_configs
+            .iter()
+            .find(|entry| entry.id == request.connector.id)
+            .cloned()
+            .ok_or_else(|| {
+                map_host_error(HostError::Internal(format!(
+                    "connector '{}' was missing from the preview inventory",
+                    request.connector.id
+                )))
+            })?;
+        (preview, next_configs.clone(), current, None)
+    } else {
+        write_connector_configs_file(&connectors_file, &next_configs).map_err(map_host_error)?;
+        let apply = match state.registry.apply_configs(next_configs.clone()).await {
+            Ok(report) => report,
+            Err(err) => {
+                let rollback_result =
+                    write_connector_configs_file(&connectors_file, &previous_configs);
+                let rollback_note = match rollback_result {
+                    Ok(()) => "connectors file rolled back".to_string(),
+                    Err(rollback_err) => {
+                        format!("connectors file rollback also failed: {}", rollback_err)
+                    }
+                };
+                return Err(map_host_error(HostError::Internal(format!(
+                    "failed to apply live connector inventory mutation for '{}': {err}; {rollback_note}",
+                    request.connector.id
+                ))));
+            }
+        };
+
+        let current_inventory = state.registry.inventory().await;
+        let current = current_inventory
+            .iter()
+            .find(|entry| entry.id == request.connector.id)
+            .cloned()
+            .ok_or_else(|| {
+                map_host_error(HostError::Internal(format!(
+                    "connector '{}' was missing from the live registry immediately after apply",
+                    request.connector.id
+                )))
+            })?;
+        let admin_state = state
+            .lifecycle
+            .reconcile_registered_connectors(&state.registry.list().await)
+            .await
+            .map_err(map_lifecycle_host_error)
+            .map_err(map_host_error)?;
+        (apply, current_inventory, current, Some(admin_state))
+    };
+
+    tracing::info!(
+        event = "connector_inventory_apply_response",
+        connector_id = %connector_id,
+        kind = ?request.kind,
+        dry_run = request.dry_run,
+        registry_version = apply.registry_version,
+        inventory_size = current_inventory.len(),
+        duration_ms = started_at.elapsed().as_millis() as u64,
+        "live connector inventory mutation complete"
+    );
+
+    Ok(Json(ConnectorInventoryMutationResponse {
+        kind: request.kind,
+        dry_run: request.dry_run,
+        connectors_file: connectors_file.display().to_string(),
+        previous,
+        current,
+        inventory_size: current_inventory.len(),
+        apply,
+        admin_state: admin_state.unwrap_or_else(|| StartupReconciliationReport {
+            reconciled_at: Utc::now(),
+            tracked_connectors: current_inventory.len(),
+            created_connectors: 0,
+            observed_updates: 0,
+            drifted_connectors: 0,
+            entries: Vec::new(),
+        }),
+    }))
+}
+
+async fn preflight_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<HostPreflightRequest>,
+) -> Json<PreflightResponse> {
+    let connector_id = request.connector_id.clone();
+    let operation = request.operation.clone();
+    let started_at = Instant::now();
+    let response = match invoke_request_from_preflight(&request) {
+        Ok(invoke_request) => {
+            evaluate_live_preflight(&state, &invoke_request, request.principal.as_deref()).await
+        }
+        Err(error) => preflight_response_from_error(error),
+    };
+    tracing::info!(
+        event = "preflight_check",
+        connector_id = %connector_id,
+        operation = %operation,
+        allowed = response.allowed,
+        reason = ?response.reason,
+        duration_ms = started_at.elapsed().as_millis() as u64,
+        "preflight request complete"
+    );
+    Json(response)
+}
+
+async fn cancel_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<CancellationRequest>,
+) -> Result<Json<CancellationResponse>, (StatusCode, String)> {
+    let operation_id = request.operation_id.clone();
+    let started_at = Instant::now();
+    tracing::debug!(
+        event = "cancel_request",
+        operation_id = %operation_id,
+        reason = %request.reason.label(),
+        cleanup = ?request.cleanup,
+        return_partial = request.return_partial,
+        "processing cancellation request"
+    );
+
+    let response = state
+        .cancellation
+        .cancel(&request, Utc::now())
+        .map_err(map_host_error)?;
+
+    tracing::info!(
+        event = "cancel_response",
+        operation_id = %operation_id,
+        outcome = ?response.outcome,
+        duration_ms = started_at.elapsed().as_millis() as u64,
+        "cancellation request complete"
+    );
+    Ok(Json(response))
+}
+
+async fn invoke_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<InvokeRequest>,
+) -> Result<Json<InvokeResponse>, (StatusCode, String)> {
+    request.validate_idempotency_key().map_err(|err| {
+        map_host_error(HostError::InvalidFilter(format!(
+            "invalid invoke request: {err}"
+        )))
+    })?;
+
+    let connector_id = request.connector_id.clone();
+    let operation = request.operation.clone();
+    let correlation_id = request
+        .correlation_id
+        .as_ref()
+        .map(std::string::ToString::to_string);
+    let operation_id = request.id.to_string();
+    let started_at = Instant::now();
+
+    tracing::debug!(
+        event = "invoke_request",
+        connector_id = %connector_id,
+        operation = %operation,
+        operation_id = %operation_id,
+        correlation_id,
+        "processing invoke request"
+    );
+
+    let preflight = evaluate_live_preflight(&state, &request, None).await;
+    if !preflight.allowed {
+        let reason = preflight
+            .reason
+            .unwrap_or_else(|| "preflight denied invoke request".to_string());
+        tracing::warn!(
+            event = "invoke_error",
+            connector_id = %connector_id,
+            operation = %operation,
+            operation_id = %operation_id,
+            correlation_id,
+            reason = %reason,
+            duration_ms = started_at.elapsed().as_millis() as u64,
+            "invoke request failed preflight"
+        );
+        return Err(map_host_error(HostError::PreflightFailed(reason)));
+    }
+
+    state.cancellation.track(&operation_id);
+    let invoke_result = state.registry.invoke(request).await;
+    state.cancellation.complete(&operation_id);
+
+    match invoke_result {
+        Ok(response) => {
+            tracing::info!(
+                event = "invoke_response",
+                connector_id = %connector_id,
+                operation = %operation,
+                operation_id = %operation_id,
+                correlation_id,
+                status = ?response.status,
+                duration_ms = started_at.elapsed().as_millis() as u64,
+                "invoke request complete"
+            );
+            Ok(Json(response))
+        }
+        Err(err) => {
+            tracing::warn!(
+                event = "invoke_error",
+                connector_id = %connector_id,
+                operation = %operation,
+                operation_id = %operation_id,
+                correlation_id,
+                error = %err,
+                duration_ms = started_at.elapsed().as_millis() as u64,
+                "invoke request failed"
+            );
+            Err(map_host_error(err))
+        }
+    }
+}
+
+fn batch_timeout_error() -> BatchOperationError {
+    BatchOperationError {
+        code: "BATCH_TIMEOUT".to_string(),
+        message: "batch timeout exceeded".to_string(),
+        retry_after_ms: None,
+    }
+}
+
+fn dependency_failed_error() -> BatchOperationError {
+    BatchOperationError {
+        code: "DEP_FAILED".to_string(),
+        message: "dependency failed".to_string(),
+        retry_after_ms: None,
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RolloutScheduleRequest {
+    connector_id: String,
+    version: semver::Version,
+    #[serde(default)]
+    previous_version: Option<semver::Version>,
+    policy: RolloutPolicy,
+    #[serde(default)]
+    observed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RolloutEvaluateRequest {
+    connector_id: String,
+    invocation_succeeded: bool,
+    #[serde(default)]
+    latency_ms: Option<u32>,
+    #[serde(default)]
+    uptime_secs: u64,
+    #[serde(default)]
+    pinned: bool,
+    #[serde(default)]
+    crashed: bool,
+    policy: RolloutPolicy,
+    #[serde(default)]
+    observed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PinRequest {
+    version: semver::Version,
+}
+
+#[derive(Debug, Serialize)]
+struct PinStateResponse {
+    connector_id: String,
+    pinned: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<semver::Version>,
+}
+
+impl PinStateResponse {
+    fn new(connector_id: &ConnectorId, version: Option<semver::Version>) -> Self {
+        Self {
+            connector_id: connector_id.to_string(),
+            pinned: version.is_some(),
+            version,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct RolloutStatusResponse {
+    #[serde(flatten)]
+    status: LifecycleStatus,
+    pinned: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pinned_version: Option<semver::Version>,
+    canary_percent: u8,
+}
+
+async fn pin_state_response(
+    lifecycle: &HostAdminStateStore,
+    connector_id: &ConnectorId,
+) -> PinStateResponse {
+    PinStateResponse::new(connector_id, lifecycle.pinned_version(connector_id).await)
+}
+
+async fn rollout_status_response(
+    lifecycle: &HostAdminStateStore,
+    connector_id: &ConnectorId,
+) -> Result<RolloutStatusResponse, LifecycleError> {
+    let record = lifecycle
+        .get(connector_id)
+        .await?
+        .ok_or_else(|| LifecycleError::NotFound {
+            connector_id: connector_id.clone(),
+        })?;
+    let status = LifecycleStatus::from_record(&record, Utc::now(), false);
+    let pinned_version = lifecycle.pinned_version(connector_id).await;
+    Ok(RolloutStatusResponse {
+        status,
+        pinned: pinned_version.is_some(),
+        pinned_version,
+        canary_percent: record.canary_policy.canary_traffic_percent,
+    })
+}
+
+fn log_startup_reconciliation(report: &fcp_host::StartupReconciliationReport) {
+    tracing::info!(
+        event = "startup_reconciliation",
+        tracked_connectors = report.tracked_connectors,
+        created_connectors = report.created_connectors,
+        observed_updates = report.observed_updates,
+        drifted_connectors = report.drifted_connectors,
+        "startup reconciliation complete"
+    );
+
+    for entry in &report.entries {
+        if let Some(drift) = entry.drift.as_ref() {
+            tracing::warn!(
+                event = "startup_reconciliation_drift",
+                connector_id = %entry.connector_id,
+                desired_state = ?entry.desired_state,
+                observed_state_after = ?entry.observed_state_after,
+                drift_kind = ?drift.kind,
+                recovery_action = ?drift.recovery_action,
+                message = %drift.message,
+                "startup reconciliation detected connector drift"
+            );
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RollbackRequest {
+    connector_id: String,
+    to_version: semver::Version,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct RollbackResponse {
+    connector_id: String,
+    state: LifecycleState,
+    from_version: semver::Version,
+    to_version: semver::Version,
+    message: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SupplyChainVerifyRequest {
+    connector_id: String,
+    version: semver::Version,
+    artifact_digest: String,
+    #[serde(default)]
+    attestation: Option<SupplyChainAttestation>,
+    #[serde(default)]
+    sbom: Option<SoftwareBillOfMaterials>,
+}
+
+fn parse_http_datetime(value: &str) -> Option<DateTime<Utc>> {
+    chrono::DateTime::parse_from_rfc2822(value)
+        .ok()
+        .map(|parsed| parsed.with_timezone(&Utc))
+}
+
+fn format_http_datetime(value: &DateTime<Utc>) -> String {
+    value.format("%a, %d %b %Y %H:%M:%S GMT").to_string()
+}
+
+fn cache_validator_from_headers(headers: &HeaderMap) -> Option<CacheValidator> {
+    let if_none_match = headers
+        .get(IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let if_modified_since = headers
+        .get(IF_MODIFIED_SINCE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_http_datetime);
+
+    if if_none_match.is_none() && if_modified_since.is_none() {
+        None
+    } else {
+        Some(CacheValidator {
+            if_none_match,
+            if_modified_since,
+        })
+    }
+}
+
+fn merge_cache_validator(
+    request_validator: Option<CacheValidator>,
+    headers: &HeaderMap,
+) -> Option<CacheValidator> {
+    let header_validator = cache_validator_from_headers(headers);
+    match (request_validator, header_validator) {
+        (Some(mut request), Some(header)) => {
+            if request.if_none_match.is_none() {
+                request.if_none_match = header.if_none_match;
+            }
+            if request.if_modified_since.is_none() {
+                request.if_modified_since = header.if_modified_since;
+            }
+            Some(request)
+        }
+        (Some(request), None) => Some(request),
+        (None, Some(header)) => Some(header),
+        (None, None) => None,
+    }
+}
+
+fn cache_headers(cache: Option<&CacheMetadata>) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    let Some(cache) = cache else {
+        return headers;
+    };
+
+    if let Ok(value) = HeaderValue::from_str(&cache.etag) {
+        headers.insert(ETAG, value);
+    }
+    if let Ok(value) = HeaderValue::from_str(&format_http_datetime(&cache.last_modified)) {
+        headers.insert(LAST_MODIFIED, value);
+    }
+
+    let mut cache_control = format!("max-age={}", cache.max_age_seconds);
+    if let Some(stale_while_revalidate_seconds) = cache.stale_while_revalidate_seconds {
+        cache_control.push_str(&format!(
+            ", stale-while-revalidate={stale_while_revalidate_seconds}"
+        ));
+    }
+    if let Ok(value) = HeaderValue::from_str(&cache_control) {
+        headers.insert(CACHE_CONTROL, value);
+    }
+    headers.insert(
+        VARY,
+        HeaderValue::from_static("If-None-Match, If-Modified-Since"),
+    );
+    headers
+}
+
+#[derive(Debug)]
+enum BindTarget {
+    Tcp(SocketAddr),
+    #[cfg(unix)]
+    Unix(PathBuf),
+}
+
+struct LoadedConnectorConfigs {
+    configs: Vec<ConnectorConfig>,
+    connectors_file: Option<PathBuf>,
+}
+
+fn resolve_connectors_file_path() -> HostResult<Option<PathBuf>> {
+    match std::env::var("FCP_HOST_CONNECTORS_FILE") {
+        Ok(raw) if raw.trim().is_empty() => Ok(None),
+        Ok(raw) => Ok(Some(PathBuf::from(raw))),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(HostError::Internal(
+            "FCP_HOST_CONNECTORS_FILE contains non-unicode data".to_string(),
+        )),
+    }
+}
+
+fn read_connector_configs_file(path: &std::path::Path) -> HostResult<Vec<ConnectorConfig>> {
+    let raw = std::fs::read_to_string(path).map_err(|err| {
+        HostError::Internal(format!(
+            "failed to read connectors file '{}': {err}",
+            path.display()
+        ))
+    })?;
+    serde_json::from_str(&raw)
+        .map_err(|err| HostError::InvalidFilter(format!("invalid connector config json: {err}")))
+}
+
+fn write_connector_configs_file(
+    path: &std::path::Path,
+    configs: &[ConnectorConfig],
+) -> HostResult<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| {
+            HostError::Internal(format!(
+                "failed to create connectors file parent '{}': {err}",
+                parent.display()
+            ))
+        })?;
+    }
+
+    let encoded = serde_json::to_string_pretty(configs).map_err(|err| {
+        HostError::Internal(format!(
+            "failed to serialize connector inventory for '{}': {err}",
+            path.display()
+        ))
+    })?;
+    std::fs::write(path, format!("{encoded}\n")).map_err(|err| {
+        HostError::Internal(format!(
+            "failed to write connectors file '{}': {err}",
+            path.display()
+        ))
+    })
+}
+
+fn merge_connector_update(
+    existing: &ConnectorConfig,
+    incoming: &ConnectorConfig,
+) -> ConnectorConfig {
+    ConnectorConfig {
+        id: existing.id.clone(),
+        binary: incoming.binary.clone(),
+        name: incoming.name.clone().or_else(|| existing.name.clone()),
+        description: incoming
+            .description
+            .clone()
+            .or_else(|| existing.description.clone()),
+        args: if incoming.args.is_empty() {
+            existing.args.clone()
+        } else {
+            incoming.args.clone()
+        },
+        env: if incoming.env.is_empty() {
+            existing.env.clone()
+        } else {
+            incoming.env.clone()
+        },
+        config: incoming.config.clone().or_else(|| existing.config.clone()),
+        categories: if incoming.categories.is_empty() {
+            existing.categories.clone()
+        } else {
+            incoming.categories.clone()
+        },
+        version: incoming
+            .version
+            .clone()
+            .or_else(|| existing.version.clone()),
+    }
+}
+
+fn load_connector_configs() -> HostResult<LoadedConnectorConfigs> {
+    let connectors_file = resolve_connectors_file_path()?;
+    let payload = if let Some(path) = connectors_file.as_ref() {
+        Some(std::fs::read_to_string(path).map_err(|err| {
+            HostError::Internal(format!(
+                "failed to read connectors file '{}': {err}",
+                path.display()
+            ))
+        })?)
+    } else {
+        std::env::var("FCP_HOST_CONNECTORS").ok()
+    };
+
+    let Some(raw) = payload else {
+        return Ok(LoadedConnectorConfigs {
+            configs: Vec::new(),
+            connectors_file,
+        });
+    };
+    if raw.trim().is_empty() {
+        return Ok(LoadedConnectorConfigs {
+            configs: Vec::new(),
+            connectors_file,
+        });
+    }
+
+    let configs = serde_json::from_str(&raw)
+        .map_err(|err| HostError::InvalidFilter(format!("invalid connector config json: {err}")))?;
+    Ok(LoadedConnectorConfigs {
+        configs,
+        connectors_file,
+    })
+}
+
+fn resolve_self_check_timeout() -> HostResult<Option<Duration>> {
+    let raw = match std::env::var("FCP_HOST_SELF_CHECK_TIMEOUT_MS") {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    if raw.trim().is_empty() {
+        return Ok(None);
+    }
+    let millis: u64 = raw.parse().map_err(|err| {
+        HostError::InvalidFilter(format!("invalid FCP_HOST_SELF_CHECK_TIMEOUT_MS: {err}"))
+    })?;
+    Ok(Some(Duration::from_millis(millis)))
+}
+
+fn resolve_supply_chain_gate_config() -> HostResult<SupplyChainGateConfig> {
+    let mut config = SupplyChainGateConfig::default();
+
+    if let Some(cache_capacity) = read_env_usize("FCP_HOST_SUPPLY_CHAIN_CACHE_CAPACITY")? {
+        if cache_capacity == 0 {
+            return Err(HostError::InvalidFilter(
+                "FCP_HOST_SUPPLY_CHAIN_CACHE_CAPACITY must be >= 1".to_string(),
+            ));
+        }
+        config.cache_capacity = cache_capacity;
+    }
+
+    if let Some(allow_dev_overrides) = read_env_bool("FCP_HOST_SUPPLY_CHAIN_ALLOW_DEV_OVERRIDES")? {
+        config.allow_dev_overrides = allow_dev_overrides;
+    }
+
+    let policy = &mut config.policy;
+    if let Some(require_attestation) = read_env_bool("FCP_HOST_SUPPLY_CHAIN_REQUIRE_ATTESTATION")? {
+        policy.require_attestation = require_attestation;
+    }
+    if let Some(require_sbom) = read_env_bool("FCP_HOST_SUPPLY_CHAIN_REQUIRE_SBOM")? {
+        policy.require_sbom = require_sbom;
+    }
+    if let Some(min_slsa_level) = read_env_u8("FCP_HOST_SUPPLY_CHAIN_MIN_SLSA_LEVEL")? {
+        if min_slsa_level > 4 {
+            return Err(HostError::InvalidFilter(
+                "FCP_HOST_SUPPLY_CHAIN_MIN_SLSA_LEVEL must be between 0 and 4".to_string(),
+            ));
+        }
+        policy.min_slsa_level = min_slsa_level;
     }
     if let Some(allow_unsigned) = read_env_bool("FCP_HOST_SUPPLY_CHAIN_ALLOW_UNSIGNED")? {
         policy.allow_unsigned = allow_unsigned;
@@ -1766,6 +2996,16 @@ async fn async_main() -> HostResult<()> {
             post(rollout_manual_rollback_handler),
         )
         .route("/rpc/rollout/{connector_id}", get(rollout_status_handler))
+        // ── Lifecycle transition and journal RPCs ──
+        .route(
+            "/rpc/lifecycle/{connector_id}",
+            post(lifecycle_transition_handler).get(lifecycle_record_handler),
+        )
+        .route("/rpc/admin/journal", post(journal_query_handler))
+        .route(
+            "/rpc/admin/journal/{connector_id}",
+            get(journal_connector_handler),
+        )
         .with_state(state);
 
     match bind_target {
@@ -2483,7 +3723,8 @@ async fn batch_invoke_handler(
         .cloned()
         .map(|operation| (operation.id.clone(), operation))
         .collect();
-    let mut results_map: HashMap<String, OperationResult> = HashMap::new();
+    let mut results_map: HashMap<String, OperationResult> =
+        HashMap::with_capacity(request.operations.len());
     let mut aborted = false;
 
     for tier in &plan.tiers {
@@ -2918,13 +4159,10 @@ async fn rollout_manual_rollback_handler(
         })?;
     let from_version = current.version.clone();
     let rollback_target = current.previous_version.clone().ok_or_else(|| {
-        map_host_error(map_lifecycle_host_error(LifecycleError::NoRollbackTarget))
-    })?;
-    if to_version != rollback_target {
-        return Err(map_host_error(HostError::InvalidFilter(format!(
+        map_host_error(HostError::InvalidFilter(format!(
             "requested rollback target '{to_version}' does not match current rollback target '{rollback_target}'"
-        ))));
-    }
+        )))
+    })?;
 
     let rolled_back = state
         .lifecycle
@@ -2991,6 +4229,103 @@ async fn rollout_status_handler(
             Err(map_host_error(host_error))
         }
     }
+}
+
+// ── Lifecycle transition and journal handlers ──────────────────────────────
+
+async fn lifecycle_transition_handler(
+    State(state): State<Arc<AppState>>,
+    Path(connector_id): Path<String>,
+    Json(request): Json<LifecycleTransitionRequest>,
+) -> Result<Json<LifecycleTransitionResponse>, (StatusCode, String)> {
+    let connector_id = parse_connector_id(&connector_id)?;
+    let started_at = Instant::now();
+    tracing::debug!(
+        event = "lifecycle_transition_request",
+        connector_id = %connector_id,
+        action = ?request.action,
+        dry_run = request.dry_run,
+        "processing lifecycle transition request"
+    );
+
+    match state
+        .lifecycle
+        .execute_lifecycle_transition(&connector_id, &request)
+        .await
+    {
+        Ok(response) => {
+            tracing::info!(
+                event = "lifecycle_transition_response",
+                connector_id = %connector_id,
+                action = ?request.action,
+                dry_run = request.dry_run,
+                previous = ?response.previous_desired_state,
+                current = ?response.current_desired_state,
+                duration_ms = started_at.elapsed().as_millis() as u64,
+                "lifecycle transition complete"
+            );
+            Ok(Json(response))
+        }
+        Err(err) => {
+            let host_error = map_lifecycle_host_error(err);
+            tracing::warn!(
+                event = "lifecycle_transition_error",
+                connector_id = %connector_id,
+                action = ?request.action,
+                error = %host_error,
+                duration_ms = started_at.elapsed().as_millis() as u64,
+                "lifecycle transition failed"
+            );
+            Err(map_host_error(host_error))
+        }
+    }
+}
+
+async fn lifecycle_record_handler(
+    State(state): State<Arc<AppState>>,
+    Path(connector_id): Path<String>,
+) -> Result<Json<ConnectorAdminStatus>, (StatusCode, String)> {
+    let connector_id = parse_connector_id(&connector_id)?;
+    match state.lifecycle.connector_status(&connector_id).await {
+        Ok(status) => Ok(Json(status)),
+        Err(err) => Err(map_host_error(map_lifecycle_host_error(err))),
+    }
+}
+
+async fn journal_query_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<JournalQueryRequest>,
+) -> Json<JournalQueryResponse> {
+    let started_at = Instant::now();
+    tracing::debug!(
+        event = "journal_query_request",
+        connector_id = ?request.connector_id,
+        after_sequence = request.after_sequence,
+        limit = request.limit,
+        "processing journal query"
+    );
+    let response = state.lifecycle.query_journal(&request).await;
+    tracing::debug!(
+        event = "journal_query_response",
+        entries = response.entries.len(),
+        total = response.total_entries,
+        latest_sequence = response.latest_sequence,
+        duration_ms = started_at.elapsed().as_millis() as u64,
+        "journal query complete"
+    );
+    Json(response)
+}
+
+async fn journal_connector_handler(
+    State(state): State<Arc<AppState>>,
+    Path(connector_id): Path<String>,
+) -> Json<JournalQueryResponse> {
+    let request = JournalQueryRequest {
+        connector_id: Some(connector_id),
+        after_sequence: 0,
+        limit: 100,
+    };
+    Json(state.lifecycle.query_journal(&request).await)
 }
 
 fn parse_connector_id(raw: &str) -> Result<ConnectorId, (StatusCode, String)> {
@@ -3231,8 +4566,8 @@ mod tests {
         let registry = fcp_async_core::time::timeout(
             Duration::from_secs(2),
             SubprocessRegistry::from_configs(vec![subprocess_test_connector_config(
-                connector_id.as_str(),
-            )]),
+            connector_id.as_str(),
+        )]),
         )
         .await
         .expect("registry construction should not hang")

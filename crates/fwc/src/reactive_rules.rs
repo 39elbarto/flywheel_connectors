@@ -6,7 +6,10 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::fs;
+use std::path::{Path, PathBuf};
 
+use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -175,6 +178,9 @@ pub struct IncomingEvent {
     pub connector: String,
     /// Event type.
     pub event_type: String,
+    /// Stable upstream event identifier, if the source provides one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<String>,
     /// Event data as key-value pairs.
     pub data: BTreeMap<String, String>,
     /// When the event was received.
@@ -187,9 +193,16 @@ impl IncomingEvent {
         Self {
             connector: connector.into(),
             event_type: event_type.into(),
+            event_id: None,
             data: BTreeMap::new(),
             received_at: Utc::now(),
         }
+    }
+
+    /// Builder: attach a stable event ID for replay-safe deduplication.
+    pub fn with_event_id(mut self, event_id: impl Into<String>) -> Self {
+        self.event_id = Some(event_id.into());
+        self
     }
 
     /// Builder: add a data field.
@@ -202,6 +215,36 @@ impl IncomingEvent {
     pub fn get_field(&self, path: &str) -> Option<&str> {
         let field = path.strip_prefix("data.").unwrap_or(path);
         self.data.get(field).map(String::as_str)
+    }
+
+    /// A stable identity for duplicate suppression.
+    ///
+    /// When an upstream event ID is present it is used directly; otherwise a
+    /// deterministic hash of the connector, event type, and payload fields is
+    /// derived so retries of the same event collapse to the same key.
+    pub fn dedup_identity(&self) -> String {
+        if let Some(event_id) = self
+            .event_id
+            .as_deref()
+            .filter(|event_id| !event_id.is_empty())
+        {
+            return format!("id:{event_id}");
+        }
+
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(self.connector.as_bytes());
+        hasher.update(&[0]);
+        hasher.update(self.event_type.as_bytes());
+        hasher.update(&[0]);
+
+        for (key, value) in &self.data {
+            hasher.update(key.as_bytes());
+            hasher.update(&[0]);
+            hasher.update(value.as_bytes());
+            hasher.update(&[0]);
+        }
+
+        format!("hash:{}", hasher.finalize().to_hex())
     }
 }
 
@@ -232,6 +275,8 @@ pub enum ExecutionOutcome {
     CircuitBroken,
     /// Rule matched but in dry-run mode.
     DryRun,
+    /// Rule matched but the event has already been processed.
+    Duplicate,
     /// Rule did not match.
     NoMatch,
     /// Rule is disabled.
@@ -245,6 +290,7 @@ impl fmt::Display for ExecutionOutcome {
             Self::Throttled => f.write_str("throttled"),
             Self::CircuitBroken => f.write_str("circuit_broken"),
             Self::DryRun => f.write_str("dry_run"),
+            Self::Duplicate => f.write_str("duplicate"),
             Self::NoMatch => f.write_str("no_match"),
             Self::Disabled => f.write_str("disabled"),
         }
@@ -423,6 +469,80 @@ impl Default for CircuitBreaker {
     }
 }
 
+// ── Event Deduplication ────────────────────────────────────────────
+
+/// Sliding-window dedup cache for rule-triggered events.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct RuleDedupCache {
+    #[serde(default)]
+    entries: BTreeMap<String, DateTime<Utc>>,
+}
+
+impl RuleDedupCache {
+    /// Create an empty dedup cache.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Check whether this `(rule, event)` pair was seen recently and record it.
+    ///
+    /// Returns `true` when the event is still inside the dedup window and
+    /// should be suppressed.
+    pub fn check_and_record(&mut self, rule: &Rule, event: &IncomingEvent) -> bool {
+        self.check_and_record_at(rule, event, Utc::now())
+    }
+
+    /// Test-only/time-aware variant of [`Self::check_and_record`].
+    pub fn check_and_record_at(
+        &mut self,
+        rule: &Rule,
+        event: &IncomingEvent,
+        now: DateTime<Utc>,
+    ) -> bool {
+        self.prune_expired_at(now);
+
+        let key = dedup_cache_key(&rule.name, event);
+        if self
+            .entries
+            .get(&key)
+            .is_some_and(|expires_at| *expires_at >= now)
+        {
+            return true;
+        }
+
+        let window = rule
+            .throttle
+            .window_duration()
+            .unwrap_or_else(|| Duration::hours(1));
+        self.entries.insert(key, now + window);
+        false
+    }
+
+    /// Remove expired dedup entries using the current time.
+    pub fn prune_expired(&mut self) {
+        self.prune_expired_at(Utc::now());
+    }
+
+    /// Test-only/time-aware variant of [`Self::prune_expired`].
+    pub fn prune_expired_at(&mut self, now: DateTime<Utc>) {
+        self.entries.retain(|_, expires_at| *expires_at >= now);
+    }
+
+    /// Number of active dedup entries.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether the cache is empty.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+fn dedup_cache_key(rule_name: &str, event: &IncomingEvent) -> String {
+    format!("{rule_name}:{}", event.dedup_identity())
+}
+
 // ── Event Matching ────────────────────────────────────────────────
 
 /// Check if an event matches a trigger's criteria.
@@ -541,6 +661,36 @@ pub fn evaluate_rule(
     circuit_breaker: &CircuitBreaker,
     dry_run: bool,
 ) -> (ExecutionOutcome, MatchResult) {
+    evaluate_rule_internal(rule, event, throttle_state, circuit_breaker, None, dry_run)
+}
+
+/// Evaluate a rule with duplicate suppression for replay-safe automation.
+pub fn evaluate_rule_with_dedup(
+    rule: &Rule,
+    event: &IncomingEvent,
+    throttle_state: &ThrottleState,
+    circuit_breaker: &CircuitBreaker,
+    dedup_cache: &mut RuleDedupCache,
+    dry_run: bool,
+) -> (ExecutionOutcome, MatchResult) {
+    evaluate_rule_internal(
+        rule,
+        event,
+        throttle_state,
+        circuit_breaker,
+        Some(dedup_cache),
+        dry_run,
+    )
+}
+
+fn evaluate_rule_internal(
+    rule: &Rule,
+    event: &IncomingEvent,
+    throttle_state: &ThrottleState,
+    circuit_breaker: &CircuitBreaker,
+    dedup_cache: Option<&mut RuleDedupCache>,
+    dry_run: bool,
+) -> (ExecutionOutcome, MatchResult) {
     let rule_name = rule.name.clone();
 
     // Check if disabled
@@ -564,6 +714,21 @@ pub fn evaluate_rule(
                 rule_name,
                 matched: false,
                 reason: "event does not match trigger".to_string(),
+                rendered_inputs: None,
+            },
+        );
+    }
+
+    // Suppress duplicate events before any side effects or counters.
+    if let Some(cache) = dedup_cache
+        && cache.check_and_record(rule, event)
+    {
+        return (
+            ExecutionOutcome::Duplicate,
+            MatchResult {
+                rule_name,
+                matched: true,
+                reason: "event already processed for this rule".to_string(),
                 rendered_inputs: None,
             },
         );
@@ -688,6 +853,103 @@ impl RuleSet {
     }
 }
 
+/// Default on-disk location for persisted reactive rules.
+pub fn default_rules_path() -> PathBuf {
+    default_rules_path_from(
+        std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(PathBuf::from),
+    )
+}
+
+fn default_rules_path_from(base_dir: Option<PathBuf>) -> PathBuf {
+    base_dir
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".fwc")
+        .join("rules.toml")
+}
+
+/// File-backed store for persisted reactive rules.
+#[derive(Clone, Debug)]
+pub struct RuleSetStore {
+    path: PathBuf,
+}
+
+impl RuleSetStore {
+    /// Create a store at the default location (`~/.fwc/rules.toml`).
+    pub fn default_path() -> Self {
+        Self::new(default_rules_path())
+    }
+
+    /// Create a store at a specific rules file path.
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+
+    /// Return the rules file path.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Load a persisted rule set.
+    ///
+    /// Returns an empty rule set when the file does not exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file exists but cannot be read or parsed.
+    pub fn load(&self) -> Result<RuleSet> {
+        if !self.path.exists() {
+            return Ok(RuleSet::new());
+        }
+
+        let raw = fs::read_to_string(&self.path)
+            .with_context(|| format!("failed to read rules file `{}`", self.path.display()))?;
+        toml::from_str(&raw)
+            .with_context(|| format!("failed to parse rules file `{}`", self.path.display()))
+    }
+
+    /// Persist a rule set atomically as TOML.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the parent directory cannot be created or the file
+    /// cannot be serialized or written.
+    pub fn save(&self, rules: &RuleSet) -> Result<()> {
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "failed to create parent directory for rules file `{}`",
+                    self.path.display()
+                )
+            })?;
+        }
+
+        let raw = toml::to_string_pretty(rules).context("failed to serialize rules as TOML")?;
+        let tmp_path = self.tmp_path();
+        fs::write(&tmp_path, raw.as_bytes())
+            .with_context(|| format!("failed to write temp rules file `{}`", tmp_path.display()))?;
+        fs::rename(&tmp_path, &self.path).with_context(|| {
+            format!(
+                "failed to promote temp rules file `{}` to `{}`",
+                tmp_path.display(),
+                self.path.display()
+            )
+        })?;
+        Ok(())
+    }
+
+    fn tmp_path(&self) -> PathBuf {
+        let file_name = self
+            .path
+            .file_name()
+            .and_then(|file_name| file_name.to_str())
+            .unwrap_or("rules.toml");
+        self.path
+            .with_file_name(format!("{file_name}.tmp.{}", std::process::id()))
+    }
+}
+
 // ── Display helpers ───────────────────────────────────────────────
 
 /// Format a rule for TOON display.
@@ -803,6 +1065,7 @@ pub fn validate_rule(rule: &Rule) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     fn sample_trigger() -> EventTrigger {
         EventTrigger::new("slack", "message.new")
@@ -942,6 +1205,7 @@ mod tests {
         let e = sample_event();
         assert_eq!(e.connector, "slack");
         assert_eq!(e.event_type, "message.new");
+        assert!(e.event_id.is_none());
         assert_eq!(e.data.len(), 3);
     }
 
@@ -951,6 +1215,26 @@ mod tests {
         assert_eq!(e.get_field("data.text"), Some("Found a bug in login"));
         assert_eq!(e.get_field("text"), Some("Found a bug in login"));
         assert_eq!(e.get_field("data.missing"), None);
+    }
+
+    #[test]
+    fn event_with_event_id() {
+        let event = sample_event().with_event_id("evt-123");
+        assert_eq!(event.event_id.as_deref(), Some("evt-123"));
+        assert_eq!(event.dedup_identity(), "id:evt-123");
+    }
+
+    #[test]
+    fn event_dedup_identity_hash_ignores_received_at() {
+        let event_a = IncomingEvent::new("slack", "message.new")
+            .with_data("text", "same payload")
+            .with_data("user", "alice");
+        let mut event_b = IncomingEvent::new("slack", "message.new")
+            .with_data("text", "same payload")
+            .with_data("user", "alice");
+        event_b.received_at = event_a.received_at + Duration::minutes(5);
+
+        assert_eq!(event_a.dedup_identity(), event_b.dedup_identity());
     }
 
     // ── ExecutionOutcome ──────────────────────────────────────────
@@ -964,6 +1248,7 @@ mod tests {
             "circuit_broken"
         );
         assert_eq!(ExecutionOutcome::DryRun.to_string(), "dry_run");
+        assert_eq!(ExecutionOutcome::Duplicate.to_string(), "duplicate");
         assert_eq!(ExecutionOutcome::NoMatch.to_string(), "no_match");
         assert_eq!(ExecutionOutcome::Disabled.to_string(), "disabled");
     }
@@ -1142,6 +1427,32 @@ mod tests {
         assert_eq!(state.triggers.len(), 1);
     }
 
+    #[test]
+    fn dedup_cache_suppresses_duplicates_within_window() {
+        let rule = sample_rule().with_throttle(RuleThrottle::new(5, "10m"));
+        let event = sample_event().with_event_id("evt-1");
+        let mut cache = RuleDedupCache::new();
+        let now = Utc::now();
+
+        assert!(!cache.check_and_record_at(&rule, &event, now));
+        assert!(cache.check_and_record_at(&rule, &event, now + Duration::minutes(9)));
+        assert!(!cache.check_and_record_at(&rule, &event, now + Duration::minutes(11)));
+    }
+
+    #[test]
+    fn dedup_cache_prunes_expired_entries() {
+        let rule = sample_rule().with_throttle(RuleThrottle::new(5, "5m"));
+        let event = sample_event().with_event_id("evt-2");
+        let mut cache = RuleDedupCache::new();
+        let now = Utc::now();
+
+        assert!(!cache.check_and_record_at(&rule, &event, now));
+        assert_eq!(cache.len(), 1);
+
+        cache.prune_expired_at(now + Duration::minutes(6));
+        assert!(cache.is_empty());
+    }
+
     // ── CircuitBreaker ────────────────────────────────────────────
 
     #[test]
@@ -1290,6 +1601,25 @@ mod tests {
         assert!(result.rendered_inputs.is_some());
     }
 
+    #[test]
+    fn eval_rule_duplicate() {
+        let rule = sample_rule();
+        let event = sample_event().with_event_id("evt-duplicate");
+        let state = ThrottleState::new("bug-to-issue");
+        let cb = CircuitBreaker::default();
+        let mut dedup = RuleDedupCache::new();
+
+        let (first_outcome, _) =
+            evaluate_rule_with_dedup(&rule, &event, &state, &cb, &mut dedup, false);
+        assert_eq!(first_outcome, ExecutionOutcome::Executed);
+
+        let (second_outcome, result) =
+            evaluate_rule_with_dedup(&rule, &event, &state, &cb, &mut dedup, false);
+        assert_eq!(second_outcome, ExecutionOutcome::Duplicate);
+        assert!(result.matched);
+        assert!(result.reason.contains("already processed"));
+    }
+
     // ── RuleSet ───────────────────────────────────────────────────
 
     #[test]
@@ -1375,6 +1705,47 @@ mod tests {
         rs.add(sample_rule());
         let json = serde_json::to_value(&rs).unwrap();
         assert_eq!(json["rules"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn default_rules_path_uses_home_directory() {
+        let path = default_rules_path_from(Some(PathBuf::from("/tmp/fwc-home")));
+        assert_eq!(path, PathBuf::from("/tmp/fwc-home/.fwc/rules.toml"));
+    }
+
+    #[test]
+    fn ruleset_store_missing_file_returns_empty() {
+        let dir = tempdir().unwrap();
+        let store = RuleSetStore::new(dir.path().join("rules.toml"));
+        let loaded = store.load().unwrap();
+        assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn ruleset_store_round_trip() {
+        let dir = tempdir().unwrap();
+        let store = RuleSetStore::new(dir.path().join("nested").join("rules.toml"));
+        let mut rules = RuleSet::new();
+        rules.add(sample_rule());
+
+        store.save(&rules).unwrap();
+        let loaded = store.load().unwrap();
+        let raw = std::fs::read_to_string(store.path()).unwrap();
+
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded.get("bug-to-issue").is_some());
+        assert!(raw.contains("[[rules]]"));
+    }
+
+    #[test]
+    fn ruleset_store_invalid_toml_errors() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("rules.toml");
+        std::fs::write(&path, "not valid toml = [").unwrap();
+
+        let store = RuleSetStore::new(path);
+        let error = store.load().unwrap_err();
+        assert!(error.to_string().contains("failed to parse rules file"));
     }
 
     // ── validate_rule ─────────────────────────────────────────────

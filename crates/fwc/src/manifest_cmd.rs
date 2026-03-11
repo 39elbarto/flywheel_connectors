@@ -381,4 +381,494 @@ mod tests {
         assert!(args.write);
         assert!(!args.check);
     }
+
+    // ── FixArgs clone and equality ─────────────────────────────
+
+    #[test]
+    fn fix_args_clone() {
+        let args = FixArgs {
+            manifest_path: PathBuf::from("clone.toml"),
+            check: true,
+            write: false,
+            json: true,
+        };
+        let cloned = args.clone();
+        assert_eq!(cloned.manifest_path, PathBuf::from("clone.toml"));
+        assert!(cloned.check);
+        assert!(!cloned.write);
+        assert!(cloned.json);
+    }
+
+    #[test]
+    fn fix_args_all_flags_false() {
+        let args = FixArgs {
+            manifest_path: PathBuf::from("x.toml"),
+            check: false,
+            write: false,
+            json: false,
+        };
+        assert!(!args.check);
+        assert!(!args.write);
+        assert!(!args.json);
+    }
+
+    #[test]
+    fn fix_args_write_and_json() {
+        let args = FixArgs {
+            manifest_path: PathBuf::from("wj.toml"),
+            check: false,
+            write: true,
+            json: true,
+        };
+        assert!(args.write);
+        assert!(args.json);
+        assert!(!args.check);
+    }
+
+    #[test]
+    fn fix_args_custom_path() {
+        let args = FixArgs {
+            manifest_path: PathBuf::from("/some/deep/nested/path/manifest.toml"),
+            check: false,
+            write: false,
+            json: false,
+        };
+        assert_eq!(
+            args.manifest_path,
+            PathBuf::from("/some/deep/nested/path/manifest.toml")
+        );
+    }
+
+    #[test]
+    fn fix_args_debug_contains_flags() {
+        let args = FixArgs {
+            manifest_path: PathBuf::from("m.toml"),
+            check: true,
+            write: false,
+            json: true,
+        };
+        let debug = format!("{args:?}");
+        assert!(debug.contains("check: true"));
+        assert!(debug.contains("write: false"));
+        assert!(debug.contains("json: true"));
+    }
+
+    // ── ManifestArgs/ManifestCommand clone and debug ───────────
+
+    #[test]
+    fn manifest_args_clone() {
+        let args = ManifestArgs {
+            command: ManifestCommand::Fix(FixArgs {
+                manifest_path: PathBuf::from("clone_test.toml"),
+                check: false,
+                write: true,
+                json: false,
+            }),
+        };
+        let cloned = args.clone();
+        let debug = format!("{cloned:?}");
+        assert!(debug.contains("clone_test.toml"));
+    }
+
+    #[test]
+    fn manifest_command_debug_contains_fix() {
+        let cmd = ManifestCommand::Fix(FixArgs {
+            manifest_path: PathBuf::from("dbg.toml"),
+            check: false,
+            write: false,
+            json: false,
+        });
+        let debug = format!("{cmd:?}");
+        assert!(debug.contains("Fix"));
+        assert!(debug.contains("dbg.toml"));
+    }
+
+    #[test]
+    fn manifest_command_clone() {
+        let cmd = ManifestCommand::Fix(FixArgs {
+            manifest_path: PathBuf::from("orig.toml"),
+            check: true,
+            write: false,
+            json: true,
+        });
+        let cloned = cmd.clone();
+        let debug = format!("{cloned:?}");
+        assert!(debug.contains("orig.toml"));
+        assert!(debug.contains("check: true"));
+    }
+
+    // ── ManifestFixReport field value tests ────────────────────
+
+    #[test]
+    fn report_path_field_preserved() {
+        let report = sample_report(false, false, None);
+        assert_eq!(report.path, "connectors/test/manifest.toml");
+    }
+
+    #[test]
+    fn report_hash_before_equals_after_when_unchanged() {
+        let report = sample_report(false, false, None);
+        assert_eq!(report.interface_hash_before, "abc123");
+        assert_eq!(report.interface_hash_after, "abc123");
+    }
+
+    #[test]
+    fn report_hash_after_differs_when_changed() {
+        let report = sample_report(true, false, None);
+        assert_eq!(report.interface_hash_before, "abc123");
+        assert_eq!(report.interface_hash_after, "def456");
+    }
+
+    #[test]
+    fn report_mode_reflects_wrote_flag() {
+        let check_report = sample_report(false, false, None);
+        assert_eq!(check_report.mode, "check");
+        let write_report = sample_report(true, true, None);
+        assert_eq!(write_report.mode, "write");
+    }
+
+    // ── ManifestFixReport JSON structure tests ─────────────────
+
+    #[test]
+    fn report_json_field_count_without_validation_error() {
+        let report = sample_report(false, false, None);
+        let json = serde_json::to_string(&report).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let obj = v.as_object().unwrap();
+        // validation_error is skipped when None, so 6 fields
+        assert_eq!(obj.len(), 6);
+    }
+
+    #[test]
+    fn report_json_field_count_with_validation_error() {
+        let report = sample_report(false, false, Some("error"));
+        let json = serde_json::to_string(&report).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let obj = v.as_object().unwrap();
+        // all 7 fields present
+        assert_eq!(obj.len(), 7);
+    }
+
+    #[test]
+    fn report_json_changed_is_bool() {
+        let report = sample_report(true, false, None);
+        let json = serde_json::to_string(&report).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v["changed"].is_boolean());
+    }
+
+    #[test]
+    fn report_json_wrote_is_bool() {
+        let report = sample_report(false, false, None);
+        let json = serde_json::to_string(&report).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v["wrote"].is_boolean());
+    }
+
+    #[test]
+    fn report_json_path_is_string() {
+        let report = sample_report(false, false, None);
+        let json = serde_json::to_string(&report).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v["path"].is_string());
+    }
+
+    #[test]
+    fn report_json_mode_is_string() {
+        let report = sample_report(false, false, None);
+        let json = serde_json::to_string(&report).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v["mode"].is_string());
+    }
+
+    #[test]
+    fn report_json_interface_hashes_are_strings() {
+        let report = sample_report(true, false, None);
+        let json = serde_json::to_string(&report).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v["interface_hash_before"].is_string());
+        assert!(v["interface_hash_after"].is_string());
+    }
+
+    #[test]
+    fn report_json_validation_error_is_string_when_present() {
+        let report = sample_report(false, false, Some("val err"));
+        let json = serde_json::to_string(&report).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v["validation_error"].is_string());
+        assert_eq!(v["validation_error"], "val err");
+    }
+
+    #[test]
+    fn report_json_validation_error_absent_when_none() {
+        let report = sample_report(false, false, None);
+        let json = serde_json::to_string(&report).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v.get("validation_error").is_none());
+    }
+
+    // ── ManifestFixReport with special characters ──────────────
+
+    #[test]
+    fn report_with_special_chars_in_validation_error() {
+        let report = sample_report(false, false, Some("error: \"quotes\" & <angle>"));
+        let json = serde_json::to_string(&report).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            v["validation_error"],
+            "error: \"quotes\" & <angle>"
+        );
+    }
+
+    #[test]
+    fn report_with_empty_validation_error() {
+        let report = sample_report(false, false, Some(""));
+        assert!(report.validation_error.is_some());
+        assert_eq!(report.validation_error.as_deref().unwrap(), "");
+    }
+
+    #[test]
+    fn report_with_long_validation_error() {
+        let long_msg = "x".repeat(1000);
+        let report = sample_report(false, false, Some(&long_msg));
+        assert_eq!(report.validation_error.as_deref().unwrap().len(), 1000);
+    }
+
+    // ── ManifestFixReport custom construction ──────────────────
+
+    #[test]
+    fn report_manual_construction() {
+        let report = ManifestFixReport {
+            path: "/custom/path.toml".to_string(),
+            mode: "check".to_string(),
+            changed: false,
+            wrote: false,
+            interface_hash_before: "hash_a".to_string(),
+            interface_hash_after: "hash_a".to_string(),
+            validation_error: None,
+        };
+        assert_eq!(report.path, "/custom/path.toml");
+        assert_eq!(report.mode, "check");
+        assert!(!report.changed);
+    }
+
+    #[test]
+    fn report_manual_construction_with_write() {
+        let report = ManifestFixReport {
+            path: "my_manifest.toml".to_string(),
+            mode: "write".to_string(),
+            changed: true,
+            wrote: true,
+            interface_hash_before: "old_hash".to_string(),
+            interface_hash_after: "new_hash".to_string(),
+            validation_error: Some("validation failed".to_string()),
+        };
+        assert!(report.changed);
+        assert!(report.wrote);
+        assert_eq!(report.interface_hash_before, "old_hash");
+        assert_eq!(report.interface_hash_after, "new_hash");
+    }
+
+    #[test]
+    fn report_debug_format() {
+        let report = sample_report(true, false, Some("test error"));
+        let debug = format!("{report:?}");
+        assert!(debug.contains("ManifestFixReport"));
+        assert!(debug.contains("test error"));
+        assert!(debug.contains("connectors/test/manifest.toml"));
+    }
+
+    // ── run_fix filesystem tests ───────────────────────────────
+
+    #[test]
+    fn run_fix_missing_file_returns_error() {
+        let args = FixArgs {
+            manifest_path: PathBuf::from("/tmp/fwc_test_nonexistent_manifest.toml"),
+            check: true,
+            write: false,
+            json: false,
+        };
+        let result = run_fix(&args);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("failed to read manifest"));
+    }
+
+    #[test]
+    fn run_fix_invalid_toml_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.toml");
+        fs::write(&path, "this is not valid toml {{{{").unwrap();
+        let args = FixArgs {
+            manifest_path: path,
+            check: true,
+            write: false,
+            json: false,
+        };
+        let result = run_fix(&args);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("failed to parse manifest TOML"));
+    }
+
+    #[test]
+    fn run_fix_empty_file_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.toml");
+        fs::write(&path, "").unwrap();
+        let args = FixArgs {
+            manifest_path: path,
+            check: true,
+            write: false,
+            json: false,
+        };
+        let result = run_fix(&args);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn run_fix_partial_toml_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("partial.toml");
+        fs::write(&path, "[manifest]\nformat = \"fcp-connector-manifest\"\n").unwrap();
+        let args = FixArgs {
+            manifest_path: path,
+            check: true,
+            write: false,
+            json: false,
+        };
+        let result = run_fix(&args);
+        assert!(result.is_err());
+    }
+
+    // ── check_only logic tests ─────────────────────────────────
+
+    #[test]
+    fn check_only_true_when_check_flag_set() {
+        // Replicate the logic: check_only = args.check || !args.write
+        let args = FixArgs {
+            manifest_path: PathBuf::from("m.toml"),
+            check: true,
+            write: false,
+            json: false,
+        };
+        let check_only = args.check || !args.write;
+        assert!(check_only);
+    }
+
+    #[test]
+    fn check_only_true_when_neither_flag_set() {
+        let args = FixArgs {
+            manifest_path: PathBuf::from("m.toml"),
+            check: false,
+            write: false,
+            json: false,
+        };
+        let check_only = args.check || !args.write;
+        assert!(check_only);
+    }
+
+    #[test]
+    fn check_only_false_when_write_flag_set() {
+        let args = FixArgs {
+            manifest_path: PathBuf::from("m.toml"),
+            check: false,
+            write: true,
+            json: false,
+        };
+        let check_only = args.check || !args.write;
+        assert!(!check_only);
+    }
+
+    // ── print_human_report additional branch coverage ──────────
+
+    #[test]
+    fn print_human_report_changed_and_wrote_false_write_mode() {
+        // This hits the `changed && !wrote` branch in non-check mode
+        let report = ManifestFixReport {
+            path: "test.toml".to_string(),
+            mode: "write".to_string(),
+            changed: true,
+            wrote: false,
+            interface_hash_before: "aaa".to_string(),
+            interface_hash_after: "bbb".to_string(),
+            validation_error: None,
+        };
+        // Should not panic — hits "changes available (use --write)" branch
+        print_human_report(&report, false);
+    }
+
+    #[test]
+    fn print_human_report_no_change_no_error_check_mode() {
+        let report = ManifestFixReport {
+            path: "test.toml".to_string(),
+            mode: "check".to_string(),
+            changed: false,
+            wrote: false,
+            interface_hash_before: "same".to_string(),
+            interface_hash_after: "same".to_string(),
+            validation_error: None,
+        };
+        // Should not panic — hits "no changes needed" in check mode
+        print_human_report(&report, true);
+    }
+
+    #[test]
+    fn print_human_report_changed_with_error_in_check_mode() {
+        let report = ManifestFixReport {
+            path: "test.toml".to_string(),
+            mode: "check".to_string(),
+            changed: true,
+            wrote: false,
+            interface_hash_before: "old".to_string(),
+            interface_hash_after: "new".to_string(),
+            validation_error: Some("zones.forbidden overlap".to_string()),
+        };
+        print_human_report(&report, true);
+    }
+
+    #[test]
+    fn print_human_report_not_changed_with_error_write_mode() {
+        let report = ManifestFixReport {
+            path: "test.toml".to_string(),
+            mode: "write".to_string(),
+            changed: false,
+            wrote: false,
+            interface_hash_before: "hash".to_string(),
+            interface_hash_after: "hash".to_string(),
+            validation_error: Some("missing capability".to_string()),
+        };
+        print_human_report(&report, false);
+    }
+
+    // ── ManifestFixReport serialization roundtrip tests ────────
+
+    #[test]
+    fn report_serde_roundtrip_with_validation_error() {
+        let report = sample_report(true, true, Some("missing field"));
+        let json = serde_json::to_string(&report).unwrap();
+        let back: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(back["path"], "connectors/test/manifest.toml");
+        assert_eq!(back["mode"], "write");
+        assert_eq!(back["changed"], true);
+        assert_eq!(back["wrote"], true);
+        assert_eq!(back["interface_hash_before"], "abc123");
+        assert_eq!(back["interface_hash_after"], "def456");
+        assert_eq!(back["validation_error"], "missing field");
+    }
+
+    #[test]
+    fn report_serde_compact_json() {
+        let report = sample_report(false, false, None);
+        let compact = serde_json::to_string(&report).unwrap();
+        // Compact JSON should have no newlines
+        assert!(!compact.contains('\n'));
+    }
+
+    #[test]
+    fn report_serde_pretty_json_has_newlines() {
+        let report = sample_report(false, false, None);
+        let pretty = serde_json::to_string_pretty(&report).unwrap();
+        assert!(pretty.contains('\n'));
+    }
 }

@@ -465,13 +465,13 @@ impl PromptArgDef {
     }
 }
 
-// ── Discovered Operation Stub ───────────────────────────────────────────
+// ── Discovered Operation Entry ──────────────────────────────────────────
 
-/// Minimal stub for a discovered operation, used to populate MCP tools
+/// Minimal operation record used to populate MCP tools
 /// without pulling in the full [`crate::readiness::DiscoveredOperation`]
 /// dependency graph.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct DiscoveredOperationStub {
+pub struct DiscoveredOperationEntry {
     /// Connector that owns this operation (e.g. `"github"`).
     pub connector_id: String,
     /// Operation identifier (e.g. `"list_issues"`).
@@ -482,8 +482,8 @@ pub struct DiscoveredOperationStub {
     pub input_schema: Value,
 }
 
-impl DiscoveredOperationStub {
-    /// Create a new operation stub.
+impl DiscoveredOperationEntry {
+    /// Create a new operation entry.
     pub fn new(
         connector_id: impl Into<String>,
         operation_id: impl Into<String>,
@@ -568,8 +568,8 @@ impl McpServerState {
 }
 
 /// Convenience constructor: build an `McpServerState` from a list of
-/// [`DiscoveredOperationStub`] values.
-pub fn from_operations(ops: &[DiscoveredOperationStub]) -> McpServerState {
+/// [`DiscoveredOperationEntry`] values.
+pub fn from_operations(ops: &[DiscoveredOperationEntry]) -> McpServerState {
     let mut builder = McpServerState::builder();
     for op in ops {
         let tool = McpToolDefinition::new(
@@ -867,21 +867,18 @@ fn handle_tools_call(state: &McpServerState, id: Value, params: Option<&Value>) 
 
     let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
 
-    // Stub response — actual invocation happens in the transport layer.
-    JsonRpcResponse::success(
+    JsonRpcResponse::error(
         id,
-        json!({
-            "content": [{
-                "type": "text",
-                "text": format!(
-                    "invocation would go here: connector={}, operation={}, arguments={}",
-                    tool.connector_id,
-                    tool.operation_id,
-                    arguments,
-                ),
-            }],
-            "isError": false,
-        }),
+        JsonRpcError::internal(format!(
+            "Direct tools/call handling is not available in the pure request router for `{}`. Use the transport-bound tool handler so invocations run for real.",
+            tool.name
+        ))
+        .with_data(json!({
+            "tool": tool.name,
+            "connector_id": tool.connector_id,
+            "operation_id": tool.operation_id,
+            "arguments": arguments,
+        })),
     )
 }
 
@@ -944,14 +941,20 @@ fn handle_resources_read(
         );
     };
 
-    // Stub: actual resource content comes from the runtime.
+    let content = json!({
+        "uri": resource.uri,
+        "name": resource.name,
+        "description": resource.description,
+        "mimeType": resource.mime_type,
+    });
     JsonRpcResponse::success(
         id,
         json!({
             "contents": [{
                 "uri": resource.uri,
                 "mimeType": resource.mime_type,
-                "text": format!("resource content stub for: {}", resource.uri),
+                "text": serde_json::to_string_pretty(&content)
+                    .unwrap_or_else(|_| content.to_string()),
             }],
         }),
     )
@@ -1026,7 +1029,37 @@ fn handle_prompts_get(
         );
     };
 
-    // Stub: actual prompt rendering comes from the runtime.
+    let provided_args = params
+        .get("arguments")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let rendered_arguments = if prompt.arguments.is_empty() {
+        "No prompt arguments.".to_string()
+    } else {
+        prompt
+            .arguments
+            .iter()
+            .map(|argument| {
+                let value = provided_args
+                    .get(&argument.name)
+                    .map(Value::to_string)
+                    .unwrap_or_else(|| {
+                        if argument.required {
+                            "<missing required value>".to_string()
+                        } else {
+                            "<optional omitted>".to_string()
+                        }
+                    });
+                format!("- {}: {}", argument.name, value)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let rendered_prompt = format!(
+        "Prompt: {}\n\n{}\n\nArguments:\n{}",
+        prompt.name, prompt.description, rendered_arguments
+    );
     JsonRpcResponse::success(
         id,
         json!({
@@ -1035,7 +1068,7 @@ fn handle_prompts_get(
                 "role": "user",
                 "content": {
                     "type": "text",
-                    "text": format!("prompt content stub for: {}", prompt.name),
+                    "text": rendered_prompt,
                 },
             }],
         }),
@@ -1496,26 +1529,26 @@ mod tests {
     // ── Discovered Operation Stub ───────────────────────────────────
 
     #[test]
-    fn operation_stub_tool_name() {
-        let stub = DiscoveredOperationStub::new(
+    fn operation_entry_tool_name() {
+        let entry = DiscoveredOperationEntry::new(
             "github",
             "list_issues",
             "List issues",
             json!({"type": "object"}),
         );
-        assert_eq!(stub.tool_name(), "github.list_issues");
+        assert_eq!(entry.tool_name(), "github.list_issues");
     }
 
     #[test]
-    fn operation_stub_serde_roundtrip() {
-        let stub = DiscoveredOperationStub::new(
+    fn operation_entry_serde_roundtrip() {
+        let entry = DiscoveredOperationEntry::new(
             "slack",
             "send_message",
             "Send a message",
             json!({"type": "object"}),
         );
-        let json = serde_json::to_string(&stub).unwrap();
-        let back: DiscoveredOperationStub = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&entry).unwrap();
+        let back: DiscoveredOperationEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(back.connector_id, "slack");
         assert_eq!(back.operation_id, "send_message");
     }
@@ -1530,7 +1563,7 @@ mod tests {
 
     #[test]
     fn from_operations_single() {
-        let ops = vec![DiscoveredOperationStub::new(
+        let ops = vec![DiscoveredOperationEntry::new(
             "github",
             "list_issues",
             "List issues",
@@ -1547,9 +1580,9 @@ mod tests {
     #[test]
     fn from_operations_multiple() {
         let ops = vec![
-            DiscoveredOperationStub::new("a", "op1", "desc1", json!({})),
-            DiscoveredOperationStub::new("a", "op2", "desc2", json!({})),
-            DiscoveredOperationStub::new("b", "op3", "desc3", json!({})),
+            DiscoveredOperationEntry::new("a", "op1", "desc1", json!({})),
+            DiscoveredOperationEntry::new("a", "op2", "desc2", json!({})),
+            DiscoveredOperationEntry::new("b", "op3", "desc3", json!({})),
         ];
         let state = from_operations(&ops);
         assert_eq!(state.tool_count(), 3);
@@ -1558,7 +1591,7 @@ mod tests {
     #[test]
     fn from_operations_preserves_input_schema() {
         let schema = json!({"type": "object", "required": ["x"]});
-        let ops = vec![DiscoveredOperationStub::new(
+        let ops = vec![DiscoveredOperationEntry::new(
             "c",
             "op",
             "desc",
@@ -1822,7 +1855,7 @@ mod tests {
     // ── handle_request: tools/call ──────────────────────────────────
 
     #[test]
-    fn handle_tools_call_success() {
+    fn handle_tools_call_requires_transport_handler() {
         let state = sample_state();
         let req = make_request(
             "tools/call",
@@ -1832,27 +1865,22 @@ mod tests {
             })),
         );
         let resp = handle_request(&state, &req);
-        assert!(!resp.is_error());
-        let result = resp.result().unwrap();
-        assert_eq!(result["isError"], false);
-        let text = result["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("invocation would go here"));
-        assert!(text.contains("github"));
-        assert!(text.contains("list_issues"));
+        assert!(resp.is_error());
+        let error = resp.error.as_ref().unwrap();
+        assert_eq!(error.code, INTERNAL_ERROR);
+        assert!(error.message.contains("transport-bound tool handler"));
     }
 
     #[test]
-    fn handle_tools_call_includes_arguments_in_stub() {
+    fn handle_tools_call_error_includes_arguments() {
         let state = sample_state();
         let req = make_request(
             "tools/call",
             Some(json!({"name": "github.list_issues", "arguments": {"owner": "x"}})),
         );
         let resp = handle_request(&state, &req);
-        let text = resp.result().unwrap()["content"][0]["text"]
-            .as_str()
-            .unwrap();
-        assert!(text.contains("owner"));
+        let data = resp.error.as_ref().unwrap().data.as_ref().unwrap();
+        assert_eq!(data["arguments"]["owner"], "x");
     }
 
     #[test]

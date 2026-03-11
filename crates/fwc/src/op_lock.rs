@@ -344,12 +344,7 @@ mod tests {
     use super::*;
 
     fn temp_store() -> LockStore {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("fwc-lock-test-{unique}"));
+        let dir = std::env::temp_dir().join(format!("fwc-lock-test-{}", uuid::Uuid::new_v4()));
         LockStore::new(dir)
     }
 

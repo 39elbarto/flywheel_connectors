@@ -722,10 +722,12 @@ impl DiscoveredConnector {
         descriptor.display_name = Some(self.detail.summary.name.clone());
         descriptor.version = Some(self.detail.summary.version.clone());
         descriptor.description = Some(self.detail.summary.description.clone());
-        descriptor.archetypes = self.detail.summary.archetypes.clone();
-        descriptor.supported_zones = self.supported_zones.clone();
+        descriptor
+            .archetypes
+            .clone_from(&self.detail.summary.archetypes);
+        descriptor.supported_zones.clone_from(&self.supported_zones);
         descriptor.runtime_format = Some(self.runtime_format.clone());
-        descriptor.state_model = self.state_model.clone();
+        descriptor.state_model.clone_from(&self.state_model);
         descriptor.operations = self
             .operations
             .iter()
@@ -1062,7 +1064,7 @@ fn parse_approval_mode(label: &str) -> Option<ApprovalMode> {
     }
 }
 
-pub(crate) const fn risk_level_label(level: fcp_core::RiskLevel) -> &'static str {
+pub const fn risk_level_label(level: fcp_core::RiskLevel) -> &'static str {
     match level {
         fcp_core::RiskLevel::Low => "low",
         fcp_core::RiskLevel::Medium => "medium",
@@ -1071,7 +1073,7 @@ pub(crate) const fn risk_level_label(level: fcp_core::RiskLevel) -> &'static str
     }
 }
 
-pub(crate) const fn safety_tier_label(tier: fcp_core::SafetyTier) -> &'static str {
+pub const fn safety_tier_label(tier: fcp_core::SafetyTier) -> &'static str {
     match tier {
         fcp_core::SafetyTier::Safe => "safe",
         fcp_core::SafetyTier::Risky => "risky",
@@ -1081,7 +1083,7 @@ pub(crate) const fn safety_tier_label(tier: fcp_core::SafetyTier) -> &'static st
     }
 }
 
-pub(crate) const fn idempotency_label(idempotency: fcp_core::IdempotencyClass) -> &'static str {
+pub const fn idempotency_label(idempotency: fcp_core::IdempotencyClass) -> &'static str {
     match idempotency {
         fcp_core::IdempotencyClass::None => "none",
         fcp_core::IdempotencyClass::BestEffort => "best-effort",
@@ -1169,7 +1171,7 @@ fn pluralize_object(object: &str) -> String {
     }
 }
 
-pub(crate) fn normalize_connector_selector(selector: &str) -> String {
+pub fn normalize_connector_selector(selector: &str) -> String {
     selector
         .trim()
         .to_lowercase()
@@ -1185,7 +1187,7 @@ fn normalize_zone_selector(selector: &str) -> String {
     selector.trim().to_lowercase()
 }
 
-pub(crate) fn normalize_operation_selector(selector: &str) -> String {
+pub fn normalize_operation_selector(selector: &str) -> String {
     selector.trim().to_lowercase().replace('-', "_")
 }
 
@@ -1223,7 +1225,7 @@ fn suggest_operation_selectors(operations: &[DiscoveredOperation], selector: &st
         .collect()
 }
 
-pub(crate) fn selector_distance(left: &str, right: &str) -> usize {
+pub fn selector_distance(left: &str, right: &str) -> usize {
     let right_chars = right.chars().collect::<Vec<_>>();
     let mut costs = (0..=right_chars.len()).collect::<Vec<_>>();
 

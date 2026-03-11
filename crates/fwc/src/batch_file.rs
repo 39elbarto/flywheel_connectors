@@ -706,6 +706,7 @@ mod tests {
             connector: "github".to_owned(),
             operation: "list_issues".to_owned(),
             input: json!({"owner": "o", "repo": "r"}),
+            zone: None,
             depends_on: vec!["step0".to_owned()],
         };
         let json = serde_json::to_string(&op).unwrap();
@@ -721,6 +722,7 @@ mod tests {
             connector: "g".to_owned(),
             operation: "o".to_owned(),
             input: json!({}),
+            zone: None,
             depends_on: vec![],
         };
         let json = serde_json::to_string(&op).unwrap();
@@ -960,6 +962,7 @@ mod tests {
             connector: "github".to_owned(),
             operation: "create_issue".to_owned(),
             input: json!({"title": "Bug", "body": "Details", "labels": ["bug", "priority"]}),
+            zone: None,
             depends_on: vec!["step0".to_owned(), "step-1".to_owned()],
         };
         let json = serde_json::to_string(&op).unwrap();
@@ -975,6 +978,7 @@ mod tests {
             connector: "g".to_owned(),
             operation: "o".to_owned(),
             input: json!({"x": 1}),
+            zone: None,
             depends_on: vec!["dep".to_owned()],
         };
         let cloned = op.clone();

@@ -24,7 +24,7 @@ This contract covers runtime behavior across four crate surfaces:
 | RaptorQ core | `crates/fcp-raptorq/src/config.rs`, `encode.rs`, `decode.rs`, `chunk.rs` | Symbol policy, chunking policy, decode admission bounds |
 | Mesh transport/admission | `crates/fcp-mesh/src/admission.rs`, `symbol_request.rs`, `degraded.rs` | Peer budgets, anti-amplification, bounded repair transport |
 | Store + repair orchestration | `crates/fcp-store/src/symbol_store.rs`, `coverage.rs`, `repair.rs` | Coverage accounting, repair eligibility, deterministic scheduling |
-| CLI repair workflow | `crates/fcp-cli/src/repair/mod.rs`, `types.rs` | Stable operator-facing status schema and exit semantics |
+| CLI repair workflow | `crates/fwc/src/main.rs`, host-backed repair/status surfaces | Stable operator-facing status schema and exit semantics |
 
 Non-goal: this bead does not implement full runtime cutover in all crates; it defines the normative contract that downstream beads must implement.
 
@@ -194,7 +194,7 @@ Queue semantics:
   - `1`: critical/unavailable
   - `2`: degraded
 
-Current implementation still contains simulation placeholders in `crates/fcp-cli/src/repair/mod.rs`; bead `235t.24` MUST replace placeholders with real mesh/store-backed data without breaking schema or exit-code semantics.
+Legacy repair/status work previously lived under `crates/fcp-cli`; bead `235t.24` MUST land real mesh/store-backed status semantics in the canonical `fwc` surface without breaking schema or exit-code semantics.
 
 ---
 
@@ -228,4 +228,3 @@ Each downstream bead must link this document in completion evidence and demonstr
 - Architecture contract is explicit for symbol sizing, decode admission, epoch buffering/replay, and deterministic repair semantics.
 - Contract is linked in ASUPERSYNC baseline docs.
 - Deterministic repair scheduling behavior is encoded in implementation/tests.
-

@@ -72,7 +72,7 @@ The destination-side representation for connector operation surfaces and invocat
 - Core connector interface already models `introspect()` + `invoke()` in [crates/fcp-core/src/connector.rs](/Users/jemanuel/projects/flywheel_connectors/crates/fcp-core/src/connector.rs:22).
 - Wire-level invoke request/response are already defined in [crates/fcp-core/src/protocol.rs](/Users/jemanuel/projects/flywheel_connectors/crates/fcp-core/src/protocol.rs:347) and [crates/fcp-core/src/protocol.rs](/Users/jemanuel/projects/flywheel_connectors/crates/fcp-core/src/protocol.rs:505).
 - Core introspection/operation types already exist in [crates/fcp-core/src/protocol.rs](/Users/jemanuel/projects/flywheel_connectors/crates/fcp-core/src/protocol.rs:1589).
-- CLI-side consumer descriptors already exist in [crates/fcp-cli/src/connector/types.rs](/Users/jemanuel/projects/flywheel_connectors/crates/fcp-cli/src/connector/types.rs:214).
+- CLI-side consumer descriptors already exist in [crates/fwc/src/readiness.rs](/Users/jemanuel/projects/flywheel_connectors/crates/fwc/src/readiness.rs).
 
 Conclusion: migration risk is not lack of destination type/system modeling. The main gap is shared Google ingestion/auth/executor/generation substrate and how handwritten overlays are layered on top.
 

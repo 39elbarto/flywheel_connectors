@@ -207,8 +207,8 @@
       ]
     },
     {
-      "id": "fcp-cli",
-      "path": "crates/fcp-cli",
+      "id": "fwc",
+      "path": "crates/fwc",
       "sync_tests": 234,
       "async_migrated": 8,
       "tokio_remaining": 0,

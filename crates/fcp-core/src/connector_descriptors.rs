@@ -310,8 +310,14 @@ impl AuthDescriptor {
         active_method: impl Into<String>,
         uses_secret_reference: bool,
     ) -> Self {
+        let active_method = active_method.into();
         self.status = DescriptorStatus::Ready;
-        self.active_method = Some(active_method.into());
+        self.summary = Some(if uses_secret_reference {
+            format!("Connector auth is configured via {active_method} using a secret reference.")
+        } else {
+            format!("Connector auth is configured via {active_method}.")
+        });
+        self.active_method = Some(active_method);
         self.uses_secret_reference = Some(uses_secret_reference);
         self
     }
@@ -728,6 +734,48 @@ mod tests {
     }
 
     #[test]
+    fn auth_descriptor_without_advertised_caps_stays_unknown() {
+        let descriptor = AuthDescriptor::from_auth_caps(&AuthCaps {
+            methods: Vec::new(),
+            oauth: None,
+        });
+
+        assert_eq!(descriptor.status, DescriptorStatus::Unknown);
+        assert_eq!(
+            descriptor.summary.as_deref(),
+            Some("Connector did not surface trustworthy auth metadata through this source.")
+        );
+        assert!(descriptor.supported_methods.is_empty());
+        assert!(descriptor.oauth.is_none());
+    }
+
+    #[test]
+    fn auth_descriptor_not_yet_measured_has_stable_json_shape() {
+        let descriptor = AuthDescriptor::not_yet_measured("auth probe has not run yet");
+        let json = serde_json::to_value(&descriptor).unwrap();
+
+        assert_eq!(json["status"], "not_yet_measured");
+        assert_eq!(json["summary"], "auth probe has not run yet");
+        assert!(json.get("supported_methods").is_none());
+        assert!(json.get("oauth").is_none());
+        assert!(json.get("checks").is_none());
+    }
+
+    #[test]
+    fn auth_descriptor_configured_replaces_pending_summary() {
+        let descriptor = AuthDescriptor::not_yet_measured("auth probe has not run yet")
+            .configured("credential_id", true);
+
+        assert_eq!(descriptor.status, DescriptorStatus::Ready);
+        assert_eq!(
+            descriptor.summary.as_deref(),
+            Some("Connector auth is configured via credential_id using a secret reference.")
+        );
+        assert_eq!(descriptor.active_method.as_deref(), Some("credential_id"));
+        assert_eq!(descriptor.uses_secret_reference, Some(true));
+    }
+
+    #[test]
     fn prerequisite_catalog_from_recipe_maps_steps() {
         let recipe = ProvisioningRecipe::new(
             RecipeId::new("github.onboarding"),
@@ -776,6 +824,18 @@ mod tests {
     }
 
     #[test]
+    fn prerequisite_catalog_not_yet_measured_has_stable_json_shape() {
+        let catalog =
+            PrerequisiteCatalog::not_yet_measured("host has not checked prerequisites yet");
+        let json = serde_json::to_value(&catalog).unwrap();
+
+        assert_eq!(json["status"], "not_yet_measured");
+        assert_eq!(json["summary"], "host has not checked prerequisites yet");
+        assert!(json.get("recipe").is_none());
+        assert!(json.get("items").is_none());
+    }
+
+    #[test]
     fn descriptor_status_distinguishes_unavailable_and_not_yet_measured() {
         assert_eq!(
             serde_json::to_string(&DescriptorStatus::NotYetMeasured).unwrap(),
@@ -791,6 +851,32 @@ mod tests {
     fn connector_health_unavailable_maps_to_unavailable_descriptor_status() {
         let status = DescriptorStatus::from(&ConnectorHealth::unavailable("host offline"));
         assert_eq!(status, DescriptorStatus::Unavailable);
+    }
+
+    #[test]
+    fn readiness_descriptor_not_yet_measured_becomes_unavailable_with_unhealthy_runtime() {
+        let descriptor = ReadinessDescriptor::not_yet_measured("runtime probe pending")
+            .with_health(ConnectorHealth::unavailable("host offline"));
+
+        assert_eq!(descriptor.status, DescriptorStatus::Unavailable);
+        assert_eq!(descriptor.summary.as_deref(), Some("runtime probe pending"));
+        assert!(matches!(
+            descriptor.health,
+            Some(ConnectorHealth::Unavailable { .. })
+        ));
+    }
+
+    #[test]
+    fn readiness_descriptor_not_yet_measured_has_stable_json_shape() {
+        let descriptor = ReadinessDescriptor::not_yet_measured("runtime probe pending");
+        let json = serde_json::to_value(&descriptor).unwrap();
+
+        assert_eq!(json["status"], "not_yet_measured");
+        assert_eq!(json["summary"], "runtime probe pending");
+        assert!(json.get("health").is_none());
+        assert!(json.get("self_check").is_none());
+        assert!(json.get("readiness").is_none());
+        assert!(json.get("checks").is_none());
     }
 
     #[test]
@@ -837,5 +923,23 @@ mod tests {
         );
 
         assert_eq!(descriptor.overall_status(), DescriptorStatus::Failed);
+    }
+
+    #[test]
+    fn connector_descriptor_overall_status_prefers_unavailable_over_unknown_and_not_yet_measured() {
+        let mut descriptor = ConnectorDescriptor::new("github");
+        descriptor.auth = Some(AuthDescriptor::from_auth_caps(&AuthCaps {
+            methods: Vec::new(),
+            oauth: None,
+        }));
+        descriptor.prerequisites = Some(PrerequisiteCatalog::not_yet_measured(
+            "prerequisite probe pending",
+        ));
+        descriptor.readiness = Some(
+            ReadinessDescriptor::not_yet_measured("readiness probe pending")
+                .with_health(ConnectorHealth::unavailable("host offline")),
+        );
+
+        assert_eq!(descriptor.overall_status(), DescriptorStatus::Unavailable);
     }
 }

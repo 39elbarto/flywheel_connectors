@@ -3,8 +3,10 @@
 //! Walks JSON Schemas and produces flat, annotated field listings with
 //! required/optional markers, types, constraints, and example values.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 // ── Schema field annotation ─────────────────────────────────────────────
 
@@ -29,27 +31,32 @@ pub struct SchemaField {
     pub maximum: Option<Value>,
     /// Default value.
     pub default: Option<Value>,
+    /// Variant summaries for `oneOf` / `anyOf` composed fields.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub variants: Option<Vec<String>>,
+    /// Additional constraints and conditional availability notes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub constraints: Option<Vec<String>>,
     /// Nesting depth (0 = top-level).
     pub depth: usize,
 }
 
 /// Walk a JSON Schema and produce a flat list of annotated fields.
 pub fn walk_schema(schema: &Value, examples: &[String]) -> Vec<SchemaField> {
+    let normalized = normalize_schema(schema);
     let mut fields = Vec::new();
-    let required_set = extract_required(schema);
     let example_values = extract_example_values(examples);
 
-    if let Some(props) = schema.get("properties").and_then(Value::as_object) {
-        for (name, prop_schema) in props {
-            walk_property(
-                name,
-                prop_schema,
-                required_set.contains(&name.as_str()),
-                &example_values,
-                &mut fields,
-                0,
-            );
-        }
+    for property in collect_child_properties(&normalized) {
+        walk_property(
+            &property.name,
+            &property.schema,
+            property.required,
+            &property.notes.into_iter().collect::<Vec<_>>(),
+            &example_values,
+            &mut fields,
+            0,
+        );
     }
 
     // Sort: required first, then alphabetical.
@@ -64,18 +71,11 @@ pub fn walk_schema(schema: &Value, examples: &[String]) -> Vec<SchemaField> {
 
 /// Generate a scaffold JSON template with placeholders for required fields.
 pub fn scaffold_template(schema: &Value) -> Value {
-    let required_set = extract_required(schema);
-    let mut template = serde_json::Map::new();
-
-    if let Some(props) = schema.get("properties").and_then(Value::as_object) {
-        for (name, prop_schema) in props {
-            if required_set.contains(&name.as_str()) {
-                template.insert(name.clone(), scaffold_value(prop_schema));
-            }
-        }
+    let normalized = normalize_schema(schema);
+    if normalized.get("properties").is_some() {
+        return scaffold_object(&normalized);
     }
-
-    Value::Object(template)
+    scaffold_value(&normalized)
 }
 
 /// Filter fields to show only those matching a specific path prefix.
@@ -102,26 +102,30 @@ fn walk_property(
     path: &str,
     schema: &Value,
     required: bool,
+    inherited_constraints: &[String],
     examples: &Value,
     fields: &mut Vec<SchemaField>,
     depth: usize,
 ) {
-    let field_type = infer_type(schema);
-    let description = schema
+    let normalized = normalize_schema(schema);
+    let field_type = infer_type(&normalized);
+    let description = normalized
         .get("description")
         .and_then(Value::as_str)
         .map(str::to_owned);
     let example = examples.get(path).cloned().or_else(|| {
-        schema.get("example").cloned().or_else(|| {
-            schema
+        normalized.get("example").cloned().or_else(|| {
+            normalized
                 .get("examples")
                 .and_then(|e| e.as_array().and_then(|a| a.first().cloned()))
         })
     });
-    let enum_values = schema.get("enum").and_then(Value::as_array).cloned();
-    let minimum = schema.get("minimum").cloned();
-    let maximum = schema.get("maximum").cloned();
-    let default = schema.get("default").cloned();
+    let enum_values = normalized.get("enum").and_then(Value::as_array).cloned();
+    let minimum = normalized.get("minimum").cloned();
+    let maximum = normalized.get("maximum").cloned();
+    let default = normalized.get("default").cloned();
+    let variants = summarize_variants(&normalized);
+    let constraints = merged_constraints(inherited_constraints, constraint_notes(&normalized));
 
     fields.push(SchemaField {
         path: path.to_owned(),
@@ -133,69 +137,113 @@ fn walk_property(
         minimum,
         maximum,
         default,
+        variants,
+        constraints,
         depth,
     });
 
-    // Recurse into nested object properties.
-    if let Some(props) = schema.get("properties").and_then(Value::as_object) {
-        let nested_required = extract_required(schema);
-        for (name, prop_schema) in props {
-            let nested_path = format!("{path}.{name}");
+    for property in collect_child_properties(&normalized) {
+        let nested_path = format!("{path}.{}", property.name);
+        let nested_constraints = property.notes.into_iter().collect::<Vec<_>>();
+        walk_property(
+            &nested_path,
+            &property.schema,
+            property.required,
+            &nested_constraints,
+            examples,
+            fields,
+            depth + 1,
+        );
+    }
+
+    if let Some(items) = normalized.get("items") {
+        let item_path = format!("{path}[]");
+        for property in collect_child_properties(items) {
+            let nested_path = format!("{item_path}.{}", property.name);
+            let nested_constraints = property.notes.into_iter().collect::<Vec<_>>();
             walk_property(
                 &nested_path,
-                prop_schema,
-                nested_required.contains(&name.as_str()),
+                &property.schema,
+                property.required,
+                &nested_constraints,
                 examples,
                 fields,
                 depth + 1,
             );
         }
     }
-
-    // Recurse into array items.
-    if let Some(items) = schema.get("items") {
-        if items.get("properties").is_some() {
-            let item_path = format!("{path}[]");
-            let nested_required = extract_required(items);
-            if let Some(props) = items.get("properties").and_then(Value::as_object) {
-                for (name, prop_schema) in props {
-                    let nested_path = format!("{item_path}.{name}");
-                    walk_property(
-                        &nested_path,
-                        prop_schema,
-                        nested_required.contains(&name.as_str()),
-                        examples,
-                        fields,
-                        depth + 1,
-                    );
-                }
-            }
-        }
-    }
 }
 
 fn infer_type(schema: &Value) -> String {
-    if let Some(type_str) = schema.get("type").and_then(Value::as_str) {
+    let normalized = normalize_schema(schema);
+    if let Some(type_values) = normalized.get("type").and_then(Value::as_array) {
+        let variants = type_values
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+        if !variants.is_empty() {
+            return variants.join(" | ");
+        }
+    }
+    if let Some(type_str) = normalized.get("type").and_then(Value::as_str) {
         if type_str == "array" {
-            if let Some(items) = schema.get("items") {
-                let item_type = items.get("type").and_then(Value::as_str).unwrap_or("any");
-                return format!("[{item_type}]");
+            if let Some(items) = normalized.get("items") {
+                return format!("[{}]", describe_schema_inline(items));
             }
             return "[any]".to_owned();
         }
         return type_str.to_owned();
     }
-    if schema.get("oneOf").is_some() || schema.get("anyOf").is_some() {
-        return "union".to_owned();
+    for key in ["oneOf", "anyOf"] {
+        if let Some(variants) = normalized.get(key).and_then(Value::as_array) {
+            let summaries = variants
+                .iter()
+                .map(describe_schema_inline)
+                .collect::<Vec<_>>()
+                .join(", ");
+            return format!("{key}<{summaries}>");
+        }
+    }
+    if normalized.get("properties").is_some() {
+        return "object".to_owned();
     }
     "any".to_owned()
 }
 
 fn scaffold_value(schema: &Value) -> Value {
-    let type_str = schema.get("type").and_then(Value::as_str).unwrap_or("any");
+    let normalized = normalize_schema(schema);
+    if let Some(default) = normalized.get("default") {
+        return default.clone();
+    }
+    if let Some(example) = normalized.get("example") {
+        return example.clone();
+    }
+    if let Some(first_example) = normalized
+        .get("examples")
+        .and_then(Value::as_array)
+        .and_then(|examples| examples.first())
+    {
+        return first_example.clone();
+    }
+    if let Some(constraint) = normalized.get("const") {
+        return constraint.clone();
+    }
+    if let Some(variant) = select_preferred_variant(&normalized) {
+        return scaffold_value(variant);
+    }
+    let type_str = normalized
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| {
+            if normalized.get("properties").is_some() {
+                "object"
+            } else {
+                "any"
+            }
+        });
     match type_str {
         "string" => {
-            if let Some(enum_vals) = schema.get("enum").and_then(Value::as_array) {
+            if let Some(enum_vals) = normalized.get("enum").and_then(Value::as_array) {
                 return enum_vals
                     .first()
                     .cloned()
@@ -206,20 +254,22 @@ fn scaffold_value(schema: &Value) -> Value {
         "integer" | "number" => Value::Number(serde_json::Number::from(0)),
         "boolean" => Value::Bool(false),
         "array" => Value::Array(vec![]),
-        "object" => {
-            let mut obj = serde_json::Map::new();
-            if let Some(props) = schema.get("properties").and_then(Value::as_object) {
-                let required_set = extract_required(schema);
-                for (name, prop_schema) in props {
-                    if required_set.contains(&name.as_str()) {
-                        obj.insert(name.clone(), scaffold_value(prop_schema));
-                    }
-                }
-            }
-            Value::Object(obj)
-        }
+        "object" => scaffold_object(&normalized),
         _ => Value::Null,
     }
+}
+
+fn scaffold_object(schema: &Value) -> Value {
+    let mut template = Map::new();
+    if let Some(props) = schema.get("properties").and_then(Value::as_object) {
+        let required_set = extract_required(schema);
+        for (name, prop_schema) in props {
+            if required_set.contains(&name.as_str()) {
+                template.insert(name.clone(), scaffold_value(prop_schema));
+            }
+        }
+    }
+    Value::Object(template)
 }
 
 fn extract_example_values(examples: &[String]) -> Value {
@@ -234,6 +284,434 @@ fn extract_example_values(examples: &[String]) -> Value {
         }
     }
     Value::Object(map)
+}
+
+#[derive(Debug)]
+struct ChildProperty {
+    name: String,
+    schema: Value,
+    required: bool,
+    notes: BTreeSet<String>,
+}
+
+#[derive(Debug, Default)]
+struct ChildPropertyAccumulator {
+    schema: Option<Value>,
+    required: bool,
+    notes: BTreeSet<String>,
+}
+
+fn collect_child_properties(schema: &Value) -> Vec<ChildProperty> {
+    let mut collected = BTreeMap::<String, ChildPropertyAccumulator>::new();
+
+    if let Some(props) = schema.get("properties").and_then(Value::as_object) {
+        let required_set = extract_required(schema);
+        for (name, prop_schema) in props {
+            let entry = collected.entry(name.clone()).or_default();
+            merge_into_schema(&mut entry.schema, prop_schema.clone());
+            entry.required = entry.required || required_set.contains(&name.as_str());
+        }
+    }
+
+    for key in ["oneOf", "anyOf"] {
+        let Some(variants) = schema.get(key).and_then(Value::as_array) else {
+            continue;
+        };
+        let discriminator = schema
+            .get("discriminator")
+            .and_then(|value| value.get("propertyName"))
+            .and_then(Value::as_str);
+        let mut stats = BTreeMap::<String, (BTreeSet<String>, BTreeSet<String>)>::new();
+
+        for (index, variant) in variants.iter().enumerate() {
+            let label = variant_condition_label(variant, index, discriminator);
+            let required_set = extract_required(variant);
+            let Some(props) = variant.get("properties").and_then(Value::as_object) else {
+                continue;
+            };
+            for (name, prop_schema) in props {
+                let entry = collected.entry(name.clone()).or_default();
+                merge_into_schema(&mut entry.schema, prop_schema.clone());
+                let stat_entry = stats
+                    .entry(name.clone())
+                    .or_insert_with(|| (BTreeSet::new(), BTreeSet::new()));
+                stat_entry.0.insert(label.clone());
+                if required_set.contains(&name.as_str()) {
+                    stat_entry.1.insert(label.clone());
+                }
+            }
+        }
+
+        for (name, (present_labels, required_labels)) in stats {
+            let Some(entry) = collected.get_mut(&name) else {
+                continue;
+            };
+            if present_labels.len() == variants.len() {
+                if required_labels.len() == variants.len() {
+                    entry.required = true;
+                } else if !required_labels.is_empty() {
+                    entry
+                        .notes
+                        .insert(format!("required when {}", join_labels(&required_labels)));
+                }
+            } else {
+                entry
+                    .notes
+                    .insert(format!("available when {}", join_labels(&present_labels)));
+                if !required_labels.is_empty() {
+                    entry
+                        .notes
+                        .insert(format!("required when {}", join_labels(&required_labels)));
+                }
+            }
+        }
+    }
+
+    collected
+        .into_iter()
+        .filter_map(|(name, accumulator)| {
+            accumulator.schema.map(|schema| ChildProperty {
+                name,
+                schema,
+                required: accumulator.required,
+                notes: accumulator.notes,
+            })
+        })
+        .collect()
+}
+
+fn merged_constraints(
+    inherited_constraints: &[String],
+    own_constraints: Vec<String>,
+) -> Option<Vec<String>> {
+    let mut merged = BTreeSet::new();
+    merged.extend(inherited_constraints.iter().cloned());
+    merged.extend(own_constraints);
+    if merged.is_empty() {
+        None
+    } else {
+        Some(merged.into_iter().collect())
+    }
+}
+
+fn summarize_variants(schema: &Value) -> Option<Vec<String>> {
+    for key in ["oneOf", "anyOf"] {
+        let Some(variants) = schema.get(key).and_then(Value::as_array) else {
+            continue;
+        };
+        let discriminator = schema
+            .get("discriminator")
+            .and_then(|value| value.get("propertyName"))
+            .and_then(Value::as_str);
+        let summaries = variants
+            .iter()
+            .enumerate()
+            .map(|(index, variant)| {
+                let label = variant_condition_label(variant, index, discriminator);
+                let shape = describe_schema_inline(variant);
+                format!("{label}: {shape}")
+            })
+            .collect::<Vec<_>>();
+        return Some(summaries);
+    }
+    None
+}
+
+fn constraint_notes(schema: &Value) -> Vec<String> {
+    let mut notes = BTreeSet::new();
+    if let Some(discriminator) = schema
+        .get("discriminator")
+        .and_then(|value| value.get("propertyName"))
+        .and_then(Value::as_str)
+    {
+        notes.insert(format!("discriminator: {discriminator}"));
+    }
+    if let Some(not_schema) = schema.get("not") {
+        notes.insert(format!("not {}", describe_schema_inline(not_schema)));
+    }
+    notes.into_iter().collect()
+}
+
+fn describe_schema_inline(schema: &Value) -> String {
+    let normalized = normalize_schema(schema);
+    if let Some(constraint) = normalized.get("const") {
+        return format!("const {}", short_value(constraint));
+    }
+    if let Some(enum_values) = normalized.get("enum").and_then(Value::as_array) {
+        if !enum_values.is_empty() {
+            return format!("enum {{{}}}", summarize_enum_values(enum_values));
+        }
+    }
+    if let Some(type_values) = normalized.get("type").and_then(Value::as_array) {
+        let variants = type_values
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+        if !variants.is_empty() {
+            return variants.join(" | ");
+        }
+    }
+    if let Some(type_str) = normalized.get("type").and_then(Value::as_str) {
+        return match type_str {
+            "array" => normalized
+                .get("items")
+                .map(|items| format!("[{}]", describe_schema_inline(items)))
+                .unwrap_or_else(|| "[any]".to_owned()),
+            "object" => describe_object_shape(&normalized),
+            _ => type_str.to_owned(),
+        };
+    }
+    for key in ["oneOf", "anyOf"] {
+        if let Some(variants) = normalized.get(key).and_then(Value::as_array) {
+            if variants.is_empty() {
+                return format!("{key}<any>");
+            }
+            return format!(
+                "{key}<{}>",
+                variants
+                    .iter()
+                    .map(describe_schema_inline)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+    }
+    if normalized.get("properties").is_some() {
+        return describe_object_shape(&normalized);
+    }
+    "any".to_owned()
+}
+
+fn describe_object_shape(schema: &Value) -> String {
+    let Some(props) = schema.get("properties").and_then(Value::as_object) else {
+        return "object".to_owned();
+    };
+    if props.is_empty() {
+        return "object".to_owned();
+    }
+
+    let mut names = props.keys().cloned().collect::<Vec<_>>();
+    names.sort();
+    let mut parts = Vec::new();
+    for (index, name) in names.iter().enumerate() {
+        if index == 3 {
+            parts.push("...".to_owned());
+            break;
+        }
+        if let Some(prop_schema) = props.get(name) {
+            parts.push(format!("{name}: {}", summarize_object_member(prop_schema)));
+        }
+    }
+    format!("object {{{}}}", parts.join(", "))
+}
+
+fn summarize_object_member(schema: &Value) -> String {
+    let normalized = normalize_schema(schema);
+    if let Some(constraint) = normalized.get("const") {
+        return format!("const {}", short_value(constraint));
+    }
+    if let Some(enum_values) = normalized.get("enum").and_then(Value::as_array) {
+        if !enum_values.is_empty() {
+            return format!("enum {{{}}}", summarize_enum_values(enum_values));
+        }
+    }
+    if let Some(type_str) = normalized.get("type").and_then(Value::as_str) {
+        return match type_str {
+            "array" => normalized
+                .get("items")
+                .map(|items| format!("[{}]", summarize_object_member(items)))
+                .unwrap_or_else(|| "[any]".to_owned()),
+            "object" => "object".to_owned(),
+            _ => type_str.to_owned(),
+        };
+    }
+    for key in ["oneOf", "anyOf"] {
+        if normalized.get(key).is_some() {
+            return key.to_owned();
+        }
+    }
+    if normalized.get("properties").is_some() {
+        return "object".to_owned();
+    }
+    "any".to_owned()
+}
+
+fn variant_condition_label(variant: &Value, index: usize, discriminator: Option<&str>) -> String {
+    if let Some(property_name) = discriminator {
+        if let Some(value) = discriminator_value(variant, property_name) {
+            return format!("{property_name}={}", short_value(value));
+        }
+    }
+    if let Some(title) = variant.get("title").and_then(Value::as_str) {
+        return title.to_owned();
+    }
+    if let Some(description) = variant
+        .get("description")
+        .and_then(Value::as_str)
+        .filter(|description| description.len() <= 48)
+    {
+        return description.to_owned();
+    }
+    format!("variant-{}", index + 1)
+}
+
+fn discriminator_value<'a>(variant: &'a Value, property_name: &str) -> Option<&'a Value> {
+    let property = variant
+        .get("properties")
+        .and_then(Value::as_object)
+        .and_then(|properties| properties.get(property_name))?;
+    property.get("const").or_else(|| {
+        property
+            .get("enum")
+            .and_then(Value::as_array)
+            .and_then(|values| values.first())
+    })
+}
+
+fn join_labels(labels: &BTreeSet<String>) -> String {
+    labels.iter().cloned().collect::<Vec<_>>().join(", ")
+}
+
+fn short_value(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        _ => value.to_string(),
+    }
+}
+
+fn summarize_enum_values(values: &[Value]) -> String {
+    let mut parts = values.iter().take(3).map(short_value).collect::<Vec<_>>();
+    if values.len() > 3 {
+        parts.push("...".to_owned());
+    }
+    parts.join(", ")
+}
+
+fn select_preferred_variant(schema: &Value) -> Option<&Value> {
+    ["oneOf", "anyOf"]
+        .into_iter()
+        .find_map(|key| schema.get(key).and_then(Value::as_array))
+        .and_then(|variants| variants.first())
+}
+
+fn normalize_schema(schema: &Value) -> Value {
+    let mut normalized = if let Some(all_of) = schema.get("allOf").and_then(Value::as_array) {
+        let mut base = schema.clone();
+        if let Some(map) = base.as_object_mut() {
+            map.remove("allOf");
+        }
+        all_of.iter().fold(base, |acc, variant| {
+            merge_schema_values(&acc, &normalize_schema(variant))
+        })
+    } else {
+        schema.clone()
+    };
+    normalize_nested_schema(&mut normalized);
+    normalized
+}
+
+fn normalize_nested_schema(schema: &mut Value) {
+    let Some(map) = schema.as_object_mut() else {
+        return;
+    };
+
+    if let Some(props) = map.get_mut("properties").and_then(Value::as_object_mut) {
+        for property in props.values_mut() {
+            *property = normalize_schema(property);
+        }
+    }
+    if let Some(items) = map.get_mut("items") {
+        *items = normalize_schema(items);
+    }
+    if let Some(not_schema) = map.get_mut("not") {
+        *not_schema = normalize_schema(not_schema);
+    }
+    for key in ["oneOf", "anyOf"] {
+        if let Some(variants) = map.get_mut(key).and_then(Value::as_array_mut) {
+            for variant in variants {
+                *variant = normalize_schema(variant);
+            }
+        }
+    }
+}
+
+fn merge_schema_values(base: &Value, overlay: &Value) -> Value {
+    let (Some(base_map), Some(overlay_map)) = (base.as_object(), overlay.as_object()) else {
+        return if base.is_null() {
+            overlay.clone()
+        } else {
+            base.clone()
+        };
+    };
+
+    let mut merged = base_map.clone();
+    for (key, overlay_value) in overlay_map {
+        match key.as_str() {
+            "allOf" => {}
+            "properties" => {
+                let combined = match (
+                    merged.get("properties").and_then(Value::as_object),
+                    overlay_value.as_object(),
+                ) {
+                    (Some(existing), Some(additional)) => {
+                        let mut props = existing.clone();
+                        for (name, prop_schema) in additional {
+                            let merged_prop = props
+                                .get(name)
+                                .map(|existing_prop| {
+                                    merge_schema_values(existing_prop, prop_schema)
+                                })
+                                .unwrap_or_else(|| prop_schema.clone());
+                            props.insert(name.clone(), merged_prop);
+                        }
+                        Value::Object(props)
+                    }
+                    (None, Some(additional)) => Value::Object(additional.clone()),
+                    _ => overlay_value.clone(),
+                };
+                merged.insert(key.clone(), combined);
+            }
+            "required" => {
+                let mut required = BTreeSet::new();
+                if let Some(existing) = merged.get("required").and_then(Value::as_array) {
+                    required.extend(existing.iter().filter_map(Value::as_str).map(str::to_owned));
+                }
+                if let Some(additional) = overlay_value.as_array() {
+                    required.extend(
+                        additional
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned),
+                    );
+                }
+                merged.insert(
+                    key.clone(),
+                    Value::Array(required.into_iter().map(Value::String).collect()),
+                );
+            }
+            "items" => {
+                let combined = merged
+                    .get("items")
+                    .map(|existing| merge_schema_values(existing, overlay_value))
+                    .unwrap_or_else(|| overlay_value.clone());
+                merged.insert(key.clone(), combined);
+            }
+            _ => {
+                merged
+                    .entry(key.clone())
+                    .or_insert_with(|| overlay_value.clone());
+            }
+        }
+    }
+
+    Value::Object(merged)
+}
+
+fn merge_into_schema(target: &mut Option<Value>, addition: Value) {
+    match target.take() {
+        Some(existing) => *target = Some(merge_schema_values(&existing, &addition)),
+        None => *target = Some(addition),
+    }
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────
@@ -386,16 +864,12 @@ mod tests {
             }
         });
         let fields = walk_schema(&schema, &[]);
-        assert!(
-            fields
-                .iter()
-                .any(|f| f.path == "spec.replicas" && f.required)
-        );
-        assert!(
-            fields
-                .iter()
-                .any(|f| f.path == "spec.selector" && !f.required)
-        );
+        assert!(fields
+            .iter()
+            .any(|f| f.path == "spec.replicas" && f.required));
+        assert!(fields
+            .iter()
+            .any(|f| f.path == "spec.selector" && !f.required));
     }
 
     #[test]
@@ -418,21 +892,15 @@ mod tests {
             }
         });
         let fields = walk_schema(&schema, &[]);
-        assert!(
-            fields
-                .iter()
-                .any(|f| f.path == "containers[].name" && f.required)
-        );
-        assert!(
-            fields
-                .iter()
-                .any(|f| f.path == "containers[].image" && f.required)
-        );
-        assert!(
-            fields
-                .iter()
-                .any(|f| f.path == "containers[].ports" && !f.required)
-        );
+        assert!(fields
+            .iter()
+            .any(|f| f.path == "containers[].name" && f.required));
+        assert!(fields
+            .iter()
+            .any(|f| f.path == "containers[].image" && f.required));
+        assert!(fields
+            .iter()
+            .any(|f| f.path == "containers[].ports" && !f.required));
     }
 
     #[test]
@@ -453,6 +921,108 @@ mod tests {
         assert_eq!(spec.depth, 0);
         let nested = fields.iter().find(|f| f.path == "spec.nested").unwrap();
         assert_eq!(nested.depth, 1);
+    }
+
+    #[test]
+    fn walk_schema_all_of_merges_properties_and_required_fields() {
+        let schema = json!({
+            "allOf": [
+                {
+                    "type": "object",
+                    "required": ["owner"],
+                    "properties": {
+                        "owner": { "type": "string" }
+                    }
+                },
+                {
+                    "type": "object",
+                    "required": ["repo"],
+                    "properties": {
+                        "repo": { "type": "string" }
+                    }
+                }
+            ]
+        });
+        let fields = walk_schema(&schema, &[]);
+        assert!(fields.iter().any(|f| f.path == "owner" && f.required));
+        assert!(fields.iter().any(|f| f.path == "repo" && f.required));
+    }
+
+    #[test]
+    fn walk_schema_discriminated_union_exposes_variants_and_conditional_children() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "assignee": {
+                    "oneOf": [
+                        {
+                            "type": "string",
+                            "description": "username"
+                        },
+                        {
+                            "type": "object",
+                            "required": ["kind", "id"],
+                            "properties": {
+                                "kind": { "const": "user" },
+                                "id": { "type": "integer" },
+                                "name": { "type": "string" }
+                            }
+                        }
+                    ],
+                    "discriminator": { "propertyName": "kind" }
+                }
+            }
+        });
+        let fields = walk_schema(&schema, &[]);
+        let assignee = fields.iter().find(|f| f.path == "assignee").unwrap();
+        assert!(assignee.field_type.starts_with("oneOf<"));
+        assert!(assignee
+            .variants
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|variant| variant
+                == "kind=user: object {id: integer, kind: const user, name: string}"));
+        assert!(assignee
+            .constraints
+            .as_ref()
+            .unwrap()
+            .contains(&"discriminator: kind".to_owned()));
+
+        let assignee_id = fields.iter().find(|f| f.path == "assignee.id").unwrap();
+        assert!(!assignee_id.required);
+        let child_constraints = assignee_id.constraints.as_ref().unwrap();
+        assert!(child_constraints
+            .iter()
+            .any(|constraint| constraint == "available when kind=user"));
+        assert!(child_constraints
+            .iter()
+            .any(|constraint| constraint == "required when kind=user"));
+    }
+
+    #[test]
+    fn walk_schema_root_union_collects_variant_properties() {
+        let schema = json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "required": ["owner"],
+                    "properties": {
+                        "owner": { "type": "string" }
+                    }
+                },
+                {
+                    "type": "object",
+                    "required": ["repo"],
+                    "properties": {
+                        "repo": { "type": "string" }
+                    }
+                }
+            ]
+        });
+        let fields = walk_schema(&schema, &[]);
+        assert!(fields.iter().any(|f| f.path == "owner"));
+        assert!(fields.iter().any(|f| f.path == "repo"));
     }
 
     // ── Enum / constraint tests ─────────────────────────────────────
@@ -508,6 +1078,26 @@ mod tests {
         let fields = walk_schema(&schema, &[]);
         let limit = fields.iter().find(|f| f.path == "limit").unwrap();
         assert_eq!(limit.default, Some(json!(20)));
+    }
+
+    #[test]
+    fn walk_schema_surfaces_not_as_constraint() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "mode": {
+                    "type": "string",
+                    "not": { "enum": ["legacy"] }
+                }
+            }
+        });
+        let fields = walk_schema(&schema, &[]);
+        let mode = fields.iter().find(|f| f.path == "mode").unwrap();
+        assert!(mode
+            .constraints
+            .as_ref()
+            .unwrap()
+            .contains(&"not enum {legacy}".to_owned()));
     }
 
     // ── scaffold_template tests ─────────────────────────────────────
@@ -598,6 +1188,58 @@ mod tests {
     }
 
     #[test]
+    fn scaffold_template_merges_all_of_required_fields() {
+        let schema = json!({
+            "allOf": [
+                {
+                    "type": "object",
+                    "required": ["owner"],
+                    "properties": {
+                        "owner": { "type": "string" }
+                    }
+                },
+                {
+                    "type": "object",
+                    "required": ["repo"],
+                    "properties": {
+                        "repo": { "type": "string" }
+                    }
+                }
+            ]
+        });
+        let template = scaffold_template(&schema);
+        assert_eq!(template["owner"], "<string>");
+        assert_eq!(template["repo"], "<string>");
+    }
+
+    #[test]
+    fn scaffold_template_uses_first_union_variant_and_const_discriminator() {
+        let schema = json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "required": ["kind", "id"],
+                    "properties": {
+                        "kind": { "const": "user" },
+                        "id": { "type": "integer" }
+                    }
+                },
+                {
+                    "type": "object",
+                    "required": ["name"],
+                    "properties": {
+                        "name": { "type": "string" }
+                    }
+                }
+            ]
+        });
+        let template = scaffold_template(&schema);
+        assert_eq!(template["kind"], "user");
+        assert_eq!(template["id"], 0);
+        assert!(template.get("name").is_none());
+    }
+
+    #[test]
     fn scaffold_template_empty_schema() {
         let schema = json!({"type": "object"});
         let template = scaffold_template(&schema);
@@ -673,12 +1315,25 @@ mod tests {
 
     #[test]
     fn infer_type_union() {
-        assert_eq!(infer_type(&json!({"oneOf": []})), "union");
+        assert_eq!(infer_type(&json!({"oneOf": []})), "oneOf<any>");
     }
 
     #[test]
     fn infer_type_any_of() {
-        assert_eq!(infer_type(&json!({"anyOf": []})), "union");
+        assert_eq!(infer_type(&json!({"anyOf": []})), "anyOf<any>");
+    }
+
+    #[test]
+    fn infer_type_all_of_merged_object() {
+        assert_eq!(
+            infer_type(&json!({
+                "allOf": [
+                    { "type": "object", "properties": { "owner": { "type": "string" } } },
+                    { "type": "object", "properties": { "repo": { "type": "string" } } }
+                ]
+            })),
+            "object"
+        );
     }
 
     #[test]
@@ -768,6 +1423,8 @@ mod tests {
             minimum: None,
             maximum: None,
             default: None,
+            variants: None,
+            constraints: None,
             depth: 0,
         };
         let json = serde_json::to_value(&field).unwrap();
@@ -1124,11 +1781,9 @@ mod tests {
         let fields = walk_schema(&schema, &[]);
         let filtered = filter_by_field(&fields, "config");
         assert_eq!(filtered.len(), 3); // config + config.timeout + config.retries
-        assert!(
-            filtered
-                .iter()
-                .all(|f| f.path == "config" || f.path.starts_with("config."))
-        );
+        assert!(filtered
+            .iter()
+            .all(|f| f.path == "config" || f.path.starts_with("config.")));
     }
 
     #[test]
@@ -1179,11 +1834,15 @@ mod tests {
             minimum: None,
             maximum: None,
             default: Some(json!("a")),
+            variants: Some(vec!["choice-a: string".to_owned()]),
+            constraints: Some(vec!["discriminator: mode".to_owned()]),
             depth: 0,
         };
         let json = serde_json::to_value(&field).unwrap();
         assert_eq!(json["enum_values"], json!(["a", "b"]));
         assert_eq!(json["default"], "a");
+        assert_eq!(json["variants"], json!(["choice-a: string"]));
+        assert_eq!(json["constraints"], json!(["discriminator: mode"]));
     }
 
     #[test]
@@ -1198,6 +1857,8 @@ mod tests {
             minimum: Some(json!(1)),
             maximum: Some(json!(100)),
             default: None,
+            variants: None,
+            constraints: Some(vec!["not enum {legacy}".to_owned()]),
             depth: 1,
         };
         let json = serde_json::to_value(&field).unwrap();
@@ -1205,6 +1866,7 @@ mod tests {
         assert_eq!(json["maximum"], 100);
         assert_eq!(json["depth"], 1);
         assert_eq!(json["example"], 42);
+        assert_eq!(json["constraints"], json!(["not enum {legacy}"]));
     }
 
     #[test]
@@ -1219,6 +1881,8 @@ mod tests {
             minimum: None,
             maximum: None,
             default: None,
+            variants: None,
+            constraints: None,
             depth: 0,
         };
         let cloned = field.clone();

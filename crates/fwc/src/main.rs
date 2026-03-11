@@ -11737,19 +11737,22 @@ fn pipeline_validate_dispatch(
         );
     }
 
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "pipeline");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "pipeline",
+        "subcommand": "validate",
+        "path": path.display().to_string(),
+        "validation": validation,
+        "next_actions": [
+            format!("fwc pipeline show {}", path.display()),
+            format!("fwc pipeline estimate {} --param key=value", path.display()),
+            format!("fwc pipeline dry-run {} --param key=value", path.display()),
+        ],
+    });
+    envelope.inject_into(&mut payload);
     DispatchOutcome {
-        payload: json!({
-            "status": "ok",
-            "command": "pipeline",
-            "subcommand": "validate",
-            "path": path.display().to_string(),
-            "validation": validation,
-            "next_actions": [
-                format!("fwc pipeline show {}", path.display()),
-                format!("fwc pipeline estimate {} --param key=value", path.display()),
-                format!("fwc pipeline dry-run {} --param key=value", path.display()),
-            ],
-        }),
+        payload,
         exit_code: CliExitCode::Success,
     }
 }
@@ -11804,27 +11807,30 @@ fn pipeline_run_dispatch(
             };
         let estimate = pipe::estimate_pipeline(&plan, &operation_metadata)
             .map_err(|error| anyhow::anyhow!("{error}"))?;
+        let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "pipeline");
+        let mut payload = json!({
+            "status": "ok",
+            "command": "pipeline",
+            "subcommand": subcommand,
+            "path": path.display().to_string(),
+            "message": format!(
+                "Pipeline estimate: {} ({} step(s), {}, highest risk {}). No host execution was attempted.",
+                definition.pipeline.name,
+                plan.step_count,
+                estimate.estimated_api_calls.summary,
+                estimate.risk_assessment.level,
+            ),
+            "estimate": estimate,
+            "dry_run": false,
+            "next_actions": [
+                format!("fwc pipeline show {}", path.display()),
+                format!("fwc pipeline validate {}", path.display()),
+                format!("fwc pipeline dry-run {} --host <endpoint>", path.display()),
+            ],
+        });
+        envelope.inject_into(&mut payload);
         return Ok(DispatchOutcome {
-            payload: json!({
-                "status": "ok",
-                "command": "pipeline",
-                "subcommand": subcommand,
-                "path": path.display().to_string(),
-                "message": format!(
-                    "Pipeline estimate: {} ({} step(s), {}, highest risk {}). No host execution was attempted.",
-                    definition.pipeline.name,
-                    plan.step_count,
-                    estimate.estimated_api_calls.summary,
-                    estimate.risk_assessment.level,
-                ),
-                "estimate": estimate,
-                "dry_run": false,
-                "next_actions": [
-                    format!("fwc pipeline show {}", path.display()),
-                    format!("fwc pipeline validate {}", path.display()),
-                    format!("fwc pipeline dry-run {} --host <endpoint>", path.display()),
-                ],
-            }),
+            payload,
             exit_code: CliExitCode::Success,
         });
     }
@@ -11911,35 +11917,41 @@ fn pipeline_run_dispatch(
         PipelinePlanMode::Estimate => unreachable!("handled above"),
     };
 
+    let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "pipeline");
+    let mut payload = json!({
+        "status": execution.status,
+        "command": "pipeline",
+        "subcommand": subcommand,
+        "source": "host-admin-api",
+        "path": path.display().to_string(),
+        "zone": zone,
+        "message": message,
+        "estimate": estimate,
+        "plan": serde_json::to_value(&plan)?,
+        "execution": {
+            "mode": subcommand,
+            "executed_steps": execution.executed_steps,
+            "preflight_only_steps": execution.preflight_only_steps,
+            "skipped_steps": execution.skipped_steps,
+            "blocked_steps": execution.blocked_steps,
+            "denied_steps": execution.denied_steps,
+            "error_steps": execution.error_steps,
+            "steps": execution.step_results,
+            "outputs": execution.outputs,
+        },
+        "next_actions": [
+            format!("fwc pipeline show {}", path.display()),
+            format!("fwc history --limit {}", plan.step_count.max(10)),
+            format!("fwc status --host {}", host.endpoint),
+        ],
+    });
+    let exit_code = execution.exit_code;
+    if exit_code.is_success() {
+        envelope.inject_into(&mut payload);
+    }
     Ok(DispatchOutcome {
-        payload: json!({
-            "status": execution.status,
-            "command": "pipeline",
-            "subcommand": subcommand,
-            "source": "host-admin-api",
-            "path": path.display().to_string(),
-            "zone": zone,
-            "message": message,
-            "estimate": estimate,
-            "plan": serde_json::to_value(&plan)?,
-            "execution": {
-                "mode": subcommand,
-                "executed_steps": execution.executed_steps,
-                "preflight_only_steps": execution.preflight_only_steps,
-                "skipped_steps": execution.skipped_steps,
-                "blocked_steps": execution.blocked_steps,
-                "denied_steps": execution.denied_steps,
-                "error_steps": execution.error_steps,
-                "steps": execution.step_results,
-                "outputs": execution.outputs,
-            },
-            "next_actions": [
-                format!("fwc pipeline show {}", path.display()),
-                format!("fwc history --limit {}", plan.step_count.max(10)),
-                format!("fwc status --host {}", host.endpoint),
-            ],
-        }),
-        exit_code: execution.exit_code,
+        payload,
+        exit_code,
     })
 }
 

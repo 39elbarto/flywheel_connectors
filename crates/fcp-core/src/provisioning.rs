@@ -1434,26 +1434,44 @@ mod tests {
             let human_prompts = recipe
                 .steps
                 .iter()
-                .filter_map(|step| match &step.kind {
-                    ProvisioningStepType::PromptSecret { message } => Some(HumanPrompt {
-                        step_id: step.id.clone(),
-                        prompt_type: HumanPromptType::Secret,
-                        message: message.clone(),
-                        url: None,
-                    }),
-                    ProvisioningStepType::PromptUser { message } => Some(HumanPrompt {
-                        step_id: step.id.clone(),
-                        prompt_type: HumanPromptType::Text,
-                        message: message.clone(),
-                        url: None,
-                    }),
-                    ProvisioningStepType::OpenUrl { url } => Some(HumanPrompt {
-                        step_id: step.id.clone(),
-                        prompt_type: HumanPromptType::Url,
-                        message: "Open URL".to_string(),
-                        url: Some(url.clone()),
-                    }),
-                    _ => None,
+                .flat_map(|step| {
+                    let mut prompts = Vec::new();
+                    if step.requires_approval {
+                        prompts.push(HumanPrompt {
+                            step_id: step.id.clone(),
+                            prompt_type: HumanPromptType::Approval,
+                            message: format!("Approve provisioning step {}", step.id.as_str()),
+                            url: None,
+                        });
+                    }
+                    match &step.kind {
+                        ProvisioningStepType::PromptSecret { message } => {
+                            prompts.push(HumanPrompt {
+                                step_id: step.id.clone(),
+                                prompt_type: HumanPromptType::Secret,
+                                message: message.clone(),
+                                url: None,
+                            });
+                        }
+                        ProvisioningStepType::PromptUser { message } => {
+                            prompts.push(HumanPrompt {
+                                step_id: step.id.clone(),
+                                prompt_type: HumanPromptType::Text,
+                                message: message.clone(),
+                                url: None,
+                            });
+                        }
+                        ProvisioningStepType::OpenUrl { url } => {
+                            prompts.push(HumanPrompt {
+                                step_id: step.id.clone(),
+                                prompt_type: HumanPromptType::Url,
+                                message: "Open URL".to_string(),
+                                url: Some(url.clone()),
+                            });
+                        }
+                        _ => {}
+                    }
+                    prompts
                 })
                 .collect();
 
@@ -1564,6 +1582,33 @@ mod tests {
 
             self.state.current_step = Some(step.id.clone());
             self.state.status = ProvisioningStatus::InProgress;
+
+            let missing_dependencies = step
+                .depends_on
+                .iter()
+                .filter(|dependency| !self.state.completed_steps.contains(dependency))
+                .map(|dependency| dependency.as_str().to_string())
+                .collect::<Vec<_>>();
+            if !missing_dependencies.is_empty() {
+                let dependency_list = missing_dependencies.join(", ");
+                let error_message = format!(
+                    "step {} is blocked by incomplete dependencies: {dependency_list}",
+                    step.id.as_str()
+                );
+                let recovery_hint = format!("Complete prerequisite steps first: {dependency_list}");
+                self.log_step(
+                    &step.id,
+                    "blocked_dependency",
+                    step.requires_approval,
+                    None,
+                    Some(error_message.as_str()),
+                    Some(recovery_hint.as_str()),
+                    started,
+                );
+                return Err(FcpError::Conflict {
+                    message: error_message,
+                });
+            }
 
             if step.requires_approval && !self.approvals.contains(&step.id) {
                 let prompt = HumanPrompt {
@@ -2753,6 +2798,41 @@ mod tests {
     }
 
     #[test]
+    fn mock_provisioner_describe_setup_includes_approval_prompts() {
+        let recipe = ProvisioningRecipe::new(
+            RecipeId::new("approval-desc"),
+            "1",
+            "Descriptor includes approval interactions",
+        )
+        .with_step(
+            ProvisioningStep::new(
+                StepId::new("register_webhook"),
+                ProvisioningStepType::Webhook {
+                    registration: WebhookRecipe {
+                        registration_url: "https://api.example.test/webhooks".to_string(),
+                        events: vec!["message.create".to_string()],
+                        verification: WebhookVerification::ChallengeResponse {
+                            challenge_param: "challenge".to_string(),
+                        },
+                        retry_policy: RetryConfig::default(),
+                    },
+                },
+            )
+            .with_approval(),
+        );
+
+        let provisioner = MockProvisioner::new(recipe);
+        let setup = provisioner.describe_setup();
+        assert_eq!(setup.human_prompts.len(), 1);
+        assert_eq!(
+            setup.human_prompts[0].prompt_type,
+            HumanPromptType::Approval
+        );
+        assert_eq!(setup.human_prompts[0].step_id.as_str(), "register_webhook");
+        assert!(setup.human_prompts[0].message.contains("register_webhook"));
+    }
+
+    #[test]
     fn mock_provisioner_validate_pending_steps() {
         let recipe = ProvisioningRecipe::new(RecipeId::new("val-test"), "1", "Validation test")
             .with_step(ProvisioningStep::new(
@@ -2766,6 +2846,76 @@ mod tests {
         assert!(!validation.valid);
         assert_eq!(validation.errors.len(), 1);
         assert!(validation.errors[0].contains("1 steps still pending"));
+    }
+
+    #[test]
+    fn mock_provisioner_blocks_out_of_order_steps_until_dependencies_complete() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let recipe = ProvisioningRecipe::new(
+                RecipeId::new("dependency-test"),
+                "1",
+                "Dependency enforcement test",
+            )
+            .with_step(ProvisioningStep::new(
+                StepId::new("ask_name"),
+                ProvisioningStepType::PromptUser {
+                    message: "Enter your name".to_string(),
+                },
+            ))
+            .with_step(
+                ProvisioningStep::new(
+                    StepId::new("register_webhook"),
+                    ProvisioningStepType::Webhook {
+                        registration: WebhookRecipe {
+                            registration_url: "https://api.example.test/webhooks".to_string(),
+                            events: vec!["message.create".to_string()],
+                            verification: WebhookVerification::ChallengeResponse {
+                                challenge_param: "challenge".to_string(),
+                            },
+                            retry_policy: RetryConfig::default(),
+                        },
+                    },
+                )
+                .depends_on(StepId::new("ask_name")),
+            );
+
+            let mut provisioner = MockProvisioner::new(recipe);
+            let error = provisioner
+                .execute_step(StepId::new("register_webhook"))
+                .await
+                .expect_err("out-of-order execution should be blocked");
+            let FcpError::Conflict { message } = error else {
+                panic!("expected dependency conflict");
+            };
+            assert!(message.contains("ask_name"));
+            assert_eq!(provisioner.step_logs.len(), 1);
+            assert_eq!(provisioner.step_logs[0]["outcome"], "blocked_dependency");
+            assert_eq!(
+                provisioner.step_logs[0]["recovery_hint"],
+                "Complete prerequisite steps first: ask_name"
+            );
+
+            let prompt = provisioner
+                .execute_step(StepId::new("ask_name"))
+                .await
+                .expect("dependency step should execute");
+            assert!(matches!(
+                prompt,
+                ProvisioningStepResult::AwaitingHuman { .. }
+            ));
+            provisioner.set_prompt_value("ask_name", "Emerald Elm");
+
+            let completion = provisioner
+                .execute_step(StepId::new("register_webhook"))
+                .await
+                .expect("dependent step should succeed after prerequisite completion");
+            assert!(matches!(
+                completion,
+                ProvisioningStepResult::Completed { .. }
+            ));
+            assert_eq!(provisioner.webhook_registrations.len(), 1);
+        })
+        .expect("runtime should enforce provisioning dependencies");
     }
 
     #[test]

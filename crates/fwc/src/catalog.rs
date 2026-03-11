@@ -1017,6 +1017,183 @@ pub fn validate_mode_consistency(command: &str, mode: RuntimeMode) -> Option<Str
     }
 }
 
+// ── Simulate truth contract ──────────────────────────────────────────────────
+// Separates real connector simulation (dry-run with side-effect model) from
+// host-level preflight (schema validation, policy check, budget estimation).
+// The CLI must never present preflight as connector-level simulation.
+
+/// What a connector actually supports for pre-execution analysis.
+///
+/// A connector may support full dry-run (real simulation), or only allow the
+/// host to run a preflight check (validation + policy + budget). The CLI must
+/// not conflate these — advertising "simulate" when only "preflight" is
+/// available is dishonest.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SimulateCapability {
+    /// The connector implements a real dry-run mode that models side effects
+    /// without committing them. Output includes a meaningful side-effect
+    /// prediction.
+    FullDryRun,
+    /// The host can validate schema, check policy, and estimate budget, but
+    /// the connector itself has no dry-run mode. Output is limited to
+    /// validation and policy results.
+    PreflightOnly,
+    /// The connector has not been audited for simulate support. The CLI must
+    /// not assume either capability.
+    Unknown,
+    /// The connector explicitly does not support any form of pre-execution
+    /// analysis. Simulation requests should be refused.
+    Unsupported,
+}
+
+impl SimulateCapability {
+    /// Machine-readable tag for embedding in output payloads.
+    #[must_use]
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::FullDryRun => "full-dry-run",
+            Self::PreflightOnly => "preflight-only",
+            Self::Unknown => "unknown",
+            Self::Unsupported => "unsupported",
+        }
+    }
+
+    /// Human-readable explanation of what "simulate" means for this capability.
+    #[must_use]
+    pub fn explanation(self) -> &'static str {
+        match self {
+            Self::FullDryRun => {
+                "This connector supports full dry-run simulation. The output \
+                 models predicted side effects without committing them."
+            }
+            Self::PreflightOnly => {
+                "This connector only supports host-level preflight checks \
+                 (schema validation, policy, budget). No connector-level \
+                 dry-run is available."
+            }
+            Self::Unknown => {
+                "This connector has not been audited for simulate support. \
+                 Do not assume dry-run semantics are available."
+            }
+            Self::Unsupported => {
+                "This connector does not support any form of pre-execution \
+                 analysis. Simulation requests will be refused."
+            }
+        }
+    }
+
+    /// Whether the capability allows presenting output as "simulated".
+    #[must_use]
+    pub fn allows_simulate_label(self) -> bool {
+        matches!(self, Self::FullDryRun)
+    }
+
+    /// Whether at least preflight checks are available.
+    #[must_use]
+    pub fn allows_preflight(self) -> bool {
+        matches!(self, Self::FullDryRun | Self::PreflightOnly)
+    }
+
+    /// Whether the capability is definitively known (audited).
+    #[must_use]
+    pub fn is_audited(self) -> bool {
+        !matches!(self, Self::Unknown)
+    }
+}
+
+/// The result of a simulate or preflight request, with honest labeling.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SimulateResult {
+    /// What level of simulation was actually performed.
+    pub actual_capability: SimulateCapability,
+    /// Whether the result represents a real connector dry-run or just
+    /// host-level validation.
+    pub is_connector_dry_run: bool,
+    /// Caveat explaining the scope of the result.
+    pub caveat: String,
+    /// If only preflight was available but full dry-run was requested,
+    /// this flag is true.
+    pub downgraded: bool,
+}
+
+/// Build a simulate result with honest labeling based on what actually happened.
+#[allow(dead_code)]
+#[must_use]
+pub fn simulate_result(
+    requested_dry_run: bool,
+    actual: SimulateCapability,
+) -> SimulateResult {
+    let downgraded = requested_dry_run && actual == SimulateCapability::PreflightOnly;
+    let is_connector_dry_run = actual == SimulateCapability::FullDryRun;
+
+    let caveat = if downgraded {
+        "Full dry-run was requested but this connector only supports \
+         preflight checks. The result shows validation and policy outcomes \
+         only — not predicted side effects."
+            .to_owned()
+    } else if is_connector_dry_run {
+        "This is a full connector dry-run. Predicted side effects are \
+         modeled but not committed."
+            .to_owned()
+    } else {
+        actual.explanation().to_owned()
+    };
+
+    SimulateResult {
+        actual_capability: actual,
+        is_connector_dry_run,
+        caveat,
+        downgraded,
+    }
+}
+
+/// Convert a [`SimulateResult`] to a JSON payload for embedding in output.
+#[allow(dead_code)]
+#[must_use]
+pub fn simulate_result_payload(result: &SimulateResult) -> Value {
+    json!({
+        "simulate_capability": result.actual_capability.tag(),
+        "is_connector_dry_run": result.is_connector_dry_run,
+        "caveat": result.caveat,
+        "downgraded": result.downgraded,
+    })
+}
+
+/// Determine if a simulate request should proceed, be downgraded, or be refused.
+///
+/// Returns `Ok(SimulateCapability)` with the actual capability to use, or
+/// `Err(reason)` if the request should be refused.
+#[allow(dead_code)]
+pub fn evaluate_simulate_request(
+    capability: SimulateCapability,
+    allow_downgrade: bool,
+) -> Result<SimulateCapability, &'static str> {
+    match capability {
+        SimulateCapability::FullDryRun => Ok(SimulateCapability::FullDryRun),
+        SimulateCapability::PreflightOnly => {
+            if allow_downgrade {
+                Ok(SimulateCapability::PreflightOnly)
+            } else {
+                Err(
+                    "This connector only supports preflight checks, not full dry-run. \
+                     Pass --allow-preflight to proceed with validation-only output.",
+                )
+            }
+        }
+        SimulateCapability::Unknown => Err(
+            "This connector has not been audited for simulate support. \
+             Cannot proceed without a known capability.",
+        ),
+        SimulateCapability::Unsupported => Err(
+            "This connector does not support simulation or preflight. \
+             The request cannot proceed.",
+        ),
+    }
+}
+
 // ── Auth UX contract ─────────────────────────────────────────────────────────
 // These types define how the CLI should guide users/agents through capability
 // token acquisition, attachment, denial, and remediation on live auth-gated
@@ -1710,12 +1887,13 @@ mod tests {
     use super::{
         AuthAcquisitionFlow, COMMAND_CLASSIFICATIONS, COMMANDS, CommandExecutionMode,
         CommandTruthSource, HYBRID_MODE_HELP, HostAbsentBehavior, HostAbsentReason,
-        OFFLINE_FLAG_HELP, OfflineSource, RuntimeContext, RuntimeMode, WorkflowKind,
-        WorkflowStepReality, auth_required_commands, auth_ux_guidance, check_auth_requirement,
-        classify_command, command_requires_host, default_offline_source, guide_payload,
-        host_absent_error, host_absent_error_payload, live_host_commands,
-        offline_capable_commands, offline_provenance, offline_provenance_payload, planned_payload,
-        resolve_boundary, resolve_runtime_mode, validate_mode_consistency,
+        OFFLINE_FLAG_HELP, OfflineSource, RuntimeContext, RuntimeMode, SimulateCapability,
+        WorkflowKind, WorkflowStepReality, auth_required_commands, auth_ux_guidance,
+        check_auth_requirement, classify_command, command_requires_host, default_offline_source,
+        evaluate_simulate_request, guide_payload, host_absent_error, host_absent_error_payload,
+        live_host_commands, offline_capable_commands, offline_provenance,
+        offline_provenance_payload, planned_payload, resolve_boundary, resolve_runtime_mode,
+        simulate_result, simulate_result_payload, validate_mode_consistency,
         workflow_can_proceed, workflow_kind,
     };
     use serde_json::json;
@@ -5219,6 +5397,239 @@ mod tests {
                         );
                     }
                 }
+            }
+        }
+    }
+
+    // ── Simulate truth contract tests ────────────────────────────────────
+
+    // -- SimulateCapability tag stability --
+
+    #[test]
+    fn simulate_capability_tags_are_stable() {
+        assert_eq!(SimulateCapability::FullDryRun.tag(), "full-dry-run");
+        assert_eq!(SimulateCapability::PreflightOnly.tag(), "preflight-only");
+        assert_eq!(SimulateCapability::Unknown.tag(), "unknown");
+        assert_eq!(SimulateCapability::Unsupported.tag(), "unsupported");
+    }
+
+    #[test]
+    fn simulate_capability_serde_roundtrip() {
+        for cap in [
+            SimulateCapability::FullDryRun,
+            SimulateCapability::PreflightOnly,
+            SimulateCapability::Unknown,
+            SimulateCapability::Unsupported,
+        ] {
+            let json = serde_json::to_string(&cap).unwrap();
+            let back: SimulateCapability = serde_json::from_str(&json).unwrap();
+            assert_eq!(cap, back);
+        }
+    }
+
+    // -- SimulateCapability semantics --
+
+    #[test]
+    fn simulate_only_full_dry_run_allows_simulate_label() {
+        assert!(SimulateCapability::FullDryRun.allows_simulate_label());
+        assert!(!SimulateCapability::PreflightOnly.allows_simulate_label());
+        assert!(!SimulateCapability::Unknown.allows_simulate_label());
+        assert!(!SimulateCapability::Unsupported.allows_simulate_label());
+    }
+
+    #[test]
+    fn simulate_preflight_allowed_for_dry_run_and_preflight() {
+        assert!(SimulateCapability::FullDryRun.allows_preflight());
+        assert!(SimulateCapability::PreflightOnly.allows_preflight());
+        assert!(!SimulateCapability::Unknown.allows_preflight());
+        assert!(!SimulateCapability::Unsupported.allows_preflight());
+    }
+
+    #[test]
+    fn simulate_unknown_is_not_audited() {
+        assert!(!SimulateCapability::Unknown.is_audited());
+        assert!(SimulateCapability::FullDryRun.is_audited());
+        assert!(SimulateCapability::PreflightOnly.is_audited());
+        assert!(SimulateCapability::Unsupported.is_audited());
+    }
+
+    #[test]
+    fn simulate_all_explanations_are_nonempty() {
+        for cap in [
+            SimulateCapability::FullDryRun,
+            SimulateCapability::PreflightOnly,
+            SimulateCapability::Unknown,
+            SimulateCapability::Unsupported,
+        ] {
+            assert!(!cap.explanation().is_empty(), "Empty explanation for {cap:?}");
+        }
+    }
+
+    // -- evaluate_simulate_request --
+
+    #[test]
+    fn evaluate_full_dry_run_always_succeeds() {
+        let result = evaluate_simulate_request(SimulateCapability::FullDryRun, false);
+        assert_eq!(result, Ok(SimulateCapability::FullDryRun));
+    }
+
+    #[test]
+    fn evaluate_preflight_with_downgrade_allowed_succeeds() {
+        let result = evaluate_simulate_request(SimulateCapability::PreflightOnly, true);
+        assert_eq!(result, Ok(SimulateCapability::PreflightOnly));
+    }
+
+    #[test]
+    fn evaluate_preflight_without_downgrade_is_refused() {
+        let result = evaluate_simulate_request(SimulateCapability::PreflightOnly, false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn evaluate_unknown_always_refused() {
+        assert!(evaluate_simulate_request(SimulateCapability::Unknown, false).is_err());
+        assert!(evaluate_simulate_request(SimulateCapability::Unknown, true).is_err());
+    }
+
+    #[test]
+    fn evaluate_unsupported_always_refused() {
+        assert!(evaluate_simulate_request(SimulateCapability::Unsupported, false).is_err());
+        assert!(evaluate_simulate_request(SimulateCapability::Unsupported, true).is_err());
+    }
+
+    // -- simulate_result honesty --
+
+    #[test]
+    fn simulate_result_full_dry_run_is_honest() {
+        let r = simulate_result(true, SimulateCapability::FullDryRun);
+        assert!(r.is_connector_dry_run);
+        assert!(!r.downgraded);
+        assert_eq!(r.actual_capability, SimulateCapability::FullDryRun);
+    }
+
+    #[test]
+    fn simulate_result_preflight_only_is_not_dry_run() {
+        let r = simulate_result(false, SimulateCapability::PreflightOnly);
+        assert!(!r.is_connector_dry_run);
+        assert!(!r.downgraded);
+    }
+
+    #[test]
+    fn simulate_result_downgraded_when_dry_run_requested_but_preflight_only() {
+        let r = simulate_result(true, SimulateCapability::PreflightOnly);
+        assert!(r.downgraded);
+        assert!(!r.is_connector_dry_run);
+        assert!(r.caveat.contains("preflight"));
+    }
+
+    #[test]
+    fn simulate_result_not_downgraded_when_preflight_requested_and_got_preflight() {
+        let r = simulate_result(false, SimulateCapability::PreflightOnly);
+        assert!(!r.downgraded);
+    }
+
+    #[test]
+    fn simulate_result_not_downgraded_when_dry_run_available() {
+        let r = simulate_result(true, SimulateCapability::FullDryRun);
+        assert!(!r.downgraded);
+    }
+
+    // -- simulate_result_payload shape --
+
+    #[test]
+    fn simulate_result_payload_has_required_fields() {
+        let r = simulate_result(true, SimulateCapability::FullDryRun);
+        let payload = simulate_result_payload(&r);
+        assert!(payload["simulate_capability"].is_string());
+        assert!(payload["is_connector_dry_run"].is_boolean());
+        assert!(payload["caveat"].is_string());
+        assert!(payload["downgraded"].is_boolean());
+    }
+
+    #[test]
+    fn simulate_result_payload_dry_run_tag_matches() {
+        let r = simulate_result(true, SimulateCapability::FullDryRun);
+        let payload = simulate_result_payload(&r);
+        assert_eq!(payload["simulate_capability"], "full-dry-run");
+        assert_eq!(payload["is_connector_dry_run"], true);
+    }
+
+    #[test]
+    fn simulate_result_payload_preflight_tag_matches() {
+        let r = simulate_result(false, SimulateCapability::PreflightOnly);
+        let payload = simulate_result_payload(&r);
+        assert_eq!(payload["simulate_capability"], "preflight-only");
+        assert_eq!(payload["is_connector_dry_run"], false);
+    }
+
+    #[test]
+    fn simulate_result_payload_downgraded_flag_correct() {
+        let r = simulate_result(true, SimulateCapability::PreflightOnly);
+        let payload = simulate_result_payload(&r);
+        assert_eq!(payload["downgraded"], true);
+    }
+
+    // -- Cross-cutting simulate invariants --
+
+    #[test]
+    fn simulate_never_labels_preflight_as_dry_run() {
+        // Critical invariant: PreflightOnly must never claim to be a dry run
+        for requested in [false, true] {
+            let r = simulate_result(requested, SimulateCapability::PreflightOnly);
+            assert!(
+                !r.is_connector_dry_run,
+                "PreflightOnly claimed is_connector_dry_run=true (requested={requested})"
+            );
+        }
+    }
+
+    #[test]
+    fn simulate_unknown_capability_never_produces_dry_run_result() {
+        for requested in [false, true] {
+            let r = simulate_result(requested, SimulateCapability::Unknown);
+            assert!(!r.is_connector_dry_run);
+        }
+    }
+
+    #[test]
+    fn simulate_unsupported_never_produces_dry_run_result() {
+        for requested in [false, true] {
+            let r = simulate_result(requested, SimulateCapability::Unsupported);
+            assert!(!r.is_connector_dry_run);
+        }
+    }
+
+    #[test]
+    fn simulate_downgrade_only_happens_when_dry_run_requested() {
+        // If dry-run wasn't requested, there's nothing to downgrade
+        for cap in [
+            SimulateCapability::FullDryRun,
+            SimulateCapability::PreflightOnly,
+            SimulateCapability::Unknown,
+            SimulateCapability::Unsupported,
+        ] {
+            let r = simulate_result(false, cap);
+            assert!(
+                !r.downgraded,
+                "Downgraded without dry-run request for {cap:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn simulate_all_results_have_nonempty_caveats() {
+        for cap in [
+            SimulateCapability::FullDryRun,
+            SimulateCapability::PreflightOnly,
+            SimulateCapability::Unknown,
+            SimulateCapability::Unsupported,
+        ] {
+            for requested in [false, true] {
+                let r = simulate_result(requested, cap);
+                assert!(
+                    !r.caveat.is_empty(),
+                    "Empty caveat for {cap:?} (requested={requested})"
+                );
             }
         }
     }

@@ -886,72 +886,6 @@ fn normalize_manifest_for_discovery(raw: &str) -> Result<Option<toml::Value>> {
         changed = true;
     }
 
-    let declares_streaming = manifest_declares_streaming(&document);
-    if let Some(connector) = document
-        .get_mut("connector")
-        .and_then(toml::Value::as_table_mut)
-    {
-        if let Some(archetypes) = connector
-            .get_mut("archetypes")
-            .and_then(toml::Value::as_array_mut)
-        {
-            let mut normalized =
-                Vec::with_capacity(archetypes.len() + usize::from(declares_streaming));
-            let mut saw_messaging = false;
-            let mut has_bidirectional = false;
-            let mut has_streaming = false;
-
-            for entry in archetypes.iter() {
-                let Some(label) = entry.as_str() else {
-                    normalized.push(entry.clone());
-                    continue;
-                };
-
-                match label {
-                    "messaging" => {
-                        saw_messaging = true;
-                        if !has_bidirectional {
-                            normalized.push(toml::Value::String("bidirectional".to_owned()));
-                            has_bidirectional = true;
-                        }
-                    }
-                    "bidirectional" => {
-                        has_bidirectional = true;
-                        normalized.push(entry.clone());
-                    }
-                    "streaming" => {
-                        has_streaming = true;
-                        normalized.push(entry.clone());
-                    }
-                    _ => normalized.push(entry.clone()),
-                }
-            }
-
-            if saw_messaging {
-                if declares_streaming && !has_streaming {
-                    normalized.push(toml::Value::String("streaming".to_owned()));
-                }
-                *archetypes = normalized;
-                changed = true;
-            }
-        }
-
-        if let Some(state) = connector
-            .get_mut("state")
-            .and_then(toml::Value::as_table_mut)
-            && state
-                .get("model")
-                .and_then(toml::Value::as_str)
-                .is_some_and(|model| model == "cursor")
-        {
-            state.insert(
-                "model".to_owned(),
-                toml::Value::String("singleton_writer".to_owned()),
-            );
-            changed = true;
-        }
-    }
-
     if let Some(operations) = document
         .get_mut("provides")
         .and_then(toml::Value::as_table_mut)
@@ -963,25 +897,7 @@ fn normalize_manifest_for_discovery(raw: &str) -> Result<Option<toml::Value>> {
                 if operation_table.remove("network").is_some() {
                     changed = true;
                 }
-                if !operation_table.contains_key("requires_approval") {
-                    operation_table.insert(
-                        "requires_approval".to_owned(),
-                        toml::Value::String("none".to_owned()),
-                    );
-                    changed = true;
-                }
             }
-        }
-    }
-
-    if document
-        .get("rate_limits")
-        .and_then(|limits| limits.get("pools"))
-        .is_some_and(toml::Value::is_table)
-    {
-        if let Some(root) = document.as_table_mut() {
-            root.remove("rate_limits");
-            changed = true;
         }
     }
 
@@ -990,44 +906,6 @@ fn normalize_manifest_for_discovery(raw: &str) -> Result<Option<toml::Value>> {
     } else {
         Ok(None)
     }
-}
-
-fn manifest_declares_streaming(document: &toml::Value) -> bool {
-    let protocol_features_streaming = document
-        .get("manifest")
-        .and_then(|manifest| manifest.get("protocol_features"))
-        .and_then(toml::Value::as_array)
-        .is_some_and(|features| {
-            features
-                .iter()
-                .filter_map(toml::Value::as_str)
-                .any(|feature| feature == "streaming")
-        });
-    if protocol_features_streaming {
-        return true;
-    }
-
-    let event_caps_streaming = document
-        .get("event_caps")
-        .and_then(|caps| caps.get("streaming"))
-        .and_then(toml::Value::as_bool)
-        .unwrap_or(false);
-    if event_caps_streaming {
-        return true;
-    }
-
-    document
-        .get("provides")
-        .and_then(|provides| provides.get("events"))
-        .and_then(toml::Value::as_table)
-        .is_some_and(|events| {
-            events.values().any(|event| {
-                event
-                    .get("streaming")
-                    .and_then(toml::Value::as_bool)
-                    .unwrap_or(false)
-            })
-        })
 }
 
 #[derive(Clone, Debug)]
@@ -1081,7 +959,8 @@ impl DiscoveredOperation {
                     operation.requires_approval,
                     ManifestApprovalMode::None
                 ),
-                supports_simulate: true,
+                // Offline manifest metadata cannot prove host-backed simulate support.
+                supports_simulate: false,
             },
             input_schema: operation.input_schema.clone(),
             output_schema: operation.output_schema.clone(),
@@ -1206,7 +1085,6 @@ fn discovered_connector_from_toml(
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default(),
-        manifest_declares_streaming(document),
     );
 
     let namespace = connector_id
@@ -1378,7 +1256,7 @@ fn discovered_operation_from_toml(
     let approval_mode = operation
         .get("requires_approval")
         .and_then(toml::Value::as_str)
-        .unwrap_or("none")
+        .unwrap_or("")
         .to_owned();
     let idempotency = operation
         .get("idempotency")
@@ -1454,7 +1332,8 @@ fn discovered_operation_from_toml(
             safety_tier,
             idempotency,
             requires_approval: approval_mode != "none",
-            supports_simulate: true,
+            // Raw manifest fallback must not invent simulate capability.
+            supports_simulate: false,
         },
         input_schema,
         output_schema,
@@ -1525,36 +1404,18 @@ fn extract_supported_zones_from_toml(zones: Option<&toml::Value>) -> Vec<String>
         .collect()
 }
 
-fn normalize_archetype_labels_from_toml(
-    labels: Vec<&str>,
-    declares_streaming: bool,
-) -> Vec<String> {
+fn normalize_archetype_labels_from_toml(labels: Vec<&str>) -> Vec<String> {
     let mut normalized = Vec::new();
-    let mut has_bidirectional = false;
-    let mut has_streaming = false;
 
     for label in labels {
-        match label {
-            "messaging" => {
-                if !has_bidirectional {
-                    normalized.push("bidirectional".to_owned());
-                    has_bidirectional = true;
-                }
-            }
-            "bidirectional" => {
-                has_bidirectional = true;
-                normalized.push(label.to_owned());
-            }
-            "streaming" => {
-                has_streaming = true;
-                normalized.push(label.to_owned());
-            }
-            _ => normalized.push(label.to_owned()),
+        let label = label.trim();
+        if label.is_empty() {
+            continue;
         }
-    }
-
-    if declares_streaming && !has_streaming {
-        normalized.push("streaming".to_owned());
+        if normalized.iter().any(|existing| existing == label) {
+            continue;
+        }
+        normalized.push(label.to_owned());
     }
 
     normalized
@@ -1884,6 +1745,7 @@ pub fn evaluate_introspection(
     let mut all_have_safety_tier = true;
     let mut all_have_idempotency = true;
     let mut all_have_ai_hints = true;
+    let mut approval_declared_where_needed = true;
     let mut operations_with_examples = 0usize;
 
     for op in &ops {
@@ -1915,6 +1777,16 @@ pub fn evaluate_introspection(
         if hints.is_null() || hints["when_to_use"].as_str().unwrap_or_default().is_empty() {
             all_have_ai_hints = false;
         }
+        let declares_approval = op
+            .get("requires_approval")
+            .is_some_and(|value| value.is_boolean() || value.is_string())
+            || op
+                .get("approval_mode")
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.is_empty());
+        if !declares_approval {
+            approval_declared_where_needed = false;
+        }
         if hints["examples"].as_array().is_some_and(|a| !a.is_empty()) {
             operations_with_examples += 1;
         }
@@ -1931,16 +1803,24 @@ pub fn evaluate_introspection(
         all_have_safety_tier,
         all_have_idempotency,
         all_have_ai_hints,
-        approval_declared_where_needed: true, // assume OK unless proven otherwise
+        approval_declared_where_needed,
         operations_with_examples,
     };
 
     // Summary readiness: derived from connector_id format and introspection.
     let id_parts: Vec<&str> = connector_id.split(':').collect();
+    let has_archetypes = introspection
+        .get("archetypes")
+        .and_then(Value::as_array)
+        .is_some_and(|archetypes| !archetypes.is_empty())
+        || introspection
+            .get("archetype")
+            .and_then(Value::as_str)
+            .is_some_and(|archetype| !archetype.is_empty());
     let summary = SummaryReadiness {
         has_canonical_id: id_parts.len() >= 3,
         has_display_name: !connector_id.is_empty(),
-        has_archetypes: true, // archetype is declared in manifest, not introspection
+        has_archetypes,
         has_semver_version: id_parts.len() >= 3,
         has_description: true, // from manifest
         has_operation_count: operation_count > 0,
@@ -1950,6 +1830,9 @@ pub fn evaluate_introspection(
     // Config and lifecycle from introspection are limited; mark as needing
     // host-level verification for a complete assessment.
     let has_auth_caps = !introspection["auth_caps"].is_null();
+    let has_rate_limits = introspection
+        .get("rate_limits")
+        .is_some_and(|rate_limits| !rate_limits.is_null());
 
     let config = ConfigReadiness {
         accepts_config: true,             // all connectors accept config
@@ -1963,7 +1846,7 @@ pub fn evaluate_introspection(
         has_health: true,              // trait requires it
         reports_lifecycle_state: true, // BaseConnector provides it
         events_declared: true,         // event declaration is optional; all connectors pass
-        has_rate_limits: true,         // trait requires rate_limits()
+        has_rate_limits,
         has_metrics: true,             // trait requires metrics()
         has_shutdown: true,            // trait requires shutdown()
     };
@@ -2848,7 +2731,7 @@ pub fn audit_all_connectors() -> Vec<ReadinessVerdict> {
                         all_have_safety_tier: true,
                         all_have_idempotency: true,
                         all_have_ai_hints: entry.has_agent_hints,
-                        approval_declared_where_needed: true,
+                        approval_declared_where_needed: false,
                         operations_with_examples: if entry.has_agent_hints {
                             entry.operation_count
                         } else {
@@ -2866,7 +2749,7 @@ pub fn audit_all_connectors() -> Vec<ReadinessVerdict> {
                         has_health: true,
                         reports_lifecycle_state: true,
                         events_declared: true,
-                        has_rate_limits: true,
+                        has_rate_limits: false,
                         has_metrics: true,
                         has_shutdown: true,
                     },
@@ -3928,6 +3811,92 @@ mod tests {
         );
 
         assert!(!verdict.areas.config.has_config_schema);
+    }
+
+    #[test]
+    fn connector_without_explicit_approval_metadata_keeps_approval_contract_false() {
+        let introspection = json!({
+            "operations": [
+                {
+                    "id": "op1",
+                    "summary": "s",
+                    "input_schema": {},
+                    "output_schema": {},
+                    "capability": "c",
+                    "risk_level": "low",
+                    "safety_tier": "safe",
+                    "idempotency": "none",
+                    "ai_hints": { "when_to_use": "w", "examples": ["e"] }
+                }
+            ]
+        });
+
+        let verdict = evaluate_introspection(
+            "approval:fcp2:1.0",
+            "connectors/approval",
+            ConnectorCohort::Ai,
+            &introspection,
+        );
+
+        assert!(!verdict.areas.operations.approval_declared_where_needed);
+    }
+
+    #[test]
+    fn connector_without_explicit_archetype_metadata_keeps_archetypes_false() {
+        let introspection = json!({
+            "operations": [
+                {
+                    "id": "op1",
+                    "summary": "s",
+                    "input_schema": {},
+                    "output_schema": {},
+                    "capability": "c",
+                    "risk_level": "low",
+                    "safety_tier": "safe",
+                    "idempotency": "none",
+                    "ai_hints": { "when_to_use": "w", "examples": ["e"] }
+                }
+            ]
+        });
+
+        let verdict = evaluate_introspection(
+            "archetype:fcp2:1.0",
+            "connectors/archetype",
+            ConnectorCohort::Knowledge,
+            &introspection,
+        );
+
+        assert!(!verdict.areas.summary.has_archetypes);
+    }
+
+    #[test]
+    fn connector_with_explicit_rate_limits_marks_rate_limit_readiness_true() {
+        let introspection = json!({
+            "operations": [
+                {
+                    "id": "op1",
+                    "summary": "s",
+                    "input_schema": {},
+                    "output_schema": {},
+                    "capability": "c",
+                    "risk_level": "low",
+                    "safety_tier": "safe",
+                    "idempotency": "none",
+                    "requires_approval": "none",
+                    "ai_hints": { "when_to_use": "w", "examples": ["e"] }
+                }
+            ],
+            "rate_limits": []
+        });
+
+        let verdict = evaluate_introspection(
+            "ratelimit:fcp2:1.0",
+            "connectors/ratelimit",
+            ConnectorCohort::Knowledge,
+            &introspection,
+        );
+
+        assert!(verdict.areas.lifecycle.has_rate_limits);
     }
 
     // ── ConnectorSummary: all fields serialize correctly ──────────────
@@ -5336,21 +5305,86 @@ burst = 5
         let normalized =
             normalize_manifest_for_discovery(raw).expect("normalization should succeed");
         let normalized = normalized.expect("legacy manifest should need normalization");
-        let manifest: ConnectorManifest = normalized
-            .try_into()
-            .expect("normalized manifest should parse");
 
+        let archetypes = normalized
+            .get("connector")
+            .and_then(toml::Value::as_table)
+            .and_then(|connector| connector.get("archetypes"))
+            .and_then(toml::Value::as_array)
+            .expect("normalized connector archetypes should exist")
+            .iter()
+            .filter_map(toml::Value::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(archetypes, vec!["messaging", "operational"]);
         assert_eq!(
-            manifest
-                .connector
-                .archetypes
-                .iter()
-                .map(fcp_manifest::ConnectorArchetype::as_str)
-                .collect::<Vec<_>>(),
-            vec!["bidirectional", "operational", "streaming"]
+            normalized
+                .get("connector")
+                .and_then(toml::Value::as_table)
+                .and_then(|connector| connector.get("state"))
+                .and_then(toml::Value::as_table)
+                .and_then(|state| state.get("model"))
+                .and_then(toml::Value::as_str),
+            Some("cursor")
         );
-        assert!(manifest.event_caps.is_none());
-        assert!(manifest.provides.events.contains_key("tick"));
+        assert!(
+            normalized
+                .get("rate_limits")
+                .and_then(toml::Value::as_table)
+                .is_some(),
+            "legacy rate limit metadata should remain visible for fallback discovery"
+        );
+        let echo = normalized
+            .get("provides")
+            .and_then(toml::Value::as_table)
+            .and_then(|provides| provides.get("operations"))
+            .and_then(toml::Value::as_table)
+            .and_then(|operations| operations.get("echo"))
+            .and_then(toml::Value::as_table)
+            .expect("echo operation should still exist");
+        assert_eq!(
+            echo.get("requires_approval").and_then(toml::Value::as_str),
+            Some("none")
+        );
+        assert!(
+            echo.get("network").is_none(),
+            "legacy network aliases should still normalize away"
+        );
+    }
+
+    #[test]
+    fn discovered_operation_from_toml_does_not_claim_simulate_support() {
+        let manifest: toml::Value = toml::from_str(
+            r#"
+[provides.operations.echo]
+description = "Echo"
+capability = "legacy.echo"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object" }
+output_schema = { type = "object" }
+"#,
+        )
+        .expect("manifest snippet should parse");
+
+        let operation = manifest
+            .get("provides")
+            .and_then(toml::Value::as_table)
+            .and_then(|provides| provides.get("operations"))
+            .and_then(toml::Value::as_table)
+            .and_then(|operations| operations.get("echo"))
+            .expect("echo op should exist");
+
+        let discovered = discovered_operation_from_toml(
+            "legacy",
+            "legacy.echo",
+            operation,
+            Path::new("legacy-manifest.toml"),
+        )
+        .expect("discovery fallback should parse operation");
+
+        assert!(!discovered.summary.supports_simulate);
     }
 
     #[test]

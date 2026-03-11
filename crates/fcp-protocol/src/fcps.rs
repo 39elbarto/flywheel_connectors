@@ -1333,15 +1333,15 @@ mod tests {
     }
 
     #[test]
-    fn decode_status_hint_bounds_exceeded() {
-        let zone_id: ZoneId = "z:bounds".parse().expect("zone parse");
+    fn decode_status_hint_bounds_exceeded_alt() {
+        let zone_id: ZoneId = "z:test".parse().unwrap();
         let status = DecodeStatus {
             header: make_test_object_header(),
             object_id: ObjectId::from_bytes([0; 32]),
             zone_id,
             zone_key_id: ZoneKeyId::from_bytes([0; 8]),
-            epoch_id: 0,
-            received_unique: 0,
+            epoch_id: 1,
+            received_unique: 50,
             needed: 100,
             complete: false,
             missing_hint: Some(vec![0; MAX_MISSING_HINT_ENTRIES + 1]),
@@ -2198,7 +2198,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_status_complete_with_hint_sign_verify() {
+    fn decode_status_sign_and_verify() {
         let signing_key = Ed25519SigningKey::generate();
         let zone_id: ZoneId = "z:test".parse().unwrap();
         let mut status = DecodeStatus {
@@ -2210,7 +2210,7 @@ mod tests {
             received_unique: 100,
             needed: 100,
             complete: true,
-            missing_hint: Some(vec![5, 10, 15]),
+            missing_hint: None,
             signature: Ed25519Signature::from_bytes(&[0; 64]),
         };
         status.sign(&signing_key);

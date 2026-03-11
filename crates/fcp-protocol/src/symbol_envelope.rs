@@ -217,6 +217,30 @@ pub fn encrypt_symbol(
         &ctx.sender_node_id,
         ctx.sender_instance_id,
     );
+    encrypt_symbol_with_subkey(&sender_key, algorithm, ctx, plaintext)
+}
+
+/// Encrypts a symbol using a pre-derived sender subkey (NORMATIVE).
+///
+/// Use this variant when encrypting multiple symbols from the same sender
+/// to avoid repeated expensive HKDF subkey derivations.
+///
+/// # Arguments
+///
+/// * `sender_key` - Pre-derived sender encryption subkey
+/// * `algorithm` - AEAD algorithm to use
+/// * `ctx` - Symbol encryption context
+/// * `plaintext` - Raw symbol data to encrypt
+///
+/// # Errors
+///
+/// Returns `SymbolEnvelopeError::EncryptFailed` if AEAD encryption fails.
+pub fn encrypt_symbol_with_subkey(
+    sender_key: &AeadKey,
+    algorithm: ZoneKeyAlgorithm,
+    ctx: &SymbolContext,
+    plaintext: &[u8],
+) -> Result<(Vec<u8>, [u8; AUTH_TAG_SIZE]), SymbolEnvelopeError> {
     let aad = build_symbol_aad(ctx);
 
     let ciphertext_with_tag = match algorithm {
@@ -276,9 +300,34 @@ pub fn decrypt_symbol(
         &ctx.sender_node_id,
         ctx.sender_instance_id,
     );
+    decrypt_symbol_with_subkey(&sender_key, algorithm, ctx, ciphertext, auth_tag)
+}
+
+/// Decrypts a symbol using a pre-derived sender subkey (NORMATIVE).
+///
+/// Use this variant when decrypting multiple symbols from the same sender
+/// to avoid repeated expensive HKDF subkey derivations.
+///
+/// # Arguments
+///
+/// * `sender_key` - Pre-derived sender encryption subkey
+/// * `algorithm` - AEAD algorithm to use
+/// * `ctx` - Symbol encryption context
+/// * `ciphertext` - Encrypted symbol data
+/// * `auth_tag` - 16-byte authentication tag
+///
+/// # Errors
+///
+/// Returns `SymbolEnvelopeError::DecryptFailed` if authentication fails.
+pub fn decrypt_symbol_with_subkey(
+    sender_key: &AeadKey,
+    algorithm: ZoneKeyAlgorithm,
+    ctx: &SymbolContext,
+    ciphertext: &[u8],
+    auth_tag: &[u8; AUTH_TAG_SIZE],
+) -> Result<Vec<u8>, SymbolEnvelopeError> {
     let aad = build_symbol_aad(ctx);
 
-    // Reconstruct ciphertext || tag for the AEAD crate
     let mut ciphertext_with_tag = Vec::with_capacity(ciphertext.len() + AUTH_TAG_SIZE);
     ciphertext_with_tag.extend_from_slice(ciphertext);
     ciphertext_with_tag.extend_from_slice(auth_tag);

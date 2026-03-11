@@ -742,7 +742,7 @@ impl EgressGuard {
             });
         }
 
-        let mut allowed_ips = Vec::new();
+        let mut allowed_ips = Vec::with_capacity(ips.len());
         for ip in ips {
             self.check_ip_constraints(*ip, constraints)?;
             allowed_ips.push(*ip);

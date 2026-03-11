@@ -253,7 +253,13 @@ impl LinuxSandbox {
 
     /// Build a seccomp BPF filter for the given policy.
     fn build_seccomp_filter(&self, policy: &CompiledPolicy) -> Vec<SockFilter> {
-        let mut filter = Vec::new();
+        // Build allowlist based on policy
+        let (allowed_syscalls, graceful_error_syscalls) = self.build_syscall_allowlist(policy);
+
+        // Calculate exact capacity to prevent reallocation during BPF assembly.
+        // 4 header instructions + (2 per allowed) + (2 per graceful) + 1 catch-all.
+        let capacity = 4 + (allowed_syscalls.len() * 2) + (graceful_error_syscalls.len() * 2) + 1;
+        let mut filter = Vec::with_capacity(capacity);
 
         // 1. Validate Architecture
         // Load architecture into accumulator
@@ -274,9 +280,6 @@ impl LinuxSandbox {
         // Load syscall number into accumulator
         // BPF_LD | BPF_W | BPF_ABS, offset 0 = syscall number
         filter.push(SockFilter::stmt(0x20, 0));
-
-        // Build allowlist based on policy
-        let (allowed_syscalls, graceful_error_syscalls) = self.build_syscall_allowlist(policy);
 
         // Add jump table for allowed syscalls
         for &syscall in &allowed_syscalls {
@@ -623,7 +626,7 @@ impl Sandbox for LinuxSandbox {
         let filter = self.build_seccomp_filter(policy);
 
         // Pre-compute CStrings for Landlock paths to avoid allocation in child
-        let mut readonly_cpaths = Vec::new();
+        let mut readonly_cpaths = Vec::with_capacity(policy.readonly_paths.len());
         for p in &policy.readonly_paths {
             use std::os::unix::ffi::OsStrExt;
             readonly_cpaths.push(
@@ -632,7 +635,7 @@ impl Sandbox for LinuxSandbox {
             );
         }
 
-        let mut writable_cpaths = Vec::new();
+        let mut writable_cpaths = Vec::with_capacity(policy.writable_paths.len());
         for p in &policy.writable_paths {
             use std::os::unix::ffi::OsStrExt;
             writable_cpaths.push(

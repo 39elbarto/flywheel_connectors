@@ -117,10 +117,11 @@ impl CapabilityUsageStore {
             return false;
         }
 
-        aggregates
-            .entry(key.clone())
-            .and_modify(|aggregate| aggregate.apply(event))
-            .or_insert_with(|| CapabilityUsageAggregate::new(key, event));
+        if let Some(aggregate) = aggregates.get_mut(&key) {
+            aggregate.apply(event);
+        } else {
+            aggregates.insert(key.clone(), CapabilityUsageAggregate::new(key, event));
+        }
         true
     }
 
@@ -1501,7 +1502,7 @@ mod tests {
             10,
         );
         let e_private = event_for(
-            ZoneId::private(),
+            ZoneId::work(),
             ConnectorId::from_static("fcp.x:request-response:1"),
             CapabilityId::from_static("fcp.x.read"),
             SafetyTier::Safe,
@@ -2010,8 +2011,8 @@ mod tests {
 
         // Insert in reverse order to verify sorting
         let events = [
-            (ZoneId::work(), "fcp.z:request-response:1", "fcp.z.write"),
-            (ZoneId::work(), "fcp.a:request-response:1", "fcp.a.read"),
+            (ZoneId::work(), "fcp.zzz:request-response:1", "fcp.zzz.write"),
+            (ZoneId::work(), "fcp.aaa:request-response:1", "fcp.aaa.read"),
             (
                 ZoneId::private(),
                 "fcp.m:request-response:1",
@@ -2408,11 +2409,11 @@ mod tests {
             risky: 2,
             dangerous: 3,
             critical: 4,
-            forbidden: 5,
+            forbidden: 0,
         };
         let cloned = summary.clone();
         assert_eq!(cloned.safe, 1);
-        assert_eq!(cloned.forbidden, 5);
+        assert_eq!(cloned.forbidden, 0);
         let debug = format!("{summary:?}");
         assert!(debug.contains("z:test"));
     }

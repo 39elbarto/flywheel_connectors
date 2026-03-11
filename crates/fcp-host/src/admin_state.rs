@@ -26,7 +26,7 @@ const HOST_ADMIN_STATE_SNAPSHOT_VERSION: u32 = 1;
 const REDACTED_CONFIG_VALUE: &str = "[REDACTED]";
 
 /// Canonical connector inventory entry persisted and applied by the host.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManagedConnectorConfig {
     /// Canonical connector identifier.
     pub id: String,
@@ -194,7 +194,7 @@ pub struct JournalQueryRequest {
     pub limit: usize,
 }
 
-fn default_journal_limit() -> usize {
+const fn default_journal_limit() -> usize {
     100
 }
 
@@ -623,24 +623,14 @@ fn diff_config_values_inner(
                 .collect::<BTreeSet<_>>();
             for key in keys {
                 let child_path = join_json_pointer(path, &key);
-                diff_config_values_inner(
-                    &child_path,
-                    left.get(&key),
-                    right.get(&key),
-                    entries,
-                );
+                diff_config_values_inner(&child_path, left.get(&key), right.get(&key), entries);
             }
         }
         (Some(Value::Array(left)), Some(Value::Array(right))) => {
             let max_len = left.len().max(right.len());
             for index in 0..max_len {
                 let child_path = join_json_pointer(path, &index.to_string());
-                diff_config_values_inner(
-                    &child_path,
-                    left.get(index),
-                    right.get(index),
-                    entries,
-                );
+                diff_config_values_inner(&child_path, left.get(index), right.get(index), entries);
             }
         }
         (Some(left), Some(right)) => entries.push(ConfigDiffEntry {
@@ -1076,7 +1066,11 @@ impl Default for HostAdminStateSnapshot {
 
 impl HostAdminStateSnapshot {
     fn connector_state_mut(&mut self, connector_id: &ConnectorId) -> &mut ConnectorAdminState {
-        self.connectors.entry(connector_id.clone()).or_default()
+        if !self.connectors.contains_key(connector_id) {
+            self.connectors
+                .insert(connector_id.clone(), ConnectorAdminState::default());
+        }
+        self.connectors.get_mut(connector_id).unwrap()
     }
 
     const fn next_config_revision_id(&mut self) -> u64 {
@@ -1604,12 +1598,13 @@ impl HostAdminStateStore {
         // Read current state first (for dry-run and validation).
         let (previous_desired, observed, current_lifecycle_status, current_seq) = {
             let state = self.state.read().await;
-            let cs = state
-                .connectors
-                .get(connector_id)
-                .ok_or_else(|| LifecycleError::NotFound {
-                    connector_id: connector_id.clone(),
-                })?;
+            let cs =
+                state
+                    .connectors
+                    .get(connector_id)
+                    .ok_or_else(|| LifecycleError::NotFound {
+                        connector_id: connector_id.clone(),
+                    })?;
             let lifecycle_status = cs.lifecycle.as_ref().map(|record| LifecycleStatus {
                 connector_id: connector_id.clone(),
                 state: record.state,
@@ -1655,17 +1650,20 @@ impl HostAdminStateStore {
         // For promote, delegate to the LifecycleManager trait implementation.
         let lifecycle_status = if request.action == LifecycleAction::Promote {
             match self.promote(connector_id).await {
-                Ok(record) => Some(LifecycleStatus {
-                    connector_id: connector_id.clone(),
-                    state: record.state,
-                    version: record.version.clone(),
-                    health: record.health.clone(),
-                    auto_promote_pending: false,
-                    auto_rollback_pending: false,
-                    canary_expires_in_secs: None,
-                    crash_loop_detected: false,
-                    rollback_target_version: record.previous_version.clone(),
-                }),
+                Ok(record) => {
+                    let status = LifecycleStatus {
+                        connector_id: connector_id.clone(),
+                        state: record.state,
+                        version: record.version.clone(),
+                        health: record.health.clone(),
+                        auto_promote_pending: false,
+                        auto_rollback_pending: false,
+                        canary_expires_in_secs: None,
+                        crash_loop_detected: false,
+                        rollback_target_version: record.previous_version,
+                    };
+                    Some(status)
+                }
                 Err(e) => return Err(e),
             }
         } else {
@@ -1705,10 +1703,7 @@ impl HostAdminStateStore {
     }
 
     /// Query the admin state journal with optional filtering.
-    pub async fn query_journal(
-        &self,
-        request: &JournalQueryRequest,
-    ) -> JournalQueryResponse {
+    pub async fn query_journal(&self, request: &JournalQueryRequest) -> JournalQueryResponse {
         let state = self.state.read().await;
         let all_entries = &state.journal;
         let total_entries = all_entries.len();

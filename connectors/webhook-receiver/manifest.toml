@@ -53,7 +53,7 @@ forbidden = [
 ]
 
 [provides.operations."webhook.endpoints.create"]
-description = "Register a new webhook endpoint"
+description = "Register a new webhook endpoint with provider-aware verification defaults"
 capability = "webhook.endpoints.write"
 risk_level = "medium"
 safety_tier = "risky"
@@ -61,10 +61,7 @@ requires_approval = "policy"
 idempotency = "strict"
 
 [provides.operations."webhook.endpoints.create".input_schema]
-required = [
-    "path",
-    "signing_secret",
-]
+required = ["path"]
 type = "object"
 
 [provides.operations."webhook.endpoints.create".input_schema.properties.allowed_sources]
@@ -75,14 +72,32 @@ type = "array"
 description = "URL path to listen on"
 type = "string"
 
+[provides.operations."webhook.endpoints.create".input_schema.properties.provider]
+description = "Provider preset: generic, github, stripe, slack, twilio"
+type = "string"
+
 [provides.operations."webhook.endpoints.create".input_schema.properties.signing_secret]
-description = "HMAC secret for signature validation"
+description = "Optional signing secret; omitted values are generated in-memory"
+type = "string"
+
+[provides.operations."webhook.endpoints.create".input_schema.properties.signature_header]
+description = "Override the expected signature header for generic endpoints"
+type = "string"
+
+[provides.operations."webhook.endpoints.create".input_schema.properties.signature_algorithm]
+description = "Override the verification algorithm for generic endpoints"
 type = "string"
 
 [provides.operations."webhook.endpoints.create".output_schema]
 required = [
     "endpoint_id",
     "url",
+    "provider",
+    "signature_header",
+    "signature_algorithm",
+    "signing_secret",
+    "signing_secret_generated",
+    "secret_last_rotated_at",
 ]
 type = "object"
 
@@ -90,6 +105,27 @@ type = "object"
 type = "string"
 
 [provides.operations."webhook.endpoints.create".output_schema.properties.url]
+type = "string"
+
+[provides.operations."webhook.endpoints.create".output_schema.properties.provider]
+type = "string"
+
+[provides.operations."webhook.endpoints.create".output_schema.properties.signature_header]
+type = "string"
+
+[provides.operations."webhook.endpoints.create".output_schema.properties.signature_algorithm]
+type = "string"
+
+[provides.operations."webhook.endpoints.create".output_schema.properties.recommended_events]
+type = "array"
+
+[provides.operations."webhook.endpoints.create".output_schema.properties.signing_secret]
+type = "string"
+
+[provides.operations."webhook.endpoints.create".output_schema.properties.signing_secret_generated]
+type = "boolean"
+
+[provides.operations."webhook.endpoints.create".output_schema.properties.secret_last_rotated_at]
 type = "string"
 
 [provides.operations."webhook.endpoints.create".network_constraints]
@@ -114,12 +150,106 @@ total_timeout_ms = 10000
 max_response_bytes = 1048576
 
 [provides.operations."webhook.endpoints.create".ai_hints]
-when_to_use = "Register a new webhook endpoint."
-common_mistakes = ["Not setting a signing secret — payloads won't be verified."]
-examples = ['{"path": "/hooks/github", "signing_secret": "whsec_abc123"}']
+when_to_use = "Register a new webhook endpoint and auto-populate provider verification settings."
+common_mistakes = [
+    "Using a provider preset with a mismatched signature header or algorithm.",
+    "Configuring a localhost public_base_url and expecting external webhook providers to reach it.",
+]
+examples = [
+    '{"path": "/hooks/github", "provider": "github"}',
+    '{"path": "/hooks/custom", "provider": "generic", "signature_header": "X-Signature", "signature_algorithm": "hmac-sha256"}',
+]
 related = [
+    "webhook.endpoints.rotate_secret",
     "webhook.endpoints.list",
     "webhook.endpoints.delete",
+]
+
+[provides.operations."webhook.endpoints.rotate_secret"]
+description = "Rotate the signing secret for an existing webhook endpoint"
+capability = "webhook.endpoints.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."webhook.endpoints.rotate_secret".input_schema]
+required = ["endpoint_id"]
+type = "object"
+
+[provides.operations."webhook.endpoints.rotate_secret".input_schema.properties.endpoint_id]
+type = "string"
+
+[provides.operations."webhook.endpoints.rotate_secret".input_schema.properties.signing_secret]
+description = "Optional replacement signing secret; omitted values are generated in-memory"
+type = "string"
+
+[provides.operations."webhook.endpoints.rotate_secret".output_schema]
+required = [
+    "endpoint_id",
+    "signing_secret",
+    "signing_secret_generated",
+    "secret_last_rotated_at",
+]
+type = "object"
+
+[provides.operations."webhook.endpoints.rotate_secret".output_schema.properties.endpoint_id]
+type = "string"
+
+[provides.operations."webhook.endpoints.rotate_secret".output_schema.properties.url]
+type = "string"
+
+[provides.operations."webhook.endpoints.rotate_secret".output_schema.properties.provider]
+type = "string"
+
+[provides.operations."webhook.endpoints.rotate_secret".output_schema.properties.signature_header]
+type = "string"
+
+[provides.operations."webhook.endpoints.rotate_secret".output_schema.properties.signature_algorithm]
+type = "string"
+
+[provides.operations."webhook.endpoints.rotate_secret".output_schema.properties.recommended_events]
+type = "array"
+
+[provides.operations."webhook.endpoints.rotate_secret".output_schema.properties.signing_secret]
+type = "string"
+
+[provides.operations."webhook.endpoints.rotate_secret".output_schema.properties.signing_secret_generated]
+type = "boolean"
+
+[provides.operations."webhook.endpoints.rotate_secret".output_schema.properties.secret_last_rotated_at]
+type = "string"
+
+[provides.operations."webhook.endpoints.rotate_secret".network_constraints]
+host_allow = ["localhost.localdomain"]
+port_allow = [
+    8080,
+    8443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = false
+dns_max_ips = 1
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 10000
+max_response_bytes = 1048576
+
+[provides.operations."webhook.endpoints.rotate_secret".ai_hints]
+when_to_use = "Rotate a webhook signing secret after suspected exposure or during routine credential hygiene."
+common_mistakes = [
+    "Rotating the local secret without updating the upstream webhook provider configuration.",
+]
+examples = ['{"endpoint_id": "ep_abc123"}']
+related = [
+    "webhook.endpoints.create",
+    "webhook.endpoints.list",
 ]
 
 [provides.operations."webhook.endpoints.delete"]
@@ -318,6 +448,7 @@ scope = "instance"
 
 [rate_limits.operation_pools]
 "webhook.endpoints.create" = ["webhook.endpoints.write"]
+"webhook.endpoints.rotate_secret" = ["webhook.endpoints.write"]
 "webhook.endpoints.list" = ["webhook.endpoints.read"]
 "webhook.endpoints.delete" = ["webhook.endpoints.write"]
 "webhook.events.recent" = ["webhook.events.read"]

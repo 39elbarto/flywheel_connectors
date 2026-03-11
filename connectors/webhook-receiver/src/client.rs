@@ -12,7 +12,7 @@ use tracing::debug;
 
 use crate::{
     error::{WebhookReceiverError, WebhookReceiverResult},
-    types::{EndpointSummary, WebhookEndpoint, WebhookEvent},
+    types::{EndpointSummary, WebhookEndpoint, WebhookEvent, WebhookProvider},
 };
 
 /// Maximum number of endpoints that can be registered.
@@ -27,9 +27,14 @@ pub const DEFAULT_EVENTS_LIMIT: usize = 50;
 /// Maximum limit for recent events query.
 pub const MAX_EVENTS_LIMIT: usize = 100;
 
+/// Default public base URL used before the connector is explicitly configured.
+pub const DEFAULT_PUBLIC_BASE_URL: &str = "http://localhost:8080";
+
 /// In-memory store for webhook endpoints and received events.
 #[derive(Debug)]
 pub struct WebhookStore {
+    /// Public base URL used to build endpoint URLs.
+    public_base_url: String,
     /// Registered endpoints, keyed by `endpoint_id`.
     endpoints: HashMap<String, WebhookEndpoint>,
     /// Events per endpoint, keyed by `endpoint_id`.
@@ -40,8 +45,23 @@ impl WebhookStore {
     /// Create a new empty webhook store.
     pub fn new() -> Self {
         Self {
+            public_base_url: DEFAULT_PUBLIC_BASE_URL.to_string(),
             endpoints: HashMap::new(),
             events: HashMap::new(),
+        }
+    }
+
+    /// Get the current public base URL.
+    #[must_use]
+    pub fn public_base_url(&self) -> &str {
+        &self.public_base_url
+    }
+
+    /// Update the public base URL and rebase any existing endpoint URLs.
+    pub fn set_public_base_url(&mut self, public_base_url: &str) {
+        self.public_base_url = public_base_url.to_string();
+        for endpoint in self.endpoints.values_mut() {
+            endpoint.update_public_base_url(public_base_url);
         }
     }
 
@@ -51,6 +71,30 @@ impl WebhookStore {
         path: String,
         signing_secret: String,
         allowed_sources: Vec<String>,
+    ) -> WebhookReceiverResult<WebhookEndpoint> {
+        self.create_endpoint_profile(
+            path,
+            signing_secret,
+            allowed_sources,
+            WebhookProvider::Generic,
+            WebhookProvider::Generic
+                .default_signature_header()
+                .to_string(),
+            WebhookProvider::Generic
+                .default_signature_algorithm()
+                .to_string(),
+        )
+    }
+
+    /// Register a new webhook endpoint with a provider-aware verification profile.
+    pub fn create_endpoint_profile(
+        &mut self,
+        path: String,
+        signing_secret: String,
+        allowed_sources: Vec<String>,
+        provider: WebhookProvider,
+        signature_header: String,
+        signature_algorithm: String,
     ) -> WebhookReceiverResult<WebhookEndpoint> {
         // Check for duplicate path
         if self.endpoints.values().any(|ep| ep.path == path) {
@@ -64,7 +108,21 @@ impl WebhookStore {
             });
         }
 
-        let endpoint = WebhookEndpoint::new(path, signing_secret, allowed_sources);
+        let endpoint = WebhookEndpoint::new(
+            path,
+            signing_secret,
+            allowed_sources,
+            &self.public_base_url,
+            provider,
+            signature_header,
+            signature_algorithm,
+        );
+        let validation_issues = endpoint.validation_issues();
+        if !validation_issues.is_empty() {
+            return Err(WebhookReceiverError::InvalidInput {
+                message: validation_issues.join("; "),
+            });
+        }
         debug!(endpoint_id = %endpoint.endpoint_id, path = %endpoint.path, "Created webhook endpoint");
 
         self.endpoints
@@ -72,6 +130,21 @@ impl WebhookStore {
         self.events.insert(endpoint.endpoint_id.clone(), Vec::new());
 
         Ok(endpoint)
+    }
+
+    /// Rotate the signing secret for a specific endpoint.
+    pub fn rotate_endpoint_secret(
+        &mut self,
+        endpoint_id: &str,
+        signing_secret: String,
+    ) -> WebhookReceiverResult<WebhookEndpoint> {
+        let endpoint = self.endpoints.get_mut(endpoint_id).ok_or_else(|| {
+            WebhookReceiverError::EndpointNotFound {
+                endpoint_id: endpoint_id.into(),
+            }
+        })?;
+        endpoint.rotate_signing_secret(signing_secret);
+        Ok(endpoint.clone())
     }
 
     /// Delete a webhook endpoint and its events.
@@ -104,6 +177,12 @@ impl WebhookStore {
             .ok_or_else(|| WebhookReceiverError::EndpointNotFound {
                 endpoint_id: endpoint_id.into(),
             })
+    }
+
+    /// Snapshot the current endpoints for readiness checks.
+    #[must_use]
+    pub fn endpoint_snapshots(&self) -> Vec<WebhookEndpoint> {
+        self.endpoints.values().cloned().collect()
     }
 
     /// Record a received webhook event.
@@ -169,6 +248,15 @@ impl WebhookStore {
         self.endpoints.len()
     }
 
+    /// Get the number of active endpoints.
+    #[must_use]
+    pub fn active_endpoint_count(&self) -> usize {
+        self.endpoints
+            .values()
+            .filter(|endpoint| endpoint.active)
+            .count()
+    }
+
     /// Get the total number of stored events.
     pub fn total_event_count(&self) -> usize {
         self.events.values().map(Vec::len).sum()
@@ -197,6 +285,7 @@ mod tests {
         let store = WebhookStore::new();
         assert_eq!(store.endpoint_count(), 0);
         assert_eq!(store.total_event_count(), 0);
+        assert_eq!(store.public_base_url(), DEFAULT_PUBLIC_BASE_URL);
     }
 
     #[test]
@@ -214,6 +303,7 @@ mod tests {
             .unwrap();
         assert!(ep.endpoint_id.starts_with("ep_"));
         assert_eq!(ep.path, "/hooks/github");
+        assert_eq!(ep.url, "http://localhost:8080/hooks/github");
         assert_eq!(store.endpoint_count(), 1);
     }
 
@@ -228,6 +318,54 @@ mod tests {
             )
             .unwrap();
         assert_eq!(ep.allowed_sources.len(), 2);
+    }
+
+    #[test]
+    fn set_public_base_url_rebases_existing_endpoints() {
+        let mut store = WebhookStore::new();
+        let ep = store
+            .create_endpoint("/hooks/github".into(), "secret".into(), vec![])
+            .unwrap();
+        assert_eq!(ep.url, "http://localhost:8080/hooks/github");
+
+        store.set_public_base_url("https://hooks.flywheel.test/");
+
+        let updated = store.get_endpoint(&ep.endpoint_id).unwrap();
+        assert_eq!(updated.url, "https://hooks.flywheel.test/hooks/github");
+    }
+
+    #[test]
+    fn create_endpoint_profile_uses_provider_defaults() {
+        let mut store = WebhookStore::new();
+        store.set_public_base_url("https://hooks.flywheel.test");
+        let ep = store
+            .create_endpoint_profile(
+                "/hooks/github".into(),
+                "ghsec_123".into(),
+                vec![],
+                WebhookProvider::GitHub,
+                "X-Hub-Signature-256".into(),
+                "hmac-sha256".into(),
+            )
+            .unwrap();
+        assert_eq!(ep.provider, WebhookProvider::GitHub);
+        assert_eq!(ep.signature_header, "X-Hub-Signature-256");
+        assert_eq!(ep.signature_algorithm, "hmac-sha256");
+        assert_eq!(ep.url, "https://hooks.flywheel.test/hooks/github");
+    }
+
+    #[test]
+    fn create_endpoint_profile_rejects_provider_mismatch() {
+        let mut store = WebhookStore::new();
+        let result = store.create_endpoint_profile(
+            "/hooks/github".into(),
+            "ghsec_123".into(),
+            vec![],
+            WebhookProvider::GitHub,
+            "Stripe-Signature".into(),
+            "stripe-signature-v1".into(),
+        );
+        assert!(result.is_err());
     }
 
     #[test]
@@ -286,6 +424,25 @@ mod tests {
         let mut store = WebhookStore::new();
         let result = store.delete_endpoint("ep_nonexistent");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn rotate_endpoint_secret_updates_stored_secret() {
+        let mut store = WebhookStore::new();
+        let ep = store
+            .create_endpoint("/hooks/test".into(), "old_secret".into(), vec![])
+            .unwrap();
+        let rotated = store
+            .rotate_endpoint_secret(&ep.endpoint_id, "new_secret".into())
+            .unwrap();
+        assert_eq!(rotated.signing_secret, "new_secret");
+        assert!(
+            store
+                .get_endpoint(&ep.endpoint_id)
+                .unwrap()
+                .signing_secret
+                .eq("new_secret")
+        );
     }
 
     #[test]

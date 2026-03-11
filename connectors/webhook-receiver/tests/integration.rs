@@ -17,7 +17,9 @@ use fcp_webhook_receiver::connector::WebhookReceiverConnector;
 
 async fn setup_connector() -> WebhookReceiverConnector {
     let mut c = WebhookReceiverConnector::new();
-    c.handle_configure(json!({})).await.unwrap();
+    c.handle_configure(json!({"public_base_url": "https://hooks.flywheel.test"}))
+        .await
+        .unwrap();
     c.handle_handshake(json!({"session_id": "test"}))
         .await
         .unwrap();
@@ -72,15 +74,19 @@ async fn lifecycle_shutdown() {
 async fn lifecycle_self_check_ready() {
     let c = setup_connector().await;
     let check = c.handle_self_check().await.unwrap();
-    assert_eq!(check["status"], "ready");
-    assert_eq!(check["connector_id"], "fcp.webhook-receiver");
+    assert_eq!(check["status"], "ok");
+    assert_eq!(
+        check["details"]["provisioning"]["public_base_url"],
+        "https://hooks.flywheel.test"
+    );
 }
 
 #[fcp_async_core::runtime::test]
 async fn lifecycle_self_check_unconfigured() {
     let c = WebhookReceiverConnector::new();
     let check = c.handle_self_check().await.unwrap();
-    assert_eq!(check["status"], "unconfigured");
+    assert_eq!(check["status"], "degraded");
+    assert_eq!(check["reason_code"], "not_configured");
 }
 
 #[fcp_async_core::runtime::test]
@@ -109,7 +115,9 @@ async fn lifecycle_introspect() {
 #[fcp_async_core::runtime::test]
 async fn lifecycle_handshake_returns_capabilities() {
     let mut c = WebhookReceiverConnector::new();
-    c.handle_configure(json!({})).await.unwrap();
+    c.handle_configure(json!({"public_base_url": "https://hooks.flywheel.test"}))
+        .await
+        .unwrap();
     let hs = c
         .handle_handshake(json!({"session_id": "s1"}))
         .await
@@ -197,13 +205,55 @@ async fn endpoints_create_missing_path() {
 }
 
 #[fcp_async_core::runtime::test]
-async fn endpoints_create_missing_signing_secret() {
+async fn endpoints_create_missing_signing_secret_generates_one() {
+    let mut c = setup_connector().await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "webhook.endpoints.create",
+            "input": {
+                "path": "/hooks/test"
+            }
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["signing_secret_generated"], true);
+    assert!(
+        result["signing_secret"]
+            .as_str()
+            .unwrap()
+            .starts_with("whsec_")
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn endpoints_create_provider_defaults() {
+    let mut c = setup_connector().await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "webhook.endpoints.create",
+            "input": {
+                "path": "/hooks/github",
+                "provider": "github"
+            }
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["provider"], "github");
+    assert_eq!(result["signature_header"], "X-Hub-Signature-256");
+    assert_eq!(result["signature_algorithm"], "hmac-sha256");
+    assert_eq!(result["recommended_events"][0], "push");
+}
+
+#[fcp_async_core::runtime::test]
+async fn endpoints_create_provider_mismatch_rejected() {
     let mut c = setup_connector().await;
     assert!(
         c.handle_invoke(json!({
             "operation_id": "webhook.endpoints.create",
             "input": {
-                "path": "/hooks/test"
+                "path": "/hooks/github",
+                "provider": "github",
+                "signature_header": "Stripe-Signature"
             }
         }))
         .await
@@ -345,6 +395,11 @@ async fn endpoints_list_returns_all() {
         assert!(ep["endpoint_id"].as_str().is_some());
         assert!(ep["path"].as_str().is_some());
         assert!(ep["url"].as_str().is_some());
+        assert!(ep["provider"].as_str().is_some());
+        assert!(ep["signature_header"].as_str().is_some());
+        assert!(ep["signature_algorithm"].as_str().is_some());
+        assert!(ep["signing_secret_configured"].as_bool().is_some());
+        assert!(ep["secret_last_rotated_at"].as_str().is_some());
         assert!(ep["active"].as_bool().is_some());
         assert!(ep["created_at"].as_str().is_some());
         assert!(ep["event_count"].as_u64().is_some());
@@ -451,6 +506,7 @@ async fn simulate_known_operations() {
     let c = setup_connector().await;
     for op_id in [
         "webhook.endpoints.create",
+        "webhook.endpoints.rotate_secret",
         "webhook.endpoints.delete",
         "webhook.endpoints.list",
         "webhook.events.recent",
@@ -678,10 +734,48 @@ async fn double_delete_fails() {
 async fn reconfigure_after_shutdown() {
     let mut c = setup_connector().await;
     c.handle_shutdown(json!({})).await.unwrap();
-    c.handle_configure(json!({})).await.unwrap();
+    c.handle_configure(json!({"public_base_url": "https://hooks.flywheel.test"}))
+        .await
+        .unwrap();
     c.handle_handshake(json!({"session_id": "new_session"}))
         .await
         .unwrap();
     let h = c.handle_health().await.unwrap();
     assert_eq!(h["status"], "healthy");
+}
+
+#[fcp_async_core::runtime::test]
+async fn endpoints_rotate_secret_returns_new_secret() {
+    let mut c = setup_connector().await;
+    let created = c
+        .handle_invoke(json!({
+            "operation_id": "webhook.endpoints.create",
+            "input": {"path": "/hooks/rotate", "provider": "stripe"}
+        }))
+        .await
+        .unwrap();
+    let endpoint_id = created["endpoint_id"].as_str().unwrap();
+
+    let rotated = c
+        .handle_invoke(json!({
+            "operation_id": "webhook.endpoints.rotate_secret",
+            "input": {"endpoint_id": endpoint_id}
+        }))
+        .await
+        .unwrap();
+    assert_eq!(rotated["endpoint_id"], endpoint_id);
+    assert_eq!(rotated["provider"], "stripe");
+    assert_eq!(rotated["signing_secret_generated"], true);
+    assert_ne!(created["signing_secret"], rotated["signing_secret"]);
+}
+
+#[fcp_async_core::runtime::test]
+async fn self_check_degrades_for_local_test_base_url() {
+    let mut c = WebhookReceiverConnector::new();
+    c.handle_configure(json!({"public_base_url": "http://localhost:8080"}))
+        .await
+        .unwrap();
+    let check = c.handle_self_check().await.unwrap();
+    assert_eq!(check["status"], "degraded");
+    assert_eq!(check["reason_code"], "public_base_url_not_public");
 }

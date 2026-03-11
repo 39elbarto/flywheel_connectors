@@ -3,16 +3,95 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::DateTime;
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityId, ConnectorId, FcpError, FcpResult, IdempotencyClass,
-    OperationId, OperationInfo, RiskLevel, SafetyTier,
+    OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport,
 };
+use rand::RngCore;
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
 
-use crate::{client::WebhookStore, error::WebhookReceiverError};
+use crate::{
+    client::{DEFAULT_PUBLIC_BASE_URL, WebhookStore},
+    error::WebhookReceiverError,
+    types::WebhookProvider,
+};
+
+/// Parsed and validated webhook receiver configuration.
+#[derive(Debug, Clone)]
+struct WebhookReceiverConfig {
+    public_base_url: String,
+}
+
+impl WebhookReceiverConfig {
+    fn from_params(params: &serde_json::Value) -> FcpResult<Self> {
+        let public_base_url = params
+            .get("public_base_url")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(DEFAULT_PUBLIC_BASE_URL)
+            .to_string();
+
+        Ok(Self { public_base_url })
+    }
+
+    fn provisioning_readiness(&self, store: &WebhookStore) -> ProvisioningReadiness {
+        let (public_base_url_accepted, publicly_routable, public_base_url_message) =
+            public_base_url_policy(&self.public_base_url);
+        let endpoints_with_issues = store
+            .endpoint_snapshots()
+            .into_iter()
+            .filter_map(|endpoint| {
+                let issues = endpoint.validation_issues();
+                if issues.is_empty() {
+                    None
+                } else {
+                    Some(EndpointProvisioningIssue {
+                        endpoint_id: endpoint.endpoint_id,
+                        provider: endpoint.provider.label().to_string(),
+                        issues,
+                    })
+                }
+            })
+            .collect::<Vec<_>>();
+
+        ProvisioningReadiness {
+            public_base_url: self.public_base_url.clone(),
+            public_base_url_accepted,
+            publicly_routable,
+            public_base_url_message,
+            endpoint_count: store.endpoint_count(),
+            active_endpoint_count: store.active_endpoint_count(),
+            invalid_endpoint_count: endpoints_with_issues.len(),
+            endpoints_with_issues,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct EndpointProvisioningIssue {
+    endpoint_id: String,
+    provider: String,
+    issues: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ProvisioningReadiness {
+    public_base_url: String,
+    public_base_url_accepted: bool,
+    publicly_routable: bool,
+    public_base_url_message: String,
+    endpoint_count: usize,
+    active_endpoint_count: usize,
+    invalid_endpoint_count: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    endpoints_with_issues: Vec<EndpointProvisioningIssue>,
+}
 
 /// Doctor check result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,7 +136,7 @@ impl DoctorResult {
 /// FCP Webhook Receiver Connector.
 pub struct WebhookReceiverConnector {
     base: Arc<BaseConnector>,
-    configured: bool,
+    config: Option<WebhookReceiverConfig>,
     store: WebhookStore,
     session_id: Option<String>,
     request_count: AtomicU64,
@@ -71,7 +150,7 @@ impl WebhookReceiverConnector {
             base: Arc::new(BaseConnector::new(ConnectorId::from_static(
                 "webhook-receiver",
             ))),
-            configured: false,
+            config: None,
             store: WebhookStore::new(),
             session_id: None,
             request_count: AtomicU64::new(0),
@@ -93,12 +172,16 @@ impl WebhookReceiverConnector {
     /// minimal. No external API credentials are needed.
     pub async fn handle_configure(
         &mut self,
-        _params: serde_json::Value,
+        params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
-        info!("Configuring Webhook Receiver connector");
-        self.configured = true;
+        let config = WebhookReceiverConfig::from_params(&params)?;
+        info!(public_base_url = %config.public_base_url, "Configuring Webhook Receiver connector");
+        self.store.set_public_base_url(&config.public_base_url);
+        self.config = Some(config);
         self.base.set_configured(true);
-        Ok(json!({}))
+        Ok(json!({
+            "public_base_url": self.store.public_base_url(),
+        }))
     }
 
     /// Handle the `handshake` method.
@@ -106,7 +189,7 @@ impl WebhookReceiverConnector {
         &mut self,
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
-        if !self.configured {
+        if self.config.is_none() {
             return Err(FcpError::InvalidRequest {
                 code: 1004,
                 message: "Connector not configured".into(),
@@ -135,11 +218,12 @@ impl WebhookReceiverConnector {
 
     /// Handle the `health` method.
     pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
+        let configured = self.config.is_some();
         let handshaken = self.session_id.is_some();
 
-        let status = if self.configured && handshaken {
+        let status = if configured && handshaken {
             "healthy"
-        } else if self.configured {
+        } else if configured {
             "degraded"
         } else {
             "unconfigured"
@@ -147,12 +231,13 @@ impl WebhookReceiverConnector {
 
         Ok(json!({
             "status": status,
-            "configured": self.configured,
+            "configured": configured,
             "handshaken": handshaken,
             "requests": self.request_count.load(Ordering::Relaxed),
             "errors": self.error_count.load(Ordering::Relaxed),
             "endpoints": self.store.endpoint_count(),
             "events": self.store.total_event_count(),
+            "public_base_url": self.config.as_ref().map(|config| config.public_base_url.clone()),
         }))
     }
 
@@ -162,11 +247,11 @@ impl WebhookReceiverConnector {
 
         checks.push(DoctorCheck {
             name: "configuration".into(),
-            passed: self.configured,
-            message: if self.configured {
+            passed: self.config.is_some(),
+            message: if self.config.is_some() {
                 None
             } else {
-                Some("Not configured — call configure first".into())
+                Some("Not configured - call configure first".into())
             },
             critical: true,
         });
@@ -177,6 +262,38 @@ impl WebhookReceiverConnector {
             message: None,
             critical: true,
         });
+
+        if let Some(config) = &self.config {
+            let readiness = config.provisioning_readiness(&self.store);
+            checks.push(DoctorCheck {
+                name: "public_base_url".into(),
+                passed: readiness.public_base_url_accepted,
+                message: Some(readiness.public_base_url_message.clone()),
+                critical: true,
+            });
+            checks.push(DoctorCheck {
+                name: "public_reachability".into(),
+                passed: readiness.publicly_routable,
+                message: Some(readiness.public_base_url_message.clone()),
+                critical: false,
+            });
+            checks.push(DoctorCheck {
+                name: "endpoint_profiles".into(),
+                passed: readiness.invalid_endpoint_count == 0,
+                message: if readiness.invalid_endpoint_count == 0 {
+                    Some(format!(
+                        "{} endpoint profile(s) validated",
+                        readiness.endpoint_count
+                    ))
+                } else {
+                    Some(format!(
+                        "{} endpoint profile(s) failed validation",
+                        readiness.invalid_endpoint_count
+                    ))
+                },
+                critical: true,
+            });
+        }
 
         let handshaken = self.session_id.is_some();
         checks.push(DoctorCheck {
@@ -196,19 +313,54 @@ impl WebhookReceiverConnector {
 
     /// Handle the `self_check` method.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
-        Ok(json!({
-            "connector_id": "fcp.webhook-receiver",
-            "version": "0.1.0",
-            "status": if self.configured { "ready" } else { "unconfigured" },
-        }))
+        let Some(config) = &self.config else {
+            let report = SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            return Self::serialize_self_check_report(report);
+        };
+
+        let readiness = config.provisioning_readiness(&self.store);
+        if !readiness.public_base_url_accepted {
+            let mut report = SelfCheckReport::failed(
+                "public_base_url_invalid",
+                readiness.public_base_url_message.clone(),
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        }
+
+        if readiness.invalid_endpoint_count > 0 {
+            let mut report = SelfCheckReport::failed(
+                "endpoint_profiles_invalid",
+                format!(
+                    "{} endpoint profile(s) failed validation",
+                    readiness.invalid_endpoint_count
+                ),
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        }
+
+        if !readiness.publicly_routable {
+            let mut report = SelfCheckReport::degraded(
+                "public_base_url_not_public",
+                readiness.public_base_url_message.clone(),
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        }
+
+        let mut report = SelfCheckReport::ok();
+        report.details = Some(json!({ "provisioning": readiness }));
+        Self::serialize_self_check_report(report)
     }
 
     /// Handle the `introspect` method.
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
+        let ops = operations_info();
         Ok(json!({
             "connector_id": "fcp.webhook-receiver",
             "version": "0.1.0",
-            "operations": serde_json::to_value(operations_info()).unwrap_or_default(),
+            "operations": serde_json::to_value(&ops).unwrap_or_default(),
         }))
     }
 
@@ -234,6 +386,7 @@ impl WebhookReceiverConnector {
 
         let result = match operation {
             "webhook.endpoints.create" => self.invoke_endpoints_create(&input),
+            "webhook.endpoints.rotate_secret" => self.invoke_endpoints_rotate_secret(&input),
             "webhook.endpoints.delete" => self.invoke_endpoints_delete(&input),
             "webhook.endpoints.list" => self.invoke_endpoints_list(),
             "webhook.events.recent" => self.invoke_events_recent(&input),
@@ -273,7 +426,7 @@ impl WebhookReceiverConnector {
     ) -> FcpResult<serde_json::Value> {
         info!("Webhook Receiver connector shutting down");
         self.store.clear();
-        self.configured = false;
+        self.config = None;
         self.base.set_configured(false);
         self.base.set_handshaken(false);
         self.session_id = None;
@@ -286,29 +439,80 @@ impl WebhookReceiverConnector {
         &mut self,
         input: &serde_json::Value,
     ) -> Result<serde_json::Value, WebhookReceiverError> {
-        let path = require_str(input, "path")?;
-        let signing_secret = require_str(input, "signing_secret")?;
+        let path = require_str(input, "path")?.trim();
+        if path.is_empty() {
+            return Err(WebhookReceiverError::InvalidInput {
+                message: "path must not be empty".into(),
+            });
+        }
 
-        let allowed_sources = input
-            .get("allowed_sources")
-            .and_then(serde_json::Value::as_array)
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(serde_json::Value::as_str)
-                    .map(str::to_string)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+        let provider = parse_provider(input)?;
+        let signing_secret = optional_str(input, "signing_secret")?
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let signing_secret_generated = signing_secret.is_none();
+        let signing_secret = signing_secret.unwrap_or_else(|| generate_signing_secret(provider));
+        let signature_header = optional_str(input, "signature_header")?
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| provider.default_signature_header().to_string());
+        let signature_algorithm = optional_str(input, "signature_algorithm")?
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| provider.default_signature_algorithm().to_string());
+        let allowed_sources = parse_string_array(input, "allowed_sources")?;
 
-        let endpoint = self.store.create_endpoint(
+        let endpoint = self.store.create_endpoint_profile(
             path.to_string(),
-            signing_secret.to_string(),
+            signing_secret,
             allowed_sources,
+            provider,
+            signature_header,
+            signature_algorithm,
         )?;
 
         Ok(json!({
             "endpoint_id": endpoint.endpoint_id,
             "url": endpoint.url,
+            "provider": endpoint.provider,
+            "signature_header": endpoint.signature_header,
+            "signature_algorithm": endpoint.signature_algorithm,
+            "recommended_events": endpoint.provider.recommended_events(),
+            "signing_secret": endpoint.signing_secret,
+            "signing_secret_generated": signing_secret_generated,
+            "secret_last_rotated_at": endpoint.secret_last_rotated_at.to_rfc3339(),
+        }))
+    }
+
+    fn invoke_endpoints_rotate_secret(
+        &mut self,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, WebhookReceiverError> {
+        let endpoint_id = require_str(input, "endpoint_id")?;
+        let provider = self.store.get_endpoint(endpoint_id)?.provider;
+        let signing_secret = optional_str(input, "signing_secret")?
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let signing_secret_generated = signing_secret.is_none();
+        let signing_secret = signing_secret.unwrap_or_else(|| generate_signing_secret(provider));
+        let endpoint = self
+            .store
+            .rotate_endpoint_secret(endpoint_id, signing_secret)?;
+
+        Ok(json!({
+            "endpoint_id": endpoint.endpoint_id,
+            "url": endpoint.url,
+            "provider": endpoint.provider,
+            "signature_header": endpoint.signature_header,
+            "signature_algorithm": endpoint.signature_algorithm,
+            "recommended_events": endpoint.provider.recommended_events(),
+            "signing_secret": endpoint.signing_secret,
+            "signing_secret_generated": signing_secret_generated,
+            "secret_last_rotated_at": endpoint.secret_last_rotated_at.to_rfc3339(),
         }))
     }
 
@@ -331,6 +535,12 @@ impl WebhookReceiverConnector {
                     "endpoint_id": ep.endpoint_id,
                     "path": ep.path,
                     "url": ep.url,
+                    "provider": ep.provider,
+                    "signature_header": ep.signature_header,
+                    "signature_algorithm": ep.signature_algorithm,
+                    "allowed_sources": ep.allowed_sources,
+                    "signing_secret_configured": ep.signing_secret_configured,
+                    "secret_last_rotated_at": ep.secret_last_rotated_at.to_rfc3339(),
                     "active": ep.active,
                     "created_at": ep.created_at.to_rfc3339(),
                     "event_count": ep.event_count,
@@ -390,6 +600,150 @@ fn require_str<'a>(
         })
 }
 
+/// Extract an optional string field from input, rejecting non-string values.
+fn optional_str<'a>(
+    input: &'a serde_json::Value,
+    field: &str,
+) -> Result<Option<&'a str>, WebhookReceiverError> {
+    match input.get(field) {
+        Some(value) => value
+            .as_str()
+            .map(Some)
+            .ok_or_else(|| WebhookReceiverError::InvalidInput {
+                message: format!("{field} must be a string"),
+            }),
+        None => Ok(None),
+    }
+}
+
+/// Parse a string array field, rejecting non-string or blank entries.
+fn parse_string_array(
+    input: &serde_json::Value,
+    field: &str,
+) -> Result<Vec<String>, WebhookReceiverError> {
+    let Some(value) = input.get(field) else {
+        return Ok(Vec::new());
+    };
+    let values = value
+        .as_array()
+        .ok_or_else(|| WebhookReceiverError::InvalidInput {
+            message: format!("{field} must be an array of strings"),
+        })?;
+
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let entry = value
+                .as_str()
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .ok_or_else(|| WebhookReceiverError::InvalidInput {
+                    message: format!("{field}[{index}] must be a non-empty string"),
+                })?;
+            Ok(entry.to_string())
+        })
+        .collect()
+}
+
+/// Parse a provider preset from create input.
+fn parse_provider(input: &serde_json::Value) -> Result<WebhookProvider, WebhookReceiverError> {
+    let Some(provider) = optional_str(input, "provider")? else {
+        return Ok(WebhookProvider::default());
+    };
+
+    WebhookProvider::from_label(provider).ok_or_else(|| WebhookReceiverError::InvalidInput {
+        message: format!("Unsupported provider preset: {provider}"),
+    })
+}
+
+/// Generate a high-entropy signing secret with a provider-specific prefix.
+fn generate_signing_secret(provider: WebhookProvider) -> String {
+    let mut bytes = [0_u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    format!(
+        "{}{}",
+        provider.secret_prefix(),
+        URL_SAFE_NO_PAD.encode(bytes)
+    )
+}
+
+fn public_base_url_policy(public_base_url: &str) -> (bool, bool, String) {
+    let parsed = match Url::parse(public_base_url) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return (
+                false,
+                false,
+                format!("public_base_url could not be parsed: {error}"),
+            );
+        }
+    };
+
+    let Some(host) = parsed.host_str() else {
+        return (false, false, "public_base_url must include a host".into());
+    };
+
+    let scheme = parsed.scheme();
+    if scheme != "http" && scheme != "https" {
+        return (
+            false,
+            false,
+            format!("public_base_url must use http or https, got: {scheme}"),
+        );
+    }
+
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return (
+            false,
+            false,
+            "public_base_url must not include query parameters or fragments".into(),
+        );
+    }
+
+    let local = is_local_test_host(host);
+    if scheme != "https" && !local {
+        return (
+            false,
+            false,
+            "public_base_url must use https unless it points to a local test host".into(),
+        );
+    }
+
+    if local {
+        (
+            true,
+            false,
+            format!("Local test base URL accepted but not publicly routable: {public_base_url}"),
+        )
+    } else {
+        (
+            true,
+            true,
+            format!("Public base URL accepted: {public_base_url}"),
+        )
+    }
+}
+
+fn is_local_test_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
+}
+
+impl WebhookReceiverConnector {
+    fn serialize_self_check_report(report: SelfCheckReport) -> FcpResult<serde_json::Value> {
+        info!(
+            event = "webhook_receiver.provisioning.self_check",
+            status = ?report.status,
+            reason_code = ?report.reason_code,
+            "Webhook receiver self-check completed"
+        );
+
+        serde_json::to_value(report).map_err(|error| FcpError::Internal {
+            message: format!("Failed to serialize self-check report: {error}"),
+        })
+    }
+}
+
 /// Build a single [`OperationInfo`].
 #[allow(clippy::too_many_arguments)]
 fn op_info(
@@ -424,22 +778,32 @@ fn operations_info() -> Vec<OperationInfo> {
     vec![
         op_info(
             "webhook.endpoints.create",
-            "Register a new webhook endpoint",
+            "Register a new webhook endpoint with provider-aware verification defaults",
             json!({
                 "type": "object",
-                "required": ["path", "signing_secret"],
+                "required": ["path"],
                 "properties": {
                     "path": { "type": "string", "description": "URL path to listen on" },
-                    "signing_secret": { "type": "string", "description": "HMAC secret for signature validation" },
+                    "provider": { "type": "string", "description": "Provider preset: generic, github, stripe, slack, twilio" },
+                    "signing_secret": { "type": "string", "description": "Optional signing secret; omitted values are generated in-memory" },
+                    "signature_header": { "type": "string", "description": "Override the expected signature header for generic endpoints" },
+                    "signature_algorithm": { "type": "string", "description": "Override the verification algorithm for generic endpoints" },
                     "allowed_sources": { "type": "array", "description": "IP CIDR ranges allowed to send webhooks" }
                 }
             }),
             json!({
                 "type": "object",
-                "required": ["endpoint_id", "url"],
+                "required": ["endpoint_id", "url", "provider", "signature_header", "signature_algorithm", "signing_secret", "signing_secret_generated", "secret_last_rotated_at"],
                 "properties": {
                     "endpoint_id": { "type": "string" },
-                    "url": { "type": "string" }
+                    "url": { "type": "string" },
+                    "provider": { "type": "string" },
+                    "signature_header": { "type": "string" },
+                    "signature_algorithm": { "type": "string" },
+                    "recommended_events": { "type": "array" },
+                    "signing_secret": { "type": "string" },
+                    "signing_secret_generated": { "type": "boolean" },
+                    "secret_last_rotated_at": { "type": "string" }
                 }
             }),
             "webhook.endpoints.write",
@@ -447,16 +811,61 @@ fn operations_info() -> Vec<OperationInfo> {
             SafetyTier::Risky,
             IdempotencyClass::Strict,
             AgentHint {
-                when_to_use: "Register a new webhook endpoint.".into(),
+                when_to_use: "Register a new webhook endpoint and auto-populate provider verification settings.".into(),
                 common_mistakes: vec![
-                    "Not setting a signing secret — payloads won't be verified.".into(),
+                    "Using a provider preset with a mismatched signature header or algorithm.".into(),
+                    "Configuring a localhost public_base_url and expecting the endpoint to be reachable from external webhook providers.".into(),
                 ],
                 examples: vec![
-                    r#"{"path": "/hooks/github", "signing_secret": "whsec_abc123"}"#.into(),
+                    r#"{"path": "/hooks/github", "provider": "github"}"#.into(),
+                    r#"{"path": "/hooks/custom", "provider": "generic", "signature_header": "X-Signature", "signature_algorithm": "hmac-sha256"}"#.into(),
                 ],
                 related: vec![
+                    CapabilityId::from_static("webhook.endpoints.rotate_secret"),
                     CapabilityId::from_static("webhook.endpoints.list"),
                     CapabilityId::from_static("webhook.endpoints.delete"),
+                ],
+            },
+        ),
+        op_info(
+            "webhook.endpoints.rotate_secret",
+            "Rotate the signing secret for an existing webhook endpoint",
+            json!({
+                "type": "object",
+                "required": ["endpoint_id"],
+                "properties": {
+                    "endpoint_id": { "type": "string" },
+                    "signing_secret": { "type": "string", "description": "Optional replacement signing secret; omitted values are generated in-memory" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["endpoint_id", "signing_secret", "signing_secret_generated", "secret_last_rotated_at"],
+                "properties": {
+                    "endpoint_id": { "type": "string" },
+                    "url": { "type": "string" },
+                    "provider": { "type": "string" },
+                    "signature_header": { "type": "string" },
+                    "signature_algorithm": { "type": "string" },
+                    "recommended_events": { "type": "array" },
+                    "signing_secret": { "type": "string" },
+                    "signing_secret_generated": { "type": "boolean" },
+                    "secret_last_rotated_at": { "type": "string" }
+                }
+            }),
+            "webhook.endpoints.write",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::None,
+            AgentHint {
+                when_to_use: "Rotate a webhook signing secret after suspected exposure or during routine credential hygiene.".into(),
+                common_mistakes: vec![
+                    "Rotating the local secret without updating the upstream webhook provider configuration.".into(),
+                ],
+                examples: vec![r#"{"endpoint_id": "ep_abc123"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("webhook.endpoints.create"),
+                    CapabilityId::from_static("webhook.endpoints.list"),
                 ],
             },
         ),
@@ -582,7 +991,7 @@ mod tests {
     #[test]
     fn operations_info_has_4_operations() {
         let ops = operations_info();
-        assert_eq!(ops.len(), 4);
+        assert_eq!(ops.len(), 5);
     }
 
     #[test]
@@ -651,6 +1060,7 @@ mod tests {
         let ops = operations_info();
         let ids: Vec<&str> = ops.iter().map(|o| o.id.as_ref()).collect();
         assert!(ids.contains(&"webhook.endpoints.create"));
+        assert!(ids.contains(&"webhook.endpoints.rotate_secret"));
         assert!(ids.contains(&"webhook.endpoints.delete"));
         assert!(ids.contains(&"webhook.endpoints.list"));
         assert!(ids.contains(&"webhook.events.recent"));
@@ -739,14 +1149,14 @@ mod tests {
     #[test]
     fn connector_default() {
         let c = WebhookReceiverConnector::default();
-        assert!(!c.configured);
+        assert!(c.config.is_none());
         assert!(c.session_id.is_none());
     }
 
     #[test]
     fn connector_new_state() {
         let c = WebhookReceiverConnector::new();
-        assert!(!c.configured);
+        assert!(c.config.is_none());
         assert!(c.session_id.is_none());
         assert_eq!(c.store.endpoint_count(), 0);
         assert_eq!(c.store.total_event_count(), 0);
@@ -804,6 +1214,19 @@ mod tests {
         assert_eq!(op.capability.as_ref(), "webhook.endpoints.write");
         assert_eq!(op.risk_level, RiskLevel::Medium);
         assert_eq!(op.safety_tier, SafetyTier::Risky);
+    }
+
+    #[test]
+    fn operations_endpoints_rotate_secret_capability() {
+        let ops = operations_info();
+        let op = ops
+            .iter()
+            .find(|o| o.id.as_ref() == "webhook.endpoints.rotate_secret")
+            .unwrap();
+        assert_eq!(op.capability.as_ref(), "webhook.endpoints.write");
+        assert_eq!(op.risk_level, RiskLevel::Medium);
+        assert_eq!(op.safety_tier, SafetyTier::Risky);
+        assert_eq!(op.idempotency, IdempotencyClass::None);
     }
 
     #[test]
@@ -972,5 +1395,39 @@ mod tests {
         let r2: DoctorResult = serde_json::from_str(&s).unwrap();
         assert_eq!(r2.status, DoctorStatus::Degraded);
         assert_eq!(r2.checks.len(), 2);
+    }
+
+    #[test]
+    fn parse_provider_defaults_to_generic() {
+        let input = json!({});
+        assert_eq!(parse_provider(&input).unwrap(), WebhookProvider::Generic);
+    }
+
+    #[test]
+    fn parse_provider_rejects_unknown_values() {
+        let input = json!({"provider": "unknown"});
+        assert!(parse_provider(&input).is_err());
+    }
+
+    #[test]
+    fn parse_string_array_rejects_blank_entries() {
+        let input = json!({"allowed_sources": ["10.0.0.0/8", "  "]});
+        assert!(parse_string_array(&input, "allowed_sources").is_err());
+    }
+
+    #[test]
+    fn public_base_url_policy_accepts_https_host() {
+        let (accepted, routable, message) = public_base_url_policy("https://hooks.flywheel.test");
+        assert!(accepted);
+        assert!(routable);
+        assert!(message.contains("accepted"));
+    }
+
+    #[test]
+    fn public_base_url_policy_marks_localhost_degraded() {
+        let (accepted, routable, message) = public_base_url_policy("http://localhost:8080");
+        assert!(accepted);
+        assert!(!routable);
+        assert!(message.contains("not publicly routable"));
     }
 }

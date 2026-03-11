@@ -15,14 +15,17 @@ use chrono::{Duration as ChronoDuration, Utc};
 use fcp_conformance::DynamicSuite;
 use fcp_core::InvokeStatus;
 use fcp_core::{
-    AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
+    CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId,
-    OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest, SimulateRequest,
-    SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
+    InstanceId, Introspection, InvokeRequest, InvokeResponse, ObjectId, OperationId, RequestId,
+    SessionId, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
+    SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
-use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
+use fcp_e2e::{
+    ComplianceSuite, ConnectorSuite, E2eReport, E2eRunner, InvokeExpectations, scan_log_jsonl,
+    validate_log_entry_value,
+};
 use fcp_manifest::ConnectorManifest;
 use fcp_snowflake::connector::SnowflakeConnector;
 use fcp_testkit::MockApiServer;
@@ -128,31 +131,7 @@ impl FcpConnector for SnowflakeConnectorAdapter {
     }
 
     fn introspect(&self) -> Introspection {
-        Introspection {
-            operations: vec![OperationInfo {
-                id: OperationId::from_static("snowflake.databases.list"),
-                summary: "snowflake.databases.list".to_string(),
-                description: None,
-                input_schema: json!({"type": "object"}),
-                output_schema: json!({"type": "object"}),
-                capability: CapabilityId::from_static("snowflake.databases.read"),
-                risk_level: RiskLevel::Low,
-                safety_tier: SafetyTier::Safe,
-                idempotency: IdempotencyClass::Strict,
-                ai_hints: AgentHint {
-                    when_to_use: String::new(),
-                    common_mistakes: Vec::new(),
-                    examples: Vec::new(),
-                    related: Vec::new(),
-                },
-                rate_limit: None,
-                requires_approval: None,
-            }],
-            events: vec![],
-            resource_types: vec![],
-            auth_caps: None,
-            event_caps: None,
-        }
+        SnowflakeConnector::introspection()
     }
 
     async fn invoke(&self, req: InvokeRequest) -> fcp_core::FcpResult<InvokeResponse> {
@@ -160,14 +139,17 @@ impl FcpConnector for SnowflakeConnectorAdapter {
             message: "Snowflake verifier not initialized; handshake required".into(),
         })?;
         let required_capability = required_capability(req.operation.as_str())?;
-        verifier.verify(
+        let request_id = req.id.clone();
+        if let Err(err) = verifier.verify(
             &req.capability_token,
             &required_capability,
             &req.operation,
             &[],
-        )?;
-
-        let request_id = req.id.clone();
+        ) {
+            let decision_label = format!("{}.decision", req.operation.as_str());
+            return Ok(InvokeResponse::error(request_id, err)
+                .with_decision_receipt_id(stable_object_id(&decision_label)));
+        }
         let value = self
             .connector
             .handle_invoke(json!({
@@ -175,7 +157,13 @@ impl FcpConnector for SnowflakeConnectorAdapter {
                 "input": req.input,
             }))
             .await?;
-        Ok(InvokeResponse::ok(request_id, value))
+        let mut response = InvokeResponse::ok(request_id, value);
+        if req.operation.as_str() == "snowflake.sql.execute" {
+            response = response
+                .with_receipt_id(stable_object_id("snowflake.sql.execute.receipt"))
+                .with_audit_event_id(stable_object_id("snowflake.sql.execute.audit"));
+        }
+        Ok(response)
     }
 
     async fn simulate(&self, req: SimulateRequest) -> fcp_core::FcpResult<SimulateResponse> {
@@ -341,6 +329,10 @@ fn invoke_request(
     }
 }
 
+fn stable_object_id(label: &str) -> ObjectId {
+    ObjectId::from_unscoped_bytes(label.as_bytes())
+}
+
 fn operation_network_constraints<'a>(
     manifest: &'a toml::Value,
     operation_name: &str,
@@ -380,6 +372,44 @@ fn host_allowed(host: &str, host_allow: &[String]) -> bool {
     })
 }
 
+fn assert_report_logs_validate(report: &E2eReport) {
+    let jsonl = report.to_stable_json_lines();
+    assert!(
+        !jsonl.trim().is_empty(),
+        "report should emit stable JSONL evidence"
+    );
+
+    let first_line = jsonl.lines().next().expect("at least one JSONL line");
+    let first_value: serde_json::Value =
+        serde_json::from_str(first_line).expect("first JSONL line should parse");
+    assert_eq!(
+        first_value
+            .get("timestamp")
+            .and_then(serde_json::Value::as_str),
+        Some("1970-01-01T00:00:00Z")
+    );
+    assert_eq!(
+        first_value
+            .get("correlation_id")
+            .and_then(serde_json::Value::as_str),
+        Some("00000000-0000-4000-8000-000000000000")
+    );
+    assert_eq!(
+        first_value
+            .get("duration_ms")
+            .and_then(serde_json::Value::as_u64),
+        Some(0)
+    );
+
+    for line in jsonl.lines() {
+        let value: serde_json::Value = serde_json::from_str(line).expect("jsonl line should parse");
+        validate_log_entry_value(&value).expect("jsonl line should satisfy E2E schema");
+    }
+
+    let scan = scan_log_jsonl(&jsonl);
+    assert_eq!(scan.error_count, 0, "stable evidence should scan cleanly");
+}
+
 #[fcp_async_core::runtime::test]
 async fn snowflake_default_deny_compliance_suite_passes() {
     let mock = MockApiServer::start().await;
@@ -410,7 +440,7 @@ async fn snowflake_default_deny_compliance_suite_passes() {
         expect_simulate_would_succeed: None,
         require_simulate_denial_details: false,
         require_capability_denial: true,
-        require_decision_receipt: false,
+        require_decision_receipt: true,
     };
     let suite = ComplianceSuite::new(
         "snowflake_default_deny",
@@ -428,6 +458,7 @@ async fn snowflake_default_deny_compliance_suite_passes() {
         report.passed,
         "default deny compliance should pass: {report:#?}"
     );
+    assert_report_logs_validate(&report);
 }
 
 #[fcp_async_core::runtime::test]
@@ -477,6 +508,7 @@ async fn snowflake_allow_valid_token_connector_suite_passes() {
         .expect("connector suite run");
 
     assert!(report.passed, "allow suite should pass: {report:#?}");
+    assert_report_logs_validate(&report);
     let invoke_entry = report
         .logs
         .iter()
@@ -486,6 +518,91 @@ async fn snowflake_allow_valid_token_connector_suite_passes() {
     assert_eq!(
         invoke_entry.context.get("invoke_status"),
         Some(&json!(format!("{:?}", InvokeStatus::Ok)))
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn snowflake_dangerous_execute_emits_receipt_audit_and_stable_evidence() {
+    let mock = MockApiServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path_regex(r"^/statements.*"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "message": "Statement executed",
+            "statementHandle": "stmt_123",
+        })))
+        .mount(mock.inner())
+        .await;
+
+    let mut connector = SnowflakeConnectorAdapter::new();
+    let signing_key = Ed25519SigningKey::generate();
+    let handshake = handshake_request(
+        signing_key.verifying_key().to_bytes(),
+        &["snowflake.sql.write"],
+    );
+    let token = build_token(
+        &signing_key,
+        "snowflake.sql.write",
+        &["snowflake.sql.execute"],
+    );
+    let invoke = invoke_request(
+        "snowflake.sql.execute",
+        json!({
+            "statement": "CREATE TABLE test_table (id INT)",
+            "database": "DEV",
+            "warehouse": "COMPUTE_WH",
+        }),
+        token,
+    );
+
+    let suite = ConnectorSuite {
+        test_name: "snowflake_sql_execute_receipts".to_string(),
+        config: snowflake_config(&mock.base_url()),
+        handshake,
+        invoke: Some(invoke),
+        invoke_expectations: InvokeExpectations {
+            expect_error: false,
+            expect_decision_receipt: false,
+            expect_audit_event: true,
+            expect_receipt: true,
+            expected_reason_code: None,
+            rate_limit_pool: None,
+        },
+    };
+
+    let mut runner = E2eRunner::new("fcp-e2e-snowflake-dangerous");
+    let report = runner
+        .run_connector_suite(&mut connector, suite)
+        .await
+        .expect("connector suite run");
+
+    assert!(
+        report.passed,
+        "dangerous execute compliance should pass: {report:#?}"
+    );
+    assert_report_logs_validate(&report);
+
+    let invoke_entry = report
+        .logs
+        .iter()
+        .find(|entry| entry.context.get("operation") == Some(&json!("invoke")))
+        .expect("invoke entry");
+    assert_eq!(invoke_entry.result, "pass");
+    assert_eq!(
+        invoke_entry.context.get("invoke_status"),
+        Some(&json!(format!("{:?}", InvokeStatus::Ok)))
+    );
+    assert_eq!(
+        invoke_entry.context.get("audit_event_id"),
+        Some(&json!(
+            stable_object_id("snowflake.sql.execute.audit").to_string()
+        ))
+    );
+    assert_eq!(
+        invoke_entry.context.get("receipt_id"),
+        Some(&json!(
+            stable_object_id("snowflake.sql.execute.receipt").to_string()
+        ))
     );
 }
 

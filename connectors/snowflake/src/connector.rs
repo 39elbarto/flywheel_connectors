@@ -253,6 +253,135 @@ impl SnowflakeConnector {
             error_count: AtomicU64::new(0),
         }
     }
+
+    /// Return the canonical introspection payload for the connector.
+    #[must_use]
+    pub fn introspection() -> Introspection {
+        Introspection {
+            operations: vec![
+                OperationInfo {
+                    id: OperationId::from_static("snowflake.databases.list"),
+                    summary: "List databases".into(),
+                    input_schema: json!({"type": "object", "required": []}),
+                    output_schema: json!({"type": "object", "required": ["databases"], "properties": {"databases": {"type": "array"}}}),
+                    capability: CapabilityId::from_static("snowflake.databases.read"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "List available Snowflake databases.".into(),
+                        common_mistakes: vec![],
+                        examples: vec![r"{}".into()],
+                        related: vec![
+                            CapabilityId::from_static("snowflake.sql.query"),
+                            CapabilityId::from_static("snowflake.warehouses.list"),
+                        ],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("snowflake.warehouses.list"),
+                    summary: "List available warehouses".into(),
+                    input_schema: json!({"type": "object", "required": []}),
+                    output_schema: json!({"type": "object", "required": ["warehouses"], "properties": {"warehouses": {"type": "array"}}}),
+                    capability: CapabilityId::from_static("snowflake.warehouses.read"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "List available Snowflake warehouses.".into(),
+                        common_mistakes: vec![],
+                        examples: vec![r"{}".into()],
+                        related: vec![CapabilityId::from_static("snowflake.sql.query")],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("snowflake.sql.query"),
+                    summary: "Execute a SQL query".into(),
+                    input_schema: json!({"type": "object", "required": ["statement"], "properties": {"statement": {"type": "string", "description": "SQL statement to execute"}, "warehouse": {"type": "string"}, "database": {"type": "string"}, "schema": {"type": "string"}}}),
+                    output_schema: json!({"type": "object", "required": ["data"], "properties": {"data": {"type": "array"}}}),
+                    capability: CapabilityId::from_static("snowflake.sql.read"),
+                    risk_level: RiskLevel::Medium,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Risky,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "Execute a SQL query against Snowflake.".into(),
+                        common_mistakes: vec![
+                            "Running unbounded queries without LIMIT.".into(),
+                            "Forgetting to specify warehouse.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"statement": "SELECT * FROM orders LIMIT 100", "warehouse": "COMPUTE_WH", "database": "ANALYTICS"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("snowflake.databases.list"),
+                            CapabilityId::from_static("snowflake.warehouses.list"),
+                        ],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("snowflake.sql.execute"),
+                    summary: "Execute a SQL statement (DDL/DML)".into(),
+                    input_schema: json!({"type": "object", "required": ["statement"], "properties": {"statement": {"type": "string", "description": "SQL DDL/DML statement"}, "warehouse": {"type": "string"}, "database": {"type": "string"}}}),
+                    output_schema: json!({"type": "object", "required": ["status"], "properties": {"status": {"type": "string"}}}),
+                    capability: CapabilityId::from_static("snowflake.sql.write"),
+                    risk_level: RiskLevel::High,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Dangerous,
+                    idempotency: IdempotencyClass::None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Execute DDL/DML statements (CREATE, INSERT, UPDATE, DELETE, DROP).".into(),
+                        common_mistakes: vec![
+                            "Running DROP without confirmation.".into(),
+                            "Forgetting to specify the correct database context.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"statement": "CREATE TABLE test (id INT, name VARCHAR)", "warehouse": "COMPUTE_WH", "database": "DEV"}"#.into(),
+                        ],
+                        related: vec![CapabilityId::from_static("snowflake.sql.query")],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("snowflake.tables.list"),
+                    summary: "List tables in a database/schema".into(),
+                    input_schema: json!({"type": "object", "required": ["database"], "properties": {"database": {"type": "string"}, "schema": {"type": "string"}}}),
+                    output_schema: json!({"type": "object", "required": ["tables"], "properties": {"tables": {"type": "array"}}}),
+                    capability: CapabilityId::from_static("snowflake.databases.read"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "List tables in a database, optionally filtered by schema.".into(),
+                        common_mistakes: vec![],
+                        examples: vec![
+                            r#"{"database": "ANALYTICS", "schema": "PUBLIC"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("snowflake.databases.list"),
+                            CapabilityId::from_static("snowflake.sql.query"),
+                        ],
+                    },
+                },
+            ],
+            events: vec![],
+            resource_types: vec![],
+            auth_caps: None,
+            event_caps: None,
+        }
+    }
 }
 
 impl Default for SnowflakeConnector {
@@ -460,132 +589,7 @@ impl SnowflakeConnector {
 
     /// Handle the `introspect` method.
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
-        let introspection = Introspection {
-            operations: vec![
-                OperationInfo {
-                    id: OperationId::from_static("snowflake.databases.list"),
-                    summary: "List databases".into(),
-                    input_schema: json!({"type": "object", "required": []}),
-                    output_schema: json!({"type": "object", "required": ["databases"], "properties": {"databases": {"type": "array"}}}),
-                    capability: CapabilityId::from_static("snowflake.databases.read"),
-                    risk_level: RiskLevel::Low,
-                    description: None,
-                    rate_limit: None,
-                    requires_approval: None,
-                    safety_tier: SafetyTier::Safe,
-                    idempotency: IdempotencyClass::Strict,
-                    ai_hints: AgentHint {
-                        when_to_use: "List available Snowflake databases.".into(),
-                        common_mistakes: vec![],
-                        examples: vec![r"{}".into()],
-                        related: vec![
-                            CapabilityId::from_static("snowflake.sql.query"),
-                            CapabilityId::from_static("snowflake.warehouses.list"),
-                        ],
-                    },
-                },
-                OperationInfo {
-                    id: OperationId::from_static("snowflake.warehouses.list"),
-                    summary: "List available warehouses".into(),
-                    input_schema: json!({"type": "object", "required": []}),
-                    output_schema: json!({"type": "object", "required": ["warehouses"], "properties": {"warehouses": {"type": "array"}}}),
-                    capability: CapabilityId::from_static("snowflake.warehouses.read"),
-                    risk_level: RiskLevel::Low,
-                    description: None,
-                    rate_limit: None,
-                    requires_approval: None,
-                    safety_tier: SafetyTier::Safe,
-                    idempotency: IdempotencyClass::Strict,
-                    ai_hints: AgentHint {
-                        when_to_use: "List available Snowflake warehouses.".into(),
-                        common_mistakes: vec![],
-                        examples: vec![r"{}".into()],
-                        related: vec![CapabilityId::from_static("snowflake.sql.query")],
-                    },
-                },
-                OperationInfo {
-                    id: OperationId::from_static("snowflake.sql.query"),
-                    summary: "Execute a SQL query".into(),
-                    input_schema: json!({"type": "object", "required": ["statement"], "properties": {"statement": {"type": "string", "description": "SQL statement to execute"}, "warehouse": {"type": "string"}, "database": {"type": "string"}, "schema": {"type": "string"}}}),
-                    output_schema: json!({"type": "object", "required": ["data"], "properties": {"data": {"type": "array"}}}),
-                    capability: CapabilityId::from_static("snowflake.sql.read"),
-                    risk_level: RiskLevel::Medium,
-                    description: None,
-                    rate_limit: None,
-                    requires_approval: None,
-                    safety_tier: SafetyTier::Risky,
-                    idempotency: IdempotencyClass::Strict,
-                    ai_hints: AgentHint {
-                        when_to_use: "Execute a SQL query against Snowflake.".into(),
-                        common_mistakes: vec![
-                            "Running unbounded queries without LIMIT.".into(),
-                            "Forgetting to specify warehouse.".into(),
-                        ],
-                        examples: vec![
-                            r#"{"statement": "SELECT * FROM orders LIMIT 100", "warehouse": "COMPUTE_WH", "database": "ANALYTICS"}"#.into(),
-                        ],
-                        related: vec![
-                            CapabilityId::from_static("snowflake.databases.list"),
-                            CapabilityId::from_static("snowflake.warehouses.list"),
-                        ],
-                    },
-                },
-                OperationInfo {
-                    id: OperationId::from_static("snowflake.sql.execute"),
-                    summary: "Execute a SQL statement (DDL/DML)".into(),
-                    input_schema: json!({"type": "object", "required": ["statement"], "properties": {"statement": {"type": "string", "description": "SQL DDL/DML statement"}, "warehouse": {"type": "string"}, "database": {"type": "string"}}}),
-                    output_schema: json!({"type": "object", "required": ["status"], "properties": {"status": {"type": "string"}}}),
-                    capability: CapabilityId::from_static("snowflake.sql.write"),
-                    risk_level: RiskLevel::High,
-                    description: None,
-                    rate_limit: None,
-                    requires_approval: None,
-                    safety_tier: SafetyTier::Dangerous,
-                    idempotency: IdempotencyClass::None,
-                    ai_hints: AgentHint {
-                        when_to_use: "Execute DDL/DML statements (CREATE, INSERT, UPDATE, DELETE, DROP).".into(),
-                        common_mistakes: vec![
-                            "Running DROP without confirmation.".into(),
-                            "Forgetting to specify the correct database context.".into(),
-                        ],
-                        examples: vec![
-                            r#"{"statement": "CREATE TABLE test (id INT, name VARCHAR)", "warehouse": "COMPUTE_WH", "database": "DEV"}"#.into(),
-                        ],
-                        related: vec![CapabilityId::from_static("snowflake.sql.query")],
-                    },
-                },
-                OperationInfo {
-                    id: OperationId::from_static("snowflake.tables.list"),
-                    summary: "List tables in a database/schema".into(),
-                    input_schema: json!({"type": "object", "required": ["database"], "properties": {"database": {"type": "string"}, "schema": {"type": "string"}}}),
-                    output_schema: json!({"type": "object", "required": ["tables"], "properties": {"tables": {"type": "array"}}}),
-                    capability: CapabilityId::from_static("snowflake.databases.read"),
-                    risk_level: RiskLevel::Low,
-                    description: None,
-                    rate_limit: None,
-                    requires_approval: None,
-                    safety_tier: SafetyTier::Safe,
-                    idempotency: IdempotencyClass::Strict,
-                    ai_hints: AgentHint {
-                        when_to_use: "List tables in a database, optionally filtered by schema.".into(),
-                        common_mistakes: vec![],
-                        examples: vec![
-                            r#"{"database": "ANALYTICS", "schema": "PUBLIC"}"#.into(),
-                        ],
-                        related: vec![
-                            CapabilityId::from_static("snowflake.databases.list"),
-                            CapabilityId::from_static("snowflake.sql.query"),
-                        ],
-                    },
-                },
-            ],
-            events: vec![],
-            resource_types: vec![],
-            auth_caps: None,
-            event_caps: None,
-        };
-
-        serde_json::to_value(introspection).map_err(|e| FcpError::Internal {
+        serde_json::to_value(Self::introspection()).map_err(|e| FcpError::Internal {
             message: format!("Failed to serialize introspection: {e}"),
         })
     }

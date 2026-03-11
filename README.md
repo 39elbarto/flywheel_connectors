@@ -797,7 +797,7 @@ Delivers the core safety story ("zones + explicit authority + auditable operatio
 `fwc` is the only canonical Flywheel connectors CLI.
 
 - `fwc` is the supported operator and agent surface for connector discovery, schema inspection, lifecycle control, simulation, invocation, batching, history, and context management.
-- The `fcp` binary is retired. The `crates/fcp-cli` crate remains only as a hard-stop migration shim that exits and tells callers to use `fwc`.
+- `fcp` is retired and no longer part of the supported workspace surface.
 - Runtime-facing `fwc` commands must either hit live `fcp-host` state or fail explicitly. They must not fabricate connector execution, simulated inventory, or placeholder results.
 
 ## Project Structure
@@ -825,7 +825,6 @@ flywheel_connectors/
 │   ├── fcp-conformance/       # Golden vectors, schema checks, interop tooling
 │   ├── fcp-testkit/           # Shared test harnesses, fixtures, and mock infrastructure
 │   ├── fcp-e2e/               # End-to-end compliance and host-backed scenarios
-│   ├── fcp-cli/               # Temporary retirement shim that exits and points callers at `fwc`
 │   └── fwc/                   # Sole supported Flywheel connectors CLI
 │
 ├── connectors/            # Individual connector implementations
@@ -858,7 +857,6 @@ The workspace already clusters into a few clear responsibility bands:
 That split is useful because it shows what is already coherent versus what is still transitional.
 `fcp-core` is carrying much of the long-lived semantic vocabulary. `fcp-host` is already the
 node-local orchestration boundary. `fwc` is now the canonical operational surface.
-`fcp-cli` still exists in the tree only as a dead-end retirement shim and must not regain live behavior.
 The remaining ambiguity is mostly around runtime substrate and where the final FCP3 kernel line
 should be drawn.
 
@@ -877,7 +875,6 @@ The FCP3 re-foundation is converging on a stricter "one concept, one home" rule:
 The main transitional or quarantine surfaces are:
 
 - `fcp-async-core` and the Tokio compatibility bridge, which exist to keep the current code running while the runtime model is being pulled toward an Asupersync-native kernel.
-- The retired `fcp` binary shim, which exists only to redirect callers to `fwc` and must not regain connector semantics.
 - Connector/runtime patterns that still assume newline JSON-RPC over stdio or request-local execution rather than the long-term supervised application model described in `FCP_Specification_V3.md`.
 
 Put differently: FCP3 should keep the strong domain model and mesh/evidence work already present in

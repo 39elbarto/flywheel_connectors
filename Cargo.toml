@@ -8,7 +8,6 @@ members = [
     "crates/fcp-cbor",
     "crates/fwc",
     "crates/fcp-core",
-    "crates/fcp-cli",
     "crates/fcp-conformance",
     "crates/fcp-crypto",
     "crates/fcp-e2e",
@@ -136,7 +135,6 @@ default-members = [
     "crates/fcp-store",
     "crates/fcp-tailscale",
     "crates/fcp-conformance",
-    "crates/fcp-cli",
 ]
 
 [workspace.package]

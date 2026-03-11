@@ -2182,10 +2182,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fcp-cli"
-version = "0.1.0"
-
-[[package]]
 name = "fcp-clickup"
 version = "0.1.0"
 dependencies = [
@@ -2794,6 +2790,7 @@ dependencies = [
  "base64 0.22.1",
  "blake3",
  "chrono",
+ "ciborium",
  "fcp-async-core",
  "fcp-cbor",
  "fcp-conformance",

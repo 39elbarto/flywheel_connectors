@@ -846,6 +846,13 @@ fn apply_binding_awareness(compiled: &mut CompiledIntent, bindings: &BTreeMap<St
 
     compiled.status = if !compiled.ambiguities.is_empty() {
         "ambiguous".to_owned()
+    } else if !compiled.unsupported_reasons.is_empty()
+        || matches!(
+            compiled.status.as_str(),
+            "unsupported" | "planned" | "offline-only" | "live-runtime-required"
+        )
+    {
+        compiled.status.clone()
     } else if compiled.chosen_connector.is_some() && compiled.missing_information.is_empty() {
         "ready".to_owned()
     } else {
@@ -1385,6 +1392,57 @@ mod tests {
 
         assert_eq!(updated.capsule_status, "ready-to-approve");
         assert_eq!(updated.execution_history.len(), 1);
+    }
+
+    #[test]
+    fn create_preserves_unsupported_capsule_status_for_missing_real_primitive() {
+        let store = store();
+        let task = store
+            .create(WorkflowRequest {
+                intent: "disable the slack connector in z:work".to_owned(),
+                connector_override: None,
+                zone_override: None,
+            })
+            .expect("task should be created");
+
+        assert_eq!(task.compiled.status, "unsupported");
+        assert_eq!(task.capsule_status, "unsupported");
+        assert!(!ready_for_execution(&task));
+        assert!(task.next_actions.iter().any(|action| {
+            action.contains("supported real primitive") || action.contains("unsupported request")
+        }));
+        assert!(
+            task.next_actions
+                .iter()
+                .all(|action| !action.contains("fwc task run")
+                    && !action.contains("fwc task advance"))
+        );
+    }
+
+    #[test]
+    fn bind_does_not_promote_unsupported_capsule_to_ready() {
+        let store = store();
+        let task = store
+            .create(WorkflowRequest {
+                intent: "restart some connector".to_owned(),
+                connector_override: None,
+                zone_override: None,
+            })
+            .expect("task should be created");
+
+        assert_eq!(task.compiled.status, "unsupported");
+
+        let rebound = store
+            .bind(
+                &task.id,
+                vec![("connector".to_owned(), "github".to_owned())],
+            )
+            .expect("bind should succeed")
+            .expect("task should exist");
+
+        assert_eq!(rebound.compiled.status, "unsupported");
+        assert_eq!(rebound.capsule_status, "unsupported");
+        assert!(!ready_for_execution(&rebound));
     }
 
     #[test]

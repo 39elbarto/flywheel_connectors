@@ -4581,6 +4581,7 @@ dependencies = [
  "fcp-manifest",
  "fcp-mesh",
  "fcp-sandbox",
+ "fcp-telemetry",
  "handlebars",
  "hex",
  "ipnet",

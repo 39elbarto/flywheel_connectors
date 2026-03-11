@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::{ConnectorRegistry, HostError, HostResult};
 
 /// Doctor report request payload.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DoctorRequest {
     /// Zone to diagnose.
     pub zone_id: String,

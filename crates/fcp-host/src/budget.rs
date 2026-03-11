@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use fcp_async_core::sync::{Mutex, RwLock};
 use fcp_core::{
     BudgetEnforcement, BudgetStatus, FcpError, UsageBudgetPolicy, UsageBudgetSnapshot,
@@ -13,6 +13,30 @@ use fcp_core::{
 };
 
 use crate::{PolicyEngine, PreflightRequest, PreflightResponse};
+
+/// Request payload for reporting current budget state.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct BudgetReportRequest {
+    /// Optional zone filter. When omitted, report every configured zone.
+    #[serde(default)]
+    pub zone_id: Option<String>,
+}
+
+/// Response payload for budget reporting.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BudgetReportResponse {
+    /// Stable schema version for the report shape.
+    pub schema_version: String,
+    /// Timestamp when the report was generated.
+    pub generated_at: DateTime<Utc>,
+    /// Current snapshots for each matching zone.
+    pub zones: Vec<UsageBudgetSnapshot>,
+}
+
+impl BudgetReportResponse {
+    /// Schema version for budget report payloads.
+    pub const SCHEMA_VERSION: &'static str = "1.0.0";
+}
 
 /// Action to take when a budget is evaluated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -296,6 +320,32 @@ impl BudgetPolicyEngine {
         }?;
         let mut tracker = self.tracker.lock().await;
         Some(tracker.snapshot(zone_id, &policy))
+    }
+
+    /// Report current budget snapshots for all configured zones or a single zone.
+    pub async fn report(&self, zone_filter: Option<&ZoneId>) -> BudgetReportResponse {
+        let policies = {
+            let read = self.policies.read().await;
+            let mut entries = read
+                .iter()
+                .filter(|(zone_id, _)| zone_filter.is_none_or(|requested| *zone_id == requested))
+                .map(|(zone_id, policy)| (zone_id.clone(), policy.clone()))
+                .collect::<Vec<_>>();
+            entries.sort_by(|left, right| left.0.as_str().cmp(right.0.as_str()));
+            entries
+        };
+
+        let mut tracker = self.tracker.lock().await;
+        let zones = policies
+            .into_iter()
+            .map(|(zone_id, policy)| tracker.snapshot(&zone_id, &policy))
+            .collect();
+
+        BudgetReportResponse {
+            schema_version: BudgetReportResponse::SCHEMA_VERSION.to_string(),
+            generated_at: Utc::now(),
+            zones,
+        }
     }
 }
 
@@ -2745,5 +2795,70 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert_eq!(*result.get(&UsageMetricKind::ApiCredits).unwrap(), 7);
         assert_eq!(*result.get(&UsageMetricKind::Bytes).unwrap(), 99);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn budget_policy_engine_report_all_zones_is_sorted() {
+        let engine = BudgetPolicyEngine::new();
+        engine
+            .upsert_policy(
+                ZoneId::work(),
+                UsageBudgetPolicy {
+                    enforcement: BudgetEnforcement::Warn,
+                    budgets: vec![UsageBudgetLimit {
+                        metric: UsageMetricKind::Requests,
+                        limit: 10,
+                        window_seconds: 60,
+                    }],
+                },
+            )
+            .await;
+        engine
+            .upsert_policy(
+                ZoneId::private(),
+                UsageBudgetPolicy {
+                    enforcement: BudgetEnforcement::Deny,
+                    budgets: vec![UsageBudgetLimit {
+                        metric: UsageMetricKind::Tokens,
+                        limit: 100,
+                        window_seconds: 60,
+                    }],
+                },
+            )
+            .await;
+
+        let report = engine.report(None).await;
+        assert_eq!(report.schema_version, BudgetReportResponse::SCHEMA_VERSION);
+        assert_eq!(report.zones.len(), 2);
+        assert_eq!(report.zones[0].zone_id, ZoneId::private());
+        assert_eq!(report.zones[1].zone_id, ZoneId::work());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn budget_policy_engine_report_zone_filter_limits_output() {
+        let engine = BudgetPolicyEngine::new();
+        let zone = ZoneId::work();
+        engine
+            .upsert_policy(
+                zone.clone(),
+                UsageBudgetPolicy {
+                    enforcement: BudgetEnforcement::Warn,
+                    budgets: vec![UsageBudgetLimit {
+                        metric: UsageMetricKind::ApiCredits,
+                        limit: 1_000,
+                        window_seconds: 3_600,
+                    }],
+                },
+            )
+            .await;
+        engine
+            .record_usage(&zone, &[UsageMetric::api_credits(250)])
+            .await
+            .expect("usage should be recorded");
+
+        let report = engine.report(Some(&zone)).await;
+        assert_eq!(report.zones.len(), 1);
+        assert_eq!(report.zones[0].zone_id, zone);
+        assert_eq!(report.zones[0].budgets[0].used, 250);
     }
 }

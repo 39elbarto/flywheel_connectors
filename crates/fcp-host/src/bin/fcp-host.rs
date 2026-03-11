@@ -36,7 +36,8 @@ use fcp_core::{
 };
 use fcp_host::{
     BatchExecutor, BatchInvokeRequest, BatchInvokeResponse, BatchOperation, BatchOperationError,
-    BatchOptions, BatchStatus, BudgetPolicyEngine, CacheMetadata, CacheValidator,
+    BatchOptions, BatchStatus, BudgetPolicyEngine, BudgetReportRequest, BudgetReportResponse,
+    CacheMetadata, CacheValidator,
     CancellationController, CancellationRequest, CancellationResponse, ConnectorAdminStatus,
     ConnectorArchetype, ConnectorInventoryResponse, ConnectorRegistry, ConnectorSummary,
     DiscoveryEndpoint, DiscoveryFilter, DiscoveryResponse, DoctorReport, DoctorRequest,
@@ -456,6 +457,7 @@ async fn serve_unix(listener: UnixListener, app: Router) -> HostResult<()> {
 struct AppState {
     registry: Arc<SubprocessRegistry>,
     doctor: DoctorService<SubprocessRegistry>,
+    budget: Arc<BudgetPolicyEngine>,
     discovery: Arc<DiscoveryEndpoint<SubprocessRegistry, BudgetPolicyEngine>>,
     cancellation: Arc<CancellationController>,
     lifecycle: Arc<HostAdminStateStore>,
@@ -1034,9 +1036,10 @@ async fn async_main() -> HostResult<()> {
         Some(timeout) => DoctorService::with_timeout(Arc::clone(&registry), timeout),
         None => DoctorService::new(Arc::clone(&registry)),
     };
+    let budget = Arc::new(BudgetPolicyEngine::new());
     let discovery = Arc::new(DiscoveryEndpoint::new(
         Arc::clone(&registry),
-        Arc::new(BudgetPolicyEngine::new()),
+        Arc::clone(&budget),
     ));
     let lifecycle = Arc::new(HostAdminStateStore::from_env()?);
     let startup_inventory = registry.list().await;
@@ -1056,6 +1059,7 @@ async fn async_main() -> HostResult<()> {
     let state = Arc::new(AppState {
         registry,
         doctor,
+        budget,
         discovery,
         cancellation,
         lifecycle,
@@ -1079,6 +1083,7 @@ async fn async_main() -> HostResult<()> {
         .route("/rpc/batch", post(batch_invoke_handler))
         .route("/rpc/batch-invoke", post(batch_invoke_handler))
         .route("/rpc/preflight", post(preflight_handler))
+        .route("/rpc/budget/report", post(budget_report_handler))
         .route(
             "/rpc/supply-chain/verify",
             post(supply_chain_verify_handler),
@@ -1157,6 +1162,41 @@ async fn doctor_handler(
             Err(map_host_error(err))
         }
     }
+}
+
+async fn budget_report_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<BudgetReportRequest>,
+) -> Result<Json<BudgetReportResponse>, (StatusCode, String)> {
+    let started_at = Instant::now();
+    tracing::debug!(
+        event = "budget_report_request",
+        zone_id = request.zone_id.as_deref().unwrap_or("*"),
+        "processing budget report request"
+    );
+
+    let zone_filter = request
+        .zone_id
+        .as_deref()
+        .map(|zone_id| {
+            zone_id.parse().map_err(|err| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("invalid zone_id '{zone_id}': {err}"),
+                )
+            })
+        })
+        .transpose()?;
+
+    let report = state.budget.report(zone_filter.as_ref()).await;
+    tracing::debug!(
+        event = "budget_report_response",
+        zone_count = report.zones.len(),
+        duration_ms = started_at.elapsed().as_millis() as u64,
+        "budget report request complete"
+    );
+
+    Ok(Json(report))
 }
 
 async fn discover_handler(
@@ -2869,9 +2909,10 @@ mod tests {
             version: 1,
         });
         let doctor = DoctorService::new(Arc::clone(&registry));
+        let budget = Arc::new(BudgetPolicyEngine::new());
         let discovery = Arc::new(DiscoveryEndpoint::new(
             Arc::clone(&registry),
-            Arc::new(BudgetPolicyEngine::new()),
+            Arc::clone(&budget),
         ));
         let lifecycle = Arc::new(HostAdminStateStore::new());
         let rollout = Arc::new(RolloutController::new(
@@ -2881,6 +2922,7 @@ mod tests {
         let state = AppState {
             registry,
             doctor,
+            budget,
             discovery,
             cancellation: Arc::new(CancellationController::new()),
             lifecycle,

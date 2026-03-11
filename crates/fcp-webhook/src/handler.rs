@@ -97,7 +97,12 @@ pub struct WebhookHandler<V: SignatureVerifier> {
     verifier: V,
     provider: String,
     config: WebhookConfig,
-    seen_events: Arc<RwLock<HashMap<String, DateTime<Utc>>>>,
+    seen_events: Arc<RwLock<SeenEventsState>>,
+}
+
+struct SeenEventsState {
+    events: HashMap<String, DateTime<Utc>>,
+    last_cleanup: DateTime<Utc>,
 }
 
 impl<V: SignatureVerifier> WebhookHandler<V> {
@@ -108,7 +113,10 @@ impl<V: SignatureVerifier> WebhookHandler<V> {
             verifier,
             provider: provider.into(),
             config: WebhookConfig::default(),
-            seen_events: Arc::new(RwLock::new(HashMap::new())),
+            seen_events: Arc::new(RwLock::new(SeenEventsState {
+                events: HashMap::new(),
+                last_cleanup: Utc::now(),
+            })),
         }
     }
 
@@ -119,7 +127,10 @@ impl<V: SignatureVerifier> WebhookHandler<V> {
             verifier,
             provider: provider.into(),
             config,
-            seen_events: Arc::new(RwLock::new(HashMap::new())),
+            seen_events: Arc::new(RwLock::new(SeenEventsState {
+                events: HashMap::new(),
+                last_cleanup: Utc::now(),
+            })),
         }
     }
 
@@ -165,10 +176,21 @@ impl<V: SignatureVerifier> WebhookHandler<V> {
             return Ok(());
         }
 
-        // Clean up old entries
+        // Clean up old entries periodically
         self.cleanup_seen_events();
 
-        let is_replay = self.seen_events.read().contains_key(event_id);
+        let is_replay = {
+            let state = self.seen_events.read();
+            if let Some(&time) = state.events.get(event_id) {
+                let now = Utc::now();
+                let ttl = chrono::Duration::from_std(self.config.idempotency_ttl)
+                    .unwrap_or(chrono::TimeDelta::MAX);
+                now - time < ttl
+            } else {
+                false
+            }
+        };
+
         if is_replay {
             return Err(WebhookError::ReplayDetected {
                 event_id: event_id.to_string(),
@@ -181,8 +203,8 @@ impl<V: SignatureVerifier> WebhookHandler<V> {
     /// Record an event as seen.
     pub fn record_event(&self, event_id: &str) {
         if self.config.idempotency_enabled {
-            let mut seen = self.seen_events.write();
-            seen.insert(event_id.to_string(), Utc::now());
+            let mut state = self.seen_events.write();
+            state.events.insert(event_id.to_string(), Utc::now());
         }
     }
 
@@ -196,30 +218,45 @@ impl<V: SignatureVerifier> WebhookHandler<V> {
             return Ok(());
         }
 
-        // Clean up old entries
+        // Clean up old entries periodically
         self.cleanup_seen_events();
 
         {
-            let mut seen = self.seen_events.write();
-            if seen.contains_key(event_id) {
-                return Err(WebhookError::ReplayDetected {
-                    event_id: event_id.to_string(),
-                });
+            let mut state = self.seen_events.write();
+            let now = Utc::now();
+            
+            if let Some(&time) = state.events.get(event_id) {
+                let ttl = chrono::Duration::from_std(self.config.idempotency_ttl)
+                    .unwrap_or(chrono::TimeDelta::MAX);
+                if now - time < ttl {
+                    return Err(WebhookError::ReplayDetected {
+                        event_id: event_id.to_string(),
+                    });
+                }
             }
 
-            seen.insert(event_id.to_string(), Utc::now());
+            state.events.insert(event_id.to_string(), now);
         }
         Ok(())
     }
 
-    /// Clean up old seen events.
+    /// Clean up old seen events periodically to avoid O(N) traversal on every request.
     fn cleanup_seen_events(&self) {
         let now = Utc::now();
+        
+        let mut state = self.seen_events.write();
+        
+        // Only run cleanup if at least 1 minute has passed since last cleanup
+        if now - state.last_cleanup < chrono::Duration::minutes(1) {
+            return;
+        }
+
         // Use saturating conversion to avoid panic on extreme durations
         let ttl = chrono::Duration::from_std(self.config.idempotency_ttl)
             .unwrap_or(chrono::TimeDelta::MAX);
-        let mut seen = self.seen_events.write();
-        seen.retain(|_, time| now - *time < ttl);
+            
+        state.events.retain(|_, time| now - *time < ttl);
+        state.last_cleanup = now;
     }
 
     /// Get the provider name.
@@ -1362,11 +1399,10 @@ mod tests {
     #[test]
     fn test_dead_letter_queue_all_returns_dead_lettered_status() {
         let dlq = DeadLetterQueue::new(10);
-        let mut event = crate::WebhookEvent::new("e1", "test", "p");
+        let mut event = crate::WebhookEvent::new("1", "test", "p");
         event.metadata.status = crate::DeliveryStatus::Failed;
         dlq.push(event);
         let all = dlq.all();
-        // DLQ push should override to DeadLettered
         assert_eq!(all[0].metadata.status, DeliveryStatus::DeadLettered);
     }
 

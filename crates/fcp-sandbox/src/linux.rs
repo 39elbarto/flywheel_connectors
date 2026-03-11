@@ -684,6 +684,9 @@ impl Sandbox for LinuxSandbox {
                 };
                 libc::setrlimit(libc::RLIMIT_CORE, &limit_core);
 
+                // Landlock requires PR_SET_NO_NEW_PRIVS if we lack CAP_SYS_ADMIN
+                libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+
                 // Apply Landlock if available
                 if landlock_available && policy_clone.platform_flags.linux_use_landlock {
                     let all_fs_access = LANDLOCK_ACCESS_FS_EXECUTE
@@ -966,6 +969,16 @@ const LANDLOCK_RULE_PATH_BENEATH: i32 = 1;
 
 /// Apply Landlock filesystem restrictions.
 fn apply_landlock(policy: &CompiledPolicy) -> Result<(), SandboxError> {
+    // Landlock requires PR_SET_NO_NEW_PRIVS if we lack CAP_SYS_ADMIN
+    unsafe {
+        if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+            return Err(SandboxError::SyscallFailed(format!(
+                "prctl(PR_SET_NO_NEW_PRIVS) failed before landlock: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+    }
+
     let all_fs_access = LANDLOCK_ACCESS_FS_EXECUTE
         | LANDLOCK_ACCESS_FS_WRITE_FILE
         | LANDLOCK_ACCESS_FS_READ_FILE

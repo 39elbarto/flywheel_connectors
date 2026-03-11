@@ -93,7 +93,7 @@ pub fn validate_canonical_id(id: &str) -> Result<(), IdValidationError> {
 /// Capability identifier - unique name for a permission.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct CapabilityId(String);
+pub struct CapabilityId(std::sync::Arc<str>);
 
 impl CapabilityId {
     /// Create a new capability ID.
@@ -123,14 +123,14 @@ impl TryFrom<String> for CapabilityId {
     type Error = IdValidationError;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        validate_canonical_id(&value)?;
-        Ok(Self(value))
+        validate_fcp_id(&value)?;
+        Ok(Self(value.into()))
     }
 }
 
 impl From<CapabilityId> for String {
     fn from(value: CapabilityId) -> Self {
-        value.0
+        value.0.to_string()
     }
 }
 
@@ -353,7 +353,7 @@ impl AsRef<str> for OperationId {
 /// Zone identifier - name of a trust boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct ZoneId(String);
+pub struct ZoneId(std::sync::Arc<str>);
 
 /// Fixed-size `ZoneId` hash (NORMATIVE).
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -530,13 +530,13 @@ impl TryFrom<String> for ZoneId {
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
         Self::validate(&value)?;
-        Ok(Self(value))
+        Ok(Self(value.into()))
     }
 }
 
 impl From<ZoneId> for String {
     fn from(value: ZoneId) -> Self {
-        value.0
+        value.0.to_string()
     }
 }
 

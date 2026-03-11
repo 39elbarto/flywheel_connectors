@@ -23,15 +23,17 @@ use fcp_core::{
     SelfCheckReport, SoftwareBillOfMaterials, SuccessThresholds, SupplyChainAttestation,
     SupplyChainSignature, TransitionReason, TrustRootBinding, VerificationReasonCode, ZoneId,
 };
+use fcp_crypto::cose::CapabilityTokenBuilder;
+use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_e2e::{AssertionsSummary, ConnectorProcessRunner, E2eLogEntry, E2eLogger};
 use fcp_host::{
     BatchInvokeResponse, BatchStatus, CancelReason, CancellationOutcome, CancellationRequest,
     CancellationResponse, CleanupBehavior, ConnectorAdminStatus, ConnectorArchetype,
     ConnectorDriftKind, ConnectorInventoryResponse, ConnectorRegistry, ConnectorSummary,
     DesiredRuntimeState, DiscoveryEndpoint, DiscoveryResponse, GateOutcome, HostAdminStateStore,
-    HostHealthResponse, HostHealthStatus, IntrospectionResponse, ObservedRuntimeState,
-    OperationResultStatus, PolicyEngine, PreflightRequest, PreflightResponse, RecoveryAction,
-    RolloutDecision, RolloutOutcome,
+    HostHealthResponse, HostHealthStatus, HostPreflightRequest,
+    IntrospectionResponse, ObservedRuntimeState, OperationResultStatus, PolicyEngine,
+    PreflightRequest, PreflightResponse, RecoveryAction, RolloutDecision, RolloutOutcome,
 };
 use fcp_testkit::LogCapture;
 use reqwest::header::{CACHE_CONTROL, ETAG, HeaderMap, HeaderValue, IF_NONE_MATCH, LAST_MODIFIED};
@@ -67,6 +69,10 @@ struct ManualRollbackResponse {
 fn test_time() -> chrono::DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 3, 7, 12, 0, 0).unwrap()
 }
+
+const TEST_PRINCIPAL: &str = "agent:test";
+const TEST_OPERATION: &str = "test.echo";
+const TEST_CAPABILITY_ID: &str = "cap.test.echo";
 
 fn valid_digest() -> String {
     format!("blake3-256:{}", "a".repeat(64))
@@ -343,16 +349,49 @@ impl ConnectorRegistry for SubprocessRegistry {
     }
 }
 
-fn build_invoke_request(connector_id: ConnectorId) -> (InvokeRequest, CorrelationId) {
+fn capability_public_key_hex(signing_key: &Ed25519SigningKey) -> String {
+    hex::encode(signing_key.verifying_key().to_bytes())
+}
+
+fn build_live_capability_token(
+    signing_key: &Ed25519SigningKey,
+    capability_id: &str,
+    principal: &str,
+    operation: &str,
+    zone_id: &ZoneId,
+) -> CapabilityToken {
+    let now = Utc::now();
+    CapabilityTokenBuilder::new()
+        .capability_id(capability_id)
+        .zone_id(zone_id.as_str())
+        .principal(principal)
+        .operations(&[operation])
+        .issuer("node:test")
+        .validity(now, now + chrono::Duration::hours(1))
+        .sign(signing_key)
+        .expect("capability token signing should succeed")
+}
+
+fn build_invoke_request(
+    connector_id: ConnectorId,
+    capability_signing_key: &Ed25519SigningKey,
+) -> (InvokeRequest, CorrelationId) {
     let correlation_id = CorrelationId::new();
+    let zone_id = ZoneId::work();
     let request = InvokeRequest {
         r#type: "invoke".to_string(),
         id: RequestId::random(),
         connector_id,
-        operation: OperationId::from_static("test.echo"),
-        zone_id: ZoneId::work(),
+        operation: OperationId::from_static(TEST_OPERATION),
+        zone_id: zone_id.clone(),
         input: json!({ "message": "hello" }),
-        capability_token: CapabilityToken::test_token(),
+        capability_token: build_live_capability_token(
+            capability_signing_key,
+            TEST_CAPABILITY_ID,
+            TEST_PRINCIPAL,
+            TEST_OPERATION,
+            &zone_id,
+        ),
         holder_proof: None,
         context: None,
         idempotency_key: None,
@@ -363,6 +402,22 @@ fn build_invoke_request(connector_id: ConnectorId) -> (InvokeRequest, Correlatio
         approval_tokens: Vec::new(),
     };
     (request, correlation_id)
+}
+
+fn build_host_preflight_request(
+    request: &InvokeRequest,
+    principal: Option<&str>,
+) -> HostPreflightRequest {
+    HostPreflightRequest {
+        request_id: request.id.clone(),
+        connector_id: request.connector_id.clone(),
+        operation: request.operation.to_string(),
+        params: Some(request.input.clone()),
+        principal: principal.map(str::to_owned),
+        zone_id: Some(request.zone_id.clone()),
+        capability_token: Some(request.capability_token.clone()),
+        approval_tokens: request.approval_tokens.clone(),
+    }
 }
 
 fn batch_operation_json(
@@ -431,7 +486,9 @@ async fn host_discovery_with_subprocess_connectors() -> Result<(), Box<dyn std::
         "connector_id": connector_b_id.as_str(),
     }));
 
-    let (invoke_request, correlation_id) = build_invoke_request(connector_a_id.clone());
+    let capability_signing_key = Ed25519SigningKey::generate();
+    let (invoke_request, correlation_id) =
+        build_invoke_request(connector_a_id.clone(), &capability_signing_key);
     let invoke_response = registry.invoke(&connector_a_id, invoke_request).await?;
     assert_eq!(invoke_response.status, InvokeStatus::Ok);
     assert!(invoke_response.receipt_id.is_some());
@@ -874,6 +931,7 @@ async fn assert_discovery_routes(
     base_url: &str,
     connector_a_id: &ConnectorId,
     connector_b_id: &ConnectorId,
+    capability_signing_key: &Ed25519SigningKey,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let url = |path: &str| format!("{base_url}{path}");
 
@@ -1089,22 +1147,19 @@ async fn assert_discovery_routes(
             .expect("not-modified introspection should expose cache metadata"),
     )?;
 
+    let (preflight_request, _) =
+        build_invoke_request(connector_a_id.clone(), capability_signing_key);
     let preflight: PreflightResponse = http_post_json(
         client.clone(),
         url("/rpc/preflight"),
-        PreflightRequest {
-            connector_id: connector_a_id.clone(),
-            operation: "test.echo".to_string(),
-            params: Some(json!({ "message": "hello" })),
-            principal: Some("agent:test".to_string()),
-            zone_id: Some(ZoneId::work()),
-        },
+        build_host_preflight_request(&preflight_request, Some(TEST_PRINCIPAL)),
     )
     .await?;
     assert!(preflight.allowed);
     assert!(preflight.reason.is_none());
 
-    let (invoke_request, correlation_id) = build_invoke_request(connector_a_id.clone());
+    let (invoke_request, correlation_id) =
+        build_invoke_request(connector_a_id.clone(), capability_signing_key);
     let invoke_response: InvokeResponse =
         http_post_json(client.clone(), url("/rpc/invoke"), invoke_request).await?;
     assert_eq!(invoke_response.status, InvokeStatus::Ok);
@@ -1184,11 +1239,19 @@ fn test_rollout_rollback_policy() -> RolloutPolicy {
 async fn fcp_host_binary_exposes_discovery_routes() -> Result<(), Box<dyn std::error::Error>> {
     let connector_a_id = ConnectorId::from_static("fcp.test.http-echo:utility:1.0.0");
     let connector_b_id = ConnectorId::from_static("fcp.test.http-ping:utility:1.0.0");
+    let capability_signing_key = Ed25519SigningKey::generate();
+    let capability_public_key = capability_public_key_hex(&capability_signing_key);
 
-    let host = HttpHostProcess::spawn(vec![
-        test_connector_config(&connector_a_id, "HTTP Echo", &["test", "primary"]),
-        test_connector_config(&connector_b_id, "HTTP Ping", &["test", "secondary"]),
-    ])
+    let host = HttpHostProcess::spawn_with_env(
+        vec![
+            test_connector_config(&connector_a_id, "HTTP Echo", &["test", "primary"]),
+            test_connector_config(&connector_b_id, "HTTP Ping", &["test", "secondary"]),
+        ],
+        &[(
+            "FCP_HOST_CAPABILITY_PUBLIC_KEY",
+            capability_public_key.as_str(),
+        )],
+    )
     .await?;
 
     assert_discovery_routes(
@@ -1196,8 +1259,54 @@ async fn fcp_host_binary_exposes_discovery_routes() -> Result<(), Box<dyn std::e
         &host.base_url,
         &connector_a_id,
         &connector_b_id,
+        &capability_signing_key,
     )
     .await?;
+
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn fcp_host_binary_preflight_route_denies_missing_capability_token()
+-> Result<(), Box<dyn std::error::Error>> {
+    let connector_id = ConnectorId::from_static("fcp.test.preflight-auth:utility:1.0.0");
+    let capability_signing_key = Ed25519SigningKey::generate();
+    let capability_public_key = capability_public_key_hex(&capability_signing_key);
+    let host = HttpHostProcess::spawn_with_env(
+        vec![test_connector_config(
+            &connector_id,
+            "Preflight Auth",
+            &["test", "auth"],
+        )],
+        &[(
+            "FCP_HOST_CAPABILITY_PUBLIC_KEY",
+            capability_public_key.as_str(),
+        )],
+    )
+    .await?;
+    let url = |path: &str| format!("{}{path}", host.base_url);
+
+    let denied: PreflightResponse = http_post_json(
+        host.client.clone(),
+        url("/rpc/preflight"),
+        HostPreflightRequest {
+            request_id: RequestId::random(),
+            connector_id,
+            operation: TEST_OPERATION.to_string(),
+            params: Some(json!({ "message": "hello" })),
+            principal: Some(TEST_PRINCIPAL.to_string()),
+            zone_id: Some(ZoneId::work()),
+            capability_token: None,
+            approval_tokens: Vec::new(),
+        },
+    )
+    .await?;
+
+    assert!(!denied.allowed);
+    assert!(denied
+        .reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains("capability token is required")));
 
     Ok(())
 }
@@ -1345,17 +1454,26 @@ async fn fcp_host_binary_supply_chain_verify_route_honors_dev_override_env()
 async fn fcp_host_binary_batch_route_executes_multiple_invokes()
 -> Result<(), Box<dyn std::error::Error>> {
     let connector_id = ConnectorId::from_static("fcp.test.batch-http:utility:1.0.0");
-    let host = HttpHostProcess::spawn(vec![test_connector_config(
-        &connector_id,
-        "Batch Echo",
-        &["test", "batch"],
-    )])
+    let capability_signing_key = Ed25519SigningKey::generate();
+    let capability_public_key = capability_public_key_hex(&capability_signing_key);
+    let host = HttpHostProcess::spawn_with_env(
+        vec![test_connector_config(
+            &connector_id,
+            "Batch Echo",
+            &["test", "batch"],
+        )],
+        &[(
+            "FCP_HOST_CAPABILITY_PUBLIC_KEY",
+            capability_public_key.as_str(),
+        )],
+    )
     .await?;
     let url = |path: &str| format!("{}{path}", host.base_url);
 
-    let (mut first_request, _) = build_invoke_request(connector_id.clone());
+    let (mut first_request, _) = build_invoke_request(connector_id.clone(), &capability_signing_key);
     first_request.input = json!({ "message": "first" });
-    let (mut second_request, _) = build_invoke_request(connector_id.clone());
+    let (mut second_request, _) =
+        build_invoke_request(connector_id.clone(), &capability_signing_key);
     second_request.input = json!({ "message": "second" });
 
     let response: BatchInvokeResponse = http_post_json(
@@ -1412,20 +1530,31 @@ async fn fcp_host_binary_batch_route_executes_multiple_invokes()
 async fn fcp_host_binary_batch_route_skips_dependents_after_failure()
 -> Result<(), Box<dyn std::error::Error>> {
     let connector_id = ConnectorId::from_static("fcp.test.batch-failure:utility:1.0.0");
-    let host = HttpHostProcess::spawn(vec![test_connector_config(
-        &connector_id,
-        "Batch Failure Echo",
-        &["test", "batch"],
-    )])
+    let capability_signing_key = Ed25519SigningKey::generate();
+    let capability_public_key = capability_public_key_hex(&capability_signing_key);
+    let host = HttpHostProcess::spawn_with_env(
+        vec![test_connector_config(
+            &connector_id,
+            "Batch Failure Echo",
+            &["test", "batch"],
+        )],
+        &[(
+            "FCP_HOST_CAPABILITY_PUBLIC_KEY",
+            capability_public_key.as_str(),
+        )],
+    )
     .await?;
     let url = |path: &str| format!("{}{path}", host.base_url);
 
     let unknown_connector_id = ConnectorId::from_static("fcp.test.missing:utility:1.0.0");
-    let (mut failing_request, _) = build_invoke_request(unknown_connector_id);
+    let (mut failing_request, _) =
+        build_invoke_request(unknown_connector_id, &capability_signing_key);
     failing_request.input = json!({ "message": "missing" });
-    let (mut dependent_request, _) = build_invoke_request(connector_id.clone());
+    let (mut dependent_request, _) =
+        build_invoke_request(connector_id.clone(), &capability_signing_key);
     dependent_request.input = json!({ "message": "dependent" });
-    let (mut independent_request, _) = build_invoke_request(connector_id.clone());
+    let (mut independent_request, _) =
+        build_invoke_request(connector_id.clone(), &capability_signing_key);
     independent_request.input = json!({ "message": "independent" });
 
     let response: BatchInvokeResponse = http_post_json(
@@ -1486,15 +1615,24 @@ async fn fcp_host_binary_batch_route_skips_dependents_after_failure()
 async fn fcp_host_binary_cancel_route_cancels_in_flight_invoke()
 -> Result<(), Box<dyn std::error::Error>> {
     let connector_id = ConnectorId::from_static("fcp.test.cancel-http:utility:1.0.0");
-    let host = HttpHostProcess::spawn(vec![test_connector_config(
-        &connector_id,
-        "Cancel Echo",
-        &["test", "cancel"],
-    )])
+    let capability_signing_key = Ed25519SigningKey::generate();
+    let capability_public_key = capability_public_key_hex(&capability_signing_key);
+    let host = HttpHostProcess::spawn_with_env(
+        vec![test_connector_config(
+            &connector_id,
+            "Cancel Echo",
+            &["test", "cancel"],
+        )],
+        &[(
+            "FCP_HOST_CAPABILITY_PUBLIC_KEY",
+            capability_public_key.as_str(),
+        )],
+    )
     .await?;
     let url = |path: &str| format!("{}{path}", host.base_url);
 
-    let (mut invoke_request, _) = build_invoke_request(connector_id.clone());
+    let (mut invoke_request, _) =
+        build_invoke_request(connector_id.clone(), &capability_signing_key);
     invoke_request.input = json!({
         "message": "slow",
         "delay_ms": 300_u64,
@@ -1576,15 +1714,23 @@ async fn fcp_host_binary_cancel_route_cancels_in_flight_invoke()
 async fn fcp_host_binary_cancel_route_returns_too_late_for_completed_invoke()
 -> Result<(), Box<dyn std::error::Error>> {
     let connector_id = ConnectorId::from_static("fcp.test.cancel-too-late:utility:1.0.0");
-    let host = HttpHostProcess::spawn(vec![test_connector_config(
-        &connector_id,
-        "Cancel Too Late Echo",
-        &["test", "cancel"],
-    )])
+    let capability_signing_key = Ed25519SigningKey::generate();
+    let capability_public_key = capability_public_key_hex(&capability_signing_key);
+    let host = HttpHostProcess::spawn_with_env(
+        vec![test_connector_config(
+            &connector_id,
+            "Cancel Too Late Echo",
+            &["test", "cancel"],
+        )],
+        &[(
+            "FCP_HOST_CAPABILITY_PUBLIC_KEY",
+            capability_public_key.as_str(),
+        )],
+    )
     .await?;
     let url = |path: &str| format!("{}{path}", host.base_url);
 
-    let (invoke_request, _) = build_invoke_request(connector_id.clone());
+    let (invoke_request, _) = build_invoke_request(connector_id.clone(), &capability_signing_key);
     let operation_id = invoke_request.id.to_string();
 
     let invoke_response: InvokeResponse =
@@ -2192,11 +2338,19 @@ async fn fcp_host_binary_emits_structured_endpoint_logs() -> Result<(), Box<dyn 
 {
     let connector_a_id = ConnectorId::from_static("fcp.test.log-echo:utility:1.0.0");
     let connector_b_id = ConnectorId::from_static("fcp.test.log-ping:utility:1.0.0");
+    let capability_signing_key = Ed25519SigningKey::generate();
+    let capability_public_key = capability_public_key_hex(&capability_signing_key);
 
-    let host = HttpHostProcess::spawn(vec![
-        test_connector_config(&connector_a_id, "Log Echo", &["test", "primary"]),
-        test_connector_config(&connector_b_id, "Log Ping", &["test", "secondary"]),
-    ])
+    let host = HttpHostProcess::spawn_with_env(
+        vec![
+            test_connector_config(&connector_a_id, "Log Echo", &["test", "primary"]),
+            test_connector_config(&connector_b_id, "Log Ping", &["test", "secondary"]),
+        ],
+        &[(
+            "FCP_HOST_CAPABILITY_PUBLIC_KEY",
+            capability_public_key.as_str(),
+        )],
+    )
     .await?;
 
     assert_discovery_routes(
@@ -2204,6 +2358,7 @@ async fn fcp_host_binary_emits_structured_endpoint_logs() -> Result<(), Box<dyn 
         &host.base_url,
         &connector_a_id,
         &connector_b_id,
+        &capability_signing_key,
     )
     .await?;
 
@@ -2276,11 +2431,19 @@ async fn fcp_host_binary_exposes_discovery_routes_over_unix_socket()
 -> Result<(), Box<dyn std::error::Error>> {
     let connector_a_id = ConnectorId::from_static("fcp.test.unix-echo:utility:1.0.0");
     let connector_b_id = ConnectorId::from_static("fcp.test.unix-ping:utility:1.0.0");
+    let capability_signing_key = Ed25519SigningKey::generate();
+    let capability_public_key = capability_public_key_hex(&capability_signing_key);
 
-    let host = UnixHostProcess::spawn(vec![
-        test_connector_config(&connector_a_id, "Unix Echo", &["test", "primary"]),
-        test_connector_config(&connector_b_id, "Unix Ping", &["test", "secondary"]),
-    ])
+    let host = UnixHostProcess::spawn_with_env(
+        vec![
+            test_connector_config(&connector_a_id, "Unix Echo", &["test", "primary"]),
+            test_connector_config(&connector_b_id, "Unix Ping", &["test", "secondary"]),
+        ],
+        &[(
+            "FCP_HOST_CAPABILITY_PUBLIC_KEY",
+            capability_public_key.as_str(),
+        )],
+    )
     .await?;
 
     assert_discovery_routes(
@@ -2288,8 +2451,46 @@ async fn fcp_host_binary_exposes_discovery_routes_over_unix_socket()
         &host.base_url,
         &connector_a_id,
         &connector_b_id,
+        &capability_signing_key,
     )
     .await?;
+
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn fcp_host_binary_invoke_route_rejects_invalid_capability_signature()
+-> Result<(), Box<dyn std::error::Error>> {
+    let connector_id = ConnectorId::from_static("fcp.test.invoke-auth:utility:1.0.0");
+    let trusted_signing_key = Ed25519SigningKey::generate();
+    let trusted_public_key = capability_public_key_hex(&trusted_signing_key);
+    let untrusted_signing_key = Ed25519SigningKey::generate();
+    let host = HttpHostProcess::spawn_with_env(
+        vec![test_connector_config(
+            &connector_id,
+            "Invoke Auth",
+            &["test", "auth"],
+        )],
+        &[(
+            "FCP_HOST_CAPABILITY_PUBLIC_KEY",
+            trusted_public_key.as_str(),
+        )],
+    )
+    .await?;
+    let url = |path: &str| format!("{}{path}", host.base_url);
+
+    let (invoke_request, _) = build_invoke_request(connector_id, &untrusted_signing_key);
+    let response = host
+        .client
+        .post(url("/rpc/invoke"))
+        .json(&invoke_request)
+        .send()
+        .await?;
+    let status = response.status();
+    let body = response.text().await?;
+
+    assert_eq!(status, reqwest::StatusCode::FORBIDDEN);
+    assert!(body.contains("capability token rejected"));
 
     Ok(())
 }

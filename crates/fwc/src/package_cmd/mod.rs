@@ -315,7 +315,7 @@ fn collect_build_metadata(args: &PackageArgs) -> BuildMetadata {
         },
         git_commit,
         git_dirty,
-        features: vec![], // TODO: Extract from cargo metadata
+        features: Vec::new(),
         build_env,
         cargo_flags: args.cargo_flags.clone(),
     }

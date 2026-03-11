@@ -88,6 +88,246 @@ pub fn filter_by_field(fields: &[SchemaField], field_name: &str) -> Vec<SchemaFi
         .collect()
 }
 
+/// Filter fields to show only required fields.
+pub fn required_only_fields(fields: &[SchemaField]) -> Vec<SchemaField> {
+    fields.iter().filter(|f| f.required).cloned().collect()
+}
+
+/// Produce a summary of schema fields as a JSON value suitable for display.
+///
+/// Each field is rendered as an object with path, type, required, description,
+/// and any constraints. This is the structured backing for `fwc schema`.
+pub fn schema_summary(fields: &[SchemaField]) -> Value {
+    let items: Vec<Value> = fields
+        .iter()
+        .map(|f| {
+            let mut obj = serde_json::json!({
+                "path": f.path,
+                "type": f.field_type,
+                "required": f.required,
+            });
+            if let Some(desc) = &f.description {
+                obj["description"] = Value::String(desc.clone());
+            }
+            if let Some(ex) = &f.example {
+                obj["example"] = ex.clone();
+            }
+            if let Some(enums) = &f.enum_values {
+                obj["enum"] = Value::Array(enums.clone());
+            }
+            if let Some(min) = &f.minimum {
+                obj["minimum"] = min.clone();
+            }
+            if let Some(max) = &f.maximum {
+                obj["maximum"] = max.clone();
+            }
+            if let Some(def) = &f.default {
+                obj["default"] = def.clone();
+            }
+            if let Some(variants) = &f.variants {
+                obj["variants"] = serde_json::json!(variants);
+            }
+            if let Some(constraints) = &f.constraints {
+                obj["constraints"] = serde_json::json!(constraints);
+            }
+            obj
+        })
+        .collect();
+    Value::Array(items)
+}
+
+/// Fill known values into a scaffolded template.
+///
+/// Takes a scaffold template (from `scaffold_template`) and a map of
+/// path → value bindings, and replaces placeholder values with the provided
+/// values. Paths use dot notation for nested fields.
+pub fn fill_template(template: &Value, bindings: &Map<String, Value>) -> Value {
+    match template {
+        Value::Object(obj) => {
+            let mut result = Map::new();
+            for (key, val) in obj {
+                if let Some(bound) = bindings.get(key) {
+                    result.insert(key.clone(), bound.clone());
+                } else {
+                    result.insert(key.clone(), fill_template(val, bindings));
+                }
+            }
+            Value::Object(result)
+        }
+        other => other.clone(),
+    }
+}
+
+// ── Pre-invoke input validation ─────────────────────────────────────────
+
+/// A single validation error with structured context for agent consumption.
+#[derive(Debug, Clone, Serialize)]
+pub struct ValidationError {
+    /// Dot-separated path to the problematic field.
+    pub path: String,
+    /// What was expected (type, constraint, etc.).
+    pub expected: String,
+    /// What was actually provided (summary).
+    pub actual: String,
+    /// Human-readable fix suggestion.
+    pub fix: String,
+}
+
+/// Validate an input payload against a JSON Schema.
+///
+/// Returns a list of validation errors. An empty list means the input is valid.
+/// This is a structural pre-check, not a full JSON Schema validator — it catches
+/// the most common agent mistakes: missing required fields, wrong types, and
+/// enum constraint violations.
+pub fn validate_input(schema: &Value, input: &Value) -> Vec<ValidationError> {
+    let normalized = normalize_schema(schema);
+    let mut errors = Vec::new();
+    validate_object(&normalized, input, "", &mut errors);
+    errors
+}
+
+fn validate_object(
+    schema: &Value,
+    input: &Value,
+    prefix: &str,
+    errors: &mut Vec<ValidationError>,
+) {
+    // Check required fields
+    let required: Vec<&str> = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|arr| arr.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+
+    let input_obj = input.as_object();
+
+    for req in &required {
+        let path = if prefix.is_empty() {
+            (*req).to_owned()
+        } else {
+            format!("{prefix}.{req}")
+        };
+
+        let present = input_obj.is_some_and(|obj| {
+            obj.get(*req)
+                .is_some_and(|v| !v.is_null())
+        });
+
+        if !present {
+            errors.push(ValidationError {
+                path: path.clone(),
+                expected: "required field".to_owned(),
+                actual: "missing".to_owned(),
+                fix: format!("Add the required field '{path}' to your input"),
+            });
+        }
+    }
+
+    // Check property types
+    if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+        if let Some(obj) = input_obj {
+            for (key, val) in obj {
+                let path = if prefix.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{prefix}.{key}")
+                };
+
+                if let Some(prop_schema) = properties.get(key) {
+                    let prop_normalized = normalize_schema(prop_schema);
+                    validate_type(&prop_normalized, val, &path, errors);
+
+                    // Recurse into nested objects
+                    if val.is_object() && prop_normalized.get("properties").is_some() {
+                        validate_object(&prop_normalized, val, &path, errors);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn validate_type(
+    schema: &Value,
+    value: &Value,
+    path: &str,
+    errors: &mut Vec<ValidationError>,
+) {
+    // Check enum constraints
+    if let Some(enum_values) = schema.get("enum").and_then(Value::as_array) {
+        if !enum_values.contains(value) {
+            let allowed: Vec<String> = enum_values.iter().map(|v| v.to_string()).collect();
+            errors.push(ValidationError {
+                path: path.to_owned(),
+                expected: format!("one of: {}", allowed.join(", ")),
+                actual: value.to_string(),
+                fix: format!(
+                    "Change '{path}' to one of the allowed values: {}",
+                    allowed.join(", ")
+                ),
+            });
+        }
+        return;
+    }
+
+    // Check type constraint
+    let expected_type = schema.get("type").and_then(Value::as_str);
+    if let Some(expected) = expected_type {
+        let type_matches = match expected {
+            "string" => value.is_string(),
+            "number" | "integer" => value.is_number(),
+            "boolean" => value.is_boolean(),
+            "array" => value.is_array(),
+            "object" => value.is_object(),
+            "null" => value.is_null(),
+            _ => true,
+        };
+
+        if !type_matches {
+            let actual_type = match value {
+                Value::Null => "null",
+                Value::Bool(_) => "boolean",
+                Value::Number(_) => "number",
+                Value::String(_) => "string",
+                Value::Array(_) => "array",
+                Value::Object(_) => "object",
+            };
+            errors.push(ValidationError {
+                path: path.to_owned(),
+                expected: format!("type '{expected}'"),
+                actual: format!("type '{actual_type}'"),
+                fix: format!("Change '{path}' to a value of type '{expected}'"),
+            });
+        }
+    }
+
+    // Check minimum/maximum for numbers
+    if let Some(min) = schema.get("minimum").and_then(Value::as_f64) {
+        if let Some(val) = value.as_f64() {
+            if val < min {
+                errors.push(ValidationError {
+                    path: path.to_owned(),
+                    expected: format!("value >= {min}"),
+                    actual: format!("{val}"),
+                    fix: format!("Change '{path}' to a value >= {min}"),
+                });
+            }
+        }
+    }
+    if let Some(max) = schema.get("maximum").and_then(Value::as_f64) {
+        if let Some(val) = value.as_f64() {
+            if val > max {
+                errors.push(ValidationError {
+                    path: path.to_owned(),
+                    expected: format!("value <= {max}"),
+                    actual: format!("{val}"),
+                    fix: format!("Change '{path}' to a value <= {max}"),
+                });
+            }
+        }
+    }
+}
+
 // ── Internal helpers ────────────────────────────────────────────────────
 
 fn extract_required(schema: &Value) -> Vec<&str> {
@@ -1994,5 +2234,389 @@ mod tests {
     fn filter_by_field_empty_fields_list() {
         let filtered = filter_by_field(&[], "anything");
         assert!(filtered.is_empty());
+    }
+
+    // ── required_only_fields tests ──────────────────────────────────────
+
+    #[test]
+    fn required_only_filters_to_required() {
+        let schema = json!({
+            "type": "object",
+            "required": ["name", "email"],
+            "properties": {
+                "name": { "type": "string" },
+                "email": { "type": "string" },
+                "age": { "type": "integer" }
+            }
+        });
+        let fields = walk_schema(&schema, &[]);
+        let required = required_only_fields(&fields);
+        assert!(required.iter().all(|f| f.required));
+        assert!(required.iter().any(|f| f.path == "name"));
+        assert!(required.iter().any(|f| f.path == "email"));
+        assert!(!required.iter().any(|f| f.path == "age"));
+    }
+
+    #[test]
+    fn required_only_empty_when_no_required() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "x": { "type": "string" },
+                "y": { "type": "string" }
+            }
+        });
+        let fields = walk_schema(&schema, &[]);
+        let required = required_only_fields(&fields);
+        assert!(required.is_empty());
+    }
+
+    #[test]
+    fn required_only_all_when_all_required() {
+        let schema = json!({
+            "type": "object",
+            "required": ["a", "b"],
+            "properties": {
+                "a": { "type": "string" },
+                "b": { "type": "integer" }
+            }
+        });
+        let fields = walk_schema(&schema, &[]);
+        let required = required_only_fields(&fields);
+        assert_eq!(required.len(), 2);
+    }
+
+    #[test]
+    fn required_only_empty_input() {
+        assert!(required_only_fields(&[]).is_empty());
+    }
+
+    // ── schema_summary tests ────────────────────────────────────────────
+
+    #[test]
+    fn schema_summary_produces_array() {
+        let schema = json!({
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+                "name": { "type": "string", "description": "User name" },
+                "age": { "type": "integer" }
+            }
+        });
+        let fields = walk_schema(&schema, &[]);
+        let summary = schema_summary(&fields);
+        assert!(summary.is_array());
+        let arr = summary.as_array().unwrap();
+        assert_eq!(arr.len(), fields.len());
+    }
+
+    #[test]
+    fn schema_summary_includes_required_flag() {
+        let schema = json!({
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+                "name": { "type": "string" },
+                "opt": { "type": "string" }
+            }
+        });
+        let fields = walk_schema(&schema, &[]);
+        let summary = schema_summary(&fields);
+        let arr = summary.as_array().unwrap();
+        let name_entry = arr.iter().find(|e| e["path"] == "name").unwrap();
+        assert_eq!(name_entry["required"], true);
+        let opt_entry = arr.iter().find(|e| e["path"] == "opt").unwrap();
+        assert_eq!(opt_entry["required"], false);
+    }
+
+    #[test]
+    fn schema_summary_includes_description() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "description": "Full name" }
+            }
+        });
+        let fields = walk_schema(&schema, &[]);
+        let summary = schema_summary(&fields);
+        let arr = summary.as_array().unwrap();
+        assert_eq!(arr[0]["description"], "Full name");
+    }
+
+    #[test]
+    fn schema_summary_includes_enum_values() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "status": { "type": "string", "enum": ["open", "closed"] }
+            }
+        });
+        let fields = walk_schema(&schema, &[]);
+        let summary = schema_summary(&fields);
+        let arr = summary.as_array().unwrap();
+        assert!(arr[0]["enum"].is_array());
+    }
+
+    #[test]
+    fn schema_summary_empty_fields() {
+        let summary = schema_summary(&[]);
+        assert!(summary.is_array());
+        assert!(summary.as_array().unwrap().is_empty());
+    }
+
+    // ── fill_template tests ─────────────────────────────────────────────
+
+    #[test]
+    fn fill_template_replaces_known_values() {
+        let schema = json!({
+            "type": "object",
+            "required": ["owner", "repo", "title"],
+            "properties": {
+                "owner": { "type": "string" },
+                "repo": { "type": "string" },
+                "title": { "type": "string" }
+            }
+        });
+        let template = scaffold_template(&schema);
+        let mut bindings = Map::new();
+        bindings.insert("owner".into(), json!("octocat"));
+        bindings.insert("repo".into(), json!("hello-world"));
+        let filled = fill_template(&template, &bindings);
+        assert_eq!(filled["owner"], "octocat");
+        assert_eq!(filled["repo"], "hello-world");
+        // title should retain its placeholder
+        assert_eq!(filled["title"], "<string>");
+    }
+
+    #[test]
+    fn fill_template_preserves_unfilled_placeholders() {
+        let template = json!({
+            "name": "<string>",
+            "count": "<integer>"
+        });
+        let filled = fill_template(&template, &Map::new());
+        assert_eq!(filled["name"], "<string>");
+        assert_eq!(filled["count"], "<integer>");
+    }
+
+    #[test]
+    fn fill_template_works_on_empty_template() {
+        let template = json!({});
+        let filled = fill_template(&template, &Map::new());
+        assert!(filled.as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn fill_template_handles_non_object() {
+        let template = json!("hello");
+        let filled = fill_template(&template, &Map::new());
+        assert_eq!(filled, "hello");
+    }
+
+    // ── validate_input tests ────────────────────────────────────────────
+
+    #[test]
+    fn validate_input_valid_payload_returns_empty() {
+        let schema = json!({
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+                "name": { "type": "string" },
+                "age": { "type": "integer" }
+            }
+        });
+        let input = json!({ "name": "Alice", "age": 30 });
+        let errors = validate_input(&schema, &input);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn validate_input_missing_required_field() {
+        let schema = json!({
+            "type": "object",
+            "required": ["name", "email"],
+            "properties": {
+                "name": { "type": "string" },
+                "email": { "type": "string" }
+            }
+        });
+        let input = json!({ "name": "Alice" });
+        let errors = validate_input(&schema, &input);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].path, "email");
+        assert_eq!(errors[0].actual, "missing");
+        assert!(errors[0].fix.contains("email"));
+    }
+
+    #[test]
+    fn validate_input_wrong_type() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "count": { "type": "integer" }
+            }
+        });
+        let input = json!({ "count": "not-a-number" });
+        let errors = validate_input(&schema, &input);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].path, "count");
+        assert!(errors[0].expected.contains("integer"));
+        assert!(errors[0].actual.contains("string"));
+    }
+
+    #[test]
+    fn validate_input_enum_violation() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "status": { "type": "string", "enum": ["open", "closed"] }
+            }
+        });
+        let input = json!({ "status": "invalid" });
+        let errors = validate_input(&schema, &input);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].expected.contains("open"));
+        assert!(errors[0].expected.contains("closed"));
+    }
+
+    #[test]
+    fn validate_input_minimum_violation() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "age": { "type": "integer", "minimum": 0 }
+            }
+        });
+        let input = json!({ "age": -5 });
+        let errors = validate_input(&schema, &input);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].expected.contains(">= 0"));
+    }
+
+    #[test]
+    fn validate_input_maximum_violation() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "score": { "type": "number", "maximum": 100.0 }
+            }
+        });
+        let input = json!({ "score": 150.0 });
+        let errors = validate_input(&schema, &input);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].expected.contains("<= 100"));
+    }
+
+    #[test]
+    fn validate_input_multiple_errors() {
+        let schema = json!({
+            "type": "object",
+            "required": ["name", "email"],
+            "properties": {
+                "name": { "type": "string" },
+                "email": { "type": "string" },
+                "age": { "type": "integer" }
+            }
+        });
+        let input = json!({ "age": "not-a-number" });
+        let errors = validate_input(&schema, &input);
+        // Missing name, missing email, wrong type for age
+        assert_eq!(errors.len(), 3);
+    }
+
+    #[test]
+    fn validate_input_null_required_field() {
+        let schema = json!({
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+                "name": { "type": "string" }
+            }
+        });
+        let input = json!({ "name": null });
+        let errors = validate_input(&schema, &input);
+        // Missing required (null treated as absent) + wrong type
+        assert!(errors.len() >= 1);
+        assert!(errors.iter().any(|e| e.path == "name"));
+    }
+
+    #[test]
+    fn validate_input_nested_object() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "address": {
+                    "type": "object",
+                    "required": ["city"],
+                    "properties": {
+                        "city": { "type": "string" },
+                        "zip": { "type": "string" }
+                    }
+                }
+            }
+        });
+        let input = json!({ "address": { "zip": "12345" } });
+        let errors = validate_input(&schema, &input);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].path, "address.city");
+    }
+
+    #[test]
+    fn validate_input_empty_object_against_schema_with_no_required() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "opt1": { "type": "string" },
+                "opt2": { "type": "integer" }
+            }
+        });
+        let input = json!({});
+        let errors = validate_input(&schema, &input);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn validate_input_correct_enum_value() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "status": { "type": "string", "enum": ["open", "closed"] }
+            }
+        });
+        let input = json!({ "status": "open" });
+        let errors = validate_input(&schema, &input);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn validate_input_all_errors_have_fix() {
+        let schema = json!({
+            "type": "object",
+            "required": ["a", "b"],
+            "properties": {
+                "a": { "type": "string" },
+                "b": { "type": "integer" },
+                "c": { "type": "string", "enum": ["x", "y"] }
+            }
+        });
+        let input = json!({ "b": "wrong", "c": "z" });
+        let errors = validate_input(&schema, &input);
+        for err in &errors {
+            assert!(!err.fix.is_empty(), "Error at '{}' has no fix", err.path);
+        }
+    }
+
+    #[test]
+    fn validation_error_debug_and_clone() {
+        let err = ValidationError {
+            path: "name".to_owned(),
+            expected: "required".to_owned(),
+            actual: "missing".to_owned(),
+            fix: "Add name".to_owned(),
+        };
+        let cloned = err.clone();
+        assert_eq!(cloned.path, err.path);
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("ValidationError"));
     }
 }

@@ -147,9 +147,9 @@ use crate::package_cmd::{
 };
 use crate::readiness::{
     ConnectorDetail, ConnectorState, ConnectorSummary, DiscoveredConnector, DiscoveredOperation,
-    DiscoveryCatalog, OperationSummary, SelectorError, SelectorErrorKind, idempotency_label,
-    normalize_connector_selector, normalize_operation_selector, risk_level_label,
-    safety_tier_label, selector_distance,
+    DiscoveryCatalog, OperationSummary, RateLimitSummary, SelectorError, SelectorErrorKind,
+    idempotency_label, normalize_connector_selector, normalize_operation_selector,
+    risk_level_label, safety_tier_label, selector_distance,
 };
 use crate::render::{
     ExtractRender, OutputFormat, RenderOptions, TemplateRender, render_with_options, token_stats,
@@ -2984,6 +2984,84 @@ fn host_connector_state_label(health: &fcp_core::ConnectorHealth) -> &'static st
     }
 }
 
+fn human_window_duration(window: std::time::Duration) -> String {
+    let window_ms = window.as_millis();
+    if let Ok(window_ms) = u64::try_from(window_ms) {
+        match window_ms {
+            1_000 => "1s".to_owned(),
+            60_000 => "60s".to_owned(),
+            3_600_000 => "1h".to_owned(),
+            86_400_000 => "1d".to_owned(),
+            _ if window_ms % 1_000 == 0 => format!("{}s", window_ms / 1_000),
+            _ => format!("{window_ms}ms"),
+        }
+    } else {
+        format!("{window_ms}ms")
+    }
+}
+
+fn host_rate_limit_summaries(
+    declarations: &fcp_core::RateLimitDeclarations,
+    pool_ids: impl IntoIterator<Item = String>,
+) -> Vec<RateLimitSummary> {
+    let mut seen = BTreeSet::new();
+    let mut summaries = Vec::new();
+
+    for pool_id in pool_ids {
+        if !seen.insert(pool_id.clone()) {
+            continue;
+        }
+        let Some(pool) = declarations.limits.iter().find(|pool| pool.id == pool_id) else {
+            continue;
+        };
+        summaries.push(RateLimitSummary {
+            scope: pool.id.clone(),
+            requests: pool.config.requests,
+            window: human_window_duration(pool.config.window),
+        });
+    }
+
+    summaries
+}
+
+fn host_connector_archetypes(introspection: &HostIntrospectionResponse) -> Option<Vec<String>> {
+    match introspection.archetype {
+        fcp_host::ConnectorArchetype::Unknown => None,
+        archetype => serde_json::to_value(archetype)
+            .ok()
+            .and_then(|value| value.as_str().map(ToOwned::to_owned))
+            .map(|label| vec![label]),
+    }
+}
+
+fn host_connector_rate_limits(
+    introspection: &HostIntrospectionResponse,
+) -> Option<Vec<RateLimitSummary>> {
+    introspection.rate_limits.as_ref().map(|declarations| {
+        host_rate_limit_summaries(
+            declarations,
+            declarations.limits.iter().map(|pool| pool.id.clone()),
+        )
+    })
+}
+
+fn host_operation_rate_limits(
+    tool: &HostToolDescriptor,
+    declarations: Option<&fcp_core::RateLimitDeclarations>,
+) -> Option<Vec<RateLimitSummary>> {
+    declarations.map(|declarations| {
+        let declared_pool_ids = declarations
+            .tool_pool_map
+            .get(&tool.name)
+            .into_iter()
+            .flatten()
+            .cloned();
+        let inline_pool_ids = tool.rate_limits.iter().cloned();
+
+        host_rate_limit_summaries(declarations, declared_pool_ids.chain(inline_pool_ids))
+    })
+}
+
 fn host_tool_summary_entry(tool: &HostToolDescriptor) -> Value {
     json!({
         "selector": &tool.name,
@@ -3014,7 +3092,7 @@ fn host_connector_list_entry(connector: &HostConnectorRecord) -> Value {
         "format": Value::Null,
         "state": host_connector_state_label(&connector.summary.health),
         "home_zone": Value::Null,
-        "archetypes": Vec::<String>::new(),
+        "archetypes": Value::Null,
         "operation_count": connector.summary.tool_count,
         "max_risk": safety_tier_label(connector.summary.max_safety_tier),
         "has_events": Value::Null,
@@ -3135,7 +3213,10 @@ fn host_mcp_tool_definitions(
         .collect()
 }
 
-fn host_discovered_operation(tool: &HostToolDescriptor) -> DiscoveredOperation {
+fn host_discovered_operation(
+    tool: &HostToolDescriptor,
+    connector_rate_limits: Option<&fcp_core::RateLimitDeclarations>,
+) -> DiscoveredOperation {
     let local_id = tool.name.rsplit('.').next().unwrap_or(tool.name.as_str());
     let summary = if tool.description.trim().is_empty() {
         tool.name.clone()
@@ -3170,7 +3251,7 @@ fn host_discovered_operation(tool: &HostToolDescriptor) -> DiscoveredOperation {
         examples: host_tool_example_strings(tool),
         related: host_tool_related(tool),
         network_constraints: None,
-        rate_limits: Vec::new(),
+        rate_limits: host_operation_rate_limits(tool, connector_rate_limits),
     }
 }
 
@@ -3181,7 +3262,7 @@ fn host_discovered_connector(
     let mut operations = introspection
         .tools
         .iter()
-        .map(host_discovered_operation)
+        .map(|tool| host_discovered_operation(tool, introspection.rate_limits.as_ref()))
         .collect::<Vec<_>>();
     operations.sort_by(|left, right| left.preferred_selector.cmp(&right.preferred_selector));
 
@@ -3193,10 +3274,7 @@ fn host_discovered_connector(
         .to_owned();
     let has_events = introspection.introspection.event_caps.is_some()
         || !introspection.introspection.events.is_empty();
-    let archetypes = serde_json::to_value(introspection.archetype)
-        .ok()
-        .and_then(|value| value.as_str().map(ToOwned::to_owned))
-        .map_or_else(Vec::new, |label| vec![label]);
+    let archetypes = host_connector_archetypes(introspection);
     let categories = connector.summary.categories.clone();
     let slug = connector.slug.clone();
 
@@ -3230,7 +3308,7 @@ fn host_discovered_connector(
                 .collect(),
             config_schema: None,
             health: None,
-            rate_limits: Vec::new(),
+            rate_limits: host_connector_rate_limits(introspection),
         },
         zones: Value::Null,
         capabilities: Value::Null,
@@ -8936,6 +9014,7 @@ fn append_history_entry(
 struct ResolvedHostOperation {
     connector: HostConnectorRecord,
     operation: HostToolDescriptor,
+    rate_limits: Option<Vec<RateLimitSummary>>,
 }
 
 fn parse_operation_reference(reference: &str) -> Option<(&str, &str)> {
@@ -9072,6 +9151,7 @@ fn resolve_host_operation_from_catalog(
 
     Ok(ResolvedHostOperation {
         connector,
+        rate_limits: host_operation_rate_limits(&operation, introspection.rate_limits.as_ref()),
         operation,
     })
 }
@@ -10374,7 +10454,7 @@ fn live_pipeline_operation_metadata(
                             fcp_core::ApprovalMode::ElevationToken => "elevation_token".to_owned(),
                         },
                     ),
-                    rate_limits: Vec::new(),
+                    rate_limits: resolved.rate_limits.clone(),
                 },
             )
         })
@@ -14301,8 +14381,8 @@ mod tests {
     use super::{
         Cli, CliExitCode, Commands, ConnectorManifest, HostConnectorCatalog, LiveAuthArgs,
         PACKAGE_OUTPUT_FILENAME, PackageBuildMetadata, PackageOutput, PrepareCliError,
-        ResolvedHostConfig, catalog, execute, host_mcp_tool_definitions, mcp_tool_invoke_args,
-        normalize_args, prepare_cli, serve_mcp,
+        ResolvedHostConfig, catalog, execute, host_discovered_connector, host_mcp_tool_definitions,
+        mcp_tool_invoke_args, normalize_args, prepare_cli, serve_mcp,
     };
     use clap::CommandFactory;
     use fcp_core::{
@@ -18768,6 +18848,90 @@ depends_on = ["missing"]
         assert_eq!(tools[0].name, "github.create_issue");
         assert_eq!(tools[0].connector_id, "github");
         assert_eq!(tools[0].operation_id, "github.create_issue");
+    }
+
+    #[test]
+    fn host_discovered_connector_keeps_unknown_metadata_unknown() {
+        let response: HostDiscoveryResponse =
+            serde_json::from_value(mock_discovery_response_json())
+                .expect("mock discovery response should deserialize");
+        let catalog = HostConnectorCatalog::from_response(&response);
+        let connector = catalog
+            .connectors
+            .first()
+            .expect("mock catalog should contain a connector");
+        let mut introspection: HostIntrospectionResponse =
+            serde_json::from_value(mock_introspection_response_json())
+                .expect("mock introspection response should deserialize");
+        introspection.archetype = fcp_host::ConnectorArchetype::Unknown;
+        introspection.rate_limits = None;
+
+        let discovered = host_discovered_connector(connector, &introspection);
+
+        assert!(discovered.detail.summary.archetypes.is_none());
+        assert!(discovered.detail.rate_limits.is_none());
+        assert!(
+            discovered
+                .operations
+                .iter()
+                .all(|operation| operation.rate_limits.is_none())
+        );
+    }
+
+    #[test]
+    fn host_discovered_connector_preserves_declared_rate_limits() {
+        let response: HostDiscoveryResponse =
+            serde_json::from_value(mock_discovery_response_json())
+                .expect("mock discovery response should deserialize");
+        let catalog = HostConnectorCatalog::from_response(&response);
+        let connector = catalog
+            .connectors
+            .first()
+            .expect("mock catalog should contain a connector");
+        let mut introspection: HostIntrospectionResponse =
+            serde_json::from_value(mock_introspection_response_json())
+                .expect("mock introspection response should deserialize");
+        introspection.rate_limits = Some(fcp_core::RateLimitDeclarations {
+            limits: vec![fcp_core::RateLimitPool {
+                id: "core".to_owned(),
+                description: "GitHub primary API limit".to_owned(),
+                config: fcp_core::RateLimitConfig {
+                    requests: 5_000,
+                    window: std::time::Duration::from_secs(3_600),
+                    burst: None,
+                    unit: fcp_core::RateLimitUnit::Requests,
+                },
+                enforcement: fcp_core::RateLimitEnforcement::Hard,
+                scope: fcp_core::RateLimitScope::Instance,
+            }],
+            tool_pool_map: std::collections::HashMap::from([(
+                "github.create_issue".to_owned(),
+                vec!["core".to_owned()],
+            )]),
+        });
+
+        let discovered = host_discovered_connector(connector, &introspection);
+        let connector_rate_limits = discovered
+            .detail
+            .rate_limits
+            .as_ref()
+            .expect("connector rate limits should stay available");
+        let create_issue = discovered
+            .operations
+            .iter()
+            .find(|operation| operation.actual_id == "github.create_issue")
+            .expect("create_issue operation should exist");
+        let operation_rate_limits = create_issue
+            .rate_limits
+            .as_ref()
+            .expect("operation rate limits should stay available");
+
+        assert_eq!(connector_rate_limits.len(), 1);
+        assert_eq!(connector_rate_limits[0].scope, "core");
+        assert_eq!(connector_rate_limits[0].requests, 5_000);
+        assert_eq!(connector_rate_limits[0].window, "1h");
+        assert_eq!(operation_rate_limits.len(), 1);
+        assert_eq!(operation_rate_limits[0].scope, "core");
     }
 
     #[test]

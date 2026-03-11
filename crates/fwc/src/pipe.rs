@@ -317,7 +317,7 @@ pub struct PipelineOperationMetadata {
     pub safety_tier: String,
     pub requires_approval: bool,
     pub approval_mode: String,
-    pub rate_limits: Vec<RateLimitSummary>,
+    pub rate_limits: Option<Vec<RateLimitSummary>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -343,8 +343,8 @@ pub struct PipelineStepEstimate {
     pub estimated_api_calls: EstimatedApiCalls,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub condition: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub rate_limits: Vec<RateLimitSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limits: Option<Vec<RateLimitSummary>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1363,6 +1363,7 @@ pub fn estimate_pipeline(
     let mut rate_limit_impact = BTreeMap::<String, RateLimitImpactAccumulator>::new();
     let mut conditional_steps = Vec::new();
     let mut steps_without_declared_limits = Vec::new();
+    let mut steps_with_unknown_rate_limits = Vec::new();
     let mut total_min_calls = 0u32;
     let mut total_max_calls = 0u32;
     let mut highest_risk = "low".to_owned();
@@ -1385,8 +1386,12 @@ pub fn estimate_pipeline(
         if estimated_api_calls.conditional {
             conditional_steps.push(step.id.clone());
         }
-        if metadata.rate_limits.is_empty() {
-            steps_without_declared_limits.push(step.id.clone());
+        match metadata.rate_limits.as_ref() {
+            Some(rate_limits) if rate_limits.is_empty() => {
+                steps_without_declared_limits.push(step.id.clone());
+            }
+            None => steps_with_unknown_rate_limits.push(step.id.clone()),
+            Some(_) => {}
         }
         if metadata.requires_approval {
             required_approvals.push(PipelineApprovalRequirement {
@@ -1419,8 +1424,10 @@ pub fn estimate_pipeline(
         impact.max_calls += estimated_api_calls.max;
         impact.conditional |= estimated_api_calls.conditional;
         impact.steps.insert(step.id.clone());
-        for rate_limit in &metadata.rate_limits {
-            push_unique_rate_limit(&mut impact.rate_limits, rate_limit);
+        if let Some(rate_limits) = metadata.rate_limits.as_ref() {
+            for rate_limit in rate_limits {
+                push_unique_rate_limit(&mut impact.rate_limits, rate_limit);
+            }
         }
 
         step_estimates.push(PipelineStepEstimate {
@@ -1454,6 +1461,12 @@ pub fn estimate_pipeline(
         notes.push(format!(
             "These steps do not declare manifest-backed rate limits, so impact is estimated only by API-call count: {}.",
             steps_without_declared_limits.join(", ")
+        ));
+    }
+    if !steps_with_unknown_rate_limits.is_empty() {
+        notes.push(format!(
+            "These steps did not surface trustworthy rate-limit metadata from the selected source, so `fwc` left their limit state unknown instead of assuming no limits: {}.",
+            steps_with_unknown_rate_limits.join(", ")
         ));
     }
 
@@ -2656,11 +2669,11 @@ condition = "{{steps.fetch.output.issues | length}} > 0"
                     safety_tier: "safe".to_owned(),
                     requires_approval: false,
                     approval_mode: "none".to_owned(),
-                    rate_limits: vec![RateLimitSummary {
+                    rate_limits: Some(vec![RateLimitSummary {
                         scope: "core".to_owned(),
                         requests: 5_000,
                         window: "1h".to_owned(),
-                    }],
+                    }]),
                 },
             ),
             (
@@ -2674,11 +2687,11 @@ condition = "{{steps.fetch.output.issues | length}} > 0"
                     safety_tier: "risky".to_owned(),
                     requires_approval: true,
                     approval_mode: "policy".to_owned(),
-                    rate_limits: vec![RateLimitSummary {
+                    rate_limits: Some(vec![RateLimitSummary {
                         scope: "messages-write".to_owned(),
                         requests: 100,
                         window: "1m".to_owned(),
-                    }],
+                    }]),
                 },
             ),
         ]);
@@ -2714,6 +2727,47 @@ condition = "{{steps.fetch.output.issues | length}} > 0"
                 .iter()
                 .any(|note| note.contains("Conditional steps"))
         );
+    }
+
+    #[test]
+    fn estimate_pipeline_calls_out_unknown_rate_limit_metadata() {
+        let definition = parse_pipeline_definition(
+            r#"
+[pipeline]
+name = "unknown-rate-limit-metadata"
+
+[[steps]]
+id = "fetch"
+operation = "github.list_issues"
+"#,
+        )
+        .unwrap();
+
+        let plan = build_pipeline_plan(&definition, &BTreeMap::new()).unwrap();
+        let operations = BTreeMap::from([(
+            "github.list_issues".to_owned(),
+            PipelineOperationMetadata {
+                connector: "github".to_owned(),
+                selector: "issues.list".to_owned(),
+                canonical_id: "github.list_issues".to_owned(),
+                capability: "github.read".to_owned(),
+                risk_level: "low".to_owned(),
+                safety_tier: "safe".to_owned(),
+                requires_approval: false,
+                approval_mode: "none".to_owned(),
+                rate_limits: None,
+            },
+        )]);
+
+        let estimate = estimate_pipeline(&plan, &operations).unwrap();
+
+        assert!(
+            estimate
+                .notes
+                .iter()
+                .any(|note| note.contains("left their limit state unknown"))
+        );
+        assert!(estimate.steps[0].rate_limits.is_none());
     }
 
     #[test]

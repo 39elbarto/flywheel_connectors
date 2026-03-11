@@ -360,7 +360,7 @@ mod tests {
             examples: vec![r#"{"owner":"a","repo":"b"}"#.to_string()],
             related: vec!["github.get_issue".to_string()],
             network_constraints: None,
-            rate_limits: vec![],
+            rate_limits: Some(vec![]),
         }
     }
 
@@ -389,7 +389,7 @@ mod tests {
             examples: vec![],
             related: vec![],
             network_constraints: None,
-            rate_limits: vec![],
+            rate_limits: Some(vec![]),
         }
     }
 
@@ -956,7 +956,7 @@ mod tests {
             examples: vec![],
             related: vec![],
             network_constraints: None,
-            rate_limits: vec![],
+            rate_limits: Some(vec![]),
         }
     }
 }

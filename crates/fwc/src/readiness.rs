@@ -278,8 +278,9 @@ pub struct ConnectorSummary {
     pub version: String,
     /// Short description.
     pub description: String,
-    /// Connector archetypes (e.g. `["request-response", "streaming"]`).
-    pub archetypes: Vec<String>,
+    /// Connector archetypes when surfaced by a trustworthy source.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archetypes: Option<Vec<String>>,
     /// Current lifecycle state.
     pub state: ConnectorState,
     /// Number of declared operations.
@@ -321,8 +322,9 @@ pub struct ConnectorDetail {
     pub config_schema: Option<Value>,
     /// Current health snapshot.
     pub health: Option<HealthSummary>,
-    /// Rate limit declarations.
-    pub rate_limits: Vec<RateLimitSummary>,
+    /// Rate limit declarations when surfaced by a trustworthy source.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limits: Option<Vec<RateLimitSummary>>,
 }
 
 /// Compact operation summary for `fwc ops`.
@@ -609,7 +611,7 @@ impl DiscoveredConnector {
             name: connector_name.clone(),
             version: connector_version.clone(),
             description: connector_description.clone(),
-            archetypes: archetypes.clone(),
+            archetypes: Some(archetypes.clone()),
             state: ConnectorState::Unknown,
             operation_count: operations.len(),
             max_risk,
@@ -673,7 +675,7 @@ impl DiscoveredConnector {
                 operations: operation_summaries,
                 config_schema: None,
                 health: None,
-                rate_limits: connector_rate_limits,
+                rate_limits: Some(connector_rate_limits),
             },
             zones,
             capabilities,
@@ -739,9 +741,9 @@ impl DiscoveredConnector {
         descriptor.display_name = Some(self.detail.summary.name.clone());
         descriptor.version = Some(self.detail.summary.version.clone());
         descriptor.description = Some(self.detail.summary.description.clone());
-        descriptor
-            .archetypes
-            .clone_from(&self.detail.summary.archetypes);
+        if let Some(archetypes) = &self.detail.summary.archetypes {
+            descriptor.archetypes.clone_from(archetypes);
+        }
         descriptor.supported_zones.clone_from(&self.supported_zones);
         descriptor.runtime_format = Some(self.runtime_format.clone());
         descriptor.state_model.clone_from(&self.state_model);
@@ -771,6 +773,7 @@ impl DiscoveredConnector {
                 .summary
                 .archetypes
                 .iter()
+                .flatten()
                 .map(|archetype| normalize_category_selector(archetype))
                 .any(|archetype| archetype == category)
     }
@@ -924,7 +927,7 @@ pub struct DiscoveredOperation {
     pub examples: Vec<String>,
     pub related: Vec<String>,
     pub network_constraints: Option<Value>,
-    pub rate_limits: Vec<RateLimitSummary>,
+    pub rate_limits: Option<Vec<RateLimitSummary>>,
 }
 
 impl DiscoveredOperation {
@@ -979,7 +982,7 @@ impl DiscoveredOperation {
                 .as_ref()
                 .map(serde_json::to_value)
                 .transpose()?,
-            rate_limits,
+            rate_limits: Some(rate_limits),
         })
     }
 
@@ -1139,7 +1142,7 @@ fn discovered_connector_from_toml(
         name: connector_name.clone(),
         version: connector_version.clone(),
         description: connector_description.clone(),
-        archetypes: archetypes.clone(),
+        archetypes: Some(archetypes.clone()),
         state: ConnectorState::Unknown,
         operation_count: operations.len(),
         max_risk,
@@ -1214,7 +1217,8 @@ fn discovered_connector_from_toml(
             operations: operation_summaries,
             config_schema: None,
             health: None,
-            rate_limits: Vec::new(),
+            // Raw TOML fallback cannot prove structured connector-level rate-limit declarations.
+            rate_limits: None,
         },
         zones,
         capabilities,
@@ -1343,7 +1347,8 @@ fn discovered_operation_from_toml(
         examples,
         related,
         network_constraints,
-        rate_limits: Vec::new(),
+        // Raw TOML fallback cannot prove structured rate-limit declarations.
+        rate_limits: None,
     })
 }
 
@@ -3054,7 +3059,7 @@ mod tests {
             name: "GitHub".to_owned(),
             version: "1.0.0".to_owned(),
             description: "GitHub API connector".to_owned(),
-            archetypes: vec!["request-response".to_owned()],
+            archetypes: Some(vec!["request-response".to_owned()]),
             state: ConnectorState::Ready,
             operation_count: 12,
             max_risk: "high".to_owned(),
@@ -3239,7 +3244,7 @@ mod tests {
                 name: "Test".to_owned(),
                 version: "1.0.0".to_owned(),
                 description: "Test connector".to_owned(),
-                archetypes: vec!["request-response".to_owned()],
+                archetypes: Some(vec!["request-response".to_owned()]),
                 state: ConnectorState::Ready,
                 operation_count: 1,
                 max_risk: "low".to_owned(),
@@ -3261,7 +3266,7 @@ mod tests {
                 uptime: "5m".to_owned(),
                 load: None,
             }),
-            rate_limits: vec![],
+            rate_limits: Some(vec![]),
         };
 
         let json = serde_json::to_string(&detail).unwrap();
@@ -3908,7 +3913,7 @@ mod tests {
             name: "Slack".to_owned(),
             version: "2.0.0".to_owned(),
             description: "Slack messaging connector".to_owned(),
-            archetypes: vec!["request-response".to_owned(), "streaming".to_owned()],
+            archetypes: Some(vec!["request-response".to_owned(), "streaming".to_owned()]),
             state: ConnectorState::Degraded,
             operation_count: 42,
             max_risk: "critical".to_owned(),
@@ -3942,7 +3947,7 @@ mod tests {
         });
         let summary: ConnectorSummary = serde_json::from_value(json).unwrap();
         assert_eq!(summary.state, ConnectorState::Unconfigured);
-        assert!(summary.archetypes.is_empty());
+        assert_eq!(summary.archetypes, Some(vec![]));
         assert!(!summary.has_events);
     }
 
@@ -3956,7 +3961,7 @@ mod tests {
                 name: "Bare".to_owned(),
                 version: "0.1.0".to_owned(),
                 description: "Bare connector".to_owned(),
-                archetypes: vec![],
+                archetypes: Some(vec![]),
                 state: ConnectorState::Unconfigured,
                 operation_count: 0,
                 max_risk: "low".to_owned(),
@@ -3965,7 +3970,7 @@ mod tests {
             operations: vec![],
             config_schema: None,
             health: None,
-            rate_limits: vec![],
+            rate_limits: Some(vec![]),
         };
 
         let json = serde_json::to_value(&detail).unwrap();
@@ -3989,7 +3994,7 @@ mod tests {
                 name: "Full".to_owned(),
                 version: "3.0.0".to_owned(),
                 description: "Full connector".to_owned(),
-                archetypes: vec!["request-response".to_owned()],
+                archetypes: Some(vec!["request-response".to_owned()]),
                 state: ConnectorState::Ready,
                 operation_count: 2,
                 max_risk: "high".to_owned(),
@@ -4029,7 +4034,7 @@ mod tests {
                 uptime: "12h 30m".to_owned(),
                 load: Some(0.75),
             }),
-            rate_limits: vec![
+            rate_limits: Some(vec![
                 RateLimitSummary {
                     scope: "global".to_owned(),
                     requests: 1000,
@@ -4040,7 +4045,7 @@ mod tests {
                     requests: 50,
                     window: "60s".to_owned(),
                 },
-            ],
+            ]),
         };
 
         let json_str = serde_json::to_string_pretty(&detail).unwrap();
@@ -4054,8 +4059,9 @@ mod tests {
         assert!(back.health.is_some());
         let h = back.health.unwrap();
         assert_eq!(h.load, Some(0.75));
-        assert_eq!(back.rate_limits.len(), 2);
-        assert_eq!(back.rate_limits[1].requests, 50);
+        let rate_limits = back.rate_limits.expect("rate limits should round-trip");
+        assert_eq!(rate_limits.len(), 2);
+        assert_eq!(rate_limits[1].requests, 50);
     }
 
     // ── OperationSummary: round-trip serde ────────────────────────────

@@ -237,6 +237,7 @@ fn connector_passes_filters(connector: &DiscoveredConnector, filters: &SearchFil
             .summary
             .archetypes
             .iter()
+            .flatten()
             .any(|a| a.to_lowercase() == arch_lower)
         {
             return false;
@@ -412,7 +413,7 @@ mod tests {
                     name: format!("{} Connector", capitalize(slug)),
                     version: "0.1.0".to_owned(),
                     description: format!("FCP connector for {slug}"),
-                    archetypes: vec!["operational".to_owned()],
+                    archetypes: Some(vec!["operational".to_owned()]),
                     state: ConnectorState::Unknown,
                     operation_count: ops.len(),
                     max_risk: "medium".to_owned(),
@@ -421,7 +422,7 @@ mod tests {
                 operations: op_summaries,
                 config_schema: None,
                 health: None,
-                rate_limits: vec![],
+                rate_limits: Some(vec![]),
             },
             zones: json!({}),
             capabilities: json!({}),
@@ -462,7 +463,7 @@ mod tests {
             examples: vec![],
             related: vec![],
             network_constraints: None,
-            rate_limits: vec![],
+            rate_limits: Some(vec![]),
         }
     }
 

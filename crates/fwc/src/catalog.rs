@@ -831,16 +831,14 @@ pub struct AuthUxGuidance {
 pub fn auth_ux_guidance(command: &str) -> AuthUxGuidance {
     let cls = classify_command(command);
 
-    let (acquisition, may_need_approval) = cls.map_or(
-        (AuthAcquisitionFlow::NotNeeded, false),
-        |c| {
+    let (acquisition, may_need_approval) =
+        cls.map_or((AuthAcquisitionFlow::NotNeeded, false), |c| {
             if c.requires_capability_token {
                 (AuthAcquisitionFlow::Required, c.may_need_approval)
             } else {
                 (AuthAcquisitionFlow::NotNeeded, false)
             }
-        },
-    );
+        });
 
     let supply_methods = if acquisition == AuthAcquisitionFlow::Required {
         vec![
@@ -1488,8 +1486,8 @@ mod tests {
         auth_required_commands, auth_ux_guidance, check_auth_requirement, classify_command,
         command_requires_host, default_offline_source, guide_payload, host_absent_error,
         host_absent_error_payload, live_host_commands, offline_capable_commands,
-        offline_provenance, offline_provenance_payload, planned_payload,
-        workflow_can_proceed, workflow_kind,
+        offline_provenance, offline_provenance_payload, planned_payload, workflow_can_proceed,
+        workflow_kind,
     };
     use serde_json::json;
 
@@ -2757,7 +2755,10 @@ mod tests {
             HostAbsentReason::Unhealthy,
         ] {
             let err = host_absent_error("invoke", *reason);
-            assert_eq!(err.exit_code, 8, "Exit code should be Transport (8) for {reason:?}");
+            assert_eq!(
+                err.exit_code, 8,
+                "Exit code should be Transport (8) for {reason:?}"
+            );
         }
     }
 
@@ -2902,12 +2903,18 @@ mod tests {
 
     #[test]
     fn default_offline_source_guide_is_static_contract() {
-        assert_eq!(default_offline_source("guide"), OfflineSource::StaticContract);
+        assert_eq!(
+            default_offline_source("guide"),
+            OfflineSource::StaticContract
+        );
     }
 
     #[test]
     fn default_offline_source_history_is_local_history() {
-        assert_eq!(default_offline_source("history"), OfflineSource::LocalHistory);
+        assert_eq!(
+            default_offline_source("history"),
+            OfflineSource::LocalHistory
+        );
     }
 
     #[test]
@@ -2922,15 +2929,30 @@ mod tests {
 
     #[test]
     fn default_offline_source_hybrid_is_workspace_manifest() {
-        assert_eq!(default_offline_source("list"), OfflineSource::WorkspaceManifest);
-        assert_eq!(default_offline_source("search"), OfflineSource::WorkspaceManifest);
-        assert_eq!(default_offline_source("show"), OfflineSource::WorkspaceManifest);
-        assert_eq!(default_offline_source("ops"), OfflineSource::WorkspaceManifest);
+        assert_eq!(
+            default_offline_source("list"),
+            OfflineSource::WorkspaceManifest
+        );
+        assert_eq!(
+            default_offline_source("search"),
+            OfflineSource::WorkspaceManifest
+        );
+        assert_eq!(
+            default_offline_source("show"),
+            OfflineSource::WorkspaceManifest
+        );
+        assert_eq!(
+            default_offline_source("ops"),
+            OfflineSource::WorkspaceManifest
+        );
     }
 
     #[test]
     fn default_offline_source_passthrough_is_subsystem() {
-        assert_eq!(default_offline_source("supply-chain"), OfflineSource::Subsystem);
+        assert_eq!(
+            default_offline_source("supply-chain"),
+            OfflineSource::Subsystem
+        );
         assert_eq!(default_offline_source("audit"), OfflineSource::Subsystem);
         assert_eq!(default_offline_source("manifest"), OfflineSource::Subsystem);
     }
@@ -2976,7 +2998,10 @@ mod tests {
         ];
         for source in &sources {
             let prov = offline_provenance("list", *source);
-            assert!(!prov.caveat.is_empty(), "Source {source:?} should have a non-empty caveat");
+            assert!(
+                !prov.caveat.is_empty(),
+                "Source {source:?} should have a non-empty caveat"
+            );
         }
     }
 
@@ -2994,7 +3019,11 @@ mod tests {
             .map(|s| offline_provenance("list", *s).caveat)
             .collect();
         let unique: std::collections::HashSet<_> = caveats.iter().collect();
-        assert_eq!(unique.len(), caveats.len(), "Each source should have a distinct caveat");
+        assert_eq!(
+            unique.len(),
+            caveats.len(),
+            "Each source should have a distinct caveat"
+        );
     }
 
     #[test]
@@ -3078,7 +3107,8 @@ mod tests {
                     guidance.acquisition,
                     AuthAcquisitionFlow::Required,
                     "Command '{}' requires token but auth guidance says {:?}",
-                    cls.command, guidance.acquisition
+                    cls.command,
+                    guidance.acquisition
                 );
             }
         }
@@ -3093,7 +3123,8 @@ mod tests {
                     guidance.acquisition,
                     AuthAcquisitionFlow::NotNeeded,
                     "Command '{}' does not require token but auth guidance says {:?}",
-                    cls.command, guidance.acquisition
+                    cls.command,
+                    guidance.acquisition
                 );
             }
         }
@@ -3122,9 +3153,24 @@ mod tests {
     #[test]
     fn auth_ux_guidance_supply_methods_for_required() {
         let guidance = auth_ux_guidance("invoke");
-        assert!(guidance.supply_methods.iter().any(|m| m.contains("--capability-token")));
-        assert!(guidance.supply_methods.iter().any(|m| m.contains("FWC_CAPABILITY_TOKEN")));
-        assert!(guidance.supply_methods.iter().any(|m| m.contains("fwc capabilities issue")));
+        assert!(
+            guidance
+                .supply_methods
+                .iter()
+                .any(|m| m.contains("--capability-token"))
+        );
+        assert!(
+            guidance
+                .supply_methods
+                .iter()
+                .any(|m| m.contains("FWC_CAPABILITY_TOKEN"))
+        );
+        assert!(
+            guidance
+                .supply_methods
+                .iter()
+                .any(|m| m.contains("fwc capabilities issue"))
+        );
     }
 
     #[test]

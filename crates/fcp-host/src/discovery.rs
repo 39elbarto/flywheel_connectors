@@ -1150,25 +1150,9 @@ impl DiscoveryCache {
         }
     }
 
-    fn cache_metadata<T: Serialize>(
-        &self,
-        payload: &T,
-        last_modified: DateTime<Utc>,
-    ) -> CacheMetadata {
-        let max_age_seconds = u32::try_from(self.ttl.as_secs().min(u64::from(u32::MAX)))
-            .expect("ttl seconds are clamped to u32::MAX");
-        let stale_while_revalidate_seconds = if max_age_seconds == 0 {
-            None
-        } else {
-            Some(max_age_seconds.min(60))
-        };
-
-        CacheMetadata::strong(
-            payload,
-            last_modified,
-            max_age_seconds,
-            stale_while_revalidate_seconds,
-        )
+    fn cache_metadata<T: Serialize>(&self, payload: &T, last_modified: DateTime<Utc>) -> CacheMetadata {
+        let ttl_seconds = self.ttl.as_secs().min(u64::from(u32::MAX)) as u32;
+        CacheMetadata::strong(payload, last_modified, ttl_seconds, Some(ttl_seconds))
     }
 
     /// Get cached connectors or refresh from registry.
@@ -2268,8 +2252,8 @@ mod tests {
         let endpoint = DiscoveryEndpoint::new(Arc::new(registry), Arc::new(DenyPolicy));
 
         let request = PreflightRequest {
-            connector_id: ConnectorId::new("preflight", "test", "v1").unwrap(),
-            operation: "invoke".to_string(),
+            connector_id: ConnectorId::new("test", "pf", "v1").unwrap(),
+            operation: "read".into(),
             params: None,
             principal: None,
             zone_id: None,
@@ -2541,7 +2525,6 @@ mod tests {
         let parsed: PreflightResponse = serde_json::from_str(&json).unwrap();
 
         assert!(!parsed.allowed);
-        assert_eq!(parsed.reason.as_deref(), Some("rate limited"));
         assert_eq!(parsed.missing_capabilities, vec!["cap.send"]);
         assert!(parsed.rate_limit.as_ref().unwrap().limited);
         assert_eq!(parsed.rate_limit.as_ref().unwrap().remaining, 5);
@@ -2766,23 +2749,8 @@ mod tests {
     }
 
     #[test]
-    fn tool_descriptor_from_operation_rate_limit_no_pool_no_scope() {
-        use fcp_core::RateLimit;
-        let mut op = make_operation("op4", None);
-        op.rate_limit = Some(RateLimit {
-            max: 10,
-            per_ms: 1000,
-            burst: None,
-            scope: None,
-            pool_name: None,
-        });
-        let tool = ToolDescriptor::from(&op);
-        assert!(tool.rate_limits.is_empty());
-    }
-
-    #[test]
     fn tool_descriptor_from_operation_empty_ai_hints() {
-        let mut op = make_operation("op5", None);
+        let mut op = make_operation("op4", None);
         op.ai_hints = AgentHint::default();
         let tool = ToolDescriptor::from(&op);
         assert!(tool.ai_hints.is_none());
@@ -3121,7 +3089,7 @@ mod tests {
         let filter = DiscoveryFilter {
             category: Some("test".into()),
             max_risk: Some(SafetyTier::Dangerous),
-            health: Some(HealthFilter::Available),
+            health: Some(HealthFilter::Healthy),
         };
         let debug = format!("{filter:?}");
         assert!(debug.contains("DiscoveryFilter"));

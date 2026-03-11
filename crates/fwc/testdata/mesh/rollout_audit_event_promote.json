@@ -1,0 +1,10 @@
+{
+  "connector_id": "fcp.github:enterprise:v1",
+  "state_before": "canary",
+  "state_after": "production",
+  "decision": "promote",
+  "reason_code": "promotion_threshold_met",
+  "message": "Canary met success-rate and latency thresholds; promoted to production.",
+  "observed_at": "2026-03-11T00:00:00Z",
+  "evidence_digest": "blake3-256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+}

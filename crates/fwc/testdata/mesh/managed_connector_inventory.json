@@ -1,0 +1,30 @@
+[
+  {
+    "id": "fcp.github:enterprise:v1",
+    "binary": "/opt/fcp/bin/github",
+    "name": "GitHub Enterprise",
+    "description": "GitHub connector pinned to the primary work node.",
+    "args": ["--serve"],
+    "env": {
+      "FCP_PROFILE": "work"
+    },
+    "config": {
+      "base_url": "https://github.example.test"
+    },
+    "categories": ["code", "dev-tools"],
+    "version": "1.2.3"
+  },
+  {
+    "id": "fcp.slack:workspace:v1",
+    "binary": "/opt/fcp/bin/slack",
+    "name": "Slack Workspace",
+    "description": "Slack connector mirrored for notification fan-out.",
+    "args": [],
+    "env": {},
+    "config": {
+      "workspace": "agent-flywheel"
+    },
+    "categories": ["messaging", "workspace"],
+    "version": "2.0.0"
+  }
+]

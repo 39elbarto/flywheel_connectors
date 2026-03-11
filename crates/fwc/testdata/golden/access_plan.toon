@@ -1,0 +1,6 @@
+ACCESS PLAN
+connector: fcp.github:enterprise:v1
+status: blocked
+reasons: capability_ceiling, approval_required
+next: request scoped approval bundle
+resume: fwc access resume --bundle approval-bundle-42.json

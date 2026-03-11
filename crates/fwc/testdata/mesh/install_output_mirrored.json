@@ -1,0 +1,25 @@
+{
+  "connector_id": "fcp.github:enterprise:v1",
+  "version": "1.2.3",
+  "target": "x86_64-unknown-linux-gnu",
+  "zone_id": "z:work",
+  "manifest_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "binary_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "manifest_object_id": "obj-manifest-0007",
+  "binary_object_id": "obj-binary-0007",
+  "verification": {
+    "publisher_signature_verified": true,
+    "registry_signature_verified": true,
+    "publisher_signatures_valid": 2,
+    "publisher_threshold": 2,
+    "supply_chain_policy_satisfied": true,
+    "capability_ceiling_respected": true,
+    "verified_attestations": ["slsa-provenance", "sigstore-bundle"],
+    "slsa_level": 3,
+    "supply_chain_reason_code": "allow",
+    "supply_chain_evidence_digest": "blake3-256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "supply_chain_artifact_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  },
+  "installed_at": 1710115200,
+  "installed_at_iso": "2026-03-11T00:00:00Z"
+}

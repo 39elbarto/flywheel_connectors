@@ -1,0 +1,10 @@
+{
+  "command": "access",
+  "summary": "Blocked by least-privilege policy gap.",
+  "reason_codes": ["capability_ceiling", "approval_required"],
+  "next_actions": [
+    "Request a temporary approval bundle for github.merge_pull_request",
+    "Refresh revocation state before retrying"
+  ],
+  "resume_command": "fwc access resume --bundle approval-bundle-42.json"
+}

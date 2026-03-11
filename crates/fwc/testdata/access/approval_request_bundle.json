@@ -1,0 +1,17 @@
+{
+  "command": "fwc access plan",
+  "status": "blocked",
+  "reason_codes": ["capability_ceiling", "approval_required"],
+  "requested_scope": {
+    "zone": "z:work",
+    "connector": "fcp.github:enterprise:v1",
+    "operation": "github.merge_pull_request",
+    "capability": "github.pull_request_merge"
+  },
+  "least_privilege_change": {
+    "grant_type": "temporary_approval",
+    "expires_at": "2026-03-11T18:00:00Z",
+    "requires_human": true
+  },
+  "resume_command": "fwc access resume --bundle approval-bundle-42.json"
+}

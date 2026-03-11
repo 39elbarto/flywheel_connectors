@@ -1,0 +1,14 @@
+[
+  {
+    "name": "access-plan",
+    "argv": ["fwc", "access", "plan", "github.merge_pull_request", "--zone", "z:work"]
+  },
+  {
+    "name": "setup-repair",
+    "argv": ["fwc", "setup", "repair", "github", "--resume", "setup-run-17"]
+  },
+  {
+    "name": "mesh-run",
+    "argv": ["fwc", "mesh", "run", "github.list_issues", "--node", "node-macbook-pro"]
+  }
+]

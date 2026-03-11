@@ -1,0 +1,28 @@
+# Shared fixture: the smallest useful two-step pipeline.
+[pipeline]
+name = "simple-pipe"
+description = "Read GitHub issues and post a Slack summary."
+version = "1.0"
+
+[[steps]]
+id = "fetch"
+operation = "github.list_issues"
+input = { owner = "{{params.owner}}", repo = "{{params.repo}}" }
+
+[[steps]]
+id = "notify"
+operation = "slack.send_message"
+depends_on = ["fetch"]
+input = { channel = "{{params.channel}}", text = "Open issues loaded for {{params.repo}}" }
+
+[params.owner]
+type = "string"
+required = true
+
+[params.repo]
+type = "string"
+required = true
+
+[params.channel]
+type = "string"
+default = "#eng-alerts"

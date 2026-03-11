@@ -1799,6 +1799,25 @@ fn push_unique_rate_limit(target: &mut Vec<RateLimitSummary>, candidate: &RateLi
 fn render_value_with_params(value: Value, params: &BTreeMap<String, Value>) -> RenderedValue {
     match value {
         Value::String(template) => {
+            if let Some(placeholder) = exact_template_placeholder(&template)
+                && placeholder.starts_with("params.")
+                && !placeholder.contains('|')
+                && !placeholder.contains(' ')
+            {
+                let unresolved_placeholder = placeholder.to_owned();
+                let context = params_render_context(params);
+                if let Some(value) = resolve_json_path(&context, placeholder) {
+                    return RenderedValue {
+                        value: value.clone(),
+                        unresolved: Vec::new(),
+                    };
+                }
+
+                return RenderedValue {
+                    value: Value::String(template),
+                    unresolved: vec![unresolved_placeholder],
+                };
+            }
             let rendered = render_template_with_params(&template, params);
             RenderedValue {
                 value: Value::String(rendered.text),
@@ -1838,14 +1857,13 @@ fn render_value_with_params(value: Value, params: &BTreeMap<String, Value>) -> R
     }
 }
 
-fn render_template_with_params(
-    template: &str,
-    params: &BTreeMap<String, Value>,
-) -> RenderedTemplate {
-    let mut rendered = String::new();
-    let mut unresolved = Vec::new();
-    let mut cursor = 0;
-    let context = Value::Object(Map::from_iter([(
+fn exact_template_placeholder(template: &str) -> Option<&str> {
+    let inner = template.strip_prefix("{{")?.strip_suffix("}}")?;
+    (!inner.contains("{{") && !inner.contains("}}")).then_some(inner.trim())
+}
+
+fn params_render_context(params: &BTreeMap<String, Value>) -> Value {
+    Value::Object(Map::from_iter([(
         "params".to_owned(),
         Value::Object(
             params
@@ -1853,7 +1871,17 @@ fn render_template_with_params(
                 .map(|(name, value)| (name.clone(), value.clone()))
                 .collect::<Map<_, _>>(),
         ),
-    )]));
+    )]))
+}
+
+fn render_template_with_params(
+    template: &str,
+    params: &BTreeMap<String, Value>,
+) -> RenderedTemplate {
+    let mut rendered = String::new();
+    let mut unresolved = Vec::new();
+    let mut cursor = 0;
+    let context = params_render_context(params);
 
     while let Some(relative_start) = template[cursor..].find("{{") {
         let start = cursor + relative_start;
@@ -2686,6 +2714,61 @@ condition = "{{steps.fetch.output.issues | length}} > 0"
                 .iter()
                 .any(|note| note.contains("Conditional steps"))
         );
+    }
+
+    #[test]
+    fn build_pipeline_plan_preserves_exact_param_placeholder_types() {
+        let definition = parse_pipeline_definition(
+            r#"
+[pipeline]
+name = "typed-params"
+
+[[steps]]
+id = "fetch"
+operation = "github.get_pull_request"
+input = { owner = "{{params.owner}}", pull_number = "{{params.pull_number}}" }
+
+[params.owner]
+type = "string"
+default = "octocat"
+
+[params.pull_number]
+type = "integer"
+default = 1
+"#,
+        )
+        .unwrap();
+
+        let bindings = bind_pipeline_params(&definition, &[]).unwrap();
+        let plan = build_pipeline_plan(&definition, &bindings).unwrap();
+
+        assert_eq!(plan.steps[0].input["owner"], "octocat");
+        assert_eq!(plan.steps[0].input["pull_number"], 1);
+    }
+
+    #[test]
+    fn build_pipeline_plan_keeps_surrounding_whitespace_for_param_templates() {
+        let definition = parse_pipeline_definition(
+            r#"
+[pipeline]
+name = "spaced-params"
+
+[[steps]]
+id = "fetch"
+operation = "github.get_pull_request"
+input = { note = " {{params.pull_number}} " }
+
+[params.pull_number]
+type = "integer"
+default = 1
+"#,
+        )
+        .unwrap();
+
+        let bindings = bind_pipeline_params(&definition, &[]).unwrap();
+        let plan = build_pipeline_plan(&definition, &bindings).unwrap();
+
+        assert_eq!(plan.steps[0].input["note"], " 1 ");
     }
 
     #[test]

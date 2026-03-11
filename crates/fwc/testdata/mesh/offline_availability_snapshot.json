@@ -1,0 +1,19 @@
+{
+  "connector": "fcp.github:enterprise:v1",
+  "mirrors": [
+    {
+      "node": "node-macbook-pro",
+      "manifest_available": true,
+      "binary_available": true
+    },
+    {
+      "node": "node-build-01",
+      "manifest_available": true,
+      "binary_available": false
+    }
+  ],
+  "offline_ready": false,
+  "missing_artifacts": [
+    "binary:x86_64-unknown-linux-gnu"
+  ]
+}

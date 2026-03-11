@@ -1,0 +1,36 @@
+# Shared fixture: pipeline with explicit condition-driven branching.
+[pipeline]
+name = "conditional-pipe"
+description = "Only notify when the filtered issue set is non-empty."
+version = "1.0"
+
+[[steps]]
+id = "fetch"
+operation = "github.list_issues"
+input = { owner = "{{params.owner}}", repo = "{{params.repo}}", state = "open" }
+
+[[steps]]
+id = "notify"
+operation = "slack.send_message"
+depends_on = ["fetch"]
+condition = "{{steps.fetch.output | length}} > 0"
+input = { channel = "{{params.channel}}", text = "There are open issues to triage." }
+
+[[steps]]
+id = "quiet_log"
+operation = "noop.echo"
+depends_on = ["fetch"]
+condition = "{{steps.fetch.output | length}} == 0"
+input = { message = "No issues matched the filter." }
+
+[params.owner]
+type = "string"
+required = true
+
+[params.repo]
+type = "string"
+required = true
+
+[params.channel]
+type = "string"
+default = "#triage"

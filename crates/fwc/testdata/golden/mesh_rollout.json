@@ -1,0 +1,8 @@
+{
+  "command": "mesh",
+  "summary": "Canary promoted after healthy convergence.",
+  "selected_node": "node-macbook-pro",
+  "cohort": "work-primary",
+  "decision": "promote",
+  "evidence_digest": "blake3-256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+}

@@ -1,0 +1,442 @@
+{
+  "connector": {
+    "id": "fcp.github:enterprise:v1",
+    "name": "GitHub Enterprise",
+    "description": "GitHub connector surfaced through fcp-host.",
+    "version": "1.2.3",
+    "categories": ["code", "dev-tools"],
+    "tool_count": 10,
+    "max_safety_tier": "dangerous",
+    "enabled": true,
+    "health": { "status": "healthy" },
+    "last_health_check": "2026-03-10T00:00:00Z"
+  },
+  "tools": [
+    {
+      "name": "github.create_issue",
+      "description": "Create a GitHub issue in a repository.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "owner": { "type": "string" },
+          "repo": { "type": "string" },
+          "title": { "type": "string" },
+          "body": { "type": "string" }
+        },
+        "required": ["owner", "repo", "title"]
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "number": { "type": "integer" },
+          "url": { "type": "string" },
+          "state": { "type": "string" }
+        },
+        "required": ["number", "url", "state"]
+      },
+      "capability": "github.issue_write",
+      "risk_level": "medium",
+      "safety_tier": "risky",
+      "idempotency": "none",
+      "approval_mode": "interactive",
+      "requires_confirmation": true,
+      "idempotent": false,
+      "supports_simulate": true,
+      "rate_limits": ["core"],
+      "examples": [
+        {
+          "description": "Minimal issue creation payload.",
+          "input": {
+            "owner": "octocat",
+            "repo": "hello-world",
+            "title": "Bug report"
+          },
+          "output": {
+            "number": 42,
+            "url": "https://example.test/issues/42",
+            "state": "open"
+          }
+        }
+      ],
+      "ai_hints": {
+        "when_to_use": "Use this when you need to file a new task or bug in GitHub.",
+        "common_mistakes": ["Forgetting the repository owner."],
+        "examples": [],
+        "related": ["github.get_issue", "github.list_issues"]
+      }
+    },
+    {
+      "name": "github.list_issues",
+      "description": "List issues in a repository.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "owner": { "type": "string" },
+          "repo": { "type": "string" },
+          "state": { "type": "string" },
+          "label": { "type": "string" }
+        },
+        "required": ["owner", "repo"]
+      },
+      "output_schema": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "number": { "type": "integer" },
+            "title": { "type": "string" },
+            "state": { "type": "string" }
+          },
+          "required": ["number", "title", "state"]
+        }
+      },
+      "capability": "github.issue_read",
+      "risk_level": "low",
+      "safety_tier": "safe",
+      "idempotency": "strict",
+      "approval_mode": null,
+      "requires_confirmation": false,
+      "idempotent": true,
+      "supports_simulate": true,
+      "rate_limits": ["core"],
+      "examples": [],
+      "ai_hints": {
+        "when_to_use": "Use this to scan current issue state before taking action.",
+        "common_mistakes": ["Forgetting to narrow the state filter for large repositories."],
+        "examples": [],
+        "related": ["github.get_issue"]
+      }
+    },
+    {
+      "name": "github.get_issue",
+      "description": "Fetch an existing GitHub issue by number.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "owner": { "type": "string" },
+          "repo": { "type": "string" },
+          "number": { "type": "integer" }
+        },
+        "required": ["owner", "repo", "number"]
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "number": { "type": "integer" },
+          "title": { "type": "string" },
+          "state": { "type": "string" },
+          "url": { "type": "string" }
+        },
+        "required": ["number", "title", "state", "url"]
+      },
+      "capability": "github.issue_read",
+      "risk_level": "low",
+      "safety_tier": "safe",
+      "idempotency": "strict",
+      "approval_mode": null,
+      "requires_confirmation": false,
+      "idempotent": true,
+      "supports_simulate": true,
+      "rate_limits": ["core"],
+      "examples": [],
+      "ai_hints": {
+        "when_to_use": "Use this when you need details about a specific issue.",
+        "common_mistakes": ["Passing a pull request number instead of an issue number."],
+        "examples": [],
+        "related": ["github.list_issues", "github.add_comment"]
+      }
+    },
+    {
+      "name": "github.add_comment",
+      "description": "Add a comment to an issue.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "owner": { "type": "string" },
+          "repo": { "type": "string" },
+          "number": { "type": "integer" },
+          "body": { "type": "string" }
+        },
+        "required": ["owner", "repo", "number", "body"]
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "integer" },
+          "url": { "type": "string" }
+        },
+        "required": ["id", "url"]
+      },
+      "capability": "github.comment_write",
+      "risk_level": "medium",
+      "safety_tier": "risky",
+      "idempotency": "best_effort",
+      "approval_mode": "policy",
+      "requires_confirmation": true,
+      "idempotent": true,
+      "supports_simulate": true,
+      "rate_limits": ["core"],
+      "examples": [],
+      "ai_hints": {
+        "when_to_use": "Use this to post follow-up analysis or remediation updates.",
+        "common_mistakes": ["Omitting context that explains why the comment is being posted."],
+        "examples": [],
+        "related": ["github.get_issue"]
+      }
+    },
+    {
+      "name": "github.list_pull_requests",
+      "description": "List pull requests in a repository.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "owner": { "type": "string" },
+          "repo": { "type": "string" },
+          "state": { "type": "string" }
+        },
+        "required": ["owner", "repo"]
+      },
+      "output_schema": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "number": { "type": "integer" },
+            "title": { "type": "string" },
+            "state": { "type": "string" },
+            "branch": { "type": "string" }
+          },
+          "required": ["number", "title", "state", "branch"]
+        }
+      },
+      "capability": "github.pull_request_read",
+      "risk_level": "low",
+      "safety_tier": "safe",
+      "idempotency": "strict",
+      "approval_mode": null,
+      "requires_confirmation": false,
+      "idempotent": true,
+      "supports_simulate": true,
+      "rate_limits": ["core"],
+      "examples": [],
+      "ai_hints": {
+        "when_to_use": "Use this when triaging review queues or release candidates.",
+        "common_mistakes": ["Treating draft pull requests as ready-to-merge."],
+        "examples": [],
+        "related": ["github.merge_pull_request"]
+      }
+    },
+    {
+      "name": "github.merge_pull_request",
+      "description": "Merge a pull request after checks pass.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "owner": { "type": "string" },
+          "repo": { "type": "string" },
+          "number": { "type": "integer" },
+          "merge_method": { "type": "string" }
+        },
+        "required": ["owner", "repo", "number"]
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "merged": { "type": "boolean" },
+          "sha": { "type": "string" }
+        },
+        "required": ["merged", "sha"]
+      },
+      "capability": "github.pull_request_merge",
+      "risk_level": "high",
+      "safety_tier": "dangerous",
+      "idempotency": "none",
+      "approval_mode": "interactive",
+      "requires_confirmation": true,
+      "idempotent": false,
+      "supports_simulate": true,
+      "rate_limits": ["core"],
+      "examples": [],
+      "ai_hints": {
+        "when_to_use": "Use this only after branch protection and review requirements are satisfied.",
+        "common_mistakes": ["Merging the wrong branch during a release train."],
+        "examples": [],
+        "related": ["github.list_pull_requests"]
+      }
+    },
+    {
+      "name": "github.create_label",
+      "description": "Create a repository label.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "owner": { "type": "string" },
+          "repo": { "type": "string" },
+          "name": { "type": "string" },
+          "color": { "type": "string" }
+        },
+        "required": ["owner", "repo", "name", "color"]
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "color": { "type": "string" },
+          "url": { "type": "string" }
+        },
+        "required": ["name", "color", "url"]
+      },
+      "capability": "github.label_write",
+      "risk_level": "medium",
+      "safety_tier": "risky",
+      "idempotency": "best_effort",
+      "approval_mode": "policy",
+      "requires_confirmation": true,
+      "idempotent": true,
+      "supports_simulate": true,
+      "rate_limits": ["core"],
+      "examples": [],
+      "ai_hints": {
+        "when_to_use": "Use this when a workflow depends on a label taxonomy that is missing.",
+        "common_mistakes": ["Choosing colors that collide with existing status labels."],
+        "examples": [],
+        "related": ["github.set_issue_labels"]
+      }
+    },
+    {
+      "name": "github.set_issue_labels",
+      "description": "Replace all labels on an issue.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "owner": { "type": "string" },
+          "repo": { "type": "string" },
+          "number": { "type": "integer" },
+          "labels": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        },
+        "required": ["owner", "repo", "number", "labels"]
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "number": { "type": "integer" },
+          "labels": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        },
+        "required": ["number", "labels"]
+      },
+      "capability": "github.issue_label_write",
+      "risk_level": "medium",
+      "safety_tier": "risky",
+      "idempotency": "none",
+      "approval_mode": "policy",
+      "requires_confirmation": true,
+      "idempotent": false,
+      "supports_simulate": true,
+      "rate_limits": ["core"],
+      "examples": [],
+      "ai_hints": {
+        "when_to_use": "Use this to align an issue with a workflow or triage lane.",
+        "common_mistakes": ["Forgetting that this replaces the full label set rather than appending."],
+        "examples": [],
+        "related": ["github.create_label", "github.get_issue"]
+      }
+    },
+    {
+      "name": "github.list_releases",
+      "description": "List repository releases.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "owner": { "type": "string" },
+          "repo": { "type": "string" }
+        },
+        "required": ["owner", "repo"]
+      },
+      "output_schema": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "tag_name": { "type": "string" },
+            "name": { "type": "string" },
+            "draft": { "type": "boolean" }
+          },
+          "required": ["tag_name", "name", "draft"]
+        }
+      },
+      "capability": "github.release_read",
+      "risk_level": "low",
+      "safety_tier": "safe",
+      "idempotency": "strict",
+      "approval_mode": null,
+      "requires_confirmation": false,
+      "idempotent": true,
+      "supports_simulate": true,
+      "rate_limits": ["core"],
+      "examples": [],
+      "ai_hints": {
+        "when_to_use": "Use this before planning release automation or rollback work.",
+        "common_mistakes": ["Assuming the latest release is always the highest semantic version."],
+        "examples": [],
+        "related": ["github.dispatch_workflow"]
+      }
+    },
+    {
+      "name": "github.dispatch_workflow",
+      "description": "Dispatch a GitHub Actions workflow.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "owner": { "type": "string" },
+          "repo": { "type": "string" },
+          "workflow": { "type": "string" },
+          "ref": { "type": "string" },
+          "inputs": { "type": "object" }
+        },
+        "required": ["owner", "repo", "workflow", "ref"]
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "run_id": { "type": "integer" },
+          "status": { "type": "string" }
+        },
+        "required": ["run_id", "status"]
+      },
+      "capability": "github.workflow_dispatch",
+      "risk_level": "high",
+      "safety_tier": "dangerous",
+      "idempotency": "none",
+      "approval_mode": "interactive",
+      "requires_confirmation": true,
+      "idempotent": false,
+      "supports_simulate": true,
+      "rate_limits": ["actions"],
+      "examples": [],
+      "ai_hints": {
+        "when_to_use": "Use this to trigger a workflow that cannot be expressed as a read-only inspection.",
+        "common_mistakes": ["Dispatching against the wrong ref or environment."],
+        "examples": [],
+        "related": ["github.list_releases"]
+      }
+    }
+  ],
+  "rate_limits": {
+    "limits": [],
+    "tool_pool_map": {}
+  },
+  "archetype": "request_response",
+  "introspection": {
+    "operations": [],
+    "events": [],
+    "resource_types": [],
+    "auth_caps": null,
+    "event_caps": null
+  }
+}

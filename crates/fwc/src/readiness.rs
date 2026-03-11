@@ -1256,7 +1256,7 @@ fn discovered_operation_from_toml(
     let approval_mode = operation
         .get("requires_approval")
         .and_then(toml::Value::as_str)
-        .unwrap_or("")
+        .unwrap_or("none")
         .to_owned();
     let idempotency = operation
         .get("idempotency")
@@ -1331,7 +1331,7 @@ fn discovered_operation_from_toml(
             risk_level,
             safety_tier,
             idempotency,
-            requires_approval: approval_mode != "none",
+            requires_approval: !approval_mode.is_empty() && approval_mode != "none",
             // Raw manifest fallback must not invent simulate capability.
             supports_simulate: false,
         },
@@ -1847,8 +1847,8 @@ pub fn evaluate_introspection(
         reports_lifecycle_state: true, // BaseConnector provides it
         events_declared: true,         // event declaration is optional; all connectors pass
         has_rate_limits,
-        has_metrics: true,             // trait requires metrics()
-        has_shutdown: true,            // trait requires shutdown()
+        has_metrics: true,  // trait requires metrics()
+        has_shutdown: true, // trait requires shutdown()
     };
 
     let areas = ReadinessAreas {
@@ -5385,6 +5385,43 @@ output_schema = { type = "object" }
         .expect("discovery fallback should parse operation");
 
         assert!(!discovered.summary.supports_simulate);
+    }
+
+    #[test]
+    fn discovered_operation_from_toml_without_approval_metadata_keeps_requirement_false() {
+        let manifest: toml::Value = toml::from_str(
+            r#"
+[provides.operations.echo]
+description = "Echo"
+capability = "legacy.echo"
+risk_level = "low"
+safety_tier = "safe"
+idempotency = "strict"
+input_schema = { type = "object" }
+output_schema = { type = "object" }
+"#,
+        )
+        .expect("manifest snippet should parse");
+
+        let operation = manifest
+            .get("provides")
+            .and_then(toml::Value::as_table)
+            .and_then(|provides| provides.get("operations"))
+            .and_then(toml::Value::as_table)
+            .and_then(|operations| operations.get("echo"))
+            .expect("echo op should exist");
+
+        let discovered = discovered_operation_from_toml(
+            "legacy",
+            "legacy.echo",
+            operation,
+            Path::new("legacy-manifest.toml"),
+        )
+        .expect("discovery fallback should parse operation");
+
+        assert_eq!(discovered.approval_mode, "none");
+        assert!(!discovered.summary.requires_approval);
+        assert!(discovered.operation_info().requires_approval.is_none());
     }
 
     #[test]

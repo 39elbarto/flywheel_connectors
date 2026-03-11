@@ -1,0 +1,8 @@
+{
+  "error": {
+    "status": 429,
+    "code": "rate_limited",
+    "message": "Too many requests in the current window.",
+    "retry_after_seconds": 30
+  }
+}

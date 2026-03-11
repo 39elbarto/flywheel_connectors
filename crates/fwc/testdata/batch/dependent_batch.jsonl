@@ -1,0 +1,3 @@
+{"id":"create-issue","connector":"github","operation":"create_issue","input":{"owner":"octocat","repo":"hello-world","title":"Follow up","body":"Opened from dependent batch fixture."}}
+{"id":"comment","connector":"github","operation":"add_comment","depends_on":["create-issue"],"input":{"owner":"octocat","repo":"hello-world","number":42,"body":"Dependent step completed."}}
+{"id":"announce","connector":"slack","operation":"send_message","depends_on":["comment"],"input":{"channel":"C12345678","text":"Dependent workflow finished."}}

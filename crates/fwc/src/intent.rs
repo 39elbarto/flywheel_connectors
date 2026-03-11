@@ -386,7 +386,7 @@ fn build_lifecycle_plan(
             last.argv.push("<version-or-channel>".to_owned());
             last.command_line = shell_join(&last.argv);
             last.notes.push(
-                "This placeholder must be replaced with a concrete version or channel before real execution."
+                "Replace this unresolved version/channel argument before real execution."
                     .to_owned(),
             );
         }
@@ -791,7 +791,7 @@ fn build_operation_plan(
                 false,
                 false,
                 vec![format!(
-                    "Use the search result to replace any placeholder resource identifiers before real execution on `{connector}`."
+                    "Use the search result to fill in the unresolved resource identifier before real execution on `{connector}`."
                 )],
             ));
         } else if action.mutating {

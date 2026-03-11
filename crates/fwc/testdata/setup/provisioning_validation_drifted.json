@@ -1,0 +1,7 @@
+{
+  "valid": false,
+  "errors": [
+    "registered webhook endpoint does not match the expected public callback URL",
+    "stored tenant binding no longer matches the upstream installation"
+  ]
+}

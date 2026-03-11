@@ -1,0 +1,17 @@
+{
+  "zone": "z:work",
+  "connector": "fcp.github:enterprise:v1",
+  "policy_conflicts": [
+    {
+      "type": "capability_ceiling",
+      "requested_capability": "github.pull_request_merge",
+      "current_ceiling": "github.pull_request_read"
+    },
+    {
+      "type": "approval_mode_mismatch",
+      "requested_mode": "interactive",
+      "current_mode": "policy"
+    }
+  ],
+  "safe_next_step": "request an interactive approval bundle scoped to github.merge_pull_request"
+}

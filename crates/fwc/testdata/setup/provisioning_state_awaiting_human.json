@@ -1,0 +1,15 @@
+{
+  "status": "awaiting_user",
+  "current_step": "oauth",
+  "completed_steps": ["open-consent"],
+  "remaining_steps": ["register-webhook"],
+  "awaiting_human": [
+    {
+      "step_id": "oauth",
+      "prompt_type": "url",
+      "message": "Approve the GitHub application in the browser.",
+      "url": "https://github.example.test/oauth/authorize"
+    }
+  ],
+  "error_message": null
+}

@@ -1,0 +1,54 @@
+# Shared fixture: five-step dependency graph for orchestration tests.
+[pipeline]
+name = "multi-step-pipe"
+description = "Collect issues, create an issue, annotate it, and announce the result."
+version = "1.1"
+
+[[steps]]
+id = "list_existing"
+operation = "github.list_issues"
+input = { owner = "{{params.owner}}", repo = "{{params.repo}}" }
+
+[[steps]]
+id = "create_issue"
+operation = "github.create_issue"
+depends_on = ["list_existing"]
+input = { owner = "{{params.owner}}", repo = "{{params.repo}}", title = "{{params.title}}", body = "{{params.body}}" }
+
+[[steps]]
+id = "annotate"
+operation = "github.add_comment"
+depends_on = ["create_issue"]
+input = { owner = "{{params.owner}}", repo = "{{params.repo}}", number = "{{steps.create_issue.output.number}}", body = "Created by shared pipeline fixture." }
+
+[[steps]]
+id = "label"
+operation = "github.set_issue_labels"
+depends_on = ["create_issue"]
+input = { owner = "{{params.owner}}", repo = "{{params.repo}}", number = "{{steps.create_issue.output.number}}", labels = ["automation", "triage"] }
+
+[[steps]]
+id = "notify"
+operation = "slack.send_message"
+depends_on = ["annotate", "label"]
+input = { channel = "{{params.channel}}", text = "Created issue {{steps.create_issue.output.number}} for {{params.repo}}" }
+
+[params.owner]
+type = "string"
+required = true
+
+[params.repo]
+type = "string"
+required = true
+
+[params.title]
+type = "string"
+required = true
+
+[params.body]
+type = "string"
+default = "Generated from a shared test fixture."
+
+[params.channel]
+type = "string"
+default = "#release-ops"

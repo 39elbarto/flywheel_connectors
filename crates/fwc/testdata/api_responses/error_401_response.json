@@ -1,0 +1,7 @@
+{
+  "error": {
+    "status": 401,
+    "code": "unauthorized",
+    "message": "Access token expired for connector workspace."
+  }
+}

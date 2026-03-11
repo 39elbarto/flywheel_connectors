@@ -1,0 +1,45 @@
+{
+  "id": "github-onboarding",
+  "version": "1",
+  "description": "Provision a GitHub connector with OAuth and webhook setup.",
+  "steps": [
+    {
+      "id": "open-consent",
+      "type": "open_url",
+      "url": "https://github.example.test/oauth/authorize"
+    },
+    {
+      "id": "oauth",
+      "type": "oauth",
+      "flow": {
+        "type": "authorization_code_pkce",
+        "authorization_url": "https://github.example.test/oauth/authorize",
+        "token_url": "https://github.example.test/oauth/token",
+        "scopes": ["repo", "workflow"],
+        "auto_browser": true,
+        "callback_port": 8732
+      }
+    },
+    {
+      "id": "register-webhook",
+      "type": "webhook",
+      "registration": {
+        "registration_url": "https://api.github.example.test/repos/octocat/hello-world/hooks",
+        "events": ["issues", "pull_request"],
+        "verification": {
+          "type": "hmac_signature",
+          "algorithm": "sha256",
+          "header": "X-Hub-Signature-256"
+        },
+        "retry_policy": {
+          "max_attempts": 3,
+          "initial_delay": 250,
+          "max_delay": 2000,
+          "multiplier": 2.0
+        }
+      },
+      "depends_on": ["oauth"],
+      "requires_approval": true
+    }
+  ]
+}

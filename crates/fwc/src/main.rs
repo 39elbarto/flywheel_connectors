@@ -146,9 +146,10 @@ use crate::package_cmd::{
     PackageArgs as PackageBuildArgs, PackageOutput,
 };
 use crate::readiness::{
-    DiscoveredConnector, DiscoveredOperation, DiscoveryCatalog, SelectorError, SelectorErrorKind,
-    idempotency_label, normalize_connector_selector, normalize_operation_selector,
-    risk_level_label, safety_tier_label, selector_distance,
+    ConnectorDetail, ConnectorState, ConnectorSummary, DiscoveredConnector, DiscoveredOperation,
+    DiscoveryCatalog, OperationSummary, SelectorError, SelectorErrorKind, idempotency_label,
+    normalize_connector_selector, normalize_operation_selector, risk_level_label,
+    safety_tier_label, selector_distance,
 };
 use crate::render::{
     ExtractRender, OutputFormat, RenderOptions, TemplateRender, render_with_options, token_stats,
@@ -204,7 +205,7 @@ Examples:
   fwc recipe dry-run github-pr-review-notify
   fwc recipe export github-pr-review-notify > .fwc/pipelines/github-pr-review-notify.toml
   fwc export-tools --host http://127.0.0.1:8787 --format mcp --json
-  fwc export-tools --format claude github
+  fwc export-tools --offline --format claude github
   fwc export-tools --format openai --risk-max medium --output tools.json
   fwc serve-mcp --host http://127.0.0.1:8787 github --capability-token <token>
 ";
@@ -674,6 +675,10 @@ struct ListArgs {
     /// Filter to a connector category such as messaging or analytics.
     #[arg(long)]
     category: Option<String>,
+
+    /// Read explicit offline workspace-manifest metadata instead of live host inventory.
+    #[arg(long, default_value_t = false)]
+    offline: bool,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -716,12 +721,20 @@ struct SearchArgs {
     /// Maximum number of results to return.
     #[arg(long, default_value_t = 20)]
     limit: usize,
+
+    /// Read explicit offline workspace-manifest metadata instead of live host inventory.
+    #[arg(long, default_value_t = false)]
+    offline: bool,
 }
 
 #[derive(Args, Debug, Serialize)]
 struct ShowArgs {
     /// Connector id, alias, or family name.
     connector: String,
+
+    /// Read explicit offline workspace-manifest metadata instead of live host inventory.
+    #[arg(long, default_value_t = false)]
+    offline: bool,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -732,6 +745,10 @@ struct OpsArgs {
     /// Optional risk ceiling to hide more dangerous operations.
     #[arg(long)]
     risk_at_most: Option<String>,
+
+    /// Read explicit offline workspace-manifest metadata instead of live host inventory.
+    #[arg(long, default_value_t = false)]
+    offline: bool,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -757,6 +774,10 @@ struct SchemaArgs {
     /// Generate a minimal JSON scaffold with required-field placeholders.
     #[arg(long)]
     scaffold: bool,
+
+    /// Read explicit offline workspace-manifest metadata instead of live host inventory.
+    #[arg(long, default_value_t = false)]
+    offline: bool,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -766,6 +787,10 @@ struct ExampleArgs {
 
     /// Optional operation name for an operation-specific example.
     operation: Option<String>,
+
+    /// Read explicit offline workspace-manifest metadata instead of live host inventory.
+    #[arg(long, default_value_t = false)]
+    offline: bool,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -1161,6 +1186,10 @@ struct ExportToolsArgs {
     /// Write output to a file instead of stdout.
     #[arg(long, value_name = "PATH")]
     output: Option<PathBuf>,
+
+    /// Read explicit offline workspace-manifest metadata instead of live host inventory.
+    #[arg(long, default_value_t = false)]
+    offline: bool,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -1205,6 +1234,10 @@ struct SuggestArgs {
     /// Maximum number of suggestions.
     #[arg(long, default_value_t = 10)]
     limit: usize,
+
+    /// Read explicit offline workspace-manifest metadata instead of live host inventory.
+    #[arg(long, default_value_t = false)]
+    offline: bool,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -1222,6 +1255,10 @@ struct TemplateArgs {
     /// Pre-fill values as key=value pairs (comma separated).
     #[arg(long)]
     fill: Option<String>,
+
+    /// Read explicit offline workspace-manifest metadata instead of live host inventory.
+    #[arg(long, default_value_t = false)]
+    offline: bool,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -1239,6 +1276,10 @@ struct ValidateArgs {
     /// File path for input JSON to validate.
     #[arg(long, value_name = "PATH")]
     input_file: Option<std::path::PathBuf>,
+
+    /// Read explicit offline workspace-manifest metadata instead of live host inventory.
+    #[arg(long, default_value_t = false)]
+    offline: bool,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -1630,7 +1671,7 @@ fn execute_serve_mcp(prepared: &PreparedCli, args: &ServeMcpArgs) -> Result<Exec
                 }),
                 vec![
                     "fwc serve-mcp --host <endpoint>".to_owned(),
-                    "Use `fwc export-tools` if you only need offline tool definitions without live execution."
+                    "Use `fwc export-tools --offline` if you only need offline tool definitions without live execution."
                         .to_owned(),
                 ],
             ),
@@ -2189,7 +2230,7 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         }
         Commands::Do(args) => intent_do_dispatch(args)?,
         Commands::List(args) => list_dispatch(args, cli.host.as_deref())?,
-        Commands::Search(args) => search_dispatch(args)?,
+        Commands::Search(args) => search_dispatch(args, cli.host.as_deref())?,
         Commands::Show(args) => show_dispatch(args, cli.host.as_deref())?,
         Commands::Ops(args) => ops_dispatch(args, cli.host.as_deref())?,
         Commands::Schema(args) => schema_dispatch(args, cli.host.as_deref())?,
@@ -2216,9 +2257,9 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         Commands::Cancel(args) => cancel_dispatch(args, cli.host.as_deref())?,
         Commands::ExportTools(args) => export_tools_dispatch(args, cli.host.as_deref())?,
         Commands::ServeMcp(args) => planned("serve-mcp", args)?,
-        Commands::Suggest(args) => suggest_dispatch(args)?,
-        Commands::Template(args) => template_dispatch(args)?,
-        Commands::Validate(args) => validate_dispatch(args)?,
+        Commands::Suggest(args) => suggest_dispatch(args, cli.host.as_deref())?,
+        Commands::Template(args) => template_dispatch(args, cli.host.as_deref())?,
+        Commands::Validate(args) => validate_dispatch(args, cli.host.as_deref())?,
         Commands::History(args) => history_dispatch(args)?,
         Commands::Pipe(args) => pipe_dispatch(args)?,
         Commands::Pipeline(args) => pipeline_dispatch(args, cli.host.as_deref())?,
@@ -3014,6 +3055,15 @@ fn host_tool_related(tool: &HostToolDescriptor) -> Vec<String> {
     })
 }
 
+const fn host_approval_mode_label(mode: fcp_core::ApprovalMode) -> &'static str {
+    match mode {
+        fcp_core::ApprovalMode::None => "none",
+        fcp_core::ApprovalMode::Policy => "policy",
+        fcp_core::ApprovalMode::Interactive => "interactive",
+        fcp_core::ApprovalMode::ElevationToken => "elevation_token",
+    }
+}
+
 fn host_tool_agent_hints(tool: &HostToolDescriptor) -> AgentHint {
     let mut hints = tool.ai_hints.clone().unwrap_or_default();
     let mut seen_examples = hints.examples.iter().cloned().collect::<BTreeSet<_>>();
@@ -3083,6 +3133,135 @@ fn host_mcp_tool_definitions(
             )
         })
         .collect()
+}
+
+fn host_discovered_operation(tool: &HostToolDescriptor) -> DiscoveredOperation {
+    let local_id = tool.name.rsplit('.').next().unwrap_or(tool.name.as_str());
+    let summary = if tool.description.trim().is_empty() {
+        tool.name.clone()
+    } else {
+        tool.description.clone()
+    };
+
+    DiscoveredOperation {
+        actual_id: tool.name.clone(),
+        local_id: local_id.to_owned(),
+        preferred_selector: tool.name.clone(),
+        aliases: host_tool_aliases(tool),
+        description: summary.clone(),
+        summary: OperationSummary {
+            id: tool.name.clone(),
+            summary,
+            capability: tool.capability.to_string(),
+            risk_level: risk_level_label(tool.risk_level).to_owned(),
+            safety_tier: safety_tier_label(tool.safety_tier).to_owned(),
+            idempotency: idempotency_label(tool.idempotency).to_owned(),
+            requires_approval: tool.approval_mode.is_some(),
+            supports_simulate: tool.supports_simulate,
+        },
+        input_schema: tool.input_schema.clone(),
+        output_schema: tool.output_schema.clone(),
+        approval_mode: tool.approval_mode.map_or_else(
+            || "none".to_owned(),
+            |mode| host_approval_mode_label(mode).to_owned(),
+        ),
+        when_to_use: host_tool_when_to_use(tool),
+        common_mistakes: host_tool_common_mistakes(tool),
+        examples: host_tool_example_strings(tool),
+        related: host_tool_related(tool),
+        network_constraints: None,
+        rate_limits: Vec::new(),
+    }
+}
+
+fn host_discovered_connector(
+    connector: &HostConnectorRecord,
+    introspection: &HostIntrospectionResponse,
+) -> DiscoveredConnector {
+    let mut operations = introspection
+        .tools
+        .iter()
+        .map(host_discovered_operation)
+        .collect::<Vec<_>>();
+    operations.sort_by(|left, right| left.preferred_selector.cmp(&right.preferred_selector));
+
+    let max_risk = operations
+        .iter()
+        .map(|operation| operation.summary.risk_level.as_str())
+        .max_by_key(|risk| risk_rank(risk))
+        .unwrap_or("low")
+        .to_owned();
+    let has_events = introspection.introspection.event_caps.is_some()
+        || !introspection.introspection.events.is_empty();
+    let archetypes = serde_json::to_value(introspection.archetype)
+        .ok()
+        .and_then(|value| value.as_str().map(ToOwned::to_owned))
+        .map_or_else(Vec::new, |label| vec![label]);
+    let categories = connector.summary.categories.clone();
+    let slug = connector.slug.clone();
+
+    DiscoveredConnector {
+        slug,
+        manifest_path: String::new(),
+        cohort: categories
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "other".to_owned()),
+        runtime_format: "host-admin-api".to_owned(),
+        state_model: None,
+        supported_zones: Vec::new(),
+        detail: ConnectorDetail {
+            summary: ConnectorSummary {
+                id: connector.summary.id.as_str().to_owned(),
+                name: connector.summary.name.clone(),
+                version: connector.summary.version.to_string(),
+                description: connector.summary.description.clone().unwrap_or_else(|| {
+                    "Host discovery did not include a connector description.".to_owned()
+                }),
+                archetypes,
+                state: ConnectorState::Unknown,
+                operation_count: operations.len(),
+                max_risk,
+                has_events,
+            },
+            operations: operations
+                .iter()
+                .map(|operation| operation.summary.clone())
+                .collect(),
+            config_schema: None,
+            health: None,
+            rate_limits: Vec::new(),
+        },
+        zones: Value::Null,
+        capabilities: Value::Null,
+        connector_schema: Value::Null,
+        operations,
+    }
+}
+
+fn load_live_discovered_connectors(
+    client: &HostAdminClient,
+    catalog: &HostConnectorCatalog,
+) -> Result<(Vec<DiscoveredConnector>, Vec<Value>)> {
+    let mut connectors = Vec::with_capacity(catalog.connectors.len());
+    let mut metadata_gaps = Vec::new();
+
+    for connector in &catalog.connectors {
+        let introspection = client.introspect(connector.summary.id.as_str())?;
+        metadata_gaps.extend(host_metadata_gaps(&introspection).into_iter().map(|gap| {
+            json!({
+                "connector": {
+                    "slug": &connector.slug,
+                    "canonical_id": connector.summary.id.as_str(),
+                    "name": &connector.summary.name,
+                },
+                "gap": gap,
+            })
+        }));
+        connectors.push(host_discovered_connector(connector, &introspection));
+    }
+
+    Ok((connectors, metadata_gaps))
 }
 
 fn host_connector_schema_glossary(
@@ -3585,8 +3764,27 @@ fn examples_dispatch_host(args: &ExampleArgs, host: &str) -> Result<DispatchOutc
 }
 
 fn list_dispatch(args: &ListArgs, host: Option<&str>) -> Result<DispatchOutcome> {
-    if let Some(host) = resolve_host_config(host)? {
+    let resolved_host = resolve_host_config(host)?;
+    if args.offline {
+        if resolved_host.is_some() {
+            return Ok(conflicting_catalog_mode_dispatch("list"));
+        }
+    } else if let Some(host) = resolved_host {
         return list_dispatch_host(args, &host.endpoint);
+    } else {
+        return Ok(missing_host_dispatch(
+            "list",
+            json!({
+                "filters": {
+                    "zone": args.zone,
+                    "category": args.category,
+                },
+            }),
+            vec![
+                "fwc list --host <endpoint>".to_owned(),
+                "fwc list --offline".to_owned(),
+            ],
+        ));
     }
 
     let catalog = DiscoveryCatalog::load()?;
@@ -3605,12 +3803,13 @@ fn list_dispatch(args: &ListArgs, host: Option<&str>) -> Result<DispatchOutcome>
             "status": "ok",
             "command": "list",
             "source": "workspace-manifests",
+            "mode": "offline-artifact",
             "message": format!("Listed {} connectors from workspace manifests.", connectors.len()),
             "filters": filters,
             "connectors": connectors,
             "next_actions": [
-                "Use `fwc show <connector>` to inspect one connector in detail.",
-                "Use `fwc ops <connector>` to enumerate operations before asking for schemas.",
+                "Use `fwc show <connector> --offline` to inspect one connector in detail.",
+                "Use `fwc ops <connector> --offline` to enumerate operations before asking for schemas.",
             ],
         }),
         exit_code: CliExitCode::Success,
@@ -3901,7 +4100,105 @@ fn context_dispatch(args: &ContextArgs) -> Result<DispatchOutcome> {
     }
 }
 
-fn search_dispatch(args: &SearchArgs) -> Result<DispatchOutcome> {
+fn search_dispatch_host(args: &SearchArgs, host: &str) -> Result<DispatchOutcome> {
+    let client = HostAdminClient::new(host)?;
+    let (catalog, _) = client.catalog(None)?;
+    let (connectors, metadata_gaps) = load_live_discovered_connectors(&client, &catalog)?;
+    let filter_gaps = host_filter_gaps(args.zone.as_deref());
+    let filters = search::SearchFilters {
+        connector: args.connector.clone(),
+        capability: args.capability.clone(),
+        risk_max: args.risk.as_deref().and_then(search::RiskCeiling::parse),
+        safety_max: args
+            .safety
+            .as_deref()
+            .and_then(search::SafetyCeiling::parse),
+        archetype: args.archetype.clone(),
+        category: args.category.clone(),
+        idempotent_only: args.idempotent,
+        zone: if filter_gaps.is_empty() {
+            args.zone.clone()
+        } else {
+            None
+        },
+    };
+    let results = search::search_operations(&connectors, &args.query, &filters);
+    let total = results.len();
+    let json_results = search::results_to_json(&results, args.limit);
+    let active_filters: Vec<String> = [
+        args.connector.as_deref().map(|v| format!("connector={v}")),
+        args.capability
+            .as_deref()
+            .map(|v| format!("capability={v}")),
+        args.risk.as_deref().map(|v| format!("risk<={v}")),
+        args.safety.as_deref().map(|v| format!("safety<={v}")),
+        args.archetype.as_deref().map(|v| format!("archetype={v}")),
+        args.category.as_deref().map(|v| format!("category={v}")),
+        args.zone.as_deref().map(|v| format!("zone={v}")),
+        if args.idempotent {
+            Some("idempotent=true".to_owned())
+        } else {
+            None
+        },
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    Ok(DispatchOutcome {
+        payload: json!({
+            "status": "ok",
+            "command": "search",
+            "source": "host-admin-api",
+            "mode": "live-introspection",
+            "message": format!("Found {} live matching operations ({} shown).", total, json_results.len()),
+            "query": &args.query,
+            "filters": active_filters,
+            "filter_gaps": filter_gaps,
+            "metadata_gaps": metadata_gaps,
+            "total_results": total,
+            "results": json_results,
+            "next_actions": [
+                "Use `fwc show <connector> --host <endpoint>` to inspect a connector in more detail.",
+                "Use `fwc schema <connector> <operation> --host <endpoint>` for the live input/output schema.",
+                "Add --capability, --risk, --safety, or --idempotent flags to narrow results.",
+            ],
+        }),
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn search_dispatch(args: &SearchArgs, host: Option<&str>) -> Result<DispatchOutcome> {
+    let resolved_host = resolve_host_config(host)?;
+    if args.offline {
+        if resolved_host.is_some() {
+            return Ok(conflicting_catalog_mode_dispatch("search"));
+        }
+    } else if let Some(host) = resolved_host {
+        return search_dispatch_host(args, &host.endpoint);
+    } else {
+        return Ok(missing_host_dispatch(
+            "search",
+            json!({
+                "query": &args.query,
+                "filters": {
+                    "zone": args.zone,
+                    "connector": args.connector,
+                    "capability": args.capability,
+                    "risk": args.risk,
+                    "safety": args.safety,
+                    "archetype": args.archetype,
+                    "category": args.category,
+                    "idempotent": args.idempotent,
+                },
+            }),
+            vec![
+                "fwc search <query> --host <endpoint>".to_owned(),
+                "fwc search <query> --offline".to_owned(),
+            ],
+        ));
+    }
+
     let catalog = DiscoveryCatalog::load()?;
 
     let filters = search::SearchFilters {
@@ -3947,14 +4244,15 @@ fn search_dispatch(args: &SearchArgs) -> Result<DispatchOutcome> {
             "status": "ok",
             "command": "search",
             "source": "workspace-manifests",
+            "mode": "offline-artifact",
             "message": format!("Found {} matching operations ({} shown).", total, json_results.len()),
             "query": &args.query,
             "filters": active_filters,
             "total_results": total,
             "results": json_results,
             "next_actions": [
-                "Use `fwc show <connector>` to inspect a connector in more detail.",
-                "Use `fwc schema <connector> <operation>` for the input/output schema.",
+                "Use `fwc show <connector> --offline` to inspect a connector in more detail.",
+                "Use `fwc schema <connector> <operation> --offline` for the input/output schema.",
                 "Add --capability, --risk, --safety, --idempotent flags to narrow results.",
             ],
         }),
@@ -3963,8 +4261,24 @@ fn search_dispatch(args: &SearchArgs) -> Result<DispatchOutcome> {
 }
 
 fn show_dispatch(args: &ShowArgs, host: Option<&str>) -> Result<DispatchOutcome> {
-    if let Some(host) = resolve_host_config(host)? {
+    let resolved_host = resolve_host_config(host)?;
+    if args.offline {
+        if resolved_host.is_some() {
+            return Ok(conflicting_catalog_mode_dispatch("show"));
+        }
+    } else if let Some(host) = resolved_host {
         return show_dispatch_host(args, &host.endpoint);
+    } else {
+        return Ok(missing_host_dispatch(
+            "show",
+            json!({
+                "connector": &args.connector,
+            }),
+            vec![
+                format!("fwc show {} --host <endpoint>", args.connector),
+                format!("fwc show {} --offline", args.connector),
+            ],
+        ));
     }
 
     let catalog = DiscoveryCatalog::load()?;
@@ -4007,6 +4321,7 @@ fn show_dispatch(args: &ShowArgs, host: Option<&str>) -> Result<DispatchOutcome>
             "status": "ok",
             "command": "show",
             "source": "workspace-manifests",
+            "mode": "offline-artifact",
             "message": "Loaded connector detail from the workspace manifest.",
             "connector": {
                 "slug": &slug,
@@ -4035,9 +4350,9 @@ fn show_dispatch(args: &ShowArgs, host: Option<&str>) -> Result<DispatchOutcome>
                 "safe_count": connector.operations.len().saturating_sub(risky_count),
             },
             "next_actions": [
-                format!("fwc ops {slug}"),
-                format!("fwc schema {slug} {example_operation}"),
-                format!("fwc examples {slug} {example_operation}"),
+                format!("fwc ops {slug} --offline"),
+                format!("fwc schema {slug} {example_operation} --offline"),
+                format!("fwc examples {slug} {example_operation} --offline"),
                 format!("fwc config schema {slug}"),
             ],
         }),
@@ -4046,8 +4361,27 @@ fn show_dispatch(args: &ShowArgs, host: Option<&str>) -> Result<DispatchOutcome>
 }
 
 fn ops_dispatch(args: &OpsArgs, host: Option<&str>) -> Result<DispatchOutcome> {
-    if let Some(host) = resolve_host_config(host)? {
+    let resolved_host = resolve_host_config(host)?;
+    if args.offline {
+        if resolved_host.is_some() {
+            return Ok(conflicting_catalog_mode_dispatch("ops"));
+        }
+    } else if let Some(host) = resolved_host {
         return ops_dispatch_host(args, &host.endpoint);
+    } else {
+        return Ok(missing_host_dispatch(
+            "ops",
+            json!({
+                "connector": &args.connector,
+                "filters": {
+                    "risk_at_most": args.risk_at_most,
+                },
+            }),
+            vec![
+                format!("fwc ops {} --host <endpoint>", args.connector),
+                format!("fwc ops {} --offline", args.connector),
+            ],
+        ));
     }
 
     let catalog = DiscoveryCatalog::load()?;
@@ -4074,6 +4408,7 @@ fn ops_dispatch(args: &OpsArgs, host: Option<&str>) -> Result<DispatchOutcome> {
             "status": "ok",
             "command": "ops",
             "source": "workspace-manifests",
+            "mode": "offline-artifact",
             "message": format!("Listed {} operations for `{slug}`.", operations.len()),
             "connector": {
                 "slug": &slug,
@@ -4085,8 +4420,8 @@ fn ops_dispatch(args: &OpsArgs, host: Option<&str>) -> Result<DispatchOutcome> {
             },
             "operations": operations,
             "next_actions": [
-                format!("fwc schema {slug} <operation>"),
-                format!("fwc examples {slug} <operation>"),
+                format!("fwc schema {slug} <operation> --offline"),
+                format!("fwc examples {slug} <operation> --offline"),
             ],
         }),
         exit_code: CliExitCode::Success,
@@ -4095,8 +4430,32 @@ fn ops_dispatch(args: &OpsArgs, host: Option<&str>) -> Result<DispatchOutcome> {
 
 #[allow(clippy::too_many_lines)]
 fn schema_dispatch(args: &SchemaArgs, host: Option<&str>) -> Result<DispatchOutcome> {
-    if let Some(host) = resolve_host_config(host)? {
+    let resolved_host = resolve_host_config(host)?;
+    if args.offline {
+        if resolved_host.is_some() {
+            return Ok(conflicting_catalog_mode_dispatch("schema"));
+        }
+    } else if let Some(host) = resolved_host {
         return schema_dispatch_host(args, &host.endpoint);
+    } else {
+        return Ok(missing_host_dispatch(
+            "schema",
+            json!({
+                "connector": &args.connector,
+                "operation": args.operation,
+                "field": args.field,
+                "required_only": args.required_only,
+                "examples": args.examples,
+                "scaffold": args.scaffold,
+            }),
+            vec![
+                format!(
+                    "fwc schema {} <operation> --host <endpoint>",
+                    args.connector
+                ),
+                format!("fwc schema {} <operation> --offline", args.connector),
+            ],
+        ));
     }
 
     let catalog = DiscoveryCatalog::load()?;
@@ -4132,6 +4491,7 @@ fn schema_dispatch(args: &SchemaArgs, host: Option<&str>) -> Result<DispatchOutc
                     "status": "ok",
                     "command": "schema",
                     "source": "workspace-manifests",
+                    "mode": "offline-artifact",
                     "scope": "scaffold",
                     "connector": { "slug": &connector.slug },
                     "operation": { "selector": &operation.preferred_selector },
@@ -4163,6 +4523,7 @@ fn schema_dispatch(args: &SchemaArgs, host: Option<&str>) -> Result<DispatchOutc
                     "status": "ok",
                     "command": "schema",
                     "source": "workspace-manifests",
+                    "mode": "offline-artifact",
                     "scope": "fields",
                     "connector": {
                         "slug": &connector.slug,
@@ -4175,7 +4536,7 @@ fn schema_dispatch(args: &SchemaArgs, host: Option<&str>) -> Result<DispatchOutc
                     "field_count": fields.len(),
                     "fields": fields,
                     "next_actions": [
-                        format!("fwc schema {} {} --scaffold", connector.slug, operation.preferred_selector),
+                        format!("fwc schema {} {} --scaffold --offline", connector.slug, operation.preferred_selector),
                     ],
                 }),
                 exit_code: CliExitCode::Success,
@@ -4188,6 +4549,7 @@ fn schema_dispatch(args: &SchemaArgs, host: Option<&str>) -> Result<DispatchOutc
                 "status": "ok",
                 "command": "schema",
                 "source": "workspace-manifests",
+                "mode": "offline-artifact",
                 "scope": "operation",
                 "message": "Loaded one operation schema from the connector manifest.",
                 "connector": {
@@ -4214,9 +4576,9 @@ fn schema_dispatch(args: &SchemaArgs, host: Option<&str>) -> Result<DispatchOutc
                     "related": operation.related.clone(),
                 },
                 "next_actions": [
-                    format!("fwc examples {} {}", connector.slug, operation.preferred_selector),
-                    format!("fwc schema {} {} --required-only", connector.slug, operation.preferred_selector),
-                    format!("fwc schema {} {} --scaffold", connector.slug, operation.preferred_selector),
+                    format!("fwc examples {} {} --offline", connector.slug, operation.preferred_selector),
+                    format!("fwc schema {} {} --required-only --offline", connector.slug, operation.preferred_selector),
+                    format!("fwc schema {} {} --scaffold --offline", connector.slug, operation.preferred_selector),
                     format!("fwc simulate {} {} --file payload.json", connector.slug, operation.preferred_selector),
                 ],
             }),
@@ -4229,6 +4591,7 @@ fn schema_dispatch(args: &SchemaArgs, host: Option<&str>) -> Result<DispatchOutc
             "status": "ok",
             "command": "schema",
             "source": "workspace-manifests",
+            "mode": "offline-artifact",
             "scope": "connector",
             "message": "Loaded the connector contract schema from the manifest.",
             "connector": {
@@ -4238,7 +4601,7 @@ fn schema_dispatch(args: &SchemaArgs, host: Option<&str>) -> Result<DispatchOutc
             },
             "schema": connector.connector_schema.clone(),
             "next_actions": [
-                format!("fwc ops {}", connector.slug),
+                format!("fwc ops {} --offline", connector.slug),
                 format!("fwc config schema {}", connector.slug),
             ],
         }),
@@ -4247,8 +4610,28 @@ fn schema_dispatch(args: &SchemaArgs, host: Option<&str>) -> Result<DispatchOutc
 }
 
 fn examples_dispatch(args: &ExampleArgs, host: Option<&str>) -> Result<DispatchOutcome> {
-    if let Some(host) = resolve_host_config(host)? {
+    let resolved_host = resolve_host_config(host)?;
+    if args.offline {
+        if resolved_host.is_some() {
+            return Ok(conflicting_catalog_mode_dispatch("examples"));
+        }
+    } else if let Some(host) = resolved_host {
         return examples_dispatch_host(args, &host.endpoint);
+    } else {
+        return Ok(missing_host_dispatch(
+            "examples",
+            json!({
+                "connector": &args.connector,
+                "operation": args.operation,
+            }),
+            vec![
+                format!(
+                    "fwc examples {} <operation> --host <endpoint>",
+                    args.connector
+                ),
+                format!("fwc examples {} <operation> --offline", args.connector),
+            ],
+        ));
     }
 
     let catalog = DiscoveryCatalog::load()?;
@@ -4281,6 +4664,7 @@ fn examples_dispatch(args: &ExampleArgs, host: Option<&str>) -> Result<DispatchO
                 "status": "ok",
                 "command": "examples",
                 "source": "workspace-manifests",
+                "mode": "offline-artifact",
                 "scope": "operation",
                 "message": "Loaded operation examples from the connector manifest.",
                 "connector": {
@@ -4298,7 +4682,7 @@ fn examples_dispatch(args: &ExampleArgs, host: Option<&str>) -> Result<DispatchO
                 "examples": operation.examples.clone(),
                 "common_mistakes": operation.common_mistakes.clone(),
                 "next_actions": [
-                    format!("fwc schema {} {}", connector.slug, operation.preferred_selector),
+                    format!("fwc schema {} {} --offline", connector.slug, operation.preferred_selector),
                     format!("fwc simulate {} {} --file payload.json", connector.slug, operation.preferred_selector),
                 ],
             }),
@@ -4326,6 +4710,7 @@ fn examples_dispatch(args: &ExampleArgs, host: Option<&str>) -> Result<DispatchO
             "status": "ok",
             "command": "examples",
             "source": "workspace-manifests",
+            "mode": "offline-artifact",
             "scope": "connector",
             "message": "Loaded connector-level examples and suggested follow-up commands.",
             "connector": {
@@ -4335,15 +4720,15 @@ fn examples_dispatch(args: &ExampleArgs, host: Option<&str>) -> Result<DispatchO
             },
             "examples": {
                 "commands": [
-                    format!("fwc show {}", connector.slug),
-                    format!("fwc ops {}", connector.slug),
+                    format!("fwc show {} --offline", connector.slug),
+                    format!("fwc ops {} --offline", connector.slug),
                     format!("fwc config schema {}", connector.slug),
                 ],
                 "operations": operation_examples,
             },
             "next_actions": [
-                format!("fwc ops {}", connector.slug),
-                format!("fwc schema {} <operation>", connector.slug),
+                format!("fwc ops {} --offline", connector.slug),
+                format!("fwc schema {} <operation> --offline", connector.slug),
             ],
         }),
         exit_code: CliExitCode::Success,
@@ -5996,8 +6381,28 @@ fn remove_invoke_binding(
 }
 
 fn export_tools_dispatch(args: &ExportToolsArgs, host: Option<&str>) -> Result<DispatchOutcome> {
-    if let Some(host) = resolve_host_config(host)? {
+    let resolved_host = resolve_host_config(host)?;
+    if args.offline {
+        if resolved_host.is_some() {
+            return Ok(conflicting_catalog_mode_dispatch("export-tools"));
+        }
+    } else if let Some(host) = resolved_host {
         return export_tools_dispatch_host(args, &host.endpoint);
+    } else {
+        return Ok(missing_host_dispatch(
+            "export-tools",
+            json!({
+                "format": args.tool_format,
+                "connector": args.connector,
+                "risk_max": args.risk_max,
+                "capability": args.capability,
+                "output_file": args.output.as_ref().map(|path| path.display().to_string()),
+            }),
+            vec![
+                "fwc export-tools --host <endpoint> --format mcp".to_owned(),
+                "fwc export-tools --offline --format mcp".to_owned(),
+            ],
+        ));
     }
 
     let catalog = DiscoveryCatalog::load()?;
@@ -6079,9 +6484,9 @@ fn export_tools_dispatch(args: &ExportToolsArgs, host: Option<&str>) -> Result<D
             "tools": tools_json,
             "next_actions": [
                 "Use `fwc export-tools --host <endpoint> --format mcp` for the live host-backed inventory.".to_owned(),
-                "Pipe to a file: fwc export-tools --format mcp --json > tools.json",
-                "Filter by risk: fwc export-tools --format mcp --risk-max medium",
-                "One connector: fwc export-tools --format claude github",
+                "Pipe to a file: fwc export-tools --offline --format mcp --json > tools.json",
+                "Filter by risk: fwc export-tools --offline --format mcp --risk-max medium",
+                "One connector: fwc export-tools --offline --format claude github",
             ],
         }),
         exit_code: CliExitCode::Success,
@@ -6192,15 +6597,262 @@ fn export_tools_dispatch_host(args: &ExportToolsArgs, host: &str) -> Result<Disp
 }
 
 #[allow(dead_code, clippy::too_many_lines)]
-fn suggest_dispatch(args: &SuggestArgs) -> Result<DispatchOutcome> {
+fn suggest_dispatch_host(args: &SuggestArgs, host: &str) -> Result<DispatchOutcome> {
+    let client = HostAdminClient::new(host)?;
+    let (catalog, _) = client.catalog(None)?;
+    let (all_connectors, metadata_gaps) = load_live_discovered_connectors(&client, &catalog)?;
+
+    if let Some(after_op) = &args.after {
+        let mut related_ids: Vec<String> = Vec::new();
+        let mut source_connector = String::new();
+        let mut source_summary = String::new();
+
+        for connector in &all_connectors {
+            for operation in &connector.operations {
+                if operation.actual_id == *after_op
+                    || operation.local_id == *after_op
+                    || operation.preferred_selector == *after_op
+                {
+                    related_ids = operation.related.clone();
+                    source_connector = connector.slug.clone();
+                    source_summary = operation.summary.summary.clone();
+                    break;
+                }
+            }
+            if !source_connector.is_empty() {
+                break;
+            }
+        }
+
+        if source_connector.is_empty() {
+            return Ok(DispatchOutcome {
+                payload: json!({
+                    "status": "error",
+                    "command": "suggest",
+                    "source": "host-admin-api",
+                    "mode": "live-introspection",
+                    "error": {
+                        "type": "operation-not-found",
+                        "message": format!("Operation '{after_op}' not found in live host inventory."),
+                        "selector": after_op,
+                    },
+                    "metadata_gaps": metadata_gaps,
+                    "next_actions": [
+                        "Use `fwc search '<query>' --host <endpoint>` to find the live operation.",
+                        "Use `fwc ops <connector> --host <endpoint>` to list operations for a connector.",
+                    ],
+                }),
+                exit_code: CliExitCode::UnknownCommand,
+            });
+        }
+
+        let mut suggestions: Vec<Value> = Vec::new();
+        for connector in &all_connectors {
+            for operation in &connector.operations {
+                if related_ids.iter().any(|related| {
+                    related == &operation.actual_id || related == &operation.summary.capability
+                }) {
+                    suggestions.push(json!({
+                        "connector": &connector.slug,
+                        "operation": &operation.actual_id,
+                        "selector": &operation.preferred_selector,
+                        "summary": &operation.summary.summary,
+                        "risk_level": &operation.summary.risk_level,
+                        "reason": "related via ai_hints",
+                    }));
+                }
+            }
+        }
+        suggestions.truncate(args.limit);
+
+        return Ok(DispatchOutcome {
+            payload: json!({
+                "status": "ok",
+                "command": "suggest",
+                "source": "host-admin-api",
+                "mode": "live-introspection",
+                "suggest_mode": "after",
+                "message": format!(
+                    "Found {} live follow-up suggestions after '{after_op}'.",
+                    suggestions.len()
+                ),
+                "after": {
+                    "operation": after_op,
+                    "connector": source_connector,
+                    "summary": source_summary,
+                },
+                "suggestions": suggestions,
+                "metadata_gaps": metadata_gaps,
+                "next_actions": [
+                    format!("fwc schema {} <operation> --host {host}", source_connector),
+                    "Use `fwc suggest --goal '<next intent>' --host <endpoint>` for goal-directed search.".to_owned(),
+                ],
+            }),
+            exit_code: CliExitCode::Success,
+        });
+    }
+
+    let connectors: Vec<&DiscoveredConnector> = if let Some(selector) = &args.connector {
+        match catalog.resolve_connector(selector) {
+            Ok(record) => all_connectors
+                .iter()
+                .filter(|connector| connector.slug == record.slug)
+                .collect(),
+            Err(error) => return Ok(connector_resolution_dispatch("suggest", selector, &error)),
+        }
+    } else {
+        all_connectors.iter().collect()
+    };
+
+    if let Some(goal) = &args.goal {
+        let filters = search::SearchFilters {
+            connector: args.connector.clone(),
+            risk_max: args.risk.as_deref().and_then(search::RiskCeiling::parse),
+            ..Default::default()
+        };
+        let results = search::search_operations(&all_connectors, goal, &filters);
+        let json_results = search::results_to_json(&results, args.limit);
+
+        return Ok(DispatchOutcome {
+            payload: json!({
+                "status": "ok",
+                "command": "suggest",
+                "source": "host-admin-api",
+                "mode": "live-introspection",
+                "suggest_mode": "goal-directed",
+                "message": format!("Found {} live operations matching goal '{goal}'.", results.len()),
+                "goal": goal,
+                "suggestions": json_results,
+                "metadata_gaps": metadata_gaps,
+                "next_actions": [
+                    "Use `fwc schema <connector> <operation> --host <endpoint>` to see the live input/output schema.",
+                    "Use `fwc simulate <connector> <operation> --host <endpoint> --file payload.json` to test safely.",
+                ],
+            }),
+            exit_code: CliExitCode::Success,
+        });
+    }
+
+    let mut by_family: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+    let risk_ceiling = args.risk.as_deref().and_then(search::RiskCeiling::parse);
+    for connector in &connectors {
+        for operation in &connector.operations {
+            if let Some(ceiling) = risk_ceiling
+                && !ceiling.allows(&operation.summary.risk_level)
+            {
+                continue;
+            }
+            let family = classify_action_family(&operation.summary.capability);
+            let entry = json!({
+                "connector": &connector.slug,
+                "operation": &operation.actual_id,
+                "selector": &operation.preferred_selector,
+                "summary": &operation.summary.summary,
+                "risk_level": &operation.summary.risk_level,
+                "safety_tier": &operation.summary.safety_tier,
+            });
+            by_family.entry(family).or_default().push(entry);
+        }
+    }
+
+    if args.grouped {
+        let grouped: Vec<Value> = by_family
+            .iter()
+            .map(|(family, ops)| {
+                json!({
+                    "family": family,
+                    "operation_count": ops.len(),
+                    "operations": ops.iter().take(5).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        return Ok(DispatchOutcome {
+            payload: json!({
+                "status": "ok",
+                "command": "suggest",
+                "source": "host-admin-api",
+                "mode": "live-introspection",
+                "suggest_mode": "overview-grouped",
+                "message": format!(
+                    "Grouped {} live action families across {} connectors.",
+                    by_family.len(), connectors.len()
+                ),
+                "families": grouped,
+                "metadata_gaps": metadata_gaps,
+                "next_actions": [
+                    "Use `fwc suggest --goal '<intent>' --host <endpoint>` for goal-directed search.",
+                    "Use `fwc search '<query>' --host <endpoint>` for keyword-based live search.",
+                ],
+            }),
+            exit_code: CliExitCode::Success,
+        });
+    }
+
+    let mut flat: Vec<Value> = Vec::new();
+    for ops in by_family.values() {
+        flat.extend(ops.iter().cloned());
+    }
+    flat.truncate(args.limit);
+
+    Ok(DispatchOutcome {
+        payload: json!({
+            "status": "ok",
+            "command": "suggest",
+            "source": "host-admin-api",
+            "mode": "live-introspection",
+            "suggest_mode": "overview",
+            "message": format!(
+                "Showing {} of {} live available operations across {} connectors.",
+                flat.len(),
+                by_family.values().map(Vec::len).sum::<usize>(),
+                connectors.len(),
+            ),
+            "suggestions": flat,
+            "action_families": by_family.keys().collect::<Vec<_>>(),
+            "metadata_gaps": metadata_gaps,
+            "next_actions": [
+                "Use `fwc suggest --goal '<intent>' --host <endpoint>` for goal-directed search.",
+                "Use `fwc suggest --grouped --host <endpoint>` to see operations grouped by action family.",
+                "Use `fwc suggest --connector <name> --host <endpoint>` to narrow to one connector.",
+            ],
+        }),
+        exit_code: CliExitCode::Success,
+    })
+}
+
+#[allow(dead_code, clippy::too_many_lines)]
+fn suggest_dispatch(args: &SuggestArgs, host: Option<&str>) -> Result<DispatchOutcome> {
+    let resolved_host = resolve_host_config(host)?;
+    if args.offline {
+        if resolved_host.is_some() {
+            return Ok(conflicting_catalog_mode_dispatch("suggest"));
+        }
+    } else if let Some(host) = resolved_host {
+        return suggest_dispatch_host(args, &host.endpoint);
+    } else {
+        return Ok(missing_host_dispatch(
+            "suggest",
+            json!({
+                "goal": args.goal,
+                "connector": args.connector,
+                "after": args.after,
+                "risk": args.risk,
+                "grouped": args.grouped,
+                "limit": args.limit,
+            }),
+            vec![
+                "fwc suggest --goal '<intent>' --host <endpoint>".to_owned(),
+                "fwc suggest --goal '<intent>' --offline".to_owned(),
+            ],
+        ));
+    }
+
     let catalog = DiscoveryCatalog::load()?;
 
-    // If --after is specified, find related operations.
     if let Some(after_op) = &args.after {
         return suggest_after_dispatch(&catalog, after_op, args);
     }
 
-    // If --goal is specified, use the search engine for goal-directed suggestions.
     if let Some(goal) = &args.goal {
         let filters = search::SearchFilters {
             connector: args.connector.clone(),
@@ -6214,12 +6866,14 @@ fn suggest_dispatch(args: &SuggestArgs) -> Result<DispatchOutcome> {
             payload: json!({
                 "status": "ok",
                 "command": "suggest",
-                "mode": "goal-directed",
+                "source": "workspace-manifests",
+                "mode": "offline-artifact",
+                "suggest_mode": "goal-directed",
                 "message": format!("Found {} operations matching goal '{goal}'.", results.len()),
                 "goal": goal,
                 "suggestions": json_results,
                 "next_actions": [
-                    "Use `fwc schema <connector> <operation>` to see input/output schema.",
+                    "Use `fwc schema <connector> <operation> --offline` to see input/output schema.",
                     "Use `fwc simulate <connector> <operation> --file payload.json` to test safely.",
                 ],
             }),
@@ -6227,7 +6881,6 @@ fn suggest_dispatch(args: &SuggestArgs) -> Result<DispatchOutcome> {
         });
     }
 
-    // General suggestions: overview of available operations grouped by action family.
     let connectors: Vec<&DiscoveredConnector> = if let Some(slug) = &args.connector {
         match catalog.resolve_connector(slug) {
             Ok(c) => vec![c],
@@ -6244,10 +6897,10 @@ fn suggest_dispatch(args: &SuggestArgs) -> Result<DispatchOutcome> {
 
     for connector in &connectors {
         for operation in &connector.operations {
-            if let Some(ceiling) = risk_ceiling {
-                if !ceiling.allows(&operation.summary.risk_level) {
-                    continue;
-                }
+            if let Some(ceiling) = risk_ceiling
+                && !ceiling.allows(&operation.summary.risk_level)
+            {
+                continue;
             }
             let family = classify_action_family(&operation.summary.capability);
             let entry = json!({
@@ -6262,7 +6915,6 @@ fn suggest_dispatch(args: &SuggestArgs) -> Result<DispatchOutcome> {
         }
     }
 
-    // Flatten and limit.
     let mut flat: Vec<Value> = Vec::new();
     if args.grouped {
         let grouped: Vec<Value> = by_family
@@ -6279,15 +6931,17 @@ fn suggest_dispatch(args: &SuggestArgs) -> Result<DispatchOutcome> {
             payload: json!({
                 "status": "ok",
                 "command": "suggest",
-                "mode": "overview-grouped",
+                "source": "workspace-manifests",
+                "mode": "offline-artifact",
+                "suggest_mode": "overview-grouped",
                 "message": format!(
                     "Grouped {} action families across {} connectors.",
                     by_family.len(), connectors.len()
                 ),
                 "families": grouped,
                 "next_actions": [
-                    "Use `fwc suggest --goal '<intent>'` for goal-directed search.",
-                    "Use `fwc search '<query>'` for keyword-based search.",
+                    "Use `fwc suggest --goal '<intent>' --offline` for goal-directed search.",
+                    "Use `fwc search '<query>' --offline` for keyword-based search.",
                 ],
             }),
             exit_code: CliExitCode::Success,
@@ -6303,7 +6957,9 @@ fn suggest_dispatch(args: &SuggestArgs) -> Result<DispatchOutcome> {
         payload: json!({
             "status": "ok",
             "command": "suggest",
-            "mode": "overview",
+            "source": "workspace-manifests",
+            "mode": "offline-artifact",
+            "suggest_mode": "overview",
             "message": format!(
                 "Showing {} of {} available operations across {} connectors.",
                 flat.len(),
@@ -6313,9 +6969,9 @@ fn suggest_dispatch(args: &SuggestArgs) -> Result<DispatchOutcome> {
             "suggestions": flat,
             "action_families": by_family.keys().collect::<Vec<_>>(),
             "next_actions": [
-                "Use `fwc suggest --goal '<intent>'` for goal-directed search.",
-                "Use `fwc suggest --grouped` to see operations grouped by action family.",
-                "Use `fwc suggest --connector <name>` to narrow to one connector.",
+                "Use `fwc suggest --goal '<intent>' --offline` for goal-directed search.",
+                "Use `fwc suggest --grouped --offline` to see operations grouped by action family.",
+                "Use `fwc suggest --connector <name> --offline` to narrow to one connector.",
             ],
         }),
         exit_code: CliExitCode::Success,
@@ -6355,6 +7011,8 @@ fn suggest_after_dispatch(
             payload: json!({
                 "status": "error",
                 "command": "suggest",
+                "source": "workspace-manifests",
+                "mode": "offline-artifact",
                 "error": {
                     "type": "operation-not-found",
                     "message": format!("Operation '{after_op}' not found in any connector."),
@@ -6394,7 +7052,9 @@ fn suggest_after_dispatch(
         payload: json!({
             "status": "ok",
             "command": "suggest",
-            "mode": "after",
+            "source": "workspace-manifests",
+            "mode": "offline-artifact",
+            "suggest_mode": "after",
             "message": format!(
                 "Found {} follow-up suggestions after '{after_op}'.",
                 suggestions.len()
@@ -6406,8 +7066,8 @@ fn suggest_after_dispatch(
             },
             "suggestions": suggestions,
             "next_actions": [
-                format!("fwc schema {} <operation>", source_connector),
-                "Use `fwc suggest --goal '<next intent>'` for goal-directed search.",
+                format!("fwc schema {} <operation> --offline", source_connector),
+                "Use `fwc suggest --goal '<next intent>' --offline` for goal-directed search.",
             ],
         }),
         exit_code: CliExitCode::Success,
@@ -6432,7 +7092,102 @@ fn classify_action_family(capability: &str) -> String {
     }
 }
 
-fn template_dispatch(args: &TemplateArgs) -> Result<DispatchOutcome> {
+fn template_dispatch_host(args: &TemplateArgs, host: &str) -> Result<DispatchOutcome> {
+    let client = HostAdminClient::new(host)?;
+    let (catalog, _) = client.catalog(None)?;
+    let connector = match catalog.resolve_connector(&args.connector) {
+        Ok(connector) => connector,
+        Err(error) => {
+            return Ok(connector_resolution_dispatch(
+                "template",
+                &args.connector,
+                &error,
+            ));
+        }
+    };
+    let introspection = client.introspect(connector.summary.id.as_str())?;
+    let operation = match resolve_host_tool(&introspection.tools, &args.operation) {
+        Ok(operation) => operation,
+        Err(error) => {
+            return Ok(host_operation_resolution_dispatch(
+                "template",
+                &connector.slug,
+                &args.operation,
+                &error,
+            ));
+        }
+    };
+    let fill = args
+        .fill
+        .as_deref()
+        .map(template::parse_fill_args)
+        .unwrap_or_default();
+    let template_json =
+        template::generate_template(&operation.input_schema, args.required_only, &fill);
+
+    Ok(DispatchOutcome {
+        payload: json!({
+            "status": "ok",
+            "command": "template",
+            "source": "host-admin-api",
+            "mode": "live-introspection",
+            "message": format!(
+                "Generated {} live template for `{}.{}`.",
+                if args.required_only { "required-only" } else { "full" },
+                connector.slug,
+                operation.name,
+            ),
+            "connector": {
+                "slug": &connector.slug,
+                "canonical_id": connector.summary.id.as_str(),
+            },
+            "operation": {
+                "selector": &operation.name,
+                "canonical_id": &operation.name,
+                "summary": &operation.description,
+            },
+            "metadata_gaps": host_metadata_gaps(&introspection),
+            "template": template_json,
+            "fill_applied": !fill.is_empty(),
+            "required_only": args.required_only,
+            "next_actions": [
+                format!("fwc schema {} {} --host {host}", connector.slug, operation.name),
+                format!("fwc simulate {} {} --host {host} --file payload.json", connector.slug, operation.name),
+            ],
+        }),
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn template_dispatch(args: &TemplateArgs, host: Option<&str>) -> Result<DispatchOutcome> {
+    let resolved_host = resolve_host_config(host)?;
+    if args.offline {
+        if resolved_host.is_some() {
+            return Ok(conflicting_catalog_mode_dispatch("template"));
+        }
+    } else if let Some(host) = resolved_host {
+        return template_dispatch_host(args, &host.endpoint);
+    } else {
+        return Ok(missing_host_dispatch(
+            "template",
+            json!({
+                "connector": &args.connector,
+                "operation": &args.operation,
+                "required_only": args.required_only,
+            }),
+            vec![
+                format!(
+                    "fwc template {} {} --host <endpoint>",
+                    args.connector, args.operation
+                ),
+                format!(
+                    "fwc template {} {} --offline",
+                    args.connector, args.operation
+                ),
+            ],
+        ));
+    }
+
     let catalog = DiscoveryCatalog::load()?;
     let connector = match catalog.resolve_connector(&args.connector) {
         Ok(connector) => connector,
@@ -6471,6 +7226,7 @@ fn template_dispatch(args: &TemplateArgs) -> Result<DispatchOutcome> {
             "status": "ok",
             "command": "template",
             "source": "workspace-manifests",
+            "mode": "offline-artifact",
             "message": format!(
                 "Generated {} template for `{}.{}`.",
                 if args.required_only { "required-only" } else { "full" },
@@ -6490,7 +7246,7 @@ fn template_dispatch(args: &TemplateArgs) -> Result<DispatchOutcome> {
             "fill_applied": !fill.is_empty(),
             "required_only": args.required_only,
             "next_actions": [
-                format!("fwc schema {} {}", connector.slug, operation.preferred_selector),
+                format!("fwc schema {} {} --offline", connector.slug, operation.preferred_selector),
                 format!("fwc simulate {} {} --file payload.json", connector.slug, operation.preferred_selector),
             ],
         }),
@@ -6498,7 +7254,145 @@ fn template_dispatch(args: &TemplateArgs) -> Result<DispatchOutcome> {
     })
 }
 
-fn validate_dispatch(args: &ValidateArgs) -> Result<DispatchOutcome> {
+fn validate_dispatch_host(args: &ValidateArgs, host: &str) -> Result<DispatchOutcome> {
+    let client = HostAdminClient::new(host)?;
+    let (catalog, _) = client.catalog(None)?;
+    let connector = match catalog.resolve_connector(&args.connector) {
+        Ok(connector) => connector,
+        Err(error) => {
+            return Ok(connector_resolution_dispatch(
+                "validate",
+                &args.connector,
+                &error,
+            ));
+        }
+    };
+    let introspection = client.introspect(connector.summary.id.as_str())?;
+    let operation = match resolve_host_tool(&introspection.tools, &args.operation) {
+        Ok(operation) => operation,
+        Err(error) => {
+            return Ok(host_operation_resolution_dispatch(
+                "validate",
+                &connector.slug,
+                &args.operation,
+                &error,
+            ));
+        }
+    };
+
+    let input: Value = if let Some(json_str) = &args.input {
+        serde_json::from_str(json_str)?
+    } else if let Some(path) = &args.input_file {
+        let content = std::fs::read_to_string(path)?;
+        serde_json::from_str(&content)?
+    } else {
+        return Ok(DispatchOutcome {
+            payload: json!({
+                "status": "error",
+                "command": "validate",
+                "source": "host-admin-api",
+                "mode": "live-introspection",
+                "error": {
+                    "type": "missing-input",
+                    "message": "No input provided. Use --input or --input-file.",
+                },
+                "next_actions": [
+                    format!("fwc validate {} {} --host {host} --input '{{...}}'", connector.slug, operation.name),
+                    format!("fwc template {} {} --host {host}", connector.slug, operation.name),
+                ],
+            }),
+            exit_code: CliExitCode::UnknownCommand,
+        });
+    };
+
+    let result = validate::validate(&input, &operation.input_schema);
+    if result.is_valid() {
+        Ok(DispatchOutcome {
+            payload: json!({
+                "status": "ok",
+                "command": "validate",
+                "source": "host-admin-api",
+                "mode": "live-introspection",
+                "message": format!("Input is valid for live `{}`.`{}`.", connector.slug, operation.name),
+                "connector": &connector.slug,
+                "operation": &operation.name,
+                "valid": true,
+                "metadata_gaps": host_metadata_gaps(&introspection),
+                "next_actions": [
+                    format!("fwc simulate {} {} --host {host} --input '...'", connector.slug, operation.name),
+                    format!("fwc invoke {} {} --host {host} --input '...'", connector.slug, operation.name),
+                ],
+            }),
+            exit_code: CliExitCode::Success,
+        })
+    } else {
+        let error_details: Vec<Value> = result
+            .errors
+            .iter()
+            .map(|error| {
+                json!({
+                    "path": error.path,
+                    "message": error.message,
+                    "suggestion": error.suggestion,
+                })
+            })
+            .collect();
+
+        Ok(DispatchOutcome {
+            payload: json!({
+                "status": "error",
+                "command": "validate",
+                "source": "host-admin-api",
+                "mode": "live-introspection",
+                "message": format!(
+                    "Validation failed for live `{}.{}`: {} error(s).",
+                    connector.slug, operation.name, result.errors.len()
+                ),
+                "connector": &connector.slug,
+                "operation": &operation.name,
+                "valid": false,
+                "error_count": result.errors.len(),
+                "errors": error_details,
+                "metadata_gaps": host_metadata_gaps(&introspection),
+                "next_actions": [
+                    format!("fwc template {} {} --host {host}", connector.slug, operation.name),
+                    format!("fwc schema {} {} --host {host}", connector.slug, operation.name),
+                ],
+            }),
+            exit_code: CliExitCode::UnknownCommand,
+        })
+    }
+}
+
+fn validate_dispatch(args: &ValidateArgs, host: Option<&str>) -> Result<DispatchOutcome> {
+    let resolved_host = resolve_host_config(host)?;
+    if args.offline {
+        if resolved_host.is_some() {
+            return Ok(conflicting_catalog_mode_dispatch("validate"));
+        }
+    } else if let Some(host) = resolved_host {
+        return validate_dispatch_host(args, &host.endpoint);
+    } else {
+        return Ok(missing_host_dispatch(
+            "validate",
+            json!({
+                "connector": &args.connector,
+                "operation": &args.operation,
+                "input_file": args.input_file.as_ref().map(|path| path.display().to_string()),
+            }),
+            vec![
+                format!(
+                    "fwc validate {} {} --host <endpoint> --input '{{...}}'",
+                    args.connector, args.operation
+                ),
+                format!(
+                    "fwc validate {} {} --offline --input '{{...}}'",
+                    args.connector, args.operation
+                ),
+            ],
+        ));
+    }
+
     let catalog = DiscoveryCatalog::load()?;
     let connector = match catalog.resolve_connector(&args.connector) {
         Ok(connector) => connector,
@@ -6534,13 +7428,15 @@ fn validate_dispatch(args: &ValidateArgs) -> Result<DispatchOutcome> {
             payload: json!({
                 "status": "error",
                 "command": "validate",
+                "source": "workspace-manifests",
+                "mode": "offline-artifact",
                 "error": {
                     "type": "missing-input",
                     "message": "No input provided. Use --input or --input-file.",
                 },
                 "next_actions": [
-                    format!("fwc validate {} {} --input '{{...}}'", connector.slug, operation.preferred_selector),
-                    format!("fwc template {} {}", connector.slug, operation.preferred_selector),
+                    format!("fwc validate {} {} --offline --input '{{...}}'", connector.slug, operation.preferred_selector),
+                    format!("fwc template {} {} --offline", connector.slug, operation.preferred_selector),
                 ],
             }),
             exit_code: CliExitCode::UnknownCommand,
@@ -6554,6 +7450,8 @@ fn validate_dispatch(args: &ValidateArgs) -> Result<DispatchOutcome> {
             payload: json!({
                 "status": "ok",
                 "command": "validate",
+                "source": "workspace-manifests",
+                "mode": "offline-artifact",
                 "message": format!(
                     "Input is valid for `{}.{}`.",
                     connector.slug, operation.preferred_selector
@@ -6585,6 +7483,8 @@ fn validate_dispatch(args: &ValidateArgs) -> Result<DispatchOutcome> {
             payload: json!({
                 "status": "error",
                 "command": "validate",
+                "source": "workspace-manifests",
+                "mode": "offline-artifact",
                 "message": format!(
                     "Validation failed for `{}.{}`: {} error(s).",
                     connector.slug, operation.preferred_selector, result.errors.len()
@@ -6595,8 +7495,8 @@ fn validate_dispatch(args: &ValidateArgs) -> Result<DispatchOutcome> {
                 "error_count": result.errors.len(),
                 "errors": error_details,
                 "next_actions": [
-                    format!("fwc template {} {}", connector.slug, operation.preferred_selector),
-                    format!("fwc schema {} {}", connector.slug, operation.preferred_selector),
+                    format!("fwc template {} {} --offline", connector.slug, operation.preferred_selector),
+                    format!("fwc schema {} {} --offline", connector.slug, operation.preferred_selector),
                 ],
             }),
             exit_code: CliExitCode::UnknownCommand,
@@ -8093,6 +8993,27 @@ fn missing_host_dispatch(
     }
 }
 
+fn conflicting_catalog_mode_dispatch(command: &str) -> DispatchOutcome {
+    DispatchOutcome {
+        payload: json!({
+            "status": "error",
+            "command": command,
+            "error": {
+                "type": "ambiguous-catalog-source",
+                "message": format!(
+                    "`{command}` cannot combine live host mode with `--offline`. Choose one source of truth."
+                ),
+                "recoverable": true,
+            },
+            "next_actions": [
+                format!("Retry `{command}` with `--host <endpoint>` for live host truth."),
+                format!("Retry `{command}` with `--offline` to inspect workspace manifests explicitly."),
+            ],
+        }),
+        exit_code: CliExitCode::Validation,
+    }
+}
+
 fn resolve_host_operation_from_catalog(
     command: &str,
     client: &HostAdminClient,
@@ -9407,7 +10328,10 @@ fn resolve_live_pipeline_operations(
             continue;
         }
         let Some((connector_selector, operation_selector)) = step.operation.split_once('.') else {
-            return Err(invalid_operation_reference_dispatch(command, &step.operation));
+            return Err(invalid_operation_reference_dispatch(
+                command,
+                &step.operation,
+            ));
         };
         let resolved = match resolve_host_operation_from_catalog(
             command,
@@ -9447,9 +10371,7 @@ fn live_pipeline_operation_metadata(
                             fcp_core::ApprovalMode::None => "none".to_owned(),
                             fcp_core::ApprovalMode::Policy => "policy".to_owned(),
                             fcp_core::ApprovalMode::Interactive => "interactive".to_owned(),
-                            fcp_core::ApprovalMode::ElevationToken => {
-                                "elevation_token".to_owned()
-                            }
+                            fcp_core::ApprovalMode::ElevationToken => "elevation_token".to_owned(),
                         },
                     ),
                     rate_limits: Vec::new(),
@@ -9486,12 +10408,12 @@ fn execute_live_pipeline_plan(
     let mut error_steps = 0usize;
 
     for step_id in &plan.execution_order {
-        let step = steps_by_id
-            .get(step_id.as_str())
-            .ok_or_else(|| anyhow::anyhow!("pipeline step `{step_id}` disappeared during execution"))?;
-        let resolved = operations
-            .get(&step.operation)
-            .ok_or_else(|| anyhow::anyhow!("pipeline step `{step_id}` is missing resolved live metadata"))?;
+        let step = steps_by_id.get(step_id.as_str()).ok_or_else(|| {
+            anyhow::anyhow!("pipeline step `{step_id}` disappeared during execution")
+        })?;
+        let resolved = operations.get(&step.operation).ok_or_else(|| {
+            anyhow::anyhow!("pipeline step `{step_id}` is missing resolved live metadata")
+        })?;
 
         let dependency_failures = step
             .depends_on
@@ -9619,18 +10541,19 @@ fn execute_live_pipeline_plan(
             Some(step.id.as_str()),
         )?;
         let idempotency_key = (mode == PipelinePlanMode::Run).then(|| request_id.to_string());
-        let connector_id: ConnectorId = resolved
-            .connector
-            .summary
-            .id
-            .as_str()
-            .parse()
-            .map_err(|error| {
-                anyhow::anyhow!(
-                    "host connector id `{}` is not canonical: {error}",
-                    resolved.connector.summary.id
-                )
-            })?;
+        let connector_id: ConnectorId =
+            resolved
+                .connector
+                .summary
+                .id
+                .as_str()
+                .parse()
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "host connector id `{}` is not canonical: {error}",
+                        resolved.connector.summary.id
+                    )
+                })?;
         let zone_id: ZoneId = zone
             .parse()
             .map_err(|error| anyhow::anyhow!("`{zone}` is not a valid FCP zone: {error}"))?;
@@ -9930,7 +10853,7 @@ fn recipe_list_dispatch() -> Result<DispatchOutcome> {
             "status": "ok",
             "command": "recipe",
             "subcommand": "list",
-            "message": "Bundled recipe library loaded. Built-ins include placeholder defaults so agents can inspect, estimate, and export them deterministically before customization.",
+            "message": "Bundled recipe library loaded. Built-ins include editable defaults so agents can inspect, estimate, and export them deterministically before customization.",
             "recipe_count": recipes.len(),
             "categories": category_counts,
             "recipes": recipes,
@@ -10117,13 +11040,16 @@ fn recipe_run_dispatch(
     };
     let client = HostAdminClient::new(&host.endpoint)?;
     let (catalog, _) = client.catalog(None)?;
-    let resolved_operations = match resolve_live_pipeline_operations("recipe", &plan, &client, &catalog)
-    {
-        Ok(operations) => operations,
-        Err(outcome) => return Ok(outcome),
-    };
-    let estimate = pipe::estimate_pipeline(&plan, &live_pipeline_operation_metadata(&resolved_operations))
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let resolved_operations =
+        match resolve_live_pipeline_operations("recipe", &plan, &client, &catalog) {
+            Ok(operations) => operations,
+            Err(outcome) => return Ok(outcome),
+        };
+    let estimate = pipe::estimate_pipeline(
+        &plan,
+        &live_pipeline_operation_metadata(&resolved_operations),
+    )
+    .map_err(|error| anyhow::anyhow!("{error}"))?;
     let zone = resolved_zone(args.zone.as_deref(), &host);
     let execution = execute_live_pipeline_plan(
         "recipe",
@@ -10629,8 +11555,11 @@ fn pipeline_run_dispatch(
             Ok(operations) => operations,
             Err(outcome) => return Ok(outcome),
         };
-    let estimate = pipe::estimate_pipeline(&plan, &live_pipeline_operation_metadata(&resolved_operations))
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let estimate = pipe::estimate_pipeline(
+        &plan,
+        &live_pipeline_operation_metadata(&resolved_operations),
+    )
+    .map_err(|error| anyhow::anyhow!("{error}"))?;
     let zone = resolved_zone(args.zone.as_deref(), &host);
     let execution = execute_live_pipeline_plan(
         "pipeline",
@@ -13595,7 +14524,8 @@ mod tests {
                     panic!("missing expected mock response for request {}", served + 1);
                 };
                 assert_eq!(
-                    &key, expected_key,
+                    &key,
+                    expected_key,
                     "unexpected mock host request order at position {}",
                     served + 1
                 );
@@ -14536,10 +15466,7 @@ deny_ptrace = true
             "code",
         ]);
 
-        let _ = server;
-        panic!(
-            "recipe dry-run payload: exit_code={exit_code:?}, payload={payload}"
-        );
+        server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["source"], "host-admin-api");
         assert_eq!(payload["filters"]["category"], "code");
@@ -14553,9 +15480,25 @@ deny_ptrace = true
     }
 
     #[test]
-    fn execute_export_tools_without_host_stays_in_offline_artifact_mode() {
+    fn execute_export_tools_without_host_requires_explicit_offline_mode() {
         let (exit_code, payload) =
             execute_json(&["fwc", "--json", "export-tools", "--format", "mcp", "github"]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
+    }
+
+    #[test]
+    fn execute_export_tools_offline_stays_in_offline_artifact_mode() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "export-tools",
+            "--offline",
+            "--format",
+            "mcp",
+            "github",
+        ]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["source"], "workspace-manifests");
@@ -15943,17 +16886,28 @@ deny_ptrace = true
         let payload: Value =
             serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
 
-        assert_eq!(outcome.exit_code, CliExitCode::Success.into());
+        assert_eq!(outcome.exit_code, CliExitCode::Transport.into());
         assert_eq!(payload["command"], "ops");
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
     }
 
     #[test]
-    fn execute_list_returns_manifest_backed_inventory() {
+    fn execute_list_without_host_requires_explicit_offline_mode() {
         let (exit_code, payload) = execute_json(&["fwc", "--json", "list"]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "list");
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
+    }
+
+    #[test]
+    fn execute_list_offline_returns_manifest_backed_inventory() {
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "list", "--offline"]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "list");
         assert_eq!(payload["source"], "workspace-manifests");
+        assert_eq!(payload["mode"], "offline-artifact");
         assert!(
             payload["connectors"]
                 .as_array()
@@ -15971,23 +16925,26 @@ deny_ptrace = true
     }
 
     #[test]
-    fn execute_search_surfaces_github_issue_matches() {
-        let (exit_code, payload) = execute_json(&["fwc", "--json", "search", "github issue"]);
+    fn execute_search_offline_surfaces_github_issue_matches() {
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "search", "github issue", "--offline"]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "search");
+        assert_eq!(payload["mode"], "offline-artifact");
         assert!(payload["results"].as_array().unwrap().iter().any(|result| {
             result["connector"] == "github" && result["operation"] == "github.create_issue"
         }));
     }
 
     #[test]
-    fn execute_show_github_returns_manifest_detail() {
-        let (exit_code, payload) = execute_json(&["fwc", "--json", "show", "github"]);
+    fn execute_show_github_offline_returns_manifest_detail() {
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "show", "github", "--offline"]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "show");
         assert_eq!(payload["source"], "workspace-manifests");
+        assert_eq!(payload["mode"], "offline-artifact");
         assert_eq!(payload["connector"]["slug"], "github");
         assert_eq!(payload["connector"]["canonical_id"], "fcp.github");
         assert_eq!(payload["connector"]["format"], "wasi");
@@ -16010,12 +16967,20 @@ deny_ptrace = true
     }
 
     #[test]
-    fn execute_ops_filters_out_risky_operations() {
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "ops", "github", "--risk-at-most", "low"]);
+    fn execute_ops_offline_filters_out_risky_operations() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "ops",
+            "github",
+            "--risk-at-most",
+            "low",
+            "--offline",
+        ]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "ops");
+        assert_eq!(payload["mode"], "offline-artifact");
         assert_eq!(payload["connector"]["slug"], "github");
         assert!(
             payload["operations"]
@@ -16034,12 +16999,19 @@ deny_ptrace = true
     }
 
     #[test]
-    fn execute_schema_resolves_friendly_operation_selector() {
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "schema", "github", "issues.create"]);
+    fn execute_schema_offline_resolves_friendly_operation_selector() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "schema",
+            "github",
+            "issues.create",
+            "--offline",
+        ]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "schema");
+        assert_eq!(payload["mode"], "offline-artifact");
         assert_eq!(payload["scope"], "operation");
         assert_eq!(payload["operation"]["requested_selector"], "issues.create");
         assert_eq!(payload["operation"]["selector"], "issues.create");
@@ -16055,12 +17027,19 @@ deny_ptrace = true
     }
 
     #[test]
-    fn execute_examples_resolves_friendly_operation_selector() {
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "examples", "github", "issues.create"]);
+    fn execute_examples_offline_resolves_friendly_operation_selector() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "examples",
+            "github",
+            "issues.create",
+            "--offline",
+        ]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "examples");
+        assert_eq!(payload["mode"], "offline-artifact");
         assert_eq!(payload["scope"], "operation");
         assert_eq!(payload["operation"]["selector"], "issues.create");
         assert_eq!(payload["operation"]["canonical_id"], "github.create_issue");
@@ -16070,6 +17049,221 @@ deny_ptrace = true
                 .and_then(Value::as_str)
                 .is_some_and(|example| example.contains("\"title\": \"Bug report\""))
         }));
+    }
+
+    #[test]
+    fn execute_suggest_without_host_requires_explicit_offline_mode() {
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "suggest", "--goal", "create github issue"]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "suggest");
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
+    }
+
+    #[test]
+    fn execute_suggest_offline_returns_manifest_backed_recommendations() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "suggest",
+            "--goal",
+            "create github issue",
+            "--offline",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "suggest");
+        assert_eq!(payload["source"], "workspace-manifests");
+        assert_eq!(payload["mode"], "offline-artifact");
+        assert!(
+            payload["suggestions"]
+                .as_array()
+                .is_some_and(|suggestions| {
+                    suggestions
+                        .iter()
+                        .any(|suggestion| suggestion["operation"] == "github.create_issue")
+                })
+        );
+    }
+
+    #[test]
+    fn execute_suggest_with_host_uses_live_introspection() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
+                    mock_introspection_response_json(),
+                ),
+            ]),
+            2,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "suggest",
+            "--goal",
+            "create github issue",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "suggest");
+        assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["mode"], "live-introspection");
+        assert!(
+            payload["suggestions"]
+                .as_array()
+                .is_some_and(|suggestions| {
+                    suggestions
+                        .iter()
+                        .any(|suggestion| suggestion["operation"] == "github.create_issue")
+                })
+        );
+    }
+
+    #[test]
+    fn execute_template_without_host_requires_explicit_offline_mode() {
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "template", "github", "issues.create"]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "template");
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
+    }
+
+    #[test]
+    fn execute_template_offline_returns_offline_artifact_template() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "template",
+            "github",
+            "issues.create",
+            "--offline",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "template");
+        assert_eq!(payload["source"], "workspace-manifests");
+        assert_eq!(payload["mode"], "offline-artifact");
+        assert_eq!(payload["operation"]["canonical_id"], "github.create_issue");
+        assert_eq!(payload["template"]["title"], "example-string");
+    }
+
+    #[test]
+    fn execute_template_with_host_uses_live_introspection() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
+                    mock_introspection_response_json(),
+                ),
+            ]),
+            2,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "template",
+            "github",
+            "issues.create",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "template");
+        assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["mode"], "live-introspection");
+        assert_eq!(payload["operation"]["selector"], "github.create_issue");
+        assert_eq!(payload["template"]["title"], "example-string");
+    }
+
+    #[test]
+    fn execute_validate_without_host_requires_explicit_offline_mode() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "validate",
+            "github",
+            "issues.create",
+            "--input",
+            "{\"owner\":\"octocat\",\"repo\":\"hello-world\",\"title\":\"Bug report\"}",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "validate");
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
+    }
+
+    #[test]
+    fn execute_validate_offline_returns_offline_artifact_result() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "validate",
+            "github",
+            "issues.create",
+            "--offline",
+            "--input",
+            "{\"owner\":\"octocat\",\"repo\":\"hello-world\",\"title\":\"Bug report\"}",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "validate");
+        assert_eq!(payload["source"], "workspace-manifests");
+        assert_eq!(payload["mode"], "offline-artifact");
+        assert_eq!(payload["valid"], true);
+    }
+
+    #[test]
+    fn execute_validate_with_host_uses_live_introspection() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
+                    mock_introspection_response_json(),
+                ),
+            ]),
+            2,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "validate",
+            "github",
+            "issues.create",
+            "--input",
+            "{\"owner\":\"octocat\",\"repo\":\"hello-world\",\"title\":\"Bug report\"}",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "validate");
+        assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["mode"], "live-introspection");
+        assert_eq!(payload["valid"], true);
     }
 
     // ── Intent recovery: config subcommand aliases ──────────────────────
@@ -16751,10 +17945,7 @@ default = "#general"
             ),
             (
                 "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
-                mock_introspection_response_with_tools(
-                    github_connector,
-                    vec![github_search_tool],
-                ),
+                mock_introspection_response_with_tools(github_connector, vec![github_search_tool]),
             ),
             (
                 "GET /rpc/introspect/fcp.slack:team:v1".to_owned(),
@@ -16819,7 +18010,10 @@ default = "#general"
         assert_eq!(payload["execution"]["preflight_only_steps"], 1);
         assert_eq!(payload["execution"]["skipped_steps"], 0);
         assert_eq!(payload["execution"]["blocked_steps"], 0);
-        assert_eq!(payload["execution"]["outputs"]["fetch"]["issues"][0]["title"], "Bug report");
+        assert_eq!(
+            payload["execution"]["outputs"]["fetch"]["issues"][0]["title"],
+            "Bug report"
+        );
         let steps = payload["execution"]["steps"]
             .as_array()
             .expect("execution steps should be present");
@@ -16828,7 +18022,10 @@ default = "#general"
         assert_eq!(steps[0]["mode"], "dry-run-read");
         assert_eq!(steps[0]["input"]["owner"], "octocat");
         assert_eq!(steps[0]["input"]["repo"], "hello-world");
-        assert_eq!(steps[0]["response"]["result"]["issues"][0]["title"], "Bug report");
+        assert_eq!(
+            steps[0]["response"]["result"]["issues"][0]["title"],
+            "Bug report"
+        );
         assert_eq!(steps[1]["id"], "notify");
         assert_eq!(steps[1]["status"], "ok");
         assert_eq!(steps[1]["mode"], "preflight");
@@ -16972,10 +18169,7 @@ operation = "github.not_a_real_operation"
             ),
             (
                 "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
-                mock_introspection_response_with_tools(
-                    github_connector,
-                    vec![github_search_tool],
-                ),
+                mock_introspection_response_with_tools(github_connector, vec![github_search_tool]),
             ),
         ]);
         let path_str = path.display().to_string();
@@ -17171,10 +18365,7 @@ depends_on = ["missing"]
             ),
             (
                 "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
-                mock_introspection_response_with_tools(
-                    github_connector,
-                    vec![github_get_pr_tool],
-                ),
+                mock_introspection_response_with_tools(github_connector, vec![github_get_pr_tool]),
             ),
             (
                 "GET /rpc/introspect/fcp.slack:team:v1".to_owned(),
@@ -17216,7 +18407,10 @@ depends_on = ["missing"]
         assert_eq!(payload["subcommand"], "dry-run");
         assert_eq!(payload["source"], "host-admin-api");
         assert_eq!(payload["recipe"], "github-pr-review-notify");
-        assert_eq!(payload["estimate"]["estimated_api_calls"]["summary"], "~2 API calls");
+        assert_eq!(
+            payload["estimate"]["estimated_api_calls"]["summary"],
+            "~2 API calls"
+        );
         assert_eq!(payload["execution"]["executed_steps"], 1);
         assert_eq!(payload["execution"]["preflight_only_steps"], 1);
         assert_eq!(

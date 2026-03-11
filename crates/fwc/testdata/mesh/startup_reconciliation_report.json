@@ -1,0 +1,31 @@
+{
+  "reconciled_at": "2026-03-11T00:00:00Z",
+  "tracked_connectors": 2,
+  "created_connectors": 0,
+  "observed_updates": 1,
+  "drifted_connectors": 1,
+  "entries": [
+    {
+      "connector_id": "fcp.github:enterprise:v1",
+      "created_admin_state": false,
+      "desired_state": "enabled",
+      "observed_state_before": "running",
+      "observed_state_after": "degraded",
+      "updated": true,
+      "drift": {
+        "kind": "enabled_but_degraded",
+        "recovery_action": "repair_connector",
+        "message": "connector health has degraded while the desired state still expects active service"
+      }
+    },
+    {
+      "connector_id": "fcp.slack:workspace:v1",
+      "created_admin_state": false,
+      "desired_state": "enabled",
+      "observed_state_before": "running",
+      "observed_state_after": "running",
+      "updated": false,
+      "drift": null
+    }
+  ]
+}

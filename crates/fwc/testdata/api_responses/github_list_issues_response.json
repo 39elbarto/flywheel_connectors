@@ -1,0 +1,7 @@
+[
+  { "number": 101, "title": "Fix flaky CI run", "state": "open" },
+  { "number": 102, "title": "Document release checklist", "state": "open" },
+  { "number": 103, "title": "Backfill audit event coverage", "state": "closed" },
+  { "number": 104, "title": "Repair Slack retry handling", "state": "open" },
+  { "number": 105, "title": "Trim unused mesh snapshots", "state": "closed" }
+]

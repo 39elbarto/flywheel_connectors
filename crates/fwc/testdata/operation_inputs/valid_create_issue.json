@@ -1,0 +1,6 @@
+{
+  "owner": "octocat",
+  "repo": "hello-world",
+  "title": "Document test fixture loading",
+  "body": "The shared CUAL fixture corpus should be validated in CI."
+}

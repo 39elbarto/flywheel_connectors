@@ -1,0 +1,15 @@
+{
+  "tool_descriptor": {
+    "name": "setup.github",
+    "description": "Bring GitHub connector prerequisites to a ready state."
+  },
+  "human_prompts": [
+    {
+      "step_id": "oauth",
+      "prompt_type": "url",
+      "message": "Open the browser and complete GitHub OAuth consent.",
+      "url": "https://github.example.test/oauth/authorize"
+    }
+  ],
+  "estimated_duration_ms": 180000
+}

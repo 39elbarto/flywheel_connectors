@@ -1,0 +1,3 @@
+{"id":"gh-issues","connector":"github","operation":"list_issues","input":{"owner":"octocat","repo":"hello-world","state":"open"}}
+{"id":"slack-post","connector":"slack","operation":"send_message","input":{"channel":"C12345678","text":"Triage run started."}}
+{"id":"noop-audit","connector":"noop","operation":"echo","input":{"message":"mixed-batch-fixture"}}

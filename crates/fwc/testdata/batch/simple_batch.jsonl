@@ -1,0 +1,5 @@
+{"id":"gh-1","connector":"github","operation":"list_issues","input":{"owner":"octocat","repo":"hello-world","state":"open"}}
+{"id":"gh-2","connector":"github","operation":"list_issues","input":{"owner":"octocat","repo":"api","state":"open"}}
+{"id":"gh-3","connector":"github","operation":"list_issues","input":{"owner":"octocat","repo":"sdk","state":"closed"}}
+{"id":"gh-4","connector":"github","operation":"list_issues","input":{"owner":"octocat","repo":"cli","state":"open"}}
+{"id":"gh-5","connector":"github","operation":"list_issues","input":{"owner":"octocat","repo":"docs","state":"all"}}

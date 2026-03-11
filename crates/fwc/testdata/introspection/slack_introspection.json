@@ -1,0 +1,216 @@
+{
+  "connector": {
+    "id": "fcp.slack:workspace:v1",
+    "name": "Slack Workspace",
+    "description": "Slack connector surfaced through fcp-host.",
+    "version": "2.0.0",
+    "categories": ["messaging", "workspace"],
+    "tool_count": 5,
+    "max_safety_tier": "risky",
+    "enabled": true,
+    "health": { "status": "healthy" },
+    "last_health_check": "2026-03-10T00:00:00Z"
+  },
+  "tools": [
+    {
+      "name": "slack.send_message",
+      "description": "Send a message to a channel.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "channel": { "type": "string" },
+          "text": { "type": "string" },
+          "thread_ts": { "type": "string" }
+        },
+        "required": ["channel", "text"]
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "ok": { "type": "boolean" },
+          "channel": { "type": "string" },
+          "ts": { "type": "string" }
+        },
+        "required": ["ok", "channel", "ts"]
+      },
+      "capability": "slack.message_write",
+      "risk_level": "medium",
+      "safety_tier": "risky",
+      "idempotency": "best_effort",
+      "approval_mode": "policy",
+      "requires_confirmation": true,
+      "idempotent": true,
+      "supports_simulate": true,
+      "rate_limits": ["chat-post"],
+      "examples": [],
+      "ai_hints": {
+        "when_to_use": "Use this for operator-visible notifications or handoff messages.",
+        "common_mistakes": ["Sending to a user id instead of a channel id."],
+        "examples": [],
+        "related": ["slack.get_channel_history"]
+      }
+    },
+    {
+      "name": "slack.list_channels",
+      "description": "List channels in the workspace.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "limit": { "type": "integer" }
+        },
+        "required": []
+      },
+      "output_schema": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "id": { "type": "string" },
+            "name": { "type": "string" }
+          },
+          "required": ["id", "name"]
+        }
+      },
+      "capability": "slack.channel_read",
+      "risk_level": "low",
+      "safety_tier": "safe",
+      "idempotency": "strict",
+      "approval_mode": null,
+      "requires_confirmation": false,
+      "idempotent": true,
+      "supports_simulate": true,
+      "rate_limits": ["conversations-read"],
+      "examples": [],
+      "ai_hints": {
+        "when_to_use": "Use this before sending or routing workspace notifications.",
+        "common_mistakes": ["Assuming archived channels will appear in the default view."],
+        "examples": [],
+        "related": ["slack.send_message"]
+      }
+    },
+    {
+      "name": "slack.get_channel_history",
+      "description": "Fetch recent messages from a channel.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "channel": { "type": "string" },
+          "limit": { "type": "integer" }
+        },
+        "required": ["channel"]
+      },
+      "output_schema": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "user": { "type": "string" },
+            "text": { "type": "string" },
+            "ts": { "type": "string" }
+          },
+          "required": ["user", "text", "ts"]
+        }
+      },
+      "capability": "slack.message_read",
+      "risk_level": "low",
+      "safety_tier": "safe",
+      "idempotency": "strict",
+      "approval_mode": null,
+      "requires_confirmation": false,
+      "idempotent": true,
+      "supports_simulate": true,
+      "rate_limits": ["conversations-read"],
+      "examples": [],
+      "ai_hints": {
+        "when_to_use": "Use this when summarizing recent channel activity or checking thread context.",
+        "common_mistakes": ["Assuming message order without sorting by timestamp."],
+        "examples": [],
+        "related": ["slack.send_message"]
+      }
+    },
+    {
+      "name": "slack.create_channel",
+      "description": "Create a new channel.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "is_private": { "type": "boolean" }
+        },
+        "required": ["name"]
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" }
+        },
+        "required": ["id", "name"]
+      },
+      "capability": "slack.channel_write",
+      "risk_level": "medium",
+      "safety_tier": "risky",
+      "idempotency": "none",
+      "approval_mode": "interactive",
+      "requires_confirmation": true,
+      "idempotent": false,
+      "supports_simulate": true,
+      "rate_limits": ["conversations-write"],
+      "examples": [],
+      "ai_hints": {
+        "when_to_use": "Use this when a workflow requires a dedicated workspace room.",
+        "common_mistakes": ["Choosing a channel name that conflicts with an existing channel."],
+        "examples": [],
+        "related": ["slack.list_channels"]
+      }
+    },
+    {
+      "name": "slack.add_reaction",
+      "description": "Add a reaction emoji to a message.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "channel": { "type": "string" },
+          "timestamp": { "type": "string" },
+          "emoji": { "type": "string" }
+        },
+        "required": ["channel", "timestamp", "emoji"]
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "ok": { "type": "boolean" }
+        },
+        "required": ["ok"]
+      },
+      "capability": "slack.reaction_write",
+      "risk_level": "medium",
+      "safety_tier": "risky",
+      "idempotency": "best_effort",
+      "approval_mode": "policy",
+      "requires_confirmation": true,
+      "idempotent": true,
+      "supports_simulate": true,
+      "rate_limits": ["reactions-write"],
+      "examples": [],
+      "ai_hints": {
+        "when_to_use": "Use this for lightweight acknowledgements when a full message would be noisy.",
+        "common_mistakes": ["Using a custom emoji name that does not exist in the workspace."],
+        "examples": [],
+        "related": ["slack.send_message"]
+      }
+    }
+  ],
+  "rate_limits": {
+    "limits": [],
+    "tool_pool_map": {}
+  },
+  "archetype": "request_response",
+  "introspection": {
+    "operations": [],
+    "events": [],
+    "resource_types": [],
+    "auth_caps": null,
+    "event_caps": null
+  }
+}

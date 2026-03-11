@@ -1,0 +1,35 @@
+{
+  "format": "fcp-policy-bundle",
+  "schema_version": "1.0",
+  "bundle_id": "bundle-z-work-0001",
+  "zone_id": "z:work",
+  "policy_seq": 1,
+  "created_at": "2026-03-10T00:00:00Z",
+  "previous_bundle": null,
+  "hash_algo": "blake3-256",
+  "bundle_hash": "blake3-256:1111111111111111111111111111111111111111111111111111111111111111",
+  "policies": [
+    {
+      "object_id": "obj-zone-policy-0001",
+      "schema_id": "fcp://schemas/zone-policy/v1",
+      "object_hash": "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ],
+  "signature": {
+    "algorithm": "ed25519",
+    "key_id": "root-2026-q1",
+    "signature": "deadbeef-signature-0001",
+    "signed_fields": [
+      "format",
+      "schema_version",
+      "bundle_id",
+      "zone_id",
+      "policy_seq",
+      "created_at",
+      "previous_bundle",
+      "hash_algo",
+      "bundle_hash",
+      "policies"
+    ]
+  }
+}

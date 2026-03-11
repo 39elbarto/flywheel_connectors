@@ -1,0 +1,15 @@
+# Shared fixture: syntactically valid TOML, semantically invalid pipeline.
+[pipeline]
+name = "invalid-pipe"
+description = "Contains an impossible dependency cycle."
+version = "1.0"
+
+[[steps]]
+id = "a"
+operation = "github.list_issues"
+depends_on = ["b"]
+
+[[steps]]
+id = "b"
+operation = "slack.send_message"
+depends_on = ["a"]

@@ -339,13 +339,13 @@ fn run_bundle_create(args: &BundleCreateArgs) -> Result<()> {
         .map(|field| (*field).to_string())
         .collect::<Vec<_>>();
 
-    let placeholder_signature =
+    let provisional_signature =
         PolicyBundleSignature::new(args.key_id.clone(), "pending", signed_fields.clone());
 
     let mut builder = PolicyBundle::builder(&args.bundle_id, zone_id, args.policy_seq)
         .bundle_hash(bundle_hash)
         .policies(policies)
-        .signature(placeholder_signature);
+        .signature(provisional_signature);
     if let Some(created_at) = created_at {
         builder = builder.created_at(created_at);
     }

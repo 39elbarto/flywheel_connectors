@@ -1,0 +1,15 @@
+{
+  "active_context": "z:work",
+  "connector": "fcp.github:enterprise:v1",
+  "selected_node": "node-macbook-pro",
+  "placement_reason": [
+    "secret locality: oauth token only exists on node-macbook-pro",
+    "health: node-macbook-pro is healthy while node-build-01 is degraded",
+    "latency: selected node has the lowest recent median latency"
+  ],
+  "eligible_nodes": [
+    "node-macbook-pro",
+    "node-build-01"
+  ],
+  "override_command": "fwc mesh run github --node node-build-01"
+}

@@ -1,0 +1,6 @@
+MESH ROLLOUT
+connector: fcp.github:enterprise:v1
+node: node-macbook-pro
+cohort: work-primary
+decision: promote
+evidence: blake3-256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd

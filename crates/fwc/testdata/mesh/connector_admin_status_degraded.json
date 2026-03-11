@@ -1,0 +1,16 @@
+{
+  "connector_id": "fcp.github:enterprise:v1",
+  "desired_state": "enabled",
+  "observed_state": "degraded",
+  "lifecycle": null,
+  "pinned_version": "1.2.3",
+  "active_config_revision_id": 7,
+  "config_revision_count": 9,
+  "last_journal_sequence": 42,
+  "drift": {
+    "kind": "enabled_but_degraded",
+    "recovery_action": "repair_connector",
+    "message": "connector health has degraded while the desired state still expects active service"
+  },
+  "evaluated_at": "2026-03-11T00:00:00Z"
+}

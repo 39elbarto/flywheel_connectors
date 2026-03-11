@@ -1,0 +1,7 @@
+{
+  "error": {
+    "status": 500,
+    "code": "upstream_failure",
+    "message": "Remote service returned an unexpected internal error."
+  }
+}

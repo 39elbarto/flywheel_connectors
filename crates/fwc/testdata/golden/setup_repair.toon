@@ -1,0 +1,6 @@
+SETUP REPAIR
+connector: fcp.github:enterprise:v1
+status: repairable
+issues: webhook drift, tenant binding drift
+next: re-register webhook and rotate secret
+resume: fwc setup repair github --resume setup-run-17

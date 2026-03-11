@@ -1,0 +1,40 @@
+{
+  "format": "fcp-policy-bundle",
+  "schema_version": "1.0",
+  "bundle_id": "bundle-z-work-0002",
+  "zone_id": "z:work",
+  "policy_seq": 2,
+  "created_at": "2026-03-11T00:00:00Z",
+  "previous_bundle": "bundle-z-work-0001",
+  "hash_algo": "blake3-256",
+  "bundle_hash": "blake3-256:2222222222222222222222222222222222222222222222222222222222222222",
+  "policies": [
+    {
+      "object_id": "obj-zone-policy-0002",
+      "schema_id": "fcp://schemas/zone-policy/v1",
+      "object_hash": "blake3-256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "object_id": "obj-role-triage-0001",
+      "schema_id": "fcp://schemas/role/v1",
+      "object_hash": "blake3-256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    }
+  ],
+  "signature": {
+    "algorithm": "ed25519",
+    "key_id": "root-2026-q1",
+    "signature": "deadbeef-signature-0002",
+    "signed_fields": [
+      "format",
+      "schema_version",
+      "bundle_id",
+      "zone_id",
+      "policy_seq",
+      "created_at",
+      "previous_bundle",
+      "hash_algo",
+      "bundle_hash",
+      "policies"
+    ]
+  }
+}

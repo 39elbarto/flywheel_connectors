@@ -1,0 +1,62 @@
+{
+  "connector": {
+    "id": "fcp.noop:test:v1",
+    "name": "Noop Test Connector",
+    "description": "Minimal connector fixture for edge-case testing.",
+    "version": "0.1.0",
+    "categories": ["testing"],
+    "tool_count": 1,
+    "max_safety_tier": "safe",
+    "enabled": true,
+    "health": { "status": "healthy" },
+    "last_health_check": "2026-03-10T00:00:00Z"
+  },
+  "tools": [
+    {
+      "name": "noop.echo",
+      "description": "Echo a payload back to the caller.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "message": { "type": "string" }
+        },
+        "required": ["message"]
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "message": { "type": "string" }
+        },
+        "required": ["message"]
+      },
+      "capability": "noop.echo",
+      "risk_level": "low",
+      "safety_tier": "safe",
+      "idempotency": "strict",
+      "approval_mode": null,
+      "requires_confirmation": false,
+      "idempotent": true,
+      "supports_simulate": true,
+      "rate_limits": [],
+      "examples": [],
+      "ai_hints": {
+        "when_to_use": "Use this to smoke-test schema plumbing and fixture loading.",
+        "common_mistakes": ["Passing a non-string message."],
+        "examples": [],
+        "related": []
+      }
+    }
+  ],
+  "rate_limits": {
+    "limits": [],
+    "tool_pool_map": {}
+  },
+  "archetype": "request_response",
+  "introspection": {
+    "operations": [],
+    "events": [],
+    "resource_types": [],
+    "auth_caps": null,
+    "event_caps": null
+  }
+}

@@ -1194,6 +1194,153 @@ pub fn evaluate_simulate_request(
     }
 }
 
+// ── Discovery truth contract ─────────────────────────────────────────────────
+// Defines how discovery commands (list, search, show, ops, schema, examples,
+// suggest) honestly label the source and freshness of their data.
+
+/// Where discovery data actually came from.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiscoveryDataSource {
+    /// Live host inventory via RPC (authoritative, fresh).
+    LiveHostInventory,
+    /// Live host introspection via RPC (authoritative, fresh).
+    LiveHostIntrospection,
+    /// Workspace manifest files on disk (stale, offline).
+    WorkspaceManifest,
+    /// Local discovery catalog cache (stale, offline).
+    LocalCatalogCache,
+    /// Static embedded schema (always available, never stale but never live).
+    StaticSchema,
+}
+
+impl DiscoveryDataSource {
+    /// Whether this source is authoritative (reflects current live state).
+    #[must_use]
+    pub fn is_authoritative(&self) -> bool {
+        matches!(
+            self,
+            Self::LiveHostInventory | Self::LiveHostIntrospection
+        )
+    }
+
+    /// Whether this source is from offline/local artifacts.
+    #[must_use]
+    pub fn is_offline(&self) -> bool {
+        matches!(
+            self,
+            Self::WorkspaceManifest | Self::LocalCatalogCache | Self::StaticSchema
+        )
+    }
+
+    /// Machine-readable tag.
+    #[must_use]
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Self::LiveHostInventory => "live-host-inventory",
+            Self::LiveHostIntrospection => "live-host-introspection",
+            Self::WorkspaceManifest => "workspace-manifest",
+            Self::LocalCatalogCache => "local-catalog-cache",
+            Self::StaticSchema => "static-schema",
+        }
+    }
+
+    /// Freshness caveat for this source.
+    #[must_use]
+    pub fn freshness_caveat(&self) -> &'static str {
+        match self {
+            Self::LiveHostInventory => "Data reflects the current host inventory.",
+            Self::LiveHostIntrospection => {
+                "Data reflects the current connector introspection state."
+            }
+            Self::WorkspaceManifest => {
+                "Data is from workspace manifests and may not reflect current host state."
+            }
+            Self::LocalCatalogCache => {
+                "Data is from a local cache and may be stale."
+            }
+            Self::StaticSchema => {
+                "Data is from embedded static schemas, not live connector state."
+            }
+        }
+    }
+}
+
+/// Provenance envelope for discovery command output.
+///
+/// Every discovery response must include this so consumers know whether
+/// they are looking at live host data or offline artifacts.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscoveryProvenance {
+    /// The command that produced this output.
+    pub command: String,
+    /// Where the data actually came from.
+    pub source: DiscoveryDataSource,
+    /// Whether the output is authoritative.
+    pub authoritative: bool,
+    /// Freshness caveat.
+    pub caveat: String,
+    /// When the data was fetched (for staleness tracking).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetched_at: Option<String>,
+}
+
+/// Build a discovery provenance envelope for a command.
+#[allow(dead_code)]
+#[must_use]
+pub fn discovery_provenance(command: &str, source: DiscoveryDataSource) -> DiscoveryProvenance {
+    DiscoveryProvenance {
+        command: command.to_owned(),
+        authoritative: source.is_authoritative(),
+        caveat: source.freshness_caveat().to_owned(),
+        source,
+        fetched_at: None,
+    }
+}
+
+/// All discovery commands that should carry a `DiscoveryProvenance` envelope.
+#[allow(dead_code)]
+pub const DISCOVERY_COMMANDS: &[&str] = &[
+    "list", "search", "show", "ops", "schema", "examples", "suggest",
+];
+
+/// Check if a command is a discovery command.
+#[allow(dead_code)]
+#[must_use]
+pub fn is_discovery_command(command: &str) -> bool {
+    DISCOVERY_COMMANDS.contains(&command)
+}
+
+/// Determine the expected discovery source for a command given the runtime mode.
+#[allow(dead_code)]
+#[must_use]
+pub fn expected_discovery_source(
+    command: &str,
+    mode: RuntimeMode,
+) -> Option<DiscoveryDataSource> {
+    if !is_discovery_command(command) {
+        return None;
+    }
+
+    Some(match mode {
+        RuntimeMode::Live => {
+            // show and ops use introspection; others use inventory
+            match command {
+                "show" | "ops" | "schema" | "examples" => {
+                    DiscoveryDataSource::LiveHostIntrospection
+                }
+                _ => DiscoveryDataSource::LiveHostInventory,
+            }
+        }
+        RuntimeMode::ExplicitOffline | RuntimeMode::DegradedOffline => {
+            DiscoveryDataSource::WorkspaceManifest
+        }
+        RuntimeMode::Refused => return None,
+    })
+}
+
 // ── Package artifact source validation ───────────────────────────────────────
 // Defines the allowed sources for connector packages on install/update runtime
 // paths. Demo, stub, and placeholder sources are explicitly rejected. Test
@@ -2166,14 +2313,15 @@ fn execution_contract(summary: &str, intended_shape: &str) -> Value {
 mod tests {
     use super::{
         AuthAcquisitionFlow, COMMAND_CLASSIFICATIONS, COMMANDS, CapabilityTokenSource,
-        CommandExecutionMode, CommandTruthSource, DEMO_MARKERS, HYBRID_MODE_HELP,
-        HostAbsentBehavior, HostAbsentReason, OFFLINE_FLAG_HELP, OfflineSource,
-        PackageArtifactSource, RuntimeContext, RuntimeMode, SYNTHETIC_TOKEN_MARKERS,
-        SimulateCapability, WorkflowKind, WorkflowStepReality, auth_required_commands,
-        auth_ux_guidance, check_auth_requirement, classify_command, classify_token_source,
-        command_requires_host, contains_demo_marker, contains_synthetic_token_marker,
-        default_offline_source, demo_source_rejection_payload, evaluate_simulate_request,
-        guide_payload, host_absent_error, host_absent_error_payload, live_host_commands,
+        CommandExecutionMode, CommandTruthSource, DEMO_MARKERS, DISCOVERY_COMMANDS,
+        DiscoveryDataSource, HYBRID_MODE_HELP, HostAbsentBehavior, HostAbsentReason,
+        OFFLINE_FLAG_HELP, OfflineSource, PackageArtifactSource, RuntimeContext, RuntimeMode,
+        SYNTHETIC_TOKEN_MARKERS, SimulateCapability, WorkflowKind, WorkflowStepReality,
+        auth_required_commands, auth_ux_guidance, check_auth_requirement, classify_command,
+        classify_token_source, command_requires_host, contains_demo_marker,
+        contains_synthetic_token_marker, default_offline_source, demo_source_rejection_payload,
+        discovery_provenance, evaluate_simulate_request, expected_discovery_source, guide_payload,
+        host_absent_error, host_absent_error_payload, is_discovery_command, live_host_commands,
         offline_capable_commands, offline_provenance, offline_provenance_payload, planned_payload,
         resolve_boundary, resolve_runtime_mode, simulate_result, simulate_result_payload,
         validate_capability_token_source, validate_mode_consistency, validate_package_source,
@@ -6377,6 +6525,205 @@ mod tests {
                     src
                 );
             }
+        }
+    }
+
+    // ── Discovery truth contract tests ───────────────────────────────────
+
+    #[test]
+    fn discovery_data_source_tags_are_stable() {
+        assert_eq!(DiscoveryDataSource::LiveHostInventory.tag(), "live-host-inventory");
+        assert_eq!(
+            DiscoveryDataSource::LiveHostIntrospection.tag(),
+            "live-host-introspection"
+        );
+        assert_eq!(DiscoveryDataSource::WorkspaceManifest.tag(), "workspace-manifest");
+        assert_eq!(DiscoveryDataSource::LocalCatalogCache.tag(), "local-catalog-cache");
+        assert_eq!(DiscoveryDataSource::StaticSchema.tag(), "static-schema");
+    }
+
+    #[test]
+    fn discovery_data_source_serde_roundtrip() {
+        for src in [
+            DiscoveryDataSource::LiveHostInventory,
+            DiscoveryDataSource::LiveHostIntrospection,
+            DiscoveryDataSource::WorkspaceManifest,
+            DiscoveryDataSource::LocalCatalogCache,
+            DiscoveryDataSource::StaticSchema,
+        ] {
+            let json = serde_json::to_string(&src).unwrap();
+            let back: DiscoveryDataSource = serde_json::from_str(&json).unwrap();
+            assert_eq!(src, back);
+        }
+    }
+
+    #[test]
+    fn discovery_live_sources_are_authoritative() {
+        assert!(DiscoveryDataSource::LiveHostInventory.is_authoritative());
+        assert!(DiscoveryDataSource::LiveHostIntrospection.is_authoritative());
+    }
+
+    #[test]
+    fn discovery_offline_sources_are_not_authoritative() {
+        assert!(!DiscoveryDataSource::WorkspaceManifest.is_authoritative());
+        assert!(!DiscoveryDataSource::LocalCatalogCache.is_authoritative());
+        assert!(!DiscoveryDataSource::StaticSchema.is_authoritative());
+    }
+
+    #[test]
+    fn discovery_offline_sources_are_offline() {
+        assert!(DiscoveryDataSource::WorkspaceManifest.is_offline());
+        assert!(DiscoveryDataSource::LocalCatalogCache.is_offline());
+        assert!(DiscoveryDataSource::StaticSchema.is_offline());
+    }
+
+    #[test]
+    fn discovery_live_sources_are_not_offline() {
+        assert!(!DiscoveryDataSource::LiveHostInventory.is_offline());
+        assert!(!DiscoveryDataSource::LiveHostIntrospection.is_offline());
+    }
+
+    #[test]
+    fn discovery_all_sources_have_freshness_caveat() {
+        for src in [
+            DiscoveryDataSource::LiveHostInventory,
+            DiscoveryDataSource::LiveHostIntrospection,
+            DiscoveryDataSource::WorkspaceManifest,
+            DiscoveryDataSource::LocalCatalogCache,
+            DiscoveryDataSource::StaticSchema,
+        ] {
+            assert!(!src.freshness_caveat().is_empty(), "Empty caveat for {src:?}");
+        }
+    }
+
+    // -- discovery_provenance --
+
+    #[test]
+    fn discovery_provenance_live_is_authoritative() {
+        let prov = discovery_provenance("list", DiscoveryDataSource::LiveHostInventory);
+        assert!(prov.authoritative);
+        assert_eq!(prov.command, "list");
+    }
+
+    #[test]
+    fn discovery_provenance_offline_is_not_authoritative() {
+        let prov = discovery_provenance("list", DiscoveryDataSource::WorkspaceManifest);
+        assert!(!prov.authoritative);
+    }
+
+    #[test]
+    fn discovery_provenance_has_caveat() {
+        let prov = discovery_provenance("show", DiscoveryDataSource::LocalCatalogCache);
+        assert!(!prov.caveat.is_empty());
+    }
+
+    // -- DISCOVERY_COMMANDS --
+
+    #[test]
+    fn discovery_commands_is_nonempty() {
+        assert!(!DISCOVERY_COMMANDS.is_empty());
+    }
+
+    #[test]
+    fn discovery_commands_contains_expected() {
+        assert!(is_discovery_command("list"));
+        assert!(is_discovery_command("search"));
+        assert!(is_discovery_command("show"));
+        assert!(is_discovery_command("ops"));
+        assert!(is_discovery_command("schema"));
+        assert!(is_discovery_command("examples"));
+        assert!(is_discovery_command("suggest"));
+    }
+
+    #[test]
+    fn discovery_commands_excludes_non_discovery() {
+        assert!(!is_discovery_command("invoke"));
+        assert!(!is_discovery_command("install"));
+        assert!(!is_discovery_command("guide"));
+    }
+
+    // -- expected_discovery_source --
+
+    #[test]
+    fn expected_source_live_list_is_inventory() {
+        let src = expected_discovery_source("list", RuntimeMode::Live);
+        assert_eq!(src, Some(DiscoveryDataSource::LiveHostInventory));
+    }
+
+    #[test]
+    fn expected_source_live_show_is_introspection() {
+        let src = expected_discovery_source("show", RuntimeMode::Live);
+        assert_eq!(src, Some(DiscoveryDataSource::LiveHostIntrospection));
+    }
+
+    #[test]
+    fn expected_source_live_ops_is_introspection() {
+        let src = expected_discovery_source("ops", RuntimeMode::Live);
+        assert_eq!(src, Some(DiscoveryDataSource::LiveHostIntrospection));
+    }
+
+    #[test]
+    fn expected_source_offline_is_workspace_manifest() {
+        let src = expected_discovery_source("list", RuntimeMode::ExplicitOffline);
+        assert_eq!(src, Some(DiscoveryDataSource::WorkspaceManifest));
+    }
+
+    #[test]
+    fn expected_source_degraded_is_workspace_manifest() {
+        let src = expected_discovery_source("search", RuntimeMode::DegradedOffline);
+        assert_eq!(src, Some(DiscoveryDataSource::WorkspaceManifest));
+    }
+
+    #[test]
+    fn expected_source_refused_is_none() {
+        let src = expected_discovery_source("list", RuntimeMode::Refused);
+        assert!(src.is_none());
+    }
+
+    #[test]
+    fn expected_source_non_discovery_is_none() {
+        let src = expected_discovery_source("invoke", RuntimeMode::Live);
+        assert!(src.is_none());
+    }
+
+    // -- Cross-cutting discovery invariants --
+
+    #[test]
+    fn all_discovery_commands_are_in_commands_list() {
+        for cmd in DISCOVERY_COMMANDS {
+            assert!(COMMANDS.contains(cmd), "Discovery command '{cmd}' not in COMMANDS");
+        }
+    }
+
+    #[test]
+    fn all_discovery_commands_have_classifications() {
+        for cmd in DISCOVERY_COMMANDS {
+            assert!(
+                classify_command(cmd).is_some(),
+                "Discovery command '{cmd}' has no classification"
+            );
+        }
+    }
+
+    #[test]
+    fn discovery_live_provenance_always_authoritative() {
+        for cmd in DISCOVERY_COMMANDS {
+            let src = expected_discovery_source(cmd, RuntimeMode::Live).unwrap();
+            assert!(
+                src.is_authoritative(),
+                "Live discovery source for '{cmd}' is not authoritative: {src:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn discovery_offline_provenance_never_authoritative() {
+        for cmd in DISCOVERY_COMMANDS {
+            let src = expected_discovery_source(cmd, RuntimeMode::ExplicitOffline).unwrap();
+            assert!(
+                !src.is_authoritative(),
+                "Offline discovery source for '{cmd}' claims authoritative: {src:?}"
+            );
         }
     }
 }

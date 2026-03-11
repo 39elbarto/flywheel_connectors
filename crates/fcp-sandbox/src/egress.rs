@@ -706,10 +706,18 @@ impl EgressGuard {
             IpAddr::V4(_) => ip,
         };
         for cidr_str in &constraints.cidr_deny {
-            if let Ok(cidr) = cidr_str.parse::<IpNet>() {
-                if cidr.contains(&check_ip) {
+            match cidr_str.parse::<IpNet>() {
+                Ok(cidr) => {
+                    if cidr.contains(&check_ip) {
+                        return Err(EgressError::Denied {
+                            reason: format!("CIDR deny rule matched: {ip} in {cidr_str}"),
+                            code: DenyReason::CidrDenyMatched,
+                        });
+                    }
+                }
+                Err(e) => {
                     return Err(EgressError::Denied {
-                        reason: format!("CIDR deny rule matched: {ip} in {cidr_str}"),
+                        reason: format!("Invalid CIDR deny rule '{cidr_str}': {e}"),
                         code: DenyReason::CidrDenyMatched,
                     });
                 }

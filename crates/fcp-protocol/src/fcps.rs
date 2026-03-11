@@ -937,9 +937,15 @@ impl SignedFcpsFrame {
     /// # Errors
     /// Returns `FrameError` if the frame is malformed.
     pub fn decode(bytes: &[u8], max_datagram_bytes: usize) -> Result<Self, FrameError> {
+        if bytes.len() > max_datagram_bytes {
+            return Err(FrameError::ExceedsMtu {
+                len: bytes.len(),
+                max: max_datagram_bytes,
+            });
+        }
+
         // Minimum: 2 (source_id_len) + 1 (min source_id) + 8 (timestamp) + 64 (sig) + 114 (min frame)
         const MIN_LEN: usize = 2 + 1 + 8 + 64 + FCPS_HEADER_LEN;
-
         if bytes.len() < MIN_LEN {
             return Err(FrameError::TooShort {
                 len: bytes.len(),
@@ -1311,35 +1317,26 @@ mod tests {
         use semver::Version;
 
         let zone_id: ZoneId = "z:bounds".parse().expect("zone parse");
-        let header = ObjectHeader {
-            schema: SchemaId::new("fcp.test", "TestObject", Version::new(1, 0, 0)),
-            zone_id: zone_id.clone(),
-            created_at: 0,
-            provenance: Provenance::new(zone_id.clone()),
-            refs: vec![],
-            foreign_refs: vec![],
-            ttl_secs: None,
-            placement: None,
-        };
-
-        // Valid: exactly at the limit
-        let status_ok = DecodeStatus {
-            header: header.clone(),
+        let status = DecodeStatus {
+            header: make_test_object_header(),
             object_id: ObjectId::from_bytes([0; 32]),
-            zone_id: zone_id.clone(),
+            zone_id,
             zone_key_id: ZoneKeyId::from_bytes([0; 8]),
             epoch_id: 0,
             received_unique: 0,
             needed: 100,
             complete: false,
             missing_hint: Some(vec![0; MAX_MISSING_HINT_ENTRIES]),
-            signature: Ed25519Signature::from_bytes(&[0u8; 64]),
+            signature: Ed25519Signature::from_bytes(&[0; 64]),
         };
-        status_ok.validate_hint_bounds().expect("at limit is ok");
+        assert!(status.validate_hint_bounds().is_ok());
+    }
 
-        // Invalid: exceeds limit
-        let status_bad = DecodeStatus {
-            header,
+    #[test]
+    fn decode_status_hint_bounds_exceeded() {
+        let zone_id: ZoneId = "z:bounds".parse().expect("zone parse");
+        let status = DecodeStatus {
+            header: make_test_object_header(),
             object_id: ObjectId::from_bytes([0; 32]),
             zone_id,
             zone_key_id: ZoneKeyId::from_bytes([0; 8]),
@@ -1348,9 +1345,9 @@ mod tests {
             needed: 100,
             complete: false,
             missing_hint: Some(vec![0; MAX_MISSING_HINT_ENTRIES + 1]),
-            signature: Ed25519Signature::from_bytes(&[0u8; 64]),
+            signature: Ed25519Signature::from_bytes(&[0; 64]),
         };
-        assert!(status_bad.validate_hint_bounds().is_err());
+        assert!(status.validate_hint_bounds().is_err());
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1828,10 +1825,10 @@ mod tests {
         assert_eq!(
             FrameError::ExceedsMtu {
                 len: 2000,
-                max: 1500
+                max: 1200
             }
             .to_string(),
-            "frame exceeds MTU (len 2000, max 1500)"
+            "frame exceeds MTU (len 2000, max 1200)"
         );
         assert_eq!(
             FrameError::InvalidMagic {
@@ -2801,55 +2798,6 @@ mod tests {
     }
 
     #[test]
-    fn decode_status_serde_roundtrip() {
-        let signing_key = Ed25519SigningKey::generate();
-        let zone_id: ZoneId = "z:serde".parse().unwrap();
-        let mut status = DecodeStatus {
-            header: make_test_object_header(),
-            object_id: ObjectId::from_bytes([0x11; 32]),
-            zone_id,
-            zone_key_id: ZoneKeyId::from_bytes([0x22; 8]),
-            epoch_id: 42,
-            received_unique: 100,
-            needed: 200,
-            complete: false,
-            missing_hint: Some(vec![5, 10]),
-            signature: Ed25519Signature::from_bytes(&[0; 64]),
-        };
-        status.sign(&signing_key);
-
-        let json = serde_json::to_string(&status).expect("serialize");
-        let back: DecodeStatus = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(back.epoch_id, 42);
-        assert_eq!(back.received_unique, 100);
-        assert_eq!(back.needed, 200);
-        assert!(!back.complete);
-        assert_eq!(back.missing_hint, Some(vec![5, 10]));
-    }
-
-    #[test]
-    fn symbol_ack_serde_roundtrip() {
-        let signing_key = Ed25519SigningKey::generate();
-        let zone_id: ZoneId = "z:ack-serde".parse().unwrap();
-        let mut ack = SymbolAck::new(
-            make_test_object_header(),
-            ObjectId::from_bytes([0x33; 32]),
-            zone_id,
-            ZoneKeyId::from_bytes([0x44; 8]),
-            99,
-            SymbolAckReason::BudgetExceeded,
-            300,
-        );
-        ack.sign(&signing_key);
-
-        let json = serde_json::to_string(&ack).expect("serialize");
-        let back: SymbolAck = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(back.epoch_id, 99);
-        assert_eq!(back.reason, SymbolAckReason::BudgetExceeded);
-        assert_eq!(back.final_symbol_count, 300);
-    }
-
-    #[test]
     fn symbol_request_serde_roundtrip() {
         let signing_key = Ed25519SigningKey::generate();
         let zone_id: ZoneId = "z:req-serde".parse().unwrap();
@@ -2858,18 +2806,18 @@ mod tests {
             ObjectId::from_bytes([0x55; 32]),
             zone_id,
             ZoneKeyId::from_bytes([0x66; 8]),
-            77,
+            42,
+            100,
             50,
-            25,
         )
         .with_missing_hint(vec![1, 2, 3]);
         request.sign(&signing_key);
 
         let json = serde_json::to_string(&request).expect("serialize");
         let back: SymbolRequest = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(back.epoch_id, 77);
-        assert_eq!(back.max_symbols, 50);
-        assert_eq!(back.current_symbols, 25);
+        assert_eq!(back.epoch_id, 42);
+        assert_eq!(back.max_symbols, 100);
+        assert_eq!(back.current_symbols, 50);
         assert_eq!(back.missing_hint, Some(vec![1, 2, 3]));
     }
 

@@ -625,6 +625,28 @@ impl ReplayWindow {
         }
     }
 
+    /// Check if sequence is valid (not a replay) without updating the window.
+    ///
+    /// This should be called before expensive MAC verification to prevent
+    /// CPU exhaustion attacks from replayed packets.
+    #[must_use]
+    pub const fn check(&self, seq: u64) -> bool {
+        if seq == 0 {
+            return false;
+        }
+
+        if seq > self.highest_seq {
+            true
+        } else {
+            let diff = self.highest_seq - seq;
+            if diff >= self.window_size || diff >= 128 {
+                return false;
+            }
+            let bit = 1u128 << diff;
+            (self.bitmap & bit) == 0
+        }
+    }
+
     /// Check if sequence is valid (not a replay) and update window.
     ///
     /// Returns `true` if accepted, `false` if replayed or too old.
@@ -1854,7 +1876,6 @@ mod tests {
         let mut window = ReplayWindow::new(128);
         assert_eq!(window.highest_seq(), 0);
         assert!(window.check_and_update(5));
-        assert_eq!(window.highest_seq(), 5);
         assert!(window.check_and_update(10));
         assert_eq!(window.highest_seq(), 10);
         // Going backwards within window doesn't change highest

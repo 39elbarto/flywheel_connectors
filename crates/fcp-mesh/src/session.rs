@@ -103,6 +103,12 @@ impl MeshSession {
         self.recv_window.check_and_update(seq)
     }
 
+    /// Check if received sequence is valid without updating the window.
+    #[must_use]
+    pub const fn is_valid_seq(&self, seq: u64) -> bool {
+        self.recv_window.check(seq)
+    }
+
     /// Get MAC key for sending.
     #[must_use]
     pub const fn send_mac_key(&self) -> &[u8; 32] {
@@ -173,19 +179,10 @@ impl MeshSession {
     /// by sending garbage frames that fail MAC verification.
     #[must_use]
     pub fn verify_incoming(&mut self, seq: u64, frame_bytes: &[u8], tag: &[u8; 16]) -> bool {
-        // Quick bounds check
-        if seq == 0 {
+        // Quick bounds check and replay check before expensive MAC verification
+        if !self.is_valid_seq(seq) {
             return false;
         }
-
-        // Anti-DoS: Check if seq is astronomically far ahead (window jumping)
-        // ReplayWindow logic handles this but we can check here too if needed.
-        // For now rely on ReplayWindow logic which we call AFTER mac check?
-        // No, we should check if it's plausible before spending CPU on MAC?
-        // But verifying MAC first is safer against window corruption?
-        // Actually, verifying MAC first is critical. But if seq is huge, it might be a valid future packet?
-        // ReplayWindow doesn't expose "is_plausible" easily.
-        // Let's verify MAC first.
 
         let valid_mac = verify_session_mac(
             self.suite,

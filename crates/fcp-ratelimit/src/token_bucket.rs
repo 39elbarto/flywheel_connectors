@@ -151,33 +151,16 @@ impl TokenBucket {
                 // CAS failed, retry with fresh value
             }
 
-            // Update last refill time, preserving phase (remainder) to avoid drift
-            // If bucket is full, we clamp last_refill to now - remainder to prevent ancient history from causing bursts
-            // If not full, we just advance by the number of periods processed
-            let current = self.tokens.load(Ordering::Acquire);
-            if current == self.capacity {
-                let remainder = elapsed.as_nanos() % self.refill_interval.as_nanos();
-                let rem_secs = u64::try_from(remainder / 1_000_000_000).unwrap_or(0);
-                let rem_nanos = (remainder % 1_000_000_000) as u32;
-                *last_refill = now
-                    .checked_sub(Duration::new(rem_secs, rem_nanos))
-                    .unwrap_or(now);
-            } else {
-                let advance_nanos = periods_u128.saturating_mul(self.refill_interval.as_nanos());
-                let adv_secs = u64::try_from(advance_nanos / 1_000_000_000).unwrap_or(u64::MAX);
-                let adv_nanos = (advance_nanos % 1_000_000_000) as u32;
-                if adv_secs < u64::MAX {
-                    if let Some(advanced) =
-                        last_refill.checked_add(Duration::new(adv_secs, adv_nanos))
-                    {
-                        *last_refill = advanced;
-                    } else {
-                        *last_refill = now;
-                    }
-                } else {
-                    *last_refill = now;
-                }
-            }
+            // Update last refill time, preserving phase (remainder) to avoid drift.
+            // By setting last_refill to (now - remainder), we correctly advance the
+            // timestamp by exactly the number of elapsed periods, avoiding both
+            // fractional drift and ancient history burst issues.
+            let remainder = elapsed.as_nanos() % self.refill_interval.as_nanos();
+            let rem_secs = u64::try_from(remainder / 1_000_000_000).unwrap_or(0);
+            let rem_nanos = (remainder % 1_000_000_000) as u32;
+            *last_refill = now
+                .checked_sub(Duration::new(rem_secs, rem_nanos))
+                .unwrap_or(now);
         }
     }
 

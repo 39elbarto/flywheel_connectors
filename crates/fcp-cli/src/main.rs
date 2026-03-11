@@ -1,298 +1,84 @@
-//! FCP2 developer/operator CLI entrypoint.
+//! Deprecated `fcp` shim.
 //!
-//! This CLI provides tooling for FCP2 operators and developers:
-//! - `fcp audit` - Audit chain operations for incident response
-//! - `fcp budget` - Usage budget status per zone
-//! - `fcp bench` - Performance benchmarking suite
-//! - `fcp capabilities` - Capability usage analytics and recommendations
-//! - `fcp connector` - Connector discovery and introspection
-//! - `fcp context` - Manage mesh contexts for multi-mesh operation
-//! - `fcp explain` - Operation decision explanations
-//! - `fcp install` - Connector installation with verification
-//! - `fcp manifest` - Manifest repair and lint checks
-//! - `fcp net` - Egress policy debugging (`NetworkConstraints`)
-//! - `fcp policy` - Policy simulation and preflight checks
-//! - `fcp repair` - Coverage status and repair planning
-//! - `fcp trace` - Deterministic mesh trace replay
+//! The canonical Flywheel connectors CLI is `fwc`. This binary exists only as
+//! a hard-stop migration notice so the repository does not expose two
+//! competing CLI implementations.
 
 #![deny(unsafe_code)]
 
-mod audit;
-mod bench;
-mod budget;
-mod capabilities;
-mod connector;
-mod context;
-mod doctor;
-mod explain;
-mod install;
-mod manifest;
-mod net;
-mod new;
-mod package;
-mod policy;
-mod repair;
-mod trace;
+use std::io::{self, Write};
+use std::process::ExitCode;
 
-use std::io::{IsTerminal, Read, Write};
-use std::process::Stdio;
+const DEPRECATION_EXIT_CODE: u8 = 2;
 
-use anyhow::{Context, Result};
-use clap::{Parser, Subcommand, ValueEnum};
+fn main() -> ExitCode {
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    let suggested = suggested_fwc_command(&args);
 
-/// FCP2 developer/operator CLI.
-#[derive(Parser)]
-#[command(name = "fcp")]
-#[command(author, version, about, long_about = None)]
-struct Cli {
-    #[command(subcommand)]
-    command: Commands,
+    let mut stderr = io::stderr().lock();
+    let _ = writeln!(
+        stderr,
+        concat!(
+            "fcp has been retired. The only canonical Flywheel connectors CLI is `fwc`.\n\n",
+            "Run instead:\n",
+            "  {suggested}\n\n",
+            "Common migrations:\n",
+            "  fcp context ...   -> fwc context ...\n",
+            "  fcp connector ... -> fwc list/show/ops/schema/examples/status/invoke/simulate\n",
+            "  fcp doctor        -> fwc status / fwc context current / fwc show <connector>\n",
+            "  fcp policy        -> fwc simulate\n\n",
+            "`fcp` no longer performs real work and will not simulate or proxy command execution."
+        ),
+        suggested = suggested
+    );
 
-    /// Read input from stdin (for piping).
-    #[arg(long, global = true, default_value_t = false)]
-    input_stdin: bool,
-
-    /// Input format for stdin (json, toml, raw).
-    #[arg(long, global = true, value_enum, default_value_t = InputFormat::Json)]
-    input_format: InputFormat,
-
-    /// Disable pager for long human-readable output.
-    #[arg(long, global = true, default_value_t = false)]
-    no_pager: bool,
-
-    /// Force pager even for short output.
-    #[arg(
-        long,
-        global = true,
-        default_value_t = false,
-        conflicts_with = "no_pager"
-    )]
-    pager: bool,
-
-    /// Use a specific context for this command (overrides current context).
-    #[arg(long, global = true)]
-    context: Option<String>,
+    ExitCode::from(DEPRECATION_EXIT_CODE)
 }
 
-#[derive(Subcommand)]
-enum Commands {
-    /// Audit chain operations for incident response and debugging.
-    ///
-    /// Stream audit events from a zone's audit chain with filtering.
-    Audit(audit::AuditArgs),
-
-    /// Performance benchmark suite.
-    ///
-    /// Run benchmarks to measure and track FCP2 performance characteristics.
-    /// Outputs machine-readable JSON with environment metadata for regression tracking.
-    Bench(bench::BenchArgs),
-
-    /// Report usage budgets per zone.
-    ///
-    /// Shows current usage vs budget and enforcement mode for each zone.
-    Budget(budget::BudgetArgs),
-
-    /// Capability usage analytics and least-privilege recommendations.
-    ///
-    /// Report usage, suggest minimal capability grants, and export raw aggregates.
-    Capabilities(capabilities::CapabilitiesArgs),
-
-    /// Connector discovery and introspection.
-    ///
-    /// List, inspect, and introspect registered connectors. The introspect
-    /// subcommand provides tool schemas optimized for AI agent consumption.
-    Connector(connector::ConnectorArgs),
-
-    /// Manage mesh contexts for multi-mesh operation.
-    ///
-    /// Switch between mesh endpoints like kubectl contexts. Configuration
-    /// is stored at `~/.fcp/contexts.toml` (or `$FCP_CONFIG_DIR/contexts.toml`).
-    Context(context::ContextArgs),
-
-    /// Diagnose zone health and freshness.
-    ///
-    /// Checks checkpoint freshness, revocation status, and degraded mode state.
-    Doctor(doctor::DoctorArgs),
-
-    /// Explain an allow/deny decision by rendering the `DecisionReceipt`.
-    ///
-    /// Load and display the mechanical evidence behind an operation decision.
-    Explain(explain::ExplainArgs),
-
-    /// Install a connector with full verification chain.
-    ///
-    /// Verify manifest signatures, binary checksums, and supply chain policy,
-    /// then mirror the connector to the mesh store.
-    Install(install::InstallArgs),
-
-    /// Repair and validate connector manifests.
-    ///
-    /// Recompute interface hashes and lint manifest defaults.
-    Manifest(manifest::ManifestArgs),
-
-    /// Create a new FCP2-compliant connector scaffold.
-    ///
-    /// Generates a complete connector crate with manifest, source files,
-    /// and test scaffolding. Runs compliance prechecks automatically.
-    New(new::NewArgs),
-
-    /// Explain egress policy decisions for a URL.
-    Net(net::NetArgs),
-
-    /// Package a connector for distribution.
-    ///
-    /// Build the connector with deterministic flags, embed manifest,
-    /// generate SBOM, and output a complete package directory.
-    Package(package::PackageArgs),
-
-    /// Policy simulation and preflight checks.
-    ///
-    /// Simulate policy outcomes for an `InvokeRequest` without side effects.
-    Policy(policy::PolicyArgs),
-
-    /// Coverage status and repair planning.
-    Repair(repair::RepairArgs),
-
-    /// Trace replay and debugging tools.
-    Trace(trace::TraceArgs),
-}
-
-#[derive(Clone, Copy, Debug, ValueEnum)]
-enum InputFormat {
-    Json,
-    Toml,
-    Raw,
-}
-
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub(crate) struct PagerConfig {
-    command: String,
-    args: Vec<String>,
-    threshold: usize,
-    disabled: bool,
-    force: bool,
-}
-
-impl PagerConfig {
-    fn from_cli(cli: &Cli) -> Self {
-        let command = std::env::var("PAGER").unwrap_or_else(|_| "less".to_string());
-        Self {
-            command,
-            args: vec!["-R".to_string()],
-            threshold: 50,
-            disabled: cli.no_pager,
-            force: cli.pager,
-        }
-    }
-}
-
-#[allow(dead_code)]
-pub(crate) fn output_with_pager(
-    content: &str,
-    config: &PagerConfig,
-    json_output: bool,
-) -> Result<()> {
-    if json_output {
-        print!("{content}");
-        return Ok(());
+fn suggested_fwc_command(args: &[String]) -> String {
+    if args.is_empty() {
+        return "fwc --help".to_owned();
     }
 
-    let should_page = if config.disabled {
-        false
-    } else if config.force {
-        true
-    } else if !std::io::stdout().is_terminal() {
-        false
+    format!(
+        "fwc {}",
+        args.iter()
+            .map(|arg| shell_quote(arg))
+            .collect::<Vec<_>>()
+            .join(" ")
+    )
+}
+
+fn shell_quote(arg: &str) -> String {
+    if arg
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':' | '='))
+    {
+        arg.to_owned()
     } else {
-        content.lines().count() >= config.threshold
-    };
-
-    if !should_page {
-        print!("{content}");
-        return Ok(());
-    }
-
-    let Ok(mut child) = std::process::Command::new(&config.command)
-        .args(&config.args)
-        .stdin(Stdio::piped())
-        .spawn()
-    else {
-        print!("{content}");
-        return Ok(());
-    };
-
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(content.as_bytes())
-            .context("failed to write to pager stdin")?;
-    }
-
-    let _ = child.wait();
-    Ok(())
-}
-
-fn read_stdin_input(format: InputFormat) -> Result<serde_json::Value> {
-    let mut input = String::new();
-    std::io::stdin()
-        .read_to_string(&mut input)
-        .context("failed to read stdin")?;
-
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        anyhow::bail!("stdin input is empty");
-    }
-
-    match format {
-        InputFormat::Json => Ok(serde_json::from_str(trimmed)?),
-        InputFormat::Toml => {
-            let toml_value: toml::Value = toml::from_str(trimmed)?;
-            Ok(serde_json::to_value(toml_value)?)
-        }
-        InputFormat::Raw => Ok(serde_json::json!({ "raw": trimmed })),
+        format!("'{}'", arg.replace('\'', "'\\''"))
     }
 }
 
-fn main() -> Result<()> {
-    // Initialize tracing subscriber for structured logging.
-    // Write logs to stderr so stdout is clean for JSON output.
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing::Level::INFO.into()),
-        )
-        .init();
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let cli = Cli::parse();
-    let _pager = PagerConfig::from_cli(&cli);
-
-    if cli.input_stdin && !matches!(cli.command, Commands::Doctor(_)) {
-        anyhow::bail!("--input-stdin is currently supported only for `fcp doctor`");
+    #[test]
+    fn suggested_command_defaults_to_help() {
+        assert_eq!(suggested_fwc_command(&[]), "fwc --help");
     }
 
-    let stdin_input = if cli.input_stdin {
-        Some(read_stdin_input(cli.input_format)?)
-    } else {
-        None
-    };
-
-    match cli.command {
-        Commands::Audit(args) => audit::run(args),
-        Commands::Bench(args) => bench::run(args),
-        Commands::Budget(args) => budget::run(&args),
-        Commands::Capabilities(args) => capabilities::run(&args),
-        Commands::Connector(args) => connector::run(&args),
-        Commands::Context(args) => context::run(&args),
-        Commands::Doctor(args) => doctor::run(&args, stdin_input.as_ref()),
-        Commands::Explain(args) => explain::run(&args),
-        Commands::Install(args) => install::run(args),
-        Commands::Manifest(args) => manifest::run(args),
-        Commands::New(args) => new::run(&args),
-        Commands::Net(args) => net::run(args),
-        Commands::Package(args) => package::run(&args),
-        Commands::Policy(args) => policy::run(&args),
-        Commands::Repair(args) => repair::run(args),
-        Commands::Trace(args) => trace::run(args),
+    #[test]
+    fn suggested_command_quotes_complex_args() {
+        let args = vec![
+            "context".to_owned(),
+            "create".to_owned(),
+            "prod env".to_owned(),
+        ];
+        assert_eq!(
+            suggested_fwc_command(&args),
+            "fwc context create 'prod env'"
+        );
     }
 }

@@ -6967,6 +6967,183 @@ mod tests {
         }
     }
 
+    // ── Runtime truth boundary closure verification (1g7z0.29.9) ──────
+    // Cross-cutting invariants proving the live/offline boundary is
+    // mechanically enforced across all command families.
+
+    #[test]
+    fn closure_every_command_has_classification() {
+        for cmd in COMMANDS {
+            assert!(
+                classify_command(cmd).is_some(),
+                "Command '{cmd}' has no classification in COMMAND_CLASSIFICATIONS"
+            );
+        }
+    }
+
+    #[test]
+    fn closure_every_classification_references_a_valid_command() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            assert!(
+                COMMANDS.contains(&cls.command),
+                "Classification for '{}' references a command not in COMMANDS",
+                cls.command
+            );
+        }
+    }
+
+    #[test]
+    fn closure_live_commands_always_fail_fast_without_host() {
+        // LiveHost commands with no host must resolve to Refused or produce errors
+        for cls in COMMAND_CLASSIFICATIONS {
+            if matches!(cls.truth_source, CommandTruthSource::LiveHost) {
+                let mode = resolve_runtime_mode(&ctx(cls.command, false, false, false));
+                assert!(
+                    mode.is_refused() || mode == RuntimeMode::DegradedOffline,
+                    "LiveHost command '{}' should refuse or degrade without host, got {:?}",
+                    cls.command,
+                    mode
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn closure_hybrid_commands_need_explicit_offline() {
+        // Hybrid commands without host and without --offline flag should NOT silently degrade
+        for cls in COMMAND_CLASSIFICATIONS {
+            if matches!(cls.truth_source, CommandTruthSource::Hybrid) {
+                let mode = resolve_runtime_mode(&ctx(cls.command, false, false, false));
+                // Must not be Live (no host), should be DegradedOffline or Refused
+                assert!(
+                    !mode.is_authoritative(),
+                    "Hybrid command '{}' claimed authoritative without host",
+                    cls.command
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn closure_hybrid_commands_with_offline_flag_are_explicit_offline() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            if matches!(cls.truth_source, CommandTruthSource::Hybrid) {
+                let mode = resolve_runtime_mode(&ctx(cls.command, true, false, false));
+                assert!(
+                    mode.is_offline(),
+                    "Hybrid command '{}' with --offline should be offline, got {:?}",
+                    cls.command,
+                    mode
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn closure_offline_commands_are_always_offline() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            if matches!(cls.truth_source, CommandTruthSource::OfflineArtifact) {
+                // With or without host
+                for host in [true, false] {
+                    let mode = resolve_runtime_mode(&ctx(cls.command, false, host, host));
+                    assert!(
+                        mode.is_offline(),
+                        "OfflineArtifact command '{}' should always be offline (host={host}), got {:?}",
+                        cls.command,
+                        mode
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn closure_offline_modes_always_need_provenance_marker() {
+        // ExplicitOffline and DegradedOffline must carry provenance markers
+        assert!(RuntimeMode::ExplicitOffline.needs_provenance_marker());
+        assert!(RuntimeMode::DegradedOffline.needs_provenance_marker());
+    }
+
+    #[test]
+    fn closure_live_mode_never_needs_provenance_marker() {
+        assert!(!RuntimeMode::Live.needs_provenance_marker());
+    }
+
+    #[test]
+    fn closure_no_command_silently_degrades_from_live_to_offline() {
+        // The key invariant: a command resolved as Live should have host_reachable=true
+        for cls in COMMAND_CLASSIFICATIONS {
+            if matches!(cls.truth_source, CommandTruthSource::LiveHost) {
+                let mode = resolve_runtime_mode(&ctx(cls.command, false, true, true));
+                assert_eq!(
+                    mode,
+                    RuntimeMode::Live,
+                    "LiveHost command '{}' with host should be Live, got {:?}",
+                    cls.command,
+                    mode
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn closure_mode_consistency_validation_catches_live_offline_misuse() {
+        // Using --offline on a LiveHost-only command should produce a warning
+        for cls in COMMAND_CLASSIFICATIONS {
+            if matches!(cls.truth_source, CommandTruthSource::LiveHost) {
+                let warning = validate_mode_consistency(cls.command, RuntimeMode::ExplicitOffline);
+                assert!(
+                    warning.is_some(),
+                    "LiveHost command '{}' in ExplicitOffline should produce a consistency warning",
+                    cls.command
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn closure_offline_provenance_all_offline_commands_produce_provenance() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            if matches!(cls.truth_source, CommandTruthSource::OfflineArtifact) {
+                let source = default_offline_source(cls.command);
+                let prov = offline_provenance(cls.command, source);
+                assert!(prov.offline);
+                assert!(!prov.caveat.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn closure_live_and_offline_command_sets_are_disjoint() {
+        let live = live_host_commands();
+        let offline = offline_capable_commands();
+        // Live-only commands should not appear in offline-capable set
+        for cmd in &live {
+            let cls = classify_command(cmd).unwrap();
+            if matches!(cls.truth_source, CommandTruthSource::LiveHost) {
+                assert!(
+                    !offline.contains(cmd),
+                    "LiveHost-only command '{cmd}' should not be in offline_capable_commands"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn closure_all_passthrough_commands_are_always_offline() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            if matches!(cls.truth_source, CommandTruthSource::Passthrough) {
+                let mode = resolve_runtime_mode(&ctx(cls.command, false, false, false));
+                assert!(
+                    mode.is_offline(),
+                    "Passthrough command '{}' should be offline, got {:?}",
+                    cls.command,
+                    mode
+                );
+            }
+        }
+    }
+
     // ── Mesh/registry admin introspection tests ─────────────────────────
 
     // -- RegistryCatalogSource --

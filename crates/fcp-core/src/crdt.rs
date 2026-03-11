@@ -112,7 +112,7 @@ where
     pub fn merge(&mut self, other: &Self) {
         for (key, entry) in &other.entries {
             match self.entries.get(key) {
-                Some(existing) if existing.wins_over(entry) || existing == entry => {}
+                Some(existing) if !entry.wins_over(existing) => {}
                 _ => {
                     self.entries.insert(key.clone(), entry.clone());
                 }

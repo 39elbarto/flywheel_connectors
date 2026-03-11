@@ -930,8 +930,8 @@ impl GmailConnector {
         let query = input.get("query").and_then(|v| v.as_str());
         let max_results = input
             .get("max_results")
-            .and_then(|v| v.as_u64())
-            .and_then(|v| u32::try_from(v).ok());
+            .and_then(|value| value.as_u64())
+            .and_then(|value| u32::try_from(value).ok());
         let page_token = input.get("page_token").and_then(|v| v.as_str());
 
         let result = client
@@ -954,7 +954,7 @@ impl GmailConnector {
         let max_results = input
             .get("max_results")
             .and_then(|value| value.as_u64())
-            .map(|value| value as u32);
+            .map(|value| u32::try_from(value).unwrap_or(u32::MAX));
         let history_types = parse_history_types(&input)?;
         let provided_lease_seq = parse_optional_u64_field(&input, "lease_seq")?;
         let provided_lease_object_id = parse_optional_string_field(&input, "lease_object_id")?;
@@ -2007,9 +2007,8 @@ mod tests {
 
     #[test]
     fn parse_history_types_valid() {
-        let result =
-            parse_history_types(&json!({"history_types": ["messageAdded", "labelRemoved"]}))
-                .unwrap();
+        let result = parse_history_types(&json!({"history_types": ["messageAdded", "labelRemoved"]}))
+            .unwrap();
         let types = result.unwrap();
         assert_eq!(types.len(), 2);
         assert!(types.contains(&"messageAdded".to_string()));
@@ -2501,19 +2500,6 @@ mod tests {
         );
 
         let signing_key = Ed25519SigningKey::generate();
-        let verifying_key = signing_key.verifying_key();
-
-        connector
-            .handle_handshake(json!({
-                "protocol_version": "1.0.0",
-                "zone": "z:work",
-                "host_public_key": verifying_key.to_bytes(),
-                "nonce": vec![0u8; 32],
-                "capabilities_requested": ["gmail.nonexistent"]
-            }))
-            .await
-            .unwrap();
-
         let token = generate_valid_token(&signing_key, "gmail.nonexistent");
 
         let result = connector

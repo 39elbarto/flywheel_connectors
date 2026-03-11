@@ -1167,7 +1167,8 @@ impl LlmRouterConnector {
             let priority = pv
                 .get("priority")
                 .and_then(|v| v.as_u64())
-                .unwrap_or(idx as u64 + 1) as u32;
+                .and_then(|v| u32::try_from(v).ok())
+                .unwrap_or_else(|| u32::try_from(idx + 1).unwrap_or(u32::MAX));
 
             let models = pv
                 .get("models")

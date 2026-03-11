@@ -830,10 +830,11 @@ impl PineconeConnector {
             input
                 .get("dimension")
                 .and_then(|v| v.as_u64())
+                .and_then(|v| u32::try_from(v).ok())
                 .ok_or(FcpError::InvalidRequest {
                     code: 1003,
                     message: "Missing required field: dimension".into(),
-                })? as u32;
+                })?;
         let metric = input
             .get("metric")
             .and_then(|v| v.as_str())
@@ -861,14 +862,15 @@ impl PineconeConnector {
 
     async fn invoke_query(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
-        let _index_name = require_str(&input, "index_name")?;
+        let index_name = require_str(&input, "index_name")?;
         let top_k = input
             .get("top_k")
             .and_then(|v| v.as_u64())
+            .and_then(|v| u32::try_from(v).ok())
             .ok_or(FcpError::InvalidRequest {
                 code: 1003,
                 message: "Missing required field: top_k".into(),
-            })? as u32;
+            })?;
 
         let vector: Option<Vec<f32>> = input
             .get("vector")

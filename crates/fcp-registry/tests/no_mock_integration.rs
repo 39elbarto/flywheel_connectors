@@ -11,12 +11,16 @@ use fcp_core::{
 };
 use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_manifest::{AttestationType, Base64Bytes, ConnectorManifest};
+use fcp_raptorq::RaptorQConfig;
 use fcp_registry::{
-    AttestationEvidence, ConnectorBundle, ConnectorTarget, RegistryError, RegistryTrustPolicy,
-    RegistryVerificationReport, RegistryVerifier, SupplyChainEvidence,
-    SupplyChainVerificationConfig, SupplyChainVerificationError,
+    AttestationEvidence, ConnectorBundle, ConnectorTarget, ReconstructedConnectorBinary,
+    RegistryError, RegistryTrustPolicy, RegistryVerificationReport, RegistryVerifier,
+    SupplyChainEvidence, SupplyChainVerificationConfig, SupplyChainVerificationError,
 };
-use fcp_store::{MemoryObjectStore, MemoryObjectStoreConfig, ObjectStore};
+use fcp_store::{
+    MemoryObjectStore, MemoryObjectStoreConfig, MemorySymbolStore, MemorySymbolStoreConfig,
+    ObjectStore, ObjectSymbolMeta, SymbolStore,
+};
 use semver::Version;
 
 const PLACEHOLDER_HASH: &str =
@@ -90,6 +94,12 @@ fn test_binary() -> Vec<u8> {
     b"fake-binary-payload-for-tests".to_vec()
 }
 
+fn patterned_binary(size: usize) -> Vec<u8> {
+    (0..size)
+        .map(|idx| u8::try_from(idx % 251).expect("pattern byte fits u8"))
+        .collect()
+}
+
 fn binary_hash(binary: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
@@ -98,9 +108,12 @@ fn binary_hash(binary: &[u8]) -> String {
 }
 
 fn signed_bundle(kid: &str) -> (ConnectorBundle, RegistryTrustPolicy) {
+    signed_bundle_with_binary(kid, test_binary())
+}
+
+fn signed_bundle_with_binary(kid: &str, binary: Vec<u8>) -> (ConnectorBundle, RegistryTrustPolicy) {
     let signing_key = Ed25519SigningKey::generate();
     let verifying_key = signing_key.verifying_key();
-    let binary = test_binary();
     let b_hash = binary_hash(&binary);
     let unsigned = unsigned_manifest_toml("");
     let sig = sign_manifest(&unsigned, &signing_key, &b_hash);
@@ -117,6 +130,14 @@ fn signed_bundle(kid: &str) -> (ConnectorBundle, RegistryTrustPolicy) {
     trust.publisher_keys.insert(kid.to_string(), verifying_key);
 
     (bundle, trust)
+}
+
+fn symbol_config() -> RaptorQConfig {
+    RaptorQConfig {
+        symbol_size: 128,
+        repair_ratio_bps: 10_000,
+        ..RaptorQConfig::default()
+    }
 }
 
 fn zone_policy_with_ceiling(caps: &[&str]) -> ZonePolicyObject {
@@ -826,6 +847,376 @@ async fn full_pipeline_denied_by_ceiling_never_mirrors() {
     assert!(result.is_err(), "should be denied by ceiling");
 
     // No mirror should happen since verify failed
+}
+
+// ── mirror_bundle_symbols / reconstruct_binary_from_symbols ──
+
+#[fcp_async_core::runtime::test]
+async fn mirror_bundle_symbols_stores_descriptor_and_symbols() {
+    let large_binary = patterned_binary(4096);
+    let (bundle, trust) = signed_bundle_with_binary("pub1", large_binary);
+    let verifier = RegistryVerifier::new(trust);
+    let verified = verifier
+        .verify_bundle(&bundle, None, None, None)
+        .expect("verify");
+
+    let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+    let symbol_store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+    let zone = ZoneId::work();
+    let object_id_key = ObjectIdKey::from_bytes([1u8; 32]);
+
+    let mirror = verifier
+        .mirror_bundle(&verified, &bundle, zone.clone(), &object_id_key, &store)
+        .await
+        .expect("mirror");
+    let result = verifier
+        .mirror_bundle_symbols(
+            &verified,
+            &bundle,
+            &mirror,
+            zone,
+            &object_id_key,
+            &store,
+            &symbol_store,
+            &symbol_config(),
+            Some(7),
+        )
+        .await
+        .expect("mirror symbols");
+
+    let descriptor = verifier
+        .load_symbol_descriptor(&result.descriptor_object_id, &store)
+        .await
+        .expect("load descriptor");
+
+    assert_eq!(descriptor.binary_object_id, mirror.binary_object_id);
+    assert_eq!(descriptor.manifest_object_id, mirror.manifest_object_id);
+    assert_eq!(descriptor.source_symbols, result.source_symbols);
+    assert_eq!(descriptor.total_symbols, result.total_symbols);
+    assert!(descriptor.encoded_body_hash.starts_with("sha256:"));
+
+    let meta = symbol_store
+        .get_object_meta(&mirror.binary_object_id)
+        .await
+        .expect("symbol meta");
+    assert_eq!(meta.object_id, mirror.binary_object_id);
+    assert_eq!(meta.source_symbols, result.source_symbols);
+    assert_eq!(
+        symbol_store.symbol_count(&mirror.binary_object_id).await,
+        result.total_symbols
+    );
+    assert!(symbol_store.can_reconstruct(&mirror.binary_object_id).await);
+}
+
+#[fcp_async_core::runtime::test]
+async fn reconstruct_binary_from_symbols_roundtrips_without_binary_object() {
+    let large_binary = patterned_binary(6144);
+    let (bundle, trust) = signed_bundle_with_binary("pub1", large_binary.clone());
+    let verifier = RegistryVerifier::new(trust);
+    let verified = verifier
+        .verify_bundle(&bundle, None, None, None)
+        .expect("verify");
+
+    let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+    let symbol_store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+    let zone = ZoneId::work();
+    let object_id_key = ObjectIdKey::from_bytes([1u8; 32]);
+
+    let mirror = verifier
+        .mirror_bundle(&verified, &bundle, zone.clone(), &object_id_key, &store)
+        .await
+        .expect("mirror");
+    let symbol_result = verifier
+        .mirror_bundle_symbols(
+            &verified,
+            &bundle,
+            &mirror,
+            zone,
+            &object_id_key,
+            &store,
+            &symbol_store,
+            &symbol_config(),
+            Some(9),
+        )
+        .await
+        .expect("mirror symbols");
+
+    // Simulate peer-side recovery where only descriptor + symbols remain.
+    store
+        .delete(&mirror.binary_object_id)
+        .await
+        .expect("delete binary object");
+
+    let descriptor = verifier
+        .load_symbol_descriptor(&symbol_result.descriptor_object_id, &store)
+        .await
+        .expect("load descriptor");
+    let reconstructed = verifier
+        .reconstruct_binary_from_symbols(&descriptor, &symbol_store, &symbol_config())
+        .await
+        .expect("reconstruct");
+
+    assert_eq!(
+        reconstructed,
+        ReconstructedConnectorBinary {
+            manifest_object_id: mirror.manifest_object_id,
+            binary_object_id: mirror.binary_object_id,
+            target: bundle.target.clone(),
+            binary_hash: verified.binary_hash.clone(),
+            binary: large_binary,
+        }
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn reconstruct_binary_from_symbol_subset_uses_repairs() {
+    let large_binary = patterned_binary(8192);
+    let (bundle, trust) = signed_bundle_with_binary("pub1", large_binary.clone());
+    let verifier = RegistryVerifier::new(trust);
+    let verified = verifier
+        .verify_bundle(&bundle, None, None, None)
+        .expect("verify");
+
+    let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+    let full_symbol_store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+    let subset_symbol_store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+    let zone = ZoneId::work();
+    let object_id_key = ObjectIdKey::from_bytes([1u8; 32]);
+    let config = symbol_config();
+
+    let mirror = verifier
+        .mirror_bundle(&verified, &bundle, zone.clone(), &object_id_key, &store)
+        .await
+        .expect("mirror");
+    let symbol_result = verifier
+        .mirror_bundle_symbols(
+            &verified,
+            &bundle,
+            &mirror,
+            zone.clone(),
+            &object_id_key,
+            &store,
+            &full_symbol_store,
+            &config,
+            Some(11),
+        )
+        .await
+        .expect("mirror symbols");
+    let descriptor = verifier
+        .load_symbol_descriptor(&symbol_result.descriptor_object_id, &store)
+        .await
+        .expect("load descriptor");
+
+    subset_symbol_store
+        .put_object_meta(ObjectSymbolMeta {
+            object_id: descriptor.binary_object_id,
+            zone_id: zone,
+            oti: descriptor.oti,
+            source_symbols: descriptor.source_symbols,
+            first_symbol_at: descriptor.mirrored_at,
+        })
+        .await
+        .expect("subset meta");
+
+    let mut symbols = full_symbol_store
+        .get_all_symbols(&descriptor.binary_object_id)
+        .await;
+    symbols.sort_by_key(|symbol| symbol.meta.esi);
+    let keep_count = usize::try_from(descriptor.source_symbols)
+        .expect("source symbols fit usize")
+        .saturating_add(3)
+        .min(symbols.len());
+    for symbol in symbols.into_iter().skip(2).take(keep_count) {
+        subset_symbol_store
+            .put_symbol(symbol)
+            .await
+            .expect("subset symbol");
+    }
+
+    let reconstructed = verifier
+        .reconstruct_binary_from_symbols(&descriptor, &subset_symbol_store, &config)
+        .await
+        .expect("subset reconstruct");
+    assert_eq!(reconstructed.binary, large_binary);
+}
+
+#[fcp_async_core::runtime::test]
+async fn reconstruct_binary_from_symbols_rejects_hash_mismatch() {
+    let large_binary = patterned_binary(4096);
+    let (bundle, trust) = signed_bundle_with_binary("pub1", large_binary);
+    let verifier = RegistryVerifier::new(trust);
+    let verified = verifier
+        .verify_bundle(&bundle, None, None, None)
+        .expect("verify");
+
+    let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+    let symbol_store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+    let zone = ZoneId::work();
+    let object_id_key = ObjectIdKey::from_bytes([1u8; 32]);
+
+    let mirror = verifier
+        .mirror_bundle(&verified, &bundle, zone.clone(), &object_id_key, &store)
+        .await
+        .expect("mirror");
+    let symbol_result = verifier
+        .mirror_bundle_symbols(
+            &verified,
+            &bundle,
+            &mirror,
+            zone,
+            &object_id_key,
+            &store,
+            &symbol_store,
+            &symbol_config(),
+            Some(13),
+        )
+        .await
+        .expect("mirror symbols");
+    let mut descriptor = verifier
+        .load_symbol_descriptor(&symbol_result.descriptor_object_id, &store)
+        .await
+        .expect("load descriptor");
+    descriptor.binary_hash = "sha256:deadbeef".to_string();
+
+    let err = verifier
+        .reconstruct_binary_from_symbols(&descriptor, &symbol_store, &symbol_config())
+        .await
+        .expect_err("hash mismatch should fail");
+    assert!(matches!(
+        err,
+        RegistryError::ReconstructedBinaryHashMismatch { .. }
+    ));
+}
+
+#[fcp_async_core::runtime::test]
+async fn reconstruct_bundle_from_symbol_descriptor_roundtrips_and_reverifies() {
+    let large_binary = patterned_binary(9216);
+    let (bundle, trust) = signed_bundle_with_binary("pub1", large_binary.clone());
+    let verifier = RegistryVerifier::new(trust);
+    let verified = verifier
+        .verify_bundle(&bundle, None, None, None)
+        .expect("verify");
+
+    let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+    let symbol_store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+    let zone = ZoneId::work();
+    let object_id_key = ObjectIdKey::from_bytes([1u8; 32]);
+
+    let mirror = verifier
+        .mirror_bundle(&verified, &bundle, zone.clone(), &object_id_key, &store)
+        .await
+        .expect("mirror");
+    let symbol_result = verifier
+        .mirror_bundle_symbols(
+            &verified,
+            &bundle,
+            &mirror,
+            zone,
+            &object_id_key,
+            &store,
+            &symbol_store,
+            &symbol_config(),
+            Some(15),
+        )
+        .await
+        .expect("mirror symbols");
+
+    store
+        .delete(&mirror.binary_object_id)
+        .await
+        .expect("delete binary object");
+
+    let recovered = verifier
+        .reconstruct_bundle_from_symbol_descriptor(
+            &symbol_result.descriptor_object_id,
+            &store,
+            &symbol_store,
+            &symbol_config(),
+        )
+        .await
+        .expect("recover bundle");
+
+    assert_eq!(recovered.manifest_toml, bundle.manifest_toml);
+    assert_eq!(recovered.binary, large_binary);
+    assert_eq!(recovered.target, bundle.target);
+
+    let reverified = verifier
+        .verify_bundle(&recovered, None, None, None)
+        .expect("reverify recovered bundle");
+    assert_eq!(reverified.manifest_hash, verified.manifest_hash);
+    assert_eq!(reverified.binary_hash, verified.binary_hash);
+}
+
+#[fcp_async_core::runtime::test]
+async fn reconstruct_bundle_from_symbol_descriptor_rejects_manifest_hash_mismatch() {
+    let large_binary = patterned_binary(4096);
+    let (bundle, trust) = signed_bundle_with_binary("pub1", large_binary);
+    let verifier = RegistryVerifier::new(trust);
+    let verified = verifier
+        .verify_bundle(&bundle, None, None, None)
+        .expect("verify");
+
+    let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+    let symbol_store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+    let zone = ZoneId::work();
+    let object_id_key = ObjectIdKey::from_bytes([1u8; 32]);
+
+    let mirror = verifier
+        .mirror_bundle(&verified, &bundle, zone.clone(), &object_id_key, &store)
+        .await
+        .expect("mirror");
+    let symbol_result = verifier
+        .mirror_bundle_symbols(
+            &verified,
+            &bundle,
+            &mirror,
+            zone,
+            &object_id_key,
+            &store,
+            &symbol_store,
+            &symbol_config(),
+            Some(17),
+        )
+        .await
+        .expect("mirror symbols");
+
+    let mut manifest_record = store
+        .get(&mirror.manifest_object_id)
+        .await
+        .expect("get manifest");
+    let replacement_hash = format!("sha256:{}", "0".repeat(64));
+    let original_hash = verified.manifest_hash.as_bytes();
+    let replacement_hash_bytes = replacement_hash.as_bytes();
+    let position = manifest_record
+        .body
+        .windows(original_hash.len())
+        .position(|window| window == original_hash)
+        .expect("manifest hash bytes present");
+    manifest_record.body[position..position + original_hash.len()]
+        .copy_from_slice(replacement_hash_bytes);
+
+    store
+        .delete(&mirror.manifest_object_id)
+        .await
+        .expect("delete manifest");
+    store
+        .put(manifest_record)
+        .await
+        .expect("put tampered manifest");
+
+    let err = verifier
+        .reconstruct_bundle_from_symbol_descriptor(
+            &symbol_result.descriptor_object_id,
+            &store,
+            &symbol_store,
+            &symbol_config(),
+        )
+        .await
+        .expect_err("tampered manifest hash should fail");
+    assert!(matches!(
+        err,
+        RegistryError::ReconstructedManifestHashMismatch { .. }
+    ));
 }
 
 // ── RegistryError display ──

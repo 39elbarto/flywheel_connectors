@@ -6,6 +6,7 @@
 use std::collections::{HashMap, HashSet};
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use chrono::Utc;
 use fcp_cbor::{CanonicalSerializer, SchemaId, SerializationError};
 use fcp_core::{
@@ -17,7 +18,11 @@ use fcp_manifest::{
     AttestationType, Base64Bytes, ConnectorManifest, ManifestError, SignatureEntry,
     SignaturesSection,
 };
-use fcp_store::{ObjectStore, ObjectStoreError};
+use fcp_raptorq::{DecodeError, EncodeError, RaptorQConfig, RaptorQDecoder, RaptorQEncoder};
+use fcp_store::{
+    ObjectStore, ObjectStoreError, ObjectSymbolMeta, ObjectTransmissionInfo, StoredSymbol,
+    SymbolMeta, SymbolStore, SymbolStoreError,
+};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -57,11 +62,35 @@ pub enum RegistryError {
     #[error("attestation builder `{builder}` not in trusted builders list")]
     UntrustedBuilder { builder: String },
     #[error("manifest signing bytes serialization failed: {0}")]
-    SigningBytes(#[from] SerializationError),
+    SigningBytes(SerializationError),
+    #[error("canonical serialization failed: {0}")]
+    Canonical(SerializationError),
     #[error("signature bytes malformed")]
     SignatureBytes,
     #[error("object store failure: {0}")]
     ObjectStore(#[from] ObjectStoreError),
+    #[error("symbol store failure: {0}")]
+    SymbolStore(#[from] SymbolStoreError),
+    #[error("raptorq encode failed: {0}")]
+    Encode(#[from] EncodeError),
+    #[error("raptorq decode failed: {0}")]
+    Decode(#[from] DecodeError),
+    #[error(
+        "not enough symbols to reconstruct binary object (received {received}, need at least {needed})"
+    )]
+    IncompleteSymbols { received: u32, needed: u32 },
+    #[error("decoded transfer length {len} exceeds platform limits")]
+    TransferLengthOverflow { len: u64 },
+    #[error("decoded body too short (expected at least {expected} bytes, got {actual})")]
+    ReconstructedBodyTooShort { expected: usize, actual: usize },
+    #[error("reconstructed body hash mismatch (expected {expected}, got {actual})")]
+    ReconstructedBodyHashMismatch { expected: String, actual: String },
+    #[error("reconstructed manifest hash mismatch (expected {expected}, got {actual})")]
+    ReconstructedManifestHashMismatch { expected: String, actual: String },
+    #[error("reconstructed binary hash mismatch (expected {expected}, got {actual})")]
+    ReconstructedBinaryHashMismatch { expected: String, actual: String },
+    #[error("reconstructed binary target mismatch (expected {expected}, got {actual})")]
+    ReconstructedBinaryTargetMismatch { expected: String, actual: String },
 }
 
 /// Connector bundle fetched from a registry.
@@ -609,6 +638,42 @@ pub struct MirrorResult {
     pub binary_hash: String,
 }
 
+/// Symbol-layer metadata for a mirrored connector binary object.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConnectorBinarySymbolSet {
+    pub manifest_object_id: ObjectId,
+    pub binary_object_id: ObjectId,
+    pub target: ConnectorTarget,
+    pub binary_hash: String,
+    pub encoded_body_hash: String,
+    pub oti: ObjectTransmissionInfo,
+    pub source_symbols: u32,
+    pub total_symbols: u32,
+    pub mirrored_at: u64,
+}
+
+/// Symbol mirroring outcome.
+#[derive(Debug, Clone)]
+pub struct SymbolMirrorResult {
+    pub descriptor_object_id: ObjectId,
+    pub manifest_object_id: ObjectId,
+    pub binary_object_id: ObjectId,
+    pub binary_hash: String,
+    pub encoded_body_hash: String,
+    pub source_symbols: u32,
+    pub total_symbols: u32,
+}
+
+/// Reconstructed connector binary recovered from the symbol layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconstructedConnectorBinary {
+    pub manifest_object_id: ObjectId,
+    pub binary_object_id: ObjectId,
+    pub target: ConnectorTarget,
+    pub binary_hash: String,
+    pub binary: Vec<u8>,
+}
+
 /// Registry verifier and mirroring helper.
 #[derive(Debug, Clone)]
 pub struct RegistryVerifier {
@@ -710,8 +775,10 @@ impl RegistryVerifier {
             SchemaId::new("fcp.registry", "ConnectorManifest", Version::new(1, 0, 0));
         let binary_schema = SchemaId::new("fcp.registry", "ConnectorBinary", Version::new(1, 0, 0));
 
-        let manifest_body = CanonicalSerializer::serialize(&manifest_obj, &manifest_schema)?;
-        let binary_body = CanonicalSerializer::serialize(&binary_obj, &binary_schema)?;
+        let manifest_body = CanonicalSerializer::serialize(&manifest_obj, &manifest_schema)
+            .map_err(RegistryError::Canonical)?;
+        let binary_body = CanonicalSerializer::serialize(&binary_obj, &binary_schema)
+            .map_err(RegistryError::Canonical)?;
 
         let now = u64::try_from(Utc::now().timestamp()).unwrap_or(0);
         let provenance = Provenance::new(zone_id.clone());
@@ -770,6 +837,273 @@ impl RegistryVerifier {
             binary_hash: verified.binary_hash.clone(),
         })
     }
+
+    /// Mirror the binary object for a verified bundle into the symbol layer.
+    ///
+    /// The binary is encoded as a repairable symbol set keyed by the mirrored
+    /// `binary_object_id`, and a pinned descriptor object is stored so another
+    /// node can reconstruct and verify the canonical binary object bytes.
+    ///
+    /// # Errors
+    /// Returns [`RegistryError`] if symbol encoding or storage fails.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn mirror_bundle_symbols(
+        &self,
+        verified: &VerifiedConnectorBundle,
+        bundle: &ConnectorBundle,
+        mirror: &MirrorResult,
+        zone_id: ZoneId,
+        object_id_key: &ObjectIdKey,
+        store: &dyn ObjectStore,
+        symbol_store: &dyn SymbolStore,
+        config: &RaptorQConfig,
+        source_node: Option<u64>,
+    ) -> Result<SymbolMirrorResult, RegistryError> {
+        let binary_obj = ConnectorBinaryObject {
+            target: verified.target.clone(),
+            binary_hash: verified.binary_hash.clone(),
+            binary: bundle.binary.clone(),
+        };
+        let binary_schema = SchemaId::new("fcp.registry", "ConnectorBinary", Version::new(1, 0, 0));
+        let binary_body = CanonicalSerializer::serialize(&binary_obj, &binary_schema)
+            .map_err(RegistryError::Canonical)?;
+
+        let encoder = RaptorQEncoder::new(&binary_body, config)?;
+        let oti = ObjectTransmissionInfo::from(encoder.transmission_info());
+        let source_symbols = encoder.source_symbols();
+        let total_symbols = encoder.total_symbols();
+        let mirrored_at = u64::try_from(Utc::now().timestamp()).unwrap_or(0);
+
+        let symbol_meta = ObjectSymbolMeta {
+            object_id: mirror.binary_object_id,
+            zone_id: zone_id.clone(),
+            oti,
+            source_symbols,
+            first_symbol_at: mirrored_at,
+        };
+        symbol_store.put_object_meta(symbol_meta).await?;
+
+        for (esi, data) in encoder.encode_all() {
+            let symbol = StoredSymbol {
+                meta: SymbolMeta {
+                    object_id: mirror.binary_object_id,
+                    esi,
+                    zone_id: zone_id.clone(),
+                    source_node,
+                    stored_at: mirrored_at,
+                },
+                data: Bytes::from(data),
+            };
+            symbol_store.put_symbol(symbol).await?;
+        }
+
+        let descriptor = ConnectorBinarySymbolSet {
+            manifest_object_id: mirror.manifest_object_id,
+            binary_object_id: mirror.binary_object_id,
+            target: verified.target.clone(),
+            binary_hash: verified.binary_hash.clone(),
+            encoded_body_hash: hash_bytes(&binary_body),
+            oti,
+            source_symbols,
+            total_symbols,
+            mirrored_at,
+        };
+        let descriptor_schema = SchemaId::new(
+            "fcp.registry",
+            "ConnectorBinarySymbolSet",
+            Version::new(1, 0, 0),
+        );
+        let descriptor_body = CanonicalSerializer::serialize(&descriptor, &descriptor_schema)
+            .map_err(RegistryError::Canonical)?;
+        let descriptor_header = ObjectHeader {
+            schema: descriptor_schema,
+            zone_id: zone_id.clone(),
+            created_at: mirrored_at,
+            provenance: Provenance::new(zone_id),
+            refs: vec![mirror.manifest_object_id, mirror.binary_object_id],
+            foreign_refs: Vec::new(),
+            ttl_secs: None,
+            placement: None,
+        };
+        let descriptor_object_id =
+            StoredObject::derive_id(&descriptor_header, &descriptor_body, object_id_key)?;
+        let descriptor_record = StoredObject {
+            object_id: descriptor_object_id,
+            header: descriptor_header,
+            body: descriptor_body,
+            storage: StorageMeta {
+                retention: RetentionClass::Pinned,
+            },
+        };
+        store.put(descriptor_record).await?;
+
+        Ok(SymbolMirrorResult {
+            descriptor_object_id,
+            manifest_object_id: mirror.manifest_object_id,
+            binary_object_id: mirror.binary_object_id,
+            binary_hash: verified.binary_hash.clone(),
+            encoded_body_hash: descriptor.encoded_body_hash.clone(),
+            source_symbols,
+            total_symbols,
+        })
+    }
+
+    /// Load a previously mirrored binary symbol descriptor from the object store.
+    ///
+    /// # Errors
+    /// Returns [`RegistryError`] if the descriptor cannot be read or decoded.
+    pub async fn load_symbol_descriptor(
+        &self,
+        descriptor_object_id: &ObjectId,
+        store: &dyn ObjectStore,
+    ) -> Result<ConnectorBinarySymbolSet, RegistryError> {
+        let descriptor = store.get(descriptor_object_id).await?;
+        let descriptor_schema = SchemaId::new(
+            "fcp.registry",
+            "ConnectorBinarySymbolSet",
+            Version::new(1, 0, 0),
+        );
+        CanonicalSerializer::deserialize(&descriptor.body, &descriptor_schema)
+            .map_err(RegistryError::Canonical)
+    }
+
+    /// Reconstruct a mirrored connector binary from the symbol layer.
+    ///
+    /// # Errors
+    /// Returns [`RegistryError`] if symbols are incomplete, decode fails, or
+    /// the reconstructed bytes do not match the expected descriptor hashes.
+    pub async fn reconstruct_binary_from_symbols(
+        &self,
+        descriptor: &ConnectorBinarySymbolSet,
+        symbol_store: &dyn SymbolStore,
+        config: &RaptorQConfig,
+    ) -> Result<ReconstructedConnectorBinary, RegistryError> {
+        let received = symbol_store
+            .symbol_count(&descriptor.binary_object_id)
+            .await;
+        if received < descriptor.source_symbols {
+            return Err(RegistryError::IncompleteSymbols {
+                received,
+                needed: descriptor.source_symbols,
+            });
+        }
+
+        let mut symbols = symbol_store
+            .get_all_symbols(&descriptor.binary_object_id)
+            .await;
+        symbols.sort_by_key(|symbol| symbol.meta.esi);
+
+        let mut decoder = RaptorQDecoder::new(descriptor.oti.to_oti(), config);
+        let mut decoded = None;
+        for symbol in symbols {
+            if let Some(bytes) = decoder.add_symbol(symbol.meta.esi, symbol.data.to_vec())? {
+                decoded = Some(bytes);
+                break;
+            }
+        }
+
+        let decoded = decoded.ok_or_else(|| RegistryError::IncompleteSymbols {
+            received,
+            needed: descriptor.source_symbols,
+        })?;
+        let expected_len = usize::try_from(descriptor.oti.transfer_length).map_err(|_| {
+            RegistryError::TransferLengthOverflow {
+                len: descriptor.oti.transfer_length,
+            }
+        })?;
+        if decoded.len() < expected_len {
+            return Err(RegistryError::ReconstructedBodyTooShort {
+                expected: expected_len,
+                actual: decoded.len(),
+            });
+        }
+
+        let body = &decoded[..expected_len];
+        let actual_body_hash = hash_bytes(body);
+        if actual_body_hash != descriptor.encoded_body_hash {
+            return Err(RegistryError::ReconstructedBodyHashMismatch {
+                expected: descriptor.encoded_body_hash.clone(),
+                actual: actual_body_hash,
+            });
+        }
+
+        let binary_schema = SchemaId::new("fcp.registry", "ConnectorBinary", Version::new(1, 0, 0));
+        let binary_obj: ConnectorBinaryObject =
+            CanonicalSerializer::deserialize(body, &binary_schema)
+                .map_err(RegistryError::Canonical)?;
+
+        if binary_obj.binary_hash != descriptor.binary_hash {
+            return Err(RegistryError::ReconstructedBinaryHashMismatch {
+                expected: descriptor.binary_hash.clone(),
+                actual: binary_obj.binary_hash,
+            });
+        }
+        let actual_binary_hash = hash_bytes(&binary_obj.binary);
+        if actual_binary_hash != descriptor.binary_hash {
+            return Err(RegistryError::ReconstructedBinaryHashMismatch {
+                expected: descriptor.binary_hash.clone(),
+                actual: actual_binary_hash,
+            });
+        }
+
+        let actual_target = binary_obj.target.as_string();
+        let expected_target = descriptor.target.as_string();
+        if binary_obj.target != descriptor.target {
+            return Err(RegistryError::ReconstructedBinaryTargetMismatch {
+                expected: expected_target,
+                actual: actual_target,
+            });
+        }
+
+        Ok(ReconstructedConnectorBinary {
+            manifest_object_id: descriptor.manifest_object_id,
+            binary_object_id: descriptor.binary_object_id,
+            target: binary_obj.target,
+            binary_hash: descriptor.binary_hash.clone(),
+            binary: binary_obj.binary,
+        })
+    }
+
+    /// Reconstruct a full connector bundle from a mirrored symbol descriptor.
+    ///
+    /// # Errors
+    /// Returns [`RegistryError`] if the descriptor or manifest object cannot be
+    /// loaded, symbol reconstruction fails, or the recovered manifest hash does
+    /// not match its stored digest.
+    pub async fn reconstruct_bundle_from_symbol_descriptor(
+        &self,
+        descriptor_object_id: &ObjectId,
+        store: &dyn ObjectStore,
+        symbol_store: &dyn SymbolStore,
+        config: &RaptorQConfig,
+    ) -> Result<ConnectorBundle, RegistryError> {
+        let descriptor = self
+            .load_symbol_descriptor(descriptor_object_id, store)
+            .await?;
+        let manifest = store.get(&descriptor.manifest_object_id).await?;
+        let manifest_schema =
+            SchemaId::new("fcp.registry", "ConnectorManifest", Version::new(1, 0, 0));
+        let manifest_obj: ConnectorManifestObject =
+            CanonicalSerializer::deserialize(&manifest.body, &manifest_schema)
+                .map_err(RegistryError::Canonical)?;
+
+        let actual_manifest_hash = hash_bytes(manifest_obj.manifest_toml.as_bytes());
+        if actual_manifest_hash != manifest_obj.manifest_hash {
+            return Err(RegistryError::ReconstructedManifestHashMismatch {
+                expected: manifest_obj.manifest_hash,
+                actual: actual_manifest_hash,
+            });
+        }
+
+        let reconstructed = self
+            .reconstruct_binary_from_symbols(&descriptor, symbol_store, config)
+            .await?;
+        Ok(ConnectorBundle {
+            manifest_toml: manifest_obj.manifest_toml,
+            binary: reconstructed.binary,
+            target: reconstructed.target,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -795,7 +1129,7 @@ pub fn manifest_signing_bytes(manifest: &ConnectorManifest) -> Result<Vec<u8>, R
         object.remove("signatures");
     }
     let schema = SchemaId::new("fcp.registry", "ManifestSigningView", Version::new(1, 0, 0));
-    Ok(CanonicalSerializer::serialize(&value, &schema)?)
+    CanonicalSerializer::serialize(&value, &schema).map_err(RegistryError::SigningBytes)
 }
 
 fn hash_bytes(bytes: &[u8]) -> String {
@@ -8489,9 +8823,9 @@ trusted_builders = ["trusted-ci"]
 
     #[test]
     fn registry_error_from_serialization_error() {
-        // SerializationError is From'd into RegistryError via SigningBytes variant
+        // Signing-bytes failures are represented explicitly through the dedicated variant
         let se = SerializationError::MissingSchemaHashPrefix;
-        let re: RegistryError = se.into();
+        let re = RegistryError::SigningBytes(se);
         assert!(matches!(re, RegistryError::SigningBytes(_)));
     }
 

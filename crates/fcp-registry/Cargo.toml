@@ -13,10 +13,12 @@ default = []
 supply-chain-live = []
 
 [dependencies]
+bytes = { workspace = true }
 fcp-cbor = { workspace = true }
 fcp-core = { workspace = true }
 fcp-crypto = { workspace = true }
 fcp-manifest = { workspace = true }
+fcp-raptorq = { workspace = true }
 fcp-store = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }

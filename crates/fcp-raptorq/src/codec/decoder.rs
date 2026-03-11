@@ -1199,7 +1199,7 @@ fn select_pivot_row(
             {
                 best = Some((row, best_cross, nnz));
             }
-            Some((_best_row, best_cross, best_nnz))
+            Some((best_row, best_cross, best_nnz))
                 if cross_block_nnz == best_cross && nnz == best_nnz && row < best_row =>
             {
                 best = Some((row, best_cross, nnz));
@@ -1344,7 +1344,7 @@ impl InactivationDecoder {
         self.validate_input(&symbols)?;
 
         // Build decoder state
-        let mut state = self.build_state(symbols);
+        let mut state = self.build_state(&symbols);
 
         // Phase 1: Peeling
         Self::peel(&mut state);
@@ -1400,7 +1400,7 @@ impl InactivationDecoder {
 
         // A batch_size of 0 falls back to sequential (single batch = all symbols).
         let effective_batch = if batch_size == 0 {
-            symbols.len()
+            symbols.len().max(1)
         } else {
             batch_size
         };
@@ -1425,20 +1425,13 @@ impl InactivationDecoder {
         let mut queue = VecDeque::new();
         let mut queued = Vec::new();
 
-        let mut symbols_iter = symbols.into_iter();
-        
-        loop {
-            let chunk: Vec<ReceivedSymbol> = symbols_iter.by_ref().take(effective_batch).collect();
-            if chunk.is_empty() {
-                break;
-            }
-
+        for chunk in symbols.chunks(effective_batch) {
             let base_eq_idx = state.equations.len();
             // Assembly: add this batch of symbols as equations.
             for sym in chunk {
-                let eq = Equation::new(sym.columns, sym.coefficients);
+                let eq = Equation::new(sym.columns.clone(), sym.coefficients.clone());
                 state.equations.push(eq);
-                state.rhs.push(sym.data);
+                state.rhs.push(sym.data.clone());
             }
             queued.resize(state.equations.len(), false);
 
@@ -1579,7 +1572,7 @@ impl InactivationDecoder {
     /// (with zero RHS) in the received symbols if needed. The higher-level
     /// `decode` module handles this by building constraint rows from
     /// the constraint matrix.
-    fn build_state(&self, symbols: Vec<ReceivedSymbol>) -> DecoderState {
+    fn build_state(&self, symbols: &[ReceivedSymbol]) -> DecoderState {
         let l = self.params.l;
 
         let mut equations = Vec::with_capacity(symbols.len());
@@ -1587,9 +1580,9 @@ impl InactivationDecoder {
 
         // Add received symbol equations
         for sym in symbols {
-            let eq = Equation::new(sym.columns, sym.coefficients);
+            let eq = Equation::new(sym.columns.clone(), sym.coefficients.clone());
             equations.push(eq);
-            rhs.push(sym.data);
+            rhs.push(sym.data.clone());
         }
 
         let active_cols: BTreeSet<usize> = (0..l).collect();

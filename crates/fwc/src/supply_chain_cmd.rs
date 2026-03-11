@@ -4,7 +4,8 @@ use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use fcp_core::{
     CanonicalEncoding, HashAlgorithm, SoftwareBillOfMaterials, SupplyChainAttestation,
-    SupplyChainVerificationPolicy, VerificationDecision, VerificationEvidence, VerificationPipeline,
+    SupplyChainVerificationPolicy, VerificationDecision, VerificationEvidence,
+    VerificationPipeline,
 };
 use serde::Serialize;
 
@@ -370,7 +371,8 @@ fn build_attestation_report(
         subject_digest: attestation.subject_digest.clone(),
         slsa_level: attestation.slsa_level,
         provenance_hash: attestation.provenance_hash.clone(),
-        content_digest: attestation.content_hash(CanonicalEncoding::Json, HashAlgorithm::Blake3_256)?,
+        content_digest: attestation
+            .content_hash(CanonicalEncoding::Json, HashAlgorithm::Blake3_256)?,
         trust_root: TrustRootReport {
             root_type: attestation.trust_root.root_type.clone(),
             root_id: attestation.trust_root.root_id.clone(),

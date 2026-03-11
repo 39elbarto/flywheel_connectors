@@ -51,6 +51,7 @@ mod json_diff;
 mod manifest_cmd;
 #[allow(dead_code)]
 mod mcp_resources;
+mod net_cmd;
 #[allow(dead_code)]
 mod op_lock;
 mod package_cmd;
@@ -60,13 +61,13 @@ mod pipe;
 mod pipeline_cond;
 #[allow(dead_code)]
 mod pipeline_recipes;
+mod policy_cmd;
 #[allow(dead_code, clippy::cast_precision_loss)]
 mod rate_forecast;
 #[allow(dead_code)]
 mod rate_limit;
 #[allow(dead_code)]
 mod reactive_rules;
-mod policy_cmd;
 #[allow(dead_code)] // Contract types wired into host-backed commands in later beads.
 mod readiness;
 mod recovery;
@@ -84,16 +85,15 @@ mod secretless;
 mod serve_mcp;
 #[allow(dead_code)]
 mod session;
+mod supply_chain_cmd;
 mod template;
 #[allow(dead_code)] // Test observability contract: logging, artifact, redaction, and replay.
 mod test_observability;
 #[allow(dead_code)]
 mod throttle;
+mod trace_cmd;
 #[allow(dead_code)] // Idempotent undo for reversible operations.
 mod undo;
-mod net_cmd;
-mod supply_chain_cmd;
-mod trace_cmd;
 mod validate;
 mod workflow;
 #[allow(dead_code)]
@@ -105,6 +105,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
+use base64::Engine;
 use clap::{Args, Parser, Subcommand, ValueEnum, error::ErrorKind};
 use reqwest::blocking::{Client as BlockingClient, ClientBuilder as BlockingClientBuilder};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -112,21 +113,26 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use fcp_core::{
-    CapabilityToken, CapabilityUsageKey, ConnectorId, InvokeRequest, InvokeResponse,
-    InvokeStatus, LifecycleStatus, OperationId, RequestId, SafetyTier, ZoneId,
+    AgentHint, ApprovalToken, CapabilityToken, CapabilityUsageKey, ConnectorId, InvokeRequest,
+    InvokeResponse, InvokeStatus, LifecycleStatus, OperationId, OperationInfo, RequestId,
+    SafetyTier, ZoneId,
 };
+use fcp_crypto::{canonicalize::to_deterministic_cbor, cose::CoseToken};
 use fcp_host::{
-    BatchInvokeResponse as HostBatchInvokeResponse, BatchOptions as HostBatchOptions, CancelReason,
+    BatchInvokeResponse as HostBatchInvokeResponse, BatchOptions as HostBatchOptions,
     BudgetReportRequest as HostBudgetReportRequest,
-    BudgetReportResponse as HostBudgetReportResponse,
+    BudgetReportResponse as HostBudgetReportResponse, CancelReason,
     CancellationRequest as HostCancellationRequest,
     CancellationResponse as HostCancellationResponse, CleanupBehavior,
     ConnectorAdminStatus as HostConnectorAdminStatus,
+    ConnectorInventoryMutationKind as HostConnectorInventoryMutationKind,
+    ConnectorInventoryMutationRequest as HostConnectorInventoryMutationRequest,
+    ConnectorInventoryMutationResponse as HostConnectorInventoryMutationResponse,
     ConnectorInventoryResponse as HostConnectorInventoryResponse,
     DiscoveryFilter as HostDiscoveryFilter, DiscoveryResponse as HostDiscoveryResponse,
-    DoctorReport as HostDoctorReport, DoctorRequest as HostDoctorRequest,
-    HostHealthResponse, IntrospectionResponse as HostIntrospectionResponse,
-    PreflightRequest as HostPreflightRequest, PreflightResponse as HostPreflightResponse,
+    DoctorReport as HostDoctorReport, DoctorRequest as HostDoctorRequest, HostHealthResponse,
+    HostPreflightRequest, IntrospectionResponse as HostIntrospectionResponse,
+    ManagedConnectorConfig, PreflightResponse as HostPreflightResponse,
     ToolDescriptor as HostToolDescriptor,
 };
 use fcp_manifest::ConnectorManifest;
@@ -135,7 +141,10 @@ use fcp_telemetry::{
     RecommendationConfig, recommend_capabilities,
 };
 
-use crate::package_cmd::{BuildMetadata as PackageBuildMetadata, PACKAGE_OUTPUT_FILENAME, PackageArgs as PackageBuildArgs, PackageOutput};
+use crate::package_cmd::{
+    BuildMetadata as PackageBuildMetadata, PACKAGE_OUTPUT_FILENAME,
+    PackageArgs as PackageBuildArgs, PackageOutput,
+};
 use crate::readiness::{
     DiscoveredConnector, DiscoveredOperation, DiscoveryCatalog, SelectorError, SelectorErrorKind,
     idempotency_label, normalize_connector_selector, normalize_operation_selector,
@@ -194,10 +203,10 @@ Examples:
   fwc recipe show github-pr-review-notify
   fwc recipe dry-run github-pr-review-notify
   fwc recipe export github-pr-review-notify > .fwc/pipelines/github-pr-review-notify.toml
-  fwc export-tools --format mcp --json
+  fwc export-tools --host http://127.0.0.1:8787 --format mcp --json
   fwc export-tools --format claude github
   fwc export-tools --format openai --risk-max medium --output tools.json
-  fwc serve-mcp github
+  fwc serve-mcp --host http://127.0.0.1:8787 github --capability-token <token>
 ";
 
 #[derive(Parser, Debug)]
@@ -431,7 +440,6 @@ enum Commands {
     /// Independent operations run in parallel; dependent ones follow topological order.
     #[command(name = "batch-file", visible_alias = "batch-ops")]
     BatchFile(BatchFileArgs),
-
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -1010,6 +1018,27 @@ struct ConfigFileArgs {
     file: Option<PathBuf>,
 }
 
+#[derive(Args, Debug, Clone, Default, Serialize)]
+struct LiveAuthArgs {
+    /// Capability token authorizing the live request. Accepts base64 CBOR or a JSON byte array/string.
+    #[arg(long, value_name = "TOKEN")]
+    #[serde(skip_serializing)]
+    capability_token: Option<String>,
+
+    /// Read the capability token from a file containing base64, JSON, or raw CBOR bytes.
+    #[arg(long, value_name = "PATH")]
+    capability_token_file: Option<PathBuf>,
+
+    /// Approval token JSON payload. Repeat for multiple approvals.
+    #[arg(long = "approval-token", value_name = "JSON")]
+    #[serde(skip_serializing)]
+    approval_token: Vec<String>,
+
+    /// Read an approval token JSON payload from a file. Repeat for multiple approvals.
+    #[arg(long = "approval-token-file", value_name = "PATH")]
+    approval_token_file: Vec<PathBuf>,
+}
+
 #[derive(Args, Debug, Serialize)]
 struct InvokeArgs {
     /// Connector id, alias, or family name.
@@ -1049,6 +1078,9 @@ struct InvokeArgs {
     /// Optional deadline in milliseconds.
     #[arg(long)]
     deadline_ms: Option<u64>,
+
+    #[command(flatten)]
+    auth: LiveAuthArgs,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -1099,9 +1131,9 @@ struct CancelArgs {
 
 #[derive(Args, Debug, Serialize)]
 struct ExportToolsArgs {
-    /// Tool schema format to export.
-    #[arg(long, value_enum)]
-    format: export_tools::ToolSchemaFormat,
+    /// Tool schema format to export. `--format` after `export-tools` is normalized here.
+    #[arg(long = "tool-format", value_enum)]
+    tool_format: export_tools::ToolSchemaFormat,
 
     /// Optional connector selector. Omit to export all connectors.
     connector: Option<String>,
@@ -1139,6 +1171,13 @@ struct ServeMcpArgs {
     /// Restrict tool exposure to connectors matching this zone.
     #[arg(long)]
     zone: Option<String>,
+
+    /// Optional principal identity forwarded on each live tool call.
+    #[arg(long)]
+    principal: Option<String>,
+
+    #[command(flatten)]
+    auth: LiveAuthArgs,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -1297,6 +1336,13 @@ struct RecipeRunArgs {
     /// Bind a recipe parameter as KEY=VALUE.
     #[arg(long = "param", value_name = "KEY=VALUE")]
     params: Vec<String>,
+
+    /// Execute each step in this zone.
+    #[arg(long)]
+    zone: Option<String>,
+
+    #[command(flatten)]
+    auth: LiveAuthArgs,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -1344,6 +1390,13 @@ struct PipelineRunArgs {
     /// Bind a pipeline parameter as KEY=VALUE.
     #[arg(long = "param", value_name = "KEY=VALUE")]
     params: Vec<String>,
+
+    /// Execute each step in this zone.
+    #[arg(long)]
+    zone: Option<String>,
+
+    #[command(flatten)]
+    auth: LiveAuthArgs,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -1378,6 +1431,9 @@ struct MapArgs {
     /// Execution zone for all mapped inputs. Defaults to the active context zone or `z:work`.
     #[arg(long)]
     zone: Option<String>,
+
+    #[command(flatten)]
+    auth: LiveAuthArgs,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -1400,6 +1456,9 @@ struct BatchFileArgs {
     /// Default execution zone for operations that do not specify one in the JSONL file.
     #[arg(long)]
     zone: Option<String>,
+
+    #[command(flatten)]
+    auth: LiveAuthArgs,
 }
 
 fn main() -> ExitCode {
@@ -1561,9 +1620,75 @@ fn execute_passthrough_command(prepared: &PreparedCli) -> Result<Option<Executio
 }
 
 fn execute_serve_mcp(prepared: &PreparedCli, args: &ServeMcpArgs) -> Result<ExecutionOutcome> {
-    let catalog = DiscoveryCatalog::load()?;
-    let resolved_host = resolve_host_config(prepared.cli.host.as_deref())?;
-    let connectors: Vec<&DiscoveredConnector> = if let Some(selector) = &args.connector {
+    let Some(resolved_host) = resolve_host_config(prepared.cli.host.as_deref())? else {
+        return render_dispatch(
+            missing_host_dispatch(
+                "serve-mcp",
+                json!({
+                    "connector": args.connector,
+                    "zone": args.zone,
+                }),
+                vec![
+                    "fwc serve-mcp --host <endpoint>".to_owned(),
+                    "Use `fwc export-tools` if you only need offline tool definitions without live execution."
+                        .to_owned(),
+                ],
+            ),
+            prepared.format,
+            prepared.cli.token_stats,
+            &prepared.render_options,
+        );
+    };
+    if let Err(error) = resolve_live_auth(&args.auth) {
+        return render_dispatch(
+            live_auth_dispatch(
+                "serve-mcp",
+                error,
+                vec![
+                    "Pass `--capability-token` or `--capability-token-file` so MCP tool calls can execute against the live host."
+                        .to_owned(),
+                    "Pass `--approval-token` or `--approval-token-file` as needed for risky or dangerous tools."
+                        .to_owned(),
+                ],
+            ),
+            prepared.format,
+            prepared.cli.token_stats,
+            &prepared.render_options,
+        );
+    }
+    if let Some(zone) = args.zone.as_deref() {
+        return render_dispatch(
+            DispatchOutcome {
+                payload: json!({
+                    "status": "error",
+                    "command": "serve-mcp",
+                    "source": "host-admin-api",
+                    "error": {
+                        "type": "unsupported-live-zone-filter",
+                        "message": format!(
+                            "`fwc serve-mcp` cannot prove connector availability for zone `{zone}` because live host discovery does not expose per-zone inventory metadata."
+                        ),
+                        "recoverable": true,
+                    },
+                    "filters": {
+                        "connector": args.connector,
+                        "zone": zone,
+                    },
+                    "next_actions": [
+                        "Retry without `--zone` so `fwc` can expose the live host inventory truthfully.".to_owned(),
+                        "Use host contexts or explicit `fwc invoke/simulate --zone ...` commands when you need zone-scoped execution.".to_owned(),
+                    ],
+                }),
+                exit_code: CliExitCode::Validation,
+            },
+            prepared.format,
+            prepared.cli.token_stats,
+            &prepared.render_options,
+        );
+    }
+    let client = HostAdminClient::new(&resolved_host.endpoint)?;
+    let (catalog, _) = client.catalog(None)?;
+    let connectors = if let Some(selector) = &args.connector {
         let connector = match catalog.resolve_connector(selector) {
             Ok(connector) => connector,
             Err(error) => {
@@ -1575,53 +1700,24 @@ fn execute_serve_mcp(prepared: &PreparedCli, args: &ServeMcpArgs) -> Result<Exec
                 );
             }
         };
-
-        if let Some(zone) = args.zone.as_deref() {
-            if !connector.matches_zone(zone) {
-                return render_dispatch(
-                    DispatchOutcome {
-                        payload: json!({
-                            "status": "error",
-                            "command": "serve-mcp",
-                            "error": {
-                                "type": "zone-mismatch",
-                                "message": format!(
-                                    "Connector `{}` is not available in zone `{zone}`.",
-                                    connector.slug
-                                ),
-                            },
-                            "connector": {
-                                "slug": &connector.slug,
-                                "canonical_id": &connector.detail.summary.id,
-                            },
-                            "next_actions": [
-                                format!("fwc show {}", connector.slug),
-                                "fwc list".to_owned(),
-                            ],
-                        }),
-                        exit_code: CliExitCode::Validation,
-                    },
-                    prepared.format,
-                    prepared.cli.token_stats,
-                    &prepared.render_options,
-                );
-            }
-        }
-
-        vec![connector]
+        vec![connector.clone()]
     } else {
-        catalog.list(args.zone.as_deref(), None)
+        catalog.connectors.clone()
     };
 
     let mut config = serve_mcp::McpServerConfig::new();
-    if let Some(zone) = &args.zone {
-        config = config.with_zone_filter(zone.clone());
-    }
     if let Some(connector) = &args.connector {
         config = config.with_connector_filter(connector.clone());
     }
 
-    let state = serve_mcp::state_from_connectors(&connectors, config);
+    let mut tools = Vec::new();
+    for connector in &connectors {
+        let introspection = client.introspect(connector.summary.id.as_str())?;
+        tools.extend(host_mcp_tool_definitions(connector, &introspection));
+    }
+
+    let zone = args.zone.clone();
+    let state = serve_mcp::state_from_tools(tools, config);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .build()?;
@@ -1630,8 +1726,19 @@ fn execute_serve_mcp(prepared: &PreparedCli, args: &ServeMcpArgs) -> Result<Exec
         let reader = tokio::io::BufReader::new(tokio::io::stdin());
         let writer = tokio::io::stdout();
         let host_context = resolved_host.clone();
+        let principal = args.principal.clone();
+        let auth = args.auth.clone();
+        let zone = zone.clone();
         serve_mcp::run_stdio_transport(&state, reader, writer, move |tool, id, arguments| {
-            mcp_tool_call_response(tool, id, &arguments, host_context.as_ref())
+            mcp_tool_call_response(
+                tool,
+                id,
+                &arguments,
+                Some(&host_context),
+                principal.as_deref(),
+                zone.as_deref(),
+                &auth,
+            )
         })
         .await
     })?;
@@ -1647,19 +1754,11 @@ fn mcp_tool_call_response(
     id: Value,
     arguments: &Value,
     host: Option<&ResolvedHostConfig>,
+    principal: Option<&str>,
+    zone: Option<&str>,
+    auth: &LiveAuthArgs,
 ) -> serve_mcp::JsonRpcResponse {
-    let invoke_args = InvokeArgs {
-        connector: tool.connector_id.clone(),
-        operation: tool.operation_id.clone(),
-        input: Some(arguments.to_string()),
-        file: None,
-        stdin: false,
-        set: Vec::new(),
-        zone: host.and_then(|config| config.default_zone.clone()),
-        principal: None,
-        idempotency_key: None,
-        deadline_ms: None,
-    };
+    let invoke_args = mcp_tool_invoke_args(tool, arguments, host, principal, zone, auth);
 
     match invoke_dispatch(
         "invoke",
@@ -1702,6 +1801,31 @@ fn mcp_tool_call_response(
                 tool.name
             )),
         ),
+    }
+}
+
+fn mcp_tool_invoke_args(
+    tool: &serve_mcp::McpToolDefinition,
+    arguments: &Value,
+    host: Option<&ResolvedHostConfig>,
+    principal: Option<&str>,
+    zone: Option<&str>,
+    auth: &LiveAuthArgs,
+) -> InvokeArgs {
+    InvokeArgs {
+        connector: tool.connector_id.clone(),
+        operation: tool.operation_id.clone(),
+        input: Some(arguments.to_string()),
+        file: None,
+        stdin: false,
+        set: Vec::new(),
+        zone: zone
+            .map(str::to_owned)
+            .or_else(|| host.and_then(|config| config.default_zone.clone())),
+        principal: principal.map(str::to_owned),
+        idempotency_key: None,
+        deadline_ms: None,
+        auth: auth.clone(),
     }
 }
 
@@ -2081,8 +2205,8 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         Commands::Status(args) => status_dispatch(args, cli.host.as_deref())?,
         Commands::Budget(args) => budget_dispatch(args, cli.host.as_deref())?,
         Commands::Capabilities(args) => capabilities_dispatch(args, cli.host.as_deref())?,
-        Commands::Install(args) => install_dispatch(args)?,
-        Commands::Update(args) => update_dispatch(args)?,
+        Commands::Install(args) => install_dispatch(args, cli.host.as_deref())?,
+        Commands::Update(args) => update_dispatch(args, cli.host.as_deref())?,
         Commands::Pin(args) => pin_dispatch(args, cli.host.as_deref())?,
         Commands::Unpin(args) => unpin_dispatch(args, cli.host.as_deref())?,
         Commands::Rollout(args) => rollout_dispatch(args, cli.host.as_deref())?,
@@ -2090,15 +2214,15 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         Commands::Invoke(args) => invoke_dispatch("invoke", args, cli.host.as_deref())?,
         Commands::Simulate(args) => invoke_dispatch("simulate", args, cli.host.as_deref())?,
         Commands::Cancel(args) => cancel_dispatch(args, cli.host.as_deref())?,
-        Commands::ExportTools(args) => export_tools_dispatch(args)?,
+        Commands::ExportTools(args) => export_tools_dispatch(args, cli.host.as_deref())?,
         Commands::ServeMcp(args) => planned("serve-mcp", args)?,
         Commands::Suggest(args) => suggest_dispatch(args)?,
         Commands::Template(args) => template_dispatch(args)?,
         Commands::Validate(args) => validate_dispatch(args)?,
         Commands::History(args) => history_dispatch(args)?,
         Commands::Pipe(args) => pipe_dispatch(args)?,
-        Commands::Pipeline(args) => pipeline_dispatch(args)?,
-        Commands::Recipe(args) => recipe_dispatch(args)?,
+        Commands::Pipeline(args) => pipeline_dispatch(args, cli.host.as_deref())?,
+        Commands::Recipe(args) => recipe_dispatch(args, cli.host.as_deref())?,
         Commands::Map(args) => map_dispatch(args, cli.host.as_deref())?,
         Commands::BatchFile(args) => batch_file_dispatch(args, cli.host.as_deref())?,
     };
@@ -2204,26 +2328,6 @@ struct HostBatchOperation {
     request: InvokeRequest,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     depends_on: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct ManagedConnectorConfig {
-    id: String,
-    binary: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    description: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    args: Vec<String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    env: BTreeMap<String, String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    config: Option<Value>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    categories: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    version: Option<String>,
 }
 
 fn resolve_host_config(explicit_host: Option<&str>) -> Result<Option<ResolvedHostConfig>> {
@@ -2440,11 +2544,15 @@ impl HostAdminClient {
         self.post_json("/rpc/preflight", request)
     }
 
-    fn budget_report(
-        &self,
-        request: &HostBudgetReportRequest,
-    ) -> Result<HostBudgetReportResponse> {
+    fn budget_report(&self, request: &HostBudgetReportRequest) -> Result<HostBudgetReportResponse> {
         self.post_json("/rpc/budget/report", request)
+    }
+
+    fn mutate_inventory(
+        &self,
+        request: &HostConnectorInventoryMutationRequest,
+    ) -> Result<HostConnectorInventoryMutationResponse> {
+        self.post_json("/rpc/connectors/apply", request)
     }
 
     fn invoke(&self, request: &InvokeRequest) -> Result<InvokeResponse> {
@@ -2543,11 +2651,22 @@ impl HostAdminClient {
         method: &str,
         path: &str,
     ) -> Result<T> {
-        let response = response
-            .error_for_status()
-            .with_context(|| format!("{method} {path} returned an error status"))?;
-        response
-            .json()
+        let status = response.status();
+        let body = response
+            .text()
+            .with_context(|| format!("{method} {path} returned an unreadable response body"))?;
+        if !status.is_success() {
+            bail!(
+                "{method} {path} returned {}: {}",
+                status,
+                if body.trim().is_empty() {
+                    "<empty body>"
+                } else {
+                    body.trim()
+                }
+            );
+        }
+        serde_json::from_str(&body)
             .with_context(|| format!("{method} {path} returned invalid JSON"))
     }
 }
@@ -2893,6 +3012,77 @@ fn host_tool_related(tool: &HostToolDescriptor) -> Vec<String> {
     tool.ai_hints.as_ref().map_or_else(Vec::new, |hints| {
         hints.related.iter().map(ToString::to_string).collect()
     })
+}
+
+fn host_tool_agent_hints(tool: &HostToolDescriptor) -> AgentHint {
+    let mut hints = tool.ai_hints.clone().unwrap_or_default();
+    let mut seen_examples = hints.examples.iter().cloned().collect::<BTreeSet<_>>();
+    for example in host_tool_example_strings(tool) {
+        if seen_examples.insert(example.clone()) {
+            hints.examples.push(example);
+        }
+    }
+    hints
+}
+
+fn host_tool_operation_info(tool: &HostToolDescriptor) -> OperationInfo {
+    let summary = if tool.description.trim().is_empty() {
+        tool.name.clone()
+    } else {
+        tool.description.clone()
+    };
+    OperationInfo {
+        id: OperationId::new(tool.name.clone())
+            .expect("host introspection should only surface canonical operation ids"),
+        summary: summary.clone(),
+        description: Some(tool.description.clone())
+            .filter(|description| !description.trim().is_empty() && description != &summary),
+        input_schema: tool.input_schema.clone(),
+        output_schema: tool.output_schema.clone(),
+        capability: tool.capability.clone(),
+        risk_level: tool.risk_level,
+        safety_tier: tool.safety_tier,
+        idempotency: tool.idempotency,
+        ai_hints: host_tool_agent_hints(tool),
+        rate_limit: None,
+        requires_approval: tool.approval_mode,
+    }
+}
+
+fn host_tool_passes_risk_filter(tool: &HostToolDescriptor, risk_max: Option<&str>) -> bool {
+    let Some(limit) = risk_max else {
+        return true;
+    };
+    risk_rank(risk_level_label(tool.risk_level)) <= risk_rank(limit)
+}
+
+fn host_tool_passes_capability_filter(tool: &HostToolDescriptor, capability: Option<&str>) -> bool {
+    let Some(filter) = capability else {
+        return true;
+    };
+    tool.capability.as_str().starts_with(filter)
+}
+
+fn host_mcp_tool_definitions(
+    connector: &HostConnectorRecord,
+    introspection: &HostIntrospectionResponse,
+) -> Vec<serve_mcp::McpToolDefinition> {
+    let options = export_tools::ExportOptions::default();
+    introspection
+        .tools
+        .iter()
+        .map(|tool| {
+            let exported =
+                export_tools::to_mcp_tool_info(&host_tool_operation_info(tool), &options);
+            serve_mcp::McpToolDefinition::new(
+                exported.name,
+                exported.description,
+                exported.input_schema,
+                connector.slug.clone(),
+                tool.name.clone(),
+            )
+        })
+        .collect()
 }
 
 fn host_connector_schema_glossary(
@@ -4218,21 +4408,23 @@ fn doctor_dispatch(args: &DoctorArgs, explicit_host: Option<&str>) -> Result<Dis
     };
 
     let client = HostAdminClient::new(&host.endpoint)?;
-    let (catalog, _) = client.catalog(None)?;
     let mut requested_connectors = Vec::new();
     let mut connector_ids = Vec::new();
-    for selector in &args.connector {
-        let connector = match catalog.resolve_connector(selector) {
-            Ok(connector) => connector,
-            Err(error) => return Ok(connector_resolution_dispatch("doctor", selector, &error)),
-        };
-        requested_connectors.push(json!({
-            "selector": selector,
-            "slug": &connector.slug,
-            "canonical_id": connector.summary.id.as_str(),
-            "name": &connector.summary.name,
-        }));
-        connector_ids.push(connector.summary.id.to_string());
+    if !args.connector.is_empty() {
+        let (catalog, _) = client.catalog(None)?;
+        for selector in &args.connector {
+            let connector = match catalog.resolve_connector(selector) {
+                Ok(connector) => connector,
+                Err(error) => return Ok(connector_resolution_dispatch("doctor", selector, &error)),
+            };
+            requested_connectors.push(json!({
+                "selector": selector,
+                "slug": &connector.slug,
+                "canonical_id": connector.summary.id.as_str(),
+                "name": &connector.summary.name,
+            }));
+            connector_ids.push(connector.summary.id.to_string());
+        }
     }
 
     let report = client.doctor(&HostDoctorRequest {
@@ -4618,8 +4810,12 @@ fn rollout_dispatch(args: &RolloutArgs, explicit_host: Option<&str>) -> Result<D
                     connector.slug
                 )
             })?;
-            let previous_version =
-                Some(client.rollout_status(connector.summary.id.as_str())?.status.version);
+            let previous_version = Some(
+                client
+                    .rollout_status(connector.summary.id.as_str())?
+                    .status
+                    .version,
+            );
             let policy = fcp_core::RolloutPolicy::builder()
                 .canary_percent(set_args.canary)
                 .build();
@@ -4792,7 +4988,8 @@ fn config_dispatch(args: &ConfigArgs) -> Result<DispatchOutcome> {
         }
         ConfigCommand::Get(target) => {
             let configs = read_managed_connector_configs(&connectors_file)?;
-            let (entry, resolved) = resolve_managed_connector(&catalog, &configs, &target.connector)?;
+            let (entry, resolved) =
+                resolve_managed_connector(&catalog, &configs, &target.connector)?;
             Ok(DispatchOutcome {
                 payload: json!({
                     "status": "ok",
@@ -4810,19 +5007,18 @@ fn config_dispatch(args: &ConfigArgs) -> Result<DispatchOutcome> {
             let mut configs = read_managed_connector_configs(&connectors_file)?;
             let resolved = catalog.resolve_connector(&set_args.connector).ok();
             let index = find_managed_connector_index(&configs, &set_args.connector, resolved)?;
-            let path = parse_invoke_path(&set_args.key)
-                .map_err(|error| anyhow::anyhow!("invalid config path `{}`: {error:?}", set_args.key))?;
+            let path = parse_invoke_path(&set_args.key).map_err(|error| {
+                anyhow::anyhow!("invalid config path `{}`: {error:?}", set_args.key)
+            })?;
             let schema = resolved.and_then(|connector| connector.detail.config_schema.as_ref());
             let schema_at_path = schema.and_then(|schema| invoke_schema_at_path(schema, &path));
             let value = coerce_invoke_value(&set_args.value, schema_at_path)
                 .map_err(|error| anyhow::anyhow!("failed to parse config value: {error}"))?;
 
-            let mut config_value = configs[index]
-                .config
-                .clone()
-                .unwrap_or_else(|| json!({}));
-            apply_invoke_binding(&mut config_value, &path, value)
-                .map_err(|error| anyhow::anyhow!("failed to set config path `{}`: {error}", set_args.key))?;
+            let mut config_value = configs[index].config.clone().unwrap_or_else(|| json!({}));
+            apply_invoke_binding(&mut config_value, &path, value).map_err(|error| {
+                anyhow::anyhow!("failed to set config path `{}`: {error}", set_args.key)
+            })?;
             let validation_errors = validate_config_value(schema, &config_value);
             if !validation_errors.is_empty() {
                 return Ok(config_validation_dispatch(
@@ -4857,14 +5053,13 @@ fn config_dispatch(args: &ConfigArgs) -> Result<DispatchOutcome> {
             let mut configs = read_managed_connector_configs(&connectors_file)?;
             let resolved = catalog.resolve_connector(&unset_args.connector).ok();
             let index = find_managed_connector_index(&configs, &unset_args.connector, resolved)?;
-            let path = parse_invoke_path(&unset_args.key)
-                .map_err(|error| anyhow::anyhow!("invalid config path `{}`: {error:?}", unset_args.key))?;
-            let mut config_value = configs[index]
-                .config
-                .clone()
-                .unwrap_or_else(|| json!({}));
-            remove_invoke_binding(&mut config_value, &path)
-                .map_err(|error| anyhow::anyhow!("failed to unset config path `{}`: {error}", unset_args.key))?;
+            let path = parse_invoke_path(&unset_args.key).map_err(|error| {
+                anyhow::anyhow!("invalid config path `{}`: {error:?}", unset_args.key)
+            })?;
+            let mut config_value = configs[index].config.clone().unwrap_or_else(|| json!({}));
+            remove_invoke_binding(&mut config_value, &path).map_err(|error| {
+                anyhow::anyhow!("failed to unset config path `{}`: {error}", unset_args.key)
+            })?;
             let schema = resolved.and_then(|connector| connector.detail.config_schema.as_ref());
             let validation_errors = validate_config_value(schema, &config_value);
             if !validation_errors.is_empty() {
@@ -4900,9 +5095,10 @@ fn config_dispatch(args: &ConfigArgs) -> Result<DispatchOutcome> {
             let mut configs = read_managed_connector_configs(&connectors_file)?;
             let resolved = catalog.resolve_connector(&file_args.connector).ok();
             let index = find_managed_connector_index(&configs, &file_args.connector, resolved)?;
-            let import_path = file_args.file.as_ref().ok_or_else(|| {
-                anyhow::anyhow!("`fwc config import` requires --file <path>")
-            })?;
+            let import_path = file_args
+                .file
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("`fwc config import` requires --file <path>"))?;
             let imported = read_json_file(import_path)?;
             let schema = resolved.and_then(|connector| connector.detail.config_schema.as_ref());
             let validation_errors = validate_config_value(schema, &imported);
@@ -4937,7 +5133,8 @@ fn config_dispatch(args: &ConfigArgs) -> Result<DispatchOutcome> {
         }
         ConfigCommand::Export(file_args) => {
             let configs = read_managed_connector_configs(&connectors_file)?;
-            let (entry, resolved) = resolve_managed_connector(&catalog, &configs, &file_args.connector)?;
+            let (entry, resolved) =
+                resolve_managed_connector(&catalog, &configs, &file_args.connector)?;
             let config_value = entry.config.clone().unwrap_or_else(|| json!({}));
             if let Some(path) = &file_args.file {
                 write_json_file(path, &config_value)?;
@@ -4958,12 +5155,17 @@ fn config_dispatch(args: &ConfigArgs) -> Result<DispatchOutcome> {
         }
         ConfigCommand::Doctor(target) => {
             let configs = read_managed_connector_configs(&connectors_file)?;
-            let (entry, resolved) = resolve_managed_connector(&catalog, &configs, &target.connector)?;
+            let (entry, resolved) =
+                resolve_managed_connector(&catalog, &configs, &target.connector)?;
             let config_value = entry.config.clone().unwrap_or_else(|| json!({}));
             let schema = resolved.and_then(|connector| connector.detail.config_schema.as_ref());
             let validation_errors = validate_config_value(schema, &config_value);
             let schema_available = schema.is_some();
-            let status = if validation_errors.is_empty() { "ok" } else { "invalid" };
+            let status = if validation_errors.is_empty() {
+                "ok"
+            } else {
+                "invalid"
+            };
             let exit_code = if validation_errors.is_empty() {
                 CliExitCode::Success
             } else {
@@ -5056,13 +5258,6 @@ fn write_managed_connector_configs(
         .with_context(|| format!("failed to write connectors file: {}", path.display()))
 }
 
-fn read_managed_connector_configs_allow_missing(path: &PathBuf) -> Result<Vec<ManagedConnectorConfig>> {
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    read_managed_connector_configs(path)
-}
-
 fn resolve_managed_connector<'a>(
     catalog: &'a DiscoveryCatalog,
     configs: &'a [ManagedConnectorConfig],
@@ -5090,9 +5285,7 @@ fn find_managed_connector_index(
                     .is_some_and(|name| name.eq_ignore_ascii_case(selector))
         })
         .ok_or_else(|| {
-            anyhow::anyhow!(
-                "connector `{selector}` was not found in the managed connectors file"
-            )
+            anyhow::anyhow!("connector `{selector}` was not found in the managed connectors file")
         })
 }
 
@@ -5160,8 +5353,7 @@ fn write_json_file(path: &PathBuf, value: &Value) -> Result<()> {
 fn read_json_file(path: &PathBuf) -> Result<Value> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read JSON file: {}", path.display()))?;
-    serde_json::from_str(&raw)
-        .with_context(|| format!("invalid JSON file: {}", path.display()))
+    serde_json::from_str(&raw).with_context(|| format!("invalid JSON file: {}", path.display()))
 }
 
 #[derive(Debug)]
@@ -5173,7 +5365,7 @@ struct PreparedPackageArtifact {
     source_description: String,
 }
 
-fn install_dispatch(args: &InstallArgs) -> Result<DispatchOutcome> {
+fn install_dispatch(args: &InstallArgs, explicit_host: Option<&str>) -> Result<DispatchOutcome> {
     let artifact = match prepare_package_artifact(&args.source, args.version.as_deref()) {
         Ok(artifact) => artifact,
         Err(error) => {
@@ -5217,128 +5409,146 @@ fn install_dispatch(args: &InstallArgs) -> Result<DispatchOutcome> {
         });
     }
 
-    let connectors_file = match resolve_connectors_file_path(args.connectors_file.as_ref()) {
-        Ok(path) => path,
+    let Some(host) = resolve_host_config(explicit_host)? else {
+        return Ok(missing_host_dispatch(
+            "install",
+            json!({
+                "source": args.source,
+                "version": args.version,
+                "verify_only": args.verify_only,
+            }),
+            vec![
+                "fwc install <source> --host <endpoint>".to_owned(),
+                "Use `--verify-only` when you only want package verification without changing a running host."
+                    .to_owned(),
+            ],
+        ));
+    };
+    let client = HostAdminClient::new(&host.endpoint)?;
+    let applied = match client.mutate_inventory(&HostConnectorInventoryMutationRequest {
+        kind: HostConnectorInventoryMutationKind::Install,
+        dry_run: false,
+        connector: candidate.clone(),
+    }) {
+        Ok(applied) => applied,
         Err(error) => {
             return Ok(DispatchOutcome {
                 payload: json!({
                     "status": "error",
                     "command": "install",
                     "error": {
-                        "type": "missing-connectors-file",
+                        "type": "host-mutation-failed",
                         "message": error.to_string(),
+                        "recoverable": true,
                     },
+                    "host": host.endpoint,
+                    "package_source": artifact.source_description,
+                    "candidate": connector_descriptor_json(&candidate, None),
+                    "package": package_output_json(&artifact),
+                    "verification": artifact.verification,
                     "next_actions": [
-                        "Pass `--connectors-file <path>` or set `FCP_HOST_CONNECTORS_FILE`.".to_owned(),
+                        format!("fwc status --host {}", host.endpoint),
+                        format!("fwc doctor --zone z:work --host {}", host.endpoint),
                     ],
                 }),
-                exit_code: CliExitCode::Validation,
+                exit_code: CliExitCode::Transport,
             });
         }
     };
 
-    let mut configs = read_managed_connector_configs_allow_missing(&connectors_file)?;
-    if let Some(existing) = configs.iter().find(|entry| entry.id == candidate.id) {
+    if let Some(previous) = applied.previous.as_ref() {
         return Ok(DispatchOutcome {
             payload: json!({
-                "status": "error",
+                "status": "warning",
                 "command": "install",
-                "error": {
-                    "type": "connector-already-installed",
-                    "message": format!(
-                        "Connector `{}` is already present in the managed connectors file. Use `fwc update {}` instead.",
-                        existing.id,
-                        existing.id
-                    ),
-                },
-                "connectors_file": connectors_file.display().to_string(),
-                "existing": connector_descriptor_json(existing, None),
+                "message": format!(
+                    "Host reported an existing connector entry while processing install for `{}`.",
+                    previous.id
+                ),
+                "host": host.endpoint,
+                "existing": connector_descriptor_json(previous, None),
                 "candidate": connector_descriptor_json(&candidate, None),
+                "response": applied,
                 "next_actions": [
-                    format!("fwc update {} --source {}", existing.id, args.source),
+                    format!("fwc update {} --source {} --host {}", previous.id, args.source, host.endpoint),
                 ],
             }),
-            exit_code: CliExitCode::Validation,
+            exit_code: CliExitCode::Transport,
         });
     }
-
-    configs.push(candidate.clone());
-    write_managed_connector_configs(&connectors_file, &configs)?;
 
     Ok(DispatchOutcome {
         payload: json!({
             "status": "ok",
             "command": "install",
             "message": format!(
-                "Registered `{}` in the persistent host connector inventory.",
-                candidate.id
+                "Installed `{}` into the live host connector inventory and applied it immediately.",
+                applied.current.id
             ),
-            "source": artifact.source_description,
-            "connectors_file": connectors_file.display().to_string(),
+            "source": "host-admin-api",
+            "host": host.endpoint,
+            "package_source": artifact.source_description,
+            "connectors_file": applied.connectors_file,
             "package": package_output_json(&artifact),
-            "installed": connector_descriptor_json(&candidate, None),
+            "installed": connector_descriptor_json(&applied.current, None),
             "verification": artifact.verification,
             "activation": {
                 "inventory_updated": true,
-                "host_restart_required": true,
-                "reason": "fcp-host currently loads the managed connector inventory at startup; there is no live install/reload endpoint yet.",
+                "live_reload_applied": true,
+                "registry_version": applied.apply.registry_version,
+                "added": applied.apply.added,
+                "updated": applied.apply.updated,
+                "removed": applied.apply.removed,
+                "unchanged": applied.apply.unchanged,
             },
+            "admin_state": {
+                "tracked_connectors": applied.admin_state.tracked_connectors,
+                "created_connectors": applied.admin_state.created_connectors,
+                "observed_updates": applied.admin_state.observed_updates,
+                "drifted_connectors": applied.admin_state.drifted_connectors,
+            },
+            "response": applied,
             "next_actions": [
-                "Restart `fcp-host` so it reloads the updated connector inventory.".to_owned(),
-                format!("fwc config doctor {}", candidate.id),
+                format!("fwc status {} --host {}", candidate.id, host.endpoint),
+                format!("fwc show {} --host {}", candidate.id, host.endpoint),
             ],
         }),
         exit_code: CliExitCode::Success,
     })
 }
 
-fn update_dispatch(args: &UpdateArgs) -> Result<DispatchOutcome> {
-    let connectors_file = match resolve_connectors_file_path(args.connectors_file.as_ref()) {
-        Ok(path) => path,
+fn update_dispatch(args: &UpdateArgs, explicit_host: Option<&str>) -> Result<DispatchOutcome> {
+    let Some(host) = resolve_host_config(explicit_host)? else {
+        return Ok(missing_host_dispatch(
+            "update",
+            json!({
+                "connector": args.connector,
+                "source": args.source,
+                "dry_run": args.dry_run,
+            }),
+            vec![
+                "fwc update <connector> --host <endpoint>".to_owned(),
+                "Update planning and application both require a live host so `fwc` can reason about the actual installed inventory."
+                    .to_owned(),
+            ],
+        ));
+    };
+    let client = HostAdminClient::new(&host.endpoint)?;
+    let (host_catalog, _) = client.catalog(None)?;
+    let target_connector_id = match host_catalog.resolve_connector(&args.connector) {
+        Ok(connector) => connector.summary.id.to_string(),
         Err(error) => {
-            return Ok(DispatchOutcome {
-                payload: json!({
-                    "status": "error",
-                    "command": "update",
-                    "error": {
-                        "type": "missing-connectors-file",
-                        "message": error.to_string(),
-                    },
-                    "next_actions": [
-                        "Pass `--connectors-file <path>` or set `FCP_HOST_CONNECTORS_FILE`.".to_owned(),
-                    ],
-                }),
-                exit_code: CliExitCode::Validation,
-            });
+            if args.connector.contains(':') {
+                args.connector.clone()
+            } else {
+                return Ok(connector_resolution_dispatch(
+                    "update",
+                    &args.connector,
+                    &error,
+                ));
+            }
         }
     };
-
-    let mut configs = read_managed_connector_configs_allow_missing(&connectors_file)?;
-    let catalog = DiscoveryCatalog::load()?;
-    let resolved = catalog.resolve_connector(&args.connector).ok();
-    let target_index = match find_managed_connector_index(&configs, &args.connector, resolved) {
-        Ok(index) => index,
-        Err(error) => {
-            return Ok(DispatchOutcome {
-                payload: json!({
-                    "status": "error",
-                    "command": "update",
-                    "error": {
-                        "type": "connector-not-installed",
-                        "message": error.to_string(),
-                    },
-                    "connectors_file": connectors_file.display().to_string(),
-                    "next_actions": [
-                        format!("fwc install {}", args.connector),
-                        "Use `fwc config doctor <connector>` to inspect the current managed inventory.".to_owned(),
-                    ],
-                }),
-                exit_code: CliExitCode::Validation,
-            });
-        }
-    };
-
-    let current = configs[target_index].clone();
     let source = args.source.as_deref().unwrap_or(&args.connector);
     let artifact = match prepare_package_artifact(source, None) {
         Ok(artifact) => artifact,
@@ -5362,7 +5572,7 @@ fn update_dispatch(args: &UpdateArgs) -> Result<DispatchOutcome> {
         }
     };
 
-    if artifact.manifest.connector.id.as_str() != current.id {
+    if artifact.manifest.connector.id.as_str() != target_connector_id {
         return Ok(DispatchOutcome {
             payload: json!({
                 "status": "error",
@@ -5370,71 +5580,88 @@ fn update_dispatch(args: &UpdateArgs) -> Result<DispatchOutcome> {
                 "error": {
                     "type": "connector-id-mismatch",
                     "message": format!(
-                        "Update source resolves to `{}`, but the managed connector entry is `{}`.",
+                        "Update source resolves to `{}`, but the live host target is `{}`.",
                         artifact.manifest.connector.id,
-                        current.id
+                        target_connector_id
                     ),
                 },
-                "connectors_file": connectors_file.display().to_string(),
-                "current": connector_descriptor_json(&current, None),
+                "host": host.endpoint,
+                "target_connector_id": target_connector_id,
                 "package": package_output_json(&artifact),
             }),
             exit_code: CliExitCode::Validation,
         });
     }
 
-    let updated = managed_connector_from_artifact(&artifact, Some(&current));
-
-    if args.dry_run {
-        return Ok(DispatchOutcome {
-            payload: json!({
-                "status": "ok",
-                "command": "update",
-                "mode": "dry-run",
-                "message": format!(
-                    "Computed a real update plan for `{}` without mutating host inventory.",
-                    current.id
-                ),
-                "source": artifact.source_description,
-                "connectors_file": connectors_file.display().to_string(),
-                "current": connector_descriptor_json(&current, None),
-                "planned": connector_descriptor_json(&updated, None),
-                "package": package_output_json(&artifact),
-                "verification": artifact.verification,
-                "activation": {
-                    "inventory_updated": false,
-                    "host_restart_required": true,
-                },
-            }),
-            exit_code: CliExitCode::Success,
-        });
-    }
-
-    configs[target_index] = updated.clone();
-    write_managed_connector_configs(&connectors_file, &configs)?;
+    let updated = managed_connector_from_artifact(&artifact, None);
+    let applied = match client.mutate_inventory(&HostConnectorInventoryMutationRequest {
+        kind: HostConnectorInventoryMutationKind::Update,
+        dry_run: args.dry_run,
+        connector: updated.clone(),
+    }) {
+        Ok(applied) => applied,
+        Err(error) => {
+            return Ok(DispatchOutcome {
+                payload: json!({
+                    "status": "error",
+                    "command": "update",
+                    "error": {
+                        "type": "host-mutation-failed",
+                        "message": error.to_string(),
+                        "recoverable": true,
+                    },
+                    "host": host.endpoint,
+                    "target_connector_id": target_connector_id,
+                    "package_source": artifact.source_description,
+                    "package": package_output_json(&artifact),
+                    "verification": artifact.verification,
+                    "next_actions": [
+                        format!("fwc status --host {}", host.endpoint),
+                        format!("fwc doctor --zone z:work --host {}", host.endpoint),
+                    ],
+                }),
+                exit_code: CliExitCode::Transport,
+            });
+        }
+    };
 
     Ok(DispatchOutcome {
         payload: json!({
             "status": "ok",
             "command": "update",
+            "mode": if applied.dry_run { "dry-run" } else { "apply" },
             "message": format!(
-                "Updated `{}` in the persistent host connector inventory.",
-                current.id
+                "{} `{}` against the live host connector inventory.",
+                if applied.dry_run { "Planned" } else { "Updated" },
+                applied.current.id
             ),
-            "source": artifact.source_description,
-            "connectors_file": connectors_file.display().to_string(),
-            "current": connector_descriptor_json(&current, None),
-            "updated": connector_descriptor_json(&updated, None),
+            "source": "host-admin-api",
+            "host": host.endpoint,
+            "package_source": artifact.source_description,
+            "connectors_file": applied.connectors_file,
+            "current": applied.previous.as_ref().map(|entry| connector_descriptor_json(entry, None)),
+            "updated": connector_descriptor_json(&applied.current, None),
             "package": package_output_json(&artifact),
             "verification": artifact.verification,
             "activation": {
-                "inventory_updated": true,
-                "host_restart_required": true,
-                "reason": "fcp-host currently loads the managed connector inventory at startup; there is no live update/reload endpoint yet.",
+                "inventory_updated": !applied.dry_run,
+                "live_reload_applied": !applied.dry_run,
+                "registry_version": applied.apply.registry_version,
+                "added": applied.apply.added,
+                "updated": applied.apply.updated,
+                "removed": applied.apply.removed,
+                "unchanged": applied.apply.unchanged,
             },
+            "admin_state": {
+                "tracked_connectors": applied.admin_state.tracked_connectors,
+                "created_connectors": applied.admin_state.created_connectors,
+                "observed_updates": applied.admin_state.observed_updates,
+                "drifted_connectors": applied.admin_state.drifted_connectors,
+            },
+            "response": applied,
             "next_actions": [
-                "Restart `fcp-host` so it reloads the updated connector inventory.".to_owned(),
-                format!("fwc status {} --host <endpoint>", current.id),
+                format!("fwc status {} --host {}", target_connector_id, host.endpoint),
+                format!("fwc show {} --host {}", target_connector_id, host.endpoint),
             ],
         }),
         exit_code: CliExitCode::Success,
@@ -5507,7 +5734,10 @@ fn load_package_output_from_path(path: &Path) -> Result<PackageOutput> {
     }
 
     if !path.is_dir() {
-        bail!("package source `{}` is not a file or directory", path.display());
+        bail!(
+            "package source `{}` is not a file or directory",
+            path.display()
+        );
     }
 
     let metadata_path = path.join(PACKAGE_OUTPUT_FILENAME);
@@ -5541,7 +5771,8 @@ fn read_package_output_metadata(path: &Path) -> Result<PackageOutput> {
     output.output_dir = resolve_package_metadata_path(base_dir, &output.output_dir);
     output.binary_path = resolve_package_metadata_path(base_dir, &output.binary_path);
     output.manifest_path = resolve_package_metadata_path(base_dir, &output.manifest_path);
-    output.build_metadata_path = resolve_package_metadata_path(base_dir, &output.build_metadata_path);
+    output.build_metadata_path =
+        resolve_package_metadata_path(base_dir, &output.build_metadata_path);
     output.sbom_path = output
         .sbom_path
         .as_ref()
@@ -5580,21 +5811,29 @@ fn inspect_package_output(
         );
     }
 
-    let manifest_raw = std::fs::read_to_string(&package_output.manifest_path)
-        .with_context(|| format!("failed to read manifest: {}", package_output.manifest_path.display()))?;
-    let manifest = ConnectorManifest::parse_str(&manifest_raw)
-        .with_context(|| format!("invalid connector manifest: {}", package_output.manifest_path.display()))?;
+    let manifest_raw =
+        std::fs::read_to_string(&package_output.manifest_path).with_context(|| {
+            format!(
+                "failed to read manifest: {}",
+                package_output.manifest_path.display()
+            )
+        })?;
+    let manifest = ConnectorManifest::parse_str(&manifest_raw).with_context(|| {
+        format!(
+            "invalid connector manifest: {}",
+            package_output.manifest_path.display()
+        )
+    })?;
 
-    let build_metadata_raw = std::fs::read_to_string(&package_output.build_metadata_path).with_context(
-        || {
+    let build_metadata_raw = std::fs::read_to_string(&package_output.build_metadata_path)
+        .with_context(|| {
             format!(
                 "failed to read build metadata: {}",
                 package_output.build_metadata_path.display()
             )
-        },
-    )?;
-    let build_metadata: PackageBuildMetadata =
-        serde_json::from_str(&build_metadata_raw).with_context(|| {
+        })?;
+    let build_metadata: PackageBuildMetadata = serde_json::from_str(&build_metadata_raw)
+        .with_context(|| {
             format!(
                 "invalid build metadata JSON: {}",
                 package_output.build_metadata_path.display()
@@ -5727,9 +5966,7 @@ fn remove_invoke_binding(
     match &path[0] {
         InvokePathSegment::Field(name) => {
             let Some(object) = target.as_object_mut() else {
-                return Err(format!(
-                    "Cannot remove `{name}` from a non-object value."
-                ));
+                return Err(format!("Cannot remove `{name}` from a non-object value."));
             };
             if path.len() == 1 {
                 object.remove(name);
@@ -5758,7 +5995,11 @@ fn remove_invoke_binding(
     }
 }
 
-fn export_tools_dispatch(args: &ExportToolsArgs) -> Result<DispatchOutcome> {
+fn export_tools_dispatch(args: &ExportToolsArgs, host: Option<&str>) -> Result<DispatchOutcome> {
+    if let Some(host) = resolve_host_config(host)? {
+        return export_tools_dispatch_host(args, &host.endpoint);
+    }
+
     let catalog = DiscoveryCatalog::load()?;
 
     let options = export_tools::ExportOptions {
@@ -5796,7 +6037,7 @@ fn export_tools_dispatch(args: &ExportToolsArgs) -> Result<DispatchOutcome> {
         })
         .collect();
 
-    let tools_json = export_tools::export_tools(&operations, args.format, &options);
+    let tools_json = export_tools::export_tools(&operations, args.tool_format, &options);
     let tool_count = operations.len();
     let connector_count = connectors.len();
 
@@ -5808,9 +6049,11 @@ fn export_tools_dispatch(args: &ExportToolsArgs) -> Result<DispatchOutcome> {
             payload: json!({
                 "status": "ok",
                 "command": "export-tools",
-                "format": args.format.to_string(),
+                "source": "workspace-manifests",
+                "mode": "offline-artifact",
+                "format": args.tool_format.to_string(),
                 "message": format!(
-                    "Exported {tool_count} tool schemas ({connector_count} connectors) to {}.",
+                    "Exported {tool_count} tool schemas ({connector_count} connectors) to {} from workspace manifests.",
                     path.display()
                 ),
                 "tool_count": tool_count,
@@ -5825,17 +6068,123 @@ fn export_tools_dispatch(args: &ExportToolsArgs) -> Result<DispatchOutcome> {
         payload: json!({
             "status": "ok",
             "command": "export-tools",
-            "format": args.format.to_string(),
+            "source": "workspace-manifests",
+            "mode": "offline-artifact",
+            "format": args.tool_format.to_string(),
             "message": format!(
-                "Exported {tool_count} tool schemas from {connector_count} connectors.",
+                "Exported {tool_count} tool schemas from {connector_count} workspace connectors. This is an offline artifact view, not live host inventory.",
             ),
             "tool_count": tool_count,
             "connector_count": connector_count,
             "tools": tools_json,
             "next_actions": [
+                "Use `fwc export-tools --host <endpoint> --format mcp` for the live host-backed inventory.".to_owned(),
                 "Pipe to a file: fwc export-tools --format mcp --json > tools.json",
                 "Filter by risk: fwc export-tools --format mcp --risk-max medium",
                 "One connector: fwc export-tools --format claude github",
+            ],
+        }),
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn export_tools_dispatch_host(args: &ExportToolsArgs, host: &str) -> Result<DispatchOutcome> {
+    let client = HostAdminClient::new(host)?;
+    let (catalog, _) = client.catalog(None)?;
+    let options = export_tools::ExportOptions {
+        include_safety_metadata: !args.no_safety,
+        include_ai_hints: !args.no_hints,
+        include_examples: !args.no_hints,
+        strip_prefix: args.strip_prefix.clone(),
+        risk_max: args.risk_max.clone(),
+        capability_filter: args.capability.clone(),
+    };
+    let connectors = if let Some(selector) = &args.connector {
+        match catalog.resolve_connector(selector) {
+            Ok(connector) => vec![connector.clone()],
+            Err(error) => {
+                return Ok(connector_resolution_dispatch(
+                    "export-tools",
+                    selector,
+                    &error,
+                ));
+            }
+        }
+    } else {
+        catalog.connectors.clone()
+    };
+
+    let mut metadata_gaps = Vec::new();
+    let mut operations = Vec::new();
+    for connector in &connectors {
+        let introspection = client.introspect(connector.summary.id.as_str())?;
+        metadata_gaps.extend(host_metadata_gaps(&introspection).into_iter().map(|gap| {
+            json!({
+                "connector": {
+                    "slug": &connector.slug,
+                    "canonical_id": connector.summary.id.as_str(),
+                },
+                "gap": gap,
+            })
+        }));
+        operations.extend(
+            introspection
+                .tools
+                .iter()
+                .filter(|tool| host_tool_passes_risk_filter(tool, options.risk_max.as_deref()))
+                .filter(|tool| {
+                    host_tool_passes_capability_filter(tool, options.capability_filter.as_deref())
+                })
+                .map(host_tool_operation_info),
+        );
+    }
+
+    let tools_json = export_tools::export_operation_infos(&operations, args.tool_format, &options);
+    let tool_count = operations.len();
+    let connector_count = connectors.len();
+
+    if let Some(path) = &args.output {
+        let content = serde_json::to_string_pretty(&tools_json)?;
+        std::fs::write(path, &content)?;
+        return Ok(DispatchOutcome {
+            payload: json!({
+                "status": "ok",
+                "command": "export-tools",
+                "source": "host-admin-api",
+                "mode": "live-introspection",
+                "format": args.tool_format.to_string(),
+                "host": host,
+                "message": format!(
+                    "Exported {tool_count} live tool schemas ({connector_count} connectors) to {}.",
+                    path.display()
+                ),
+                "tool_count": tool_count,
+                "connector_count": connector_count,
+                "metadata_gaps": metadata_gaps,
+                "output_file": path.display().to_string(),
+            }),
+            exit_code: CliExitCode::Success,
+        });
+    }
+
+    Ok(DispatchOutcome {
+        payload: json!({
+            "status": "ok",
+            "command": "export-tools",
+            "source": "host-admin-api",
+            "mode": "live-introspection",
+            "format": args.tool_format.to_string(),
+            "host": host,
+            "message": format!(
+                "Exported {tool_count} live tool schemas from {connector_count} connectors exposed by `fcp-host`."
+            ),
+            "tool_count": tool_count,
+            "connector_count": connector_count,
+            "metadata_gaps": metadata_gaps,
+            "tools": tools_json,
+            "next_actions": [
+                format!("Use `fwc serve-mcp --host {host}` to expose the same live inventory over MCP."),
+                format!("Use `fwc ops <connector> --host {host}` to inspect one connector before exporting again."),
             ],
         }),
         exit_code: CliExitCode::Success,
@@ -6278,6 +6627,227 @@ struct InvokeInputError {
     details: Option<Value>,
 }
 
+#[derive(Debug, Clone)]
+struct ResolvedLiveAuth {
+    capability_token: CapabilityToken,
+    approval_tokens: Vec<ApprovalToken>,
+    principal_hint: Option<String>,
+}
+
+#[derive(Debug)]
+enum LiveAuthError {
+    MissingCapabilityToken,
+    ConflictingCapabilityTokenSources,
+    InvalidCapabilityToken { source: String, message: String },
+    InvalidApprovalToken { source: String, message: String },
+}
+
+impl LiveAuthError {
+    fn error_type(&self) -> &'static str {
+        match self {
+            Self::MissingCapabilityToken => "missing-capability-token",
+            Self::ConflictingCapabilityTokenSources => "ambiguous-capability-token-source",
+            Self::InvalidCapabilityToken { .. } => "invalid-capability-token",
+            Self::InvalidApprovalToken { .. } => "invalid-approval-token",
+        }
+    }
+
+    fn message(&self) -> String {
+        match self {
+            Self::MissingCapabilityToken => "Live host execution requires a real capability token. `fwc` will not fabricate one.".to_owned(),
+            Self::ConflictingCapabilityTokenSources => "Specify either `--capability-token` or `--capability-token-file`, not both.".to_owned(),
+            Self::InvalidCapabilityToken { source, message } => {
+                format!("Failed to parse the capability token from {source}: {message}")
+            }
+            Self::InvalidApprovalToken { source, message } => {
+                format!("Failed to parse an approval token from {source}: {message}")
+            }
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ApprovalTokenEnvelope {
+    One(ApprovalToken),
+    Many(Vec<ApprovalToken>),
+}
+
+impl ApprovalTokenEnvelope {
+    fn into_tokens(self) -> Vec<ApprovalToken> {
+        match self {
+            Self::One(token) => vec![token],
+            Self::Many(tokens) => tokens,
+        }
+    }
+}
+
+fn resolve_live_auth(args: &LiveAuthArgs) -> std::result::Result<ResolvedLiveAuth, LiveAuthError> {
+    let capability_token = match (&args.capability_token, &args.capability_token_file) {
+        (Some(_), Some(_)) => Err(LiveAuthError::ConflictingCapabilityTokenSources),
+        (Some(raw), None) => parse_capability_token_str(raw, "--capability-token"),
+        (None, Some(path)) => parse_capability_token_file(path),
+        (None, None) => Err(LiveAuthError::MissingCapabilityToken),
+    }?;
+
+    let mut approval_tokens = Vec::new();
+    for raw in &args.approval_token {
+        approval_tokens.extend(parse_approval_tokens_str(raw, "--approval-token")?);
+    }
+    for path in &args.approval_token_file {
+        approval_tokens.extend(parse_approval_tokens_file(path)?);
+    }
+
+    let principal_hint = capability_token
+        .raw
+        .claims_unverified()
+        .ok()
+        .and_then(|claims| claims.get_subject().map(ToOwned::to_owned));
+
+    Ok(ResolvedLiveAuth {
+        capability_token,
+        approval_tokens,
+        principal_hint,
+    })
+}
+
+fn parse_capability_token_file(path: &Path) -> std::result::Result<CapabilityToken, LiveAuthError> {
+    let bytes = std::fs::read(path).map_err(|error| LiveAuthError::InvalidCapabilityToken {
+        source: format!("`{}`", path.display()),
+        message: error.to_string(),
+    })?;
+    parse_capability_token_bytes(&bytes, &format!("`{}`", path.display()))
+}
+
+fn parse_capability_token_bytes(
+    bytes: &[u8],
+    source: &str,
+) -> std::result::Result<CapabilityToken, LiveAuthError> {
+    if let Ok(raw) = std::str::from_utf8(bytes) {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty()
+            && let Ok(token) = parse_capability_token_str(trimmed, source)
+        {
+            return Ok(token);
+        }
+    }
+
+    let raw =
+        CoseToken::from_cbor(bytes).map_err(|error| LiveAuthError::InvalidCapabilityToken {
+            source: source.to_owned(),
+            message: error.to_string(),
+        })?;
+    Ok(CapabilityToken { raw })
+}
+
+fn parse_capability_token_str(
+    raw: &str,
+    source: &str,
+) -> std::result::Result<CapabilityToken, LiveAuthError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(LiveAuthError::InvalidCapabilityToken {
+            source: source.to_owned(),
+            message: "token payload is empty".to_owned(),
+        });
+    }
+
+    if let Ok(token) = serde_json::from_str::<CapabilityToken>(trimmed) {
+        return Ok(token);
+    }
+
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(trimmed)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(trimmed))
+        .map_err(|error| LiveAuthError::InvalidCapabilityToken {
+            source: source.to_owned(),
+            message: format!(
+                "{error}. Expected base64 COSE bytes, a JSON string, or a JSON byte array."
+            ),
+        })?;
+    parse_capability_token_bytes(&bytes, source)
+}
+
+fn parse_approval_tokens_file(
+    path: &Path,
+) -> std::result::Result<Vec<ApprovalToken>, LiveAuthError> {
+    let raw =
+        std::fs::read_to_string(path).map_err(|error| LiveAuthError::InvalidApprovalToken {
+            source: format!("`{}`", path.display()),
+            message: error.to_string(),
+        })?;
+    parse_approval_tokens_str(&raw, &format!("`{}`", path.display()))
+}
+
+fn parse_approval_tokens_str(
+    raw: &str,
+    source: &str,
+) -> std::result::Result<Vec<ApprovalToken>, LiveAuthError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(LiveAuthError::InvalidApprovalToken {
+            source: source.to_owned(),
+            message: "approval token payload is empty".to_owned(),
+        });
+    }
+
+    serde_json::from_str::<ApprovalTokenEnvelope>(trimmed)
+        .map(ApprovalTokenEnvelope::into_tokens)
+        .map_err(|error| LiveAuthError::InvalidApprovalToken {
+            source: source.to_owned(),
+            message: format!(
+                "{error}. Expected a JSON approval token object or an array of approval tokens."
+            ),
+        })
+}
+
+fn live_auth_dispatch(
+    command: &str,
+    error: LiveAuthError,
+    next_actions: Vec<String>,
+) -> DispatchOutcome {
+    DispatchOutcome {
+        payload: json!({
+            "status": "error",
+            "command": command,
+            "error": {
+                "type": error.error_type(),
+                "message": error.message(),
+                "recoverable": true,
+            },
+            "next_actions": next_actions,
+        }),
+        exit_code: CliExitCode::Validation,
+    }
+}
+
+fn derive_live_request_id(
+    connector_id: &str,
+    operation_name: &str,
+    zone: &str,
+    payload: &Value,
+    idempotency_key: Option<&str>,
+    scope_salt: Option<&str>,
+) -> Result<RequestId> {
+    let payload_bytes = to_deterministic_cbor(payload)
+        .map_err(|error| anyhow::anyhow!("failed to canonicalize request payload: {error}"))?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"fwc-live-request-v1");
+    hasher.update(connector_id.as_bytes());
+    hasher.update(operation_name.as_bytes());
+    hasher.update(zone.as_bytes());
+    hasher.update(&payload_bytes);
+    if let Some(key) = idempotency_key {
+        hasher.update(key.as_bytes());
+    }
+    if let Some(salt) = scope_salt {
+        hasher.update(salt.as_bytes());
+    }
+
+    let digest = hasher.finalize().to_hex().to_string();
+    Ok(RequestId::new(format!("req_{}", &digest[..32])))
+}
+
 fn invoke_dispatch(
     command: &str,
     args: &InvokeArgs,
@@ -6295,6 +6865,23 @@ fn invoke_dispatch_host(
     args: &InvokeArgs,
     host: &ResolvedHostConfig,
 ) -> Result<DispatchOutcome> {
+    let auth = match resolve_live_auth(&args.auth) {
+        Ok(auth) => auth,
+        Err(error) => {
+            return Ok(live_auth_dispatch(
+                command,
+                error,
+                vec![
+                    format!(
+                        "fwc {command} {} {} --host {} --capability-token-file <token.cbor> --input '{{...}}'",
+                        args.connector, args.operation, host.endpoint
+                    ),
+                    "Provide real approval tokens with `--approval-token-file` when the operation requires explicit approval.".to_owned(),
+                ],
+            ));
+        }
+    };
+
     let client = HostAdminClient::new(&host.endpoint)?;
     let (catalog, _) = client.catalog(None)?;
     let connector = match catalog.resolve_connector(&args.connector) {
@@ -6368,6 +6955,18 @@ fn invoke_dispatch_host(
             operation.name
         )
     })?;
+    let request_id = derive_live_request_id(
+        connector.summary.id.as_str(),
+        &operation.name,
+        &zone,
+        &prepared_payload,
+        args.idempotency_key.as_deref(),
+        None,
+    )?;
+    let effective_principal = args
+        .principal
+        .clone()
+        .or_else(|| auth.principal_hint.clone());
 
     let mut payload = json!({
         "status": if valid { "ready" } else { "error" },
@@ -6403,9 +7002,11 @@ fn invoke_dispatch_host(
         },
         "request": {
             "zone": &zone,
-            "principal": args.principal.clone(),
+            "principal": &effective_principal,
+            "request_id": request_id.to_string(),
             "idempotency_key": args.idempotency_key.clone(),
             "deadline_ms": args.deadline_ms,
+            "approval_token_count": auth.approval_tokens.len(),
         },
         "input_authoring": {
             "primary_source": primary_source,
@@ -6451,11 +7052,14 @@ fn invoke_dispatch_host(
     }
 
     let preflight_request = HostPreflightRequest {
+        request_id: request_id.clone(),
         connector_id: connector_id.clone(),
         operation: operation.name.clone(),
         params: Some(prepared_payload.clone()),
-        principal: args.principal.clone(),
+        principal: effective_principal.clone(),
         zone_id: Some(zone_id.clone()),
+        capability_token: Some(auth.capability_token.clone()),
+        approval_tokens: auth.approval_tokens.clone(),
     };
     let preflight = client.preflight(&preflight_request)?;
     payload["preflight"] = serde_json::to_value(&preflight)?;
@@ -6555,7 +7159,6 @@ fn invoke_dispatch_host(
         });
     }
 
-    let request_id = RequestId::random();
     let invoke_request = InvokeRequest {
         r#type: "invoke".to_owned(),
         id: request_id,
@@ -6563,7 +7166,7 @@ fn invoke_dispatch_host(
         operation: operation_id,
         zone_id,
         input: prepared_payload.clone(),
-        capability_token: CapabilityToken::test_token(),
+        capability_token: auth.capability_token,
         holder_proof: None,
         context: None,
         idempotency_key: args.idempotency_key.clone(),
@@ -6571,7 +7174,7 @@ fn invoke_dispatch_host(
         deadline_ms: args.deadline_ms,
         correlation_id: None,
         provenance: None,
-        approval_tokens: Vec::new(),
+        approval_tokens: auth.approval_tokens,
     };
     let started_at = std::time::Instant::now();
     let response = client.invoke(&invoke_request)?;
@@ -7557,7 +8160,9 @@ fn build_live_invoke_request(
     operation_name: &str,
     zone: &str,
     payload: Value,
-    _principal: Option<String>,
+    request_id: RequestId,
+    capability_token: CapabilityToken,
+    approval_tokens: Vec<ApprovalToken>,
     idempotency_key: Option<String>,
     deadline_ms: Option<u64>,
 ) -> Result<InvokeRequest> {
@@ -7573,12 +8178,12 @@ fn build_live_invoke_request(
 
     Ok(InvokeRequest {
         r#type: "invoke".to_owned(),
-        id: RequestId::random(),
+        id: request_id,
         connector_id,
         operation: operation_id,
         zone_id,
         input: payload,
-        capability_token: CapabilityToken::test_token(),
+        capability_token,
         holder_proof: None,
         context: None,
         idempotency_key,
@@ -7586,7 +8191,7 @@ fn build_live_invoke_request(
         deadline_ms,
         correlation_id: None,
         provenance: None,
-        approval_tokens: Vec::new(),
+        approval_tokens,
     })
 }
 
@@ -8000,19 +8605,19 @@ fn capabilities_dispatch(
     history_filter.limit = usize::MAX;
     let mut entries = store.query(&history_filter)?;
 
-    let connector_filter = filters
-        .connector
-        .as_deref()
-        .map(|selector| {
-            resolve_capability_connector_filter(
-                &command_name,
-                selector,
-                host_catalog.as_ref(),
-                &manifest_catalog,
-                &entries,
-            )
-        })
-        .transpose()?;
+    let connector_filter = match filters.connector.as_deref() {
+        Some(selector) => match resolve_capability_connector_filter(
+            &command_name,
+            selector,
+            host_catalog.as_ref(),
+            &manifest_catalog,
+            &entries,
+        ) {
+            Ok(connector_id) => Some(connector_id),
+            Err(outcome) => return Ok(outcome),
+        },
+        None => None,
+    };
 
     if let Some(zone) = zone_filter.as_deref() {
         entries.retain(|entry| entry.zone.as_deref() == Some(zone));
@@ -8036,8 +8641,11 @@ fn capabilities_dispatch(
 
     let aggregation = aggregate_capability_usage(&entries, &operation_metadata);
     let now = u64::try_from(chrono::Utc::now().timestamp()).unwrap_or(0);
-    let recommendation_report =
-        recommend_capabilities(&aggregation.aggregates, now, RecommendationConfig::default());
+    let recommendation_report = recommend_capabilities(
+        &aggregation.aggregates,
+        now,
+        RecommendationConfig::default(),
+    );
 
     let payload = match subcommand {
         "report" => capability_report_payload(
@@ -8087,7 +8695,10 @@ fn resolve_capability_connector_filter(
     if let Ok(connector) = manifest_catalog.resolve_connector(selector) {
         return Ok(connector.detail.summary.id.clone());
     }
-    if history_entries.iter().any(|entry| entry.connector_id == selector) {
+    if history_entries
+        .iter()
+        .any(|entry| entry.connector_id == selector)
+    {
         return Ok(selector.to_owned());
     }
     if let Some(catalog) = host_catalog
@@ -8108,14 +8719,23 @@ fn local_capability_metadata_map(
     for connector in manifest_catalog.connectors() {
         for operation in &connector.operations {
             let info = operation.operation_info();
-            metadata.insert(
-                (connector.detail.summary.id.clone(), operation.actual_id.clone()),
-                CapabilityOperationMetadata {
-                    connector_slug: connector.slug.clone(),
-                    capability_id: info.capability,
-                    risk_tier: info.safety_tier,
-                },
-            );
+            let entry = CapabilityOperationMetadata {
+                connector_slug: connector.slug.clone(),
+                capability_id: info.capability,
+                risk_tier: info.safety_tier,
+            };
+            let mut keys = BTreeSet::from([
+                operation.actual_id.clone(),
+                operation.local_id.clone(),
+                operation.preferred_selector.clone(),
+            ]);
+            keys.extend(operation.aliases.iter().cloned());
+            for operation_key in keys {
+                metadata.insert(
+                    (connector.detail.summary.id.clone(), operation_key),
+                    entry.clone(),
+                );
+            }
         }
     }
     metadata
@@ -8207,7 +8827,9 @@ fn aggregate_capability_usage(
             }
             continue;
         };
-        let Some(metadata) = operation_metadata.get(&(entry.connector_id.clone(), entry.operation_id.clone())) else {
+        let Some(metadata) =
+            operation_metadata.get(&(entry.connector_id.clone(), entry.operation_id.clone()))
+        else {
             unresolved_entry_count += 1;
             if unresolved_samples.len() < 10 {
                 unresolved_samples.push(json!({
@@ -8220,11 +8842,7 @@ fn aggregate_capability_usage(
             continue;
         };
 
-        let key = CapabilityUsageKey::new(
-            zone_id,
-            connector_id,
-            metadata.capability_id.clone(),
-        );
+        let key = CapabilityUsageKey::new(zone_id, connector_id, metadata.capability_id.clone());
         let occurred_at = u64::try_from(entry.timestamp.timestamp()).unwrap_or(0);
         let aggregate = aggregates
             .entry(key.clone())
@@ -8335,12 +8953,13 @@ fn capability_report_payload(
                             CapabilitySuggestionKind::Keep => keep += 1,
                         }
                     }
-                    let connector_slug = operation_metadata
-                        .iter()
-                        .find_map(|((connector_id, _), metadata)| {
-                            (connector_id == aggregate.key.connector_id.as_str())
-                                .then(|| metadata.connector_slug.clone())
-                        });
+                    let connector_slug =
+                        operation_metadata
+                            .iter()
+                            .find_map(|((connector_id, _), metadata)| {
+                                (connector_id == aggregate.key.connector_id.as_str())
+                                    .then(|| metadata.connector_slug.clone())
+                            });
                     json!({
                         "connector_id": aggregate.key.connector_id.as_str(),
                         "connector_slug": connector_slug,
@@ -8358,10 +8977,22 @@ fn capability_report_payload(
                 })
                 .collect::<Vec<_>>();
 
-            let total = aggregates.iter().map(|aggregate| aggregate.total).sum::<u64>();
-            let allowed = aggregates.iter().map(|aggregate| aggregate.allowed).sum::<u64>();
-            let denied = aggregates.iter().map(|aggregate| aggregate.denied).sum::<u64>();
-            let errors = aggregates.iter().map(|aggregate| aggregate.errors).sum::<u64>();
+            let total = aggregates
+                .iter()
+                .map(|aggregate| aggregate.total)
+                .sum::<u64>();
+            let allowed = aggregates
+                .iter()
+                .map(|aggregate| aggregate.allowed)
+                .sum::<u64>();
+            let denied = aggregates
+                .iter()
+                .map(|aggregate| aggregate.denied)
+                .sum::<u64>();
+            let errors = aggregates
+                .iter()
+                .map(|aggregate| aggregate.errors)
+                .sum::<u64>();
 
             json!({
                 "zone_id": zone_id,
@@ -8548,7 +9179,7 @@ fn pipe_dispatch(args: &PipeArgs) -> Result<DispatchOutcome> {
 }
 
 #[allow(dead_code)] // Wired when host integration lands.
-fn pipeline_dispatch(args: &PipelineArgs) -> Result<DispatchOutcome> {
+fn pipeline_dispatch(args: &PipelineArgs, explicit_host: Option<&str>) -> Result<DispatchOutcome> {
     let cwd = std::env::current_dir()?;
     let roots = pipe::default_pipeline_roots(&cwd);
 
@@ -8556,17 +9187,19 @@ fn pipeline_dispatch(args: &PipelineArgs) -> Result<DispatchOutcome> {
         PipelineCommand::List(_) => pipeline_list_dispatch(&roots),
         PipelineCommand::Show(args) => Ok(pipeline_show_dispatch(&roots, args)),
         PipelineCommand::Validate(args) => Ok(pipeline_validate_dispatch(&roots, args)),
-        PipelineCommand::Run(args) => pipeline_run_dispatch(&roots, args, PipelinePlanMode::Run),
+        PipelineCommand::Run(args) => {
+            pipeline_run_dispatch(&roots, args, PipelinePlanMode::Run, explicit_host)
+        }
         PipelineCommand::DryRun(args) => {
-            pipeline_run_dispatch(&roots, args, PipelinePlanMode::DryRun)
+            pipeline_run_dispatch(&roots, args, PipelinePlanMode::DryRun, explicit_host)
         }
         PipelineCommand::Estimate(args) => {
-            pipeline_run_dispatch(&roots, args, PipelinePlanMode::Estimate)
+            pipeline_run_dispatch(&roots, args, PipelinePlanMode::Estimate, explicit_host)
         }
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum PipelinePlanMode {
     Run,
     DryRun,
@@ -8581,25 +9214,680 @@ impl PipelinePlanMode {
             Self::Estimate => "estimate",
         }
     }
+}
 
-    const fn include_plan(self) -> bool {
-        !matches!(self, Self::Estimate)
-    }
+#[derive(Debug)]
+struct LivePipelineExecutionResult {
+    status: &'static str,
+    exit_code: CliExitCode,
+    executed_steps: usize,
+    preflight_only_steps: usize,
+    skipped_steps: usize,
+    blocked_steps: usize,
+    denied_steps: usize,
+    error_steps: usize,
+    step_results: Vec<Value>,
+    outputs: BTreeMap<String, Value>,
+}
 
-    const fn dry_run(self) -> bool {
-        matches!(self, Self::DryRun)
+fn pipeline_execution_context(
+    params: &BTreeMap<String, pipe::PipelineParamBinding>,
+    step_outputs: &BTreeMap<String, Value>,
+) -> Value {
+    let params_value = params
+        .iter()
+        .map(|(name, binding)| (name.clone(), binding.value.clone()))
+        .collect::<serde_json::Map<_, _>>();
+    let steps_value = step_outputs
+        .iter()
+        .map(|(step_id, output)| {
+            (
+                step_id.clone(),
+                json!({
+                    "output": output,
+                }),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+
+    json!({
+        "params": Value::Object(params_value),
+        "steps": Value::Object(steps_value),
+    })
+}
+
+fn pipeline_filter_expression(expr: &str) -> String {
+    let expr = expr.trim();
+    if expr.starts_with('.') {
+        expr.to_owned()
+    } else {
+        format!(".{expr}")
     }
 }
 
+fn pipeline_eval_expression(context: &Value, expr: &str) -> Result<Value> {
+    render::apply_extract_filter(context, &pipeline_filter_expression(expr))
+}
+
+fn pipeline_value_to_text(value: &Value) -> Result<String> {
+    Ok(match value {
+        Value::String(text) => text.clone(),
+        Value::Null => "null".to_owned(),
+        Value::Bool(flag) => flag.to_string(),
+        Value::Number(number) => number.to_string(),
+        Value::Array(_) | Value::Object(_) => serde_json::to_string(value)?,
+    })
+}
+
+fn pipeline_exact_placeholder_expr(template: &str) -> Option<&str> {
+    let trimmed = template.trim();
+    let inner = trimmed.strip_prefix("{{")?.strip_suffix("}}")?;
+    (!inner.contains("{{") && !inner.contains("}}")).then_some(inner.trim())
+}
+
+fn pipeline_render_template(template: &str, context: &Value) -> Result<String> {
+    let mut rendered = String::new();
+    let mut cursor = 0usize;
+
+    while let Some(relative_start) = template[cursor..].find("{{") {
+        let start = cursor + relative_start;
+        rendered.push_str(&template[cursor..start]);
+        let search_start = start + 2;
+        let Some(relative_end) = template[search_start..].find("}}") else {
+            bail!("unterminated pipeline template placeholder in `{template}`");
+        };
+        let end = search_start + relative_end;
+        let expr = template[search_start..end].trim();
+        let value = pipeline_eval_expression(context, expr)?;
+        rendered.push_str(&pipeline_value_to_text(&value)?);
+        cursor = end + 2;
+    }
+
+    rendered.push_str(&template[cursor..]);
+    Ok(rendered)
+}
+
+fn pipeline_render_value(value: &Value, context: &Value) -> Result<Value> {
+    match value {
+        Value::String(template) => {
+            if let Some(expr) = pipeline_exact_placeholder_expr(template) {
+                pipeline_eval_expression(context, expr)
+            } else if template.contains("{{") {
+                Ok(Value::String(pipeline_render_template(template, context)?))
+            } else {
+                Ok(Value::String(template.clone()))
+            }
+        }
+        Value::Array(items) => {
+            let mut rendered = Vec::with_capacity(items.len());
+            for item in items {
+                rendered.push(pipeline_render_value(item, context)?);
+            }
+            Ok(Value::Array(rendered))
+        }
+        Value::Object(fields) => {
+            let mut rendered = serde_json::Map::with_capacity(fields.len());
+            for (key, field) in fields {
+                rendered.insert(key.clone(), pipeline_render_value(field, context)?);
+            }
+            Ok(Value::Object(rendered))
+        }
+        primitive => Ok(primitive.clone()),
+    }
+}
+
+fn pipeline_condition_filter(template: &str) -> Result<String> {
+    let mut rendered = String::new();
+    let mut cursor = 0usize;
+
+    while let Some(relative_start) = template[cursor..].find("{{") {
+        let start = cursor + relative_start;
+        rendered.push_str(&template[cursor..start]);
+        let search_start = start + 2;
+        let Some(relative_end) = template[search_start..].find("}}") else {
+            bail!("unterminated pipeline condition placeholder in `{template}`");
+        };
+        let end = search_start + relative_end;
+        let expr = template[search_start..end].trim();
+        rendered.push('(');
+        rendered.push_str(&pipeline_filter_expression(expr));
+        rendered.push(')');
+        cursor = end + 2;
+    }
+
+    rendered.push_str(&template[cursor..]);
+    Ok(rendered)
+}
+
+fn pipeline_evaluate_condition(template: &str, context: &Value) -> Result<bool> {
+    let value = render::apply_extract_filter(context, &pipeline_condition_filter(template)?)?;
+    match value {
+        Value::Bool(flag) => Ok(flag),
+        Value::Null => Ok(false),
+        other => bail!(
+            "pipeline condition `{template}` did not evaluate to a boolean: {}",
+            other
+        ),
+    }
+}
+
+fn pipeline_value_uses_dynamic_outputs(value: &Value) -> bool {
+    match value {
+        Value::String(text) => text.contains("{{steps."),
+        Value::Array(items) => items.iter().any(pipeline_value_uses_dynamic_outputs),
+        Value::Object(fields) => fields.values().any(pipeline_value_uses_dynamic_outputs),
+        _ => false,
+    }
+}
+
+fn pipeline_step_uses_dynamic_outputs(step: &pipe::PlannedPipelineStep) -> bool {
+    pipeline_value_uses_dynamic_outputs(&step.input)
+        || step
+            .condition
+            .as_deref()
+            .is_some_and(|condition| condition.contains("{{steps."))
+}
+
+fn pipeline_dry_run_can_materialize_output(operation: &HostToolDescriptor) -> bool {
+    operation.idempotent
+        && operation.approval_mode.is_none()
+        && matches!(operation.safety_tier, SafetyTier::Safe)
+}
+
+fn resolve_live_pipeline_operations(
+    command: &str,
+    plan: &pipe::PipelinePlan,
+    client: &HostAdminClient,
+    catalog: &HostConnectorCatalog,
+) -> Result<BTreeMap<String, ResolvedHostOperation>, DispatchOutcome> {
+    let mut operations = BTreeMap::new();
+
+    for step in &plan.steps {
+        if operations.contains_key(&step.operation) {
+            continue;
+        }
+        let Some((connector_selector, operation_selector)) = step.operation.split_once('.') else {
+            return Err(invalid_operation_reference_dispatch(command, &step.operation));
+        };
+        let resolved = match resolve_host_operation_from_catalog(
+            command,
+            client,
+            catalog,
+            connector_selector,
+            operation_selector,
+        ) {
+            Ok(resolved) => resolved,
+            Err(outcome) => return Err(outcome),
+        };
+        operations.insert(step.operation.clone(), resolved);
+    }
+
+    Ok(operations)
+}
+
+fn live_pipeline_operation_metadata(
+    operations: &BTreeMap<String, ResolvedHostOperation>,
+) -> BTreeMap<String, pipe::PipelineOperationMetadata> {
+    operations
+        .iter()
+        .map(|(reference, resolved)| {
+            (
+                reference.clone(),
+                pipe::PipelineOperationMetadata {
+                    connector: resolved.connector.slug.clone(),
+                    selector: resolved.operation.name.clone(),
+                    canonical_id: resolved.operation.name.clone(),
+                    capability: resolved.operation.capability.to_string(),
+                    risk_level: risk_level_label(resolved.operation.risk_level).to_owned(),
+                    safety_tier: safety_tier_label(resolved.operation.safety_tier).to_owned(),
+                    requires_approval: resolved.operation.approval_mode.is_some(),
+                    approval_mode: resolved.operation.approval_mode.as_ref().map_or_else(
+                        || "none".to_owned(),
+                        |mode| match mode {
+                            fcp_core::ApprovalMode::None => "none".to_owned(),
+                            fcp_core::ApprovalMode::Policy => "policy".to_owned(),
+                            fcp_core::ApprovalMode::Interactive => "interactive".to_owned(),
+                            fcp_core::ApprovalMode::ElevationToken => {
+                                "elevation_token".to_owned()
+                            }
+                        },
+                    ),
+                    rate_limits: Vec::new(),
+                },
+            )
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_lines)]
+fn execute_live_pipeline_plan(
+    _command: &str,
+    plan: &pipe::PipelinePlan,
+    operations: &BTreeMap<String, ResolvedHostOperation>,
+    mode: PipelinePlanMode,
+    host: &ResolvedHostConfig,
+    zone: &str,
+    auth: &ResolvedLiveAuth,
+) -> Result<LivePipelineExecutionResult> {
+    let client = HostAdminClient::new(&host.endpoint)?;
+    let steps_by_id = plan
+        .steps
+        .iter()
+        .map(|step| (step.id.as_str(), step))
+        .collect::<BTreeMap<_, _>>();
+    let mut step_outputs = BTreeMap::<String, Value>::new();
+    let mut step_statuses = BTreeMap::<String, &'static str>::new();
+    let mut step_results = Vec::with_capacity(plan.steps.len());
+    let mut executed_steps = 0usize;
+    let mut preflight_only_steps = 0usize;
+    let mut skipped_steps = 0usize;
+    let mut blocked_steps = 0usize;
+    let mut denied_steps = 0usize;
+    let mut error_steps = 0usize;
+
+    for step_id in &plan.execution_order {
+        let step = steps_by_id
+            .get(step_id.as_str())
+            .ok_or_else(|| anyhow::anyhow!("pipeline step `{step_id}` disappeared during execution"))?;
+        let resolved = operations
+            .get(&step.operation)
+            .ok_or_else(|| anyhow::anyhow!("pipeline step `{step_id}` is missing resolved live metadata"))?;
+
+        let dependency_failures = step
+            .depends_on
+            .iter()
+            .filter(|dependency| {
+                step_statuses
+                    .get(dependency.as_str())
+                    .is_some_and(|status| matches!(*status, "error" | "denied" | "blocked"))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if !dependency_failures.is_empty() {
+            blocked_steps += 1;
+            step_statuses.insert(step.id.clone(), "blocked");
+            step_results.push(json!({
+                "id": &step.id,
+                "operation": &step.operation,
+                "connector": {
+                    "slug": &resolved.connector.slug,
+                    "canonical_id": resolved.connector.summary.id.as_str(),
+                    "name": &resolved.connector.summary.name,
+                },
+                "status": "blocked",
+                "reason": "dependency-failed",
+                "depends_on": &step.depends_on,
+                "blocked_by": dependency_failures,
+            }));
+            continue;
+        }
+
+        let missing_outputs = step
+            .depends_on
+            .iter()
+            .filter(|dependency| !step_outputs.contains_key(dependency.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !missing_outputs.is_empty() && pipeline_step_uses_dynamic_outputs(step) {
+            blocked_steps += 1;
+            step_statuses.insert(step.id.clone(), "blocked");
+            step_results.push(json!({
+                "id": &step.id,
+                "operation": &step.operation,
+                "connector": {
+                    "slug": &resolved.connector.slug,
+                    "canonical_id": resolved.connector.summary.id.as_str(),
+                    "name": &resolved.connector.summary.name,
+                },
+                "status": "blocked",
+                "reason": "missing-dependency-output",
+                "depends_on": &step.depends_on,
+                "missing_outputs": missing_outputs,
+                "notes": [
+                    "A prior step did not materialize an output value, so this step could not render a truthful live input."
+                ],
+            }));
+            continue;
+        }
+
+        let context = pipeline_execution_context(&plan.params, &step_outputs);
+        let condition_evaluation = if let Some(condition) = &step.condition {
+            Some(pipeline_evaluate_condition(condition, &context)?)
+        } else {
+            None
+        };
+        if condition_evaluation == Some(false) {
+            skipped_steps += 1;
+            step_statuses.insert(step.id.clone(), "skipped");
+            step_results.push(json!({
+                "id": &step.id,
+                "operation": &step.operation,
+                "connector": {
+                    "slug": &resolved.connector.slug,
+                    "canonical_id": resolved.connector.summary.id.as_str(),
+                    "name": &resolved.connector.summary.name,
+                },
+                "status": "skipped",
+                "reason": "condition-false",
+                "depends_on": &step.depends_on,
+                "condition": {
+                    "template": &step.condition,
+                    "allowed": false,
+                },
+            }));
+            continue;
+        }
+
+        let rendered_input = pipeline_render_value(&step.input, &context)?;
+        let (valid, validation_errors) =
+            validate_payload_against_schema(&rendered_input, &resolved.operation.input_schema);
+        if !valid {
+            error_steps += 1;
+            step_statuses.insert(step.id.clone(), "error");
+            step_results.push(json!({
+                "id": &step.id,
+                "operation": &step.operation,
+                "connector": {
+                    "slug": &resolved.connector.slug,
+                    "canonical_id": resolved.connector.summary.id.as_str(),
+                    "name": &resolved.connector.summary.name,
+                },
+                "status": "error",
+                "reason": "invalid-input-payload",
+                "depends_on": &step.depends_on,
+                "condition": condition_evaluation.map(|allowed| {
+                    json!({
+                        "template": &step.condition,
+                        "allowed": allowed,
+                    })
+                }),
+                "input": rendered_input,
+                "validation": {
+                    "valid": false,
+                    "errors": validation_errors,
+                },
+            }));
+            continue;
+        }
+
+        let request_id = derive_live_request_id(
+            resolved.connector.summary.id.as_str(),
+            &resolved.operation.name,
+            zone,
+            &rendered_input,
+            None,
+            Some(step.id.as_str()),
+        )?;
+        let idempotency_key = (mode == PipelinePlanMode::Run).then(|| request_id.to_string());
+        let connector_id: ConnectorId = resolved
+            .connector
+            .summary
+            .id
+            .as_str()
+            .parse()
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "host connector id `{}` is not canonical: {error}",
+                    resolved.connector.summary.id
+                )
+            })?;
+        let zone_id: ZoneId = zone
+            .parse()
+            .map_err(|error| anyhow::anyhow!("`{zone}` is not a valid FCP zone: {error}"))?;
+        let preflight_request = HostPreflightRequest {
+            request_id: request_id.clone(),
+            connector_id: connector_id.clone(),
+            operation: resolved.operation.name.clone(),
+            params: Some(rendered_input.clone()),
+            principal: auth.principal_hint.clone(),
+            zone_id: Some(zone_id.clone()),
+            capability_token: Some(auth.capability_token.clone()),
+            approval_tokens: auth.approval_tokens.clone(),
+        };
+        let preflight = client.preflight(&preflight_request)?;
+        let preflight_value = serde_json::to_value(&preflight)?;
+
+        if !preflight.allowed {
+            denied_steps += 1;
+            step_statuses.insert(step.id.clone(), "denied");
+            let reason = preflight
+                .reason
+                .clone()
+                .unwrap_or_else(|| "preflight denied pipeline step".to_owned());
+            let history_status = if mode == PipelinePlanMode::DryRun {
+                history::OpStatus::Denied
+            } else {
+                history::OpStatus::Denied
+            };
+            let _ = append_history_entry(
+                history_status,
+                resolved.connector.summary.id.as_str(),
+                &resolved.operation.name,
+                Some(zone),
+                &rendered_input,
+                Some(&preflight_value),
+                Some(reason.clone()),
+                idempotency_key.as_deref(),
+                0,
+            );
+            step_results.push(json!({
+                "id": &step.id,
+                "operation": &step.operation,
+                "connector": {
+                    "slug": &resolved.connector.slug,
+                    "canonical_id": resolved.connector.summary.id.as_str(),
+                    "name": &resolved.connector.summary.name,
+                },
+                "status": "denied",
+                "mode": if mode == PipelinePlanMode::DryRun { "preflight" } else { "invoke" },
+                "depends_on": &step.depends_on,
+                "condition": condition_evaluation.map(|allowed| {
+                    json!({
+                        "template": &step.condition,
+                        "allowed": allowed,
+                    })
+                }),
+                "input": rendered_input,
+                "request_id": request_id.to_string(),
+                "idempotency_key": idempotency_key,
+                "preflight": preflight_value,
+                "error": {
+                    "type": "policy-denied",
+                    "message": reason,
+                    "recoverable": true,
+                },
+            }));
+            continue;
+        }
+
+        if mode == PipelinePlanMode::DryRun
+            && !pipeline_dry_run_can_materialize_output(&resolved.operation)
+        {
+            preflight_only_steps += 1;
+            step_statuses.insert(step.id.clone(), "preflight");
+            let _ = append_history_entry(
+                history::OpStatus::Simulated,
+                resolved.connector.summary.id.as_str(),
+                &resolved.operation.name,
+                Some(zone),
+                &rendered_input,
+                Some(&preflight_value),
+                None,
+                None,
+                0,
+            );
+            step_results.push(json!({
+                "id": &step.id,
+                "operation": &step.operation,
+                "connector": {
+                    "slug": &resolved.connector.slug,
+                    "canonical_id": resolved.connector.summary.id.as_str(),
+                    "name": &resolved.connector.summary.name,
+                },
+                "status": "ok",
+                "mode": "preflight",
+                "depends_on": &step.depends_on,
+                "condition": condition_evaluation.map(|allowed| {
+                    json!({
+                        "template": &step.condition,
+                        "allowed": allowed,
+                    })
+                }),
+                "input": rendered_input,
+                "request_id": request_id.to_string(),
+                "preflight": preflight_value,
+                "notes": [
+                    "Dry-run performed a real host preflight only. This step was not invoked because it is not clearly safe, read-only, and idempotent."
+                ],
+            }));
+            continue;
+        }
+
+        let invoke_request = build_live_invoke_request(
+            resolved.connector.summary.id.as_str(),
+            &resolved.operation.name,
+            zone,
+            rendered_input.clone(),
+            request_id.clone(),
+            auth.capability_token.clone(),
+            auth.approval_tokens.clone(),
+            idempotency_key.clone(),
+            None,
+        )?;
+        let started_at = std::time::Instant::now();
+        let response = client.invoke(&invoke_request)?;
+        let latency_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let response_value = serde_json::to_value(&response)?;
+        let history_status = match response.status {
+            InvokeStatus::Ok => history::OpStatus::Success,
+            InvokeStatus::Error => history::OpStatus::Error,
+        };
+        let _ = append_history_entry(
+            history_status,
+            resolved.connector.summary.id.as_str(),
+            &resolved.operation.name,
+            Some(zone),
+            &rendered_input,
+            Some(&response_value),
+            response.error.as_ref().map(ToString::to_string),
+            idempotency_key.as_deref(),
+            latency_ms,
+        );
+
+        match response.status {
+            InvokeStatus::Ok => {
+                executed_steps += 1;
+                step_statuses.insert(step.id.clone(), "ok");
+                step_outputs.insert(
+                    step.id.clone(),
+                    response.result.clone().unwrap_or(Value::Null),
+                );
+                step_results.push(json!({
+                    "id": &step.id,
+                    "operation": &step.operation,
+                    "connector": {
+                        "slug": &resolved.connector.slug,
+                        "canonical_id": resolved.connector.summary.id.as_str(),
+                        "name": &resolved.connector.summary.name,
+                    },
+                    "status": "ok",
+                    "mode": if mode == PipelinePlanMode::DryRun {
+                        "dry-run-read"
+                    } else {
+                        "invoke"
+                    },
+                    "depends_on": &step.depends_on,
+                    "condition": condition_evaluation.map(|allowed| {
+                        json!({
+                            "template": &step.condition,
+                            "allowed": allowed,
+                        })
+                    }),
+                    "input": rendered_input,
+                    "request_id": request_id.to_string(),
+                    "idempotency_key": idempotency_key,
+                    "preflight": preflight_value,
+                    "response": response_value,
+                }));
+            }
+            InvokeStatus::Error => {
+                error_steps += 1;
+                step_statuses.insert(step.id.clone(), "error");
+                step_results.push(json!({
+                    "id": &step.id,
+                    "operation": &step.operation,
+                    "connector": {
+                        "slug": &resolved.connector.slug,
+                        "canonical_id": resolved.connector.summary.id.as_str(),
+                        "name": &resolved.connector.summary.name,
+                    },
+                    "status": "error",
+                    "mode": if mode == PipelinePlanMode::DryRun {
+                        "dry-run-read"
+                    } else {
+                        "invoke"
+                    },
+                    "depends_on": &step.depends_on,
+                    "condition": condition_evaluation.map(|allowed| {
+                        json!({
+                            "template": &step.condition,
+                            "allowed": allowed,
+                        })
+                    }),
+                    "input": rendered_input,
+                    "request_id": request_id.to_string(),
+                    "idempotency_key": idempotency_key,
+                    "preflight": preflight_value,
+                    "response": response_value,
+                }));
+            }
+        }
+    }
+
+    let status = if error_steps > 0 {
+        "error"
+    } else if denied_steps > 0 && executed_steps == 0 && preflight_only_steps == 0 {
+        "denied"
+    } else if denied_steps > 0 || blocked_steps > 0 {
+        "partial"
+    } else {
+        "ok"
+    };
+    let exit_code = if error_steps > 0 {
+        CliExitCode::Connector
+    } else if denied_steps > 0 {
+        CliExitCode::PolicyDenied
+    } else {
+        CliExitCode::Success
+    };
+
+    Ok(LivePipelineExecutionResult {
+        status,
+        exit_code,
+        executed_steps,
+        preflight_only_steps,
+        skipped_steps,
+        blocked_steps,
+        denied_steps,
+        error_steps,
+        step_results,
+        outputs: step_outputs,
+    })
+}
+
 #[allow(dead_code)]
-fn recipe_dispatch(args: &RecipeArgs) -> Result<DispatchOutcome> {
+fn recipe_dispatch(args: &RecipeArgs, explicit_host: Option<&str>) -> Result<DispatchOutcome> {
     match &args.command {
         RecipeCommand::List(_) => recipe_list_dispatch(),
         RecipeCommand::Show(args) => recipe_show_dispatch(args),
         RecipeCommand::Validate(args) => Ok(recipe_validate_dispatch(args)),
-        RecipeCommand::Run(args) => recipe_run_dispatch(args, PipelinePlanMode::Run),
-        RecipeCommand::DryRun(args) => recipe_run_dispatch(args, PipelinePlanMode::DryRun),
-        RecipeCommand::Estimate(args) => recipe_run_dispatch(args, PipelinePlanMode::Estimate),
+        RecipeCommand::Run(args) => recipe_run_dispatch(args, PipelinePlanMode::Run, explicit_host),
+        RecipeCommand::DryRun(args) => {
+            recipe_run_dispatch(args, PipelinePlanMode::DryRun, explicit_host)
+        }
+        RecipeCommand::Estimate(args) => {
+            recipe_run_dispatch(args, PipelinePlanMode::Estimate, explicit_host)
+        }
         RecipeCommand::Export(args) => Ok(recipe_export_dispatch(args)),
     }
 }
@@ -8723,7 +10011,11 @@ fn recipe_validate_dispatch(args: &RecipeRefArgs) -> DispatchOutcome {
 }
 
 #[allow(dead_code)]
-fn recipe_run_dispatch(args: &RecipeRunArgs, mode: PipelinePlanMode) -> Result<DispatchOutcome> {
+fn recipe_run_dispatch(
+    args: &RecipeRunArgs,
+    mode: PipelinePlanMode,
+    explicit_host: Option<&str>,
+) -> Result<DispatchOutcome> {
     let recipe = match load_recipe_definition(&args.recipe, mode.subcommand()) {
         Ok(recipe) => recipe,
         Err(outcome) => return Ok(outcome),
@@ -8751,55 +10043,151 @@ fn recipe_run_dispatch(args: &RecipeRunArgs, mode: PipelinePlanMode) -> Result<D
 
     let plan = pipe::build_pipeline_plan(&recipe.definition, &params)
         .map_err(|error| anyhow::anyhow!("{error}"))?;
-    let catalog = DiscoveryCatalog::load()?;
-    let operation_metadata =
-        match resolve_recipe_operation_metadata(&catalog, &plan, mode.subcommand(), &recipe.slug) {
+    if mode == PipelinePlanMode::Estimate {
+        let catalog = DiscoveryCatalog::load()?;
+        let operation_metadata = match resolve_recipe_operation_metadata(
+            &catalog,
+            &plan,
+            mode.subcommand(),
+            &recipe.slug,
+        ) {
             Ok(metadata) => metadata,
             Err(outcome) => return Ok(outcome),
         };
-    let estimate = pipe::estimate_pipeline(&plan, &operation_metadata)
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
-    let message = match mode {
-        PipelinePlanMode::Run => format!(
-            "Recipe plan: {} ({} step(s), {}, highest risk {}). Execution requires host integration (not yet available).",
-            recipe.title,
-            plan.step_count,
-            estimate.estimated_api_calls.summary,
-            estimate.risk_assessment.level,
-        ),
-        PipelinePlanMode::DryRun => format!(
-            "Recipe dry-run: {} ({} step(s), {}, highest risk {}). Execution requires host integration (not yet available).",
-            recipe.title,
-            plan.step_count,
-            estimate.estimated_api_calls.summary,
-            estimate.risk_assessment.level,
-        ),
-        PipelinePlanMode::Estimate => format!(
-            "Recipe estimate: {} ({} step(s), {}, highest risk {}). No host execution was attempted.",
-            recipe.title,
-            plan.step_count,
-            estimate.estimated_api_calls.summary,
-            estimate.risk_assessment.level,
-        ),
-    };
-    let mut payload = json!({
-        "status": "planned",
-        "command": "recipe",
-        "subcommand": mode.subcommand(),
-        "recipe": recipe.slug,
-        "export_path": recipe.export_path,
-        "message": message,
-        "estimate": estimate,
-        "dry_run": mode.dry_run(),
-        "next_actions": recipe_next_actions(&recipe.slug),
-    });
-    if mode.include_plan() {
-        payload["plan"] = serde_json::to_value(&plan)?;
+        let estimate = pipe::estimate_pipeline(&plan, &operation_metadata)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        return Ok(DispatchOutcome {
+            payload: json!({
+                "status": "ok",
+                "command": "recipe",
+                "subcommand": mode.subcommand(),
+                "recipe": recipe.slug,
+                "export_path": recipe.export_path,
+                "message": format!(
+                    "Recipe estimate: {} ({} step(s), {}, highest risk {}). No host execution was attempted.",
+                    recipe.title,
+                    plan.step_count,
+                    estimate.estimated_api_calls.summary,
+                    estimate.risk_assessment.level,
+                ),
+                "estimate": estimate,
+                "dry_run": false,
+                "next_actions": recipe_next_actions(&recipe.slug),
+            }),
+            exit_code: CliExitCode::Success,
+        });
     }
 
+    let Some(host) = resolve_host_config(explicit_host)? else {
+        return Ok(missing_host_dispatch(
+            "recipe",
+            json!({
+                "subcommand": mode.subcommand(),
+                "recipe": &recipe.slug,
+                "step_count": plan.step_count,
+            }),
+            vec![
+                format!(
+                    "fwc recipe {} {} --host <endpoint> --capability-token-file <token.cbor>",
+                    mode.subcommand(),
+                    recipe.slug
+                ),
+                "Set `FWC_HOST` or `FCP_HOST_ENDPOINT`, or configure an active FCP context."
+                    .to_owned(),
+            ],
+        ));
+    };
+    let auth = match resolve_live_auth(&args.auth) {
+        Ok(auth) => auth,
+        Err(error) => {
+            return Ok(live_auth_dispatch(
+                "recipe",
+                error,
+                vec![
+                    format!(
+                        "fwc recipe {} {} --host {} --capability-token-file <token.cbor>",
+                        mode.subcommand(),
+                        recipe.slug,
+                        host.endpoint
+                    ),
+                    "Provide approval tokens with `--approval-token-file` when recipe steps require explicit authorization.".to_owned(),
+                ],
+            ));
+        }
+    };
+    let client = HostAdminClient::new(&host.endpoint)?;
+    let (catalog, _) = client.catalog(None)?;
+    let resolved_operations = match resolve_live_pipeline_operations("recipe", &plan, &client, &catalog)
+    {
+        Ok(operations) => operations,
+        Err(outcome) => return Ok(outcome),
+    };
+    let estimate = pipe::estimate_pipeline(&plan, &live_pipeline_operation_metadata(&resolved_operations))
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let zone = resolved_zone(args.zone.as_deref(), &host);
+    let execution = execute_live_pipeline_plan(
+        "recipe",
+        &plan,
+        &resolved_operations,
+        mode,
+        &host,
+        &zone,
+        &auth,
+    )?;
+
+    let message = match mode {
+        PipelinePlanMode::Run => format!(
+            "Executed recipe `{}` against the live host in zone `{}` ({} invoked, {} skipped, {} blocked, {} denied, {} errored).",
+            recipe.slug,
+            zone,
+            execution.executed_steps,
+            execution.skipped_steps,
+            execution.blocked_steps,
+            execution.denied_steps,
+            execution.error_steps,
+        ),
+        PipelinePlanMode::DryRun => format!(
+            "Ran a truthful dry-run for recipe `{}` in zone `{}` ({} safe step(s) materialized, {} preflight-only, {} skipped, {} blocked).",
+            recipe.slug,
+            zone,
+            execution.executed_steps,
+            execution.preflight_only_steps,
+            execution.skipped_steps,
+            execution.blocked_steps,
+        ),
+        PipelinePlanMode::Estimate => unreachable!("handled above"),
+    };
+
     Ok(DispatchOutcome {
-        payload,
-        exit_code: CliExitCode::Success,
+        payload: json!({
+            "status": execution.status,
+            "command": "recipe",
+            "subcommand": mode.subcommand(),
+            "source": "host-admin-api",
+            "recipe": recipe.slug,
+            "export_path": recipe.export_path,
+            "zone": zone,
+            "message": message,
+            "estimate": estimate,
+            "plan": serde_json::to_value(&plan)?,
+            "execution": {
+                "mode": mode.subcommand(),
+                "executed_steps": execution.executed_steps,
+                "preflight_only_steps": execution.preflight_only_steps,
+                "skipped_steps": execution.skipped_steps,
+                "blocked_steps": execution.blocked_steps,
+                "denied_steps": execution.denied_steps,
+                "error_steps": execution.error_steps,
+                "steps": execution.step_results,
+                "outputs": execution.outputs,
+            },
+            "next_actions": [
+                format!("fwc recipe show {}", recipe.slug),
+                format!("fwc history --limit {}", plan.step_count.max(10)),
+                format!("fwc status --host {}", host.endpoint),
+            ],
+        }),
+        exit_code: execution.exit_code,
     })
 }
 
@@ -9127,6 +10515,7 @@ fn pipeline_run_dispatch(
     roots: &pipe::PipelineRoots,
     args: &PipelineRunArgs,
     mode: PipelinePlanMode,
+    explicit_host: Option<&str>,
 ) -> Result<DispatchOutcome> {
     let (path, definition, validation) = match load_pipeline_definition(roots, &args.pipeline) {
         Ok(v) => v,
@@ -9162,59 +10551,148 @@ fn pipeline_run_dispatch(
 
     let plan = pipe::build_pipeline_plan(&definition, &params)
         .map_err(|error| anyhow::anyhow!("{error}"))?;
-    let catalog = DiscoveryCatalog::load()?;
-    let operation_metadata =
-        match resolve_pipeline_operation_metadata(&catalog, &plan, subcommand, &path) {
-            Ok(metadata) => metadata,
-            Err(outcome) => return Ok(outcome),
-        };
-    let estimate = pipe::estimate_pipeline(&plan, &operation_metadata)
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
-    let message = match mode {
-        PipelinePlanMode::Run => format!(
-            "Pipeline plan: {} ({} step(s), {}, highest risk {}). Execution requires host integration (not yet available).",
-            definition.pipeline.name,
-            plan.step_count,
-            estimate.estimated_api_calls.summary,
-            estimate.risk_assessment.level,
-        ),
-        PipelinePlanMode::DryRun => format!(
-            "Pipeline dry-run: {} ({} step(s), {}, highest risk {}). Execution requires host integration (not yet available).",
-            definition.pipeline.name,
-            plan.step_count,
-            estimate.estimated_api_calls.summary,
-            estimate.risk_assessment.level,
-        ),
-        PipelinePlanMode::Estimate => format!(
-            "Pipeline estimate: {} ({} step(s), {}, highest risk {}). No host execution was attempted.",
-            definition.pipeline.name,
-            plan.step_count,
-            estimate.estimated_api_calls.summary,
-            estimate.risk_assessment.level,
-        ),
-    };
-    let mut payload = json!({
-        "status": "planned",
-        "command": "pipeline",
-        "subcommand": subcommand,
-        "path": path.display().to_string(),
-        "message": message,
-        "estimate": estimate,
-        "dry_run": mode.dry_run(),
-        "next_actions": [
-            format!("fwc pipeline show {}", path.display()),
-            format!("fwc pipeline validate {}", path.display()),
-            format!("fwc pipeline estimate {} --param key=value", path.display()),
-            format!("fwc pipeline dry-run {} --param key=value", path.display()),
-        ],
-    });
-    if mode.include_plan() {
-        payload["plan"] = serde_json::to_value(&plan)?;
+    if mode == PipelinePlanMode::Estimate {
+        let catalog = DiscoveryCatalog::load()?;
+        let operation_metadata =
+            match resolve_pipeline_operation_metadata(&catalog, &plan, subcommand, &path) {
+                Ok(metadata) => metadata,
+                Err(outcome) => return Ok(outcome),
+            };
+        let estimate = pipe::estimate_pipeline(&plan, &operation_metadata)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        return Ok(DispatchOutcome {
+            payload: json!({
+                "status": "ok",
+                "command": "pipeline",
+                "subcommand": subcommand,
+                "path": path.display().to_string(),
+                "message": format!(
+                    "Pipeline estimate: {} ({} step(s), {}, highest risk {}). No host execution was attempted.",
+                    definition.pipeline.name,
+                    plan.step_count,
+                    estimate.estimated_api_calls.summary,
+                    estimate.risk_assessment.level,
+                ),
+                "estimate": estimate,
+                "dry_run": false,
+                "next_actions": [
+                    format!("fwc pipeline show {}", path.display()),
+                    format!("fwc pipeline validate {}", path.display()),
+                    format!("fwc pipeline dry-run {} --host <endpoint>", path.display()),
+                ],
+            }),
+            exit_code: CliExitCode::Success,
+        });
     }
 
+    let Some(host) = resolve_host_config(explicit_host)? else {
+        return Ok(missing_host_dispatch(
+            "pipeline",
+            json!({
+                "subcommand": subcommand,
+                "path": path.display().to_string(),
+                "step_count": plan.step_count,
+            }),
+            vec![
+                format!(
+                    "fwc pipeline {} {} --host <endpoint> --capability-token-file <token.cbor>",
+                    subcommand,
+                    path.display()
+                ),
+                "Set `FWC_HOST` or `FCP_HOST_ENDPOINT`, or configure an active FCP context."
+                    .to_owned(),
+            ],
+        ));
+    };
+    let auth = match resolve_live_auth(&args.auth) {
+        Ok(auth) => auth,
+        Err(error) => {
+            return Ok(live_auth_dispatch(
+                "pipeline",
+                error,
+                vec![
+                    format!(
+                        "fwc pipeline {} {} --host {} --capability-token-file <token.cbor>",
+                        subcommand,
+                        path.display(),
+                        host.endpoint
+                    ),
+                    "Provide approval tokens with `--approval-token-file` when pipeline steps require explicit authorization.".to_owned(),
+                ],
+            ));
+        }
+    };
+    let client = HostAdminClient::new(&host.endpoint)?;
+    let (catalog, _) = client.catalog(None)?;
+    let resolved_operations =
+        match resolve_live_pipeline_operations("pipeline", &plan, &client, &catalog) {
+            Ok(operations) => operations,
+            Err(outcome) => return Ok(outcome),
+        };
+    let estimate = pipe::estimate_pipeline(&plan, &live_pipeline_operation_metadata(&resolved_operations))
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let zone = resolved_zone(args.zone.as_deref(), &host);
+    let execution = execute_live_pipeline_plan(
+        "pipeline",
+        &plan,
+        &resolved_operations,
+        mode,
+        &host,
+        &zone,
+        &auth,
+    )?;
+    let message = match mode {
+        PipelinePlanMode::Run => format!(
+            "Executed pipeline `{}` against the live host in zone `{}` ({} invoked, {} skipped, {} blocked, {} denied, {} errored).",
+            definition.pipeline.name,
+            zone,
+            execution.executed_steps,
+            execution.skipped_steps,
+            execution.blocked_steps,
+            execution.denied_steps,
+            execution.error_steps,
+        ),
+        PipelinePlanMode::DryRun => format!(
+            "Ran a truthful dry-run for pipeline `{}` in zone `{}` ({} safe step(s) materialized, {} preflight-only, {} skipped, {} blocked).",
+            definition.pipeline.name,
+            zone,
+            execution.executed_steps,
+            execution.preflight_only_steps,
+            execution.skipped_steps,
+            execution.blocked_steps,
+        ),
+        PipelinePlanMode::Estimate => unreachable!("handled above"),
+    };
+
     Ok(DispatchOutcome {
-        payload,
-        exit_code: CliExitCode::Success,
+        payload: json!({
+            "status": execution.status,
+            "command": "pipeline",
+            "subcommand": subcommand,
+            "source": "host-admin-api",
+            "path": path.display().to_string(),
+            "zone": zone,
+            "message": message,
+            "estimate": estimate,
+            "plan": serde_json::to_value(&plan)?,
+            "execution": {
+                "mode": subcommand,
+                "executed_steps": execution.executed_steps,
+                "preflight_only_steps": execution.preflight_only_steps,
+                "skipped_steps": execution.skipped_steps,
+                "blocked_steps": execution.blocked_steps,
+                "denied_steps": execution.denied_steps,
+                "error_steps": execution.error_steps,
+                "steps": execution.step_results,
+                "outputs": execution.outputs,
+            },
+            "next_actions": [
+                format!("fwc pipeline show {}", path.display()),
+                format!("fwc history --limit {}", plan.step_count.max(10)),
+                format!("fwc status --host {}", host.endpoint),
+            ],
+        }),
+        exit_code: execution.exit_code,
     })
 }
 
@@ -9541,6 +11019,22 @@ fn map_dispatch(args: &MapArgs, explicit_host: Option<&str>) -> Result<DispatchO
         Err(outcome) => return Ok(outcome),
     };
     let zone = resolved_zone(args.zone.as_deref(), &host);
+    let auth = match resolve_live_auth(&args.auth) {
+        Ok(auth) => auth,
+        Err(error) => {
+            return Ok(live_auth_dispatch(
+                "map",
+                error,
+                vec![
+                    format!(
+                        "fwc map {} --host {} --capability-token-file <token.cbor> --inputs '[{{...}}]'",
+                        args.operation, host.endpoint
+                    ),
+                    "Provide approval tokens with `--approval-token-file` when the mapped operation requires explicit authorization.".to_owned(),
+                ],
+            ));
+        }
+    };
 
     let preview_count = inputs.len().min(3);
     let plan = batch::BatchPlan {
@@ -9569,7 +11063,16 @@ fn map_dispatch(args: &MapArgs, explicit_host: Option<&str>) -> Result<DispatchO
             &resolved.operation.name,
             &zone,
             payload,
-            None,
+            derive_live_request_id(
+                resolved.connector.summary.id.as_str(),
+                &resolved.operation.name,
+                &zone,
+                &inputs.items[index],
+                None,
+                Some(&format!("map-item-{}", index + 1)),
+            )?,
+            auth.capability_token.clone(),
+            auth.approval_tokens.clone(),
             None,
             None,
         )?;
@@ -9685,6 +11188,23 @@ fn batch_file_dispatch(
     })?;
     let client = HostAdminClient::new(&host.endpoint)?;
     let (catalog, _) = client.catalog(None)?;
+    let auth = match resolve_live_auth(&args.auth) {
+        Ok(auth) => auth,
+        Err(error) => {
+            return Ok(live_auth_dispatch(
+                "batch-file",
+                error,
+                vec![
+                    format!(
+                        "fwc batch-file {} --host {} --capability-token-file <token.cbor>",
+                        args.file.display(),
+                        host.endpoint
+                    ),
+                    "Provide approval tokens with `--approval-token-file` when batch operations require explicit authorization.".to_owned(),
+                ],
+            ));
+        }
+    };
     let mut invalid_operations = Vec::new();
     let mut request_operations = Vec::new();
     let mut preflights = Vec::new();
@@ -9740,7 +11260,16 @@ fn batch_file_dispatch(
         }
 
         if args.dry_run {
+            let request_id = derive_live_request_id(
+                connector.summary.id.as_str(),
+                &operation.name,
+                &zone,
+                &op.input,
+                None,
+                Some(op.id.as_str()),
+            )?;
             let preflight_request = HostPreflightRequest {
+                request_id,
                 connector_id: connector.summary.id.as_str().parse().map_err(|error| {
                     anyhow::anyhow!(
                         "host connector id `{}` is not canonical: {error}",
@@ -9753,6 +11282,8 @@ fn batch_file_dispatch(
                 zone_id: Some(zone.parse().map_err(|error| {
                     anyhow::anyhow!("`{zone}` is not a valid FCP zone for `batch-file`: {error}")
                 })?),
+                capability_token: Some(auth.capability_token.clone()),
+                approval_tokens: auth.approval_tokens.clone(),
             };
             let response = client.preflight(&preflight_request)?;
             preflights.push(json!({
@@ -9775,7 +11306,16 @@ fn batch_file_dispatch(
             &operation.name,
             &zone,
             op.input.clone(),
-            None,
+            derive_live_request_id(
+                connector.summary.id.as_str(),
+                &operation.name,
+                &zone,
+                &op.input,
+                None,
+                Some(op.id.as_str()),
+            )?,
+            auth.capability_token.clone(),
+            auth.approval_tokens.clone(),
             None,
             None,
         )?;
@@ -11121,6 +12661,33 @@ fn normalize_args(
         }
     }
 
+    // ── Phase 6: disambiguate export-tools format flag ───────────────
+    if args
+        .get(command_index)
+        .is_some_and(|segment| segment == "export-tools")
+    {
+        for index in (command_index + 1)..args.len() {
+            if args[index] == "--format" {
+                corrections.push(InputCorrection {
+                    from: "--format".to_owned(),
+                    to: "--tool-format".to_owned(),
+                    rationale: "Interpreted `export-tools --format` as the tool schema format flag to avoid colliding with the global output `--format` option.",
+                });
+                args[index] = "--tool-format".to_owned();
+                break;
+            }
+            if let Some(value) = args[index].strip_prefix("--format=") {
+                corrections.push(InputCorrection {
+                    from: args[index].clone(),
+                    to: format!("--tool-format={value}"),
+                    rationale: "Interpreted `export-tools --format` as the tool schema format flag to avoid colliding with the global output `--format` option.",
+                });
+                args[index] = format!("--tool-format={value}");
+                break;
+            }
+        }
+    }
+
     Ok(NormalizedArgs { args, corrections })
 }
 
@@ -11453,7 +13020,8 @@ fn parse_failure_dispatch(args: &[String], error: &clap::Error) -> DispatchOutco
                     .map(String::as_str),
                 workflow::task_subcommands(),
                 vec![
-                    "fwc task \"create a GitHub issue titled 'FWC: add workflow macros'\"".to_owned(),
+                    "fwc task \"create a GitHub issue titled 'FWC: add workflow macros'\""
+                        .to_owned(),
                     "fwc task list".to_owned(),
                     "fwc task show <task-id>".to_owned(),
                     "fwc task resolve <task-id> --until ready".to_owned(),
@@ -11794,6 +13362,7 @@ fn enrich_unknown_guide_command(payload: &mut Value, command: Option<&str>) {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap as StdBTreeMap;
+    use std::fs;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
     use std::path::PathBuf;
@@ -11801,12 +13370,25 @@ mod tests {
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use super::{
-        Cli, CliExitCode, Commands, PrepareCliError, catalog, execute, normalize_args, prepare_cli,
+        Cli, CliExitCode, Commands, ConnectorManifest, HostConnectorCatalog, LiveAuthArgs,
+        PACKAGE_OUTPUT_FILENAME, PackageBuildMetadata, PackageOutput, PrepareCliError,
+        ResolvedHostConfig, catalog, execute, host_mcp_tool_definitions, mcp_tool_invoke_args,
+        normalize_args, prepare_cli, serve_mcp,
     };
     use clap::CommandFactory;
-    use fcp_core::{ConnectorHealth, InvokeResponse, RequestId};
-    use fcp_host::PreflightResponse as HostPreflightResponse;
+    use fcp_core::{
+        BudgetEnforcement, BudgetStatus, ConnectorHealth, InvokeResponse, RequestId,
+        UsageBudgetSnapshot, UsageBudgetUsage, UsageMetricKind, ZoneId,
+    };
+    use fcp_host::{
+        BudgetReportResponse as HostBudgetReportResponse, ConnectorInventoryApplyReport,
+        ConnectorInventoryMutationKind, ConnectorInventoryMutationResponse,
+        DiscoveryResponse as HostDiscoveryResponse, DoctorReport as HostDoctorReport,
+        IntrospectionResponse as HostIntrospectionResponse, ManagedConnectorConfig,
+        PreflightResponse as HostPreflightResponse, StartupReconciliationReport,
+    };
     use serde_json::{Value, json};
+    use tempfile::TempDir;
 
     fn execute_json(args: &[&str]) -> (std::process::ExitCode, Value) {
         let owned_args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
@@ -11930,6 +13512,114 @@ mod tests {
         (endpoint, handle)
     }
 
+    fn spawn_mock_host_sequence(routes: Vec<(String, Value)>) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("mock host should bind");
+        listener
+            .set_nonblocking(true)
+            .expect("mock host should configure nonblocking accept");
+        let endpoint = format!(
+            "http://{}",
+            listener.local_addr().expect("mock host address")
+        );
+        let expected_requests = routes.len();
+        let responses = routes
+            .into_iter()
+            .map(|(key, value)| {
+                (
+                    key,
+                    serde_json::to_string(&value).expect("mock response should serialize"),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let handle = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut served = 0usize;
+
+            while served < expected_requests && Instant::now() < deadline {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(connection) => connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                        continue;
+                    }
+                    Err(error) => panic!("mock host accept failed: {error}"),
+                };
+
+                stream
+                    .set_nonblocking(false)
+                    .expect("mock host stream should switch back to blocking mode");
+
+                let mut reader =
+                    BufReader::new(stream.try_clone().expect("mock host should clone socket"));
+                let mut request_line = String::new();
+                reader
+                    .read_line(&mut request_line)
+                    .expect("mock host should read request line");
+                assert!(
+                    !request_line.trim().is_empty(),
+                    "mock host received an empty request line"
+                );
+
+                let mut content_length = 0usize;
+                loop {
+                    let mut header = String::new();
+                    reader
+                        .read_line(&mut header)
+                        .expect("mock host should read headers");
+                    if header == "\r\n" || header.is_empty() {
+                        break;
+                    }
+                    if let Some((name, value)) = header.split_once(':')
+                        && name.eq_ignore_ascii_case("content-length")
+                    {
+                        content_length = value
+                            .trim()
+                            .parse()
+                            .expect("content-length should be numeric");
+                    }
+                }
+
+                if content_length > 0 {
+                    let mut body = vec![0u8; content_length];
+                    reader
+                        .read_exact(&mut body)
+                        .expect("mock host should read request body");
+                }
+
+                let mut parts = request_line.split_whitespace();
+                let method = parts.next().expect("request method should exist");
+                let path = parts.next().expect("request path should exist");
+                let key = format!("{method} {path}");
+                let Some((expected_key, body)) = responses.get(served) else {
+                    panic!("missing expected mock response for request {}", served + 1);
+                };
+                assert_eq!(
+                    &key, expected_key,
+                    "unexpected mock host request order at position {}",
+                    served + 1
+                );
+
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .expect("mock host should write response");
+                stream.flush().expect("mock host should flush response");
+                served += 1;
+            }
+
+            assert_eq!(
+                served, expected_requests,
+                "mock host served {served} request(s), expected {expected_requests}"
+            );
+        });
+
+        (endpoint, handle)
+    }
+
     fn mock_connector_summary_json() -> Value {
         let health =
             serde_json::to_value(ConnectorHealth::healthy()).expect("health should serialize");
@@ -11941,6 +13631,28 @@ mod tests {
             "categories": ["code", "dev-tools"],
             "tool_count": 2,
             "max_safety_tier": "risky",
+            "enabled": true,
+            "health": health,
+            "last_health_check": "2026-03-10T00:00:00Z",
+        })
+    }
+
+    fn mock_connector_summary_custom_json(
+        id: &str,
+        name: &str,
+        tool_count: usize,
+        max_safety_tier: &str,
+    ) -> Value {
+        let health =
+            serde_json::to_value(ConnectorHealth::healthy()).expect("health should serialize");
+        json!({
+            "id": id,
+            "name": name,
+            "description": format!("{name} connector surfaced through fcp-host."),
+            "version": "1.2.3",
+            "categories": ["code", "dev-tools"],
+            "tool_count": tool_count,
+            "max_safety_tier": max_safety_tier,
             "enabled": true,
             "health": health,
             "last_health_check": "2026-03-10T00:00:00Z",
@@ -12055,6 +13767,16 @@ mod tests {
         })
     }
 
+    fn mock_discovery_response_with_connectors(connectors: Vec<Value>) -> Value {
+        json!({
+            "connectors": connectors,
+            "registry_version": 7,
+            "supports_streaming": true,
+            "supports_batching": true,
+            "timestamp": "2026-03-10T00:00:00Z"
+        })
+    }
+
     fn mock_inventory_response_json() -> Value {
         json!({
             "connector": mock_connector_summary_json(),
@@ -12081,6 +13803,25 @@ mod tests {
         })
     }
 
+    fn mock_introspection_response_with_tools(connector: Value, tools: Vec<Value>) -> Value {
+        json!({
+            "connector": connector,
+            "tools": tools,
+            "rate_limits": {
+                "limits": [],
+                "tool_pool_map": {}
+            },
+            "archetype": "request_response",
+            "introspection": {
+                "operations": [],
+                "events": [],
+                "resource_types": [],
+                "auth_caps": null,
+                "event_caps": null
+            }
+        })
+    }
+
     fn mock_preflight_response_json(allowed: bool) -> Value {
         serde_json::to_value(if allowed {
             HostPreflightResponse::allowed()
@@ -12088,6 +13829,33 @@ mod tests {
             HostPreflightResponse::denied("connector policy denied the request")
         })
         .expect("preflight response should serialize")
+    }
+
+    fn mock_doctor_report_json() -> Value {
+        serde_json::to_value(HostDoctorReport::baseline("z:work"))
+            .expect("doctor report should serialize")
+    }
+
+    fn mock_budget_report_response_json() -> Value {
+        serde_json::to_value(HostBudgetReportResponse {
+            schema_version: HostBudgetReportResponse::SCHEMA_VERSION.to_string(),
+            generated_at: chrono::Utc::now(),
+            zones: vec![UsageBudgetSnapshot {
+                zone_id: ZoneId::work(),
+                enforcement: BudgetEnforcement::Warn,
+                budgets: vec![UsageBudgetUsage {
+                    metric: UsageMetricKind::Requests,
+                    used: 3,
+                    limit: 10,
+                    remaining: 7,
+                    window_started_at: 1_700_000_000,
+                    window_resets_at: 1_700_000_060,
+                    status: BudgetStatus::Ok,
+                }],
+                updated_at: 1_700_000_001,
+            }],
+        })
+        .expect("budget report should serialize")
     }
 
     fn mock_invoke_response_json(result: Value) -> Value {
@@ -12113,6 +13881,173 @@ mod tests {
             }).collect::<Vec<_>>(),
             "total_duration_ms": ids.len(),
         })
+    }
+
+    fn test_capability_token_arg() -> String {
+        use base64::Engine as _;
+
+        let token = super::CapabilityToken::test_token();
+        base64::engine::general_purpose::STANDARD
+            .encode(token.raw.to_cbor().expect("test token should encode"))
+    }
+
+    fn write_test_package_output(connector_id: &str, version: &str) -> (TempDir, PathBuf) {
+        const PLACEHOLDER_INTERFACE_HASH: &str = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000";
+
+        let tempdir = tempfile::tempdir().expect("temp package dir");
+        let package_dir = tempdir.path().join("package");
+        fs::create_dir_all(&package_dir).expect("package dir");
+
+        let manifest_template = format!(
+            r#"[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "{PLACEHOLDER_INTERFACE_HASH}"
+
+[connector]
+id = "{connector_id}"
+name = "Fixture Connector"
+version = "{version}"
+description = "Fixture connector used by fwc install/update tests"
+archetypes = ["operational"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:work"]
+allowed_targets = ["z:work"]
+forbidden = []
+
+[capabilities]
+required = ["network.dns"]
+optional = []
+forbidden = ["system.exec"]
+
+[provides.operations.echo]
+description = "Echo fixture operation"
+capability = "fixture.echo"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+input_schema = {{ type = "object" }}
+output_schema = {{ type = "object" }}
+
+[sandbox]
+profile = "strict"
+memory_mb = 64
+cpu_percent = 20
+wall_clock_timeout_ms = 1000
+fs_readonly_paths = ["/usr"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+"#
+        );
+        let unchecked = ConnectorManifest::parse_str_unchecked(&manifest_template)
+            .expect("fixture manifest should parse unchecked");
+        let interface_hash = unchecked
+            .compute_interface_hash()
+            .expect("fixture interface hash should compute");
+        let manifest_text =
+            manifest_template.replace(PLACEHOLDER_INTERFACE_HASH, &interface_hash.to_string());
+        let manifest =
+            ConnectorManifest::parse_str(&manifest_text).expect("fixture manifest should validate");
+
+        let binary_path = package_dir.join("fixture-connector");
+        fs::write(&binary_path, format!("fixture:{connector_id}:{version}")).expect("binary");
+        let manifest_path = package_dir.join("manifest.toml");
+        fs::write(&manifest_path, &manifest_text).expect("manifest");
+        let build_metadata_path = package_dir.join("build-metadata.json");
+        fs::write(
+            &build_metadata_path,
+            serde_json::to_vec_pretty(&PackageBuildMetadata {
+                rust_version: "1.86.0-nightly".to_string(),
+                cargo_version: "1.86.0-nightly".to_string(),
+                target_triple: "x86_64-unknown-linux-gnu".to_string(),
+                build_timestamp: "2026-03-11T07:00:00Z".to_string(),
+                profile: "release".to_string(),
+                git_commit: Some("deadbeef".to_string()),
+                git_dirty: Some(false),
+                features: vec![],
+                build_env: std::collections::HashMap::new(),
+                cargo_flags: vec!["--release".to_string()],
+            })
+            .expect("build metadata json"),
+        )
+        .expect("build metadata");
+
+        let package_output = PackageOutput {
+            output_dir: package_dir.clone(),
+            binary_path: binary_path.clone(),
+            manifest_path: manifest_path.clone(),
+            sbom_path: None,
+            build_metadata_path: build_metadata_path.clone(),
+            binary_sha256: super::compute_file_sha256(&binary_path).expect("binary sha"),
+            connector_id: manifest.connector.id.to_string(),
+            version: manifest.connector.version.to_string(),
+        };
+        let package_output_path = package_dir.join(PACKAGE_OUTPUT_FILENAME);
+        fs::write(
+            &package_output_path,
+            serde_json::to_vec_pretty(&package_output).expect("package output json"),
+        )
+        .expect("package output");
+
+        (tempdir, package_output_path)
+    }
+
+    fn mock_inventory_mutation_response_json(
+        kind: ConnectorInventoryMutationKind,
+        dry_run: bool,
+        current: ManagedConnectorConfig,
+        previous: Option<ManagedConnectorConfig>,
+    ) -> Value {
+        serde_json::to_value(ConnectorInventoryMutationResponse {
+            kind,
+            dry_run,
+            connectors_file: "/tmp/fcp-host-connectors.json".to_string(),
+            previous,
+            current,
+            inventory_size: 1,
+            apply: ConnectorInventoryApplyReport {
+                added: if matches!(kind, ConnectorInventoryMutationKind::Install) && !dry_run {
+                    vec!["fcp.github:enterprise:v1".to_string()]
+                } else {
+                    Vec::new()
+                },
+                updated: if matches!(kind, ConnectorInventoryMutationKind::Update) && !dry_run {
+                    vec!["fcp.github:enterprise:v1".to_string()]
+                } else {
+                    Vec::new()
+                },
+                removed: Vec::new(),
+                unchanged: if dry_run {
+                    vec!["fcp.github:enterprise:v1".to_string()]
+                } else {
+                    Vec::new()
+                },
+                registry_version: 11,
+            },
+            admin_state: StartupReconciliationReport {
+                reconciled_at: chrono::Utc::now(),
+                tracked_connectors: 1,
+                created_connectors: 0,
+                observed_updates: if dry_run { 0 } else { 1 },
+                drifted_connectors: 0,
+                entries: Vec::new(),
+            },
+        })
+        .expect("inventory mutation response should serialize")
     }
 
     fn mock_github_host_routes(extra: StdBTreeMap<String, Value>) -> StdBTreeMap<String, Value> {
@@ -12279,6 +14214,7 @@ mod tests {
 
     #[test]
     fn execute_renders_invoke_output_with_inline_template() {
+        let capability_token = test_capability_token_arg();
         let (host, server) = spawn_mock_host(
             mock_github_host_routes(StdBTreeMap::from([
                 (
@@ -12304,6 +14240,8 @@ mod tests {
             "issues.create",
             "--input",
             "{\"owner\":\"octocat\",\"repo\":\"hello-world\",\"title\":\"Bug report\"}",
+            "--capability-token",
+            &capability_token,
             "--template",
             "{{command}} {{connector.slug}} {{operation.requested_selector}}",
         ]);
@@ -12315,6 +14253,7 @@ mod tests {
 
     #[test]
     fn execute_invoke_accepts_set_bindings_for_payload_authoring() {
+        let capability_token = test_capability_token_arg();
         let (host, server) = spawn_mock_host(
             mock_github_host_routes(StdBTreeMap::from([
                 (
@@ -12345,6 +14284,8 @@ mod tests {
             "repo=hello-world",
             "--set",
             "title=Bug report",
+            "--capability-token",
+            &capability_token,
         ]);
 
         server.join().expect("mock host thread should complete");
@@ -12580,6 +14521,40 @@ mod tests {
             "fcp.github:enterprise:v1"
         );
         assert_eq!(payload["filter_gaps"][0]["field"], "filters.zone");
+    }
+
+    #[test]
+    fn execute_export_tools_without_host_stays_in_offline_artifact_mode() {
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "export-tools", "--format", "mcp", "github"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["source"], "workspace-manifests");
+        assert_eq!(payload["mode"], "offline-artifact");
+    }
+
+    #[test]
+    fn execute_export_tools_with_host_uses_live_introspection() {
+        let (host, server) = spawn_mock_host(mock_github_host_routes(StdBTreeMap::new()), 2);
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "export-tools",
+            "--format",
+            "mcp",
+            "github",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["mode"], "live-introspection");
+        assert_eq!(payload["connector_count"], 1);
+        assert_eq!(payload["tool_count"], 2);
+        assert_eq!(payload["tools"][0]["name"], "github.create_issue");
     }
 
     #[test]
@@ -13399,6 +15374,7 @@ mod tests {
 
     #[test]
     fn execute_preview_alias_resolves_to_simulate() {
+        let capability_token = test_capability_token_arg();
         let (host, server) = spawn_mock_host(
             mock_github_host_routes(StdBTreeMap::from([(
                 "POST /rpc/preflight".to_owned(),
@@ -13416,12 +15392,300 @@ mod tests {
             "issues.create",
             "--input",
             "{\"owner\":\"octocat\",\"repo\":\"hello-world\",\"title\":\"Bug report\"}",
+            "--capability-token",
+            &capability_token,
         ]);
 
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "simulate");
         assert_eq!(payload["phase"], "preflight");
+    }
+
+    #[test]
+    fn execute_simulate_host_requires_real_capability_token() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            "http://127.0.0.1:9999",
+            "simulate",
+            "github",
+            "issues.create",
+            "--input",
+            "{\"owner\":\"octocat\",\"repo\":\"hello-world\",\"title\":\"Bug report\"}",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["command"], "simulate");
+        assert_eq!(payload["error"]["type"], "missing-capability-token");
+    }
+
+    #[test]
+    fn execute_doctor_reads_live_host_report() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([("POST /doctor".to_owned(), mock_doctor_report_json())]),
+            1,
+        );
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "--host", &host, "doctor", "--zone", "z:work",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "doctor");
+        assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["report"]["zone_id"], "z:work");
+        assert_eq!(payload["summary"]["overall_status"], "OK");
+    }
+
+    #[test]
+    fn execute_budget_reads_live_host_report() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([(
+                "POST /rpc/budget/report".to_owned(),
+                mock_budget_report_response_json(),
+            )]),
+            1,
+        );
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "--host", &host, "budget"]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "budget");
+        assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["summary"]["zone_count"], 1);
+        assert_eq!(payload["zones"][0]["zone_id"], "z:work");
+    }
+
+    #[test]
+    fn execute_install_applies_live_host_inventory_mutation() {
+        let (_package_dir, package_output_path) =
+            write_test_package_output("fcp.github:enterprise:v1", "1.2.4");
+        let package_output_path = package_output_path.display().to_string();
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([(
+                "POST /rpc/connectors/apply".to_owned(),
+                mock_inventory_mutation_response_json(
+                    ConnectorInventoryMutationKind::Install,
+                    false,
+                    ManagedConnectorConfig {
+                        id: "fcp.github:enterprise:v1".to_string(),
+                        binary: "/opt/fcp/github-enterprise".to_string(),
+                        name: Some("GitHub Enterprise".to_string()),
+                        description: Some("Live installed GitHub connector".to_string()),
+                        args: Vec::new(),
+                        env: StdBTreeMap::new(),
+                        config: None,
+                        categories: vec!["code".to_string()],
+                        version: Some("1.2.4".to_string()),
+                    },
+                    None,
+                ),
+            )]),
+            1,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "install",
+            &package_output_path,
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "install");
+        assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["activation"]["live_reload_applied"], true);
+        assert_eq!(payload["activation"]["registry_version"], 11);
+        assert_eq!(
+            payload["installed"]["canonical_id"],
+            "fcp.github:enterprise:v1"
+        );
+    }
+
+    #[test]
+    fn execute_update_dry_run_uses_live_host_inventory_preview() {
+        let (_package_dir, package_output_path) =
+            write_test_package_output("fcp.github:enterprise:v1", "1.2.4");
+        let package_output_path = package_output_path.display().to_string();
+        let previous = ManagedConnectorConfig {
+            id: "fcp.github:enterprise:v1".to_string(),
+            binary: "/opt/fcp/github-enterprise-old".to_string(),
+            name: Some("GitHub Enterprise".to_string()),
+            description: Some("Existing live GitHub connector".to_string()),
+            args: vec!["--existing".to_string()],
+            env: StdBTreeMap::from([("LOG_LEVEL".to_string(), "debug".to_string())]),
+            config: Some(json!({ "profile": "work" })),
+            categories: vec!["code".to_string(), "dev-tools".to_string()],
+            version: Some("1.2.3".to_string()),
+        };
+        let planned = ManagedConnectorConfig {
+            id: "fcp.github:enterprise:v1".to_string(),
+            binary: "/opt/fcp/github-enterprise-new".to_string(),
+            name: Some("GitHub Enterprise".to_string()),
+            description: Some("Updated live GitHub connector".to_string()),
+            args: previous.args.clone(),
+            env: previous.env.clone(),
+            config: previous.config.clone(),
+            categories: previous.categories.clone(),
+            version: Some("1.2.4".to_string()),
+        };
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "POST /rpc/connectors/apply".to_owned(),
+                    mock_inventory_mutation_response_json(
+                        ConnectorInventoryMutationKind::Update,
+                        true,
+                        planned,
+                        Some(previous),
+                    ),
+                ),
+            ]),
+            2,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "update",
+            "github",
+            "--source",
+            &package_output_path,
+            "--dry-run",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "update");
+        assert_eq!(payload["mode"], "dry-run");
+        assert_eq!(payload["activation"]["inventory_updated"], false);
+        assert_eq!(payload["response"]["dry_run"], true);
+        assert_eq!(payload["response"]["current"]["args"][0], "--existing");
+        assert_eq!(payload["updated"]["version"], "1.2.4");
+    }
+
+    #[test]
+    fn execute_capabilities_report_uses_real_history_entries() {
+        let root = std::env::temp_dir().join(format!(
+            "fwc-capabilities-history-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let history_path = root.join("history.jsonl");
+        let _guard = super::install_test_history_path(history_path.clone());
+
+        super::append_history_entry(
+            super::history::OpStatus::Success,
+            "fcp.slack",
+            "slack.post_message",
+            Some("z:work"),
+            &json!({"channel":"C123","text":"hello"}),
+            Some(&json!({"ok":true})),
+            None,
+            None,
+            12,
+        )
+        .expect("history append should succeed");
+        super::append_history_entry(
+            super::history::OpStatus::Denied,
+            "fcp.discord",
+            "delete_message",
+            Some("z:work"),
+            &json!({"channel_id":"1","message_id":"2"}),
+            Some(&json!({"allowed":false})),
+            Some("policy denied".to_owned()),
+            None,
+            0,
+        )
+        .expect("history append should succeed");
+        super::append_history_entry(
+            super::history::OpStatus::Simulated,
+            "fcp.slack",
+            "slack.post_message",
+            Some("z:work"),
+            &json!({"channel":"C123","text":"preview"}),
+            Some(&json!({"allowed":true})),
+            None,
+            None,
+            0,
+        )
+        .expect("history append should succeed");
+
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "capabilities", "report"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "capabilities");
+        assert_eq!(payload["subcommand"], "report");
+        assert_eq!(payload["summary"]["aggregate_count"], 2);
+        assert_eq!(payload["summary"]["skipped_simulated"], 1);
+        assert_eq!(payload["zones"][0]["zone_id"], "z:work");
+        assert!(
+            payload["zones"][0]["capabilities"]
+                .as_array()
+                .is_some_and(|entries| entries
+                    .iter()
+                    .any(|entry| entry["capability_id"] == "slack.write"))
+        );
+        assert!(
+            payload["zones"][0]["capabilities"]
+                .as_array()
+                .is_some_and(|entries| entries
+                    .iter()
+                    .any(|entry| entry["capability_id"] == "discord.delete"))
+        );
+    }
+
+    #[test]
+    fn execute_capabilities_suggest_filters_review_risky() {
+        let root = std::env::temp_dir().join(format!(
+            "fwc-capabilities-suggest-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let history_path = root.join("history.jsonl");
+        let _guard = super::install_test_history_path(history_path.clone());
+
+        super::append_history_entry(
+            super::history::OpStatus::Denied,
+            "fcp.discord",
+            "delete_message",
+            Some("z:work"),
+            &json!({"channel_id":"1","message_id":"2"}),
+            Some(&json!({"allowed":false})),
+            Some("policy denied".to_owned()),
+            None,
+            0,
+        )
+        .expect("history append should succeed");
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "capabilities",
+            "suggest",
+            "--filter",
+            "review-risky",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "capabilities");
+        assert_eq!(payload["subcommand"], "suggest");
+        assert_eq!(payload["recommendations"][0]["suggestion"], "review_risky");
+        assert_eq!(
+            payload["recommendations"][0]["key"]["capability_id"],
+            "discord.delete"
+        );
     }
 
     // ── Intent recovery: typo auto-corrections (readonly) ───────────────
@@ -14065,6 +16329,7 @@ mod tests {
 
     #[test]
     fn execute_map_inline_json_array() {
+        let capability_token = test_capability_token_arg();
         let (host, server) = spawn_mock_host(
             mock_github_host_routes(StdBTreeMap::from([(
                 "POST /rpc/batch".to_owned(),
@@ -14081,6 +16346,8 @@ mod tests {
             "github.get_issue",
             "--inputs",
             r#"[{"owner":"octocat","repo":"hello-world","number":1},{"owner":"octocat","repo":"hello-world","number":2},{"owner":"octocat","repo":"hello-world","number":3}]"#,
+            "--capability-token",
+            &capability_token,
         ]);
 
         server.join().expect("mock host thread should complete");
@@ -14101,6 +16368,7 @@ mod tests {
 
     #[test]
     fn execute_map_on_error_continue() {
+        let capability_token = test_capability_token_arg();
         let (host, server) = spawn_mock_host(
             mock_github_host_routes(StdBTreeMap::from([(
                 "POST /rpc/batch".to_owned(),
@@ -14119,6 +16387,8 @@ mod tests {
             r#"[{"owner":"octocat","repo":"hello-world","number":1}]"#,
             "--on-error",
             "continue",
+            "--capability-token",
+            &capability_token,
         ]);
 
         server.join().expect("mock host thread should complete");
@@ -14129,6 +16399,7 @@ mod tests {
 
     #[test]
     fn execute_map_custom_concurrency() {
+        let capability_token = test_capability_token_arg();
         let (host, server) = spawn_mock_host(
             mock_github_host_routes(StdBTreeMap::from([(
                 "POST /rpc/batch".to_owned(),
@@ -14147,6 +16418,8 @@ mod tests {
             r#"[{"owner":"octocat","repo":"hello-world","number":1},{"owner":"octocat","repo":"hello-world","number":2}]"#,
             "--concurrency",
             "10",
+            "--capability-token",
+            &capability_token,
         ]);
 
         server.join().expect("mock host thread should complete");
@@ -14188,6 +16461,7 @@ mod tests {
 
     #[test]
     fn execute_map_template_with_items() {
+        let capability_token = test_capability_token_arg();
         let (host, server) = spawn_mock_host(
             mock_github_host_routes(StdBTreeMap::from([(
                 "POST /rpc/batch".to_owned(),
@@ -14206,6 +16480,8 @@ mod tests {
             r#"{"owner":"octocat","repo":"hello-world","number":{{item}}}"#,
             "--items",
             "1,2,3",
+            "--capability-token",
+            &capability_token,
         ]);
 
         server.join().expect("mock host thread should complete");
@@ -14219,6 +16495,7 @@ mod tests {
 
     #[test]
     fn execute_map_preview_capped_at_three() {
+        let capability_token = test_capability_token_arg();
         let (host, server) = spawn_mock_host(
             mock_github_host_routes(StdBTreeMap::from([(
                 "POST /rpc/batch".to_owned(),
@@ -14235,6 +16512,8 @@ mod tests {
             "github.get_issue",
             "--inputs",
             r#"[{"owner":"octocat","repo":"hello-world","number":1},{"owner":"octocat","repo":"hello-world","number":2},{"owner":"octocat","repo":"hello-world","number":3},{"owner":"octocat","repo":"hello-world","number":4},{"owner":"octocat","repo":"hello-world","number":5}]"#,
+            "--capability-token",
+            &capability_token,
         ]);
 
         server.join().expect("mock host thread should complete");
@@ -14249,6 +16528,7 @@ mod tests {
 
     #[test]
     fn execute_map_batch_alias() {
+        let capability_token = test_capability_token_arg();
         let (host, server) = spawn_mock_host(
             mock_github_host_routes(StdBTreeMap::from([(
                 "POST /rpc/batch".to_owned(),
@@ -14265,6 +16545,8 @@ mod tests {
             "github.get_issue",
             "--inputs",
             r#"[{"owner":"octocat","repo":"hello-world","number":1}]"#,
+            "--capability-token",
+            &capability_token,
         ]);
 
         server.join().expect("mock host thread should complete");
@@ -14649,6 +16931,7 @@ depends_on = ["missing"]
 
     #[test]
     fn execute_batch_file_valid() {
+        let capability_token = test_capability_token_arg();
         let file = batch_test_file(
             "valid.jsonl",
             r#"{"id":"s1","connector":"github","operation":"get_issue","input":{"owner":"octocat","repo":"hello-world","number":1}}
@@ -14662,8 +16945,16 @@ depends_on = ["missing"]
             3,
         );
         let file_path = file.display().to_string();
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "--host", &host, "batch-file", &file_path]);
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "batch-file",
+            &file_path,
+            "--capability-token",
+            &capability_token,
+        ]);
 
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Success.into());
@@ -14677,6 +16968,7 @@ depends_on = ["missing"]
 
     #[test]
     fn execute_batch_file_all_independent_single_wave() {
+        let capability_token = test_capability_token_arg();
         let file = batch_test_file(
             "independent.jsonl",
             r#"{"id":"a","connector":"github","operation":"get_issue","input":{"owner":"octocat","repo":"hello-world","number":1}}
@@ -14691,8 +16983,16 @@ depends_on = ["missing"]
             3,
         );
         let file_path = file.display().to_string();
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "--host", &host, "batch-file", &file_path]);
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "batch-file",
+            &file_path,
+            "--capability-token",
+            &capability_token,
+        ]);
 
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Success.into());
@@ -14703,6 +17003,7 @@ depends_on = ["missing"]
 
     #[test]
     fn execute_batch_file_custom_concurrency() {
+        let capability_token = test_capability_token_arg();
         let file = batch_test_file(
             "concurrency.jsonl",
             r#"{"id":"a","connector":"github","operation":"get_issue","input":{"owner":"octocat","repo":"hello-world","number":1}}"#,
@@ -14724,6 +17025,8 @@ depends_on = ["missing"]
             &file_path,
             "--concurrency",
             "10",
+            "--capability-token",
+            &capability_token,
         ]);
 
         server.join().expect("mock host thread should complete");
@@ -14759,6 +17062,7 @@ depends_on = ["missing"]
 
     #[test]
     fn execute_batch_ops_alias() {
+        let capability_token = test_capability_token_arg();
         let file = batch_test_file(
             "alias.jsonl",
             r#"{"id":"a","connector":"github","operation":"get_issue","input":{"owner":"octocat","repo":"hello-world","number":1}}"#,
@@ -14771,8 +17075,16 @@ depends_on = ["missing"]
             3,
         );
         let file_path = file.display().to_string();
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "--host", &host, "batch-ops", &file_path]);
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "batch-ops",
+            &file_path,
+            "--capability-token",
+            &capability_token,
+        ]);
 
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Success.into());
@@ -14783,12 +17095,17 @@ depends_on = ["missing"]
 
     #[test]
     fn prepare_cli_parses_serve_mcp_command() {
+        let capability_token = test_capability_token_arg();
         let prepared = prepare_cli(&[
             "fwc".to_owned(),
             "serve-mcp".to_owned(),
             "github".to_owned(),
             "--zone".to_owned(),
             "z:work".to_owned(),
+            "--principal".to_owned(),
+            "agent:blackoak".to_owned(),
+            "--capability-token".to_owned(),
+            capability_token,
         ])
         .unwrap();
 
@@ -14796,8 +17113,119 @@ depends_on = ["missing"]
             Commands::ServeMcp(args) => {
                 assert_eq!(args.connector.as_deref(), Some("github"));
                 assert_eq!(args.zone.as_deref(), Some("z:work"));
+                assert_eq!(args.principal.as_deref(), Some("agent:blackoak"));
+                assert!(args.auth.capability_token.is_some());
             }
             command => panic!("expected serve-mcp command, got {command:?}"),
         }
+    }
+
+    #[test]
+    fn execute_serve_mcp_requires_live_host() {
+        let outcome = execute(&[
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "serve-mcp".to_owned(),
+            "github".to_owned(),
+        ])
+        .expect("execution should not fail internally");
+        let payload: Value =
+            serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
+
+        assert_eq!(outcome.exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "serve-mcp");
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
+    }
+
+    #[test]
+    fn execute_serve_mcp_requires_real_capability_token() {
+        let outcome = execute(&[
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "--host".to_owned(),
+            "http://127.0.0.1:8787".to_owned(),
+            "serve-mcp".to_owned(),
+            "github".to_owned(),
+        ])
+        .expect("execution should not fail internally");
+        let payload: Value =
+            serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
+
+        assert_eq!(outcome.exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["command"], "serve-mcp");
+        assert_eq!(payload["error"]["type"], "missing-capability-token");
+    }
+
+    #[test]
+    fn execute_serve_mcp_rejects_unprovable_live_zone_filter() {
+        let capability_token = test_capability_token_arg();
+        let outcome = execute(&[
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "--host".to_owned(),
+            "http://127.0.0.1:8787".to_owned(),
+            "serve-mcp".to_owned(),
+            "github".to_owned(),
+            "--zone".to_owned(),
+            "z:work".to_owned(),
+            "--capability-token".to_owned(),
+            capability_token,
+        ])
+        .expect("execution should not fail internally");
+        let payload: Value =
+            serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
+
+        assert_eq!(outcome.exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["command"], "serve-mcp");
+        assert_eq!(payload["error"]["type"], "unsupported-live-zone-filter");
+    }
+
+    #[test]
+    fn host_mcp_tool_definitions_use_live_tool_names_and_selectors() {
+        let response: HostDiscoveryResponse =
+            serde_json::from_value(mock_discovery_response_json())
+                .expect("mock discovery response should deserialize");
+        let catalog = HostConnectorCatalog::from_response(&response);
+        let connector = catalog
+            .connectors
+            .first()
+            .expect("mock catalog should contain a connector");
+        let introspection: HostIntrospectionResponse =
+            serde_json::from_value(mock_introspection_response_json())
+                .expect("mock introspection response should deserialize");
+
+        let tools = host_mcp_tool_definitions(connector, &introspection);
+
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0].name, "github.create_issue");
+        assert_eq!(tools[0].connector_id, "github");
+        assert_eq!(tools[0].operation_id, "github.create_issue");
+    }
+
+    #[test]
+    fn mcp_tool_invoke_args_prefers_explicit_zone_over_host_default() {
+        let tool = serve_mcp::McpToolDefinition::new(
+            "github.create_issue",
+            "Create an issue",
+            json!({"type": "object"}),
+            "github",
+            "github.create_issue",
+        );
+        let host = ResolvedHostConfig {
+            endpoint: "http://127.0.0.1:8787".to_owned(),
+            default_zone: Some("z:work".to_owned()),
+        };
+
+        let args = mcp_tool_invoke_args(
+            &tool,
+            &json!({"title": "hello"}),
+            Some(&host),
+            Some("agent:blackoak"),
+            Some("z:community"),
+            &LiveAuthArgs::default(),
+        );
+
+        assert_eq!(args.zone.as_deref(), Some("z:community"));
+        assert_eq!(args.principal.as_deref(), Some("agent:blackoak"));
     }
 }

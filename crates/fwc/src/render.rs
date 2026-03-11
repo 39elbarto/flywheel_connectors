@@ -190,6 +190,11 @@ pub fn render(value: Value, format: OutputFormat) -> Result<String> {
     render_with_options(value, format, &RenderOptions::default())
 }
 
+pub fn apply_extract_filter(value: &Value, filter: &str) -> Result<Value> {
+    let extract = ExtractRender::inline(filter)?;
+    render_extract(value, &extract)
+}
+
 /// Render a JSON value according to the chosen output format plus any
 /// post-processing transforms such as Handlebars templating.
 pub fn render_with_options(

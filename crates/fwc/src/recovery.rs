@@ -284,12 +284,7 @@ pub fn correction_safety(resolution: &CommandResolution) -> CorrectionSafety {
 pub fn is_mutating_command(command: &str) -> bool {
     matches!(
         command,
-        "invoke"
-            | "install"
-            | "update"
-            | "pin"
-            | "unpin"
-            | "do"
+        "invoke" | "install" | "update" | "pin" | "unpin" | "do"
     )
 }
 
@@ -956,9 +951,28 @@ mod tests {
     #[test]
     fn mutating_and_readonly_are_disjoint() {
         let all_commands = [
-            "guide", "task", "plan", "explain", "do", "list", "search", "show", "ops", "schema",
-            "examples", "doctor", "status", "budget", "capabilities", "install", "update",
-            "pin", "unpin", "config", "invoke", "simulate",
+            "guide",
+            "task",
+            "plan",
+            "explain",
+            "do",
+            "list",
+            "search",
+            "show",
+            "ops",
+            "schema",
+            "examples",
+            "doctor",
+            "status",
+            "budget",
+            "capabilities",
+            "install",
+            "update",
+            "pin",
+            "unpin",
+            "config",
+            "invoke",
+            "simulate",
         ];
         for cmd in all_commands {
             assert!(
@@ -1173,9 +1187,28 @@ mod tests {
     #[test]
     fn all_aliases_resolve_to_known_canonical_commands() {
         let known = [
-            "guide", "task", "plan", "explain", "do", "list", "search", "show", "ops", "schema",
-            "examples", "doctor", "status", "budget", "capabilities", "install", "update",
-            "pin", "unpin", "config", "invoke", "simulate",
+            "guide",
+            "task",
+            "plan",
+            "explain",
+            "do",
+            "list",
+            "search",
+            "show",
+            "ops",
+            "schema",
+            "examples",
+            "doctor",
+            "status",
+            "budget",
+            "capabilities",
+            "install",
+            "update",
+            "pin",
+            "unpin",
+            "config",
+            "invoke",
+            "simulate",
         ];
         let test_aliases = [
             "info",
@@ -1260,14 +1293,50 @@ mod tests {
     #[test]
     fn all_typos_resolve_to_known_canonical_commands() {
         let known = [
-            "guide", "task", "plan", "explain", "list", "search", "show", "ops", "schema",
-            "examples", "doctor", "status", "budget", "capabilities", "install", "update",
-            "config", "invoke", "simulate", "pin", "unpin",
+            "guide",
+            "task",
+            "plan",
+            "explain",
+            "list",
+            "search",
+            "show",
+            "ops",
+            "schema",
+            "examples",
+            "doctor",
+            "status",
+            "budget",
+            "capabilities",
+            "install",
+            "update",
+            "config",
+            "invoke",
+            "simulate",
+            "pin",
+            "unpin",
         ];
         let test_typos = [
-            "gudie", "taks", "paln", "expalin", "lsit", "serach", "shwo", "osp", "schmea",
-            "exmaples", "docotr", "stauts", "budgte", "capabilties", "insatll", "udpate",
-            "conifg", "invoe", "simlate", "pni", "unpni",
+            "gudie",
+            "taks",
+            "paln",
+            "expalin",
+            "lsit",
+            "serach",
+            "shwo",
+            "osp",
+            "schmea",
+            "exmaples",
+            "docotr",
+            "stauts",
+            "budgte",
+            "capabilties",
+            "insatll",
+            "udpate",
+            "conifg",
+            "invoe",
+            "simlate",
+            "pni",
+            "unpni",
         ];
         for typo in test_typos {
             let res = resolve_command(typo);
@@ -1285,7 +1354,9 @@ mod tests {
 
     #[test]
     fn typo_to_readonly_is_safe_auto_correct() {
-        let readonly_typos = ["gudie", "lsit", "serach", "shwo", "osp", "schmea", "exmaples", "stauts", "paln"];
+        let readonly_typos = [
+            "gudie", "lsit", "serach", "shwo", "osp", "schmea", "exmaples", "stauts", "paln",
+        ];
         for typo in readonly_typos {
             let res = resolve_command(typo).unwrap();
             assert_eq!(

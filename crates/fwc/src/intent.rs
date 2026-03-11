@@ -291,7 +291,9 @@ fn build_plan(
     action: &ActionSignals,
 ) -> PlanBuild {
     match action.family {
-        "lifecycle" => build_lifecycle_plan(request, zone, payload_literal, chosen_connector, action),
+        "lifecycle" => {
+            build_lifecycle_plan(request, zone, payload_literal, chosen_connector, action)
+        }
         "config" => build_config_plan(request, zone, payload_literal, chosen_connector, action),
         "unsupported" => build_unsupported_plan(zone, chosen_connector, action),
         "discovery" => build_discovery_plan(request, zone, normalized_intent, chosen_connector),
@@ -543,7 +545,10 @@ fn build_unsupported_plan(
     );
 
     let Some(connector) = chosen_connector else {
-        plan.summary = format!("`{}` is not currently a supported real `fwc` primitive.", action.verb);
+        plan.summary = format!(
+            "`{}` is not currently a supported real `fwc` primitive.",
+            action.verb
+        );
         plan.missing_information.push(
             "Name the connector explicitly if you want the compiler to suggest the closest real inspection commands."
                 .to_owned(),
@@ -2702,7 +2707,10 @@ mod tests {
         let plan = compile(&request("tail the github connector logs"));
         assert_eq!(plan.template, "unsupported");
         assert_eq!(plan.status, "unsupported");
-        assert_eq!(plan.steps[1].command_line, "fwc history --connector github --limit 20");
+        assert_eq!(
+            plan.steps[1].command_line,
+            "fwc history --connector github --limit 20"
+        );
     }
 
     #[test]

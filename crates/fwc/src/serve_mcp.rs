@@ -591,21 +591,31 @@ pub fn state_from_connectors(
     config: McpServerConfig,
 ) -> McpServerState {
     let options = export_tools::ExportOptions::default();
-    let mut builder = McpServerState::builder().with_config(config);
-
-    for connector in connectors {
-        for operation in &connector.operations {
+    let tools = connectors.iter().flat_map(|connector| {
+        connector.operations.iter().map(|operation| {
             let tool = export_tools::to_mcp_tool(operation, &options);
-            builder = builder.with_tool(McpToolDefinition::new(
+            McpToolDefinition::new(
                 tool.name,
                 tool.description,
                 tool.input_schema,
                 connector.slug.clone(),
                 operation.preferred_selector.clone(),
-            ));
-        }
-    }
+            )
+        })
+    });
+    state_from_tools(tools, config)
+}
 
+/// Build an MCP server state from already-prepared tool definitions.
+#[must_use]
+pub fn state_from_tools<I>(tools: I, config: McpServerConfig) -> McpServerState
+where
+    I: IntoIterator<Item = McpToolDefinition>,
+{
+    let mut builder = McpServerState::builder().with_config(config);
+    for tool in tools {
+        builder = builder.with_tool(tool);
+    }
     builder.build()
 }
 

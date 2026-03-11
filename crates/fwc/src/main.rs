@@ -14536,7 +14536,10 @@ deny_ptrace = true
             "code",
         ]);
 
-        server.join().expect("mock host thread should complete");
+        let _ = server;
+        panic!(
+            "recipe dry-run payload: exit_code={exit_code:?}, payload={payload}"
+        );
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["source"], "host-admin-api");
         assert_eq!(payload["filters"]["category"], "code");

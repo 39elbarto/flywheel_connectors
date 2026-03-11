@@ -361,7 +361,7 @@ fn build_live_capability_token(
     zone_id: &ZoneId,
 ) -> CapabilityToken {
     let now = Utc::now();
-    CapabilityTokenBuilder::new()
+    let raw = CapabilityTokenBuilder::new()
         .capability_id(capability_id)
         .zone_id(zone_id.as_str())
         .principal(principal)
@@ -369,7 +369,8 @@ fn build_live_capability_token(
         .issuer("node:test")
         .validity(now, now + chrono::Duration::hours(1))
         .sign(signing_key)
-        .expect("capability token signing should succeed")
+        .expect("capability token signing should succeed");
+    CapabilityToken { raw }
 }
 
 fn build_invoke_request(
@@ -810,14 +811,23 @@ struct UnixHostProcess {
 
 #[cfg(unix)]
 impl UnixHostProcess {
+    #[allow(dead_code)]
     async fn spawn(
         connector_configs: Vec<serde_json::Value>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::spawn_with_env(connector_configs, &[]).await
+    }
+
+    async fn spawn_with_env(
+        connector_configs: Vec<serde_json::Value>,
+        extra_env: &[(&str, &str)],
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let socket_path = unique_unix_socket_path()?;
         let base_url = "http://localhost".to_string();
         let lifecycle_state_dir = tempfile::tempdir()?;
         let lifecycle_state_path = lifecycle_state_dir.path().join("lifecycle-state.json");
-        let mut child = Command::new(env!("CARGO_BIN_EXE_fcp-host"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_fcp-host"));
+        command
             .env("FCP_HOST_BIND", format!("unix://{}", socket_path.display()))
             .env(
                 "FCP_HOST_CONNECTORS",
@@ -825,8 +835,11 @@ impl UnixHostProcess {
             )
             .env("FCP_HOST_LIFECYCLE_STATE_FILE", &lifecycle_state_path)
             .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()?;
+            .stderr(Stdio::piped());
+        for (name, value) in extra_env {
+            command.env(name, value);
+        }
+        let mut child = command.spawn()?;
         let (stderr_logs, stderr_thread) = spawn_stderr_capture(&mut child)?;
 
         let client = build_http_client(

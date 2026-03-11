@@ -7295,28 +7295,31 @@ fn suggest_after_dispatch(
     }
     suggestions.truncate(args.limit);
 
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "suggest");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "suggest",
+        "source": "workspace-manifests",
+        "mode": "offline-artifact",
+        "suggest_mode": "after",
+        "message": format!(
+            "Found {} follow-up suggestions after '{after_op}'.",
+            suggestions.len()
+        ),
+        "after": {
+            "operation": after_op,
+            "connector": source_connector,
+            "summary": source_summary,
+        },
+        "suggestions": suggestions,
+        "next_actions": [
+            format!("fwc schema {} <operation> --offline", source_connector),
+            "Use `fwc suggest --goal '<next intent>' --offline` for goal-directed search.",
+        ],
+    });
+    envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
-        payload: json!({
-            "status": "ok",
-            "command": "suggest",
-            "source": "workspace-manifests",
-            "mode": "offline-artifact",
-            "suggest_mode": "after",
-            "message": format!(
-                "Found {} follow-up suggestions after '{after_op}'.",
-                suggestions.len()
-            ),
-            "after": {
-                "operation": after_op,
-                "connector": source_connector,
-                "summary": source_summary,
-            },
-            "suggestions": suggestions,
-            "next_actions": [
-                format!("fwc schema {} <operation> --offline", source_connector),
-                "Use `fwc suggest --goal '<next intent>' --offline` for goal-directed search.",
-            ],
-        }),
+        payload,
         exit_code: CliExitCode::Success,
     })
 }
@@ -10370,23 +10373,26 @@ fn pipe_dispatch(args: &PipeArgs) -> Result<DispatchOutcome> {
         preview_input: None,
     };
 
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "pipe");
+    let mut payload = json!({
+        "status": "planned",
+        "command": "pipe",
+        "message": format!(
+            "Pipe plan: {} -> {} ({} mapping rule(s)). \
+             Execution requires host integration (not yet available).",
+            args.source, args.target, plan.mapping.rules.len()
+        ),
+        "plan": plan,
+        "dry_run": args.dry_run,
+        "include_intermediate": args.include_intermediate,
+        "next_actions": [
+            format!("fwc schema {} --scaffold", args.source),
+            format!("fwc schema {} --required-only", args.target),
+        ],
+    });
+    envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
-        payload: json!({
-            "status": "planned",
-            "command": "pipe",
-            "message": format!(
-                "Pipe plan: {} -> {} ({} mapping rule(s)). \
-                 Execution requires host integration (not yet available).",
-                args.source, args.target, plan.mapping.rules.len()
-            ),
-            "plan": plan,
-            "dry_run": args.dry_run,
-            "include_intermediate": args.include_intermediate,
-            "next_actions": [
-                format!("fwc schema {} --scaffold", args.source),
-                format!("fwc schema {} --required-only", args.target),
-            ],
-        }),
+        payload,
         exit_code: CliExitCode::Success,
     })
 }
@@ -11140,21 +11146,24 @@ fn recipe_list_dispatch() -> Result<DispatchOutcome> {
         acc
     });
 
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "recipe");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "recipe",
+        "subcommand": "list",
+        "message": "Bundled recipe library loaded. Built-ins include editable defaults so agents can inspect, estimate, and export them deterministically before customization.",
+        "recipe_count": recipes.len(),
+        "categories": category_counts,
+        "recipes": recipes,
+        "next_actions": [
+            "fwc recipe show github-pr-review-notify".to_owned(),
+            "fwc recipe dry-run github-pr-review-notify".to_owned(),
+            "fwc recipe export github-pr-review-notify".to_owned(),
+        ],
+    });
+    envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
-        payload: json!({
-            "status": "ok",
-            "command": "recipe",
-            "subcommand": "list",
-            "message": "Bundled recipe library loaded. Built-ins include editable defaults so agents can inspect, estimate, and export them deterministically before customization.",
-            "recipe_count": recipes.len(),
-            "categories": category_counts,
-            "recipes": recipes,
-            "next_actions": [
-                "fwc recipe show github-pr-review-notify".to_owned(),
-                "fwc recipe dry-run github-pr-review-notify".to_owned(),
-                "fwc recipe export github-pr-review-notify".to_owned(),
-            ],
-        }),
+        payload,
         exit_code: CliExitCode::Success,
     })
 }
@@ -11173,24 +11182,27 @@ fn recipe_show_dispatch(args: &RecipeRefArgs) -> Result<DispatchOutcome> {
     let estimate = default_recipe_estimate(&catalog, &recipe)
         .ok_or_else(|| anyhow::anyhow!("built-in recipe estimate unexpectedly failed"))?;
 
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "recipe");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "recipe",
+        "subcommand": "show",
+        "recipe": {
+            "slug": recipe.slug,
+            "title": recipe.title,
+            "category": recipe.category,
+            "summary": recipe.summary,
+            "required_connectors": recipe.required_connectors,
+            "export_path": recipe.export_path,
+        },
+        "definition": recipe.definition,
+        "validation": recipe.validation,
+        "estimate": estimate,
+        "next_actions": recipe_next_actions(&args.recipe),
+    });
+    envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
-        payload: json!({
-            "status": "ok",
-            "command": "recipe",
-            "subcommand": "show",
-            "recipe": {
-                "slug": recipe.slug,
-                "title": recipe.title,
-                "category": recipe.category,
-                "summary": recipe.summary,
-                "required_connectors": recipe.required_connectors,
-                "export_path": recipe.export_path,
-            },
-            "definition": recipe.definition,
-            "validation": recipe.validation,
-            "estimate": estimate,
-            "next_actions": recipe_next_actions(&args.recipe),
-        }),
+        payload,
         exit_code: CliExitCode::Success,
     })
 }
@@ -11416,8 +11428,16 @@ fn recipe_export_dispatch(args: &RecipeRefArgs) -> DispatchOutcome {
         Err(outcome) => return outcome,
     };
 
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "recipe");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "recipe",
+        "subcommand": "export",
+        "content": recipe.toml,
+    });
+    envelope.inject_into(&mut payload);
     DispatchOutcome {
-        payload: Value::String(recipe.toml),
+        payload,
         exit_code: CliExitCode::Success,
     }
 }
@@ -11640,27 +11660,30 @@ fn pipeline_list_dispatch(roots: &pipe::PipelineRoots) -> Result<DispatchOutcome
     ];
     let valid_count = pipelines.iter().filter(|pipeline| pipeline.valid).count();
 
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "pipeline");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "pipeline",
+        "subcommand": "list",
+        "message": if pipelines.is_empty() {
+            "No pipeline definitions were found in the project or user pipeline directories."
+        } else {
+            "Discovered pipeline definitions from the project and user pipeline directories."
+        },
+        "search_paths": search_paths,
+        "pipeline_count": pipelines.len(),
+        "valid_count": valid_count,
+        "pipelines": pipelines,
+        "next_actions": [
+            "Create `.fwc/pipelines/<name>.toml` in the current project to register a project-scoped pipeline."
+                .to_owned(),
+            "Run `fwc pipeline validate <name-or-path>` before attempting `fwc pipeline estimate` or `fwc pipeline dry-run`."
+                .to_owned(),
+        ],
+    });
+    envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
-        payload: json!({
-            "status": "ok",
-            "command": "pipeline",
-            "subcommand": "list",
-            "message": if pipelines.is_empty() {
-                "No pipeline definitions were found in the project or user pipeline directories."
-            } else {
-                "Discovered pipeline definitions from the project and user pipeline directories."
-            },
-            "search_paths": search_paths,
-            "pipeline_count": pipelines.len(),
-            "valid_count": valid_count,
-            "pipelines": pipelines,
-            "next_actions": [
-                "Create `.fwc/pipelines/<name>.toml` in the current project to register a project-scoped pipeline."
-                    .to_owned(),
-                "Run `fwc pipeline validate <name-or-path>` before attempting `fwc pipeline estimate` or `fwc pipeline dry-run`."
-                    .to_owned(),
-            ],
-        }),
+        payload,
         exit_code: CliExitCode::Success,
     })
 }
@@ -11675,20 +11698,23 @@ fn pipeline_show_dispatch(roots: &pipe::PipelineRoots, args: &PipelineRefArgs) -
         return pipeline_invalid_definition_dispatch("show", &path, Some(&definition), &validation);
     }
 
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "pipeline");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "pipeline",
+        "subcommand": "show",
+        "path": path.display().to_string(),
+        "definition": definition,
+        "validation": validation,
+        "next_actions": [
+            format!("fwc pipeline validate {}", path.display()),
+            format!("fwc pipeline estimate {} --param key=value", path.display()),
+            format!("fwc pipeline dry-run {} --param key=value", path.display()),
+        ],
+    });
+    envelope.inject_into(&mut payload);
     DispatchOutcome {
-        payload: json!({
-            "status": "ok",
-            "command": "pipeline",
-            "subcommand": "show",
-            "path": path.display().to_string(),
-            "definition": definition,
-            "validation": validation,
-            "next_actions": [
-                format!("fwc pipeline validate {}", path.display()),
-                format!("fwc pipeline estimate {} --param key=value", path.display()),
-                format!("fwc pipeline dry-run {} --param key=value", path.display()),
-            ],
-        }),
+        payload,
         exit_code: CliExitCode::Success,
     }
 }
@@ -12342,11 +12368,11 @@ fn map_dispatch(args: &MapArgs, explicit_host: Option<&str>) -> Result<DispatchO
     let response = client.batch(&request)?;
     let (status, exit_code) = batch_status_label(&response);
 
-    Ok(DispatchOutcome {
-        payload: json!({
-            "status": status,
-            "command": "map",
-            "source": "host-admin-api",
+    let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "map");
+    let mut payload = json!({
+        "status": status,
+        "command": "map",
+        "source": "host-admin-api",
             "message": format!(
                 "Executed a live mapped batch for `{}.{}` against `fcp-host` ({} inputs, concurrency={}, on_error={}).",
                 resolved.connector.slug,
@@ -12372,7 +12398,10 @@ fn map_dispatch(args: &MapArgs, explicit_host: Option<&str>) -> Result<DispatchO
                 format!("fwc status {} --host {}", resolved.connector.slug, host.endpoint),
                 format!("fwc history --connector {} --limit 20", resolved.connector.slug),
             ],
-        }),
+        });
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
         exit_code,
     })
 }
@@ -12572,25 +12601,30 @@ fn batch_file_dispatch(
 
     if args.dry_run {
         let (status, exit_code) = preflight_status_label(&preflights);
+        let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "batch");
+        let mut payload = json!({
+            "status": status,
+            "command": "batch-file",
+            "source": "host-admin-api",
+            "message": format!(
+                "Evaluated real preflight checks for `{}` across {} operation(s) and {} wave(s).",
+                args.file.display(),
+                plan.total_operations,
+                plan.waves.len()
+            ),
+            "file": args.file.display().to_string(),
+            "dry_run": true,
+            "plan": plan,
+            "preflights": preflights,
+            "next_actions": [
+                format!("fwc batch-file {} --host {}", args.file.display(), host.endpoint),
+            ],
+        });
+        if exit_code.is_success() {
+            envelope.inject_into(&mut payload);
+        }
         return Ok(DispatchOutcome {
-            payload: json!({
-                "status": status,
-                "command": "batch-file",
-                "source": "host-admin-api",
-                "message": format!(
-                    "Evaluated real preflight checks for `{}` across {} operation(s) and {} wave(s).",
-                    args.file.display(),
-                    plan.total_operations,
-                    plan.waves.len()
-                ),
-                "file": args.file.display().to_string(),
-                "dry_run": true,
-                "plan": plan,
-                "preflights": preflights,
-                "next_actions": [
-                    format!("fwc batch-file {} --host {}", args.file.display(), host.endpoint),
-                ],
-            }),
+            payload,
             exit_code,
         });
     }
@@ -12602,25 +12636,30 @@ fn batch_file_dispatch(
     let response = client.batch(&request)?;
     let (status, exit_code) = batch_status_label(&response);
 
+    let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "batch");
+    let mut payload = json!({
+        "status": status,
+        "command": "batch-file",
+        "source": "host-admin-api",
+        "message": format!(
+            "Executed `{}` as a live batch through `fcp-host` ({} operations across {} connectors).",
+            args.file.display(),
+            plan.total_operations,
+            plan.connectors.len()
+        ),
+        "file": args.file.display().to_string(),
+        "dry_run": false,
+        "plan": plan,
+        "response": response,
+        "next_actions": plan.connectors.iter().map(|connector| {
+            format!("fwc status {connector} --host {}", host.endpoint)
+        }).collect::<Vec<_>>(),
+    });
+    if exit_code.is_success() {
+        envelope.inject_into(&mut payload);
+    }
     Ok(DispatchOutcome {
-        payload: json!({
-            "status": status,
-            "command": "batch-file",
-            "source": "host-admin-api",
-            "message": format!(
-                "Executed `{}` as a live batch through `fcp-host` ({} operations across {} connectors).",
-                args.file.display(),
-                plan.total_operations,
-                plan.connectors.len()
-            ),
-            "file": args.file.display().to_string(),
-            "dry_run": false,
-            "plan": plan,
-            "response": response,
-            "next_actions": plan.connectors.iter().map(|connector| {
-                format!("fwc status {connector} --host {}", host.endpoint)
-            }).collect::<Vec<_>>(),
-        }),
+        payload,
         exit_code,
     })
 }
@@ -12812,15 +12851,18 @@ fn task_create_dispatch(args: &IntentArgs) -> Result<DispatchOutcome> {
         connector_override: args.connector.clone(),
         zone_override: args.zone.clone(),
     })?;
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "task");
+    let mut payload = json!({
+        "status": "created",
+        "command": "task",
+        "subcommand": "create",
+        "message": "Created a resumable workflow capsule from the requested intent.",
+        "task": task_payload_view(&task),
+        "state_root": store.root_dir().display().to_string(),
+    });
+    envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
-        payload: json!({
-            "status": "created",
-            "command": "task",
-            "subcommand": "create",
-            "message": "Created a resumable workflow capsule from the requested intent.",
-            "task": task_payload_view(&task),
-            "state_root": store.root_dir().display().to_string(),
-        }),
+        payload,
         exit_code: CliExitCode::Success,
     })
 }
@@ -12831,15 +12873,18 @@ fn task_show_dispatch(args: &TaskIdArgs) -> Result<DispatchOutcome> {
         return Ok(missing_task_dispatch(&args.task_id));
     };
 
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "task");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "task",
+        "subcommand": "show",
+        "message": "Loaded the current workflow capsule state.",
+        "task": task_payload_view(&task),
+        "state_root": store.root_dir().display().to_string(),
+    });
+    envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
-        payload: json!({
-            "status": "ok",
-            "command": "task",
-            "subcommand": "show",
-            "message": "Loaded the current workflow capsule state.",
-            "task": task_payload_view(&task),
-            "state_root": store.root_dir().display().to_string(),
-        }),
+        payload,
         exit_code: CliExitCode::Success,
     })
 }
@@ -12847,15 +12892,18 @@ fn task_show_dispatch(args: &TaskIdArgs) -> Result<DispatchOutcome> {
 fn task_list_dispatch(args: &TaskListArgs) -> Result<DispatchOutcome> {
     let store = workflow::TaskStore::discover()?;
     let tasks = store.list(args.limit, args.status.as_deref())?;
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "task");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "task",
+        "subcommand": "list",
+        "message": "Listed recent workflow capsules.",
+        "tasks": serde_json::to_value(tasks)?,
+        "state_root": store.root_dir().display().to_string(),
+    });
+    envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
-        payload: json!({
-            "status": "ok",
-            "command": "task",
-            "subcommand": "list",
-            "message": "Listed recent workflow capsules.",
-            "tasks": serde_json::to_value(tasks)?,
-            "state_root": store.root_dir().display().to_string(),
-        }),
+        payload,
         exit_code: CliExitCode::Success,
     })
 }
@@ -12944,24 +12992,27 @@ fn task_resolve_dispatch(args: &TaskResolveArgs) -> Result<DispatchOutcome> {
         }
     };
 
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "task");
+    let mut payload = json!({
+        "status": task.capsule_status,
+        "command": "task",
+        "subcommand": "resolve",
+        "message": resolve_message(stop_reason, until_ready),
+        "resolution": {
+            "mode": mode,
+            "pass_count": pass_count,
+            "safe_step_count": safe_step_count,
+            "changed": changed_any,
+            "stop_reason": stop_reason,
+            "pending_question": task.resolution.pending_question,
+            "passes": pass_summaries,
+        },
+        "task": task_payload_view(&task),
+        "state_root": store.root_dir().display().to_string(),
+    });
+    envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
-        payload: json!({
-            "status": task.capsule_status,
-            "command": "task",
-            "subcommand": "resolve",
-            "message": resolve_message(stop_reason, until_ready),
-            "resolution": {
-                "mode": mode,
-                "pass_count": pass_count,
-                "safe_step_count": safe_step_count,
-                "changed": changed_any,
-                "stop_reason": stop_reason,
-                "pending_question": task.resolution.pending_question,
-                "passes": pass_summaries,
-            },
-            "task": task_payload_view(&task),
-            "state_root": store.root_dir().display().to_string(),
-        }),
+        payload,
         exit_code: CliExitCode::Success,
     })
 }
@@ -12989,16 +13040,19 @@ fn task_ask_dispatch(args: &TaskIdArgs) -> Result<DispatchOutcome> {
         )
     };
 
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "task");
+    let mut payload = json!({
+        "status": status,
+        "command": "task",
+        "subcommand": "ask",
+        "message": message,
+        "question": task.resolution.pending_question,
+        "task": task_payload_view(&task),
+        "state_root": store.root_dir().display().to_string(),
+    });
+    envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
-        payload: json!({
-            "status": status,
-            "command": "task",
-            "subcommand": "ask",
-            "message": message,
-            "question": task.resolution.pending_question,
-            "task": task_payload_view(&task),
-            "state_root": store.root_dir().display().to_string(),
-        }),
+        payload,
         exit_code: CliExitCode::Success,
     })
 }
@@ -13040,14 +13094,17 @@ fn task_bind_dispatch(args: &TaskBindArgs) -> Result<DispatchOutcome> {
         return Ok(missing_task_dispatch(&args.task_id));
     };
 
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "task");
+    let mut payload = json!({
+        "status": "updated",
+        "command": "task",
+        "subcommand": "bind",
+        "message": "Updated the workflow capsule bindings and recomputed its status.",
+        "task": task_payload_view(&task),
+    });
+    envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
-        payload: json!({
-            "status": "updated",
-            "command": "task",
-            "subcommand": "bind",
-            "message": "Updated the workflow capsule bindings and recomputed its status.",
-            "task": task_payload_view(&task),
-        }),
+        payload,
         exit_code: CliExitCode::Success,
     })
 }
@@ -13058,14 +13115,17 @@ fn task_approve_dispatch(args: &TaskIdArgs) -> Result<DispatchOutcome> {
         return Ok(missing_task_dispatch(&args.task_id));
     };
 
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "task");
+    let mut payload = json!({
+        "status": "approved",
+        "command": "task",
+        "subcommand": "approve",
+        "message": "Marked the workflow capsule as approved for side-effecting execution.",
+        "task": task_payload_view(&task),
+    });
+    envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
-        payload: json!({
-            "status": "approved",
-            "command": "task",
-            "subcommand": "approve",
-            "message": "Marked the workflow capsule as approved for side-effecting execution.",
-            "task": task_payload_view(&task),
-        }),
+        payload,
         exit_code: CliExitCode::Success,
     })
 }
@@ -13101,19 +13161,22 @@ fn task_advance_dispatch(args: &TaskIdArgs) -> Result<DispatchOutcome> {
         return Ok(missing_task_dispatch(&args.task_id));
     };
 
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "task");
+    let mut payload = json!({
+        "status": task.capsule_status,
+        "command": "task",
+        "subcommand": "advance",
+        "message": if approve {
+            "Advanced the workflow capsule by executing its current non-side-effecting plan."
+        } else {
+            "Advanced the workflow capsule by materializing its next safe simulation step."
+        },
+        "execution": execution,
+        "task": task_payload_view(&task),
+    });
+    envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
-        payload: json!({
-            "status": task.capsule_status,
-            "command": "task",
-            "subcommand": "advance",
-            "message": if approve {
-                "Advanced the workflow capsule by executing its current non-side-effecting plan."
-            } else {
-                "Advanced the workflow capsule by materializing its next safe simulation step."
-            },
-            "execution": execution,
-            "task": task_payload_view(&task),
-        }),
+        payload,
         exit_code: CliExitCode::Success,
     })
 }
@@ -13182,19 +13245,22 @@ fn task_run_dispatch(args: &TaskIdArgs) -> Result<DispatchOutcome> {
         return Ok(missing_task_dispatch(&args.task_id));
     };
 
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "task");
+    let mut payload = json!({
+        "status": task.capsule_status,
+        "command": "task",
+        "subcommand": "run",
+        "message": if task.approval.workflow {
+            "Ran the approved workflow capsule and surfaced the live result of each primitive step."
+        } else {
+            "Ran the workflow capsule in non-side-effecting mode."
+        },
+        "execution": execution,
+        "task": task_payload_view(&task),
+    });
+    envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
-        payload: json!({
-            "status": task.capsule_status,
-            "command": "task",
-            "subcommand": "run",
-            "message": if task.approval.workflow {
-                "Ran the approved workflow capsule and surfaced the live result of each primitive step."
-            } else {
-                "Ran the workflow capsule in non-side-effecting mode."
-            },
-            "execution": execution,
-            "task": task_payload_view(&task),
-        }),
+        payload,
         exit_code: CliExitCode::Success,
     })
 }
@@ -13258,26 +13324,32 @@ fn resolution_receipt_summary(receipt: &workflow::ResolutionReceipt) -> Value {
 
 fn intent_plan_dispatch(request: &intent::IntentRequest) -> Result<DispatchOutcome> {
     let compiled = intent::compile(request);
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "intent");
+    let mut payload = json!({
+        "status": compiled.status,
+        "command": "plan",
+        "message": "Compiled the requested intent into an explicit primitive workflow.",
+        "workflow": serde_json::to_value(compiled)?,
+    });
+    envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
-        payload: json!({
-            "status": compiled.status,
-            "command": "plan",
-            "message": "Compiled the requested intent into an explicit primitive workflow.",
-            "workflow": serde_json::to_value(compiled)?,
-        }),
+        payload,
         exit_code: CliExitCode::Success,
     })
 }
 
 fn intent_explain_dispatch(request: &intent::IntentRequest) -> Result<DispatchOutcome> {
     let compiled = intent::compile(request);
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "intent");
+    let mut payload = json!({
+        "status": compiled.status,
+        "command": "explain",
+        "message": "Explained why the compiler chose this connector, template, and step sequence.",
+        "analysis": serde_json::to_value(compiled)?,
+    });
+    envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
-        payload: json!({
-            "status": compiled.status,
-            "command": "explain",
-            "message": "Explained why the compiler chose this connector, template, and step sequence.",
-            "analysis": serde_json::to_value(compiled)?,
-        }),
+        payload,
         exit_code: CliExitCode::Success,
     })
 }
@@ -13314,23 +13386,26 @@ fn intent_do_dispatch(args: &DoIntentArgs) -> Result<DispatchOutcome> {
     let execution = materialize_compiled_steps(&compiled, approve, None)?;
     let defaulted_to_simulation = !args.simulate && !args.approve;
 
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "do");
+    let mut payload = json!({
+        "status": if approve { "materialized" } else { "simulated" },
+        "command": "do",
+        "message": if approve {
+            "Materialized the full primitive workflow in approval mode and surfaced the live result of each primitive step."
+        } else {
+            "Materialized the safe prefix of the primitive workflow and stopped before the first side-effecting step."
+        },
+        "execution_mode": {
+            "requested": if approve { "approve" } else if args.simulate { "simulate" } else { "default-simulate" },
+            "effective": if approve { "approve" } else { "simulate" },
+            "defaulted": defaulted_to_simulation,
+        },
+        "workflow": serde_json::to_value(compiled)?,
+        "execution": execution,
+    });
+    envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
-        payload: json!({
-            "status": if approve { "materialized" } else { "simulated" },
-            "command": "do",
-            "message": if approve {
-                "Materialized the full primitive workflow in approval mode and surfaced the live result of each primitive step."
-            } else {
-                "Materialized the safe prefix of the primitive workflow and stopped before the first side-effecting step."
-            },
-            "execution_mode": {
-                "requested": if approve { "approve" } else if args.simulate { "simulate" } else { "default-simulate" },
-                "effective": if approve { "approve" } else { "simulate" },
-                "defaulted": defaulted_to_simulation,
-            },
-            "workflow": serde_json::to_value(compiled)?,
-            "execution": execution,
-        }),
+        payload,
         exit_code: CliExitCode::Success,
     })
 }

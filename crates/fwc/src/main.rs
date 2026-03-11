@@ -147,9 +147,9 @@ use crate::package_cmd::{
 };
 use crate::readiness::{
     ConnectorDetail, ConnectorState, ConnectorSummary, DiscoveredConnector, DiscoveredOperation,
-    DiscoveryCatalog, OperationSummary, RateLimitSummary, SelectorError, SelectorErrorKind,
-    idempotency_label, normalize_connector_selector, normalize_operation_selector,
-    risk_level_label, safety_tier_label, selector_distance,
+    DiscoveryCatalog, MetadataField, OperationSummary, RateLimitSummary, SelectorError,
+    SelectorErrorKind, idempotency_label, normalize_connector_selector,
+    normalize_operation_selector, risk_level_label, safety_tier_label, selector_distance,
 };
 use crate::render::{
     ExtractRender, OutputFormat, RenderOptions, TemplateRender, render_with_options, token_stats,
@@ -3024,25 +3024,26 @@ fn host_rate_limit_summaries(
     summaries
 }
 
-fn host_connector_archetypes(introspection: &HostIntrospectionResponse) -> Option<Vec<String>> {
+fn host_connector_archetypes(introspection: &HostIntrospectionResponse) -> MetadataField<Vec<String>> {
     match introspection.archetype {
-        fcp_host::ConnectorArchetype::Unknown => None,
+        fcp_host::ConnectorArchetype::Unknown => MetadataField::Unknown,
         archetype => serde_json::to_value(archetype)
             .ok()
             .and_then(|value| value.as_str().map(ToOwned::to_owned))
-            .map(|label| vec![label]),
+            .map_or(MetadataField::Unknown, |label| MetadataField::Known(vec![label])),
     }
 }
 
 fn host_connector_rate_limits(
     introspection: &HostIntrospectionResponse,
-) -> Option<Vec<RateLimitSummary>> {
-    introspection.rate_limits.as_ref().map(|declarations| {
-        host_rate_limit_summaries(
+) -> MetadataField<Vec<RateLimitSummary>> {
+    match introspection.rate_limits.as_ref() {
+        Some(declarations) => MetadataField::Known(host_rate_limit_summaries(
             declarations,
             declarations.limits.iter().map(|pool| pool.id.clone()),
-        )
-    })
+        )),
+        None => MetadataField::Unknown,
+    }
 }
 
 fn host_operation_rate_limits(
@@ -3286,7 +3287,7 @@ fn host_discovered_connector(
             .cloned()
             .unwrap_or_else(|| "other".to_owned()),
         runtime_format: "host-admin-api".to_owned(),
-        state_model: None,
+        state_model: MetadataField::Unknown,
         supported_zones: Vec::new(),
         detail: ConnectorDetail {
             summary: ConnectorSummary {
@@ -3306,8 +3307,8 @@ fn host_discovered_connector(
                 .iter()
                 .map(|operation| operation.summary.clone())
                 .collect(),
-            config_schema: None,
-            health: None,
+            config_schema: MetadataField::Unknown,
+            health: MetadataField::Unknown,
             rate_limits: host_connector_rate_limits(introspection),
         },
         zones: Value::Null,
@@ -4410,8 +4411,8 @@ fn show_dispatch(args: &ShowArgs, host: Option<&str>) -> Result<DispatchOutcome>
                 "cohort": &connector.cohort,
                 "format": &connector.runtime_format,
                 "state": summary.state,
-                "state_model": connector.state_model.clone(),
-                "archetypes": summary.archetypes.clone(),
+                "state_model": connector.state_model.as_known().cloned(),
+                "archetypes": summary.archetypes.as_known().cloned(),
                 "operation_count": summary.operation_count,
                 "max_risk": &summary.max_risk,
                 "has_events": summary.has_events,
@@ -4419,7 +4420,7 @@ fn show_dispatch(args: &ShowArgs, host: Option<&str>) -> Result<DispatchOutcome>
             },
             "zones": connector.zones.clone(),
             "capabilities": connector.capabilities.clone(),
-            "rate_limits": connector.detail.rate_limits.clone(),
+            "rate_limits": connector.detail.rate_limits.as_known().cloned(),
             "shared_descriptor": connector.shared_descriptor(),
             "operations": {
                 "preview": preview,
@@ -5412,7 +5413,7 @@ fn config_dispatch(args: &ConfigArgs) -> Result<DispatchOutcome> {
                     ));
                 }
             };
-            let Some(schema) = connector.detail.config_schema.as_ref() else {
+            let Some(schema) = connector.detail.config_schema.as_known() else {
                 return Ok(DispatchOutcome {
                     payload: json!({
                         "status": "unavailable",
@@ -5473,7 +5474,7 @@ fn config_dispatch(args: &ConfigArgs) -> Result<DispatchOutcome> {
             let path = parse_invoke_path(&set_args.key).map_err(|error| {
                 anyhow::anyhow!("invalid config path `{}`: {error:?}", set_args.key)
             })?;
-            let schema = resolved.and_then(|connector| connector.detail.config_schema.as_ref());
+            let schema = resolved.and_then(|connector| connector.detail.config_schema.as_known());
             let schema_at_path = schema.and_then(|schema| invoke_schema_at_path(schema, &path));
             let value = coerce_invoke_value(&set_args.value, schema_at_path)
                 .map_err(|error| anyhow::anyhow!("failed to parse config value: {error}"))?;
@@ -5523,7 +5524,7 @@ fn config_dispatch(args: &ConfigArgs) -> Result<DispatchOutcome> {
             remove_invoke_binding(&mut config_value, &path).map_err(|error| {
                 anyhow::anyhow!("failed to unset config path `{}`: {error}", unset_args.key)
             })?;
-            let schema = resolved.and_then(|connector| connector.detail.config_schema.as_ref());
+            let schema = resolved.and_then(|connector| connector.detail.config_schema.as_known());
             let validation_errors = validate_config_value(schema, &config_value);
             if !validation_errors.is_empty() {
                 return Ok(config_validation_dispatch(
@@ -5563,7 +5564,7 @@ fn config_dispatch(args: &ConfigArgs) -> Result<DispatchOutcome> {
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("`fwc config import` requires --file <path>"))?;
             let imported = read_json_file(import_path)?;
-            let schema = resolved.and_then(|connector| connector.detail.config_schema.as_ref());
+            let schema = resolved.and_then(|connector| connector.detail.config_schema.as_known());
             let validation_errors = validate_config_value(schema, &imported);
             if !validation_errors.is_empty() {
                 return Ok(config_validation_dispatch(
@@ -5621,7 +5622,7 @@ fn config_dispatch(args: &ConfigArgs) -> Result<DispatchOutcome> {
             let (entry, resolved) =
                 resolve_managed_connector(&catalog, &configs, &target.connector)?;
             let config_value = entry.config.clone().unwrap_or_else(|| json!({}));
-            let schema = resolved.and_then(|connector| connector.detail.config_schema.as_ref());
+            let schema = resolved.and_then(|connector| connector.detail.config_schema.as_known());
             let validation_errors = validate_config_value(schema, &config_value);
             let schema_available = schema.is_some();
             let status = if validation_errors.is_empty() {
@@ -12424,7 +12425,7 @@ fn connector_list_entry(connector: &DiscoveredConnector) -> Value {
         "cohort": &connector.cohort,
         "format": &connector.runtime_format,
         "state": connector.detail.summary.state,
-        "archetypes": connector.detail.summary.archetypes.clone(),
+        "archetypes": connector.detail.summary.archetypes.as_known().cloned(),
         "home_zone": connector.zones.get("home").cloned().unwrap_or(Value::Null),
         "operation_count": connector.detail.summary.operation_count,
         "max_risk": &connector.detail.summary.max_risk,
@@ -18868,8 +18869,8 @@ depends_on = ["missing"]
 
         let discovered = host_discovered_connector(connector, &introspection);
 
-        assert!(discovered.detail.summary.archetypes.is_none());
-        assert!(discovered.detail.rate_limits.is_none());
+        assert!(!discovered.detail.summary.archetypes.is_known());
+        assert!(!discovered.detail.rate_limits.is_known());
         assert!(
             discovered
                 .operations
@@ -18914,7 +18915,7 @@ depends_on = ["missing"]
         let connector_rate_limits = discovered
             .detail
             .rate_limits
-            .as_ref()
+            .as_known()
             .expect("connector rate limits should stay available");
         let create_issue = discovered
             .operations

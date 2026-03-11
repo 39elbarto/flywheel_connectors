@@ -196,6 +196,9 @@ fn infer_type(schema: &Value) -> String {
     }
     for key in ["oneOf", "anyOf"] {
         if let Some(variants) = normalized.get(key).and_then(Value::as_array) {
+            if variants.is_empty() {
+                return format!("{key}<any>");
+            }
             let summaries = variants
                 .iter()
                 .map(describe_schema_inline)

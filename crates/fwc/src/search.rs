@@ -236,7 +236,8 @@ fn connector_passes_filters(connector: &DiscoveredConnector, filters: &SearchFil
             .detail
             .summary
             .archetypes
-            .iter()
+            .as_known()
+            .into_iter()
             .flatten()
             .any(|a| a.to_lowercase() == arch_lower)
         {
@@ -405,7 +406,7 @@ mod tests {
             manifest_path: format!("connectors/{slug}/manifest.toml"),
             cohort: "dev-tools".to_owned(),
             runtime_format: "wasi".to_owned(),
-            state_model: None,
+            state_model: crate::readiness::MetadataField::Unknown,
             supported_zones: vec!["z:work".to_owned()],
             detail: ConnectorDetail {
                 summary: ConnectorSummary {
@@ -413,16 +414,16 @@ mod tests {
                     name: format!("{} Connector", capitalize(slug)),
                     version: "0.1.0".to_owned(),
                     description: format!("FCP connector for {slug}"),
-                    archetypes: Some(vec!["operational".to_owned()]),
+                    archetypes: crate::readiness::MetadataField::Known(vec!["operational".to_owned()]),
                     state: ConnectorState::Unknown,
                     operation_count: ops.len(),
                     max_risk: "medium".to_owned(),
                     has_events: false,
                 },
                 operations: op_summaries,
-                config_schema: None,
-                health: None,
-                rate_limits: Some(vec![]),
+                config_schema: crate::readiness::MetadataField::Unknown,
+                health: crate::readiness::MetadataField::Unknown,
+                rate_limits: crate::readiness::MetadataField::Known(vec![]),
             },
             zones: json!({}),
             capabilities: json!({}),

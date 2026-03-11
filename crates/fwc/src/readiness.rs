@@ -22,6 +22,114 @@ use fcp_manifest::{ConnectorManifest, ConnectorRuntimeFormat, ManifestApprovalMo
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+// ── Metadata field truthfulness ─────────────────────────────────────────
+
+/// Explicit metadata-field wrapper that distinguishes between "we have a
+/// value", "we have not queried yet", "the connector does not implement
+/// this surface", and "the data should exist but is temporarily
+/// unreachable."
+///
+/// Serialises as an object with `status` + optional `value` so consumers
+/// never have to guess whether a missing JSON key means "unknown" or
+/// "not applicable."
+#[derive(Clone, Debug)]
+pub enum MetadataField<T> {
+    /// The field has a verified value.
+    Known(T),
+    /// No trustworthy signal is available yet (host still loading, first
+    /// query has not returned, etc.).
+    Unknown,
+    /// The connector definitively does not implement this surface.
+    Unsupported,
+    /// The surface should exist but is temporarily unreachable (host
+    /// down, timeout, transient error).
+    Unavailable,
+    /// The surface is not relevant for this connector archetype (e.g.
+    /// streaming rate-limits on a request-response-only connector).
+    NotApplicable,
+}
+
+impl<T> MetadataField<T> {
+    /// Returns `true` when a verified value is present.
+    pub fn is_known(&self) -> bool {
+        matches!(self, Self::Known(_))
+    }
+
+    /// Borrow the inner value if `Known`.
+    pub fn as_known(&self) -> Option<&T> {
+        match self {
+            Self::Known(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// Map the inner value when `Known`, preserving the state otherwise.
+    pub fn map<U, F: FnOnce(T) -> U>(self, f: F) -> MetadataField<U> {
+        match self {
+            Self::Known(value) => MetadataField::Known(f(value)),
+            Self::Unknown => MetadataField::Unknown,
+            Self::Unsupported => MetadataField::Unsupported,
+            Self::Unavailable => MetadataField::Unavailable,
+            Self::NotApplicable => MetadataField::NotApplicable,
+        }
+    }
+
+    /// Machine-readable status tag for this field.
+    pub fn status_tag(&self) -> &'static str {
+        match self {
+            Self::Known(_) => "known",
+            Self::Unknown => "unknown",
+            Self::Unsupported => "unsupported",
+            Self::Unavailable => "unavailable",
+            Self::NotApplicable => "not-applicable",
+        }
+    }
+
+    /// Upgrade a legacy `Option<T>` into a `MetadataField`.  `None` becomes
+    /// `Unknown` because the old code path could not distinguish states.
+    pub fn from_option(value: Option<T>) -> Self {
+        match value {
+            Some(value) => Self::Known(value),
+            None => Self::Unknown,
+        }
+    }
+}
+
+impl<T: Serialize> Serialize for MetadataField<T> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("status", self.status_tag())?;
+        if let Self::Known(value) = self {
+            map.serialize_entry("value", value)?;
+        }
+        map.end()
+    }
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for MetadataField<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Raw<V> {
+            status: String,
+            value: Option<V>,
+        }
+        let raw = Raw::<T>::deserialize(deserializer)?;
+        match raw.status.as_str() {
+            "known" => raw.value.map(MetadataField::Known).ok_or_else(|| {
+                serde::de::Error::custom("MetadataField status 'known' requires a value")
+            }),
+            "unknown" => Ok(MetadataField::Unknown),
+            "unsupported" => Ok(MetadataField::Unsupported),
+            "unavailable" => Ok(MetadataField::Unavailable),
+            "not-applicable" => Ok(MetadataField::NotApplicable),
+            other => Err(serde::de::Error::custom(format!(
+                "unknown MetadataField status: {other}"
+            ))),
+        }
+    }
+}
+
 // ── Readiness verdict ───────────────────────────────────────────────────
 
 /// Overall readiness assessment for a single connector.
@@ -278,9 +386,8 @@ pub struct ConnectorSummary {
     pub version: String,
     /// Short description.
     pub description: String,
-    /// Connector archetypes when surfaced by a trustworthy source.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub archetypes: Option<Vec<String>>,
+    /// Connector archetypes with explicit metadata state.
+    pub archetypes: MetadataField<Vec<String>>,
     /// Current lifecycle state.
     pub state: ConnectorState,
     /// Number of declared operations.
@@ -319,12 +426,11 @@ pub struct ConnectorDetail {
     /// Per-operation metadata.
     pub operations: Vec<OperationSummary>,
     /// Config schema (redacted: secrets replaced with `"***"`).
-    pub config_schema: Option<Value>,
+    pub config_schema: MetadataField<Value>,
     /// Current health snapshot.
-    pub health: Option<HealthSummary>,
-    /// Rate limit declarations when surfaced by a trustworthy source.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rate_limits: Option<Vec<RateLimitSummary>>,
+    pub health: MetadataField<HealthSummary>,
+    /// Rate limit declarations with explicit metadata state.
+    pub rate_limits: MetadataField<Vec<RateLimitSummary>>,
 }
 
 /// Compact operation summary for `fwc ops`.
@@ -483,7 +589,7 @@ pub struct DiscoveredConnector {
     pub manifest_path: String,
     pub cohort: String,
     pub runtime_format: String,
-    pub state_model: Option<String>,
+    pub state_model: MetadataField<String>,
     pub supported_zones: Vec<String>,
     pub detail: ConnectorDetail,
     pub zones: Value,
@@ -544,6 +650,7 @@ impl DiscoveredConnector {
                     .and_then(Value::as_str)
                     .map(std::borrow::ToOwned::to_owned)
             });
+        let state_model_json = state_model.clone();
 
         let mut operations = manifest
             .provides
@@ -611,7 +718,7 @@ impl DiscoveredConnector {
             name: connector_name.clone(),
             version: connector_version.clone(),
             description: connector_description.clone(),
-            archetypes: Some(archetypes.clone()),
+            archetypes: MetadataField::Known(archetypes.clone()),
             state: ConnectorState::Unknown,
             operation_count: operations.len(),
             max_risk,
@@ -642,7 +749,7 @@ impl DiscoveredConnector {
                 "description": &connector_description,
                 "archetypes": archetypes,
                 "format": &runtime_format,
-                "state_model": state_model,
+                "state_model": state_model_json,
             },
             "zones": zones,
             "capabilities": capabilities,
@@ -668,14 +775,14 @@ impl DiscoveredConnector {
             manifest_path: relative_to_workspace(manifest_path),
             cohort,
             runtime_format,
-            state_model,
+            state_model: MetadataField::from_option(state_model),
             supported_zones,
             detail: ConnectorDetail {
                 summary,
                 operations: operation_summaries,
-                config_schema: None,
-                health: None,
-                rate_limits: Some(connector_rate_limits),
+                config_schema: MetadataField::Unknown,
+                health: MetadataField::Unknown,
+                rate_limits: MetadataField::Known(connector_rate_limits),
             },
             zones,
             capabilities,
@@ -720,7 +827,7 @@ impl DiscoveredConnector {
             DescriptorStatus::NotYetMeasured,
             "Runtime lifecycle and health have not been measured yet by the host.",
         ))
-        .with_check(if self.detail.config_schema.is_some() {
+        .with_check(if self.detail.config_schema.is_known() {
             DescriptorCheck::new(
                 "config.schema",
                 DescriptorStatus::Ready,
@@ -746,12 +853,12 @@ impl DiscoveredConnector {
         descriptor.display_name = Some(self.detail.summary.name.clone());
         descriptor.version = Some(self.detail.summary.version.clone());
         descriptor.description = Some(self.detail.summary.description.clone());
-        if let Some(archetypes) = &self.detail.summary.archetypes {
+        if let Some(archetypes) = self.detail.summary.archetypes.as_known() {
             descriptor.archetypes.clone_from(archetypes);
         }
         descriptor.supported_zones.clone_from(&self.supported_zones);
         descriptor.runtime_format = Some(self.runtime_format.clone());
-        descriptor.state_model.clone_from(&self.state_model);
+        descriptor.state_model = self.state_model.as_known().cloned();
         descriptor.operations = self
             .operations
             .iter()
@@ -777,7 +884,8 @@ impl DiscoveredConnector {
                 .detail
                 .summary
                 .archetypes
-                .iter()
+                .as_known()
+                .into_iter()
                 .flatten()
                 .map(|archetype| normalize_category_selector(archetype))
                 .any(|archetype| archetype == category)
@@ -1147,7 +1255,7 @@ fn discovered_connector_from_toml(
         name: connector_name.clone(),
         version: connector_version.clone(),
         description: connector_description.clone(),
-        archetypes: Some(archetypes.clone()),
+        archetypes: MetadataField::Known(archetypes.clone()),
         state: ConnectorState::Unknown,
         operation_count: operations.len(),
         max_risk,
@@ -1180,6 +1288,7 @@ fn discovered_connector_from_toml(
         .get("rate_limits")
         .map(toml_value_to_json)
         .transpose()?;
+    let state_model_json = state_model.clone();
     let connector_schema = serde_json::json!({
         "connector": {
             "id": &connector_id,
@@ -1188,7 +1297,7 @@ fn discovered_connector_from_toml(
             "description": &connector_description,
             "archetypes": archetypes,
             "format": &runtime_format,
-            "state_model": state_model,
+            "state_model": state_model_json,
         },
         "zones": zones,
         "capabilities": capabilities,
@@ -1215,15 +1324,15 @@ fn discovered_connector_from_toml(
         manifest_path: relative_to_workspace(manifest_path),
         cohort,
         runtime_format,
-        state_model,
+        state_model: MetadataField::from_option(state_model),
         supported_zones,
         detail: ConnectorDetail {
             summary,
             operations: operation_summaries,
-            config_schema: None,
-            health: None,
+            config_schema: MetadataField::Unknown,
+            health: MetadataField::Unknown,
             // Raw TOML fallback cannot prove structured connector-level rate-limit declarations.
-            rate_limits: None,
+            rate_limits: MetadataField::Unknown,
         },
         zones,
         capabilities,
@@ -2776,6 +2885,148 @@ mod tests {
 
     use super::*;
 
+    // ── MetadataField ──────────────────────────────────────────────────
+
+    #[test]
+    fn metadata_field_known_serializes_with_status_and_value() {
+        let field = MetadataField::Known(vec!["request-response".to_owned()]);
+        let json = serde_json::to_value(&field).unwrap();
+        assert_eq!(json["status"], "known");
+        assert_eq!(json["value"][0], "request-response");
+    }
+
+    #[test]
+    fn metadata_field_unknown_serializes_status_only() {
+        let field: MetadataField<String> = MetadataField::Unknown;
+        let json = serde_json::to_value(&field).unwrap();
+        assert_eq!(json["status"], "unknown");
+        assert!(json.get("value").is_none());
+    }
+
+    #[test]
+    fn metadata_field_unsupported_serializes_status_only() {
+        let field: MetadataField<i32> = MetadataField::Unsupported;
+        let json = serde_json::to_value(&field).unwrap();
+        assert_eq!(json["status"], "unsupported");
+        assert!(json.get("value").is_none());
+    }
+
+    #[test]
+    fn metadata_field_unavailable_serializes_status_only() {
+        let field: MetadataField<bool> = MetadataField::Unavailable;
+        let json = serde_json::to_value(&field).unwrap();
+        assert_eq!(json["status"], "unavailable");
+    }
+
+    #[test]
+    fn metadata_field_not_applicable_serializes_status_only() {
+        let field: MetadataField<String> = MetadataField::NotApplicable;
+        let json = serde_json::to_value(&field).unwrap();
+        assert_eq!(json["status"], "not-applicable");
+    }
+
+    #[test]
+    fn metadata_field_known_round_trip() {
+        let field = MetadataField::Known(42_u32);
+        let json = serde_json::to_string(&field).unwrap();
+        let back: MetadataField<u32> = serde_json::from_str(&json).unwrap();
+        assert!(back.is_known());
+        assert_eq!(*back.as_known().unwrap(), 42);
+    }
+
+    #[test]
+    fn metadata_field_unknown_round_trip() {
+        let field: MetadataField<String> = MetadataField::Unknown;
+        let json = serde_json::to_string(&field).unwrap();
+        let back: MetadataField<String> = serde_json::from_str(&json).unwrap();
+        assert!(!back.is_known());
+        assert_eq!(back.status_tag(), "unknown");
+    }
+
+    #[test]
+    fn metadata_field_unsupported_round_trip() {
+        let field: MetadataField<Vec<String>> = MetadataField::Unsupported;
+        let json = serde_json::to_string(&field).unwrap();
+        let back: MetadataField<Vec<String>> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.status_tag(), "unsupported");
+    }
+
+    #[test]
+    fn metadata_field_unavailable_round_trip() {
+        let field: MetadataField<f64> = MetadataField::Unavailable;
+        let json = serde_json::to_string(&field).unwrap();
+        let back: MetadataField<f64> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.status_tag(), "unavailable");
+    }
+
+    #[test]
+    fn metadata_field_not_applicable_round_trip() {
+        let field: MetadataField<bool> = MetadataField::NotApplicable;
+        let json = serde_json::to_string(&field).unwrap();
+        let back: MetadataField<bool> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.status_tag(), "not-applicable");
+    }
+
+    #[test]
+    fn metadata_field_from_option_some() {
+        let field = MetadataField::from_option(Some("hello".to_owned()));
+        assert!(field.is_known());
+        assert_eq!(field.as_known().unwrap(), "hello");
+    }
+
+    #[test]
+    fn metadata_field_from_option_none() {
+        let field: MetadataField<String> = MetadataField::from_option(None);
+        assert!(!field.is_known());
+        assert_eq!(field.status_tag(), "unknown");
+    }
+
+    #[test]
+    fn metadata_field_map_known() {
+        let field = MetadataField::Known(42_i32);
+        let mapped = field.map(|v| v.to_string());
+        assert_eq!(mapped.as_known().unwrap(), "42");
+    }
+
+    #[test]
+    fn metadata_field_map_unknown_preserves_state() {
+        let field: MetadataField<i32> = MetadataField::Unknown;
+        let mapped = field.map(|v| v.to_string());
+        assert_eq!(mapped.status_tag(), "unknown");
+    }
+
+    #[test]
+    fn metadata_field_map_unsupported_preserves_state() {
+        let field: MetadataField<i32> = MetadataField::Unsupported;
+        let mapped = field.map(|v| v.to_string());
+        assert_eq!(mapped.status_tag(), "unsupported");
+    }
+
+    #[test]
+    fn metadata_field_known_with_nested_json_value() {
+        let schema = json!({"type": "object", "properties": {"key": {"type": "string"}}});
+        let field = MetadataField::Known(schema);
+        let json = serde_json::to_value(&field).unwrap();
+        assert_eq!(json["status"], "known");
+        assert_eq!(json["value"]["type"], "object");
+    }
+
+    #[test]
+    fn metadata_field_rejects_known_without_value() {
+        let bad_json = json!({"status": "known"});
+        let result: std::result::Result<MetadataField<String>, _> =
+            serde_json::from_value(bad_json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn metadata_field_rejects_unknown_status_string() {
+        let bad_json = json!({"status": "banana"});
+        let result: std::result::Result<MetadataField<String>, _> =
+            serde_json::from_value(bad_json);
+        assert!(result.is_err());
+    }
+
     // ── ReadinessLevel ──────────────────────────────────────────────────
 
     #[test]
@@ -3064,7 +3315,7 @@ mod tests {
             name: "GitHub".to_owned(),
             version: "1.0.0".to_owned(),
             description: "GitHub API connector".to_owned(),
-            archetypes: Some(vec!["request-response".to_owned()]),
+            archetypes: MetadataField::Known(vec!["request-response".to_owned()]),
             state: ConnectorState::Ready,
             operation_count: 12,
             max_risk: "high".to_owned(),
@@ -3075,6 +3326,8 @@ mod tests {
         assert_eq!(json["id"], "github:fcp2:1.0");
         assert_eq!(json["state"], "ready");
         assert_eq!(json["operation_count"], 12);
+        assert_eq!(json["archetypes"]["status"], "known");
+        assert_eq!(json["archetypes"]["value"][0], "request-response");
     }
 
     // ── OperationSummary ────────────────────────────────────────────────
@@ -3249,7 +3502,7 @@ mod tests {
                 name: "Test".to_owned(),
                 version: "1.0.0".to_owned(),
                 description: "Test connector".to_owned(),
-                archetypes: Some(vec!["request-response".to_owned()]),
+                archetypes: MetadataField::Known(vec!["request-response".to_owned()]),
                 state: ConnectorState::Ready,
                 operation_count: 1,
                 max_risk: "low".to_owned(),
@@ -3265,13 +3518,13 @@ mod tests {
                 requires_approval: false,
                 supports_simulate: true,
             }],
-            config_schema: Some(json!({"type": "object", "properties": {}})),
-            health: Some(HealthSummary {
+            config_schema: MetadataField::Known(json!({"type": "object", "properties": {}})),
+            health: MetadataField::Known(HealthSummary {
                 state: "ready".to_owned(),
                 uptime: "5m".to_owned(),
                 load: None,
             }),
-            rate_limits: Some(vec![]),
+            rate_limits: MetadataField::Known(vec![]),
         };
 
         let json = serde_json::to_string(&detail).unwrap();
@@ -3918,7 +4171,10 @@ mod tests {
             name: "Slack".to_owned(),
             version: "2.0.0".to_owned(),
             description: "Slack messaging connector".to_owned(),
-            archetypes: Some(vec!["request-response".to_owned(), "streaming".to_owned()]),
+            archetypes: MetadataField::Known(vec![
+                "request-response".to_owned(),
+                "streaming".to_owned(),
+            ]),
             state: ConnectorState::Degraded,
             operation_count: 42,
             max_risk: "critical".to_owned(),
@@ -3930,7 +4186,8 @@ mod tests {
         assert_eq!(json["name"], "Slack");
         assert_eq!(json["version"], "2.0.0");
         assert_eq!(json["description"], "Slack messaging connector");
-        assert_eq!(json["archetypes"].as_array().unwrap().len(), 2);
+        assert_eq!(json["archetypes"]["status"], "known");
+        assert_eq!(json["archetypes"]["value"].as_array().unwrap().len(), 2);
         assert_eq!(json["state"], "degraded");
         assert_eq!(json["operation_count"], 42);
         assert_eq!(json["max_risk"], "critical");
@@ -3944,7 +4201,7 @@ mod tests {
             "name": "X",
             "version": "1.0.0",
             "description": "desc",
-            "archetypes": [],
+            "archetypes": { "status": "known", "value": [] },
             "state": "unconfigured",
             "operation_count": 0,
             "max_risk": "low",
@@ -3952,54 +4209,55 @@ mod tests {
         });
         let summary: ConnectorSummary = serde_json::from_value(json).unwrap();
         assert_eq!(summary.state, ConnectorState::Unconfigured);
-        assert_eq!(summary.archetypes, Some(vec![]));
+        assert!(summary.archetypes.is_known());
         assert!(!summary.has_events);
     }
 
     // ── ConnectorDetail: with None health and empty rate_limits ───────
 
     #[test]
-    fn connector_detail_none_health_empty_rate_limits() {
+    fn connector_detail_unknown_health_empty_rate_limits() {
         let detail = ConnectorDetail {
             summary: ConnectorSummary {
                 id: "bare:fcp2:0.1".to_owned(),
                 name: "Bare".to_owned(),
                 version: "0.1.0".to_owned(),
                 description: "Bare connector".to_owned(),
-                archetypes: Some(vec![]),
+                archetypes: MetadataField::Known(vec![]),
                 state: ConnectorState::Unconfigured,
                 operation_count: 0,
                 max_risk: "low".to_owned(),
                 has_events: false,
             },
             operations: vec![],
-            config_schema: None,
-            health: None,
-            rate_limits: Some(vec![]),
+            config_schema: MetadataField::Unknown,
+            health: MetadataField::Unknown,
+            rate_limits: MetadataField::Known(vec![]),
         };
 
         let json = serde_json::to_value(&detail).unwrap();
-        assert!(json["health"].is_null());
-        assert!(json["config_schema"].is_null());
-        assert_eq!(json["rate_limits"].as_array().unwrap().len(), 0);
+        assert_eq!(json["health"]["status"], "unknown");
+        assert_eq!(json["config_schema"]["status"], "unknown");
+        assert_eq!(json["rate_limits"]["status"], "known");
+        assert_eq!(json["rate_limits"]["value"].as_array().unwrap().len(), 0);
         assert_eq!(json["operations"].as_array().unwrap().len(), 0);
 
         let back: ConnectorDetail = serde_json::from_value(json).unwrap();
-        assert!(back.health.is_none());
-        assert!(back.config_schema.is_none());
+        assert!(!back.health.is_known());
+        assert!(!back.config_schema.is_known());
     }
 
     // ── ConnectorDetail: round-trip with all optionals populated ──────
 
     #[test]
-    fn connector_detail_all_optionals_populated_round_trip() {
+    fn connector_detail_all_fields_known_round_trip() {
         let detail = ConnectorDetail {
             summary: ConnectorSummary {
                 id: "full:fcp2:3.0".to_owned(),
                 name: "Full".to_owned(),
                 version: "3.0.0".to_owned(),
                 description: "Full connector".to_owned(),
-                archetypes: Some(vec!["request-response".to_owned()]),
+                archetypes: MetadataField::Known(vec!["request-response".to_owned()]),
                 state: ConnectorState::Ready,
                 operation_count: 2,
                 max_risk: "high".to_owned(),
@@ -4027,19 +4285,19 @@ mod tests {
                     supports_simulate: true,
                 },
             ],
-            config_schema: Some(json!({
+            config_schema: MetadataField::Known(json!({
                 "type": "object",
                 "properties": {
                     "api_key": { "type": "string", "secret": true },
                     "base_url": { "type": "string", "default": "https://api.example.com" }
                 }
             })),
-            health: Some(HealthSummary {
+            health: MetadataField::Known(HealthSummary {
                 state: "ready".to_owned(),
                 uptime: "12h 30m".to_owned(),
                 load: Some(0.75),
             }),
-            rate_limits: Some(vec![
+            rate_limits: MetadataField::Known(vec![
                 RateLimitSummary {
                     scope: "global".to_owned(),
                     requests: 1000,
@@ -4060,11 +4318,11 @@ mod tests {
         assert_eq!(back.operations.len(), 2);
         assert!(back.operations[0].requires_approval);
         assert!(!back.operations[1].requires_approval);
-        assert!(back.config_schema.is_some());
-        assert!(back.health.is_some());
-        let h = back.health.unwrap();
+        assert!(back.config_schema.is_known());
+        assert!(back.health.is_known());
+        let h = back.health.as_known().expect("health should be known");
         assert_eq!(h.load, Some(0.75));
-        let rate_limits = back.rate_limits.expect("rate limits should round-trip");
+        let rate_limits = back.rate_limits.as_known().expect("rate limits should round-trip");
         assert_eq!(rate_limits.len(), 2);
         assert_eq!(rate_limits[1].requests, 50);
     }

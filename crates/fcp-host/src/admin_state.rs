@@ -1713,9 +1713,10 @@ impl HostAdminStateStore {
             .iter()
             .filter(|e| e.sequence > request.after_sequence)
             .filter(|e| {
-                request.connector_id.as_ref().map_or(true, |filter_id| {
-                    e.connector_id.as_str() == filter_id.as_str()
-                })
+                request
+                    .connector_id
+                    .as_ref()
+                    .is_none_or(|filter_id| e.connector_id.as_str() == filter_id.as_str())
             })
             .take(request.limit)
             .cloned()
@@ -2761,5 +2762,651 @@ mod tests {
             canary_drift.recovery_action,
             RecoveryAction::CompleteRollout
         );
+    }
+
+    // ── LifecycleAction serde ──
+
+    #[test]
+    fn lifecycle_action_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&LifecycleAction::Enable).unwrap(),
+            r#""enable""#
+        );
+        assert_eq!(
+            serde_json::to_string(&LifecycleAction::Disable).unwrap(),
+            r#""disable""#
+        );
+        assert_eq!(
+            serde_json::to_string(&LifecycleAction::Restart).unwrap(),
+            r#""restart""#
+        );
+        assert_eq!(
+            serde_json::to_string(&LifecycleAction::Reload).unwrap(),
+            r#""reload""#
+        );
+        assert_eq!(
+            serde_json::to_string(&LifecycleAction::Uninstall).unwrap(),
+            r#""uninstall""#
+        );
+        assert_eq!(
+            serde_json::to_string(&LifecycleAction::Promote).unwrap(),
+            r#""promote""#
+        );
+    }
+
+    #[test]
+    fn lifecycle_action_deserializes_all_variants() {
+        let actions = [
+            "enable", "disable", "restart", "reload", "uninstall", "promote",
+        ];
+        for action in actions {
+            let json = format!("\"{action}\"");
+            let parsed: LifecycleAction = serde_json::from_str(&json).unwrap();
+            let reserialized = serde_json::to_string(&parsed).unwrap();
+            assert_eq!(reserialized, json);
+        }
+    }
+
+    // ── LifecycleTransitionRequest serde ──
+
+    #[test]
+    fn lifecycle_transition_request_minimal() {
+        let json = r#"{"action":"enable"}"#;
+        let req: LifecycleTransitionRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.action, LifecycleAction::Enable);
+        assert!(req.reason.is_none());
+        assert!(req.initiated_by.is_none());
+        assert!(!req.dry_run);
+    }
+
+    #[test]
+    fn lifecycle_transition_request_full() {
+        let json = r#"{
+            "action": "disable",
+            "reason": "maintenance window",
+            "initiated_by": "operator",
+            "dry_run": true
+        }"#;
+        let req: LifecycleTransitionRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.action, LifecycleAction::Disable);
+        assert_eq!(req.reason.as_deref(), Some("maintenance window"));
+        assert_eq!(req.initiated_by.as_deref(), Some("operator"));
+        assert!(req.dry_run);
+    }
+
+    #[test]
+    fn lifecycle_transition_response_roundtrip() {
+        let response = LifecycleTransitionResponse {
+            connector_id: "fcp.test:echo:1.0.0".to_string(),
+            action: LifecycleAction::Enable,
+            dry_run: false,
+            previous_desired_state: DesiredRuntimeState::Disabled,
+            current_desired_state: DesiredRuntimeState::Enabled,
+            observed_state: ObservedRuntimeState::Stopped,
+            lifecycle_status: None,
+            journal_sequence: 42,
+            transitioned_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        let parsed: LifecycleTransitionResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.connector_id, "fcp.test:echo:1.0.0");
+        assert_eq!(parsed.action, LifecycleAction::Enable);
+        assert_eq!(
+            parsed.previous_desired_state,
+            DesiredRuntimeState::Disabled
+        );
+        assert_eq!(parsed.current_desired_state, DesiredRuntimeState::Enabled);
+        assert_eq!(parsed.journal_sequence, 42);
+    }
+
+    // ── JournalQueryRequest serde ──
+
+    #[test]
+    fn journal_query_request_defaults() {
+        let json = r#"{}"#;
+        let req: JournalQueryRequest = serde_json::from_str(json).unwrap();
+        assert!(req.connector_id.is_none());
+        assert_eq!(req.after_sequence, 0);
+        assert_eq!(req.limit, 100);
+    }
+
+    #[test]
+    fn journal_query_request_with_filter() {
+        let json = r#"{"connector_id":"fcp.test:echo:1.0.0","after_sequence":10,"limit":50}"#;
+        let req: JournalQueryRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            req.connector_id.as_deref(),
+            Some("fcp.test:echo:1.0.0")
+        );
+        assert_eq!(req.after_sequence, 10);
+        assert_eq!(req.limit, 50);
+    }
+
+    #[test]
+    fn journal_query_response_roundtrip() {
+        let response = JournalQueryResponse {
+            entries: Vec::new(),
+            total_entries: 42,
+            latest_sequence: 100,
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        let parsed: JournalQueryResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.total_entries, 42);
+        assert_eq!(parsed.latest_sequence, 100);
+        assert!(parsed.entries.is_empty());
+    }
+
+    // ── execute_lifecycle_transition integration ──
+
+    #[fcp_async_core::runtime::test]
+    async fn lifecycle_transition_enable_dry_run() {
+        let store = HostAdminStateStore::in_memory();
+        let connector_id = ConnectorId::from_static("fcp.test:echo:1.0.0");
+        let summaries = [ConnectorSummary {
+            id: connector_id.clone(),
+            name: Some("Echo".to_string()),
+            description: None,
+            version: semver::Version::new(1, 0, 0),
+            health: ConnectorHealth::Unknown,
+            categories: Vec::new(),
+            tool_count: 0,
+        }];
+        store
+            .reconcile_registered_connectors(&summaries)
+            .await
+            .unwrap();
+
+        let request = LifecycleTransitionRequest {
+            action: LifecycleAction::Enable,
+            reason: None,
+            initiated_by: None,
+            dry_run: true,
+        };
+        let response = store
+            .execute_lifecycle_transition(&connector_id, &request)
+            .await
+            .unwrap();
+        assert!(response.dry_run);
+        assert_eq!(response.current_desired_state, DesiredRuntimeState::Enabled);
+        assert_eq!(response.action, LifecycleAction::Enable);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn lifecycle_transition_enable_persists() {
+        let store = HostAdminStateStore::in_memory();
+        let connector_id = ConnectorId::from_static("fcp.test:echo:1.0.0");
+        let summaries = [ConnectorSummary {
+            id: connector_id.clone(),
+            name: Some("Echo".to_string()),
+            description: None,
+            version: semver::Version::new(1, 0, 0),
+            health: ConnectorHealth::Unknown,
+            categories: Vec::new(),
+            tool_count: 0,
+        }];
+        store
+            .reconcile_registered_connectors(&summaries)
+            .await
+            .unwrap();
+
+        let request = LifecycleTransitionRequest {
+            action: LifecycleAction::Enable,
+            reason: Some("go live".to_string()),
+            initiated_by: Some("operator".to_string()),
+            dry_run: false,
+        };
+        let response = store
+            .execute_lifecycle_transition(&connector_id, &request)
+            .await
+            .unwrap();
+        assert!(!response.dry_run);
+        assert_eq!(response.current_desired_state, DesiredRuntimeState::Enabled);
+        assert!(response.journal_sequence > 0);
+
+        let status = store.connector_status(&connector_id).await.unwrap();
+        assert_eq!(status.desired_state, DesiredRuntimeState::Enabled);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn lifecycle_transition_disable() {
+        let store = HostAdminStateStore::in_memory();
+        let connector_id = ConnectorId::from_static("fcp.test:echo:1.0.0");
+        let summaries = [ConnectorSummary {
+            id: connector_id.clone(),
+            name: Some("Echo".to_string()),
+            description: None,
+            version: semver::Version::new(1, 0, 0),
+            health: ConnectorHealth::Unknown,
+            categories: Vec::new(),
+            tool_count: 0,
+        }];
+        store
+            .reconcile_registered_connectors(&summaries)
+            .await
+            .unwrap();
+
+        // Enable first.
+        let enable = LifecycleTransitionRequest {
+            action: LifecycleAction::Enable,
+            reason: None,
+            initiated_by: None,
+            dry_run: false,
+        };
+        store
+            .execute_lifecycle_transition(&connector_id, &enable)
+            .await
+            .unwrap();
+
+        // Then disable.
+        let disable = LifecycleTransitionRequest {
+            action: LifecycleAction::Disable,
+            reason: Some("maintenance".to_string()),
+            initiated_by: None,
+            dry_run: false,
+        };
+        let response = store
+            .execute_lifecycle_transition(&connector_id, &disable)
+            .await
+            .unwrap();
+        assert_eq!(
+            response.previous_desired_state,
+            DesiredRuntimeState::Enabled
+        );
+        assert_eq!(
+            response.current_desired_state,
+            DesiredRuntimeState::Disabled
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn lifecycle_transition_uninstall() {
+        let store = HostAdminStateStore::in_memory();
+        let connector_id = ConnectorId::from_static("fcp.test:echo:1.0.0");
+        let summaries = [ConnectorSummary {
+            id: connector_id.clone(),
+            name: Some("Echo".to_string()),
+            description: None,
+            version: semver::Version::new(1, 0, 0),
+            health: ConnectorHealth::Unknown,
+            categories: Vec::new(),
+            tool_count: 0,
+        }];
+        store
+            .reconcile_registered_connectors(&summaries)
+            .await
+            .unwrap();
+
+        let request = LifecycleTransitionRequest {
+            action: LifecycleAction::Uninstall,
+            reason: Some("no longer needed".to_string()),
+            initiated_by: None,
+            dry_run: false,
+        };
+        let response = store
+            .execute_lifecycle_transition(&connector_id, &request)
+            .await
+            .unwrap();
+        assert_eq!(
+            response.current_desired_state,
+            DesiredRuntimeState::Uninstalled
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn lifecycle_transition_restart_sets_enabled() {
+        let store = HostAdminStateStore::in_memory();
+        let connector_id = ConnectorId::from_static("fcp.test:echo:1.0.0");
+        let summaries = [ConnectorSummary {
+            id: connector_id.clone(),
+            name: Some("Echo".to_string()),
+            description: None,
+            version: semver::Version::new(1, 0, 0),
+            health: ConnectorHealth::Unknown,
+            categories: Vec::new(),
+            tool_count: 0,
+        }];
+        store
+            .reconcile_registered_connectors(&summaries)
+            .await
+            .unwrap();
+
+        let request = LifecycleTransitionRequest {
+            action: LifecycleAction::Restart,
+            reason: None,
+            initiated_by: None,
+            dry_run: false,
+        };
+        let response = store
+            .execute_lifecycle_transition(&connector_id, &request)
+            .await
+            .unwrap();
+        assert_eq!(response.action, LifecycleAction::Restart);
+        assert_eq!(response.current_desired_state, DesiredRuntimeState::Enabled);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn lifecycle_transition_reload_sets_enabled() {
+        let store = HostAdminStateStore::in_memory();
+        let connector_id = ConnectorId::from_static("fcp.test:echo:1.0.0");
+        let summaries = [ConnectorSummary {
+            id: connector_id.clone(),
+            name: Some("Echo".to_string()),
+            description: None,
+            version: semver::Version::new(1, 0, 0),
+            health: ConnectorHealth::Unknown,
+            categories: Vec::new(),
+            tool_count: 0,
+        }];
+        store
+            .reconcile_registered_connectors(&summaries)
+            .await
+            .unwrap();
+
+        let request = LifecycleTransitionRequest {
+            action: LifecycleAction::Reload,
+            reason: None,
+            initiated_by: None,
+            dry_run: false,
+        };
+        let response = store
+            .execute_lifecycle_transition(&connector_id, &request)
+            .await
+            .unwrap();
+        assert_eq!(response.action, LifecycleAction::Reload);
+        assert_eq!(response.current_desired_state, DesiredRuntimeState::Enabled);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn lifecycle_transition_not_found() {
+        let store = HostAdminStateStore::in_memory();
+        let connector_id = ConnectorId::from_static("fcp.test:ghost:1.0.0");
+        let request = LifecycleTransitionRequest {
+            action: LifecycleAction::Enable,
+            reason: None,
+            initiated_by: None,
+            dry_run: false,
+        };
+        let result = store
+            .execute_lifecycle_transition(&connector_id, &request)
+            .await;
+        assert!(result.is_err());
+    }
+
+    // ── query_journal integration ──
+
+    #[fcp_async_core::runtime::test]
+    async fn query_journal_empty() {
+        let store = HostAdminStateStore::in_memory();
+        let request = JournalQueryRequest {
+            connector_id: None,
+            after_sequence: 0,
+            limit: 100,
+        };
+        let response = store.query_journal(&request).await;
+        assert!(response.entries.is_empty());
+        assert_eq!(response.total_entries, 0);
+        assert_eq!(response.latest_sequence, 0);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn query_journal_after_transitions() {
+        let store = HostAdminStateStore::in_memory();
+        let connector_id = ConnectorId::from_static("fcp.test:echo:1.0.0");
+        let summaries = [ConnectorSummary {
+            id: connector_id.clone(),
+            name: Some("Echo".to_string()),
+            description: None,
+            version: semver::Version::new(1, 0, 0),
+            health: ConnectorHealth::Unknown,
+            categories: Vec::new(),
+            tool_count: 0,
+        }];
+        store
+            .reconcile_registered_connectors(&summaries)
+            .await
+            .unwrap();
+
+        // Perform transitions.
+        let enable = LifecycleTransitionRequest {
+            action: LifecycleAction::Enable,
+            reason: None,
+            initiated_by: Some("test".to_string()),
+            dry_run: false,
+        };
+        store
+            .execute_lifecycle_transition(&connector_id, &enable)
+            .await
+            .unwrap();
+
+        let disable = LifecycleTransitionRequest {
+            action: LifecycleAction::Disable,
+            reason: None,
+            initiated_by: Some("test".to_string()),
+            dry_run: false,
+        };
+        store
+            .execute_lifecycle_transition(&connector_id, &disable)
+            .await
+            .unwrap();
+
+        // Query all entries.
+        let request = JournalQueryRequest {
+            connector_id: None,
+            after_sequence: 0,
+            limit: 100,
+        };
+        let response = store.query_journal(&request).await;
+        assert!(response.total_entries >= 2);
+        assert!(response.latest_sequence > 0);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn query_journal_with_connector_filter() {
+        let store = HostAdminStateStore::in_memory();
+        let c1 = ConnectorId::from_static("fcp.test:alpha:1.0.0");
+        let c2 = ConnectorId::from_static("fcp.test:beta:1.0.0");
+        let summaries = [
+            ConnectorSummary {
+                id: c1.clone(),
+                name: Some("Alpha".to_string()),
+                description: None,
+                version: semver::Version::new(1, 0, 0),
+                health: ConnectorHealth::Unknown,
+                categories: Vec::new(),
+                tool_count: 0,
+            },
+            ConnectorSummary {
+                id: c2.clone(),
+                name: Some("Beta".to_string()),
+                description: None,
+                version: semver::Version::new(1, 0, 0),
+                health: ConnectorHealth::Unknown,
+                categories: Vec::new(),
+                tool_count: 0,
+            },
+        ];
+        store
+            .reconcile_registered_connectors(&summaries)
+            .await
+            .unwrap();
+
+        let enable_c1 = LifecycleTransitionRequest {
+            action: LifecycleAction::Enable,
+            reason: None,
+            initiated_by: None,
+            dry_run: false,
+        };
+        store
+            .execute_lifecycle_transition(&c1, &enable_c1)
+            .await
+            .unwrap();
+
+        let enable_c2 = LifecycleTransitionRequest {
+            action: LifecycleAction::Enable,
+            reason: None,
+            initiated_by: None,
+            dry_run: false,
+        };
+        store
+            .execute_lifecycle_transition(&c2, &enable_c2)
+            .await
+            .unwrap();
+
+        // Filter to c1 only.
+        let request = JournalQueryRequest {
+            connector_id: Some("fcp.test:alpha:1.0.0".to_string()),
+            after_sequence: 0,
+            limit: 100,
+        };
+        let response = store.query_journal(&request).await;
+        for entry in &response.entries {
+            assert_eq!(entry.connector_id.as_str(), "fcp.test:alpha:1.0.0");
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn query_journal_respects_after_sequence() {
+        let store = HostAdminStateStore::in_memory();
+        let connector_id = ConnectorId::from_static("fcp.test:echo:1.0.0");
+        let summaries = [ConnectorSummary {
+            id: connector_id.clone(),
+            name: Some("Echo".to_string()),
+            description: None,
+            version: semver::Version::new(1, 0, 0),
+            health: ConnectorHealth::Unknown,
+            categories: Vec::new(),
+            tool_count: 0,
+        }];
+        store
+            .reconcile_registered_connectors(&summaries)
+            .await
+            .unwrap();
+
+        // Two transitions.
+        for action in [LifecycleAction::Enable, LifecycleAction::Disable] {
+            let req = LifecycleTransitionRequest {
+                action,
+                reason: None,
+                initiated_by: None,
+                dry_run: false,
+            };
+            store
+                .execute_lifecycle_transition(&connector_id, &req)
+                .await
+                .unwrap();
+        }
+
+        // Get all entries to find a midpoint.
+        let all = store
+            .query_journal(&JournalQueryRequest {
+                connector_id: None,
+                after_sequence: 0,
+                limit: 1000,
+            })
+            .await;
+        let total = all.entries.len();
+        assert!(total >= 2);
+
+        // Query after the first entry.
+        let first_seq = all.entries[0].sequence;
+        let after_first = store
+            .query_journal(&JournalQueryRequest {
+                connector_id: None,
+                after_sequence: first_seq,
+                limit: 1000,
+            })
+            .await;
+        assert!(after_first.entries.len() < total);
+        for entry in &after_first.entries {
+            assert!(entry.sequence > first_seq);
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn query_journal_respects_limit() {
+        let store = HostAdminStateStore::in_memory();
+        let connector_id = ConnectorId::from_static("fcp.test:echo:1.0.0");
+        let summaries = [ConnectorSummary {
+            id: connector_id.clone(),
+            name: Some("Echo".to_string()),
+            description: None,
+            version: semver::Version::new(1, 0, 0),
+            health: ConnectorHealth::Unknown,
+            categories: Vec::new(),
+            tool_count: 0,
+        }];
+        store
+            .reconcile_registered_connectors(&summaries)
+            .await
+            .unwrap();
+
+        // Several transitions to create journal entries.
+        for action in [
+            LifecycleAction::Enable,
+            LifecycleAction::Disable,
+            LifecycleAction::Enable,
+        ] {
+            let req = LifecycleTransitionRequest {
+                action,
+                reason: None,
+                initiated_by: None,
+                dry_run: false,
+            };
+            store
+                .execute_lifecycle_transition(&connector_id, &req)
+                .await
+                .unwrap();
+        }
+
+        let request = JournalQueryRequest {
+            connector_id: None,
+            after_sequence: 0,
+            limit: 1,
+        };
+        let response = store.query_journal(&request).await;
+        assert_eq!(response.entries.len(), 1);
+    }
+
+    // ── Lifecycle action target mapping ──
+
+    #[test]
+    fn lifecycle_action_target_desired_state() {
+        assert_eq!(
+            lifecycle_action_target(LifecycleAction::Enable),
+            DesiredRuntimeState::Enabled
+        );
+        assert_eq!(
+            lifecycle_action_target(LifecycleAction::Disable),
+            DesiredRuntimeState::Disabled
+        );
+        assert_eq!(
+            lifecycle_action_target(LifecycleAction::Restart),
+            DesiredRuntimeState::Enabled
+        );
+        assert_eq!(
+            lifecycle_action_target(LifecycleAction::Reload),
+            DesiredRuntimeState::Enabled
+        );
+        assert_eq!(
+            lifecycle_action_target(LifecycleAction::Uninstall),
+            DesiredRuntimeState::Uninstalled
+        );
+        assert_eq!(
+            lifecycle_action_target(LifecycleAction::Promote),
+            DesiredRuntimeState::Enabled
+        );
+    }
+}
+
+/// Helper for test assertions on lifecycle action → desired state mapping.
+#[cfg(test)]
+fn lifecycle_action_target(action: LifecycleAction) -> DesiredRuntimeState {
+    match action {
+        LifecycleAction::Enable | LifecycleAction::Restart | LifecycleAction::Reload => {
+            DesiredRuntimeState::Enabled
+        }
+        LifecycleAction::Disable => DesiredRuntimeState::Disabled,
+        LifecycleAction::Uninstall => DesiredRuntimeState::Uninstalled,
+        LifecycleAction::Promote => DesiredRuntimeState::Enabled,
     }
 }

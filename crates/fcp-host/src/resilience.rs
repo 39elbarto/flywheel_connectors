@@ -1563,8 +1563,8 @@ mod tests {
         assert_eq!(critical_shed, 0);
     }
 
-    #[test]
-    fn timeout_only_failure_predicate_trips_on_timeout() {
+    #[fcp_async_core::runtime::test]
+    async fn timeout_only_failure_predicate_trips_on_timeout() {
         let layer = ResilienceLayer::new(ResilienceConfig {
             operation_timeout: Some(Duration::from_millis(25)),
             circuit_breaker: CircuitBreakerConfig {

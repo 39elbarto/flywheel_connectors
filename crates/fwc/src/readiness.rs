@@ -130,6 +130,195 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for MetadataField<T> {
     }
 }
 
+// ── Command availability semantics ──────────────────────────────────────
+
+/// Distinct semantic state for any command outcome that makes the source
+/// of truth, authority boundary, and recoverability machine-readable.
+///
+/// Every `fwc` dispatch should tag its result with one of these so agents
+/// and downstream tooling never have to guess whether a response came from
+/// live runtime, offline artifacts, or something in between.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CommandAvailability {
+    /// Result backed by a live, authenticated host/mesh connection.
+    LiveRuntime,
+    /// Result derived from offline artifacts (manifests, local catalog,
+    /// static contracts) — not authoritative for runtime state.
+    OfflineArtifact,
+    /// The connector or host definitively does not implement this surface.
+    /// This is a permanent condition until the connector is upgraded.
+    Unsupported,
+    /// The feature is planned but not yet implemented.  Output is a
+    /// contract preview, not a real result.
+    Planned,
+    /// The surface should exist but is temporarily unreachable (host
+    /// down, endpoint timeout, transient network error).
+    Unavailable,
+    /// The operation was blocked by policy, approval, auth, or zone
+    /// restrictions.  The caller may be able to remediate.
+    Denied,
+    /// Cannot determine the availability state (host not queried, first
+    /// connection pending, mixed signals).
+    Unknown,
+}
+
+impl CommandAvailability {
+    /// Machine-readable tag for JSON envelopes.
+    pub const fn tag(&self) -> &'static str {
+        match self {
+            Self::LiveRuntime => "live-runtime",
+            Self::OfflineArtifact => "offline-artifact",
+            Self::Unsupported => "unsupported",
+            Self::Planned => "planned",
+            Self::Unavailable => "unavailable",
+            Self::Denied => "denied",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// Human-readable one-line explanation of what this state means.
+    pub const fn explanation(&self) -> &'static str {
+        match self {
+            Self::LiveRuntime => "Result is backed by a live host connection.",
+            Self::OfflineArtifact => {
+                "Result is derived from offline artifacts and may not reflect live state."
+            }
+            Self::Unsupported => {
+                "This operation is not supported by the connector or host."
+            }
+            Self::Planned => {
+                "This feature is planned but not yet implemented. Output is a contract preview."
+            }
+            Self::Unavailable => {
+                "The operation should be available but the host or endpoint is temporarily unreachable."
+            }
+            Self::Denied => {
+                "The operation was blocked by policy, approval requirements, or authorization."
+            }
+            Self::Unknown => {
+                "Cannot determine availability. The host has not been queried or returned ambiguous state."
+            }
+        }
+    }
+
+    /// Whether an agent should consider retrying or remediating.
+    pub const fn is_recoverable(&self) -> bool {
+        match self {
+            Self::LiveRuntime
+            | Self::OfflineArtifact
+            | Self::Unsupported
+            | Self::Planned => false,
+            Self::Unavailable | Self::Denied | Self::Unknown => true,
+        }
+    }
+
+    /// Whether the result carries authoritative runtime data.
+    pub const fn is_authoritative(&self) -> bool {
+        matches!(self, Self::LiveRuntime)
+    }
+
+    /// Whether the result represents a successful data delivery
+    /// (live or offline).
+    pub const fn is_success(&self) -> bool {
+        matches!(self, Self::LiveRuntime | Self::OfflineArtifact)
+    }
+
+    /// Suggested next actions for the caller based on this state.
+    pub fn next_actions(&self, command: &str) -> Vec<String> {
+        match self {
+            Self::LiveRuntime => vec![],
+            Self::OfflineArtifact => vec![
+                format!("Use `fwc {command} --host <endpoint>` for live host truth."),
+                "Offline data may be stale; verify against the running system.".to_owned(),
+            ],
+            Self::Unsupported => vec![
+                "Check if a newer connector version supports this operation.".to_owned(),
+                format!("Use `fwc ops <connector>` to see available operations."),
+            ],
+            Self::Planned => vec![
+                "This feature is under development and not yet available.".to_owned(),
+                "The contract preview shows the expected interface shape.".to_owned(),
+            ],
+            Self::Unavailable => vec![
+                "Check that `fcp-host` is running and reachable.".to_owned(),
+                format!("Retry `fwc {command}` once the host is available."),
+                format!("Use `fwc {command} --offline` to inspect local artifacts instead."),
+            ],
+            Self::Denied => vec![
+                "Review the policy or approval requirements for this operation.".to_owned(),
+                "Check zone restrictions and agent authorization.".to_owned(),
+                "Use `fwc auth status` to inspect current credentials.".to_owned(),
+            ],
+            Self::Unknown => vec![
+                format!("Use `fwc {command} --host <endpoint>` to query a specific host."),
+                "Run `fwc doctor` to diagnose connectivity issues.".to_owned(),
+            ],
+        }
+    }
+
+    /// Standard exit-code category for dispatch outcomes.
+    ///
+    /// This maps availability states to the `CliExitCode` semantic
+    /// buckets defined in `main.rs` without importing the enum itself.
+    pub const fn exit_code_u8(&self) -> u8 {
+        match self {
+            Self::LiveRuntime | Self::OfflineArtifact | Self::Planned => 0, // success / preview
+            Self::Unsupported => 5,              // validation
+            Self::Unavailable | Self::Unknown => 8, // transport
+            Self::Denied => 6,                   // policy-denied
+        }
+    }
+}
+
+/// Structured outcome envelope that pairs a JSON payload with its
+/// availability semantics.  This is the standard shape emitted by
+/// dispatch functions and consumed by the rendering pipeline.
+#[derive(Clone, Debug, Serialize)]
+pub struct CommandEnvelope {
+    /// Machine-readable availability state.
+    pub availability: CommandAvailability,
+    /// The command that produced this envelope.
+    pub command: String,
+    /// Whether the result is authoritative runtime data.
+    pub authoritative: bool,
+    /// Human-readable explanation of the availability state.
+    pub explanation: String,
+    /// Whether the caller can remediate the situation.
+    pub recoverable: bool,
+    /// Suggested next actions.
+    pub next_actions: Vec<String>,
+}
+
+impl CommandEnvelope {
+    /// Build an envelope from an availability state and command name.
+    pub fn new(availability: CommandAvailability, command: &str) -> Self {
+        let authoritative = availability.is_authoritative();
+        let explanation = availability.explanation().to_owned();
+        let recoverable = availability.is_recoverable();
+        let next_actions = availability.next_actions(command);
+        Self {
+            availability,
+            command: command.to_owned(),
+            authoritative,
+            explanation,
+            recoverable,
+            next_actions,
+        }
+    }
+
+    /// Merge this envelope into a JSON payload as a top-level
+    /// `"availability"` object.
+    pub fn inject_into(&self, payload: &mut Value) {
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert(
+                "availability".to_owned(),
+                serde_json::to_value(self).unwrap_or(Value::Null),
+            );
+        }
+    }
+}
+
 // ── Readiness verdict ───────────────────────────────────────────────────
 
 /// Overall readiness assessment for a single connector.
@@ -3025,6 +3214,347 @@ mod tests {
         let result: std::result::Result<MetadataField<String>, _> =
             serde_json::from_value(bad_json);
         assert!(result.is_err());
+    }
+
+    // ── CommandAvailability ─────────────────────────────────────────────
+
+    #[test]
+    fn availability_tag_matches_serde_variant() {
+        let cases = [
+            (CommandAvailability::LiveRuntime, "live-runtime"),
+            (CommandAvailability::OfflineArtifact, "offline-artifact"),
+            (CommandAvailability::Unsupported, "unsupported"),
+            (CommandAvailability::Planned, "planned"),
+            (CommandAvailability::Unavailable, "unavailable"),
+            (CommandAvailability::Denied, "denied"),
+            (CommandAvailability::Unknown, "unknown"),
+        ];
+        for (variant, expected_tag) in &cases {
+            assert_eq!(variant.tag(), *expected_tag, "tag mismatch for {variant:?}");
+            // Serde round-trip must produce the same tag
+            let json = serde_json::to_value(variant).unwrap();
+            assert_eq!(json.as_str().unwrap(), *expected_tag);
+        }
+    }
+
+    #[test]
+    fn availability_serde_round_trip_all_variants() {
+        let all = [
+            CommandAvailability::LiveRuntime,
+            CommandAvailability::OfflineArtifact,
+            CommandAvailability::Unsupported,
+            CommandAvailability::Planned,
+            CommandAvailability::Unavailable,
+            CommandAvailability::Denied,
+            CommandAvailability::Unknown,
+        ];
+        for variant in &all {
+            let json = serde_json::to_string(variant).unwrap();
+            let back: CommandAvailability = serde_json::from_str(&json).unwrap();
+            assert_eq!(*variant, back);
+        }
+    }
+
+    #[test]
+    fn availability_explanation_non_empty() {
+        let all = [
+            CommandAvailability::LiveRuntime,
+            CommandAvailability::OfflineArtifact,
+            CommandAvailability::Unsupported,
+            CommandAvailability::Planned,
+            CommandAvailability::Unavailable,
+            CommandAvailability::Denied,
+            CommandAvailability::Unknown,
+        ];
+        for variant in &all {
+            assert!(!variant.explanation().is_empty(), "empty explanation for {variant:?}");
+        }
+    }
+
+    #[test]
+    fn availability_is_recoverable_correct() {
+        // Success states are not "recoverable" (they're not errors)
+        assert!(!CommandAvailability::LiveRuntime.is_recoverable());
+        assert!(!CommandAvailability::OfflineArtifact.is_recoverable());
+        // Permanent conditions are not recoverable
+        assert!(!CommandAvailability::Unsupported.is_recoverable());
+        assert!(!CommandAvailability::Planned.is_recoverable());
+        // Transient/actionable states are recoverable
+        assert!(CommandAvailability::Unavailable.is_recoverable());
+        assert!(CommandAvailability::Denied.is_recoverable());
+        assert!(CommandAvailability::Unknown.is_recoverable());
+    }
+
+    #[test]
+    fn availability_is_authoritative_only_live() {
+        assert!(CommandAvailability::LiveRuntime.is_authoritative());
+        assert!(!CommandAvailability::OfflineArtifact.is_authoritative());
+        assert!(!CommandAvailability::Unsupported.is_authoritative());
+        assert!(!CommandAvailability::Planned.is_authoritative());
+        assert!(!CommandAvailability::Unavailable.is_authoritative());
+        assert!(!CommandAvailability::Denied.is_authoritative());
+        assert!(!CommandAvailability::Unknown.is_authoritative());
+    }
+
+    #[test]
+    fn availability_is_success_live_and_offline() {
+        assert!(CommandAvailability::LiveRuntime.is_success());
+        assert!(CommandAvailability::OfflineArtifact.is_success());
+        assert!(!CommandAvailability::Unsupported.is_success());
+        assert!(!CommandAvailability::Planned.is_success());
+        assert!(!CommandAvailability::Unavailable.is_success());
+        assert!(!CommandAvailability::Denied.is_success());
+        assert!(!CommandAvailability::Unknown.is_success());
+    }
+
+    #[test]
+    fn availability_exit_codes_correct() {
+        assert_eq!(CommandAvailability::LiveRuntime.exit_code_u8(), 0);
+        assert_eq!(CommandAvailability::OfflineArtifact.exit_code_u8(), 0);
+        assert_eq!(CommandAvailability::Unsupported.exit_code_u8(), 5);
+        assert_eq!(CommandAvailability::Planned.exit_code_u8(), 0);
+        assert_eq!(CommandAvailability::Unavailable.exit_code_u8(), 8);
+        assert_eq!(CommandAvailability::Denied.exit_code_u8(), 6);
+        assert_eq!(CommandAvailability::Unknown.exit_code_u8(), 8);
+    }
+
+    #[test]
+    fn availability_next_actions_live_runtime_empty() {
+        let actions = CommandAvailability::LiveRuntime.next_actions("show");
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn availability_next_actions_offline_suggests_host() {
+        let actions = CommandAvailability::OfflineArtifact.next_actions("list");
+        assert!(actions.iter().any(|a| a.contains("--host")));
+    }
+
+    #[test]
+    fn availability_next_actions_unsupported_suggests_ops() {
+        let actions = CommandAvailability::Unsupported.next_actions("invoke");
+        assert!(actions.iter().any(|a| a.contains("ops")));
+    }
+
+    #[test]
+    fn availability_next_actions_unavailable_suggests_retry() {
+        let actions = CommandAvailability::Unavailable.next_actions("show");
+        assert!(actions.iter().any(|a| a.contains("Retry")));
+        assert!(actions.iter().any(|a| a.contains("--offline")));
+    }
+
+    #[test]
+    fn availability_next_actions_denied_suggests_auth() {
+        let actions = CommandAvailability::Denied.next_actions("invoke");
+        assert!(actions.iter().any(|a| a.contains("auth")));
+    }
+
+    #[test]
+    fn availability_next_actions_unknown_suggests_host_flag() {
+        let actions = CommandAvailability::Unknown.next_actions("search");
+        assert!(actions.iter().any(|a| a.contains("--host")));
+    }
+
+    #[test]
+    fn availability_next_actions_planned_explains_preview() {
+        let actions = CommandAvailability::Planned.next_actions("batch");
+        assert!(actions.iter().any(|a| a.contains("preview") || a.contains("development")));
+    }
+
+    #[test]
+    fn availability_next_actions_embed_command_name() {
+        // Unavailable should embed the actual command name
+        let actions = CommandAvailability::Unavailable.next_actions("my-custom-cmd");
+        assert!(actions.iter().any(|a| a.contains("my-custom-cmd")));
+    }
+
+    // ── CommandEnvelope ────────────────────────────────────────────────
+
+    #[test]
+    fn envelope_new_live_runtime() {
+        let env = CommandEnvelope::new(CommandAvailability::LiveRuntime, "show");
+        assert_eq!(env.availability, CommandAvailability::LiveRuntime);
+        assert_eq!(env.command, "show");
+        assert!(env.authoritative);
+        assert!(!env.recoverable);
+        assert!(env.next_actions.is_empty());
+    }
+
+    #[test]
+    fn envelope_new_offline_artifact() {
+        let env = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "list");
+        assert!(!env.authoritative);
+        assert!(!env.recoverable);
+        assert!(!env.next_actions.is_empty());
+    }
+
+    #[test]
+    fn envelope_new_unavailable() {
+        let env = CommandEnvelope::new(CommandAvailability::Unavailable, "invoke");
+        assert!(!env.authoritative);
+        assert!(env.recoverable);
+        assert!(!env.next_actions.is_empty());
+    }
+
+    #[test]
+    fn envelope_new_denied() {
+        let env = CommandEnvelope::new(CommandAvailability::Denied, "simulate");
+        assert!(!env.authoritative);
+        assert!(env.recoverable);
+        assert!(env.next_actions.iter().any(|a| a.contains("auth") || a.contains("policy")));
+    }
+
+    #[test]
+    fn envelope_new_unsupported() {
+        let env = CommandEnvelope::new(CommandAvailability::Unsupported, "stream");
+        assert!(!env.authoritative);
+        assert!(!env.recoverable);
+        assert!(!env.explanation.is_empty());
+    }
+
+    #[test]
+    fn envelope_new_planned() {
+        let env = CommandEnvelope::new(CommandAvailability::Planned, "batch");
+        assert!(!env.authoritative);
+        assert!(!env.recoverable);
+        assert!(env.explanation.contains("planned"));
+    }
+
+    #[test]
+    fn envelope_inject_into_adds_availability_key() {
+        let env = CommandEnvelope::new(CommandAvailability::LiveRuntime, "show");
+        let mut payload = json!({"status": "ok", "data": {}});
+        env.inject_into(&mut payload);
+        assert!(payload["availability"].is_object());
+        assert_eq!(payload["availability"]["availability"], "live-runtime");
+        assert_eq!(payload["availability"]["command"], "show");
+        assert_eq!(payload["availability"]["authoritative"], true);
+    }
+
+    #[test]
+    fn envelope_inject_into_unavailable_has_next_actions() {
+        let env = CommandEnvelope::new(CommandAvailability::Unavailable, "ops");
+        let mut payload = json!({"status": "error"});
+        env.inject_into(&mut payload);
+        let avail = &payload["availability"];
+        assert_eq!(avail["availability"], "unavailable");
+        assert!(avail["recoverable"].as_bool().unwrap());
+        assert!(avail["next_actions"].as_array().unwrap().len() > 0);
+    }
+
+    #[test]
+    fn envelope_inject_preserves_existing_payload() {
+        let env = CommandEnvelope::new(CommandAvailability::Denied, "invoke");
+        let mut payload = json!({
+            "status": "error",
+            "command": "invoke",
+            "error": {"type": "policy-denied", "message": "not allowed"}
+        });
+        env.inject_into(&mut payload);
+        // Original keys preserved
+        assert_eq!(payload["status"], "error");
+        assert_eq!(payload["error"]["type"], "policy-denied");
+        // Availability added
+        assert_eq!(payload["availability"]["availability"], "denied");
+    }
+
+    #[test]
+    fn envelope_inject_noop_on_non_object() {
+        let env = CommandEnvelope::new(CommandAvailability::LiveRuntime, "show");
+        let mut payload = json!("just a string");
+        env.inject_into(&mut payload);
+        // Should not panic, payload stays as-is
+        assert_eq!(payload, json!("just a string"));
+    }
+
+    #[test]
+    fn envelope_serializes_complete_json() {
+        let env = CommandEnvelope::new(CommandAvailability::Unknown, "schema");
+        let json = serde_json::to_value(&env).unwrap();
+        assert!(json["availability"].is_string());
+        assert!(json["command"].is_string());
+        assert!(json["authoritative"].is_boolean());
+        assert!(json["explanation"].is_string());
+        assert!(json["recoverable"].is_boolean());
+        assert!(json["next_actions"].is_array());
+    }
+
+    #[test]
+    fn all_availability_variants_produce_valid_envelopes() {
+        let all = [
+            CommandAvailability::LiveRuntime,
+            CommandAvailability::OfflineArtifact,
+            CommandAvailability::Unsupported,
+            CommandAvailability::Planned,
+            CommandAvailability::Unavailable,
+            CommandAvailability::Denied,
+            CommandAvailability::Unknown,
+        ];
+        for variant in &all {
+            let env = CommandEnvelope::new(variant.clone(), "test-cmd");
+            let json = serde_json::to_value(&env).unwrap();
+            // Every envelope must have these fields
+            assert!(json["availability"].is_string(), "missing availability for {variant:?}");
+            assert!(json["command"].is_string(), "missing command for {variant:?}");
+            assert!(json["explanation"].is_string(), "missing explanation for {variant:?}");
+            assert!(json["recoverable"].is_boolean(), "missing recoverable for {variant:?}");
+            assert!(json["next_actions"].is_array(), "missing next_actions for {variant:?}");
+            // Inject should work
+            let mut payload = json!({"status": "test"});
+            env.inject_into(&mut payload);
+            assert!(payload["availability"].is_object());
+        }
+    }
+
+    #[test]
+    fn availability_denied_exit_code_is_policy() {
+        // PolicyDenied = 6 in CliExitCode
+        assert_eq!(CommandAvailability::Denied.exit_code_u8(), 6);
+    }
+
+    #[test]
+    fn availability_unavailable_exit_code_is_transport() {
+        // Transport = 8 in CliExitCode
+        assert_eq!(CommandAvailability::Unavailable.exit_code_u8(), 8);
+    }
+
+    #[test]
+    fn availability_unsupported_exit_code_is_validation() {
+        // Validation = 5 in CliExitCode
+        assert_eq!(CommandAvailability::Unsupported.exit_code_u8(), 5);
+    }
+
+    #[test]
+    fn envelope_command_name_propagates() {
+        let commands = ["list", "show", "search", "invoke", "simulate", "batch"];
+        for cmd in commands {
+            let env = CommandEnvelope::new(CommandAvailability::LiveRuntime, cmd);
+            assert_eq!(env.command, cmd);
+        }
+    }
+
+    #[test]
+    fn availability_deserialize_rejects_invalid() {
+        let bad: Result<CommandAvailability, _> = serde_json::from_str("\"not-a-state\"");
+        assert!(bad.is_err());
+    }
+
+    #[test]
+    fn availability_deserialize_accepts_all_tags() {
+        let tags = [
+            "live-runtime",
+            "offline-artifact",
+            "unsupported",
+            "planned",
+            "unavailable",
+            "denied",
+            "unknown",
+        ];
+        for tag in tags {
+            let json = format!("\"{tag}\"");
+            let parsed: CommandAvailability = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed.tag(), tag);
+        }
     }
 
     // ── ReadinessLevel ──────────────────────────────────────────────────

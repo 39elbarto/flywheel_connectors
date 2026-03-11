@@ -146,10 +146,11 @@ use crate::package_cmd::{
     PackageArgs as PackageBuildArgs, PackageOutput,
 };
 use crate::readiness::{
-    ConnectorDetail, ConnectorState, ConnectorSummary, DiscoveredConnector, DiscoveredOperation,
-    DiscoveryCatalog, MetadataField, OperationSummary, RateLimitSummary, SelectorError,
-    SelectorErrorKind, idempotency_label, normalize_connector_selector,
-    normalize_operation_selector, risk_level_label, safety_tier_label, selector_distance,
+    CommandAvailability, CommandEnvelope, ConnectorDetail, ConnectorState, ConnectorSummary,
+    DiscoveredConnector, DiscoveredOperation, DiscoveryCatalog, MetadataField, OperationSummary,
+    RateLimitSummary, SelectorError, SelectorErrorKind, idempotency_label,
+    normalize_connector_selector, normalize_operation_selector, risk_level_label,
+    safety_tier_label, selector_distance,
 };
 use crate::render::{
     ExtractRender, OutputFormat, RenderOptions, TemplateRender, render_with_options, token_stats,
@@ -9055,41 +9056,47 @@ fn missing_host_dispatch(
     details: Value,
     next_actions: Vec<String>,
 ) -> DispatchOutcome {
+    let envelope = CommandEnvelope::new(CommandAvailability::Unavailable, command);
+    let mut payload = json!({
+        "status": "error",
+        "command": command,
+        "error": {
+            "type": "missing-host-endpoint",
+            "message": format!(
+                "`{command}` requires a live `fcp-host` endpoint. `fwc` will not simulate runtime behavior or fabricate results."
+            ),
+            "recoverable": true,
+        },
+        "details": details,
+        "next_actions": next_actions,
+    });
+    envelope.inject_into(&mut payload);
     DispatchOutcome {
-        payload: json!({
-            "status": "error",
-            "command": command,
-            "error": {
-                "type": "missing-host-endpoint",
-                "message": format!(
-                    "`{command}` requires a live `fcp-host` endpoint. `fwc` will not simulate runtime behavior or fabricate results."
-                ),
-                "recoverable": true,
-            },
-            "details": details,
-            "next_actions": next_actions,
-        }),
+        payload,
         exit_code: CliExitCode::Transport,
     }
 }
 
 fn conflicting_catalog_mode_dispatch(command: &str) -> DispatchOutcome {
+    let envelope = CommandEnvelope::new(CommandAvailability::Denied, command);
+    let mut payload = json!({
+        "status": "error",
+        "command": command,
+        "error": {
+            "type": "ambiguous-catalog-source",
+            "message": format!(
+                "`{command}` cannot combine live host mode with `--offline`. Choose one source of truth."
+            ),
+            "recoverable": true,
+        },
+        "next_actions": [
+            format!("Retry `{command}` with `--host <endpoint>` for live host truth."),
+            format!("Retry `{command}` with `--offline` to inspect workspace manifests explicitly."),
+        ],
+    });
+    envelope.inject_into(&mut payload);
     DispatchOutcome {
-        payload: json!({
-            "status": "error",
-            "command": command,
-            "error": {
-                "type": "ambiguous-catalog-source",
-                "message": format!(
-                    "`{command}` cannot combine live host mode with `--offline`. Choose one source of truth."
-                ),
-                "recoverable": true,
-            },
-            "next_actions": [
-                format!("Retry `{command}` with `--host <endpoint>` for live host truth."),
-                format!("Retry `{command}` with `--offline` to inspect workspace manifests explicitly."),
-            ],
-        }),
+        payload,
         exit_code: CliExitCode::Validation,
     }
 }

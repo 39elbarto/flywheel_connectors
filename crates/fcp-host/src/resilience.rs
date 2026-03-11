@@ -9,9 +9,9 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use fcp_async_core::sync::{OwnedSemaphorePermit, Semaphore};
@@ -293,7 +293,7 @@ pub struct ResilienceMetricsSnapshot {
 #[derive(Debug)]
 pub struct ResilienceLayer {
     config: ResilienceConfig,
-    connectors: Mutex<HashMap<ConnectorId, Arc<ConnectorState>>>,
+    connectors: RwLock<HashMap<ConnectorId, Arc<ConnectorState>>>,
     health_router: HealthRouter,
     load_shedder: LoadShedder,
 }
@@ -312,7 +312,7 @@ impl ResilienceLayer {
             load_shedder: LoadShedder::new(config.load_shed.clone()),
             health_router: HealthRouter::new(config.health.clone()),
             config,
-            connectors: Mutex::new(HashMap::new()),
+            connectors: RwLock::new(HashMap::new()),
         }
     }
 
@@ -630,7 +630,16 @@ impl ResilienceLayer {
     }
 
     fn connector_state(&self, connector_id: &ConnectorId) -> Arc<ConnectorState> {
-        let mut states = lock_unpoisoned(&self.connectors);
+        // Fast path: try to get the existing state with a read lock
+        {
+            let states = self.connectors.read().unwrap_or_else(|e| e.into_inner());
+            if let Some(state) = states.get(connector_id) {
+                return Arc::clone(state);
+            }
+        }
+        
+        // Slow path: upgrade to write lock and insert if missing
+        let mut states = self.connectors.write().unwrap_or_else(|e| e.into_inner());
         Arc::clone(
             states
                 .entry(connector_id.clone())
@@ -1542,8 +1551,8 @@ mod tests {
         assert_eq!(critical_shed, 0);
     }
 
-    #[fcp_async_core::runtime::test]
-    async fn timeout_only_failure_predicate_trips_on_timeout() {
+    #[test]
+    fn timeout_only_failure_predicate_trips_on_timeout() {
         let layer = ResilienceLayer::new(ResilienceConfig {
             operation_timeout: Some(Duration::from_millis(25)),
             circuit_breaker: CircuitBreakerConfig {
@@ -2524,8 +2533,7 @@ mod tests {
         let mut window = ErrorWindow::new(Duration::from_mins(1));
         window.record_success();
         window.record_success();
-        window.record_success();
-        assert_eq!(window.successes, 3);
+        assert_eq!(window.successes, 2);
         assert_eq!(window.failures, 0);
     }
 

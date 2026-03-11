@@ -12,7 +12,12 @@ use crate::{
     ProvisioningStepType, ReadinessResponse, SelfCheckReport, SelfCheckStatus,
 };
 
-/// Normalized status for connector metadata surfaces.
+/// Canonical metadata-state vocabulary for connector metadata surfaces.
+///
+/// The host and CLI need to distinguish between "we do not know yet",
+/// "we have not measured it yet", "the surface is unsupported", and
+/// "the surface exists but is currently unavailable". Collapsing those into a
+/// single null-like state makes downstream guidance dishonest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DescriptorStatus {
@@ -34,6 +39,10 @@ pub enum DescriptorStatus {
     Unsupported,
     /// No trustworthy signal is available yet.
     Unknown,
+    /// The surface is real, but measurement has not run yet.
+    NotYetMeasured,
+    /// The surface should exist, but it is currently unavailable.
+    Unavailable,
 }
 
 impl DescriptorStatus {
@@ -42,13 +51,15 @@ impl DescriptorStatus {
         match self {
             Self::Ready => 0,
             Self::Unknown => 1,
-            Self::Unsupported => 2,
-            Self::Unverifiable => 3,
-            Self::Degraded => 4,
-            Self::Drifted => 5,
-            Self::Missing => 6,
-            Self::PolicyBlocked => 7,
-            Self::Failed => 8,
+            Self::NotYetMeasured => 2,
+            Self::Unsupported => 3,
+            Self::Unverifiable => 4,
+            Self::Degraded => 5,
+            Self::Drifted => 6,
+            Self::Missing => 7,
+            Self::Unavailable => 8,
+            Self::PolicyBlocked => 9,
+            Self::Failed => 10,
         }
     }
 
@@ -79,7 +90,7 @@ impl From<&ConnectorHealth> for DescriptorStatus {
         match health {
             ConnectorHealth::Healthy => Self::Ready,
             ConnectorHealth::Degraded { .. } => Self::Degraded,
-            ConnectorHealth::Unavailable { .. } => Self::Failed,
+            ConnectorHealth::Unavailable { .. } => Self::Unavailable,
         }
     }
 }
@@ -239,20 +250,39 @@ impl AuthDescriptor {
     /// Create an auth descriptor from advertised auth capabilities.
     #[must_use]
     pub fn from_auth_caps(auth_caps: &AuthCaps) -> Self {
-        let status = if auth_caps.methods.is_empty() && auth_caps.oauth.is_none() {
-            DescriptorStatus::Unknown
+        let (status, summary) = if auth_caps.methods.is_empty() && auth_caps.oauth.is_none() {
+            (
+                DescriptorStatus::Unknown,
+                "Connector did not surface trustworthy auth metadata through this source."
+                    .to_string(),
+            )
         } else {
-            DescriptorStatus::Unverifiable
+            (
+                DescriptorStatus::NotYetMeasured,
+                "Connector advertises auth methods, but active auth state has not been measured yet."
+                    .to_string(),
+            )
         };
 
         Self {
             status,
-            summary: Some(
-                "Connector advertises auth methods, but active auth state has not been verified yet."
-                    .to_string(),
-            ),
+            summary: Some(summary),
             supported_methods: auth_caps.methods.clone(),
             oauth: auth_caps.oauth.clone(),
+            active_method: None,
+            uses_secret_reference: None,
+            checks: Vec::new(),
+        }
+    }
+
+    /// Create an auth descriptor whose state is not yet measured.
+    #[must_use]
+    pub fn not_yet_measured(summary: impl Into<String>) -> Self {
+        Self {
+            status: DescriptorStatus::NotYetMeasured,
+            summary: Some(summary.into()),
+            supported_methods: Vec::new(),
+            oauth: None,
             active_method: None,
             uses_secret_reference: None,
             checks: Vec::new(),
@@ -309,6 +339,10 @@ pub enum PrerequisiteStatus {
     Unverifiable,
     /// Policy currently blocks satisfying or checking the prerequisite.
     PolicyBlocked,
+    /// The prerequisite exists, but its current state has not been measured yet.
+    NotYetMeasured,
+    /// The prerequisite check surface is currently unavailable.
+    Unavailable,
 }
 
 impl From<PrerequisiteStatus> for DescriptorStatus {
@@ -319,6 +353,8 @@ impl From<PrerequisiteStatus> for DescriptorStatus {
             PrerequisiteStatus::Drifted => Self::Drifted,
             PrerequisiteStatus::Unverifiable => Self::Unverifiable,
             PrerequisiteStatus::PolicyBlocked => Self::PolicyBlocked,
+            PrerequisiteStatus::NotYetMeasured => Self::NotYetMeasured,
+            PrerequisiteStatus::Unavailable => Self::Unavailable,
         }
     }
 }
@@ -396,7 +432,7 @@ impl PrerequisiteDescriptor {
         Self {
             id: step.id.as_str().to_owned(),
             kind,
-            status: PrerequisiteStatus::Unverifiable,
+            status: PrerequisiteStatus::NotYetMeasured,
             summary,
             depends_on: step
                 .depends_on
@@ -438,14 +474,14 @@ impl PrerequisiteCatalog {
         let status = if items.is_empty() {
             DescriptorStatus::Ready
         } else {
-            DescriptorStatus::Unverifiable
+            DescriptorStatus::NotYetMeasured
         };
 
         let summary = if items.is_empty() {
             Some("Connector declares no provisioning prerequisites.".to_string())
         } else {
             Some(
-                "Provisioning recipe is available, but prerequisite state has not been verified yet."
+                "Provisioning recipe is available, but prerequisite state has not been measured yet."
                     .to_string(),
             )
         };
@@ -463,6 +499,17 @@ impl PrerequisiteCatalog {
     pub fn unverifiable(summary: impl Into<String>) -> Self {
         Self {
             status: DescriptorStatus::Unverifiable,
+            summary: Some(summary.into()),
+            recipe: None,
+            items: Vec::new(),
+        }
+    }
+
+    /// Create a prerequisite catalog whose state is not yet measured.
+    #[must_use]
+    pub fn not_yet_measured(summary: impl Into<String>) -> Self {
+        Self {
+            status: DescriptorStatus::NotYetMeasured,
             summary: Some(summary.into()),
             recipe: None,
             items: Vec::new(),
@@ -498,6 +545,19 @@ impl ReadinessDescriptor {
     pub fn unverifiable(summary: impl Into<String>) -> Self {
         Self {
             status: DescriptorStatus::Unverifiable,
+            summary: Some(summary.into()),
+            health: None,
+            self_check: None,
+            readiness: None,
+            checks: Vec::new(),
+        }
+    }
+
+    /// Create a readiness descriptor whose measurement has not run yet.
+    #[must_use]
+    pub fn not_yet_measured(summary: impl Into<String>) -> Self {
+        Self {
+            status: DescriptorStatus::NotYetMeasured,
             summary: Some(summary.into()),
             health: None,
             self_check: None,
@@ -659,7 +719,7 @@ mod tests {
             }),
         });
 
-        assert_eq!(descriptor.status, DescriptorStatus::Unverifiable);
+        assert_eq!(descriptor.status, DescriptorStatus::NotYetMeasured);
         assert_eq!(descriptor.supported_methods.len(), 2);
         assert_eq!(
             descriptor.oauth.as_ref().map(|oauth| oauth.scopes.clone()),
@@ -706,11 +766,31 @@ mod tests {
 
         let catalog = PrerequisiteCatalog::from_recipe(recipe);
 
-        assert_eq!(catalog.status, DescriptorStatus::Unverifiable);
+        assert_eq!(catalog.status, DescriptorStatus::NotYetMeasured);
         assert_eq!(catalog.items.len(), 2);
         assert_eq!(catalog.items[0].kind, PrerequisiteKind::Oauth);
+        assert_eq!(catalog.items[0].status, PrerequisiteStatus::NotYetMeasured);
         assert_eq!(catalog.items[1].kind, PrerequisiteKind::Webhook);
+        assert_eq!(catalog.items[1].status, PrerequisiteStatus::NotYetMeasured);
         assert_eq!(catalog.items[1].depends_on, vec!["oauth".to_string()]);
+    }
+
+    #[test]
+    fn descriptor_status_distinguishes_unavailable_and_not_yet_measured() {
+        assert_eq!(
+            serde_json::to_string(&DescriptorStatus::NotYetMeasured).unwrap(),
+            "\"not_yet_measured\""
+        );
+        assert_eq!(
+            serde_json::to_string(&DescriptorStatus::Unavailable).unwrap(),
+            "\"unavailable\""
+        );
+    }
+
+    #[test]
+    fn connector_health_unavailable_maps_to_unavailable_descriptor_status() {
+        let status = DescriptorStatus::from(&ConnectorHealth::unavailable("host offline"));
+        assert_eq!(status, DescriptorStatus::Unavailable);
     }
 
     #[test]

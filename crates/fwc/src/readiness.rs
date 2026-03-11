@@ -696,7 +696,12 @@ impl DiscoveredConnector {
                 "Use host-backed introspection to inspect active auth methods, profiles, and health.",
             )
             .with_remediation("Expose auth capabilities and active auth state through the host discovery contract."),
-        );
+        )
+        .with_check(DescriptorCheck::new(
+            "auth.active_state",
+            DescriptorStatus::NotYetMeasured,
+            "The connector's active auth configuration has not been measured yet.",
+        ));
 
         let prerequisites = PrerequisiteCatalog::unverifiable(
             "Provisioning prerequisites are not surfaced by workspace-manifest discovery yet.",
@@ -712,8 +717,8 @@ impl DiscoveredConnector {
         ))
         .with_check(DescriptorCheck::new(
             "runtime.state",
-            DescriptorStatus::Unverifiable,
-            "Runtime lifecycle and health require host-backed discovery.",
+            DescriptorStatus::NotYetMeasured,
+            "Runtime lifecycle and health have not been measured yet by the host.",
         ))
         .with_check(if self.detail.config_schema.is_some() {
             DescriptorCheck::new(
@@ -733,8 +738,8 @@ impl DiscoveredConnector {
         })
         .with_check(DescriptorCheck::new(
             "setup.prerequisites",
-            DescriptorStatus::Unverifiable,
-            "Service-side onboarding and prerequisite drift need shared provisioning descriptors.",
+            DescriptorStatus::NotYetMeasured,
+            "Service-side onboarding and prerequisite drift have not been measured yet.",
         ));
 
         let mut descriptor = ConnectorDescriptor::new(self.detail.summary.id.clone());
@@ -5449,5 +5454,45 @@ output_schema = { type = "object" }
 
         assert!(connector_ids.contains(&"fcp.discord"));
         assert!(connector_ids.contains(&"fcp.telegram"));
+    }
+
+    #[test]
+    fn shared_descriptor_uses_explicit_not_yet_measured_checks_for_runtime_gaps() {
+        let catalog = DiscoveryCatalog::load().expect("catalog should load");
+        let connector = catalog
+            .resolve_connector("github")
+            .expect("github connector should resolve");
+        let descriptor = connector.shared_descriptor();
+
+        let auth = descriptor.auth.expect("auth descriptor should exist");
+        assert_eq!(auth.status, DescriptorStatus::Unverifiable);
+        assert_eq!(
+            auth.checks
+                .iter()
+                .find(|check| check.id == "auth.active_state")
+                .map(|check| check.status),
+            Some(DescriptorStatus::NotYetMeasured)
+        );
+
+        let readiness = descriptor
+            .readiness
+            .expect("readiness descriptor should exist");
+        assert_eq!(readiness.status, DescriptorStatus::Unverifiable);
+        assert_eq!(
+            readiness
+                .checks
+                .iter()
+                .find(|check| check.id == "runtime.state")
+                .map(|check| check.status),
+            Some(DescriptorStatus::NotYetMeasured)
+        );
+        assert_eq!(
+            readiness
+                .checks
+                .iter()
+                .find(|check| check.id == "setup.prerequisites")
+                .map(|check| check.status),
+            Some(DescriptorStatus::NotYetMeasured)
+        );
     }
 }

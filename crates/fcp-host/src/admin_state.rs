@@ -583,7 +583,8 @@ pub struct SimulateReceiptQueryResponse {
 /// Host-advertised simulation capability for a connector operation.
 ///
 /// This is the truthful metadata that tells the CLI whether simulation is
-/// real, trivial, or unsupported for a given operation.
+/// real, trivial, unknown, not-yet-measured, unavailable, or unsupported for
+/// a given operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SimulateSupport {
@@ -594,8 +595,12 @@ pub enum SimulateSupport {
     Trivial,
     /// The connector does not support simulation for this operation.
     Unsupported,
-    /// The host has not yet determined simulation support for this operation.
+    /// No trustworthy simulate-support signal is available yet.
     Unknown,
+    /// The host has not run the measurement needed to classify support yet.
+    NotYetMeasured,
+    /// The host would normally classify support, but the connector is currently unavailable.
+    Unavailable,
 }
 
 /// Per-operation simulation metadata advertised by the host.
@@ -906,17 +911,18 @@ pub struct AuthDenial {
 impl AuthDenial {
     /// Create a denial from a failed verification.
     #[must_use]
-    pub fn from_verify_failure(
-        rpc: &str,
-        verify: &CapabilityTokenVerifyResponse,
-    ) -> Self {
+    pub fn from_verify_failure(rpc: &str, verify: &CapabilityTokenVerifyResponse) -> Self {
         let kind = if !verify.signature_valid {
             AuthDenialKind::InvalidSignature
         } else if !verify.temporally_valid {
             AuthDenialKind::TemporallyInvalid
         } else if !verify.scope_valid {
             AuthDenialKind::InsufficientScope
-        } else if verify.rejection_reasons.iter().any(|r| r.contains("revoked")) {
+        } else if verify
+            .rejection_reasons
+            .iter()
+            .any(|r| r.contains("revoked"))
+        {
             AuthDenialKind::Revoked
         } else {
             AuthDenialKind::InsufficientScope
@@ -931,15 +937,23 @@ impl AuthDenial {
         let mut remediation = Vec::new();
         match kind {
             AuthDenialKind::TemporallyInvalid => {
-                remediation.push("Re-issue the capability token (the current one is expired or not yet valid)".to_owned());
-                remediation.push("Check system clock synchronization between host and client".to_owned());
+                remediation.push(
+                    "Re-issue the capability token (the current one is expired or not yet valid)"
+                        .to_owned(),
+                );
+                remediation
+                    .push("Check system clock synchronization between host and client".to_owned());
             }
             AuthDenialKind::InsufficientScope => {
                 remediation.push("Request a token with the correct operation scope".to_owned());
-                remediation.push("Check that the token covers the target connector and operation".to_owned());
+                remediation.push(
+                    "Check that the token covers the target connector and operation".to_owned(),
+                );
             }
             AuthDenialKind::Revoked => {
-                remediation.push("Request a new capability token (the previous one was revoked)".to_owned());
+                remediation.push(
+                    "Request a new capability token (the previous one was revoked)".to_owned(),
+                );
             }
             AuthDenialKind::InvalidSignature => {
                 remediation.push("Ensure the token was issued by a trusted authority".to_owned());
@@ -954,11 +968,7 @@ impl AuthDenial {
             message,
             inspection: Some(verify.inspection.clone()),
             remediation,
-            denial_id: format!(
-                "denial-{}-{}",
-                rpc,
-                Utc::now().timestamp_millis()
-            ),
+            denial_id: format!("denial-{}-{}", rpc, Utc::now().timestamp_millis()),
             denied_at: Utc::now(),
         }
     }
@@ -969,19 +979,15 @@ impl AuthDenial {
         Self {
             rpc: rpc.to_owned(),
             kind: AuthDenialKind::MissingToken,
-            message: format!(
-                "{rpc}: a capability token is required but none was provided"
-            ),
+            message: format!("{rpc}: a capability token is required but none was provided"),
             inspection: None,
             remediation: vec![
-                format!("Issue a capability token: `fwc capabilities issue --connector <id> --operation {rpc}`"),
+                format!(
+                    "Issue a capability token: `fwc capabilities issue --connector <id> --operation {rpc}`"
+                ),
                 "Pass the token via --capability-token or FWC_CAPABILITY_TOKEN".to_owned(),
             ],
-            denial_id: format!(
-                "denial-{}-{}",
-                rpc,
-                Utc::now().timestamp_millis()
-            ),
+            denial_id: format!("denial-{}-{}", rpc, Utc::now().timestamp_millis()),
             denied_at: Utc::now(),
         }
     }
@@ -992,19 +998,13 @@ impl AuthDenial {
         Self {
             rpc: rpc.to_owned(),
             kind: AuthDenialKind::MalformedToken,
-            message: format!(
-                "{rpc}: capability token could not be parsed: {parse_error}"
-            ),
+            message: format!("{rpc}: capability token could not be parsed: {parse_error}"),
             inspection: None,
             remediation: vec![
                 "Ensure the token is a valid base64-encoded COSE_Sign1 structure".to_owned(),
                 "Re-issue the token if it was corrupted".to_owned(),
             ],
-            denial_id: format!(
-                "denial-{}-{}",
-                rpc,
-                Utc::now().timestamp_millis()
-            ),
+            denial_id: format!("denial-{}-{}", rpc, Utc::now().timestamp_millis()),
             denied_at: Utc::now(),
         }
     }
@@ -1015,19 +1015,13 @@ impl AuthDenial {
         Self {
             rpc: rpc.to_owned(),
             kind: AuthDenialKind::HolderProofFailed,
-            message: format!(
-                "{rpc}: holder proof verification failed: {reason}"
-            ),
+            message: format!("{rpc}: holder proof verification failed: {reason}"),
             inspection: None,
             remediation: vec![
                 "Include a valid holder proof matching the token's holder_node claim".to_owned(),
                 "Sign the request binding with the holder's Ed25519 key".to_owned(),
             ],
-            denial_id: format!(
-                "denial-{}-{}",
-                rpc,
-                Utc::now().timestamp_millis()
-            ),
+            denial_id: format!("denial-{}-{}", rpc, Utc::now().timestamp_millis()),
             denied_at: Utc::now(),
         }
     }
@@ -1046,11 +1040,7 @@ impl AuthDenial {
                 format!("Request an approval token with scope '{required_scope}'"),
                 "Pass approval tokens via --approval-token".to_owned(),
             ],
-            denial_id: format!(
-                "denial-{}-{}",
-                rpc,
-                Utc::now().timestamp_millis()
-            ),
+            denial_id: format!("denial-{}-{}", rpc, Utc::now().timestamp_millis()),
             denied_at: Utc::now(),
         }
     }
@@ -3366,17 +3356,12 @@ impl HostAdminStateStore {
         let temporally_valid = inspection.currently_valid;
         if !temporally_valid {
             if inspection.seconds_remaining == 0 {
-                rejection_reasons.push(format!(
-                    "Token expired at {}",
-                    inspection.expires_at
-                ));
+                rejection_reasons.push(format!("Token expired at {}", inspection.expires_at));
             }
             if let Some(nbf) = inspection.not_before {
                 let now = Utc::now();
                 if now < nbf {
-                    rejection_reasons.push(format!(
-                        "Token not yet valid (not-before: {nbf})"
-                    ));
+                    rejection_reasons.push(format!("Token not yet valid (not-before: {nbf})"));
                 }
             }
         }
@@ -3392,10 +3377,7 @@ impl HostAdminStateStore {
         // 4. Revocation check
         let revoked = self.is_token_revoked(&inspection.token_id).await;
         if revoked {
-            rejection_reasons.push(format!(
-                "Token {} has been revoked",
-                inspection.token_id
-            ));
+            rejection_reasons.push(format!("Token {} has been revoked", inspection.token_id));
         }
 
         let valid = signature_valid && temporally_valid && scope_valid && !revoked;
@@ -3443,8 +3425,7 @@ impl HostAdminStateStore {
                 rejection_reasons.push(format!(
                     "Token not scoped for connector '{cid}'. \
                      Subject: '{}', Audience: {:?}",
-                    inspection.subject,
-                    inspection.audience
+                    inspection.subject, inspection.audience
                 ));
             }
         }
@@ -6569,6 +6550,8 @@ mod tests {
             (SimulateSupport::Trivial, "\"trivial\""),
             (SimulateSupport::Unsupported, "\"unsupported\""),
             (SimulateSupport::Unknown, "\"unknown\""),
+            (SimulateSupport::NotYetMeasured, "\"not_yet_measured\""),
+            (SimulateSupport::Unavailable, "\"unavailable\""),
         ] {
             let json = serde_json::to_string(&support).unwrap();
             assert_eq!(json, expected);
@@ -6829,7 +6812,12 @@ mod tests {
 
         let denial = AuthDenial::from_verify_failure("batch", &verify);
         assert_eq!(denial.kind, AuthDenialKind::Revoked);
-        assert!(denial.remediation.iter().any(|r| r.contains("new capability token")));
+        assert!(
+            denial
+                .remediation
+                .iter()
+                .any(|r| r.contains("new capability token"))
+        );
     }
 
     #[test]
@@ -6867,9 +6855,16 @@ mod tests {
             AuthDenialKind::MissingApproval,
             AuthDenialKind::InvalidApproval,
         ];
-        let serialized: Vec<String> = kinds.iter().map(|k| serde_json::to_string(k).unwrap()).collect();
+        let serialized: Vec<String> = kinds
+            .iter()
+            .map(|k| serde_json::to_string(k).unwrap())
+            .collect();
         let unique: std::collections::HashSet<_> = serialized.iter().collect();
-        assert_eq!(unique.len(), serialized.len(), "Each kind should serialize distinctly");
+        assert_eq!(
+            unique.len(),
+            serialized.len(),
+            "Each kind should serialize distinctly"
+        );
     }
 
     #[fcp_async_core::runtime::test]
@@ -7010,7 +7005,12 @@ mod tests {
             .expect("verify token");
 
         assert!(!result.valid);
-        assert!(result.rejection_reasons.iter().any(|r| r.contains("revoked")));
+        assert!(
+            result
+                .rejection_reasons
+                .iter()
+                .any(|r| r.contains("revoked"))
+        );
     }
 
     #[fcp_async_core::runtime::test]
@@ -7132,7 +7132,8 @@ mod tests {
         ArtifactProvenance {
             source_kind: ArtifactSourceKind::Registry,
             source_uri: "registry://connectors/test:saas:1.0.0".to_owned(),
-            content_hash: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2".to_owned(),
+            content_hash: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+                .to_owned(),
             hash_verified: true,
             signature_b64: Some("dGVzdC1zaWduYXR1cmU=".to_owned()),
             signature_verified: true,
@@ -7176,7 +7177,8 @@ mod tests {
     #[test]
     fn zero_hash_rejected() {
         let mut prov = valid_provenance();
-        prov.content_hash = "0000000000000000000000000000000000000000000000000000000000000000".to_owned();
+        prov.content_hash =
+            "0000000000000000000000000000000000000000000000000000000000000000".to_owned();
         let result = validate_artifact_provenance("test:saas:1.0.0", &prov, false, None);
         assert!(result.is_some());
         assert_eq!(result.unwrap().kind, ArtifactRejectionKind::PlaceholderHash);
@@ -7185,7 +7187,8 @@ mod tests {
     #[test]
     fn sha256_empty_hash_rejected() {
         let mut prov = valid_provenance();
-        prov.content_hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_owned();
+        prov.content_hash =
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_owned();
         let result = validate_artifact_provenance("test:saas:1.0.0", &prov, false, None);
         assert!(result.is_some());
         assert_eq!(result.unwrap().kind, ArtifactRejectionKind::PlaceholderHash);
@@ -7227,14 +7230,18 @@ mod tests {
         prov.signature_verified = false;
         let result = validate_artifact_provenance("test:saas:1.0.0", &prov, false, None);
         assert!(result.is_some());
-        assert_eq!(result.unwrap().kind, ArtifactRejectionKind::InvalidSignature);
+        assert_eq!(
+            result.unwrap().kind,
+            ArtifactRejectionKind::InvalidSignature
+        );
     }
 
     #[test]
     fn oversized_artifact_rejected() {
         let mut prov = valid_provenance();
         prov.size_bytes = 100_000_000;
-        let result = validate_artifact_provenance("test:saas:1.0.0", &prov, false, Some(50_000_000));
+        let result =
+            validate_artifact_provenance("test:saas:1.0.0", &prov, false, Some(50_000_000));
         assert!(result.is_some());
         let rejection = result.unwrap();
         assert_eq!(rejection.kind, ArtifactRejectionKind::OversizedArtifact);
@@ -7297,8 +7304,12 @@ mod tests {
     fn is_placeholder_hash_detects_known_placeholders() {
         assert!(is_placeholder_hash("PLACEHOLDER_HASH"));
         assert!(is_placeholder_hash(""));
-        assert!(is_placeholder_hash("0000000000000000000000000000000000000000000000000000000000000000"));
-        assert!(!is_placeholder_hash("a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"));
+        assert!(is_placeholder_hash(
+            "0000000000000000000000000000000000000000000000000000000000000000"
+        ));
+        assert!(!is_placeholder_hash(
+            "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+        ));
     }
 
     #[test]
@@ -7311,7 +7322,8 @@ mod tests {
     fn artifact_rejection_json_has_required_fields() {
         let mut prov = valid_provenance();
         prov.content_hash = "PLACEHOLDER_HASH".to_owned();
-        let rejection = validate_artifact_provenance("test:saas:1.0.0", &prov, false, None).unwrap();
+        let rejection =
+            validate_artifact_provenance("test:saas:1.0.0", &prov, false, None).unwrap();
         let value: Value = serde_json::to_value(&rejection).unwrap();
         assert!(value.get("connector_id").is_some());
         assert!(value.get("kind").is_some());
@@ -7329,7 +7341,8 @@ mod tests {
         prov.hash_verified = false;
         prov.signature_b64 = None;
         prov.size_bytes = 999_999_999;
-        let rejection = validate_artifact_provenance("test:saas:1.0.0", &prov, true, Some(100)).unwrap();
+        let rejection =
+            validate_artifact_provenance("test:saas:1.0.0", &prov, true, Some(100)).unwrap();
         assert_eq!(rejection.kind, ArtifactRejectionKind::PlaceholderHash);
     }
 }

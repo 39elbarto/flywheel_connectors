@@ -1194,6 +1194,153 @@ pub fn evaluate_simulate_request(
     }
 }
 
+// ── Package artifact source validation ───────────────────────────────────────
+// Defines the allowed sources for connector packages on install/update runtime
+// paths. Demo, stub, and placeholder sources are explicitly rejected. Test
+// code may use demo fixtures, but the canonical runtime paths refuse them.
+
+/// Where a connector package artifact originates.
+///
+/// Install and update dispatch paths must validate the source before
+/// proceeding. Only production-grade sources are accepted on runtime paths.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PackageArtifactSource {
+    /// A real local directory containing a built package output.
+    LocalDirectory(String),
+    /// A real registry reference (URL or registry ID).
+    Registry(String),
+    /// A real mesh-distributed package bundle.
+    MeshBundle(String),
+    /// An offline-prepared package bundle (pre-verified, signed).
+    OfflinePrepared(String),
+    /// A demo/test fixture (REJECTED on runtime paths).
+    DemoFixture(String),
+    /// A stub/placeholder source (REJECTED on runtime paths).
+    StubPlaceholder(String),
+}
+
+impl PackageArtifactSource {
+    /// Whether this source is acceptable for runtime install/update paths.
+    #[must_use]
+    pub fn is_runtime_acceptable(&self) -> bool {
+        !matches!(self, Self::DemoFixture(_) | Self::StubPlaceholder(_))
+    }
+
+    /// Whether this source is a demo or placeholder (test-only).
+    #[must_use]
+    pub fn is_demo_or_placeholder(&self) -> bool {
+        matches!(self, Self::DemoFixture(_) | Self::StubPlaceholder(_))
+    }
+
+    /// Machine-readable tag for the source type.
+    #[must_use]
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Self::LocalDirectory(_) => "local-directory",
+            Self::Registry(_) => "registry",
+            Self::MeshBundle(_) => "mesh-bundle",
+            Self::OfflinePrepared(_) => "offline-prepared",
+            Self::DemoFixture(_) => "demo-fixture",
+            Self::StubPlaceholder(_) => "stub-placeholder",
+        }
+    }
+
+    /// The path or identifier for this source.
+    #[must_use]
+    pub fn path(&self) -> &str {
+        match self {
+            Self::LocalDirectory(p)
+            | Self::Registry(p)
+            | Self::MeshBundle(p)
+            | Self::OfflinePrepared(p)
+            | Self::DemoFixture(p)
+            | Self::StubPlaceholder(p) => p,
+        }
+    }
+}
+
+/// Error returned when a demo/stub source is used on a runtime path.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DemoSourceRejection {
+    /// What kind of source was rejected.
+    pub source_tag: String,
+    /// The path or identifier of the rejected source.
+    pub source_path: String,
+    /// Human-readable explanation.
+    pub reason: String,
+    /// Suggested remediation steps.
+    pub next_actions: Vec<String>,
+}
+
+/// Validate a package source for use on a runtime install/update path.
+///
+/// Returns `Ok(())` if the source is acceptable, or `Err(DemoSourceRejection)`
+/// if the source is a demo fixture or stub placeholder.
+#[allow(dead_code)]
+pub fn validate_package_source(
+    source: &PackageArtifactSource,
+    command: &str,
+) -> Result<(), DemoSourceRejection> {
+    if source.is_runtime_acceptable() {
+        return Ok(());
+    }
+
+    Err(DemoSourceRejection {
+        source_tag: source.tag().to_owned(),
+        source_path: source.path().to_owned(),
+        reason: format!(
+            "The '{command}' command requires a real package source, not a {}. \
+             Demo fixtures and stub placeholders are only valid in test environments.",
+            source.tag()
+        ),
+        next_actions: vec![
+            format!("Use `fwc package <connector>` to build a real package artifact"),
+            format!("Or provide a real registry reference: `fwc {command} --source registry:<id>`"),
+            format!("Or provide a real local directory: `fwc {command} --source <path>`"),
+        ],
+    })
+}
+
+/// Convert a [`DemoSourceRejection`] to a JSON payload.
+#[allow(dead_code)]
+#[must_use]
+pub fn demo_source_rejection_payload(rejection: &DemoSourceRejection) -> Value {
+    json!({
+        "error": "demo_source_rejected",
+        "source_tag": rejection.source_tag,
+        "source_path": rejection.source_path,
+        "reason": rejection.reason,
+        "next_actions": rejection.next_actions,
+    })
+}
+
+/// Known marker strings that indicate a demo or placeholder artifact.
+///
+/// Used to detect when a path or identifier is synthetic even if not explicitly
+/// tagged as a `DemoFixture` or `StubPlaceholder`.
+#[allow(dead_code)]
+pub const DEMO_MARKERS: &[&str] = &[
+    "fixture-connector",
+    "placeholder",
+    "PLACEHOLDER",
+    "demo-package",
+    "stub-connector",
+    "deadbeef",
+    "0000000000000000",
+    "test-only",
+    "fake-registry",
+];
+
+/// Check whether a string contains any known demo/placeholder markers.
+#[allow(dead_code)]
+#[must_use]
+pub fn contains_demo_marker(s: &str) -> bool {
+    DEMO_MARKERS.iter().any(|marker| s.contains(marker))
+}
+
 // ── Auth UX contract ─────────────────────────────────────────────────────────
 // These types define how the CLI should guide users/agents through capability
 // token acquisition, attachment, denial, and remediation on live auth-gated
@@ -1886,15 +2033,16 @@ fn execution_contract(summary: &str, intended_shape: &str) -> Value {
 mod tests {
     use super::{
         AuthAcquisitionFlow, COMMAND_CLASSIFICATIONS, COMMANDS, CommandExecutionMode,
-        CommandTruthSource, HYBRID_MODE_HELP, HostAbsentBehavior, HostAbsentReason,
-        OFFLINE_FLAG_HELP, OfflineSource, RuntimeContext, RuntimeMode, SimulateCapability,
-        WorkflowKind, WorkflowStepReality, auth_required_commands, auth_ux_guidance,
-        check_auth_requirement, classify_command, command_requires_host, default_offline_source,
-        evaluate_simulate_request, guide_payload, host_absent_error, host_absent_error_payload,
-        live_host_commands, offline_capable_commands, offline_provenance,
-        offline_provenance_payload, planned_payload, resolve_boundary, resolve_runtime_mode,
-        simulate_result, simulate_result_payload, validate_mode_consistency,
-        workflow_can_proceed, workflow_kind,
+        CommandTruthSource, DEMO_MARKERS, HYBRID_MODE_HELP, HostAbsentBehavior,
+        HostAbsentReason, OFFLINE_FLAG_HELP, OfflineSource, PackageArtifactSource,
+        RuntimeContext, RuntimeMode, SimulateCapability, WorkflowKind, WorkflowStepReality,
+        auth_required_commands, auth_ux_guidance, check_auth_requirement, classify_command,
+        command_requires_host, contains_demo_marker, default_offline_source,
+        demo_source_rejection_payload, evaluate_simulate_request, guide_payload,
+        host_absent_error, host_absent_error_payload, live_host_commands,
+        offline_capable_commands, offline_provenance, offline_provenance_payload, planned_payload,
+        resolve_boundary, resolve_runtime_mode, simulate_result, simulate_result_payload,
+        validate_mode_consistency, validate_package_source, workflow_can_proceed, workflow_kind,
     };
     use serde_json::json;
 
@@ -5632,5 +5780,250 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── Package artifact source validation tests ─────────────────────────
+
+    // -- PackageArtifactSource tag stability --
+
+    #[test]
+    fn package_source_tags_are_stable() {
+        assert_eq!(
+            PackageArtifactSource::LocalDirectory(String::new()).tag(),
+            "local-directory"
+        );
+        assert_eq!(
+            PackageArtifactSource::Registry(String::new()).tag(),
+            "registry"
+        );
+        assert_eq!(
+            PackageArtifactSource::MeshBundle(String::new()).tag(),
+            "mesh-bundle"
+        );
+        assert_eq!(
+            PackageArtifactSource::OfflinePrepared(String::new()).tag(),
+            "offline-prepared"
+        );
+        assert_eq!(
+            PackageArtifactSource::DemoFixture(String::new()).tag(),
+            "demo-fixture"
+        );
+        assert_eq!(
+            PackageArtifactSource::StubPlaceholder(String::new()).tag(),
+            "stub-placeholder"
+        );
+    }
+
+    #[test]
+    fn package_source_serde_roundtrip() {
+        let sources = [
+            PackageArtifactSource::LocalDirectory("/tmp/pkg".into()),
+            PackageArtifactSource::Registry("registry:fcp.slack:1.0.0".into()),
+            PackageArtifactSource::MeshBundle("mesh://node-1/pkg-abc".into()),
+            PackageArtifactSource::OfflinePrepared("/opt/bundles/slack-v1.tar".into()),
+            PackageArtifactSource::DemoFixture("fixture-connector".into()),
+            PackageArtifactSource::StubPlaceholder("stub://test".into()),
+        ];
+        for src in &sources {
+            let json = serde_json::to_string(src).unwrap();
+            let back: PackageArtifactSource = serde_json::from_str(&json).unwrap();
+            assert_eq!(src, &back);
+        }
+    }
+
+    // -- Runtime acceptability --
+
+    #[test]
+    fn package_source_real_sources_are_runtime_acceptable() {
+        assert!(PackageArtifactSource::LocalDirectory("/tmp/pkg".into()).is_runtime_acceptable());
+        assert!(PackageArtifactSource::Registry("r:1.0".into()).is_runtime_acceptable());
+        assert!(PackageArtifactSource::MeshBundle("m:1".into()).is_runtime_acceptable());
+        assert!(PackageArtifactSource::OfflinePrepared("/opt/b".into()).is_runtime_acceptable());
+    }
+
+    #[test]
+    fn package_source_demo_fixture_is_not_runtime_acceptable() {
+        assert!(!PackageArtifactSource::DemoFixture("demo".into()).is_runtime_acceptable());
+    }
+
+    #[test]
+    fn package_source_stub_placeholder_is_not_runtime_acceptable() {
+        assert!(!PackageArtifactSource::StubPlaceholder("stub".into()).is_runtime_acceptable());
+    }
+
+    #[test]
+    fn package_source_demo_and_stub_are_demo_or_placeholder() {
+        assert!(PackageArtifactSource::DemoFixture("d".into()).is_demo_or_placeholder());
+        assert!(PackageArtifactSource::StubPlaceholder("s".into()).is_demo_or_placeholder());
+    }
+
+    #[test]
+    fn package_source_real_sources_not_demo_or_placeholder() {
+        assert!(!PackageArtifactSource::LocalDirectory("/x".into()).is_demo_or_placeholder());
+        assert!(!PackageArtifactSource::Registry("r".into()).is_demo_or_placeholder());
+        assert!(!PackageArtifactSource::MeshBundle("m".into()).is_demo_or_placeholder());
+        assert!(!PackageArtifactSource::OfflinePrepared("o".into()).is_demo_or_placeholder());
+    }
+
+    // -- validate_package_source --
+
+    #[test]
+    fn validate_package_source_accepts_real_local_dir() {
+        let src = PackageArtifactSource::LocalDirectory("/tmp/real-pkg".into());
+        assert!(validate_package_source(&src, "install").is_ok());
+    }
+
+    #[test]
+    fn validate_package_source_accepts_real_registry() {
+        let src = PackageArtifactSource::Registry("registry:fcp.slack:2.1.0".into());
+        assert!(validate_package_source(&src, "update").is_ok());
+    }
+
+    #[test]
+    fn validate_package_source_accepts_mesh_bundle() {
+        let src = PackageArtifactSource::MeshBundle("mesh://node/pkg".into());
+        assert!(validate_package_source(&src, "install").is_ok());
+    }
+
+    #[test]
+    fn validate_package_source_accepts_offline_prepared() {
+        let src = PackageArtifactSource::OfflinePrepared("/opt/bundles/v1.tar".into());
+        assert!(validate_package_source(&src, "install").is_ok());
+    }
+
+    #[test]
+    fn validate_package_source_rejects_demo_fixture_on_install() {
+        let src = PackageArtifactSource::DemoFixture("fixture-connector".into());
+        let err = validate_package_source(&src, "install").unwrap_err();
+        assert!(err.reason.contains("install"));
+        assert!(err.reason.contains("demo"));
+        assert!(!err.next_actions.is_empty());
+    }
+
+    #[test]
+    fn validate_package_source_rejects_demo_fixture_on_update() {
+        let src = PackageArtifactSource::DemoFixture("fixture-connector".into());
+        let err = validate_package_source(&src, "update").unwrap_err();
+        assert!(err.reason.contains("update"));
+    }
+
+    #[test]
+    fn validate_package_source_rejects_stub_placeholder_on_install() {
+        let src = PackageArtifactSource::StubPlaceholder("stub://test".into());
+        let err = validate_package_source(&src, "install").unwrap_err();
+        assert!(err.reason.contains("stub-placeholder"));
+    }
+
+    #[test]
+    fn validate_rejection_has_informative_next_actions() {
+        let src = PackageArtifactSource::DemoFixture("demo-pkg".into());
+        let err = validate_package_source(&src, "install").unwrap_err();
+        assert!(err.next_actions.len() >= 2);
+        assert!(err.next_actions.iter().any(|a| a.contains("package")));
+        assert!(err.next_actions.iter().any(|a| a.contains("registry")));
+    }
+
+    #[test]
+    fn validate_rejection_preserves_source_info() {
+        let src = PackageArtifactSource::DemoFixture("my-demo-pkg".into());
+        let err = validate_package_source(&src, "install").unwrap_err();
+        assert_eq!(err.source_tag, "demo-fixture");
+        assert_eq!(err.source_path, "my-demo-pkg");
+    }
+
+    // -- demo_source_rejection_payload --
+
+    #[test]
+    fn demo_rejection_payload_has_required_fields() {
+        let src = PackageArtifactSource::DemoFixture("demo".into());
+        let err = validate_package_source(&src, "install").unwrap_err();
+        let payload = demo_source_rejection_payload(&err);
+        assert_eq!(payload["error"], "demo_source_rejected");
+        assert!(payload["source_tag"].is_string());
+        assert!(payload["source_path"].is_string());
+        assert!(payload["reason"].is_string());
+        assert!(payload["next_actions"].is_array());
+    }
+
+    // -- DEMO_MARKERS and contains_demo_marker --
+
+    #[test]
+    fn demo_markers_is_nonempty() {
+        assert!(!DEMO_MARKERS.is_empty());
+    }
+
+    #[test]
+    fn demo_markers_detects_fixture_connector() {
+        assert!(contains_demo_marker("path/to/fixture-connector/v1"));
+    }
+
+    #[test]
+    fn demo_markers_detects_placeholder() {
+        assert!(contains_demo_marker("blake3-256:PLACEHOLDER:0000"));
+    }
+
+    #[test]
+    fn demo_markers_detects_deadbeef() {
+        assert!(contains_demo_marker("git_commit=deadbeef"));
+    }
+
+    #[test]
+    fn demo_markers_detects_zero_hash() {
+        assert!(contains_demo_marker("hash:0000000000000000abcd"));
+    }
+
+    #[test]
+    fn demo_markers_does_not_match_real_paths() {
+        assert!(!contains_demo_marker("/opt/packages/fcp.slack-2.1.0"));
+        assert!(!contains_demo_marker("registry:fcp.github:3.0.1"));
+        assert!(!contains_demo_marker("mesh://node-production/pkg-5a2f"));
+    }
+
+    // -- Cross-cutting: no demo source ever validates on runtime paths --
+
+    #[test]
+    fn no_demo_source_validates_for_any_install_update_command() {
+        let demo_sources = [
+            PackageArtifactSource::DemoFixture("fixture-connector".into()),
+            PackageArtifactSource::DemoFixture("demo-package".into()),
+            PackageArtifactSource::StubPlaceholder("stub://test".into()),
+            PackageArtifactSource::StubPlaceholder("placeholder".into()),
+        ];
+        for src in &demo_sources {
+            for cmd in ["install", "update"] {
+                assert!(
+                    validate_package_source(src, cmd).is_err(),
+                    "Demo source {:?} should be rejected for '{cmd}'",
+                    src
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn all_real_sources_validate_for_install_and_update() {
+        let real_sources = [
+            PackageArtifactSource::LocalDirectory("/tmp/real".into()),
+            PackageArtifactSource::Registry("r:1.0".into()),
+            PackageArtifactSource::MeshBundle("m://node/pkg".into()),
+            PackageArtifactSource::OfflinePrepared("/opt/bundles/v1".into()),
+        ];
+        for src in &real_sources {
+            for cmd in ["install", "update"] {
+                assert!(
+                    validate_package_source(src, cmd).is_ok(),
+                    "Real source {:?} should be accepted for '{cmd}'",
+                    src
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn package_source_path_accessor_returns_inner_value() {
+        let src = PackageArtifactSource::LocalDirectory("/my/path".into());
+        assert_eq!(src.path(), "/my/path");
+        let src = PackageArtifactSource::DemoFixture("demo-id".into());
+        assert_eq!(src.path(), "demo-id");
     }
 }

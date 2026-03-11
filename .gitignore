@@ -109,6 +109,7 @@ test_ip.rs
 # Local/alternate build target directories (agent experiments)
 local_target/
 tmp_target/
+tmp_target_*/
 
 # Build/test artifacts directory
 artifacts/

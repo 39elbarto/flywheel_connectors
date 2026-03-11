@@ -178,165 +178,10 @@ impl Default for SendGridConnector {
 }
 
 impl SendGridConnector {
-    /// Handle the `configure` method.
-    pub async fn handle_configure(
-        &mut self,
-        params: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
-        let config = SendGridConfig::from_params(&params)?;
-        info!(auth = %config.auth.redacted_label(), base_url = %config.base_url, "Configuring SendGrid connector");
-
-        let client = SendGridClient::new(config.auth.clone(), Some(&config.base_url))
-            .map_err(|e| e.to_fcp_error())?;
-
-        self.client = Some(Arc::new(client));
-        self.config = Some(config);
-        self.base.set_configured(true);
-        Ok(json!({}))
-    }
-
-    /// Handle the `handshake` method.
-    pub async fn handle_handshake(
-        &mut self,
-        params: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
-        if self.config.is_none() {
-            return Err(FcpError::InvalidRequest {
-                code: 1004,
-                message: "Connector not configured".into(),
-            });
-        }
-
-        let session_id = params
-            .get("session_id")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string);
-
-        self.session_id = session_id;
-        self.base.set_handshaken(true);
-
-        Ok(json!({
-            "protocol_version": "2.0",
-            "connector_id": "fcp.sendgrid",
-            "connector_version": "0.1.0",
-            "capabilities": [
-                "sendgrid.mail.write",
-                "sendgrid.contacts.read",
-                "sendgrid.lists.read",
-                "sendgrid.lists.write",
-                "sendgrid.templates.read",
-                "sendgrid.stats.read"
-            ]
-        }))
-    }
-
-    /// Handle the `health` method.
-    pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
-        let configured = self.config.is_some();
-        let handshaken = self.session_id.is_some();
-
-        let status = if configured && handshaken {
-            "healthy"
-        } else if configured {
-            "degraded"
-        } else {
-            "unconfigured"
-        };
-
-        Ok(json!({
-            "status": status,
-            "configured": configured,
-            "handshaken": handshaken,
-            "requests": self.request_count.load(Ordering::Relaxed),
-            "errors": self.error_count.load(Ordering::Relaxed),
-        }))
-    }
-
-    /// Handle the `doctor` method.
-    pub async fn handle_doctor(&self) -> FcpResult<serde_json::Value> {
-        let mut checks = Vec::new();
-
-        checks.push(DoctorCheck {
-            name: "configuration".into(),
-            passed: self.config.is_some(),
-            message: if self.config.is_none() {
-                Some("Not configured — call configure first".into())
-            } else {
-                None
-            },
-            critical: true,
-        });
-
-        checks.push(DoctorCheck {
-            name: "client_initialized".into(),
-            passed: self.client.is_some(),
-            message: if self.client.is_none() {
-                Some("API client not initialized".into())
-            } else {
-                None
-            },
-            critical: true,
-        });
-
-        let handshaken = self.session_id.is_some();
-        checks.push(DoctorCheck {
-            name: "handshake".into(),
-            passed: handshaken,
-            message: if handshaken {
-                None
-            } else {
-                Some("Handshake not completed".into())
-            },
-            critical: false,
-        });
-
-        let result = DoctorResult::from_checks(checks);
-        Ok(serde_json::to_value(result).unwrap_or_else(|_| json!({"status": "error"})))
-    }
-
-    /// Handle the `self_check` method.
-    pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
-        let Some(config) = &self.config else {
-            let report = SelfCheckReport::degraded("not_configured", "Connector is not configured");
-            return Self::serialize_self_check_report(report);
-        };
-
-        let readiness = config.provisioning_readiness();
-        if !readiness.network_ok {
-            let mut report = SelfCheckReport::failed(
-                "network_constraints_invalid",
-                readiness.network_message.clone(),
-            );
-            report.details = Some(json!({ "provisioning": readiness }));
-            return Self::serialize_self_check_report(report);
-        }
-
-        let Some(_client) = &self.client else {
-            let mut report = SelfCheckReport::failed(
-                "client_missing",
-                "API client not initialized; re-run configure",
-            );
-            report.details = Some(json!({ "provisioning": readiness }));
-            return Self::serialize_self_check_report(report);
-        };
-
-        if readiness.requires_credential_injection {
-            let mut report = SelfCheckReport::degraded(
-                "credential_injection_required",
-                "credential_id mode requires egress proxy injection; skipping live probe",
-            );
-            report.details = Some(json!({ "provisioning": readiness }));
-            return Self::serialize_self_check_report(report);
-        }
-
-        let mut report = SelfCheckReport::ok();
-        report.details = Some(json!({ "provisioning": readiness }));
-        Self::serialize_self_check_report(report)
-    }
-
-    /// Handle the `introspect` method.
-    pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
-        let introspection = Introspection {
+    /// Build the SendGrid operation catalog for host introspection.
+    #[must_use]
+    pub fn introspection() -> Introspection {
+        Introspection {
             operations: vec![
                 OperationInfo {
                     id: OperationId::from_static("sendgrid.mail.send"),
@@ -706,7 +551,168 @@ impl SendGridConnector {
             resource_types: vec![],
             auth_caps: None,
             event_caps: None,
+        }
+    }
+
+    /// Handle the `configure` method.
+    pub async fn handle_configure(
+        &mut self,
+        params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let config = SendGridConfig::from_params(&params)?;
+        info!(auth = %config.auth.redacted_label(), base_url = %config.base_url, "Configuring SendGrid connector");
+
+        let client = SendGridClient::new(config.auth.clone(), Some(&config.base_url))
+            .map_err(|e| e.to_fcp_error())?;
+
+        self.client = Some(Arc::new(client));
+        self.config = Some(config);
+        self.base.set_configured(true);
+        Ok(json!({}))
+    }
+
+    /// Handle the `handshake` method.
+    pub async fn handle_handshake(
+        &mut self,
+        params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        if self.config.is_none() {
+            return Err(FcpError::InvalidRequest {
+                code: 1004,
+                message: "Connector not configured".into(),
+            });
+        }
+
+        let session_id = params
+            .get("session_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+
+        self.session_id = session_id;
+        self.base.set_handshaken(true);
+
+        Ok(json!({
+            "protocol_version": "2.0",
+            "connector_id": "fcp.sendgrid",
+            "connector_version": "0.1.0",
+            "capabilities": [
+                "sendgrid.mail.write",
+                "sendgrid.contacts.read",
+                "sendgrid.lists.read",
+                "sendgrid.lists.write",
+                "sendgrid.templates.read",
+                "sendgrid.stats.read"
+            ]
+        }))
+    }
+
+    /// Handle the `health` method.
+    pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
+        let configured = self.config.is_some();
+        let handshaken = self.session_id.is_some();
+
+        let status = if configured && handshaken {
+            "healthy"
+        } else if configured {
+            "degraded"
+        } else {
+            "unconfigured"
         };
+
+        Ok(json!({
+            "status": status,
+            "configured": configured,
+            "handshaken": handshaken,
+            "requests": self.request_count.load(Ordering::Relaxed),
+            "errors": self.error_count.load(Ordering::Relaxed),
+        }))
+    }
+
+    /// Handle the `doctor` method.
+    pub async fn handle_doctor(&self) -> FcpResult<serde_json::Value> {
+        let mut checks = Vec::new();
+
+        checks.push(DoctorCheck {
+            name: "configuration".into(),
+            passed: self.config.is_some(),
+            message: if self.config.is_none() {
+                Some("Not configured — call configure first".into())
+            } else {
+                None
+            },
+            critical: true,
+        });
+
+        checks.push(DoctorCheck {
+            name: "client_initialized".into(),
+            passed: self.client.is_some(),
+            message: if self.client.is_none() {
+                Some("API client not initialized".into())
+            } else {
+                None
+            },
+            critical: true,
+        });
+
+        let handshaken = self.session_id.is_some();
+        checks.push(DoctorCheck {
+            name: "handshake".into(),
+            passed: handshaken,
+            message: if handshaken {
+                None
+            } else {
+                Some("Handshake not completed".into())
+            },
+            critical: false,
+        });
+
+        let result = DoctorResult::from_checks(checks);
+        Ok(serde_json::to_value(result).unwrap_or_else(|_| json!({"status": "error"})))
+    }
+
+    /// Handle the `self_check` method.
+    pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
+        let Some(config) = &self.config else {
+            let report = SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            return Self::serialize_self_check_report(report);
+        };
+
+        let readiness = config.provisioning_readiness();
+        if !readiness.network_ok {
+            let mut report = SelfCheckReport::failed(
+                "network_constraints_invalid",
+                readiness.network_message.clone(),
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        }
+
+        let Some(_client) = &self.client else {
+            let mut report = SelfCheckReport::failed(
+                "client_missing",
+                "API client not initialized; re-run configure",
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        };
+
+        if readiness.requires_credential_injection {
+            let mut report = SelfCheckReport::degraded(
+                "credential_injection_required",
+                "credential_id mode requires egress proxy injection; skipping live probe",
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        }
+
+        let mut report = SelfCheckReport::ok();
+        report.details = Some(json!({ "provisioning": readiness }));
+        Self::serialize_self_check_report(report)
+    }
+
+    /// Handle the `introspect` method.
+    pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
+        let introspection = Self::introspection();
 
         serde_json::to_value(introspection).map_err(|e| FcpError::Internal {
             message: format!("Failed to serialize introspection: {e}"),

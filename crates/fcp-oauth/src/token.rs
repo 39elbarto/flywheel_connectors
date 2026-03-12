@@ -85,7 +85,7 @@ impl OAuthTokens {
         let now = Utc::now();
         let expires_at = response
             .expires_in
-            .map(|secs| now + chrono::Duration::seconds(i64::try_from(secs).unwrap_or(i64::MAX)));
+            .map(|secs| now + chrono::Duration::seconds(i64::try_from(secs.min(u64::from(u32::MAX))).unwrap_or(i64::MAX)));
 
         let scopes = response
             .scope
@@ -184,7 +184,7 @@ impl OAuthTokens {
         self.token_type = response.token_type;
         self.expires_at = response
             .expires_in
-            .map(|secs| now + chrono::Duration::seconds(i64::try_from(secs).unwrap_or(i64::MAX)));
+            .map(|secs| now + chrono::Duration::seconds(i64::try_from(secs.min(u64::from(u32::MAX))).unwrap_or(i64::MAX)));
         self.issued_at = now;
 
         // Only update refresh token if a new one is provided

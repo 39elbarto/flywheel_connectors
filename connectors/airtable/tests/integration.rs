@@ -18,13 +18,30 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> CapabilityToken {
+fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
     let now = Utc::now();
+    let cap = match op {
+        "airtable.create_record"
+        | "airtable.create_records"
+        | "airtable.update_record"
+        | "airtable.update_records"
+        | "airtable.upsert_records"
+        | "airtable.replace_record" => "airtable.write",
+        "airtable.delete_record"
+        | "airtable.delete_records" => "airtable.delete",
+        "airtable.create_webhook"
+        | "airtable.list_webhooks"
+        | "airtable.delete_webhook"
+        | "airtable.list_webhook_payloads"
+        | "airtable.refresh_webhook"
+        | "airtable.set_webhook_notifications" => "airtable.webhooks",
+        _ => "airtable.read",
+    };
     let cose = CapabilityTokenBuilder::new()
         .capability_id(cap)
         .zone_id("z:work")
         .principal("user:test")
-        .operations(&[cap])
+        .operations(&[op])
         .issuer("node:test")
         .validity(now, now + chrono::Duration::hours(1))
         .sign(signing_key)
@@ -38,13 +55,33 @@ async fn setup_handshake(
     capabilities: &[&str],
 ) {
     let verifying_key = signing_key.verifying_key();
+    let mapped_caps: Vec<&str> = capabilities.iter().map(|&op| match op {
+        "airtable.create_record"
+        | "airtable.create_records"
+        | "airtable.update_record"
+        | "airtable.update_records"
+        | "airtable.upsert_records"
+        | "airtable.replace_record" => "airtable.write",
+        "airtable.delete_record"
+        | "airtable.delete_records" => "airtable.delete",
+        "airtable.create_webhook"
+        | "airtable.list_webhooks"
+        | "airtable.delete_webhook"
+        | "airtable.list_webhook_payloads"
+        | "airtable.refresh_webhook"
+        | "airtable.set_webhook_notifications" => "airtable.webhooks",
+        "airtable.read" | "airtable.write" | "airtable.webhooks" | "airtable.delete" => op,
+        "airtable.nonexistent" => op,
+        _ => "airtable.read",
+    }).collect();
+
     connector
         .handle_handshake(json!({
             "protocol_version": "1.0.0",
             "zone": "z:work",
             "host_public_key": verifying_key.to_bytes(),
             "nonce": vec![0u8; 32],
-            "capabilities_requested": capabilities
+            "capabilities_requested": mapped_caps
         }))
         .await
         .unwrap();

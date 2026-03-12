@@ -561,10 +561,7 @@ impl AdmissionController {
 
     /// Get or create usage tracker for a peer.
     fn get_or_create_usage(&mut self, peer: &NodeId, now_ms: u64) -> &mut PeerUsage {
-        if !self.peer_usage.contains_key(peer) {
-            self.peer_usage.insert(peer.clone(), PeerUsage::new(now_ms));
-        }
-        self.peer_usage.get_mut(peer).unwrap()
+        self.peer_usage.entry(peer.clone()).or_insert_with(|| PeerUsage::new(now_ms))
     }
 
     fn effective_byte_limit(&self, is_authenticated: bool) -> u64 {

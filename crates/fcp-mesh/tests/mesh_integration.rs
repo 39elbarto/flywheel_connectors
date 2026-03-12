@@ -2581,6 +2581,37 @@ fn log_capture() -> &'static LogCapture {
     CAPTURE.get_or_init(LogCapture::new)
 }
 
+fn tracing_events(capture: &LogCapture) -> Vec<serde_json::Value> {
+    capture
+        .jsonl()
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(
+                    serde_json::from_str(trimmed).unwrap_or_else(|err| {
+                        panic!("invalid tracing log line `{trimmed}`: {err}")
+                    }),
+                )
+            }
+        })
+        .collect()
+}
+
+fn find_tracing_event(capture: &LogCapture, event_name: &str) -> serde_json::Value {
+    tracing_events(capture)
+        .into_iter()
+        .find(|value| value.get("event").and_then(serde_json::Value::as_str) == Some(event_name))
+        .unwrap_or_else(|| {
+            panic!(
+                "missing tracing event `{event_name}` in capture:\n{}",
+                capture.jsonl()
+            )
+        })
+}
+
 fn test_start_times() -> &'static Mutex<HashMap<String, Instant>> {
     static STARTS: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
     STARTS.get_or_init(|| Mutex::new(HashMap::new()))
@@ -4053,7 +4084,10 @@ mod gossip_integration {
         emit_test_start(TEST_NAME, CATEGORY);
 
         let zone_id = ZoneId::work();
-        let mut gossip = MeshGossip::with_defaults(TailscaleNodeId::new("node-local"));
+        let config = GossipConfig::default();
+        let mut gossip = MeshGossip::new(TailscaleNodeId::new("node-local"), config.clone());
+        let capture = LogCapture::new();
+        let _guard = capture.install_json_with_filter("warn");
 
         let invalid_summary = GossipSummary {
             from: TailscaleNodeId::new("node-invalid"),
@@ -4072,14 +4106,159 @@ mod gossip_integration {
 
         assert_eq!(gossip.peer_count(), 0);
 
+        let rejected_log = find_tracing_event(&capture, "summary_rejected");
+        assert_eq!(
+            rejected_log
+                .get("reason")
+                .and_then(serde_json::Value::as_str),
+            Some("iblt_invalid_encoding")
+        );
+        assert_eq!(
+            rejected_log
+                .get("peer_node_id")
+                .and_then(serde_json::Value::as_str),
+            Some("node-invalid")
+        );
+        assert_eq!(
+            rejected_log
+                .get("zone_id")
+                .and_then(serde_json::Value::as_str),
+            Some(zone_id.as_str())
+        );
+        assert_eq!(
+            rejected_log
+                .get("iblt_bytes")
+                .and_then(serde_json::Value::as_u64),
+            Some(u64::try_from(invalid_summary.iblt.len()).unwrap_or(u64::MAX))
+        );
+        assert_eq!(
+            rejected_log
+                .get("max_iblt_bytes")
+                .and_then(serde_json::Value::as_u64),
+            Some(u64::try_from(config.max_iblt_bytes()).unwrap_or(u64::MAX))
+        );
+        assert!(
+            rejected_log
+                .get("decode_ms")
+                .and_then(serde_json::Value::as_u64)
+                .is_some(),
+            "summary_rejected log should include decode_ms"
+        );
+
         emit_test_pass(
             TEST_NAME,
             CATEGORY,
             serde_json::json!({
                 "zone": zone_id.as_str(),
                 "peer_count": gossip.peer_count(),
+                "peer_node_id": "node-invalid",
                 "iblt_bytes": invalid_summary.iblt.len(),
-                "rejected_reason": "iblt_invalid_encoding",
+                "decode_ms": rejected_log["decode_ms"].clone(),
+                "rejected_reason": rejected_log["reason"].clone(),
+                "result": "pass",
+            }),
+        );
+    }
+
+    /// Test: Accepted gossip summaries emit decode metrics and peer identity.
+    #[test]
+    fn test_gossip_summary_received_logs_decode_metrics() {
+        const TEST_NAME: &str = "gossip_summary_received_logs_decode_metrics";
+        const CATEGORY: &str = "gossip";
+        emit_test_start(TEST_NAME, CATEGORY);
+
+        let zone_id = ZoneId::work();
+        let epoch = EpochId::new("epoch-summary-received");
+        let now = 1_000u64;
+
+        let mut peer_gossip = MeshGossip::with_defaults(TailscaleNodeId::new("node-peer"));
+        let object_id = test_object_id("received-object");
+        peer_gossip.announce_object(&zone_id, &object_id, ObjectAdmissionClass::Admitted, now);
+        peer_gossip.announce_symbol(&zone_id, &object_id, 7, ObjectAdmissionClass::Admitted, now);
+
+        let summary = peer_gossip
+            .create_summary(&zone_id, epoch)
+            .expect("summary should exist");
+        let expected_summary_bytes = u64::try_from(
+            serde_json::to_vec(&summary)
+                .expect("summary serializes")
+                .len(),
+        )
+        .unwrap_or(u64::MAX);
+        let expected_iblt_bytes = u64::try_from(summary.iblt.len()).unwrap_or(u64::MAX);
+
+        let capture = LogCapture::new();
+        let _guard = capture.install_json_with_filter("debug");
+        let mut local_gossip = MeshGossip::with_defaults(TailscaleNodeId::new("node-local"));
+        local_gossip.handle_summary(summary, now + 1);
+
+        assert_eq!(local_gossip.peer_count(), 1);
+
+        let received_log = find_tracing_event(&capture, "summary_received");
+        assert_eq!(
+            received_log
+                .get("peer_node_id")
+                .and_then(serde_json::Value::as_str),
+            Some("node-peer")
+        );
+        assert_eq!(
+            received_log
+                .get("object_count")
+                .and_then(serde_json::Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            received_log
+                .get("symbol_count")
+                .and_then(serde_json::Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            received_log
+                .get("summary_bytes")
+                .and_then(serde_json::Value::as_u64),
+            Some(expected_summary_bytes)
+        );
+        assert_eq!(
+            received_log
+                .get("iblt_bytes")
+                .and_then(serde_json::Value::as_u64),
+            Some(expected_iblt_bytes)
+        );
+        assert!(
+            received_log
+                .get("iblt_cells")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0)
+                > 0,
+            "summary_received log should include iblt_cells"
+        );
+        assert_eq!(
+            received_log
+                .get("accepted")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert!(
+            received_log
+                .get("decode_ms")
+                .and_then(serde_json::Value::as_u64)
+                .is_some(),
+            "summary_received log should include decode_ms"
+        );
+
+        emit_test_pass(
+            TEST_NAME,
+            CATEGORY,
+            serde_json::json!({
+                "zone": zone_id.as_str(),
+                "peer_node_id": "node-peer",
+                "summary_bytes": received_log["summary_bytes"].clone(),
+                "iblt_bytes": received_log["iblt_bytes"].clone(),
+                "iblt_cells": received_log["iblt_cells"].clone(),
+                "decode_ms": received_log["decode_ms"].clone(),
+                "fallback_reason": "none",
+                "result": "pass",
             }),
         );
     }
@@ -4180,6 +4359,9 @@ mod gossip_integration {
         const CATEGORY: &str = "gossip";
         emit_test_start(TEST_NAME, CATEGORY);
 
+        let capture = LogCapture::new();
+        let _guard = capture.install_json_with_filter("debug");
+
         let zone_id = ZoneId::work();
         let epoch = EpochId::new("epoch-bandwidth");
         let config = GossipConfig {
@@ -4231,6 +4413,46 @@ mod gossip_integration {
             "compact summary should be smaller than explicit baseline (summary={summary_bytes}, baseline={baseline_bytes})"
         );
 
+        let created_log = find_tracing_event(&capture, "summary_created");
+        assert_eq!(
+            created_log
+                .get("component")
+                .and_then(serde_json::Value::as_str),
+            Some("mesh.gossip")
+        );
+        assert_eq!(
+            created_log
+                .get("zone_id")
+                .and_then(serde_json::Value::as_str),
+            Some(zone_id.as_str())
+        );
+        assert_eq!(
+            created_log
+                .get("fallback_reason")
+                .and_then(serde_json::Value::as_str),
+            Some("none")
+        );
+        assert_eq!(
+            created_log
+                .get("summary_bytes")
+                .and_then(serde_json::Value::as_u64),
+            Some(u64::try_from(summary_bytes).unwrap_or(u64::MAX))
+        );
+        assert_eq!(
+            created_log
+                .get("iblt_bytes")
+                .and_then(serde_json::Value::as_u64),
+            Some(u64::try_from(summary.iblt.len()).unwrap_or(u64::MAX))
+        );
+        assert!(
+            created_log
+                .get("iblt_cells")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0)
+                > 0,
+            "summary_created log should include a non-zero iblt_cells count"
+        );
+
         emit_test_pass(
             TEST_NAME,
             CATEGORY,
@@ -4239,6 +4461,9 @@ mod gossip_integration {
                 "summary_bytes": summary_bytes,
                 "baseline_bytes": baseline_bytes,
                 "bandwidth_reduction_bytes": baseline_bytes - summary_bytes,
+                "iblt_cells": created_log["iblt_cells"].clone(),
+                "fallback_reason": created_log["fallback_reason"].clone(),
+                "result": "pass",
             }),
         );
     }

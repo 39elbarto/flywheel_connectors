@@ -1062,7 +1062,7 @@ impl MeshGossip {
                 component = "mesh.gossip",
                 event = "summary_rejected",
                 reason = "stale",
-                peer_id = %summary.from.as_str(),
+                peer_node_id = %summary.from.as_str(),
                 zone_id = %summary.zone_id,
                 object_count = summary.object_count,
                 symbol_count = summary.symbol_count,
@@ -1079,7 +1079,7 @@ impl MeshGossip {
                 component = "mesh.gossip",
                 event = "summary_rejected",
                 reason = "oversized",
-                peer_id = %summary.from.as_str(),
+                peer_node_id = %summary.from.as_str(),
                 zone_id = %summary.zone_id,
                 object_count = summary.object_count,
                 symbol_count = summary.symbol_count,
@@ -1108,7 +1108,7 @@ impl MeshGossip {
                     component = "mesh.gossip",
                     event = "summary_rejected",
                     reason = error.reason_code(),
-                    peer_id = %summary.from.as_str(),
+                    peer_node_id = %summary.from.as_str(),
                     zone_id = %summary.zone_id,
                     object_count,
                     symbol_count,
@@ -1125,13 +1125,16 @@ impl MeshGossip {
         let iblt_cells = u64::try_from(iblt_cells).unwrap_or(u64::MAX);
 
         // Update peer state
-        let peer_state = self.peer_states.entry(peer_id.clone()).or_insert_with(|| PeerGossipState::new(peer_id.clone()));
-        
+        let peer_state = self
+            .peer_states
+            .entry(peer_id.clone())
+            .or_insert_with(|| PeerGossipState::new(peer_id.clone()));
+
         peer_state.update_from_summary(summary, now);
         debug!(
             component = "mesh.gossip",
             event = "summary_received",
-            peer_id = %peer_id.as_str(),
+            peer_node_id = %peer_id.as_str(),
             object_count,
             symbol_count,
             summary_bytes,
@@ -2946,13 +2949,7 @@ mod tests {
         let mut gossip = MeshGossip::with_defaults(test_node("local"));
         let zone = test_zone();
         let obj = test_object_id("sym-zone");
-        gossip.announce_symbol(
-            &zone,
-            &obj,
-            7,
-            ObjectAdmissionClass::Admitted,
-            100,
-        );
+        gossip.announce_symbol(&zone, &obj, 7, ObjectAdmissionClass::Admitted, 100);
         assert!(gossip.has_symbol(&zone, &obj, 7));
         assert!(!gossip.has_symbol(&zone, &obj, 8));
     }
@@ -2962,13 +2959,7 @@ mod tests {
         let mut gossip = MeshGossip::with_defaults(test_node("local"));
         let zone = test_zone();
         let obj = test_object_id("q-sym");
-        let result = gossip.announce_symbol(
-            &zone,
-            &obj,
-            0,
-            ObjectAdmissionClass::Quarantined,
-            100,
-        );
+        let result = gossip.announce_symbol(&zone, &obj, 0, ObjectAdmissionClass::Quarantined, 100);
         assert!(!result);
         assert!(!gossip.has_symbol(&zone, &obj, 0));
     }

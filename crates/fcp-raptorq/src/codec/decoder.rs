@@ -2250,7 +2250,7 @@ mod tests {
 
         let mut cache = DenseFactorCache::default();
         assert_eq!(
-            cache.insert(sig_a, Arc::new(DenseFactorArtifact::new(vec![1, 0]))),
+            cache.insert(sig_a.clone(), Arc::new(DenseFactorArtifact::new(vec![1, 0]))),
             DenseFactorCacheResult::MissInserted
         );
         assert_eq!(
@@ -2273,7 +2273,7 @@ mod tests {
 
         let mut cache = DenseFactorCache::default();
         assert_eq!(
-            cache.insert(sig_a, Arc::new(DenseFactorArtifact::new(vec![1, 0]))),
+            cache.insert(sig_a.clone(), Arc::new(DenseFactorArtifact::new(vec![1, 0]))),
             DenseFactorCacheResult::MissInserted
         );
         assert_eq!(

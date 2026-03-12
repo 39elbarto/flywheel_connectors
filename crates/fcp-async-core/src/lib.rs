@@ -696,7 +696,8 @@ pub mod channel {
                 let cx = compatibility_cx();
                 self.inner.recv(&cx).await.map_err(|err| match err {
                     asupersync::channel::broadcast::RecvError::Closed
-                    | asupersync::channel::broadcast::RecvError::Cancelled => {
+                    | asupersync::channel::broadcast::RecvError::Cancelled
+                    | asupersync::channel::broadcast::RecvError::PolledAfterCompletion => {
                         error::RecvError::Closed
                     }
                     asupersync::channel::broadcast::RecvError::Lagged(skipped) => {

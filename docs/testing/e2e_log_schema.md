@@ -73,6 +73,30 @@ Optional Fields (All Shapes)
 - `error_code` (string; stable FCP error code when `result=fail`)
 - `details` (object/array/string/number/boolean/null; extra error metadata)
 
+Truthfulness Context Conventions
+--------------------------------
+
+For host-first truthfulness scenarios, prefer carrying the following fields
+inside `context` (or `details` when the harness shape makes that more natural):
+
+- `command_mode` with the same tags used by `CommandAvailability`
+  (`live-runtime`, `offline-artifact`, `unsupported`, `planned`,
+  `unavailable`, `denied`, `unknown`)
+- `provenance_markers` as an array of explicit source labels such as
+  `live-host-introspection`, `live-host-inventory`, `workspace-manifest`,
+  `local-catalog-cache`, or `static-schema`
+- `phase` as one of `setup`, `offline-artifact`, `host-discovery`,
+  `preflight`, `simulate`, `invoke`, `host-receipt`, `reconnect`,
+  `cancellation`, or `teardown`
+- `host_request_id`, `host_response_id`, and `receipt_id` when the scenario
+  crossed the live host boundary
+- `reconnect_event` and `cancellation_event` when long-lived or interruptible
+  flows are being exercised
+
+These markers are not just debugging decoration. They are the evidence that a
+future engineer can use to prove whether a scenario exercised live runtime
+truth, explicit offline artifact work, or a refusal/remediation path.
+
 Compatibility Rules
 -------------------
 
@@ -159,6 +183,13 @@ The runner writes:
 - `artifacts/asupersync/e2e/<run-id>/scenario_plan.json` (scenario id/seed/replay contract)
 - `artifacts/asupersync/e2e/<run-id>/replay.sh` (deterministic full + per-scenario replay commands)
 - `artifacts/asupersync/e2e/<run-id>/scenarios/<scenario>/...` (command.txt, execution.log, scenario.json, artifacts/)
+
+For any cargo-backed replay or validation step emitted by these artifacts, the
+replay contract should preserve the required remote-offload prefix:
+
+```bash
+rch exec -- cargo ...
+```
 
 Required scenarios are listed in `scripts/e2e/run_matrix.sh` and should exit
 `pass` with schema-valid JSONL logs. Optional scenarios may be skipped until

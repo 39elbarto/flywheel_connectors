@@ -312,14 +312,15 @@ The same module also defines:
 
 - structured scenario IDs as `{layer}:{suite}:{case}`
 - redaction rules for sensitive fields and token-like prefixes
-- replay instructions derived from the captured environment and command line
+- per-entry truthfulness evidence (`command_mode`, provenance markers, phase markers, host request/response ids, receipt ids, reconnect/cancellation markers)
+- replay instructions derived from the captured environment and command line, including `rch exec -- ...` for cargo-backed replay
 
 How to read the bundle:
 
-- `trace.jsonl`: the step-by-step timeline and correlation trail
-- `summary.json`: the machine-readable verdict and short explanation of why the run passed or failed
-- `environment.json`: the execution context needed to decide whether a mismatch is environmental or semantic
-- `replay.sh`: the deterministic rerun entrypoint; if it cannot reproduce the scenario, the evidence is incomplete
+- `trace.jsonl`: the step-by-step timeline and correlation trail, plus per-step truthfulness evidence about mode, provenance, and phase
+- `summary.json`: the machine-readable verdict, aggregate log summary, and the deduplicated truthfulness markers observed during the run
+- `environment.json`: the execution context needed to decide whether a mismatch is environmental or semantic, including whether replay is expected to stay offloaded through `rch`
+- `replay.sh`: the deterministic rerun entrypoint; cargo-backed verification steps should preserve `rch exec -- ...`, and if the script cannot reproduce the scenario, the evidence is incomplete
 
 ### Structured E2E logs
 

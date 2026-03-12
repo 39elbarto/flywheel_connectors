@@ -3230,13 +3230,17 @@ mod tests {
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
 
-    fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> CapabilityToken {
+    fn generate_valid_token(
+        signing_key: &Ed25519SigningKey,
+        cap: &str,
+        op: &str,
+    ) -> CapabilityToken {
         let now = Utc::now();
         let cose = CapabilityTokenBuilder::new()
             .capability_id(cap)
             .zone_id("z:work")
             .principal("user:test")
-            .operations(&[cap])
+            .operations(&[op])
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
             .sign(signing_key)
@@ -3335,7 +3339,7 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "airtable.list_bases");
+        let token = generate_valid_token(&signing_key, "airtable.read", "airtable.list_bases");
 
         let result = connector
             .handle_invoke(json!({
@@ -3374,7 +3378,7 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "airtable.get_record");
+        let token = generate_valid_token(&signing_key, "airtable.read", "airtable.get_record");
 
         let result = connector
             .handle_invoke(json!({

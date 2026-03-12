@@ -29,6 +29,8 @@ mod checkpoint;
 mod credential;
 #[allow(dead_code)]
 mod credential_store;
+#[allow(dead_code)]
+mod doctor;
 #[allow(dead_code)] // Error taxonomy wired when host-backed dispatch lands.
 mod error_taxonomy;
 #[allow(dead_code)] // Stream types wired when host integration lands.
@@ -429,7 +431,6 @@ enum Commands {
     /// Generate a fill-in-the-blanks JSON template for an operation.
     ///
     /// Produces scaffolded JSON with placeholder values and type annotations.
-    #[command(visible_alias = "scaffold")]
     Template(TemplateArgs),
 
     /// Validate an operation input against its schema before invoking.
@@ -1184,6 +1185,9 @@ enum AuthCommand {
 
     /// Run local structural validation and expiry checks without contacting the live connector.
     Test(TargetArgs),
+
+    /// Comprehensive credential verification: structural test + expiry + age-based rotation advisory + doctor diagnosis.
+    Verify(TargetArgs),
 
     /// Report expiry and rotation status for one credential or the full store.
     Status(AuthStatusArgs),
@@ -7051,6 +7055,7 @@ fn auth_dispatch_with_store(args: &AuthArgs, store: &CredentialStore) -> Result<
         AuthCommand::Show(target) => auth_show_dispatch(target, store),
         AuthCommand::Remove(target) => auth_remove_dispatch(target, store),
         AuthCommand::Test(target) => auth_test_dispatch(target, store),
+        AuthCommand::Verify(target) => auth_verify_dispatch(target, store),
         AuthCommand::Status(status_args) => auth_status_dispatch(status_args, store),
     }
 }
@@ -7392,6 +7397,161 @@ fn auth_test_dispatch(args: &TargetArgs, store: &CredentialStore) -> Result<Disp
         envelope.inject_into(&mut payload);
     }
     Ok(DispatchOutcome { payload, exit_code })
+}
+
+fn auth_verify_dispatch(args: &TargetArgs, store: &CredentialStore) -> Result<DispatchOutcome> {
+    if let Err(message) = validate_connector_id(&args.connector) {
+        return Ok(auth_invalid_connector_dispatch("verify", &message));
+    }
+    let credential = match auth_load_credential(store, &args.connector) {
+        Ok(credential) => credential,
+        Err(AuthLookupError::Missing) => {
+            return Ok(DispatchOutcome {
+                payload: json!({
+                    "status": "error",
+                    "command": "auth",
+                    "subcommand": "verify",
+                    "source": "credential-store",
+                    "result": {
+                        "structural": { "status": "no_credential" },
+                        "expiry": { "status": "unknown" },
+                        "rotation_advisory": { "recommendation": "none" },
+                        "diagnosis": [],
+                    },
+                    "error": {
+                        "type": "credential-not-found",
+                        "message": format!("No stored credential exists for `{}`.", args.connector),
+                        "recoverable": true,
+                    },
+                    "next_actions": [
+                        format!("fwc auth add {} --token <token>", args.connector),
+                        "fwc auth list".to_owned(),
+                    ],
+                }),
+                exit_code: CliExitCode::Validation,
+            });
+        }
+        Err(AuthLookupError::Store(error)) => {
+            return Ok(auth_store_error_dispatch("verify", store, &error));
+        }
+    };
+
+    // 1. Structural validation (same as `auth test`)
+    let structural_result = verify_stored_credential(&credential);
+    let structural_ok = matches!(structural_result.status, AuthStatus::Valid);
+
+    // 2. Expiry + age-based rotation advisory
+    let expires_at = credential
+        .get_field("expires_at")
+        .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
+        .map(|dt| dt.with_timezone(&chrono::Utc));
+    let metadata = {
+        let mut m = auth_status::AuthMetadata::new(&credential.connector_id, expires_at);
+        if let Some(used) = credential
+            .get_field("last_used_at")
+            .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
+        {
+            m.last_used_at = Some(used.with_timezone(&chrono::Utc));
+        }
+        m
+    };
+    let expiry_status = auth_status::classify_expiry(&metadata);
+    let rotation_advisory = auth_status::rotation_advisory(&metadata);
+    let rotation_guidance = auth_status::rotation_guidance(
+        &credential.connector_id,
+        &auth_method_tag(&credential.auth_method),
+    );
+
+    // 3. Doctor diagnosis from local symptoms
+    let symptoms = doctor::Symptoms {
+        http_status: None,
+        error_message: None,
+        latency_ms: None,
+        installed: true,
+        has_credentials: true,
+        rate_limit_percent: None,
+        last_op_success: None,
+    };
+    let report = doctor::diagnose(&args.connector, &symptoms);
+
+    // 4. Combine into unified verification report
+    let has_issues = !structural_ok
+        || expiry_status.needs_attention()
+        || rotation_advisory.recommendation.needs_attention()
+        || report.has_issues();
+
+    let overall_status = if !structural_ok {
+        "error"
+    } else if has_issues {
+        "warning"
+    } else {
+        "ok"
+    };
+    let exit_code = if !structural_ok {
+        CliExitCode::Validation
+    } else {
+        CliExitCode::Success
+    };
+
+    let mut payload = json!({
+        "status": overall_status,
+        "command": "auth",
+        "subcommand": "verify",
+        "source": "credential-store",
+        "store_path": store.path().display().to_string(),
+        "connector_id": args.connector,
+        "verification_scope": {
+            "mode": "comprehensive-local",
+            "description": "Structural validation, expiry analysis, age-based rotation advisory, and symptom-based diagnosis.",
+        },
+        "credential": credential.redacted_view(),
+        "result": {
+            "structural": structural_result,
+            "expiry": {
+                "status": expiry_status,
+                "time_remaining": metadata.time_to_expiry().map(|d| {
+                    let days = d.num_days();
+                    let hours = d.num_hours() % 24;
+                    if days > 0 { format!("{days}d {hours}h") }
+                    else { format!("{}h {}m", hours, d.num_minutes() % 60) }
+                }),
+            },
+            "rotation_advisory": rotation_advisory,
+            "rotation_guidance": rotation_guidance,
+            "diagnosis": report.to_json(),
+        },
+        "next_actions": auth_verify_next_actions(&args.connector, structural_ok, &expiry_status, &rotation_advisory.recommendation),
+    });
+    if exit_code.is_success() {
+        let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "auth");
+        envelope.inject_into(&mut payload);
+    }
+    Ok(DispatchOutcome { payload, exit_code })
+}
+
+fn auth_verify_next_actions(
+    connector_id: &str,
+    structural_ok: bool,
+    expiry: &auth_status::ExpiryStatus,
+    rotation: &auth_status::RotationUrgency,
+) -> Vec<String> {
+    let mut actions = Vec::new();
+    if !structural_ok {
+        actions.push(format!("fwc auth add {connector_id} --token <token>"));
+    }
+    if expiry.needs_attention() {
+        actions.push(format!("fwc auth status --connector {connector_id}"));
+    }
+    if rotation.needs_attention() {
+        actions.push(format!(
+            "Rotate credentials — see rotation_guidance in output"
+        ));
+    }
+    if actions.is_empty() {
+        actions.push(format!("fwc auth show {connector_id}"));
+        actions.push("fwc auth status".to_owned());
+    }
+    actions
 }
 
 fn auth_status_dispatch(args: &AuthStatusArgs, store: &CredentialStore) -> Result<DispatchOutcome> {
@@ -19352,6 +19512,101 @@ deny_ptrace = true
     }
 
     #[test]
+    fn auth_verify_reports_missing_credential() {
+        let (_tempdir, store) = temp_auth_store();
+        let result = super::auth_dispatch_with_store(
+            &super::AuthArgs {
+                command: super::AuthCommand::Verify(super::TargetArgs {
+                    connector: "github".to_owned(),
+                }),
+            },
+            &store,
+        )
+        .expect("auth verify should produce a structured error");
+
+        assert_eq!(result.exit_code, CliExitCode::Validation);
+        assert_eq!(result.payload["error"]["type"], "credential-not-found");
+        assert_eq!(
+            result.payload["result"]["structural"]["status"],
+            "no_credential"
+        );
+    }
+
+    #[test]
+    fn auth_verify_comprehensive_report_for_valid_credential() {
+        let (_tempdir, store) = temp_auth_store();
+        let add = super::AuthArgs {
+            command: super::AuthCommand::Add(super::AuthAddArgs {
+                connector: "github".to_owned(),
+                label: None,
+                fields: Vec::new(),
+                extra_fields: Vec::new(),
+                token: Some("ghp-secret".to_owned()),
+                api_token: None,
+                api_key: None,
+                username: None,
+                password: None,
+                client_id: None,
+                client_secret: None,
+                access_token: None,
+                refresh_token: None,
+                session_token: None,
+                credential_id: None,
+                expires_at: Some("2030-01-01T00:00:00Z".to_owned()),
+            }),
+        };
+        super::auth_dispatch_with_store(&add, &store).expect("auth add should work");
+
+        let result = super::auth_dispatch_with_store(
+            &super::AuthArgs {
+                command: super::AuthCommand::Verify(super::TargetArgs {
+                    connector: "github".to_owned(),
+                }),
+            },
+            &store,
+        )
+        .expect("auth verify should succeed");
+
+        assert_eq!(result.exit_code, CliExitCode::Success);
+        assert_eq!(
+            result.payload["verification_scope"]["mode"],
+            "comprehensive-local"
+        );
+        assert_eq!(result.payload["result"]["structural"]["status"], "valid");
+        assert!(result.payload["result"]["rotation_advisory"].is_object());
+        assert_eq!(
+            result.payload["result"]["rotation_advisory"]["recommendation"],
+            "none"
+        );
+        assert!(result.payload["result"]["rotation_guidance"].is_object());
+        assert!(result.payload["result"]["diagnosis"].is_object());
+        assert!(result.payload["credential"]["fields"]["token"]
+            .as_str()
+            .unwrap()
+            .contains("***"));
+    }
+
+    #[test]
+    fn auth_verify_rejects_invalid_connector_id() {
+        let (_tempdir, store) = temp_auth_store();
+        let result = super::auth_dispatch_with_store(
+            &super::AuthArgs {
+                command: super::AuthCommand::Verify(super::TargetArgs {
+                    connector: "BAD ID".to_owned(),
+                }),
+            },
+            &store,
+        )
+        .expect("auth verify should return structured error");
+
+        assert_eq!(
+            result.payload["error"]["type"], "invalid-connector-id",
+            "payload: {:?}",
+            result.payload
+        );
+    }
+
+    #[test]
     fn execute_auth_missing_subcommand_returns_structured_guidance() {
         let (exit_code, payload) = execute_json(&["fwc", "--json", "auth"]);
 
@@ -19390,7 +19645,7 @@ deny_ptrace = true
             .clone();
         let help = auth.render_long_help().to_string();
 
-        for subcommand in ["add", "list", "show", "remove", "test", "status"] {
+        for subcommand in ["add", "list", "show", "remove", "test", "verify", "status"] {
             assert!(
                 help.contains(subcommand),
                 "auth help should mention `{subcommand}`: {help}"

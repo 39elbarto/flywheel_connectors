@@ -318,6 +318,97 @@ pub fn rotation_guidance(connector_id: &str, auth_type: &str) -> RotationGuidanc
     }
 }
 
+// ── Age-based rotation advisory ───────────────────────────────────
+
+/// Advisory about whether a credential should be rotated based on age,
+/// independent of expiry status.
+#[derive(Clone, Debug, Serialize)]
+pub struct RotationAdvisory {
+    pub connector_id: String,
+    pub age_days: i64,
+    pub last_rotated_days: Option<i64>,
+    pub recommendation: RotationUrgency,
+    pub message: String,
+}
+
+/// How urgently a credential should be rotated based on age.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RotationUrgency {
+    /// No rotation needed.
+    None,
+    /// Consider rotating soon (> 90 days old without rotation).
+    Suggested,
+    /// Strongly recommend rotation (> 180 days old without rotation).
+    Recommended,
+    /// Overdue for rotation (> 365 days old without rotation).
+    Overdue,
+}
+
+impl RotationUrgency {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Suggested => "suggested",
+            Self::Recommended => "recommended",
+            Self::Overdue => "overdue",
+        }
+    }
+
+    pub const fn needs_attention(self) -> bool {
+        !matches!(self, Self::None)
+    }
+}
+
+/// Produce an age-based rotation advisory for a credential.
+pub fn rotation_advisory(metadata: &AuthMetadata) -> RotationAdvisory {
+    let age_days = metadata.age().num_days();
+    let last_rotated_days = metadata.last_rotated_at.map(|t| (Utc::now() - t).num_days());
+    let days_since_rotation = last_rotated_days.unwrap_or(age_days);
+
+    let (recommendation, message) = if days_since_rotation > 365 {
+        (
+            RotationUrgency::Overdue,
+            format!(
+                "{}: credential is {} days old without rotation — overdue for rotation",
+                metadata.connector_id, days_since_rotation
+            ),
+        )
+    } else if days_since_rotation > 180 {
+        (
+            RotationUrgency::Recommended,
+            format!(
+                "{}: credential is {} days old without rotation — rotation recommended",
+                metadata.connector_id, days_since_rotation
+            ),
+        )
+    } else if days_since_rotation > 90 {
+        (
+            RotationUrgency::Suggested,
+            format!(
+                "{}: credential is {} days old without rotation — consider rotating",
+                metadata.connector_id, days_since_rotation
+            ),
+        )
+    } else {
+        (
+            RotationUrgency::None,
+            format!(
+                "{}: credential age ({} days) within normal range",
+                metadata.connector_id, days_since_rotation
+            ),
+        )
+    };
+
+    RotationAdvisory {
+        connector_id: metadata.connector_id.clone(),
+        age_days,
+        last_rotated_days,
+        recommendation,
+        message,
+    }
+}
+
 // ── Warning middleware ─────────────────────────────────────────────
 
 /// Check all metadata entries and return warnings for credentials needing attention.
@@ -1224,5 +1315,121 @@ mod tests {
         let json = serde_json::to_value(&g).unwrap();
         assert!(!json["automated"].as_bool().unwrap());
         assert!(json["estimated_downtime"].is_string());
+    }
+
+    // ── RotationAdvisory ────────────────────────────────────────────
+
+    #[test]
+    fn rotation_advisory_fresh_credential() {
+        let meta = AuthMetadata::new("github", None);
+        let advisory = rotation_advisory(&meta);
+        assert_eq!(advisory.recommendation, RotationUrgency::None);
+        assert_eq!(advisory.age_days, 0);
+        assert!(advisory.last_rotated_days.is_none());
+    }
+
+    #[test]
+    fn rotation_advisory_91_days_old_suggests_rotation() {
+        let mut meta = AuthMetadata::new("github", None);
+        meta.created_at = now() - Duration::days(91);
+        let advisory = rotation_advisory(&meta);
+        assert_eq!(advisory.recommendation, RotationUrgency::Suggested);
+        assert!(advisory.message.contains("consider rotating"));
+    }
+
+    #[test]
+    fn rotation_advisory_181_days_old_recommends_rotation() {
+        let mut meta = AuthMetadata::new("github", None);
+        meta.created_at = now() - Duration::days(181);
+        let advisory = rotation_advisory(&meta);
+        assert_eq!(advisory.recommendation, RotationUrgency::Recommended);
+        assert!(advisory.message.contains("rotation recommended"));
+    }
+
+    #[test]
+    fn rotation_advisory_366_days_old_is_overdue() {
+        let mut meta = AuthMetadata::new("github", None);
+        meta.created_at = now() - Duration::days(366);
+        let advisory = rotation_advisory(&meta);
+        assert_eq!(advisory.recommendation, RotationUrgency::Overdue);
+        assert!(advisory.message.contains("overdue"));
+    }
+
+    #[test]
+    fn rotation_advisory_recent_rotation_resets_clock() {
+        let mut meta = AuthMetadata::new("github", None);
+        meta.created_at = now() - Duration::days(400);
+        meta.last_rotated_at = Some(now() - Duration::days(10));
+        let advisory = rotation_advisory(&meta);
+        assert_eq!(advisory.recommendation, RotationUrgency::None);
+        assert!(advisory.last_rotated_days.is_some());
+    }
+
+    #[test]
+    fn rotation_advisory_old_rotation_still_flags() {
+        let mut meta = AuthMetadata::new("github", None);
+        meta.created_at = now() - Duration::days(400);
+        meta.last_rotated_at = Some(now() - Duration::days(200));
+        let advisory = rotation_advisory(&meta);
+        assert_eq!(advisory.recommendation, RotationUrgency::Recommended);
+    }
+
+    #[test]
+    fn rotation_urgency_label_round_trips() {
+        for u in [
+            RotationUrgency::None,
+            RotationUrgency::Suggested,
+            RotationUrgency::Recommended,
+            RotationUrgency::Overdue,
+        ] {
+            assert!(!u.label().is_empty());
+        }
+    }
+
+    #[test]
+    fn rotation_urgency_none_does_not_need_attention() {
+        assert!(!RotationUrgency::None.needs_attention());
+    }
+
+    #[test]
+    fn rotation_urgency_others_need_attention() {
+        assert!(RotationUrgency::Suggested.needs_attention());
+        assert!(RotationUrgency::Recommended.needs_attention());
+        assert!(RotationUrgency::Overdue.needs_attention());
+    }
+
+    #[test]
+    fn rotation_advisory_serializes() {
+        let mut meta = AuthMetadata::new("github", None);
+        meta.created_at = now() - Duration::days(100);
+        let advisory = rotation_advisory(&meta);
+        let json = serde_json::to_value(&advisory).unwrap();
+        assert_eq!(json["connector_id"], "github");
+        assert_eq!(json["recommendation"], "suggested");
+        assert!(json["age_days"].as_i64().unwrap() >= 100);
+    }
+
+    #[test]
+    fn rotation_advisory_boundary_90_days() {
+        let mut meta = AuthMetadata::new("github", None);
+        meta.created_at = now() - Duration::days(90);
+        let advisory = rotation_advisory(&meta);
+        assert_eq!(advisory.recommendation, RotationUrgency::None);
+    }
+
+    #[test]
+    fn rotation_advisory_boundary_180_days() {
+        let mut meta = AuthMetadata::new("github", None);
+        meta.created_at = now() - Duration::days(180);
+        let advisory = rotation_advisory(&meta);
+        assert_eq!(advisory.recommendation, RotationUrgency::Suggested);
+    }
+
+    #[test]
+    fn rotation_advisory_boundary_365_days() {
+        let mut meta = AuthMetadata::new("github", None);
+        meta.created_at = now() - Duration::days(365);
+        let advisory = rotation_advisory(&meta);
+        assert_eq!(advisory.recommendation, RotationUrgency::Recommended);
     }
 }

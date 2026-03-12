@@ -8,7 +8,10 @@ use std::collections::BTreeSet;
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::readiness::{DiscoveredConnector, DiscoveredOperation};
+use crate::{
+    readiness::{DiscoveredConnector, DiscoveredOperation},
+    recovery::levenshtein,
+};
 
 // ── Scoring weights ─────────────────────────────────────────────────────
 
@@ -16,6 +19,8 @@ use crate::readiness::{DiscoveredConnector, DiscoveredOperation};
 const WEIGHT_OP_ID_EXACT: i64 = 30;
 /// Weight for partial operation ID match.
 const WEIGHT_OP_ID_PARTIAL: i64 = 14;
+/// Weight for fuzzy operation ID or alias match within a tight edit budget.
+const WEIGHT_OP_ID_FUZZY: i64 = 6;
 /// Weight for match in `when_to_use` (highest value for agent consumption).
 const WEIGHT_WHEN_TO_USE: i64 = 18;
 /// Weight for match in operation summary/description.
@@ -310,6 +315,11 @@ fn score_operation(
 
     let op_id_lower = operation.actual_id.to_lowercase();
     let local_id_lower = operation.local_id.to_lowercase();
+    let aliases_lower: Vec<String> = operation
+        .aliases
+        .iter()
+        .map(|alias| alias.to_lowercase())
+        .collect();
     let summary_lower = operation.summary.summary.to_lowercase();
     let when_to_use_lower = operation.when_to_use.to_lowercase();
     let capability_lower = operation.summary.capability.to_lowercase();
@@ -322,19 +332,26 @@ fn score_operation(
         } else if op_id_lower.contains(token) || local_id_lower.contains(token) {
             score += WEIGHT_OP_ID_PARTIAL;
             reasons.insert("partial_id_match".to_owned());
+        } else if identifier_has_fuzzy_match(&op_id_lower, token)
+            || identifier_has_fuzzy_match(&local_id_lower, token)
+        {
+            score += WEIGHT_OP_ID_FUZZY;
+            reasons.insert("fuzzy_id_match".to_owned());
         }
 
         // Alias match.
-        if operation.aliases.iter().any(|a| a.to_lowercase() == *token) {
+        if aliases_lower.iter().any(|alias| alias == token) {
             score += WEIGHT_OP_ID_EXACT;
             reasons.insert("alias_match".to_owned());
-        } else if operation
-            .aliases
-            .iter()
-            .any(|a| a.to_lowercase().contains(token))
-        {
+        } else if aliases_lower.iter().any(|alias| alias.contains(token)) {
             score += WEIGHT_OP_ID_PARTIAL;
             reasons.insert("partial_alias_match".to_owned());
+        } else if aliases_lower
+            .iter()
+            .any(|alias| identifier_has_fuzzy_match(alias, token))
+        {
+            score += WEIGHT_OP_ID_FUZZY;
+            reasons.insert("fuzzy_alias_match".to_owned());
         }
 
         // when_to_use (3x effective — highest value for agent search).
@@ -379,6 +396,38 @@ fn score_operation(
     (score, reasons.into_iter().collect())
 }
 
+fn identifier_has_fuzzy_match(identifier: &str, token: &str) -> bool {
+    fuzzy_term_matches(identifier, token)
+        || identifier
+            .split(|ch: char| !ch.is_ascii_alphanumeric())
+            .filter(|segment| !segment.is_empty())
+            .any(|segment| fuzzy_term_matches(segment, token))
+}
+
+fn fuzzy_term_matches(candidate: &str, token: &str) -> bool {
+    let max_distance = fuzzy_distance_budget(candidate, token);
+    max_distance > 0 && levenshtein(candidate, token) <= max_distance
+}
+
+fn fuzzy_distance_budget(candidate: &str, token: &str) -> usize {
+    let candidate_len = candidate.chars().count();
+    let token_len = token.chars().count();
+    if candidate_len == 0 || token_len < 4 {
+        return 0;
+    }
+
+    let length_gap = candidate_len.abs_diff(token_len);
+    if length_gap > 2 {
+        return 0;
+    }
+
+    if candidate_len >= 8 || token_len >= 8 {
+        2
+    } else {
+        1
+    }
+}
+
 fn tokenize(query: &str) -> Vec<String> {
     query
         .split(|ch: char| {
@@ -414,7 +463,9 @@ mod tests {
                     name: format!("{} Connector", capitalize(slug)),
                     version: "0.1.0".to_owned(),
                     description: format!("FCP connector for {slug}"),
-                    archetypes: crate::readiness::MetadataField::Known(vec!["operational".to_owned()]),
+                    archetypes: crate::readiness::MetadataField::Known(vec![
+                        "operational".to_owned(),
+                    ]),
                     state: ConnectorState::Unknown,
                     operation_count: ops.len(),
                     max_risk: "medium".to_owned(),
@@ -737,6 +788,46 @@ mod tests {
     }
 
     #[test]
+    fn fuzzy_typo_in_operation_id_recovers_result() {
+        let connectors = sample_connectors();
+        let results = search_operations(&connectors, "send_mesage", &SearchFilters::default());
+        assert!(!results.is_empty());
+        assert_eq!(results[0].operation_id, "slack.send_message");
+        assert!(
+            results[0]
+                .match_reasons
+                .contains(&"fuzzy_id_match".to_owned())
+        );
+    }
+
+    #[test]
+    fn fuzzy_typo_in_identifier_segment_recovers_result() {
+        let connectors = sample_connectors();
+        let results = search_operations(&connectors, "mesage", &SearchFilters::default());
+        assert!(!results.is_empty());
+        assert_eq!(results[0].operation_id, "slack.send_message");
+        assert!(
+            results[0]
+                .match_reasons
+                .contains(&"fuzzy_id_match".to_owned())
+        );
+    }
+
+    #[test]
+    fn fuzzy_typo_in_alias_recovers_result() {
+        let mut connectors = sample_connectors();
+        connectors[0].operations[0].aliases = vec!["open_ticket".to_owned()];
+        let results = search_operations(&connectors, "open_tiket", &SearchFilters::default());
+        assert!(!results.is_empty());
+        assert_eq!(results[0].operation_id, "github.create_issue");
+        assert!(
+            results[0]
+                .match_reasons
+                .contains(&"fuzzy_alias_match".to_owned())
+        );
+    }
+
+    #[test]
     fn results_sorted_by_score_descending() {
         let connectors = sample_connectors();
         let results = search_operations(&connectors, "create", &SearchFilters::default());
@@ -977,6 +1068,22 @@ mod tests {
     fn tokenize_only_separators() {
         let tokens = tokenize("   + & ");
         assert!(tokens.is_empty());
+    }
+
+    #[test]
+    fn fuzzy_identifier_match_rejects_short_noise() {
+        assert!(!identifier_has_fuzzy_match("send_message", "sg"));
+    }
+
+    #[test]
+    fn fuzzy_identifier_match_accepts_small_typos() {
+        assert!(identifier_has_fuzzy_match("send_message", "send_mesage"));
+        assert!(identifier_has_fuzzy_match("send_message", "mesage"));
+    }
+
+    #[test]
+    fn fuzzy_identifier_match_rejects_distant_terms() {
+        assert!(!identifier_has_fuzzy_match("send_message", "calendar"));
     }
 
     #[test]

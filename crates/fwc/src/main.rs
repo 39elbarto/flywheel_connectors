@@ -34,6 +34,8 @@ mod event_stream;
 #[allow(dead_code)] // Comprehensive event filtering engine.
 mod events;
 mod export_tools;
+#[allow(dead_code)] // Fallback routing with circuit-breaker integration.
+mod fallback_routing;
 mod format_table;
 #[allow(dead_code)] // Cross-connector health aggregation dashboard.
 mod health;
@@ -19007,7 +19009,7 @@ deny_ptrace = true
         assert_eq!(payload["source"], "workspace-manifests");
         assert_template_provenance(&payload, "workspace_manifest", false, "offline-artifact");
         assert_eq!(payload["operation"]["canonical_id"], "github.create_issue");
-        assert_eq!(payload["template"]["title"], "example-string");
+        assert_eq!(payload["template"]["title"], "<string:required>");
     }
 
     #[test]

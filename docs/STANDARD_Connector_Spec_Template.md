@@ -54,6 +54,8 @@ Notes:
 - `api.rs` is only generated for request-response connectors.
 - `stream.rs` is only generated for streaming/bidirectional connectors.
 - `polling.rs` is only generated for polling connectors.
+- `limits.rs` should centralize named platform caps plus TODO placeholders for limits that are known but not yet enforced.
+- Validation code and boundary tests should import from `limits.rs` rather than repeating raw numeric limits in `connector.rs` or test files.
 
 ---
 

@@ -946,11 +946,12 @@ bash scripts/ci/asupersync_tokio_guard.sh
 
 1. Create connector crate: `cargo new connectors/myservice --lib`
 2. Add FCP SDK dependency
-3. Implement `FcpConnector` trait
-4. Define manifest with capabilities, zone policy, and sandbox config
-5. Add archetype-specific traits
-6. Write tests with mocked external service
-7. Document AI hints for each operation
+3. Add `src/limits.rs` with named platform caps and TODO placeholders for limits you have not wired yet
+4. Implement `FcpConnector` trait and import limits from `limits.rs` instead of inlining magic numbers in validation code
+5. Define manifest with capabilities, zone policy, and sandbox config
+6. Add archetype-specific traits
+7. Write tests with mocked external service, including limit-boundary coverage that uses the named constants
+8. Document AI hints for each operation
 
 ---
 

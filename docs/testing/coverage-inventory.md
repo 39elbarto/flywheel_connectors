@@ -402,6 +402,37 @@ Maintenance guidance:
 
 These are **manual-only** runs against dedicated sandbox accounts. No mocks. Use the E2E JSONL schema in `docs/testing/e2e_log_schema.md` and validate with `fcp-e2e --validate-log`.
 
+### Preferred Entry Point
+
+Use `scripts/e2e/live_connector_smoke_suite.sh` for Anthropic, OpenAI, Telegram, Discord, and Twitter/X. It:
+- offloads cargo-backed build/run steps through `rch exec -- cargo ...`
+- generates JSON request files from environment variables so secrets do not need to appear on the command line
+- runs `fcp-e2e --connector-cmd` with redacted JSONL logging
+- validates the resulting JSONL artifacts and emits a redaction scan report per connector
+
+Example:
+
+```bash
+export OPENAI_API_KEY=...
+export ANTHROPIC_API_KEY=...
+export TELEGRAM_BOT_TOKEN=...
+export DISCORD_BOT_TOKEN=...
+export TWITTER_CONSUMER_KEY=...
+export TWITTER_CONSUMER_SECRET=...
+export TWITTER_ACCESS_TOKEN=...
+export TWITTER_ACCESS_TOKEN_SECRET=...
+
+bash scripts/e2e/live_connector_smoke_suite.sh \
+  --connectors anthropic,openai,telegram,discord,twitter \
+  --out-root artifacts/e2e/live_connector_smoke/manual-run
+```
+
+Optional invoke coverage:
+- Set `FCP_LIVE_CAPABILITY_TOKEN` to enable honest direct-connector invoke requests.
+- Set `TELEGRAM_CHAT_ID`, `DISCORD_CHANNEL_ID`, and `TWITTER_TWEET_ID` to enable connector-specific invoke smoke.
+- `OPENAI_PROMPT`, `OPENAI_MODEL`, `ANTHROPIC_PROMPT`, and `ANTHROPIC_MODEL` can tune the low-cost LLM smoke request.
+- If `fcp-e2e` is not already on `PATH`, keep `rch` installed so the script can invoke `cargo run -p fcp-e2e --bin fcp-e2e -- ...` through the remote builder.
+
 ### Common Setup (All Connectors)
 - Provision a dedicated sandbox account (no production data).
 - Acquire scoped API keys/tokens for the connector capabilities under test.
@@ -426,12 +457,15 @@ These are **manual-only** runs against dedicated sandbox accounts. No mocks. Use
 ### Command Templates (fcp-e2e connector mode)
 Build the connector binary first:
 ```bash
-cargo build -p fcp-telegram
-cargo build -p fcp-discord
-cargo build -p fcp-twitter
-cargo build -p fcp-openai
-cargo build -p fcp-anthropic
+rch exec -- cargo build -p fcp-telegram
+rch exec -- cargo build -p fcp-discord
+rch exec -- cargo build -p fcp-twitter
+rch exec -- cargo build -p fcp-openai
+rch exec -- cargo build -p fcp-anthropic
 ```
+
+Low-level fallback note:
+- Prefer the script above over hand-written command lines so secrets stay in environment variables and request files rather than shell history or process arguments.
 
 **Common JSON-RPC request skeletons** (use with `--request '<json>'`):
 - Configure: `{"jsonrpc":"2.0","id":"1","method":"configure","params":{...}}`

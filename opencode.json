@@ -2,7 +2,7 @@
   "mcp": {
     "mcp-agent-mail": {
       "type": "remote",
-      "url": "http://127.0.0.1:8765/api/",
+      "url": "http://127.0.0.1:8765/mcp/",
       "headers": {
         "Authorization": "Bearer 552e3d77c4386828e5fc260b6243d44c9880177a1f945224e1aed7be1efd3c48"
       },

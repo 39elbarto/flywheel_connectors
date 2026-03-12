@@ -146,7 +146,10 @@ impl<T> MetadataField<T> {
 }
 
 impl<T: Serialize> Serialize for MetadataField<T> {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
         let mut map = serializer.serialize_map(None)?;
         map.serialize_entry("status", self.status_tag())?;
@@ -158,7 +161,9 @@ impl<T: Serialize> Serialize for MetadataField<T> {
 }
 
 impl<'de, T: Deserialize<'de>> Deserialize<'de> for MetadataField<T> {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
         #[derive(Deserialize)]
         struct Raw<V> {
             status: String,
@@ -264,7 +269,10 @@ impl<T> ProvenanceMetadataField<T> {
 }
 
 impl<T: Serialize> Serialize for ProvenanceMetadataField<T> {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
         let mut map = serializer.serialize_map(None)?;
         map.serialize_entry("status", self.field.status_tag())?;
@@ -277,7 +285,9 @@ impl<T: Serialize> Serialize for ProvenanceMetadataField<T> {
 }
 
 impl<'de, T: Deserialize<'de>> Deserialize<'de> for ProvenanceMetadataField<T> {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
         #[derive(Deserialize)]
         struct Raw<V> {
             status: String,
@@ -438,7 +448,10 @@ pub fn format_field_cli<T>(field: &MetadataField<T>) -> String {
 #[must_use]
 pub fn format_field_log<T>(field: &MetadataField<T>) -> String {
     let repr = field_repr(field);
-    format!("status={} explanation=\"{}\"", repr.status, repr.explanation)
+    format!(
+        "status={} explanation=\"{}\"",
+        repr.status, repr.explanation
+    )
 }
 
 /// Build a JSON representation of a `MetadataField`'s state metadata
@@ -491,7 +504,7 @@ pub fn format_provenance_field_log<T>(field: &ProvenanceMetadataField<T>) -> Str
 /// Every `fwc` dispatch should tag its result with one of these so agents
 /// and downstream tooling never have to guess whether a response came from
 /// live runtime, offline artifacts, or something in between.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CommandAvailability {
     /// Result backed by a live, authenticated host/mesh connection.
@@ -537,9 +550,7 @@ impl CommandAvailability {
             Self::OfflineArtifact => {
                 "Result is derived from offline artifacts and may not reflect live state."
             }
-            Self::Unsupported => {
-                "This operation is not supported by the connector or host."
-            }
+            Self::Unsupported => "This operation is not supported by the connector or host.",
             Self::Planned => {
                 "This feature is planned but not yet implemented. Output is a contract preview."
             }
@@ -558,10 +569,7 @@ impl CommandAvailability {
     /// Whether an agent should consider retrying or remediating.
     pub const fn is_recoverable(&self) -> bool {
         match self {
-            Self::LiveRuntime
-            | Self::OfflineArtifact
-            | Self::Unsupported
-            | Self::Planned => false,
+            Self::LiveRuntime | Self::OfflineArtifact | Self::Unsupported | Self::Planned => false,
             Self::Unavailable | Self::Denied | Self::Unknown => true,
         }
     }
@@ -617,11 +625,234 @@ impl CommandAvailability {
     pub const fn exit_code_u8(&self) -> u8 {
         match self {
             Self::LiveRuntime | Self::OfflineArtifact | Self::Planned => 0, // success / preview
-            Self::Unsupported => 5,              // validation
-            Self::Unavailable | Self::Unknown => 8, // transport
-            Self::Denied => 6,                   // policy-denied
+            Self::Unsupported => 5,                                         // validation
+            Self::Unavailable | Self::Unknown => 8,                         // transport
+            Self::Denied => 6,                                              // policy-denied
         }
     }
+
+    /// Compact label for terminal and agent-facing output.
+    ///
+    /// Returns a short string like `"LIVE"`, `"OFFLINE"`, `"DENIED [remediate]"`
+    /// that fits in a status column or agent summary line.  Bracket suffixes
+    /// indicate whether the caller can act.
+    pub const fn compact_label(&self) -> &'static str {
+        match self {
+            Self::LiveRuntime => "LIVE",
+            Self::OfflineArtifact => "OFFLINE",
+            Self::Unsupported => "UNSUPPORTED",
+            Self::Planned => "PLANNED [preview]",
+            Self::Unavailable => "UNAVAILABLE [retry]",
+            Self::Denied => "DENIED [remediate]",
+            Self::Unknown => "UNKNOWN [diagnose]",
+        }
+    }
+
+    /// Short actionable help text for the given command, suitable for
+    /// inline display in `--help`, error banners, and agent tool-call
+    /// responses.  More detailed guidance lives in `next_actions()`.
+    pub fn help_text(&self, command: &str) -> String {
+        match self {
+            Self::LiveRuntime => {
+                format!("'{command}' returned live host-authoritative data.")
+            }
+            Self::OfflineArtifact => {
+                format!("'{command}' used offline artifacts. Add --host <endpoint> for live data.")
+            }
+            Self::Unsupported => {
+                format!(
+                    "'{command}' is not supported by this connector. Check `fwc ops` for available operations."
+                )
+            }
+            Self::Planned => {
+                format!(
+                    "'{command}' is planned but not yet implemented. Output is a contract preview only."
+                )
+            }
+            Self::Unavailable => {
+                format!(
+                    "'{command}' failed: host unreachable. Retry later or use --offline for local artifacts."
+                )
+            }
+            Self::Denied => {
+                format!(
+                    "'{command}' was denied by policy or authorization. Run `fwc auth status` to inspect."
+                )
+            }
+            Self::Unknown => {
+                format!(
+                    "'{command}' availability unknown. Run `fwc doctor` or specify --host to query directly."
+                )
+            }
+        }
+    }
+
+    /// CLI-friendly symbol for tabular rendering.
+    pub const fn cli_symbol(&self) -> &'static str {
+        match self {
+            Self::LiveRuntime => "[+]",
+            Self::OfflineArtifact => "[~]",
+            Self::Unsupported => "[x]",
+            Self::Planned => "[.]",
+            Self::Unavailable => "[!]",
+            Self::Denied => "[-]",
+            Self::Unknown => "[?]",
+        }
+    }
+
+    /// Severity category for sorting and filtering.
+    pub const fn severity_rank(&self) -> u8 {
+        match self {
+            Self::LiveRuntime => 0,
+            Self::OfflineArtifact => 1,
+            Self::Planned => 2,
+            Self::Unsupported => 3,
+            Self::Unknown => 4,
+            Self::Unavailable => 5,
+            Self::Denied => 6,
+        }
+    }
+}
+
+impl std::fmt::Display for CommandAvailability {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.compact_label())
+    }
+}
+
+// ── Command family runtime-boundary classification ───────────────────
+
+/// How a command family relates to the live/offline truth boundary.
+///
+/// Every `fwc` command must be classified into exactly one of these
+/// categories so agents can mechanically determine whether a result
+/// carries live runtime authority or explicit offline artifact data.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CommandTruthMode {
+    /// The command always requires a live host connection and returns
+    /// host-authoritative data.  Fails fast when no host is reachable.
+    LiveOnly,
+    /// The command always operates on local artifacts (manifests,
+    /// catalog files, stored state) and never contacts a host.
+    OfflineOnly,
+    /// The command can operate in both modes.  The user chooses via
+    /// `--host` (live) or `--offline` (artifact) flags.  The output
+    /// always carries a clear provenance marker.
+    Hybrid,
+    /// The command passes through to a separate binary and the
+    /// availability semantics are set at the binary boundary.
+    Passthrough,
+    /// The command is planned but not yet implemented.  Its structured
+    /// dispatch returns a contract preview.
+    PlannedOnly,
+}
+
+impl CommandTruthMode {
+    /// Machine-readable tag.
+    pub const fn tag(&self) -> &'static str {
+        match self {
+            Self::LiveOnly => "live-only",
+            Self::OfflineOnly => "offline-only",
+            Self::Hybrid => "hybrid",
+            Self::Passthrough => "passthrough",
+            Self::PlannedOnly => "planned-only",
+        }
+    }
+
+    /// Human-readable description.
+    pub const fn description(&self) -> &'static str {
+        match self {
+            Self::LiveOnly => "Requires a live host connection.",
+            Self::OfflineOnly => "Operates on local artifacts only.",
+            Self::Hybrid => {
+                "Supports both live and offline modes with explicit provenance."
+            }
+            Self::Passthrough => {
+                "Passes through to a separate binary at the process boundary."
+            }
+            Self::PlannedOnly => "Planned but not yet implemented.",
+        }
+    }
+
+    /// Whether this mode can produce authoritative runtime data.
+    pub const fn can_be_authoritative(&self) -> bool {
+        matches!(self, Self::LiveOnly | Self::Hybrid)
+    }
+}
+
+/// Static classification of an `fwc` command family with its truth-boundary mode.
+#[derive(Clone, Debug, Serialize)]
+pub struct CommandFamilyEntry {
+    /// Command name as it appears in the CLI (e.g. `"list"`, `"batch-file"`).
+    pub name: &'static str,
+    /// Truth boundary classification.
+    pub mode: CommandTruthMode,
+}
+
+/// Complete classification of all `fwc` command families.
+///
+/// This is the canonical source of truth for which commands are live-only,
+/// offline-only, hybrid, passthrough, or planned.  Bead 29.9 requires that
+/// this table is mechanically complete and that dispatch functions honor it.
+pub const COMMAND_FAMILY_CLASSIFICATION: &[CommandFamilyEntry] = &[
+    // ── Live-only commands (require host, fail fast without it) ──
+    CommandFamilyEntry { name: "invoke", mode: CommandTruthMode::LiveOnly },
+    CommandFamilyEntry { name: "simulate", mode: CommandTruthMode::LiveOnly },
+    CommandFamilyEntry { name: "batch", mode: CommandTruthMode::LiveOnly },
+    CommandFamilyEntry { name: "batch-file", mode: CommandTruthMode::LiveOnly },
+    CommandFamilyEntry { name: "doctor", mode: CommandTruthMode::LiveOnly },
+    CommandFamilyEntry { name: "status", mode: CommandTruthMode::LiveOnly },
+    CommandFamilyEntry { name: "budget", mode: CommandTruthMode::LiveOnly },
+    CommandFamilyEntry { name: "pin", mode: CommandTruthMode::LiveOnly },
+    CommandFamilyEntry { name: "unpin", mode: CommandTruthMode::LiveOnly },
+    CommandFamilyEntry { name: "rollout", mode: CommandTruthMode::LiveOnly },
+    CommandFamilyEntry { name: "install", mode: CommandTruthMode::LiveOnly },
+    CommandFamilyEntry { name: "update", mode: CommandTruthMode::LiveOnly },
+    CommandFamilyEntry { name: "cancel", mode: CommandTruthMode::LiveOnly },
+    CommandFamilyEntry { name: "map", mode: CommandTruthMode::LiveOnly },
+    // ── Offline-only commands (operate on local state, never contact host) ──
+    CommandFamilyEntry { name: "context", mode: CommandTruthMode::OfflineOnly },
+    CommandFamilyEntry { name: "session", mode: CommandTruthMode::OfflineOnly },
+    CommandFamilyEntry { name: "agent", mode: CommandTruthMode::OfflineOnly },
+    CommandFamilyEntry { name: "task", mode: CommandTruthMode::OfflineOnly },
+    CommandFamilyEntry { name: "history", mode: CommandTruthMode::OfflineOnly },
+    CommandFamilyEntry { name: "pipe", mode: CommandTruthMode::OfflineOnly },
+    CommandFamilyEntry { name: "plan", mode: CommandTruthMode::OfflineOnly },
+    CommandFamilyEntry { name: "explain", mode: CommandTruthMode::OfflineOnly },
+    CommandFamilyEntry { name: "do", mode: CommandTruthMode::OfflineOnly },
+    CommandFamilyEntry { name: "guide", mode: CommandTruthMode::OfflineOnly },
+    CommandFamilyEntry { name: "config", mode: CommandTruthMode::OfflineOnly },
+    // ── Hybrid commands (live with --host, offline otherwise) ──
+    CommandFamilyEntry { name: "list", mode: CommandTruthMode::Hybrid },
+    CommandFamilyEntry { name: "show", mode: CommandTruthMode::Hybrid },
+    CommandFamilyEntry { name: "ops", mode: CommandTruthMode::Hybrid },
+    CommandFamilyEntry { name: "schema", mode: CommandTruthMode::Hybrid },
+    CommandFamilyEntry { name: "examples", mode: CommandTruthMode::Hybrid },
+    CommandFamilyEntry { name: "search", mode: CommandTruthMode::Hybrid },
+    CommandFamilyEntry { name: "suggest", mode: CommandTruthMode::Hybrid },
+    CommandFamilyEntry { name: "template", mode: CommandTruthMode::Hybrid },
+    CommandFamilyEntry { name: "validate", mode: CommandTruthMode::Hybrid },
+    CommandFamilyEntry { name: "export-tools", mode: CommandTruthMode::Hybrid },
+    CommandFamilyEntry { name: "recipe", mode: CommandTruthMode::Hybrid },
+    CommandFamilyEntry { name: "pipeline", mode: CommandTruthMode::Hybrid },
+    // ── Passthrough commands (delegated to separate binaries) ──
+    CommandFamilyEntry { name: "supply-chain", mode: CommandTruthMode::Passthrough },
+    CommandFamilyEntry { name: "audit", mode: CommandTruthMode::Passthrough },
+    CommandFamilyEntry { name: "manifest", mode: CommandTruthMode::Passthrough },
+    CommandFamilyEntry { name: "net", mode: CommandTruthMode::Passthrough },
+    CommandFamilyEntry { name: "trace", mode: CommandTruthMode::Passthrough },
+    CommandFamilyEntry { name: "policy", mode: CommandTruthMode::Passthrough },
+    CommandFamilyEntry { name: "package", mode: CommandTruthMode::Passthrough },
+    // ── Planned commands (not yet implemented, contract preview only) ──
+    CommandFamilyEntry { name: "serve-mcp", mode: CommandTruthMode::PlannedOnly },
+];
+
+/// Look up the truth-boundary classification for a command name.
+pub fn classify_command(name: &str) -> Option<&'static CommandFamilyEntry> {
+    COMMAND_FAMILY_CLASSIFICATION
+        .iter()
+        .find(|entry| entry.name == name)
 }
 
 /// Structured outcome envelope that pairs a JSON payload with its
@@ -669,6 +900,62 @@ impl CommandEnvelope {
                 serde_json::to_value(self).unwrap_or(Value::Null),
             );
         }
+    }
+
+    /// Compact single-line rendering for terminal output and agent summaries.
+    ///
+    /// Format: `[symbol] LABEL: explanation`
+    /// Example: `[!] UNAVAILABLE [retry]: The operation should be available but the host or endpoint is temporarily unreachable.`
+    pub fn compact_line(&self) -> String {
+        format!(
+            "{} {}: {}",
+            self.availability.cli_symbol(),
+            self.availability.compact_label(),
+            self.explanation
+        )
+    }
+
+    /// Structured transcript entry for logging and replay.
+    ///
+    /// Returns a JSON value with a stable schema suitable for audit
+    /// trails and transcript reconstruction.  Unlike `inject_into()`,
+    /// this is self-contained and includes a timestamp placeholder.
+    pub fn transcript_entry(&self) -> Value {
+        serde_json::json!({
+            "type": "availability_verdict",
+            "command": self.command,
+            "state": self.availability.tag(),
+            "authoritative": self.authoritative,
+            "recoverable": self.recoverable,
+            "exit_code": self.availability.exit_code_u8(),
+            "severity_rank": self.availability.severity_rank(),
+            "explanation": self.explanation,
+            "next_actions": self.next_actions,
+            "compact": self.availability.compact_label(),
+            "symbol": self.availability.cli_symbol(),
+        })
+    }
+
+    /// Help-text suitable for inline display in error banners.
+    pub fn help_banner(&self) -> String {
+        self.availability.help_text(&self.command)
+    }
+
+    /// Exit code derived from availability semantics.
+    pub const fn exit_code(&self) -> u8 {
+        self.availability.exit_code_u8()
+    }
+}
+
+impl std::fmt::Display for CommandEnvelope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} {} ({})",
+            self.availability.cli_symbol(),
+            self.command,
+            self.availability.compact_label()
+        )
     }
 }
 
@@ -3425,6 +3712,17 @@ mod tests {
 
     use super::*;
 
+    /// All seven `CommandAvailability` variants for exhaustive testing.
+    const ALL_AVAILABILITY: [CommandAvailability; 7] = [
+        CommandAvailability::LiveRuntime,
+        CommandAvailability::OfflineArtifact,
+        CommandAvailability::Unsupported,
+        CommandAvailability::Planned,
+        CommandAvailability::Unavailable,
+        CommandAvailability::Denied,
+        CommandAvailability::Unknown,
+    ];
+
     // ── MetadataField ──────────────────────────────────────────────────
 
     #[test]
@@ -3572,10 +3870,16 @@ mod tests {
     #[test]
     fn provenance_tag_matches_serde_variant() {
         let cases = [
-            (MetadataProvenance::DeclaredByConnector, "declared-by-connector"),
+            (
+                MetadataProvenance::DeclaredByConnector,
+                "declared-by-connector",
+            ),
             (MetadataProvenance::ObservedByHost, "observed-by-host"),
             (MetadataProvenance::MeasuredAtRuntime, "measured-at-runtime"),
-            (MetadataProvenance::InferredFromPolicy, "inferred-from-policy"),
+            (
+                MetadataProvenance::InferredFromPolicy,
+                "inferred-from-policy",
+            ),
             (MetadataProvenance::Unattributed, "unattributed"),
         ];
         for (variant, expected_tag) in &cases {
@@ -3895,7 +4199,10 @@ mod tests {
             CommandAvailability::Unknown,
         ];
         for variant in &all {
-            assert!(!variant.explanation().is_empty(), "empty explanation for {variant:?}");
+            assert!(
+                !variant.explanation().is_empty(),
+                "empty explanation for {variant:?}"
+            );
         }
     }
 
@@ -3986,7 +4293,11 @@ mod tests {
     #[test]
     fn availability_next_actions_planned_explains_preview() {
         let actions = CommandAvailability::Planned.next_actions("batch");
-        assert!(actions.iter().any(|a| a.contains("preview") || a.contains("development")));
+        assert!(
+            actions
+                .iter()
+                .any(|a| a.contains("preview") || a.contains("development"))
+        );
     }
 
     #[test]
@@ -4029,7 +4340,11 @@ mod tests {
         let env = CommandEnvelope::new(CommandAvailability::Denied, "simulate");
         assert!(!env.authoritative);
         assert!(env.recoverable);
-        assert!(env.next_actions.iter().any(|a| a.contains("auth") || a.contains("policy")));
+        assert!(
+            env.next_actions
+                .iter()
+                .any(|a| a.contains("auth") || a.contains("policy"))
+        );
     }
 
     #[test]
@@ -4122,11 +4437,26 @@ mod tests {
             let env = CommandEnvelope::new(variant.clone(), "test-cmd");
             let json = serde_json::to_value(&env).unwrap();
             // Every envelope must have these fields
-            assert!(json["availability"].is_string(), "missing availability for {variant:?}");
-            assert!(json["command"].is_string(), "missing command for {variant:?}");
-            assert!(json["explanation"].is_string(), "missing explanation for {variant:?}");
-            assert!(json["recoverable"].is_boolean(), "missing recoverable for {variant:?}");
-            assert!(json["next_actions"].is_array(), "missing next_actions for {variant:?}");
+            assert!(
+                json["availability"].is_string(),
+                "missing availability for {variant:?}"
+            );
+            assert!(
+                json["command"].is_string(),
+                "missing command for {variant:?}"
+            );
+            assert!(
+                json["explanation"].is_string(),
+                "missing explanation for {variant:?}"
+            );
+            assert!(
+                json["recoverable"].is_boolean(),
+                "missing recoverable for {variant:?}"
+            );
+            assert!(
+                json["next_actions"].is_array(),
+                "missing next_actions for {variant:?}"
+            );
             // Inject should work
             let mut payload = json!({"status": "test"});
             env.inject_into(&mut payload);
@@ -5480,7 +5810,10 @@ mod tests {
         assert!(back.health.is_known());
         let h = back.health.as_known().expect("health should be known");
         assert_eq!(h.load, Some(0.75));
-        let rate_limits = back.rate_limits.as_known().expect("rate limits should round-trip");
+        let rate_limits = back
+            .rate_limits
+            .as_known()
+            .expect("rate limits should round-trip");
         assert_eq!(rate_limits.len(), 2);
         assert_eq!(rate_limits[1].requests, 50);
     }
@@ -6961,10 +7294,7 @@ output_schema = { type = "object" }
             MetadataProvenance::DeclaredByConnector.tag(),
             "declared-by-connector"
         );
-        assert_eq!(
-            MetadataProvenance::ObservedByHost.tag(),
-            "observed-by-host"
-        );
+        assert_eq!(MetadataProvenance::ObservedByHost.tag(), "observed-by-host");
         assert_eq!(
             MetadataProvenance::MeasuredAtRuntime.tag(),
             "measured-at-runtime"
@@ -7029,7 +7359,9 @@ output_schema = { type = "object" }
     fn truthfulness_envelope_planned_is_not_authoritative() {
         let envelope = CommandEnvelope::new(CommandAvailability::Planned, "batch");
         assert!(!envelope.authoritative);
-        assert!(envelope.explanation.contains("planned") || envelope.explanation.contains("not yet"));
+        assert!(
+            envelope.explanation.contains("planned") || envelope.explanation.contains("not yet")
+        );
     }
 
     #[test]
@@ -7184,7 +7516,11 @@ output_schema = { type = "object" }
         assert!(obj.contains_key("status"));
         assert!(obj.contains_key("provenance"));
         assert!(obj.contains_key("value"));
-        assert_eq!(obj.len(), 3, "Known provenance field should have exactly 3 keys");
+        assert_eq!(
+            obj.len(),
+            3,
+            "Known provenance field should have exactly 3 keys"
+        );
 
         let unknown = serde_json::to_value(ProvenanceMetadataField::<i32>::unknown(
             MetadataProvenance::Unattributed,
@@ -7193,7 +7529,11 @@ output_schema = { type = "object" }
         let obj = unknown.as_object().unwrap();
         assert!(obj.contains_key("status"));
         assert!(obj.contains_key("provenance"));
-        assert_eq!(obj.len(), 2, "Unknown provenance field should have exactly 2 keys");
+        assert_eq!(
+            obj.len(),
+            2,
+            "Unknown provenance field should have exactly 2 keys"
+        );
     }
 
     #[test]
@@ -7231,7 +7571,10 @@ output_schema = { type = "object" }
             "next_actions",
         ];
         for key in &required_keys {
-            assert!(obj.contains_key(*key), "envelope missing required key: {key}");
+            assert!(
+                obj.contains_key(*key),
+                "envelope missing required key: {key}"
+            );
         }
     }
 
@@ -7337,28 +7680,44 @@ output_schema = { type = "object" }
     #[test]
     fn repr_cli_symbols_are_nonempty() {
         for repr in METADATA_STATE_REPRS {
-            assert!(!repr.cli_symbol.is_empty(), "Empty CLI symbol for '{}'", repr.status);
+            assert!(
+                !repr.cli_symbol.is_empty(),
+                "Empty CLI symbol for '{}'",
+                repr.status
+            );
         }
     }
 
     #[test]
     fn repr_cli_labels_are_nonempty() {
         for repr in METADATA_STATE_REPRS {
-            assert!(!repr.cli_label.is_empty(), "Empty CLI label for '{}'", repr.status);
+            assert!(
+                !repr.cli_label.is_empty(),
+                "Empty CLI label for '{}'",
+                repr.status
+            );
         }
     }
 
     #[test]
     fn repr_cli_colors_are_nonempty() {
         for repr in METADATA_STATE_REPRS {
-            assert!(!repr.cli_color.is_empty(), "Empty CLI color for '{}'", repr.status);
+            assert!(
+                !repr.cli_color.is_empty(),
+                "Empty CLI color for '{}'",
+                repr.status
+            );
         }
     }
 
     #[test]
     fn repr_explanations_are_nonempty() {
         for repr in METADATA_STATE_REPRS {
-            assert!(!repr.explanation.is_empty(), "Empty explanation for '{}'", repr.status);
+            assert!(
+                !repr.explanation.is_empty(),
+                "Empty explanation for '{}'",
+                repr.status
+            );
         }
     }
 
@@ -7559,7 +7918,8 @@ output_schema = { type = "object" }
 
     #[test]
     fn format_provenance_log_unsupported() {
-        let f = ProvenanceMetadataField::<i32>::unsupported(MetadataProvenance::DeclaredByConnector);
+        let f =
+            ProvenanceMetadataField::<i32>::unsupported(MetadataProvenance::DeclaredByConnector);
         let s = format_provenance_field_log(&f);
         assert!(s.contains("status=unsupported"));
         assert!(s.contains("provenance=declared-by-connector"));
@@ -7577,7 +7937,11 @@ output_schema = { type = "object" }
             assert_eq!(json["cli_label"], repr.cli_label);
             assert_eq!(json["cli_color"], repr.cli_color);
             assert_eq!(json["actionable"], repr.actionable);
-            assert!(json["guidance"].is_array(), "guidance must be an array for '{}'", repr.status);
+            assert!(
+                json["guidance"].is_array(),
+                "guidance must be an array for '{}'",
+                repr.status
+            );
         }
     }
 
@@ -7600,7 +7964,10 @@ output_schema = { type = "object" }
         for tag in ["known", "not-applicable"] {
             let repr = metadata_state_repr(tag).unwrap();
             assert!(!repr.actionable);
-            assert!(repr.guidance.is_empty(), "Terminal state '{tag}' should have empty guidance");
+            assert!(
+                repr.guidance.is_empty(),
+                "Terminal state '{tag}' should have empty guidance"
+            );
         }
     }
 
@@ -7631,5 +7998,932 @@ output_schema = { type = "object" }
             assert!(json.get("cli_symbol").is_some(), "Missing 'cli_symbol'");
             assert!(json.get("cli_label").is_some(), "Missing 'cli_label'");
         }
+    }
+
+    // ── Bead 29.7.3: Workflow truth output semantics ──────────────────────
+
+    // ── compact_label ─────────────────────────────────────────────────────
+
+    #[test]
+    fn compact_label_all_seven_variants_are_distinct() {
+        let labels: Vec<&str> = ALL_AVAILABILITY.iter().map(|a| a.compact_label()).collect();
+        let unique: std::collections::HashSet<&str> = labels.iter().copied().collect();
+        assert_eq!(labels.len(), unique.len(), "Duplicate compact labels");
+    }
+
+    #[test]
+    fn compact_label_success_states_have_no_bracket_action() {
+        assert_eq!(CommandAvailability::LiveRuntime.compact_label(), "LIVE");
+        assert_eq!(
+            CommandAvailability::OfflineArtifact.compact_label(),
+            "OFFLINE"
+        );
+        // No bracket suffix for states that need no caller action
+        assert!(
+            !CommandAvailability::LiveRuntime
+                .compact_label()
+                .contains('[')
+        );
+    }
+
+    #[test]
+    fn compact_label_recoverable_states_have_bracket_action() {
+        for avail in &ALL_AVAILABILITY {
+            if avail.is_recoverable() {
+                let label = avail.compact_label();
+                assert!(
+                    label.contains('['),
+                    "{:?} is recoverable but compact_label '{}' has no bracket action",
+                    avail,
+                    label,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn compact_label_planned_has_preview_suffix() {
+        assert!(
+            CommandAvailability::Planned
+                .compact_label()
+                .contains("preview")
+        );
+    }
+
+    #[test]
+    fn compact_label_unavailable_has_retry_suffix() {
+        assert!(
+            CommandAvailability::Unavailable
+                .compact_label()
+                .contains("retry")
+        );
+    }
+
+    #[test]
+    fn compact_label_denied_has_remediate_suffix() {
+        assert!(
+            CommandAvailability::Denied
+                .compact_label()
+                .contains("remediate")
+        );
+    }
+
+    #[test]
+    fn compact_label_unknown_has_diagnose_suffix() {
+        assert!(
+            CommandAvailability::Unknown
+                .compact_label()
+                .contains("diagnose")
+        );
+    }
+
+    // ── help_text ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn help_text_embeds_command_name_in_all_variants() {
+        for avail in &ALL_AVAILABILITY {
+            let text = avail.help_text("my-test-cmd");
+            assert!(
+                text.contains("my-test-cmd"),
+                "{:?} help_text does not embed command name: {}",
+                avail,
+                text,
+            );
+        }
+    }
+
+    #[test]
+    fn help_text_all_variants_non_empty() {
+        for avail in &ALL_AVAILABILITY {
+            let text = avail.help_text("cmd");
+            assert!(!text.is_empty(), "{:?} has empty help_text", avail);
+        }
+    }
+
+    #[test]
+    fn help_text_live_runtime_mentions_live() {
+        let text = CommandAvailability::LiveRuntime.help_text("show");
+        assert!(text.contains("live") || text.contains("Live"));
+    }
+
+    #[test]
+    fn help_text_offline_mentions_host_flag() {
+        let text = CommandAvailability::OfflineArtifact.help_text("list");
+        assert!(text.contains("--host"));
+    }
+
+    #[test]
+    fn help_text_unsupported_mentions_ops() {
+        let text = CommandAvailability::Unsupported.help_text("invoke");
+        assert!(text.contains("ops"));
+    }
+
+    #[test]
+    fn help_text_planned_mentions_preview() {
+        let text = CommandAvailability::Planned.help_text("batch");
+        assert!(text.contains("preview"));
+    }
+
+    #[test]
+    fn help_text_unavailable_mentions_offline_flag() {
+        let text = CommandAvailability::Unavailable.help_text("show");
+        assert!(text.contains("--offline"));
+    }
+
+    #[test]
+    fn help_text_denied_mentions_auth() {
+        let text = CommandAvailability::Denied.help_text("invoke");
+        assert!(text.contains("auth"));
+    }
+
+    #[test]
+    fn help_text_unknown_mentions_doctor() {
+        let text = CommandAvailability::Unknown.help_text("show");
+        assert!(text.contains("doctor"));
+    }
+
+    // ── cli_symbol ────────────────────────────────────────────────────────
+
+    #[test]
+    fn cli_symbol_all_seven_variants_are_distinct() {
+        let symbols: Vec<&str> = ALL_AVAILABILITY.iter().map(|a| a.cli_symbol()).collect();
+        let unique: std::collections::HashSet<&str> = symbols.iter().copied().collect();
+        assert_eq!(symbols.len(), unique.len(), "Duplicate CLI symbols");
+    }
+
+    #[test]
+    fn cli_symbol_all_are_bracketed() {
+        for avail in &ALL_AVAILABILITY {
+            let sym = avail.cli_symbol();
+            assert!(
+                sym.starts_with('[') && sym.ends_with(']'),
+                "{:?} has unbracketed symbol: {}",
+                avail,
+                sym
+            );
+        }
+    }
+
+    #[test]
+    fn cli_symbol_live_is_plus() {
+        assert_eq!(CommandAvailability::LiveRuntime.cli_symbol(), "[+]");
+    }
+
+    #[test]
+    fn cli_symbol_denied_is_minus() {
+        assert_eq!(CommandAvailability::Denied.cli_symbol(), "[-]");
+    }
+
+    #[test]
+    fn cli_symbol_unknown_is_question() {
+        assert_eq!(CommandAvailability::Unknown.cli_symbol(), "[?]");
+    }
+
+    #[test]
+    fn cli_symbol_unsupported_is_x() {
+        assert_eq!(CommandAvailability::Unsupported.cli_symbol(), "[x]");
+    }
+
+    // ── severity_rank ─────────────────────────────────────────────────────
+
+    #[test]
+    fn severity_rank_all_variants_are_distinct() {
+        let ranks: Vec<u8> = ALL_AVAILABILITY.iter().map(|a| a.severity_rank()).collect();
+        let unique: std::collections::HashSet<u8> = ranks.iter().copied().collect();
+        assert_eq!(ranks.len(), unique.len(), "Duplicate severity ranks");
+    }
+
+    #[test]
+    fn severity_rank_live_runtime_is_lowest() {
+        assert_eq!(CommandAvailability::LiveRuntime.severity_rank(), 0);
+        for avail in &ALL_AVAILABILITY {
+            assert!(avail.severity_rank() >= CommandAvailability::LiveRuntime.severity_rank());
+        }
+    }
+
+    #[test]
+    fn severity_rank_denied_is_highest() {
+        assert_eq!(CommandAvailability::Denied.severity_rank(), 6);
+        for avail in &ALL_AVAILABILITY {
+            assert!(avail.severity_rank() <= CommandAvailability::Denied.severity_rank());
+        }
+    }
+
+    #[test]
+    fn severity_rank_ordering_success_before_degraded() {
+        // Success states should rank lower (less severe) than degraded states
+        assert!(
+            CommandAvailability::LiveRuntime.severity_rank()
+                < CommandAvailability::Unavailable.severity_rank()
+        );
+        assert!(
+            CommandAvailability::OfflineArtifact.severity_rank()
+                < CommandAvailability::Denied.severity_rank()
+        );
+    }
+
+    // ── Display impls ─────────────────────────────────────────────────────
+
+    #[test]
+    fn availability_display_matches_compact_label() {
+        for avail in &ALL_AVAILABILITY {
+            assert_eq!(format!("{avail}"), avail.compact_label());
+        }
+    }
+
+    #[test]
+    fn envelope_display_contains_command_and_symbol() {
+        let env = CommandEnvelope::new(CommandAvailability::Denied, "invoke");
+        let display = format!("{env}");
+        assert!(display.contains("invoke"));
+        assert!(display.contains("[-]"));
+        assert!(display.contains("DENIED"));
+    }
+
+    #[test]
+    fn envelope_display_all_variants() {
+        for avail in &ALL_AVAILABILITY {
+            let env = CommandEnvelope::new(avail.clone(), "test-cmd");
+            let display = format!("{env}");
+            assert!(display.contains("test-cmd"), "{:?}: {}", avail, display);
+            assert!(
+                display.contains(avail.cli_symbol()),
+                "{:?}: {}",
+                avail,
+                display
+            );
+        }
+    }
+
+    // ── compact_line ──────────────────────────────────────────────────────
+
+    #[test]
+    fn envelope_compact_line_contains_symbol_label_explanation() {
+        let env = CommandEnvelope::new(CommandAvailability::Unavailable, "show");
+        let line = env.compact_line();
+        assert!(line.contains("[!]"));
+        assert!(line.contains("UNAVAILABLE [retry]"));
+        assert!(line.contains("temporarily unreachable"));
+    }
+
+    #[test]
+    fn envelope_compact_line_all_variants_non_empty() {
+        for avail in &ALL_AVAILABILITY {
+            let env = CommandEnvelope::new(avail.clone(), "cmd");
+            assert!(!env.compact_line().is_empty(), "{:?}", avail);
+        }
+    }
+
+    #[test]
+    fn envelope_compact_line_live_runtime_has_live_label() {
+        let env = CommandEnvelope::new(CommandAvailability::LiveRuntime, "show");
+        let line = env.compact_line();
+        assert!(line.starts_with("[+]"));
+        assert!(line.contains("LIVE"));
+    }
+
+    // ── transcript_entry ──────────────────────────────────────────────────
+
+    #[test]
+    fn transcript_entry_has_required_schema_keys() {
+        let required_keys = [
+            "type",
+            "command",
+            "state",
+            "authoritative",
+            "recoverable",
+            "exit_code",
+            "severity_rank",
+            "explanation",
+            "next_actions",
+            "compact",
+            "symbol",
+        ];
+        for avail in &ALL_AVAILABILITY {
+            let env = CommandEnvelope::new(avail.clone(), "test-cmd");
+            let entry = env.transcript_entry();
+            let obj = entry.as_object().unwrap();
+            for key in &required_keys {
+                assert!(
+                    obj.contains_key(*key),
+                    "{:?} transcript missing key: {}",
+                    avail,
+                    key
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn transcript_entry_type_is_availability_verdict() {
+        let env = CommandEnvelope::new(CommandAvailability::LiveRuntime, "show");
+        let entry = env.transcript_entry();
+        assert_eq!(entry["type"], "availability_verdict");
+    }
+
+    #[test]
+    fn transcript_entry_state_matches_tag() {
+        for avail in &ALL_AVAILABILITY {
+            let env = CommandEnvelope::new(avail.clone(), "cmd");
+            let entry = env.transcript_entry();
+            assert_eq!(entry["state"].as_str().unwrap(), avail.tag());
+        }
+    }
+
+    #[test]
+    fn transcript_entry_exit_code_matches_availability() {
+        for avail in &ALL_AVAILABILITY {
+            let env = CommandEnvelope::new(avail.clone(), "cmd");
+            let entry = env.transcript_entry();
+            assert_eq!(
+                entry["exit_code"].as_u64().unwrap(),
+                u64::from(avail.exit_code_u8()),
+            );
+        }
+    }
+
+    #[test]
+    fn transcript_entry_authoritative_only_for_live() {
+        for avail in &ALL_AVAILABILITY {
+            let env = CommandEnvelope::new(avail.clone(), "cmd");
+            let entry = env.transcript_entry();
+            let auth = entry["authoritative"].as_bool().unwrap();
+            assert_eq!(auth, avail.is_authoritative(), "{:?}", avail);
+        }
+    }
+
+    #[test]
+    fn transcript_entry_recoverable_matches_availability() {
+        for avail in &ALL_AVAILABILITY {
+            let env = CommandEnvelope::new(avail.clone(), "cmd");
+            let entry = env.transcript_entry();
+            let rec = entry["recoverable"].as_bool().unwrap();
+            assert_eq!(rec, avail.is_recoverable(), "{:?}", avail);
+        }
+    }
+
+    #[test]
+    fn transcript_entry_severity_rank_matches() {
+        for avail in &ALL_AVAILABILITY {
+            let env = CommandEnvelope::new(avail.clone(), "cmd");
+            let entry = env.transcript_entry();
+            assert_eq!(
+                entry["severity_rank"].as_u64().unwrap(),
+                u64::from(avail.severity_rank()),
+            );
+        }
+    }
+
+    #[test]
+    fn transcript_entry_compact_label_matches() {
+        for avail in &ALL_AVAILABILITY {
+            let env = CommandEnvelope::new(avail.clone(), "cmd");
+            let entry = env.transcript_entry();
+            assert_eq!(entry["compact"].as_str().unwrap(), avail.compact_label());
+        }
+    }
+
+    #[test]
+    fn transcript_entry_symbol_matches() {
+        for avail in &ALL_AVAILABILITY {
+            let env = CommandEnvelope::new(avail.clone(), "cmd");
+            let entry = env.transcript_entry();
+            assert_eq!(entry["symbol"].as_str().unwrap(), avail.cli_symbol());
+        }
+    }
+
+    #[test]
+    fn transcript_entry_next_actions_is_array() {
+        for avail in &ALL_AVAILABILITY {
+            let env = CommandEnvelope::new(avail.clone(), "cmd");
+            let entry = env.transcript_entry();
+            assert!(entry["next_actions"].is_array(), "{:?}", avail);
+        }
+    }
+
+    #[test]
+    fn transcript_entry_command_preserved() {
+        let env = CommandEnvelope::new(CommandAvailability::Denied, "my-special-cmd");
+        let entry = env.transcript_entry();
+        assert_eq!(entry["command"].as_str().unwrap(), "my-special-cmd");
+    }
+
+    // ── help_banner ───────────────────────────────────────────────────────
+
+    #[test]
+    fn envelope_help_banner_matches_availability_help_text() {
+        for avail in &ALL_AVAILABILITY {
+            let env = CommandEnvelope::new(avail.clone(), "test-cmd");
+            assert_eq!(env.help_banner(), avail.help_text("test-cmd"));
+        }
+    }
+
+    #[test]
+    fn envelope_help_banner_embeds_command() {
+        let env = CommandEnvelope::new(CommandAvailability::Unavailable, "batch-run");
+        assert!(env.help_banner().contains("batch-run"));
+    }
+
+    // ── exit_code ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn envelope_exit_code_matches_availability() {
+        for avail in &ALL_AVAILABILITY {
+            let env = CommandEnvelope::new(avail.clone(), "cmd");
+            assert_eq!(env.exit_code(), avail.exit_code_u8());
+        }
+    }
+
+    // ── Cross-cutting snapshot invariants for bead 29.7.3 ─────────────────
+
+    #[test]
+    fn snapshot_all_seven_states_have_distinct_output_tuple() {
+        // Invariant: (tag, compact_label, cli_symbol, exit_code, severity_rank)
+        // must be unique for every variant.
+        let tuples: Vec<_> = ALL_AVAILABILITY
+            .iter()
+            .map(|a| {
+                (
+                    a.tag(),
+                    a.compact_label(),
+                    a.cli_symbol(),
+                    a.exit_code_u8(),
+                    a.severity_rank(),
+                )
+            })
+            .collect();
+        for (i, a) in tuples.iter().enumerate() {
+            for (j, b) in tuples.iter().enumerate() {
+                if i != j {
+                    assert_ne!(
+                        a, b,
+                        "Variants {} and {} have identical output tuples",
+                        i, j
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn snapshot_envelope_json_shape_is_stable_across_variants() {
+        let required_keys = [
+            "availability",
+            "command",
+            "authoritative",
+            "explanation",
+            "recoverable",
+            "next_actions",
+        ];
+        for avail in &ALL_AVAILABILITY {
+            let env = CommandEnvelope::new(avail.clone(), "test");
+            let json = serde_json::to_value(&env).unwrap();
+            let obj = json.as_object().unwrap();
+            for key in &required_keys {
+                assert!(
+                    obj.contains_key(*key),
+                    "{:?} envelope JSON missing key: {}",
+                    avail,
+                    key
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn snapshot_inject_then_extract_round_trip() {
+        // Verify that inject_into produces data that can be deserialized
+        // back into a CommandEnvelope-like structure.
+        for avail in &ALL_AVAILABILITY {
+            let env = CommandEnvelope::new(avail.clone(), "round-trip");
+            let mut payload = json!({"data": "test"});
+            env.inject_into(&mut payload);
+
+            let avail_obj = &payload["availability"];
+            assert_eq!(avail_obj["command"].as_str().unwrap(), "round-trip");
+            assert_eq!(avail_obj["availability"].as_str().unwrap(), avail.tag());
+            assert_eq!(
+                avail_obj["authoritative"].as_bool().unwrap(),
+                avail.is_authoritative()
+            );
+            assert_eq!(
+                avail_obj["recoverable"].as_bool().unwrap(),
+                avail.is_recoverable()
+            );
+            // Original data preserved
+            assert_eq!(payload["data"], "test");
+        }
+    }
+
+    #[test]
+    fn snapshot_denied_exit_code_is_distinct_from_unavailable() {
+        // Critical invariant: Denied (policy) and Unavailable (transport)
+        // must have different exit codes so agents can distinguish them.
+        assert_ne!(
+            CommandAvailability::Denied.exit_code_u8(),
+            CommandAvailability::Unavailable.exit_code_u8(),
+        );
+    }
+
+    #[test]
+    fn snapshot_unsupported_exit_code_is_distinct_from_denied() {
+        assert_ne!(
+            CommandAvailability::Unsupported.exit_code_u8(),
+            CommandAvailability::Denied.exit_code_u8(),
+        );
+    }
+
+    #[test]
+    fn snapshot_planned_exit_code_is_success() {
+        // Planned is exit 0 because the output (contract preview) is valid data.
+        assert_eq!(CommandAvailability::Planned.exit_code_u8(), 0);
+    }
+
+    #[test]
+    fn snapshot_no_silent_fallback_test() {
+        // Invariant: OfflineArtifact must never claim to be authoritative.
+        // If this test fails, it means someone added a silent fallback where
+        // offline data pretends to be live.
+        let offline_env = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "list");
+        assert!(!offline_env.authoritative);
+        assert!(offline_env.explanation.contains("offline"));
+        assert!(!offline_env.next_actions.is_empty());
+    }
+
+    #[test]
+    fn snapshot_transcript_entries_are_valid_json_for_all_variants() {
+        for avail in &ALL_AVAILABILITY {
+            let env = CommandEnvelope::new(avail.clone(), "test");
+            let entry = env.transcript_entry();
+            // Must be a valid JSON object (not null, not array)
+            assert!(entry.is_object(), "{:?} transcript is not an object", avail);
+            // Must round-trip through serialization
+            let serialized = serde_json::to_string(&entry).unwrap();
+            let parsed: Value = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(entry, parsed, "{:?} transcript round-trip failed", avail);
+        }
+    }
+
+    #[test]
+    fn snapshot_compact_labels_are_uppercase_prefix() {
+        // Convention: compact labels start with an UPPERCASE word
+        for avail in &ALL_AVAILABILITY {
+            let label = avail.compact_label();
+            let first_char = label.chars().next().unwrap();
+            assert!(
+                first_char.is_uppercase(),
+                "{:?} compact_label '{}' doesn't start uppercase",
+                avail,
+                label,
+            );
+        }
+    }
+
+    #[test]
+    fn snapshot_help_text_distinct_for_all_variants() {
+        let texts: Vec<String> = ALL_AVAILABILITY
+            .iter()
+            .map(|a| a.help_text("cmd"))
+            .collect();
+        let unique: std::collections::HashSet<&str> = texts.iter().map(String::as_str).collect();
+        assert_eq!(texts.len(), unique.len(), "Duplicate help_text outputs");
+    }
+
+    #[test]
+    fn snapshot_severity_rank_is_monotonically_increasing_with_severity() {
+        // Success states should be 0-1, planning 2, errors 3+
+        assert!(CommandAvailability::LiveRuntime.severity_rank() < 2);
+        assert!(CommandAvailability::OfflineArtifact.severity_rank() < 2);
+        assert!(CommandAvailability::Planned.severity_rank() < 3);
+        assert!(CommandAvailability::Unsupported.severity_rank() >= 3);
+        assert!(CommandAvailability::Unknown.severity_rank() >= 3);
+        assert!(CommandAvailability::Unavailable.severity_rank() >= 3);
+        assert!(CommandAvailability::Denied.severity_rank() >= 3);
+    }
+
+    // ── CommandTruthMode ─────────────────────────────────────────────────
+
+    const ALL_TRUTH_MODES: [CommandTruthMode; 5] = [
+        CommandTruthMode::LiveOnly,
+        CommandTruthMode::OfflineOnly,
+        CommandTruthMode::Hybrid,
+        CommandTruthMode::Passthrough,
+        CommandTruthMode::PlannedOnly,
+    ];
+
+    #[test]
+    fn truth_mode_tags_are_stable_kebab_case() {
+        let expected = [
+            "live-only",
+            "offline-only",
+            "hybrid",
+            "passthrough",
+            "planned-only",
+        ];
+        for (mode, tag) in ALL_TRUTH_MODES.iter().zip(expected.iter()) {
+            assert_eq!(mode.tag(), *tag, "{:?}", mode);
+        }
+    }
+
+    #[test]
+    fn truth_mode_tags_are_all_unique() {
+        let tags: Vec<&str> = ALL_TRUTH_MODES.iter().map(|m| m.tag()).collect();
+        let unique: std::collections::HashSet<&str> = tags.iter().copied().collect();
+        assert_eq!(tags.len(), unique.len());
+    }
+
+    #[test]
+    fn truth_mode_descriptions_are_all_non_empty() {
+        for mode in &ALL_TRUTH_MODES {
+            assert!(!mode.description().is_empty(), "{:?}", mode);
+        }
+    }
+
+    #[test]
+    fn truth_mode_descriptions_are_all_unique() {
+        let descs: Vec<&str> = ALL_TRUTH_MODES.iter().map(|m| m.description()).collect();
+        let unique: std::collections::HashSet<&str> = descs.iter().copied().collect();
+        assert_eq!(descs.len(), unique.len());
+    }
+
+    #[test]
+    fn truth_mode_can_be_authoritative_only_live_and_hybrid() {
+        assert!(CommandTruthMode::LiveOnly.can_be_authoritative());
+        assert!(CommandTruthMode::Hybrid.can_be_authoritative());
+        assert!(!CommandTruthMode::OfflineOnly.can_be_authoritative());
+        assert!(!CommandTruthMode::Passthrough.can_be_authoritative());
+        assert!(!CommandTruthMode::PlannedOnly.can_be_authoritative());
+    }
+
+    #[test]
+    fn truth_mode_serde_round_trip() {
+        for mode in &ALL_TRUTH_MODES {
+            let json = serde_json::to_string(mode).unwrap();
+            let back: CommandTruthMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(*mode, back, "round-trip failed for {:?}", mode);
+        }
+    }
+
+    #[test]
+    fn truth_mode_serde_uses_kebab_case() {
+        let json = serde_json::to_string(&CommandTruthMode::LiveOnly).unwrap();
+        assert_eq!(json, "\"live-only\"");
+        let json = serde_json::to_string(&CommandTruthMode::PlannedOnly).unwrap();
+        assert_eq!(json, "\"planned-only\"");
+    }
+
+    #[test]
+    fn truth_mode_clone_and_eq() {
+        for mode in &ALL_TRUTH_MODES {
+            let cloned = mode.clone();
+            assert_eq!(*mode, cloned);
+        }
+    }
+
+    #[test]
+    fn truth_mode_debug_contains_variant_name() {
+        assert!(format!("{:?}", CommandTruthMode::LiveOnly).contains("LiveOnly"));
+        assert!(format!("{:?}", CommandTruthMode::Passthrough).contains("Passthrough"));
+    }
+
+    // ── COMMAND_FAMILY_CLASSIFICATION ────────────────────────────────────
+
+    #[test]
+    fn family_classification_has_no_duplicates() {
+        let names: Vec<&str> = COMMAND_FAMILY_CLASSIFICATION
+            .iter()
+            .map(|e| e.name)
+            .collect();
+        let unique: std::collections::HashSet<&str> = names.iter().copied().collect();
+        assert_eq!(
+            names.len(),
+            unique.len(),
+            "Duplicate command names in COMMAND_FAMILY_CLASSIFICATION"
+        );
+    }
+
+    #[test]
+    fn family_classification_names_are_non_empty() {
+        for entry in COMMAND_FAMILY_CLASSIFICATION {
+            assert!(!entry.name.is_empty());
+        }
+    }
+
+    #[test]
+    fn family_classification_names_are_lowercase_kebab() {
+        for entry in COMMAND_FAMILY_CLASSIFICATION {
+            assert!(
+                entry
+                    .name
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c == '-'),
+                "Command name '{}' is not lowercase-kebab",
+                entry.name,
+            );
+        }
+    }
+
+    #[test]
+    fn family_classification_covers_live_only_commands() {
+        let live: Vec<&str> = COMMAND_FAMILY_CLASSIFICATION
+            .iter()
+            .filter(|e| e.mode == CommandTruthMode::LiveOnly)
+            .map(|e| e.name)
+            .collect();
+        assert!(live.contains(&"invoke"));
+        assert!(live.contains(&"batch"));
+        assert!(live.contains(&"batch-file"));
+        assert!(live.contains(&"doctor"));
+        assert!(live.contains(&"status"));
+        assert!(live.len() >= 10, "Expected at least 10 live-only commands");
+    }
+
+    #[test]
+    fn family_classification_covers_offline_only_commands() {
+        let offline: Vec<&str> = COMMAND_FAMILY_CLASSIFICATION
+            .iter()
+            .filter(|e| e.mode == CommandTruthMode::OfflineOnly)
+            .map(|e| e.name)
+            .collect();
+        assert!(offline.contains(&"context"));
+        assert!(offline.contains(&"session"));
+        assert!(offline.contains(&"guide"));
+        assert!(offline.contains(&"config"));
+    }
+
+    #[test]
+    fn family_classification_covers_hybrid_commands() {
+        let hybrid: Vec<&str> = COMMAND_FAMILY_CLASSIFICATION
+            .iter()
+            .filter(|e| e.mode == CommandTruthMode::Hybrid)
+            .map(|e| e.name)
+            .collect();
+        assert!(hybrid.contains(&"list"));
+        assert!(hybrid.contains(&"show"));
+        assert!(hybrid.contains(&"ops"));
+        assert!(hybrid.contains(&"export-tools"));
+    }
+
+    #[test]
+    fn family_classification_covers_passthrough_commands() {
+        let passthrough: Vec<&str> = COMMAND_FAMILY_CLASSIFICATION
+            .iter()
+            .filter(|e| e.mode == CommandTruthMode::Passthrough)
+            .map(|e| e.name)
+            .collect();
+        assert!(passthrough.contains(&"supply-chain"));
+        assert!(passthrough.contains(&"audit"));
+        assert!(passthrough.contains(&"manifest"));
+    }
+
+    #[test]
+    fn family_classification_serve_mcp_is_planned_only() {
+        let entry = classify_command("serve-mcp").unwrap();
+        assert_eq!(entry.mode, CommandTruthMode::PlannedOnly);
+    }
+
+    #[test]
+    fn family_classification_all_five_modes_represented() {
+        let modes: std::collections::HashSet<&str> = COMMAND_FAMILY_CLASSIFICATION
+            .iter()
+            .map(|e| e.mode.tag())
+            .collect();
+        assert!(modes.contains("live-only"));
+        assert!(modes.contains("offline-only"));
+        assert!(modes.contains("hybrid"));
+        assert!(modes.contains("passthrough"));
+        assert!(modes.contains("planned-only"));
+    }
+
+    #[test]
+    fn family_classification_serializes_to_json_array() {
+        let json = serde_json::to_value(COMMAND_FAMILY_CLASSIFICATION).unwrap();
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), COMMAND_FAMILY_CLASSIFICATION.len());
+        let first = &arr[0];
+        assert!(first.get("name").is_some());
+        assert!(first.get("mode").is_some());
+    }
+
+    // ── classify_command ─────────────────────────────────────────────────
+
+    #[test]
+    fn classify_command_returns_correct_entry() {
+        let entry = classify_command("invoke").unwrap();
+        assert_eq!(entry.name, "invoke");
+        assert_eq!(entry.mode, CommandTruthMode::LiveOnly);
+    }
+
+    #[test]
+    fn classify_command_returns_none_for_unknown() {
+        assert!(classify_command("nonexistent-command").is_none());
+        assert!(classify_command("").is_none());
+    }
+
+    #[test]
+    fn classify_command_is_case_sensitive() {
+        assert!(classify_command("INVOKE").is_none());
+        assert!(classify_command("Invoke").is_none());
+    }
+
+    #[test]
+    fn classify_command_every_table_entry_round_trips() {
+        for entry in COMMAND_FAMILY_CLASSIFICATION {
+            let found = classify_command(entry.name).unwrap();
+            assert_eq!(found.name, entry.name);
+            assert_eq!(found.mode, entry.mode);
+        }
+    }
+
+    #[test]
+    fn classify_command_static_lifetime_borrow() {
+        // Ensure the returned reference has 'static lifetime.
+        let entry: &'static CommandFamilyEntry = classify_command("list").unwrap();
+        assert_eq!(entry.name, "list");
+    }
+
+    // ── Cross-cutting truth-boundary invariants ──────────────────────────
+
+    #[test]
+    fn truth_mode_live_commands_cannot_be_offline_artifact() {
+        // A live-only command should never produce OfflineArtifact availability.
+        // This is a design contract — just verify the classification is consistent.
+        for entry in COMMAND_FAMILY_CLASSIFICATION {
+            if entry.mode == CommandTruthMode::LiveOnly {
+                assert!(
+                    entry.mode.can_be_authoritative(),
+                    "Live-only command '{}' must be able to produce authoritative data",
+                    entry.name,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn truth_mode_offline_commands_are_not_authoritative() {
+        for entry in COMMAND_FAMILY_CLASSIFICATION {
+            if entry.mode == CommandTruthMode::OfflineOnly {
+                assert!(
+                    !entry.mode.can_be_authoritative(),
+                    "Offline-only command '{}' should not be authoritative",
+                    entry.name,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn truth_mode_planned_commands_are_not_authoritative() {
+        for entry in COMMAND_FAMILY_CLASSIFICATION {
+            if entry.mode == CommandTruthMode::PlannedOnly {
+                assert!(
+                    !entry.mode.can_be_authoritative(),
+                    "Planned-only command '{}' should not be authoritative",
+                    entry.name,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn family_entry_debug_shows_name_and_mode() {
+        let entry = classify_command("invoke").unwrap();
+        let dbg = format!("{:?}", entry);
+        assert!(dbg.contains("invoke"));
+        assert!(dbg.contains("LiveOnly"));
+    }
+
+    #[test]
+    fn family_classification_minimum_count() {
+        // Ensure we haven't accidentally truncated the table.
+        assert!(
+            COMMAND_FAMILY_CLASSIFICATION.len() >= 40,
+            "Expected at least 40 classified commands, got {}",
+            COMMAND_FAMILY_CLASSIFICATION.len(),
+        );
+    }
+
+    #[test]
+    fn classify_command_batch_file_is_live_only() {
+        let entry = classify_command("batch-file").unwrap();
+        assert_eq!(entry.mode, CommandTruthMode::LiveOnly);
+    }
+
+    #[test]
+    fn classify_command_template_is_hybrid() {
+        let entry = classify_command("template").unwrap();
+        assert_eq!(entry.mode, CommandTruthMode::Hybrid);
+    }
+
+    #[test]
+    fn classify_command_audit_is_passthrough() {
+        let entry = classify_command("audit").unwrap();
+        assert_eq!(entry.mode, CommandTruthMode::Passthrough);
+    }
+
+    #[test]
+    fn classify_command_session_is_offline_only() {
+        let entry = classify_command("session").unwrap();
+        assert_eq!(entry.mode, CommandTruthMode::OfflineOnly);
     }
 }

@@ -31,6 +31,8 @@ mod credential_store;
 mod event_stream;
 #[allow(dead_code)] // Comprehensive event filtering engine.
 mod events;
+#[allow(dead_code)] // Error taxonomy wired when host-backed dispatch lands.
+mod error_taxonomy;
 mod export_tools;
 mod format_table;
 #[allow(dead_code)] // Cross-connector health aggregation dashboard.
@@ -184,6 +186,9 @@ Examples:
   fwc session start --agent BronzeValley --goal \"triage issues\" --zone z:work
   fwc session show
   fwc session list --status active
+  fwc agent announce --agent BronzeValley --connector github --purpose \"triage issue backlog\"
+  fwc agent send --from BronzeValley --to GoldenWolf --kind info --payload '{\"bead\":\"flywheel_connectors-qnchs.13.3\"}'
+  fwc agent inbox --agent GoldenWolf
   fwc list
   fwc plan \"create a GitHub issue titled 'FWC: add workflow macros'\"
   fwc explain \"find the Notion page named Roadmap and append this summary\"
@@ -282,6 +287,9 @@ enum Commands {
 
     /// Track the current agent session and persist resumable context.
     Session(SessionArgs),
+
+    /// Coordinate local multi-agent work through the fwc agent-mail hub.
+    Agent(AgentArgs),
 
     /// Compile a natural-language goal into exact primitive fwc steps.
     #[command(visible_alias = "workflow")]
@@ -732,6 +740,125 @@ struct SessionListArgs {
 struct SessionTargetArgs {
     /// Session id such as `s:deadbeef`.
     session_id: Option<String>,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct AgentArgs {
+    #[command(subcommand)]
+    command: AgentCommand,
+}
+
+#[derive(Subcommand, Debug, Serialize)]
+#[serde(tag = "subcommand", content = "args", rename_all = "kebab-case")]
+enum AgentCommand {
+    /// List active announcements and reservations in the local coordination hub.
+    List(AgentListArgs),
+
+    /// Announce connector usage intent to other local agents.
+    Announce(AgentAnnounceArgs),
+
+    /// Reserve a connector resource for coordinated local work.
+    Reserve(AgentReserveArgs),
+
+    /// Send a message to another local agent inbox.
+    Send(AgentSendArgs),
+
+    /// Inspect or drain one local agent inbox.
+    #[command(visible_alias = "recv")]
+    Inbox(AgentInboxArgs),
+}
+
+#[derive(Args, Debug, Default, Serialize)]
+struct AgentListArgs {
+    /// Optional connector filter.
+    #[arg(long)]
+    connector: Option<String>,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct AgentAnnounceArgs {
+    /// Agent identity announcing the work.
+    #[arg(long)]
+    agent: String,
+
+    /// Connector being used.
+    #[arg(long)]
+    connector: String,
+
+    /// Human-readable purpose for the work.
+    #[arg(long)]
+    purpose: String,
+
+    /// Optional specific operation being targeted.
+    #[arg(long)]
+    operation: Option<String>,
+
+    /// Expected announcement duration in seconds (0 = indefinite).
+    #[arg(long, default_value_t = 0)]
+    duration: u64,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct AgentReserveArgs {
+    /// Agent identity requesting the reservation.
+    #[arg(long)]
+    agent: String,
+
+    /// Connector being coordinated.
+    #[arg(long)]
+    connector: String,
+
+    /// Resource identifier within the connector.
+    #[arg(long)]
+    resource: String,
+
+    /// Reservation TTL in seconds.
+    #[arg(long, default_value_t = 3600)]
+    ttl: u64,
+
+    /// Require exclusive access to the resource.
+    #[arg(long, default_value_t = false)]
+    exclusive: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+enum AgentMessageKindArg {
+    Request,
+    Response,
+    Info,
+    Warning,
+    Release,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct AgentSendArgs {
+    /// Sender agent identity.
+    #[arg(long)]
+    from: String,
+
+    /// Recipient agent identity.
+    #[arg(long)]
+    to: String,
+
+    /// Message kind.
+    #[arg(long, value_enum, default_value_t = AgentMessageKindArg::Info)]
+    kind: AgentMessageKindArg,
+
+    /// JSON payload or plain text payload.
+    #[arg(long)]
+    payload: String,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct AgentInboxArgs {
+    /// Agent identity whose inbox should be inspected.
+    #[arg(long)]
+    agent: String,
+
+    /// Drain the inbox instead of peeking non-destructively.
+    #[arg(long, default_value_t = false)]
+    drain: bool,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -2282,17 +2409,20 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
     let outcome = match &cli.command {
         Commands::Guide(args) => {
             let mut payload = catalog::guide_payload(args.command.as_deref());
-            let exit_code = if payload["status"] == "unknown-command" {
+            let (exit_code, availability) = if payload["status"] == "unknown-command" {
                 enrich_unknown_guide_command(&mut payload, args.command.as_deref());
-                CliExitCode::UnknownCommand
+                (CliExitCode::UnknownCommand, CommandAvailability::Unsupported)
             } else {
-                CliExitCode::Success
+                (CliExitCode::Success, CommandAvailability::OfflineArtifact)
             };
+            let envelope = CommandEnvelope::new(availability, "guide");
+            envelope.inject_into(&mut payload);
             DispatchOutcome { payload, exit_code }
         }
         Commands::Context(args) => context_dispatch(args)?,
         Commands::Task(args) => task_dispatch(args)?,
         Commands::Session(args) => session_dispatch(args)?,
+        Commands::Agent(args) => agent_dispatch(args)?,
         Commands::Plan(args) => intent_plan_dispatch(&args.request(intent::IntentMode::Plan))?,
         Commands::Explain(args) => {
             intent_explain_dispatch(&args.request(intent::IntentMode::Explain))?
@@ -2360,8 +2490,11 @@ fn planned<T>(command: &str, args: &T) -> Result<DispatchOutcome>
 where
     T: Serialize,
 {
+    let envelope = CommandEnvelope::new(CommandAvailability::Planned, command);
+    let mut payload = catalog::planned_payload(command, &serde_json::to_value(args)?);
+    envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
-        payload: catalog::planned_payload(command, &serde_json::to_value(args)?),
+        payload,
         exit_code: CliExitCode::Success,
     })
 }
@@ -3093,13 +3226,17 @@ fn host_rate_limit_summaries(
     summaries
 }
 
-fn host_connector_archetypes(introspection: &HostIntrospectionResponse) -> MetadataField<Vec<String>> {
+fn host_connector_archetypes(
+    introspection: &HostIntrospectionResponse,
+) -> MetadataField<Vec<String>> {
     match introspection.archetype {
         fcp_host::ConnectorArchetype::Unknown => MetadataField::Unknown,
         archetype => serde_json::to_value(archetype)
             .ok()
             .and_then(|value| value.as_str().map(ToOwned::to_owned))
-            .map_or(MetadataField::Unknown, |label| MetadataField::Known(vec![label])),
+            .map_or(MetadataField::Unknown, |label| {
+                MetadataField::Known(vec![label])
+            }),
     }
 }
 
@@ -3502,6 +3639,34 @@ fn host_operation_resolution_dispatch(
     )
 }
 
+fn discovery_mode_label(source: &catalog::DiscoveryDataSource) -> &'static str {
+    match source {
+        catalog::DiscoveryDataSource::LiveHostInventory => "live-inventory",
+        catalog::DiscoveryDataSource::LiveHostIntrospection => "live-introspection",
+        catalog::DiscoveryDataSource::WorkspaceManifest
+        | catalog::DiscoveryDataSource::LocalCatalogCache
+        | catalog::DiscoveryDataSource::StaticSchema => "offline-artifact",
+    }
+}
+
+fn attach_discovery_provenance(
+    payload: &mut Value,
+    command: &str,
+    source: catalog::DiscoveryDataSource,
+) {
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert(
+            "mode".to_owned(),
+            Value::String(discovery_mode_label(&source).to_owned()),
+        );
+        obj.insert(
+            "provenance".to_owned(),
+            serde_json::to_value(catalog::discovery_provenance(command, source))
+                .unwrap_or(Value::Null),
+        );
+    }
+}
+
 fn list_dispatch_host(args: &ListArgs, host: &str) -> Result<DispatchOutcome> {
     let client = HostAdminClient::new(host)?;
     let filter = HostDiscoveryFilter {
@@ -3535,6 +3700,11 @@ fn list_dispatch_host(args: &ListArgs, host: &str) -> Result<DispatchOutcome> {
             "Use `fwc ops <connector> --host <endpoint>` to enumerate host-backed operations.",
         ],
     });
+    attach_discovery_provenance(
+        &mut payload,
+        "list",
+        catalog::DiscoveryDataSource::LiveHostInventory,
+    );
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -3619,6 +3789,11 @@ fn show_dispatch_host(args: &ShowArgs, host: &str) -> Result<DispatchOutcome> {
             format!("fwc examples {} {} --host {host}", connector.slug, example_operation),
         ],
     });
+    attach_discovery_provenance(
+        &mut payload,
+        "show",
+        catalog::DiscoveryDataSource::LiveHostIntrospection,
+    );
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -3672,6 +3847,11 @@ fn ops_dispatch_host(args: &OpsArgs, host: &str) -> Result<DispatchOutcome> {
             format!("fwc examples {} <operation> --host {host}", connector.slug),
         ],
     });
+    attach_discovery_provenance(
+        &mut payload,
+        "ops",
+        catalog::DiscoveryDataSource::LiveHostIntrospection,
+    );
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -3714,14 +3894,19 @@ fn schema_dispatch_host(args: &SchemaArgs, host: &str) -> Result<DispatchOutcome
             let scaffold = schema_nav::scaffold_template(&operation.input_schema);
             let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "schema");
             let mut payload = json!({
-                    "status": "ok",
-                    "command": "schema",
-                    "source": "host-admin-api",
-                    "scope": "scaffold",
-                    "connector": { "slug": &connector.slug },
-                    "operation": { "selector": &operation.name },
-                    "scaffold": scaffold,
-                });
+                "status": "ok",
+                "command": "schema",
+                "source": "host-admin-api",
+                "scope": "scaffold",
+                "connector": { "slug": &connector.slug },
+                "operation": { "selector": &operation.name },
+                "scaffold": scaffold,
+            });
+            attach_discovery_provenance(
+                &mut payload,
+                "schema",
+                catalog::DiscoveryDataSource::LiveHostIntrospection,
+            );
             envelope.inject_into(&mut payload);
             return Ok(DispatchOutcome {
                 payload,
@@ -3744,44 +3929,49 @@ fn schema_dispatch_host(args: &SchemaArgs, host: &str) -> Result<DispatchOutcome
 
         let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "schema");
         let mut payload = json!({
-                "status": "ok",
-                "command": "schema",
-                "source": "host-admin-api",
-                "scope": "operation",
-                "message": "Loaded operation schemas from `fcp-host` introspection.",
-                "connector": {
-                    "slug": &connector.slug,
-                    "canonical_id": connector.summary.id.as_str(),
-                    "name": &connector.summary.name,
-                },
-                "operation": {
-                    "requested_selector": operation_selector,
-                    "selector": &operation.name,
-                    "canonical_id": &operation.name,
-                    "aliases": host_tool_aliases(operation),
-                    "summary": &operation.description,
-                    "capability": operation.capability.as_str(),
-                    "risk_level": risk_level_label(operation.risk_level),
-                    "safety_tier": safety_tier_label(operation.safety_tier),
-                    "idempotency": idempotency_label(operation.idempotency),
-                    "approval_mode": &operation.approval_mode,
-                    "supports_simulate": operation.supports_simulate,
-                },
-                "input_schema": &operation.input_schema,
-                "output_schema": &operation.output_schema,
-                "fields": fields,
-                "guidance": {
-                    "when_to_use": host_tool_when_to_use(operation),
-                    "common_mistakes": host_tool_common_mistakes(operation),
-                    "related": host_tool_related(operation),
-                },
-                "metadata_gaps": metadata_gaps,
-                "next_actions": [
-                    format!("fwc examples {} {} --host {host}", connector.slug, operation.name),
-                    format!("fwc schema {} {} --required-only --host {host}", connector.slug, operation.name),
-                    format!("fwc schema {} {} --scaffold --host {host}", connector.slug, operation.name),
-                ],
-            });
+            "status": "ok",
+            "command": "schema",
+            "source": "host-admin-api",
+            "scope": "operation",
+            "message": "Loaded operation schemas from `fcp-host` introspection.",
+            "connector": {
+                "slug": &connector.slug,
+                "canonical_id": connector.summary.id.as_str(),
+                "name": &connector.summary.name,
+            },
+            "operation": {
+                "requested_selector": operation_selector,
+                "selector": &operation.name,
+                "canonical_id": &operation.name,
+                "aliases": host_tool_aliases(operation),
+                "summary": &operation.description,
+                "capability": operation.capability.as_str(),
+                "risk_level": risk_level_label(operation.risk_level),
+                "safety_tier": safety_tier_label(operation.safety_tier),
+                "idempotency": idempotency_label(operation.idempotency),
+                "approval_mode": &operation.approval_mode,
+                "supports_simulate": operation.supports_simulate,
+            },
+            "input_schema": &operation.input_schema,
+            "output_schema": &operation.output_schema,
+            "fields": fields,
+            "guidance": {
+                "when_to_use": host_tool_when_to_use(operation),
+                "common_mistakes": host_tool_common_mistakes(operation),
+                "related": host_tool_related(operation),
+            },
+            "metadata_gaps": metadata_gaps,
+            "next_actions": [
+                format!("fwc examples {} {} --host {host}", connector.slug, operation.name),
+                format!("fwc schema {} {} --required-only --host {host}", connector.slug, operation.name),
+                format!("fwc schema {} {} --scaffold --host {host}", connector.slug, operation.name),
+            ],
+        });
+        attach_discovery_provenance(
+            &mut payload,
+            "schema",
+            catalog::DiscoveryDataSource::LiveHostIntrospection,
+        );
         envelope.inject_into(&mut payload);
         return Ok(DispatchOutcome {
             payload,
@@ -3791,22 +3981,27 @@ fn schema_dispatch_host(args: &SchemaArgs, host: &str) -> Result<DispatchOutcome
 
     let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "schema");
     let mut payload = json!({
-            "status": "ok",
-            "command": "schema",
-            "source": "host-admin-api",
-            "scope": "connector",
-            "message": "Loaded the connector inventory/introspection field glossary from `fcp-host`.",
-            "connector": {
-                "slug": &connector.slug,
-                "canonical_id": connector.summary.id.as_str(),
-                "name": &connector.summary.name,
-            },
-            "schema": host_connector_schema_glossary(&inventory, &introspection, &metadata_gaps),
-            "next_actions": [
-                format!("fwc ops {} --host {host}", connector.slug),
-                format!("fwc schema {} <operation> --host {host}", connector.slug),
-            ],
-        });
+        "status": "ok",
+        "command": "schema",
+        "source": "host-admin-api",
+        "scope": "connector",
+        "message": "Loaded the connector inventory/introspection field glossary from `fcp-host`.",
+        "connector": {
+            "slug": &connector.slug,
+            "canonical_id": connector.summary.id.as_str(),
+            "name": &connector.summary.name,
+        },
+        "schema": host_connector_schema_glossary(&inventory, &introspection, &metadata_gaps),
+        "next_actions": [
+            format!("fwc ops {} --host {host}", connector.slug),
+            format!("fwc schema {} <operation> --host {host}", connector.slug),
+        ],
+    });
+    attach_discovery_provenance(
+        &mut payload,
+        "schema",
+        catalog::DiscoveryDataSource::LiveHostIntrospection,
+    );
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -3846,37 +4041,42 @@ fn examples_dispatch_host(args: &ExampleArgs, host: &str) -> Result<DispatchOutc
 
         let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "examples");
         let mut payload = json!({
-                "status": "ok",
-                "command": "examples",
-                "source": "host-admin-api",
-                "scope": "operation",
-                "message": "Loaded operation examples from `fcp-host` introspection.",
-                "connector": {
-                    "slug": &connector.slug,
-                    "canonical_id": connector.summary.id.as_str(),
-                    "name": &connector.summary.name,
-                },
-                "operation": {
-                    "requested_selector": operation_selector,
-                    "selector": &operation.name,
-                    "canonical_id": &operation.name,
-                    "aliases": host_tool_aliases(operation),
-                    "when_to_use": host_tool_when_to_use(operation),
-                },
-                "examples": operation.examples.iter().map(|example| {
-                    json!({
-                        "description": &example.description,
-                        "input": &example.input,
-                        "output": &example.output,
-                    })
-                }).collect::<Vec<_>>(),
-                "common_mistakes": host_tool_common_mistakes(operation),
-                "metadata_gaps": metadata_gaps,
-                "next_actions": [
-                    format!("fwc schema {} {} --host {host}", connector.slug, operation.name),
-                    format!("fwc simulate {} {} --file payload.json", connector.slug, operation.name),
-                ],
-            });
+            "status": "ok",
+            "command": "examples",
+            "source": "host-admin-api",
+            "scope": "operation",
+            "message": "Loaded operation examples from `fcp-host` introspection.",
+            "connector": {
+                "slug": &connector.slug,
+                "canonical_id": connector.summary.id.as_str(),
+                "name": &connector.summary.name,
+            },
+            "operation": {
+                "requested_selector": operation_selector,
+                "selector": &operation.name,
+                "canonical_id": &operation.name,
+                "aliases": host_tool_aliases(operation),
+                "when_to_use": host_tool_when_to_use(operation),
+            },
+            "examples": operation.examples.iter().map(|example| {
+                json!({
+                    "description": &example.description,
+                    "input": &example.input,
+                    "output": &example.output,
+                })
+            }).collect::<Vec<_>>(),
+            "common_mistakes": host_tool_common_mistakes(operation),
+            "metadata_gaps": metadata_gaps,
+            "next_actions": [
+                format!("fwc schema {} {} --host {host}", connector.slug, operation.name),
+                format!("fwc simulate {} {} --file payload.json", connector.slug, operation.name),
+            ],
+        });
+        attach_discovery_provenance(
+            &mut payload,
+            "examples",
+            catalog::DiscoveryDataSource::LiveHostIntrospection,
+        );
         envelope.inject_into(&mut payload);
         return Ok(DispatchOutcome {
             payload,
@@ -3904,30 +4104,35 @@ fn examples_dispatch_host(args: &ExampleArgs, host: &str) -> Result<DispatchOutc
 
     let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "examples");
     let mut payload = json!({
-            "status": "ok",
-            "command": "examples",
-            "source": "host-admin-api",
-            "scope": "connector",
-            "message": "Loaded connector-level examples and suggested follow-up commands from `fcp-host`.",
-            "connector": {
-                "slug": &connector.slug,
-                "canonical_id": connector.summary.id.as_str(),
-                "name": &connector.summary.name,
-            },
-            "examples": {
-                "commands": [
-                    format!("fwc show {} --host {host}", connector.slug),
-                    format!("fwc ops {} --host {host}", connector.slug),
-                    format!("fwc schema {} <operation> --host {host}", connector.slug),
-                ],
-                "operations": operation_examples,
-            },
-            "metadata_gaps": metadata_gaps,
-            "next_actions": [
+        "status": "ok",
+        "command": "examples",
+        "source": "host-admin-api",
+        "scope": "connector",
+        "message": "Loaded connector-level examples and suggested follow-up commands from `fcp-host`.",
+        "connector": {
+            "slug": &connector.slug,
+            "canonical_id": connector.summary.id.as_str(),
+            "name": &connector.summary.name,
+        },
+        "examples": {
+            "commands": [
+                format!("fwc show {} --host {host}", connector.slug),
                 format!("fwc ops {} --host {host}", connector.slug),
                 format!("fwc schema {} <operation> --host {host}", connector.slug),
             ],
-        });
+            "operations": operation_examples,
+        },
+        "metadata_gaps": metadata_gaps,
+        "next_actions": [
+            format!("fwc ops {} --host {host}", connector.slug),
+            format!("fwc schema {} <operation> --host {host}", connector.slug),
+        ],
+    });
+    attach_discovery_provenance(
+        &mut payload,
+        "examples",
+        catalog::DiscoveryDataSource::LiveHostIntrospection,
+    );
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -3984,6 +4189,11 @@ fn list_dispatch(args: &ListArgs, host: Option<&str>) -> Result<DispatchOutcome>
             "Use `fwc ops <connector> --offline` to enumerate operations before asking for schemas.",
         ],
     });
+    attach_discovery_provenance(
+        &mut payload,
+        "list",
+        catalog::DiscoveryDataSource::WorkspaceManifest,
+    );
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -4446,8 +4656,7 @@ fn session_dispatch(args: &SessionArgs) -> Result<DispatchOutcome> {
         SessionCommand::Resume(args) => {
             let store = cli_session_store();
             let mut paused_session = store.active_session()?;
-            let mut session = match resolve_session_for_resume(&store, args.session_id.as_deref())
-            {
+            let mut session = match resolve_session_for_resume(&store, args.session_id.as_deref()) {
                 Ok(session) => session,
                 Err(outcome) => return Ok(outcome),
             };
@@ -4630,10 +4839,420 @@ fn session_missing_dispatch(subcommand: &str, session_id: &str) -> DispatchOutco
     }
 }
 
+fn agent_dispatch(args: &AgentArgs) -> Result<DispatchOutcome> {
+    match &args.command {
+        AgentCommand::List(args) => {
+            let store = cli_agent_coord_store();
+            let mut hub = match store.load() {
+                Ok(hub) => hub,
+                Err(error) => return Ok(agent_store_error_dispatch("list", &error.to_string())),
+            };
+            let cleaned = hub.cleanup_expired();
+            if cleaned > 0 {
+                if let Err(error) = store.save(&hub) {
+                    return Ok(agent_store_error_dispatch("list", &error.to_string()));
+                }
+            }
+
+            let announcements = if let Some(connector) = args.connector.as_deref() {
+                hub.announcements_for(connector)
+                    .into_iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+            } else {
+                hub.active_announcements()
+                    .into_iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+            };
+            let reservations = if let Some(connector) = args.connector.as_deref() {
+                hub.reservations_for(connector)
+                    .into_iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+            } else {
+                hub.active_reservations()
+                    .into_iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+            };
+
+            let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "agent");
+            let mut payload = json!({
+                "status": "ok",
+                "command": "agent",
+                "subcommand": "list",
+                "connector_filter": args.connector,
+                "store_path": store.path().display().to_string(),
+                "summary": {
+                    "announcement_count": announcements.len(),
+                    "reservation_count": reservations.len(),
+                },
+                "announcements": announcements,
+                "reservations": reservations,
+                "next_actions": [
+                    "fwc agent announce --agent <name> --connector <connector> --purpose <purpose>".to_owned(),
+                    "fwc agent reserve --agent <name> --connector <connector> --resource <resource>".to_owned(),
+                    "fwc agent inbox --agent <name>".to_owned(),
+                ],
+            });
+            if cleaned > 0 {
+                payload["cleanup"] = json!({
+                    "expired_entries_removed": cleaned,
+                });
+            }
+            envelope.inject_into(&mut payload);
+            Ok(DispatchOutcome {
+                payload,
+                exit_code: CliExitCode::Success,
+            })
+        }
+        AgentCommand::Announce(args) => {
+            let agent = match parse_coord_agent_id(&args.agent, "announce", "agent") {
+                Ok(agent) => agent,
+                Err(outcome) => return Ok(outcome),
+            };
+            let store = cli_agent_coord_store();
+            let mut hub = match store.load() {
+                Ok(hub) => hub,
+                Err(error) => {
+                    return Ok(agent_store_error_dispatch("announce", &error.to_string()));
+                }
+            };
+            let cleaned = hub.cleanup_expired();
+
+            let mut announcement = agent_coord::UsageAnnouncement::new(
+                agent.clone(),
+                args.connector.clone(),
+                args.purpose.clone(),
+            );
+            if let Some(operation) = args.operation.as_deref() {
+                announcement = announcement.with_operation(operation);
+            }
+            if args.duration > 0 {
+                announcement = announcement.with_duration(args.duration);
+            }
+
+            hub.announce(announcement.clone());
+            if let Err(error) = store.save(&hub) {
+                return Ok(agent_store_error_dispatch("announce", &error.to_string()));
+            }
+
+            let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "agent");
+            let mut payload = json!({
+                "status": "ok",
+                "command": "agent",
+                "subcommand": "announce",
+                "message": format!(
+                    "Recorded coordination announcement for `{}` on connector `{}`.",
+                    args.agent, args.connector
+                ),
+                "store_path": store.path().display().to_string(),
+                "announcement": announcement,
+                "summary": {
+                    "announcement_count": hub.announcement_count(),
+                    "reservation_count": hub.reservation_count(),
+                },
+                "next_actions": [
+                    "fwc agent list".to_owned(),
+                    format!("fwc agent reserve --agent {} --connector {} --resource <resource>", args.agent, args.connector),
+                    format!("fwc agent send --from {} --to <other-agent> --kind info --payload '{{\"connector\":\"{}\"}}'", args.agent, args.connector),
+                ],
+            });
+            if cleaned > 0 {
+                payload["cleanup"] = json!({
+                    "expired_entries_removed": cleaned,
+                });
+            }
+            envelope.inject_into(&mut payload);
+            Ok(DispatchOutcome {
+                payload,
+                exit_code: CliExitCode::Success,
+            })
+        }
+        AgentCommand::Reserve(args) => {
+            let agent = match parse_coord_agent_id(&args.agent, "reserve", "agent") {
+                Ok(agent) => agent,
+                Err(outcome) => return Ok(outcome),
+            };
+            let store = cli_agent_coord_store();
+            let mut hub = match store.load() {
+                Ok(hub) => hub,
+                Err(error) => return Ok(agent_store_error_dispatch("reserve", &error.to_string())),
+            };
+            let cleaned = hub.cleanup_expired();
+            if cleaned > 0 {
+                if let Err(error) = store.save(&hub) {
+                    return Ok(agent_store_error_dispatch("reserve", &error.to_string()));
+                }
+            }
+
+            let reservation_id = match hub.reserve(
+                agent.clone(),
+                args.connector.clone(),
+                args.resource.clone(),
+                args.ttl,
+                args.exclusive,
+            ) {
+                Ok(id) => id,
+                Err(agent_coord::CoordError::ResourceConflict { resource, held_by }) => {
+                    return Ok(DispatchOutcome {
+                        payload: json!({
+                            "status": "error",
+                            "command": "agent",
+                            "subcommand": "reserve",
+                            "error": {
+                                "type": "resource-conflict",
+                                "message": format!(
+                                    "Resource `{resource}` is already reserved by `{held_by}`."
+                                ),
+                                "recoverable": true,
+                            },
+                            "connector": args.connector,
+                            "resource": resource,
+                            "held_by": held_by,
+                            "next_actions": [
+                                "fwc agent list".to_owned(),
+                                format!("fwc agent inbox --agent {}", args.agent),
+                            ],
+                        }),
+                        exit_code: CliExitCode::Validation,
+                    });
+                }
+                Err(error) => {
+                    return Ok(agent_store_error_dispatch("reserve", &error.to_string()));
+                }
+            };
+
+            let reservation = hub
+                .active_reservations()
+                .into_iter()
+                .find(|reservation| reservation.id == reservation_id)
+                .cloned()
+                .expect("newly created reservation should exist");
+            if let Err(error) = store.save(&hub) {
+                return Ok(agent_store_error_dispatch("reserve", &error.to_string()));
+            }
+
+            let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "agent");
+            let mut payload = json!({
+                "status": "ok",
+                "command": "agent",
+                "subcommand": "reserve",
+                "message": format!(
+                    "Reserved `{}` on connector `{}` for agent `{}`.",
+                    args.resource, args.connector, args.agent
+                ),
+                "store_path": store.path().display().to_string(),
+                "reservation": reservation,
+                "summary": {
+                    "announcement_count": hub.announcement_count(),
+                    "reservation_count": hub.reservation_count(),
+                },
+                "next_actions": [
+                    "fwc agent list".to_owned(),
+                    format!("fwc agent send --from {} --to <other-agent> --kind warning --payload '{{\"resource\":\"{}\"}}'", args.agent, args.resource),
+                ],
+            });
+            if cleaned > 0 {
+                payload["cleanup"] = json!({
+                    "expired_entries_removed": cleaned,
+                });
+            }
+            envelope.inject_into(&mut payload);
+            Ok(DispatchOutcome {
+                payload,
+                exit_code: CliExitCode::Success,
+            })
+        }
+        AgentCommand::Send(args) => {
+            let from = match parse_coord_agent_id(&args.from, "send", "from") {
+                Ok(agent) => agent,
+                Err(outcome) => return Ok(outcome),
+            };
+            let to = match parse_coord_agent_id(&args.to, "send", "to") {
+                Ok(agent) => agent,
+                Err(outcome) => return Ok(outcome),
+            };
+            let store = cli_agent_coord_store();
+            let mut hub = match store.load() {
+                Ok(hub) => hub,
+                Err(error) => return Ok(agent_store_error_dispatch("send", &error.to_string())),
+            };
+            let cleaned = hub.cleanup_expired();
+            let payload_value = parse_agent_message_payload(&args.payload);
+            let kind = agent_message_kind(args.kind);
+            hub.send(from.clone(), &to, kind, payload_value.clone());
+            let unread_count = hub.unread_count(&to);
+            if let Err(error) = store.save(&hub) {
+                return Ok(agent_store_error_dispatch("send", &error.to_string()));
+            }
+
+            let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "agent");
+            let mut payload = json!({
+                "status": "ok",
+                "command": "agent",
+                "subcommand": "send",
+                "message": format!(
+                    "Delivered a `{}` message from `{}` to `{}`.",
+                    agent_message_kind_name(args.kind),
+                    args.from,
+                    args.to
+                ),
+                "store_path": store.path().display().to_string(),
+                "from": args.from,
+                "to": args.to,
+                "kind": args.kind,
+                "payload_sent": payload_value,
+                "recipient_unread_count": unread_count,
+                "next_actions": [
+                    format!("fwc agent inbox --agent {}", args.to),
+                    "fwc agent list".to_owned(),
+                ],
+            });
+            if cleaned > 0 {
+                payload["cleanup"] = json!({
+                    "expired_entries_removed": cleaned,
+                });
+            }
+            envelope.inject_into(&mut payload);
+            Ok(DispatchOutcome {
+                payload,
+                exit_code: CliExitCode::Success,
+            })
+        }
+        AgentCommand::Inbox(args) => {
+            let agent = match parse_coord_agent_id(&args.agent, "inbox", "agent") {
+                Ok(agent) => agent,
+                Err(outcome) => return Ok(outcome),
+            };
+            let store = cli_agent_coord_store();
+            let mut hub = match store.load() {
+                Ok(hub) => hub,
+                Err(error) => return Ok(agent_store_error_dispatch("inbox", &error.to_string())),
+            };
+            let cleaned = hub.cleanup_expired();
+            let unread_before = hub.unread_count(&agent);
+            let messages = if args.drain {
+                hub.read_inbox(&agent)
+            } else {
+                hub.inbox(&agent).into_iter().cloned().collect::<Vec<_>>()
+            };
+            if args.drain || cleaned > 0 {
+                if let Err(error) = store.save(&hub) {
+                    return Ok(agent_store_error_dispatch("inbox", &error.to_string()));
+                }
+            }
+
+            let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "agent");
+            let mut payload = json!({
+                "status": "ok",
+                "command": "agent",
+                "subcommand": "inbox",
+                "store_path": store.path().display().to_string(),
+                "agent": args.agent,
+                "drained": args.drain,
+                "message_count": messages.len(),
+                "unread_count": unread_before,
+                "messages": messages,
+                "next_actions": [
+                    "fwc agent list".to_owned(),
+                    format!("fwc agent send --from {} --to <other-agent> --kind response --payload '{{\"status\":\"received\"}}'", args.agent),
+                ],
+            });
+            if cleaned > 0 {
+                payload["cleanup"] = json!({
+                    "expired_entries_removed": cleaned,
+                });
+            }
+            envelope.inject_into(&mut payload);
+            Ok(DispatchOutcome {
+                payload,
+                exit_code: CliExitCode::Success,
+            })
+        }
+    }
+}
+
+fn parse_coord_agent_id(
+    raw: &str,
+    subcommand: &str,
+    field: &str,
+) -> std::result::Result<agent_coord::AgentId, DispatchOutcome> {
+    let trimmed = raw.trim();
+    if !trimmed.is_empty() && agent_mail::AgentId::parse(trimmed).is_some() {
+        return Ok(agent_coord::AgentId::new(trimmed));
+    }
+
+    Err(DispatchOutcome {
+        payload: json!({
+            "status": "error",
+            "command": "agent",
+            "subcommand": subcommand,
+            "error": {
+                "type": "invalid-agent-name",
+                "message": format!(
+                    "`{raw}` is not a valid Agent Mail identifier for `{field}`. Use a two-word PascalCase name such as `BronzeValley` or `GoldenWolf`."
+                ),
+                "recoverable": true,
+            },
+            "next_actions": [
+                "fwc agent list".to_owned(),
+                "Choose a two-word PascalCase agent identifier.".to_owned(),
+            ],
+        }),
+        exit_code: CliExitCode::Validation,
+    })
+}
+
+fn parse_agent_message_payload(raw: &str) -> Value {
+    serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_owned()))
+}
+
+fn agent_message_kind(kind: AgentMessageKindArg) -> agent_coord::MessageKind {
+    match kind {
+        AgentMessageKindArg::Request => agent_coord::MessageKind::Request,
+        AgentMessageKindArg::Response => agent_coord::MessageKind::Response,
+        AgentMessageKindArg::Info => agent_coord::MessageKind::Info,
+        AgentMessageKindArg::Warning => agent_coord::MessageKind::Warning,
+        AgentMessageKindArg::Release => agent_coord::MessageKind::Release,
+    }
+}
+
+fn agent_message_kind_name(kind: AgentMessageKindArg) -> &'static str {
+    match kind {
+        AgentMessageKindArg::Request => "request",
+        AgentMessageKindArg::Response => "response",
+        AgentMessageKindArg::Info => "info",
+        AgentMessageKindArg::Warning => "warning",
+        AgentMessageKindArg::Release => "release",
+    }
+}
+
+fn agent_store_error_dispatch(subcommand: &str, message: &str) -> DispatchOutcome {
+    DispatchOutcome {
+        payload: json!({
+            "status": "error",
+            "command": "agent",
+            "subcommand": subcommand,
+            "error": {
+                "type": "agent-store-error",
+                "message": format!("Failed to access the local agent coordination store: {message}"),
+                "recoverable": true,
+            },
+            "next_actions": [
+                "fwc agent list".to_owned(),
+            ],
+        }),
+        exit_code: CliExitCode::Internal,
+    }
+}
+
 fn session_active_locks(agent_name: &str) -> (Vec<Value>, Option<String>) {
     match cli_lock_store().list_by_agent(agent_name) {
         Ok(locks) => (
-            locks.into_iter()
+            locks
+                .into_iter()
                 .map(|lock| {
                     json!({
                         "resource": lock.resource,
@@ -4961,6 +5580,11 @@ fn show_dispatch(args: &ShowArgs, host: Option<&str>) -> Result<DispatchOutcome>
             format!("fwc config schema {slug}"),
         ],
     });
+    attach_discovery_provenance(
+        &mut payload,
+        "show",
+        catalog::DiscoveryDataSource::WorkspaceManifest,
+    );
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -5032,6 +5656,11 @@ fn ops_dispatch(args: &OpsArgs, host: Option<&str>) -> Result<DispatchOutcome> {
             format!("fwc examples {slug} <operation> --offline"),
         ],
     });
+    attach_discovery_provenance(
+        &mut payload,
+        "ops",
+        catalog::DiscoveryDataSource::WorkspaceManifest,
+    );
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -5108,6 +5737,11 @@ fn schema_dispatch(args: &SchemaArgs, host: Option<&str>) -> Result<DispatchOutc
                 "operation": { "selector": &operation.preferred_selector },
                 "scaffold": scaffold,
             });
+            attach_discovery_provenance(
+                &mut payload,
+                "schema",
+                catalog::DiscoveryDataSource::WorkspaceManifest,
+            );
             envelope.inject_into(&mut payload);
             return Ok(DispatchOutcome {
                 payload,
@@ -5153,6 +5787,11 @@ fn schema_dispatch(args: &SchemaArgs, host: Option<&str>) -> Result<DispatchOutc
                     format!("fwc schema {} {} --scaffold --offline", connector.slug, operation.preferred_selector),
                 ],
             });
+            attach_discovery_provenance(
+                &mut payload,
+                "schema",
+                catalog::DiscoveryDataSource::WorkspaceManifest,
+            );
             envelope.inject_into(&mut payload);
             return Ok(DispatchOutcome {
                 payload,
@@ -5199,6 +5838,11 @@ fn schema_dispatch(args: &SchemaArgs, host: Option<&str>) -> Result<DispatchOutc
                 format!("fwc simulate {} {} --file payload.json", connector.slug, operation.preferred_selector),
             ],
         });
+        attach_discovery_provenance(
+            &mut payload,
+            "schema",
+            catalog::DiscoveryDataSource::WorkspaceManifest,
+        );
         envelope.inject_into(&mut payload);
         return Ok(DispatchOutcome {
             payload,
@@ -5225,6 +5869,11 @@ fn schema_dispatch(args: &SchemaArgs, host: Option<&str>) -> Result<DispatchOutc
             format!("fwc config schema {}", connector.slug),
         ],
     });
+    attach_discovery_provenance(
+        &mut payload,
+        "schema",
+        catalog::DiscoveryDataSource::WorkspaceManifest,
+    );
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -5309,6 +5958,11 @@ fn examples_dispatch(args: &ExampleArgs, host: Option<&str>) -> Result<DispatchO
                 format!("fwc simulate {} {} --file payload.json", connector.slug, operation.preferred_selector),
             ],
         });
+        attach_discovery_provenance(
+            &mut payload,
+            "examples",
+            catalog::DiscoveryDataSource::WorkspaceManifest,
+        );
         envelope.inject_into(&mut payload);
         return Ok(DispatchOutcome {
             payload,
@@ -5357,6 +6011,11 @@ fn examples_dispatch(args: &ExampleArgs, host: Option<&str>) -> Result<DispatchO
             format!("fwc schema {} <operation> --offline", connector.slug),
         ],
     });
+    attach_discovery_provenance(
+        &mut payload,
+        "examples",
+        catalog::DiscoveryDataSource::WorkspaceManifest,
+    );
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -5514,33 +6173,33 @@ fn status_dispatch(args: &StatusArgs, explicit_host: Option<&str>) -> Result<Dis
 
         let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "status");
         let mut payload = json!({
-                "status": "ok",
-                "command": "status",
-                "scope": "connector",
-                "source": "host-admin-api",
-                "message": format!("Loaded live connector admin status for `{}` from `fcp-host`.", connector.slug),
-                "connector": {
-                    "slug": &connector.slug,
-                    "canonical_id": connector.summary.id.as_str(),
-                    "name": &connector.summary.name,
-                    "version": connector.summary.version.to_string(),
-                    "enabled": connector.summary.enabled,
-                    "health": &connector.summary.health,
-                },
-                "admin": admin,
-                "pin": pin,
-                "rollout": rollout,
-                "host_health": {
-                    "status": health.status,
-                    "timestamp": health.timestamp,
-                },
-                "registry_version": discovery.registry_version,
-                "next_actions": [
-                    format!("fwc show {} --host {}", connector.slug, host.endpoint),
-                    format!("fwc ops {} --host {}", connector.slug, host.endpoint),
-                    format!("fwc pin {} --to {} --host {}", connector.slug, connector.summary.version, host.endpoint),
-                ],
-            });
+            "status": "ok",
+            "command": "status",
+            "scope": "connector",
+            "source": "host-admin-api",
+            "message": format!("Loaded live connector admin status for `{}` from `fcp-host`.", connector.slug),
+            "connector": {
+                "slug": &connector.slug,
+                "canonical_id": connector.summary.id.as_str(),
+                "name": &connector.summary.name,
+                "version": connector.summary.version.to_string(),
+                "enabled": connector.summary.enabled,
+                "health": &connector.summary.health,
+            },
+            "admin": admin,
+            "pin": pin,
+            "rollout": rollout,
+            "host_health": {
+                "status": health.status,
+                "timestamp": health.timestamp,
+            },
+            "registry_version": discovery.registry_version,
+            "next_actions": [
+                format!("fwc show {} --host {}", connector.slug, host.endpoint),
+                format!("fwc ops {} --host {}", connector.slug, host.endpoint),
+                format!("fwc pin {} --to {} --host {}", connector.slug, connector.summary.version, host.endpoint),
+            ],
+        });
         envelope.inject_into(&mut payload);
         return Ok(DispatchOutcome {
             payload,
@@ -5568,20 +6227,20 @@ fn status_dispatch(args: &StatusArgs, explicit_host: Option<&str>) -> Result<Dis
 
     let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "status");
     let mut payload = json!({
-            "status": "ok",
-            "command": "status",
-            "scope": "fleet",
-            "source": "host-admin-api",
-            "message": format!("Loaded live fleet status for {} connectors from `fcp-host`.", connector_rows.len()),
-            "host_health": health,
-            "registry_version": discovery.registry_version,
-            "connectors": connector_rows,
-            "next_actions": [
-                format!("fwc status <connector> --host {}", host.endpoint),
-                format!("fwc list --host {}", host.endpoint),
-                format!("fwc show <connector> --host {}", host.endpoint),
-            ],
-        });
+        "status": "ok",
+        "command": "status",
+        "scope": "fleet",
+        "source": "host-admin-api",
+        "message": format!("Loaded live fleet status for {} connectors from `fcp-host`.", connector_rows.len()),
+        "host_health": health,
+        "registry_version": discovery.registry_version,
+        "connectors": connector_rows,
+        "next_actions": [
+            format!("fwc status <connector> --host {}", host.endpoint),
+            format!("fwc list --host {}", host.endpoint),
+            format!("fwc show <connector> --host {}", host.endpoint),
+        ],
+    });
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -5658,27 +6317,27 @@ fn budget_dispatch(args: &BudgetArgs, explicit_host: Option<&str>) -> Result<Dis
 
     let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "budget");
     let mut payload = json!({
-            "status": "ok",
-            "command": "budget",
-            "source": "host-admin-api",
-            "message": if report.zones.is_empty() {
-                "No live usage-budget policies are currently configured on `fcp-host`.".to_owned()
-            } else {
-                format!("Loaded live budget snapshots for {} zone(s) from `fcp-host`.", report.zones.len())
-            },
-            "filter": {
-                "zone": &args.zone,
-            },
-            "schema_version": report.schema_version,
-            "generated_at": report.generated_at,
-            "summary": {
-                "zone_count": report.zones.len(),
-                "budget_count": budget_count,
-                "exceeded_count": exceeded_count,
-            },
-            "zones": report.zones,
-            "next_actions": next_actions,
-        });
+        "status": "ok",
+        "command": "budget",
+        "source": "host-admin-api",
+        "message": if report.zones.is_empty() {
+            "No live usage-budget policies are currently configured on `fcp-host`.".to_owned()
+        } else {
+            format!("Loaded live budget snapshots for {} zone(s) from `fcp-host`.", report.zones.len())
+        },
+        "filter": {
+            "zone": &args.zone,
+        },
+        "schema_version": report.schema_version,
+        "generated_at": report.generated_at,
+        "summary": {
+            "zone_count": report.zones.len(),
+            "budget_count": budget_count,
+            "exceeded_count": exceeded_count,
+        },
+        "zones": report.zones,
+        "next_actions": next_actions,
+    });
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -5725,20 +6384,20 @@ fn pin_dispatch(args: &PinArgs, explicit_host: Option<&str>) -> Result<DispatchO
 
     let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "pin");
     let mut payload = json!({
-            "status": "ok",
-            "command": "pin",
-            "source": "host-admin-api",
-            "message": format!("Pinned `{}` to `{}` via `fcp-host`.", connector.slug, version),
-            "connector": {
-                "slug": &connector.slug,
-                "canonical_id": connector.summary.id.as_str(),
-            },
-            "pin": pin,
-            "next_actions": [
-                format!("fwc status {} --host {}", connector.slug, host.endpoint),
-                format!("fwc unpin {} --host {}", connector.slug, host.endpoint),
-            ],
-        });
+        "status": "ok",
+        "command": "pin",
+        "source": "host-admin-api",
+        "message": format!("Pinned `{}` to `{}` via `fcp-host`.", connector.slug, version),
+        "connector": {
+            "slug": &connector.slug,
+            "canonical_id": connector.summary.id.as_str(),
+        },
+        "pin": pin,
+        "next_actions": [
+            format!("fwc status {} --host {}", connector.slug, host.endpoint),
+            format!("fwc unpin {} --host {}", connector.slug, host.endpoint),
+        ],
+    });
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -5776,20 +6435,20 @@ fn unpin_dispatch(args: &TargetArgs, explicit_host: Option<&str>) -> Result<Disp
 
     let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "unpin");
     let mut payload = json!({
-            "status": "ok",
-            "command": "unpin",
-            "source": "host-admin-api",
-            "message": format!("Removed the live rollout pin for `{}`.", connector.slug),
-            "connector": {
-                "slug": &connector.slug,
-                "canonical_id": connector.summary.id.as_str(),
-            },
-            "pin": pin,
-            "next_actions": [
-                format!("fwc status {} --host {}", connector.slug, host.endpoint),
-                format!("fwc pin {} --to <version> --host {}", connector.slug, host.endpoint),
-            ],
-        });
+        "status": "ok",
+        "command": "unpin",
+        "source": "host-admin-api",
+        "message": format!("Removed the live rollout pin for `{}`.", connector.slug),
+        "connector": {
+            "slug": &connector.slug,
+            "canonical_id": connector.summary.id.as_str(),
+        },
+        "pin": pin,
+        "next_actions": [
+            format!("fwc status {} --host {}", connector.slug, host.endpoint),
+            format!("fwc pin {} --to <version> --host {}", connector.slug, host.endpoint),
+        ],
+    });
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -5862,27 +6521,27 @@ fn rollout_dispatch(args: &RolloutArgs, explicit_host: Option<&str>) -> Result<D
 
             let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "rollout");
             let mut payload = json!({
-                    "status": "ok",
-                    "command": "rollout",
-                    "subcommand": "set",
-                    "source": "host-admin-api",
-                    "message": format!(
-                        "Scheduled a {}% canary rollout for `{}`.",
-                        set_args.canary,
-                        connector.slug
-                    ),
-                    "connector": {
-                        "slug": &connector.slug,
-                        "canonical_id": connector.summary.id.as_str(),
-                    },
-                    "requested_canary_percent": set_args.canary,
-                    "pin": pin_state,
-                    "rollout": outcome,
-                    "next_actions": [
-                        format!("fwc rollout status {} --host {}", connector.slug, host.endpoint),
-                        format!("fwc status {} --host {}", connector.slug, host.endpoint),
-                    ],
-                });
+                "status": "ok",
+                "command": "rollout",
+                "subcommand": "set",
+                "source": "host-admin-api",
+                "message": format!(
+                    "Scheduled a {}% canary rollout for `{}`.",
+                    set_args.canary,
+                    connector.slug
+                ),
+                "connector": {
+                    "slug": &connector.slug,
+                    "canonical_id": connector.summary.id.as_str(),
+                },
+                "requested_canary_percent": set_args.canary,
+                "pin": pin_state,
+                "rollout": outcome,
+                "next_actions": [
+                    format!("fwc rollout status {} --host {}", connector.slug, host.endpoint),
+                    format!("fwc status {} --host {}", connector.slug, host.endpoint),
+                ],
+            });
             envelope.inject_into(&mut payload);
             Ok(DispatchOutcome {
                 payload,
@@ -5905,22 +6564,22 @@ fn rollout_dispatch(args: &RolloutArgs, explicit_host: Option<&str>) -> Result<D
 
             let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "rollout");
             let mut payload = json!({
-                    "status": "ok",
-                    "command": "rollout",
-                    "subcommand": "status",
-                    "source": "host-admin-api",
-                    "message": format!("Loaded live rollout state for `{}`.", connector.slug),
-                    "connector": {
-                        "slug": &connector.slug,
-                        "canonical_id": connector.summary.id.as_str(),
-                    },
-                    "pin": pin,
-                    "rollout": rollout,
-                    "next_actions": [
-                        format!("fwc status {} --host {}", connector.slug, host.endpoint),
-                        format!("fwc rollout rollback {} --to <version> --host {}", connector.slug, host.endpoint),
-                    ],
-                });
+                "status": "ok",
+                "command": "rollout",
+                "subcommand": "status",
+                "source": "host-admin-api",
+                "message": format!("Loaded live rollout state for `{}`.", connector.slug),
+                "connector": {
+                    "slug": &connector.slug,
+                    "canonical_id": connector.summary.id.as_str(),
+                },
+                "pin": pin,
+                "rollout": rollout,
+                "next_actions": [
+                    format!("fwc status {} --host {}", connector.slug, host.endpoint),
+                    format!("fwc rollout rollback {} --to <version> --host {}", connector.slug, host.endpoint),
+                ],
+            });
             envelope.inject_into(&mut payload);
             Ok(DispatchOutcome {
                 payload,
@@ -5947,24 +6606,24 @@ fn rollout_dispatch(args: &RolloutArgs, explicit_host: Option<&str>) -> Result<D
 
             let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "rollout");
             let mut payload = json!({
-                    "status": "ok",
-                    "command": "rollout",
-                    "subcommand": "rollback",
-                    "source": "host-admin-api",
-                    "message": format!(
-                        "Rolled `{}` from `{}` back to `{}`.",
-                        connector.slug, response.from_version, response.to_version
-                    ),
-                    "connector": {
-                        "slug": &connector.slug,
-                        "canonical_id": connector.summary.id.as_str(),
-                    },
-                    "rollback": response,
-                    "next_actions": [
-                        format!("fwc rollout status {} --host {}", connector.slug, host.endpoint),
-                        format!("fwc status {} --host {}", connector.slug, host.endpoint),
-                    ],
-                });
+                "status": "ok",
+                "command": "rollout",
+                "subcommand": "rollback",
+                "source": "host-admin-api",
+                "message": format!(
+                    "Rolled `{}` from `{}` back to `{}`.",
+                    connector.slug, response.from_version, response.to_version
+                ),
+                "connector": {
+                    "slug": &connector.slug,
+                    "canonical_id": connector.summary.id.as_str(),
+                },
+                "rollback": response,
+                "next_actions": [
+                    format!("fwc rollout status {} --host {}", connector.slug, host.endpoint),
+                    format!("fwc status {} --host {}", connector.slug, host.endpoint),
+                ],
+            });
             envelope.inject_into(&mut payload);
             Ok(DispatchOutcome {
                 payload,
@@ -6013,17 +6672,17 @@ fn config_dispatch(args: &ConfigArgs) -> Result<DispatchOutcome> {
 
             let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "config");
             let mut payload = json!({
-                    "status": "ok",
-                    "command": "config",
-                    "subcommand": "schema",
-                    "source": "workspace-discovery",
-                    "connector": {
-                        "slug": &connector.slug,
-                        "canonical_id": connector.detail.summary.id.as_str(),
-                    },
-                    "connectors_file": connectors_file.display().to_string(),
-                    "schema": schema,
-                });
+                "status": "ok",
+                "command": "config",
+                "subcommand": "schema",
+                "source": "workspace-discovery",
+                "connector": {
+                    "slug": &connector.slug,
+                    "canonical_id": connector.detail.summary.id.as_str(),
+                },
+                "connectors_file": connectors_file.display().to_string(),
+                "schema": schema,
+            });
             envelope.inject_into(&mut payload);
             Ok(DispatchOutcome {
                 payload,
@@ -6036,14 +6695,14 @@ fn config_dispatch(args: &ConfigArgs) -> Result<DispatchOutcome> {
                 resolve_managed_connector(&catalog, &configs, &target.connector)?;
             let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "config");
             let mut payload = json!({
-                    "status": "ok",
-                    "command": "config",
-                    "subcommand": "get",
-                    "source": "connectors-file",
-                    "connector": connector_descriptor_json(&entry, resolved),
-                    "connectors_file": connectors_file.display().to_string(),
-                    "config": entry.config.clone().unwrap_or_else(|| json!({})),
-                });
+                "status": "ok",
+                "command": "config",
+                "subcommand": "get",
+                "source": "connectors-file",
+                "connector": connector_descriptor_json(&entry, resolved),
+                "connectors_file": connectors_file.display().to_string(),
+                "config": entry.config.clone().unwrap_or_else(|| json!({})),
+            });
             envelope.inject_into(&mut payload);
             Ok(DispatchOutcome {
                 payload,
@@ -6084,15 +6743,15 @@ fn config_dispatch(args: &ConfigArgs) -> Result<DispatchOutcome> {
 
             let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "config");
             let mut payload = json!({
-                    "status": "ok",
-                    "command": "config",
-                    "subcommand": "set",
-                    "source": "connectors-file",
-                    "connector": connector_descriptor_json(entry, resolved),
-                    "connectors_file": connectors_file.display().to_string(),
-                    "updated_path": set_args.key,
-                    "config": config_value,
-                });
+                "status": "ok",
+                "command": "config",
+                "subcommand": "set",
+                "source": "connectors-file",
+                "connector": connector_descriptor_json(entry, resolved),
+                "connectors_file": connectors_file.display().to_string(),
+                "updated_path": set_args.key,
+                "config": config_value,
+            });
             envelope.inject_into(&mut payload);
             Ok(DispatchOutcome {
                 payload,
@@ -6129,15 +6788,15 @@ fn config_dispatch(args: &ConfigArgs) -> Result<DispatchOutcome> {
 
             let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "config");
             let mut payload = json!({
-                    "status": "ok",
-                    "command": "config",
-                    "subcommand": "unset",
-                    "source": "connectors-file",
-                    "connector": connector_descriptor_json(entry, resolved),
-                    "connectors_file": connectors_file.display().to_string(),
-                    "updated_path": unset_args.key,
-                    "config": config_value,
-                });
+                "status": "ok",
+                "command": "config",
+                "subcommand": "unset",
+                "source": "connectors-file",
+                "connector": connector_descriptor_json(entry, resolved),
+                "connectors_file": connectors_file.display().to_string(),
+                "updated_path": unset_args.key,
+                "config": config_value,
+            });
             envelope.inject_into(&mut payload);
             Ok(DispatchOutcome {
                 payload,
@@ -6172,15 +6831,15 @@ fn config_dispatch(args: &ConfigArgs) -> Result<DispatchOutcome> {
 
             let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "config");
             let mut payload = json!({
-                    "status": "ok",
-                    "command": "config",
-                    "subcommand": "import",
-                    "source": "connectors-file",
-                    "connector": connector_descriptor_json(entry, resolved),
-                    "connectors_file": connectors_file.display().to_string(),
-                    "input_file": import_path.display().to_string(),
-                    "config": imported,
-                });
+                "status": "ok",
+                "command": "config",
+                "subcommand": "import",
+                "source": "connectors-file",
+                "connector": connector_descriptor_json(entry, resolved),
+                "connectors_file": connectors_file.display().to_string(),
+                "input_file": import_path.display().to_string(),
+                "config": imported,
+            });
             envelope.inject_into(&mut payload);
             Ok(DispatchOutcome {
                 payload,
@@ -6197,15 +6856,15 @@ fn config_dispatch(args: &ConfigArgs) -> Result<DispatchOutcome> {
             }
             let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "config");
             let mut payload = json!({
-                    "status": "ok",
-                    "command": "config",
-                    "subcommand": "export",
-                    "source": "connectors-file",
-                    "connector": connector_descriptor_json(&entry, resolved),
-                    "connectors_file": connectors_file.display().to_string(),
-                    "output_file": file_args.file.as_ref().map(|path| path.display().to_string()),
-                    "config": config_value,
-                });
+                "status": "ok",
+                "command": "config",
+                "subcommand": "export",
+                "source": "connectors-file",
+                "connector": connector_descriptor_json(&entry, resolved),
+                "connectors_file": connectors_file.display().to_string(),
+                "output_file": file_args.file.as_ref().map(|path| path.display().to_string()),
+                "config": config_value,
+            });
             envelope.inject_into(&mut payload);
             Ok(DispatchOutcome {
                 payload,
@@ -6233,54 +6892,51 @@ fn config_dispatch(args: &ConfigArgs) -> Result<DispatchOutcome> {
 
             let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "config");
             let mut payload = json!({
-                    "status": status,
-                    "command": "config",
-                    "subcommand": "doctor",
-                    "source": "connectors-file",
-                    "connector": connector_descriptor_json(&entry, resolved),
-                    "connectors_file": connectors_file.display().to_string(),
-                    "schema_available": schema_available,
-                    "checks": [
-                        {
-                            "name": "connectors_file",
-                            "status": "ok",
-                            "detail": format!("Loaded {}", connectors_file.display()),
+                "status": status,
+                "command": "config",
+                "subcommand": "doctor",
+                "source": "connectors-file",
+                "connector": connector_descriptor_json(&entry, resolved),
+                "connectors_file": connectors_file.display().to_string(),
+                "schema_available": schema_available,
+                "checks": [
+                    {
+                        "name": "connectors_file",
+                        "status": "ok",
+                        "detail": format!("Loaded {}", connectors_file.display()),
+                    },
+                    {
+                        "name": "connector_entry",
+                        "status": "ok",
+                        "detail": format!("Found connector entry `{}`", entry.id),
+                    },
+                    {
+                        "name": "schema",
+                        "status": if schema_available { "ok" } else { "unavailable" },
+                        "detail": if schema_available {
+                            "Config schema loaded from workspace discovery."
+                        } else {
+                            "No config schema is available from workspace discovery."
                         },
-                        {
-                            "name": "connector_entry",
-                            "status": "ok",
-                            "detail": format!("Found connector entry `{}`", entry.id),
+                    },
+                    {
+                        "name": "validation",
+                        "status": if validation_errors.is_empty() { "ok" } else { "fail" },
+                        "detail": if validation_errors.is_empty() {
+                            "Current config satisfies all available schema checks."
+                        } else {
+                            "Current config failed schema validation."
                         },
-                        {
-                            "name": "schema",
-                            "status": if schema_available { "ok" } else { "unavailable" },
-                            "detail": if schema_available {
-                                "Config schema loaded from workspace discovery."
-                            } else {
-                                "No config schema is available from workspace discovery."
-                            },
-                        },
-                        {
-                            "name": "validation",
-                            "status": if validation_errors.is_empty() { "ok" } else { "fail" },
-                            "detail": if validation_errors.is_empty() {
-                                "Current config satisfies all available schema checks."
-                            } else {
-                                "Current config failed schema validation."
-                            },
-                        }
-                    ],
-                    "errors": validation_errors,
-                    "config": config_value,
-                    "schema": schema,
-                });
+                    }
+                ],
+                "errors": validation_errors,
+                "config": config_value,
+                "schema": schema,
+            });
             if exit_code.is_success() {
                 envelope.inject_into(&mut payload);
             }
-            Ok(DispatchOutcome {
-                payload,
-                exit_code,
-            })
+            Ok(DispatchOutcome { payload, exit_code })
         }
     }
 }
@@ -6457,18 +7113,18 @@ fn install_dispatch(args: &InstallArgs, explicit_host: Option<&str>) -> Result<D
     if args.verify_only {
         let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "install");
         let mut payload = json!({
-                "status": "ok",
-                "command": "install",
-                "mode": "verify-only",
-                "message": format!(
-                    "Verified install candidate `{}` without mutating host inventory.",
-                    candidate.id
-                ),
-                "source": artifact.source_description,
-                "package": package_output_json(&artifact),
-                "candidate": connector_descriptor_json(&candidate, None),
-                "verification": artifact.verification,
-            });
+            "status": "ok",
+            "command": "install",
+            "mode": "verify-only",
+            "message": format!(
+                "Verified install candidate `{}` without mutating host inventory.",
+                candidate.id
+            ),
+            "source": artifact.source_description,
+            "package": package_output_json(&artifact),
+            "candidate": connector_descriptor_json(&candidate, None),
+            "verification": artifact.verification,
+        });
         envelope.inject_into(&mut payload);
         return Ok(DispatchOutcome {
             payload,
@@ -6546,40 +7202,40 @@ fn install_dispatch(args: &InstallArgs, explicit_host: Option<&str>) -> Result<D
 
     let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "install");
     let mut payload = json!({
-            "status": "ok",
-            "command": "install",
-            "message": format!(
-                "Installed `{}` into the live host connector inventory and applied it immediately.",
-                applied.current.id
-            ),
-            "source": "host-admin-api",
-            "host": host.endpoint,
-            "package_source": artifact.source_description,
-            "connectors_file": applied.connectors_file,
-            "package": package_output_json(&artifact),
-            "installed": connector_descriptor_json(&applied.current, None),
-            "verification": artifact.verification,
-            "activation": {
-                "inventory_updated": true,
-                "live_reload_applied": true,
-                "registry_version": applied.apply.registry_version,
-                "added": applied.apply.added,
-                "updated": applied.apply.updated,
-                "removed": applied.apply.removed,
-                "unchanged": applied.apply.unchanged,
-            },
-            "admin_state": {
-                "tracked_connectors": applied.admin_state.tracked_connectors,
-                "created_connectors": applied.admin_state.created_connectors,
-                "observed_updates": applied.admin_state.observed_updates,
-                "drifted_connectors": applied.admin_state.drifted_connectors,
-            },
-            "response": applied,
-            "next_actions": [
-                format!("fwc status {} --host {}", candidate.id, host.endpoint),
-                format!("fwc show {} --host {}", candidate.id, host.endpoint),
-            ],
-        });
+        "status": "ok",
+        "command": "install",
+        "message": format!(
+            "Installed `{}` into the live host connector inventory and applied it immediately.",
+            applied.current.id
+        ),
+        "source": "host-admin-api",
+        "host": host.endpoint,
+        "package_source": artifact.source_description,
+        "connectors_file": applied.connectors_file,
+        "package": package_output_json(&artifact),
+        "installed": connector_descriptor_json(&applied.current, None),
+        "verification": artifact.verification,
+        "activation": {
+            "inventory_updated": true,
+            "live_reload_applied": true,
+            "registry_version": applied.apply.registry_version,
+            "added": applied.apply.added,
+            "updated": applied.apply.updated,
+            "removed": applied.apply.removed,
+            "unchanged": applied.apply.unchanged,
+        },
+        "admin_state": {
+            "tracked_connectors": applied.admin_state.tracked_connectors,
+            "created_connectors": applied.admin_state.created_connectors,
+            "observed_updates": applied.admin_state.observed_updates,
+            "drifted_connectors": applied.admin_state.drifted_connectors,
+        },
+        "response": applied,
+        "next_actions": [
+            format!("fwc status {} --host {}", candidate.id, host.endpoint),
+            format!("fwc show {} --host {}", candidate.id, host.endpoint),
+        ],
+    });
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -6697,43 +7353,43 @@ fn update_dispatch(args: &UpdateArgs, explicit_host: Option<&str>) -> Result<Dis
 
     let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "update");
     let mut payload = json!({
-            "status": "ok",
-            "command": "update",
-            "mode": if applied.dry_run { "dry-run" } else { "apply" },
-            "message": format!(
-                "{} `{}` against the live host connector inventory.",
-                if applied.dry_run { "Planned" } else { "Updated" },
-                applied.current.id
-            ),
-            "source": "host-admin-api",
-            "host": host.endpoint,
-            "package_source": artifact.source_description,
-            "connectors_file": applied.connectors_file,
-            "current": applied.previous.as_ref().map(|entry| connector_descriptor_json(entry, None)),
-            "updated": connector_descriptor_json(&applied.current, None),
-            "package": package_output_json(&artifact),
-            "verification": artifact.verification,
-            "activation": {
-                "inventory_updated": !applied.dry_run,
-                "live_reload_applied": !applied.dry_run,
-                "registry_version": applied.apply.registry_version,
-                "added": applied.apply.added,
-                "updated": applied.apply.updated,
-                "removed": applied.apply.removed,
-                "unchanged": applied.apply.unchanged,
-            },
-            "admin_state": {
-                "tracked_connectors": applied.admin_state.tracked_connectors,
-                "created_connectors": applied.admin_state.created_connectors,
-                "observed_updates": applied.admin_state.observed_updates,
-                "drifted_connectors": applied.admin_state.drifted_connectors,
-            },
-            "response": applied,
-            "next_actions": [
-                format!("fwc status {} --host {}", target_connector_id, host.endpoint),
-                format!("fwc show {} --host {}", target_connector_id, host.endpoint),
-            ],
-        });
+        "status": "ok",
+        "command": "update",
+        "mode": if applied.dry_run { "dry-run" } else { "apply" },
+        "message": format!(
+            "{} `{}` against the live host connector inventory.",
+            if applied.dry_run { "Planned" } else { "Updated" },
+            applied.current.id
+        ),
+        "source": "host-admin-api",
+        "host": host.endpoint,
+        "package_source": artifact.source_description,
+        "connectors_file": applied.connectors_file,
+        "current": applied.previous.as_ref().map(|entry| connector_descriptor_json(entry, None)),
+        "updated": connector_descriptor_json(&applied.current, None),
+        "package": package_output_json(&artifact),
+        "verification": artifact.verification,
+        "activation": {
+            "inventory_updated": !applied.dry_run,
+            "live_reload_applied": !applied.dry_run,
+            "registry_version": applied.apply.registry_version,
+            "added": applied.apply.added,
+            "updated": applied.apply.updated,
+            "removed": applied.apply.removed,
+            "unchanged": applied.apply.unchanged,
+        },
+        "admin_state": {
+            "tracked_connectors": applied.admin_state.tracked_connectors,
+            "created_connectors": applied.admin_state.created_connectors,
+            "observed_updates": applied.admin_state.observed_updates,
+            "drifted_connectors": applied.admin_state.drifted_connectors,
+        },
+        "response": applied,
+        "next_actions": [
+            format!("fwc status {} --host {}", target_connector_id, host.endpoint),
+            format!("fwc show {} --host {}", target_connector_id, host.endpoint),
+        ],
+    });
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -7140,19 +7796,19 @@ fn export_tools_dispatch(args: &ExportToolsArgs, host: Option<&str>) -> Result<D
         std::fs::write(path, &content)?;
         let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "export-tools");
         let mut payload = json!({
-                "status": "ok",
-                "command": "export-tools",
-                "source": "workspace-manifests",
-                "mode": "offline-artifact",
-                "format": args.tool_format.to_string(),
-                "message": format!(
-                    "Exported {tool_count} tool schemas ({connector_count} connectors) to {} from workspace manifests.",
-                    path.display()
-                ),
-                "tool_count": tool_count,
-                "connector_count": connector_count,
-                "output_file": path.display().to_string(),
-            });
+            "status": "ok",
+            "command": "export-tools",
+            "source": "workspace-manifests",
+            "mode": "offline-artifact",
+            "format": args.tool_format.to_string(),
+            "message": format!(
+                "Exported {tool_count} tool schemas ({connector_count} connectors) to {} from workspace manifests.",
+                path.display()
+            ),
+            "tool_count": tool_count,
+            "connector_count": connector_count,
+            "output_file": path.display().to_string(),
+        });
         envelope.inject_into(&mut payload);
         return Ok(DispatchOutcome {
             payload,
@@ -7162,24 +7818,24 @@ fn export_tools_dispatch(args: &ExportToolsArgs, host: Option<&str>) -> Result<D
 
     let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "export-tools");
     let mut payload = json!({
-            "status": "ok",
-            "command": "export-tools",
-            "source": "workspace-manifests",
-            "mode": "offline-artifact",
-            "format": args.tool_format.to_string(),
-            "message": format!(
-                "Exported {tool_count} tool schemas from {connector_count} workspace connectors. This is an offline artifact view, not live host inventory.",
-            ),
-            "tool_count": tool_count,
-            "connector_count": connector_count,
-            "tools": tools_json,
-            "next_actions": [
-                "Use `fwc export-tools --host <endpoint> --format mcp` for the live host-backed inventory.".to_owned(),
-                "Pipe to a file: fwc export-tools --offline --format mcp --json > tools.json",
-                "Filter by risk: fwc export-tools --offline --format mcp --risk-max medium",
-                "One connector: fwc export-tools --offline --format claude github",
-            ],
-        });
+        "status": "ok",
+        "command": "export-tools",
+        "source": "workspace-manifests",
+        "mode": "offline-artifact",
+        "format": args.tool_format.to_string(),
+        "message": format!(
+            "Exported {tool_count} tool schemas from {connector_count} workspace connectors. This is an offline artifact view, not live host inventory.",
+        ),
+        "tool_count": tool_count,
+        "connector_count": connector_count,
+        "tools": tools_json,
+        "next_actions": [
+            "Use `fwc export-tools --host <endpoint> --format mcp` for the live host-backed inventory.".to_owned(),
+            "Pipe to a file: fwc export-tools --offline --format mcp --json > tools.json",
+            "Filter by risk: fwc export-tools --offline --format mcp --risk-max medium",
+            "One connector: fwc export-tools --offline --format claude github",
+        ],
+    });
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -7247,21 +7903,21 @@ fn export_tools_dispatch_host(args: &ExportToolsArgs, host: &str) -> Result<Disp
         std::fs::write(path, &content)?;
         let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "export-tools");
         let mut payload = json!({
-                "status": "ok",
-                "command": "export-tools",
-                "source": "host-admin-api",
-                "mode": "live-introspection",
-                "format": args.tool_format.to_string(),
-                "host": host,
-                "message": format!(
-                    "Exported {tool_count} live tool schemas ({connector_count} connectors) to {}.",
-                    path.display()
-                ),
-                "tool_count": tool_count,
-                "connector_count": connector_count,
-                "metadata_gaps": metadata_gaps,
-                "output_file": path.display().to_string(),
-            });
+            "status": "ok",
+            "command": "export-tools",
+            "source": "host-admin-api",
+            "mode": "live-introspection",
+            "format": args.tool_format.to_string(),
+            "host": host,
+            "message": format!(
+                "Exported {tool_count} live tool schemas ({connector_count} connectors) to {}.",
+                path.display()
+            ),
+            "tool_count": tool_count,
+            "connector_count": connector_count,
+            "metadata_gaps": metadata_gaps,
+            "output_file": path.display().to_string(),
+        });
         envelope.inject_into(&mut payload);
         return Ok(DispatchOutcome {
             payload,
@@ -7271,24 +7927,24 @@ fn export_tools_dispatch_host(args: &ExportToolsArgs, host: &str) -> Result<Disp
 
     let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "export-tools");
     let mut payload = json!({
-            "status": "ok",
-            "command": "export-tools",
-            "source": "host-admin-api",
-            "mode": "live-introspection",
-            "format": args.tool_format.to_string(),
-            "host": host,
-            "message": format!(
-                "Exported {tool_count} live tool schemas from {connector_count} connectors exposed by `fcp-host`."
-            ),
-            "tool_count": tool_count,
-            "connector_count": connector_count,
-            "metadata_gaps": metadata_gaps,
-            "tools": tools_json,
-            "next_actions": [
-                format!("Use `fwc serve-mcp --host {host}` to expose the same live inventory over MCP."),
-                format!("Use `fwc ops <connector> --host {host}` to inspect one connector before exporting again."),
-            ],
-        });
+        "status": "ok",
+        "command": "export-tools",
+        "source": "host-admin-api",
+        "mode": "live-introspection",
+        "format": args.tool_format.to_string(),
+        "host": host,
+        "message": format!(
+            "Exported {tool_count} live tool schemas from {connector_count} connectors exposed by `fcp-host`."
+        ),
+        "tool_count": tool_count,
+        "connector_count": connector_count,
+        "metadata_gaps": metadata_gaps,
+        "tools": tools_json,
+        "next_actions": [
+            format!("Use `fwc serve-mcp --host {host}` to expose the same live inventory over MCP."),
+            format!("Use `fwc ops <connector> --host {host}` to inspect one connector before exporting again."),
+        ],
+    });
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -7367,27 +8023,27 @@ fn suggest_dispatch_host(args: &SuggestArgs, host: &str) -> Result<DispatchOutco
 
         let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "suggest");
         let mut payload = json!({
-                "status": "ok",
-                "command": "suggest",
-                "source": "host-admin-api",
-                "mode": "live-introspection",
-                "suggest_mode": "after",
-                "message": format!(
-                    "Found {} live follow-up suggestions after '{after_op}'.",
-                    suggestions.len()
-                ),
-                "after": {
-                    "operation": after_op,
-                    "connector": source_connector,
-                    "summary": source_summary,
-                },
-                "suggestions": suggestions,
-                "metadata_gaps": metadata_gaps,
-                "next_actions": [
-                    format!("fwc schema {} <operation> --host {host}", source_connector),
-                    "Use `fwc suggest --goal '<next intent>' --host <endpoint>` for goal-directed search.".to_owned(),
-                ],
-            });
+            "status": "ok",
+            "command": "suggest",
+            "source": "host-admin-api",
+            "mode": "live-introspection",
+            "suggest_mode": "after",
+            "message": format!(
+                "Found {} live follow-up suggestions after '{after_op}'.",
+                suggestions.len()
+            ),
+            "after": {
+                "operation": after_op,
+                "connector": source_connector,
+                "summary": source_summary,
+            },
+            "suggestions": suggestions,
+            "metadata_gaps": metadata_gaps,
+            "next_actions": [
+                format!("fwc schema {} <operation> --host {host}", source_connector),
+                "Use `fwc suggest --goal '<next intent>' --host <endpoint>` for goal-directed search.".to_owned(),
+            ],
+        });
         envelope.inject_into(&mut payload);
         return Ok(DispatchOutcome {
             payload,
@@ -7418,20 +8074,20 @@ fn suggest_dispatch_host(args: &SuggestArgs, host: &str) -> Result<DispatchOutco
 
         let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "suggest");
         let mut payload = json!({
-                "status": "ok",
-                "command": "suggest",
-                "source": "host-admin-api",
-                "mode": "live-introspection",
-                "suggest_mode": "goal-directed",
-                "message": format!("Found {} live operations matching goal '{goal}'.", results.len()),
-                "goal": goal,
-                "suggestions": json_results,
-                "metadata_gaps": metadata_gaps,
-                "next_actions": [
-                    "Use `fwc schema <connector> <operation> --host <endpoint>` to see the live input/output schema.",
-                    "Use `fwc simulate <connector> <operation> --host <endpoint> --file payload.json` to test safely.",
-                ],
-            });
+            "status": "ok",
+            "command": "suggest",
+            "source": "host-admin-api",
+            "mode": "live-introspection",
+            "suggest_mode": "goal-directed",
+            "message": format!("Found {} live operations matching goal '{goal}'.", results.len()),
+            "goal": goal,
+            "suggestions": json_results,
+            "metadata_gaps": metadata_gaps,
+            "next_actions": [
+                "Use `fwc schema <connector> <operation> --host <endpoint>` to see the live input/output schema.",
+                "Use `fwc simulate <connector> <operation> --host <endpoint> --file payload.json` to test safely.",
+            ],
+        });
         envelope.inject_into(&mut payload);
         return Ok(DispatchOutcome {
             payload,
@@ -7474,22 +8130,22 @@ fn suggest_dispatch_host(args: &SuggestArgs, host: &str) -> Result<DispatchOutco
             .collect();
         let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "suggest");
         let mut payload = json!({
-                "status": "ok",
-                "command": "suggest",
-                "source": "host-admin-api",
-                "mode": "live-introspection",
-                "suggest_mode": "overview-grouped",
-                "message": format!(
-                    "Grouped {} live action families across {} connectors.",
-                    by_family.len(), connectors.len()
-                ),
-                "families": grouped,
-                "metadata_gaps": metadata_gaps,
-                "next_actions": [
-                    "Use `fwc suggest --goal '<intent>' --host <endpoint>` for goal-directed search.",
-                    "Use `fwc search '<query>' --host <endpoint>` for keyword-based live search.",
-                ],
-            });
+            "status": "ok",
+            "command": "suggest",
+            "source": "host-admin-api",
+            "mode": "live-introspection",
+            "suggest_mode": "overview-grouped",
+            "message": format!(
+                "Grouped {} live action families across {} connectors.",
+                by_family.len(), connectors.len()
+            ),
+            "families": grouped,
+            "metadata_gaps": metadata_gaps,
+            "next_actions": [
+                "Use `fwc suggest --goal '<intent>' --host <endpoint>` for goal-directed search.",
+                "Use `fwc search '<query>' --host <endpoint>` for keyword-based live search.",
+            ],
+        });
         envelope.inject_into(&mut payload);
         return Ok(DispatchOutcome {
             payload,
@@ -7505,26 +8161,26 @@ fn suggest_dispatch_host(args: &SuggestArgs, host: &str) -> Result<DispatchOutco
 
     let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "suggest");
     let mut payload = json!({
-            "status": "ok",
-            "command": "suggest",
-            "source": "host-admin-api",
-            "mode": "live-introspection",
-            "suggest_mode": "overview",
-            "message": format!(
-                "Showing {} of {} live available operations across {} connectors.",
-                flat.len(),
-                by_family.values().map(Vec::len).sum::<usize>(),
-                connectors.len(),
-            ),
-            "suggestions": flat,
-            "action_families": by_family.keys().collect::<Vec<_>>(),
-            "metadata_gaps": metadata_gaps,
-            "next_actions": [
-                "Use `fwc suggest --goal '<intent>' --host <endpoint>` for goal-directed search.",
-                "Use `fwc suggest --grouped --host <endpoint>` to see operations grouped by action family.",
-                "Use `fwc suggest --connector <name> --host <endpoint>` to narrow to one connector.",
-            ],
-        });
+        "status": "ok",
+        "command": "suggest",
+        "source": "host-admin-api",
+        "mode": "live-introspection",
+        "suggest_mode": "overview",
+        "message": format!(
+            "Showing {} of {} live available operations across {} connectors.",
+            flat.len(),
+            by_family.values().map(Vec::len).sum::<usize>(),
+            connectors.len(),
+        ),
+        "suggestions": flat,
+        "action_families": by_family.keys().collect::<Vec<_>>(),
+        "metadata_gaps": metadata_gaps,
+        "next_actions": [
+            "Use `fwc suggest --goal '<intent>' --host <endpoint>` for goal-directed search.",
+            "Use `fwc suggest --grouped --host <endpoint>` to see operations grouped by action family.",
+            "Use `fwc suggest --connector <name> --host <endpoint>` to narrow to one connector.",
+        ],
+    });
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -7576,19 +8232,19 @@ fn suggest_dispatch(args: &SuggestArgs, host: Option<&str>) -> Result<DispatchOu
 
         let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "suggest");
         let mut payload = json!({
-                "status": "ok",
-                "command": "suggest",
-                "source": "workspace-manifests",
-                "mode": "offline-artifact",
-                "suggest_mode": "goal-directed",
-                "message": format!("Found {} operations matching goal '{goal}'.", results.len()),
-                "goal": goal,
-                "suggestions": json_results,
-                "next_actions": [
-                    "Use `fwc schema <connector> <operation> --offline` to see input/output schema.",
-                    "Use `fwc simulate <connector> <operation> --file payload.json` to test safely.",
-                ],
-            });
+            "status": "ok",
+            "command": "suggest",
+            "source": "workspace-manifests",
+            "mode": "offline-artifact",
+            "suggest_mode": "goal-directed",
+            "message": format!("Found {} operations matching goal '{goal}'.", results.len()),
+            "goal": goal,
+            "suggestions": json_results,
+            "next_actions": [
+                "Use `fwc schema <connector> <operation> --offline` to see input/output schema.",
+                "Use `fwc simulate <connector> <operation> --file payload.json` to test safely.",
+            ],
+        });
         envelope.inject_into(&mut payload);
         return Ok(DispatchOutcome {
             payload,
@@ -7644,21 +8300,21 @@ fn suggest_dispatch(args: &SuggestArgs, host: Option<&str>) -> Result<DispatchOu
             .collect();
         let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "suggest");
         let mut payload = json!({
-                "status": "ok",
-                "command": "suggest",
-                "source": "workspace-manifests",
-                "mode": "offline-artifact",
-                "suggest_mode": "overview-grouped",
-                "message": format!(
-                    "Grouped {} action families across {} connectors.",
-                    by_family.len(), connectors.len()
-                ),
-                "families": grouped,
-                "next_actions": [
-                    "Use `fwc suggest --goal '<intent>' --offline` for goal-directed search.",
-                    "Use `fwc search '<query>' --offline` for keyword-based search.",
-                ],
-            });
+            "status": "ok",
+            "command": "suggest",
+            "source": "workspace-manifests",
+            "mode": "offline-artifact",
+            "suggest_mode": "overview-grouped",
+            "message": format!(
+                "Grouped {} action families across {} connectors.",
+                by_family.len(), connectors.len()
+            ),
+            "families": grouped,
+            "next_actions": [
+                "Use `fwc suggest --goal '<intent>' --offline` for goal-directed search.",
+                "Use `fwc search '<query>' --offline` for keyword-based search.",
+            ],
+        });
         envelope.inject_into(&mut payload);
         return Ok(DispatchOutcome {
             payload,
@@ -7673,25 +8329,25 @@ fn suggest_dispatch(args: &SuggestArgs, host: Option<&str>) -> Result<DispatchOu
 
     let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "suggest");
     let mut payload = json!({
-            "status": "ok",
-            "command": "suggest",
-            "source": "workspace-manifests",
-            "mode": "offline-artifact",
-            "suggest_mode": "overview",
-            "message": format!(
-                "Showing {} of {} available operations across {} connectors.",
-                flat.len(),
-                by_family.values().map(Vec::len).sum::<usize>(),
-                connectors.len(),
-            ),
-            "suggestions": flat,
-            "action_families": by_family.keys().collect::<Vec<_>>(),
-            "next_actions": [
-                "Use `fwc suggest --goal '<intent>' --offline` for goal-directed search.",
-                "Use `fwc suggest --grouped --offline` to see operations grouped by action family.",
-                "Use `fwc suggest --connector <name> --offline` to narrow to one connector.",
-            ],
-        });
+        "status": "ok",
+        "command": "suggest",
+        "source": "workspace-manifests",
+        "mode": "offline-artifact",
+        "suggest_mode": "overview",
+        "message": format!(
+            "Showing {} of {} available operations across {} connectors.",
+            flat.len(),
+            by_family.values().map(Vec::len).sum::<usize>(),
+            connectors.len(),
+        ),
+        "suggestions": flat,
+        "action_families": by_family.keys().collect::<Vec<_>>(),
+        "next_actions": [
+            "Use `fwc suggest --goal '<intent>' --offline` for goal-directed search.",
+            "Use `fwc suggest --grouped --offline` to see operations grouped by action family.",
+            "Use `fwc suggest --connector <name> --offline` to narrow to one connector.",
+        ],
+    });
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -9615,6 +10271,9 @@ thread_local! {
     static TEST_LOCK_DIR_OVERRIDE: std::cell::RefCell<Option<PathBuf>> = const {
         std::cell::RefCell::new(None)
     };
+    static TEST_AGENT_COORD_PATH_OVERRIDE: std::cell::RefCell<Option<PathBuf>> = const {
+        std::cell::RefCell::new(None)
+    };
 }
 
 fn cli_session_store() -> session::SessionStore {
@@ -9633,6 +10292,15 @@ fn cli_lock_store() -> op_lock::LockStore {
     }
 
     op_lock::LockStore::default_path()
+}
+
+fn cli_agent_coord_store() -> agent_coord::CoordinationStore {
+    #[cfg(test)]
+    if let Some(path) = TEST_AGENT_COORD_PATH_OVERRIDE.with(|slot| slot.borrow().clone()) {
+        return agent_coord::CoordinationStore::new(path);
+    }
+
+    agent_coord::CoordinationStore::default_path()
 }
 
 #[cfg(test)]
@@ -9670,6 +10338,26 @@ fn install_test_lock_dir(path: PathBuf) -> LockDirOverrideGuard {
 impl Drop for LockDirOverrideGuard {
     fn drop(&mut self) {
         TEST_LOCK_DIR_OVERRIDE.with(|slot| {
+            slot.borrow_mut().take();
+        });
+    }
+}
+
+#[cfg(test)]
+struct AgentCoordPathOverrideGuard;
+
+#[cfg(test)]
+fn install_test_agent_coord_path(path: PathBuf) -> AgentCoordPathOverrideGuard {
+    TEST_AGENT_COORD_PATH_OVERRIDE.with(|slot| {
+        *slot.borrow_mut() = Some(path);
+    });
+    AgentCoordPathOverrideGuard
+}
+
+#[cfg(test)]
+impl Drop for AgentCoordPathOverrideGuard {
+    fn drop(&mut self) {
+        TEST_AGENT_COORD_PATH_OVERRIDE.with(|slot| {
             slot.borrow_mut().take();
         });
     }
@@ -9743,7 +10431,9 @@ fn append_history_entry(
         latency_ms,
         error_code,
         idempotency_key: idempotency_key.map(ToOwned::to_owned),
-        agent_session: active_session.as_ref().map(|session| session.id.to_string()),
+        agent_session: active_session
+            .as_ref()
+            .map(|session| session.id.to_string()),
     };
     store.append(&entry)?;
 
@@ -10154,27 +10844,24 @@ fn cancel_dispatch(args: &CancelArgs, explicit_host: Option<&str>) -> Result<Dis
 
     let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "cancel");
     let mut payload = json!({
-            "status": if exit_code.is_success() { "ok" } else { "error" },
-            "command": "cancel",
-            "source": "host-admin-api",
-            "message": format!(
-                "Submitted a live cancellation request for operation `{}` against `fcp-host`.",
-                args.operation_id
-            ),
-            "request": request,
-            "response": response,
-            "next_actions": [
-                format!("fwc history --status error --limit 10"),
-                format!("fwc status --host {}", host.endpoint),
-            ],
-        });
+        "status": if exit_code.is_success() { "ok" } else { "error" },
+        "command": "cancel",
+        "source": "host-admin-api",
+        "message": format!(
+            "Submitted a live cancellation request for operation `{}` against `fcp-host`.",
+            args.operation_id
+        ),
+        "request": request,
+        "response": response,
+        "next_actions": [
+            format!("fwc history --status error --limit 10"),
+            format!("fwc status --host {}", host.endpoint),
+        ],
+    });
     if exit_code.is_success() {
         envelope.inject_into(&mut payload);
     }
-    Ok(DispatchOutcome {
-        payload,
-        exit_code,
-    })
+    Ok(DispatchOutcome { payload, exit_code })
 }
 
 #[allow(clippy::option_if_let_else)]
@@ -10199,7 +10886,8 @@ fn history_dispatch(args: &HistoryArgs) -> Result<DispatchOutcome> {
                 })
             },
             |entry| {
-                let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "history");
+                let envelope =
+                    CommandEnvelope::new(CommandAvailability::OfflineArtifact, "history");
                 let mut payload = json!({
                     "status": "ok",
                     "command": "history",
@@ -11133,9 +11821,7 @@ fn pipeline_evaluate_condition(template: &str, context: &Value) -> Result<bool> 
     match value {
         Value::Bool(flag) => Ok(flag),
         Value::Null => Ok(false),
-        other => bail!(
-            "pipeline condition `{template}` did not evaluate to a boolean: {other}"
-        ),
+        other => bail!("pipeline condition `{template}` did not evaluate to a boolean: {other}"),
     }
 }
 
@@ -11972,10 +12658,7 @@ fn recipe_run_dispatch(
     if exit_code.is_success() {
         envelope.inject_into(&mut payload);
     }
-    Ok(DispatchOutcome {
-        payload,
-        exit_code,
-    })
+    Ok(DispatchOutcome { payload, exit_code })
 }
 
 #[allow(dead_code)]
@@ -12506,10 +13189,7 @@ fn pipeline_run_dispatch(
     if exit_code.is_success() {
         envelope.inject_into(&mut payload);
     }
-    Ok(DispatchOutcome {
-        payload,
-        exit_code,
-    })
+    Ok(DispatchOutcome { payload, exit_code })
 }
 
 #[allow(dead_code)]
@@ -12939,40 +13619,37 @@ fn map_dispatch(args: &MapArgs, explicit_host: Option<&str>) -> Result<DispatchO
 
     let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "map");
     let mut payload = json!({
-        "status": status,
-        "command": "map",
-        "source": "host-admin-api",
-            "message": format!(
-                "Executed a live mapped batch for `{}.{}` against `fcp-host` ({} inputs, concurrency={}, on_error={}).",
-                resolved.connector.slug,
-                resolved.operation.name,
-                inputs.len(),
-                args.concurrency,
-                on_error
-            ),
-            "connector": {
-                "slug": &resolved.connector.slug,
-                "canonical_id": resolved.connector.summary.id.as_str(),
-                "name": &resolved.connector.summary.name,
-            },
-            "operation": {
-                "requested_selector": &args.operation,
-                "selector": &resolved.operation.name,
-                "canonical_id": &resolved.operation.name,
-            },
-            "zone": zone,
-            "plan": plan,
-            "response": response,
-            "next_actions": [
-                format!("fwc status {} --host {}", resolved.connector.slug, host.endpoint),
-                format!("fwc history --connector {} --limit 20", resolved.connector.slug),
-            ],
-        });
+    "status": status,
+    "command": "map",
+    "source": "host-admin-api",
+        "message": format!(
+            "Executed a live mapped batch for `{}.{}` against `fcp-host` ({} inputs, concurrency={}, on_error={}).",
+            resolved.connector.slug,
+            resolved.operation.name,
+            inputs.len(),
+            args.concurrency,
+            on_error
+        ),
+        "connector": {
+            "slug": &resolved.connector.slug,
+            "canonical_id": resolved.connector.summary.id.as_str(),
+            "name": &resolved.connector.summary.name,
+        },
+        "operation": {
+            "requested_selector": &args.operation,
+            "selector": &resolved.operation.name,
+            "canonical_id": &resolved.operation.name,
+        },
+        "zone": zone,
+        "plan": plan,
+        "response": response,
+        "next_actions": [
+            format!("fwc status {} --host {}", resolved.connector.slug, host.endpoint),
+            format!("fwc history --connector {} --limit 20", resolved.connector.slug),
+        ],
+    });
     envelope.inject_into(&mut payload);
-    Ok(DispatchOutcome {
-        payload,
-        exit_code,
-    })
+    Ok(DispatchOutcome { payload, exit_code })
 }
 
 #[allow(clippy::too_many_lines)]
@@ -13146,24 +13823,28 @@ fn batch_file_dispatch(
     }
 
     if !invalid_operations.is_empty() {
+        let validation_envelope =
+            CommandEnvelope::new(CommandAvailability::LiveRuntime, "batch-file");
+        let mut payload = json!({
+            "status": "error",
+            "command": "batch-file",
+            "source": "host-admin-api",
+            "message": format!(
+                "{} operation(s) in `{}` failed local schema validation, so no live execution was attempted.",
+                invalid_operations.len(),
+                args.file.display()
+            ),
+            "file": args.file.display().to_string(),
+            "plan": plan,
+            "dry_run": args.dry_run,
+            "invalid_operations": invalid_operations,
+            "next_actions": plan.connectors.iter().map(|connector| {
+                format!("fwc show {connector} --host {}", host.endpoint)
+            }).collect::<Vec<_>>(),
+        });
+        validation_envelope.inject_into(&mut payload);
         return Ok(DispatchOutcome {
-            payload: json!({
-                "status": "error",
-                "command": "batch-file",
-                "source": "host-admin-api",
-                "message": format!(
-                    "{} operation(s) in `{}` failed local schema validation, so no live execution was attempted.",
-                    invalid_operations.len(),
-                    args.file.display()
-                ),
-                "file": args.file.display().to_string(),
-                "plan": plan,
-                "dry_run": args.dry_run,
-                "invalid_operations": invalid_operations,
-                "next_actions": plan.connectors.iter().map(|connector| {
-                    format!("fwc show {connector} --host {}", host.endpoint)
-                }).collect::<Vec<_>>(),
-            }),
+            payload,
             exit_code: CliExitCode::Validation,
         });
     }
@@ -13189,13 +13870,8 @@ fn batch_file_dispatch(
                 format!("fwc batch-file {} --host {}", args.file.display(), host.endpoint),
             ],
         });
-        if exit_code.is_success() {
-            envelope.inject_into(&mut payload);
-        }
-        return Ok(DispatchOutcome {
-            payload,
-            exit_code,
-        });
+        envelope.inject_into(&mut payload);
+        return Ok(DispatchOutcome { payload, exit_code });
     }
 
     let request = HostBatchInvokeRequest {
@@ -13224,13 +13900,8 @@ fn batch_file_dispatch(
             format!("fwc status {connector} --host {}", host.endpoint)
         }).collect::<Vec<_>>(),
     });
-    if exit_code.is_success() {
-        envelope.inject_into(&mut payload);
-    }
-    Ok(DispatchOutcome {
-        payload,
-        exit_code,
-    })
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome { payload, exit_code })
 }
 
 #[allow(dead_code)] // Wired when host integration lands.
@@ -14758,6 +15429,28 @@ fn parse_failure_dispatch(args: &[String], error: &clap::Error) -> DispatchOutco
                         next_actions: vec![
                             "Pass a quoted intent after `fwc task` to create a new capsule.".to_owned(),
                             "Or use `fwc task show|list|resolve|ask|advance|bind|approve|run` with an existing task id.".to_owned(),
+                        ],
+                    },
+                );
+            }
+
+            if command == Some("agent") {
+                return structured_error(
+                    "missing-agent-subcommand",
+                    "No agent coordination subcommand was provided.",
+                    CliExitCode::Parse,
+                    true,
+                    args,
+                    &normalized_args,
+                    ErrorDetails {
+                        did_you_mean: Vec::new(),
+                        examples: vec![
+                            "fwc agent list".to_owned(),
+                            "fwc agent inbox --agent BronzeValley".to_owned(),
+                        ],
+                        next_actions: vec![
+                            "Use `fwc agent list` to inspect the local coordination hub.".to_owned(),
+                            "Use `fwc agent announce|reserve|send|inbox` to record or inspect coordinated work.".to_owned(),
                         ],
                     },
                 );
@@ -19304,10 +19997,7 @@ depends_on = ["missing"]
             ),
             (
                 "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
-                mock_introspection_response_with_tools(
-                    github_connector,
-                    vec![github_get_pr_tool],
-                ),
+                mock_introspection_response_with_tools(github_connector, vec![github_get_pr_tool]),
             ),
             (
                 "GET /rpc/introspect/fcp.slack:team:v1".to_owned(),
@@ -19666,6 +20356,40 @@ depends_on = ["missing"]
     }
 
     #[test]
+    fn prepare_cli_parses_agent_send_command() {
+        let prepared = prepare_cli(&[
+            "fwc".to_owned(),
+            "agent".to_owned(),
+            "send".to_owned(),
+            "--from".to_owned(),
+            "BronzeValley".to_owned(),
+            "--to".to_owned(),
+            "GoldenWolf".to_owned(),
+            "--kind".to_owned(),
+            "info".to_owned(),
+            "--payload".to_owned(),
+            "{\"bead\":\"flywheel_connectors-qnchs.13.3\"}".to_owned(),
+        ])
+        .unwrap();
+
+        match prepared.cli.command {
+            Commands::Agent(args) => match args.command {
+                super::AgentCommand::Send(args) => {
+                    assert_eq!(args.from, "BronzeValley");
+                    assert_eq!(args.to, "GoldenWolf");
+                    assert_eq!(args.kind, super::AgentMessageKindArg::Info);
+                    assert_eq!(
+                        args.payload,
+                        "{\"bead\":\"flywheel_connectors-qnchs.13.3\"}"
+                    );
+                }
+                command => panic!("expected agent send command, got {command:?}"),
+            },
+            command => panic!("expected agent command, got {command:?}"),
+        }
+    }
+
+    #[test]
     fn execute_serve_mcp_requires_live_host() {
         let outcome = execute(&[
             "fwc".to_owned(),
@@ -19843,6 +20567,112 @@ depends_on = ["missing"]
     }
 
     #[test]
+    fn execute_agent_list_announce_reserve_send_and_inbox_flow() {
+        let coord_dir = TempDir::new().expect("coordination tempdir should exist");
+        let _coord_guard =
+            super::install_test_agent_coord_path(coord_dir.path().join("coordination.json"));
+
+        let (empty_exit, empty_payload) = execute_json(&["fwc", "--json", "agent", "list"]);
+        assert_eq!(empty_exit, CliExitCode::Success.into());
+        assert_eq!(empty_payload["summary"]["announcement_count"], 0);
+        assert_eq!(empty_payload["summary"]["reservation_count"], 0);
+
+        let (announce_exit, announce_payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "agent",
+            "announce",
+            "--agent",
+            "BronzeValley",
+            "--connector",
+            "github",
+            "--purpose",
+            "triage active beads",
+            "--operation",
+            "issues.create",
+            "--duration",
+            "300",
+        ]);
+        assert_eq!(announce_exit, CliExitCode::Success.into());
+        assert_eq!(announce_payload["command"], "agent");
+        assert_eq!(announce_payload["subcommand"], "announce");
+        assert_eq!(announce_payload["announcement"]["agent"], "BronzeValley");
+        assert_eq!(announce_payload["announcement"]["connector"], "github");
+        assert_eq!(
+            announce_payload["announcement"]["operation"],
+            "issues.create"
+        );
+
+        let (reserve_exit, reserve_payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "agent",
+            "reserve",
+            "--agent",
+            "BronzeValley",
+            "--connector",
+            "github",
+            "--resource",
+            "repo:octocat/hello-world",
+            "--ttl",
+            "120",
+            "--exclusive",
+        ]);
+        assert_eq!(reserve_exit, CliExitCode::Success.into());
+        assert_eq!(reserve_payload["subcommand"], "reserve");
+        assert_eq!(
+            reserve_payload["reservation"]["resource"],
+            "repo:octocat/hello-world"
+        );
+        assert_eq!(reserve_payload["reservation"]["exclusive"], true);
+
+        let (send_exit, send_payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "agent",
+            "send",
+            "--from",
+            "BronzeValley",
+            "--to",
+            "GoldenWolf",
+            "--kind",
+            "info",
+            "--payload",
+            "{\"status\":\"claimed\"}",
+        ]);
+        assert_eq!(send_exit, CliExitCode::Success.into());
+        assert_eq!(send_payload["subcommand"], "send");
+        assert_eq!(send_payload["recipient_unread_count"], 1);
+
+        let (peek_exit, peek_payload) =
+            execute_json(&["fwc", "--json", "agent", "inbox", "--agent", "GoldenWolf"]);
+        assert_eq!(peek_exit, CliExitCode::Success.into());
+        assert_eq!(peek_payload["message_count"], 1);
+        assert_eq!(peek_payload["messages"][0]["from"], "BronzeValley");
+        assert_eq!(peek_payload["messages"][0]["kind"], "info");
+        assert_eq!(peek_payload["messages"][0]["payload"]["status"], "claimed");
+
+        let (drain_exit, drain_payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "agent",
+            "inbox",
+            "--agent",
+            "GoldenWolf",
+            "--drain",
+        ]);
+        assert_eq!(drain_exit, CliExitCode::Success.into());
+        assert_eq!(drain_payload["message_count"], 1);
+        assert_eq!(drain_payload["drained"], true);
+
+        let (final_list_exit, final_list_payload) =
+            execute_json(&["fwc", "--json", "agent", "list"]);
+        assert_eq!(final_list_exit, CliExitCode::Success.into());
+        assert_eq!(final_list_payload["summary"]["announcement_count"], 1);
+        assert_eq!(final_list_payload["summary"]["reservation_count"], 1);
+    }
+
+    #[test]
     fn append_history_entry_records_active_session_metadata_and_increments_operations() {
         let session_dir = TempDir::new().expect("session tempdir should exist");
         let history_dir = TempDir::new().expect("history tempdir should exist");
@@ -19890,16 +20720,21 @@ depends_on = ["missing"]
             .query(&super::history::HistoryFilter::new())
             .expect("history query should succeed");
         assert_eq!(entries.len(), 2);
-        assert!(entries
-            .iter()
-            .all(|entry| entry.agent_session.as_deref() == Some(session_id.as_str())));
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.agent_session.as_deref() == Some(session_id.as_str()))
+        );
 
         let updated_session = super::cli_session_store()
             .load_resolved(&session_id)
             .expect("session load should succeed")
             .expect("session should still exist");
         assert_eq!(updated_session.operations_completed, 2);
-        assert_eq!(updated_session.status, super::session::SessionStatus::Active);
+        assert_eq!(
+            updated_session.status,
+            super::session::SessionStatus::Active
+        );
     }
 
     #[test]

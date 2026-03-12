@@ -45,6 +45,7 @@ mod client;
 mod config;
 mod connector;
 mod error;
+pub mod limits;
 mod oauth;
 mod stream;
 pub mod streaming;

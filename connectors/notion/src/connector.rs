@@ -15,6 +15,7 @@ use tracing::{info, instrument};
 use crate::{
     client::{DEFAULT_API_URL, NotionAuth, NotionClient},
     error::NotionError,
+    limits,
 };
 
 /// Validated configuration for the Notion connector.
@@ -765,7 +766,7 @@ impl NotionConnector {
                     IdempotencyClass::None,
                     AgentHint {
                         when_to_use: "Add content blocks to a page.".into(),
-                        common_mistakes: vec!["Exceeding 100 blocks per request".into()],
+                        common_mistakes: vec![format!("Exceeding {} blocks per request", limits::BLOCKS_MAX_PER_REQUEST)],
                         examples: vec![
                             r#"{"block_id": "abc123", "children": [{"object": "block", "type": "paragraph", "paragraph": {"rich_text": [{"text": {"content": "Hello"}}]}}]}"#.into(),
                         ],

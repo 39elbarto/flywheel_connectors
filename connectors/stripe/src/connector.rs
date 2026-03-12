@@ -22,12 +22,11 @@ use tracing::{info, instrument};
 use crate::{
     client::{DEFAULT_API_URL, StripeAuth, StripeClient},
     error::StripeError,
+    limits,
     types::StripeWebhookEvent,
 };
 
 const DEFAULT_WEBHOOK_TOLERANCE_SECONDS: i64 = 300;
-const MAX_WEBHOOK_PAYLOAD_BYTES: usize = 256 * 1024;
-const MAX_WEBHOOK_REPLAY_ENTRIES: usize = 4096;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -1471,11 +1470,12 @@ impl StripeConnector {
         input: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         let payload = require_str(&input, "payload")?;
-        if payload.len() > MAX_WEBHOOK_PAYLOAD_BYTES {
+        if payload.len() > limits::MAX_WEBHOOK_PAYLOAD_BYTES {
             return Err(FcpError::InvalidRequest {
                 code: 1003,
                 message: format!(
-                    "Webhook payload exceeds maximum size of {MAX_WEBHOOK_PAYLOAD_BYTES} bytes"
+                    "Webhook payload exceeds maximum size of {} bytes",
+                    limits::MAX_WEBHOOK_PAYLOAD_BYTES
                 ),
             });
         }
@@ -1566,7 +1566,7 @@ impl StripeConnector {
             });
         }
 
-        if cache.len() >= MAX_WEBHOOK_REPLAY_ENTRIES {
+        if cache.len() >= limits::MAX_WEBHOOK_REPLAY_ENTRIES {
             if let Some(oldest_key) = cache
                 .iter()
                 .min_by_key(|(_, ts)| *ts)

@@ -364,10 +364,20 @@ impl FcpsFrame {
     /// # Errors
     /// Returns `FrameError` if the frame is malformed or exceeds MTU.
     pub fn decode(bytes: &[u8], max_datagram_bytes: usize) -> Result<Self, FrameError> {
+        // Minimum: 2 (source_id_len) + 1 (min source_id) + 8 (timestamp) + 64 (sig) + 114 (min frame)
+        const MIN_LEN: usize = 2 + 1 + 8 + 64 + FCPS_HEADER_LEN;
+
         if bytes.len() > max_datagram_bytes {
             return Err(FrameError::ExceedsMtu {
                 len: bytes.len(),
                 max: max_datagram_bytes,
+            });
+        }
+
+        if bytes.len() < MIN_LEN {
+            return Err(FrameError::TooShort {
+                len: bytes.len(),
+                min: MIN_LEN,
             });
         }
 
@@ -937,6 +947,9 @@ impl SignedFcpsFrame {
     /// # Errors
     /// Returns `FrameError` if the frame is malformed.
     pub fn decode(bytes: &[u8], max_datagram_bytes: usize) -> Result<Self, FrameError> {
+        // Minimum: 2 (source_id_len) + 1 (min source_id) + 8 (timestamp) + 64 (sig) + 114 (min frame)
+        const MIN_LEN: usize = 2 + 1 + 8 + 64 + FCPS_HEADER_LEN;
+
         if bytes.len() > max_datagram_bytes {
             return Err(FrameError::ExceedsMtu {
                 len: bytes.len(),
@@ -944,8 +957,6 @@ impl SignedFcpsFrame {
             });
         }
 
-        // Minimum: 2 (source_id_len) + 1 (min source_id) + 8 (timestamp) + 64 (sig) + 114 (min frame)
-        const MIN_LEN: usize = 2 + 1 + 8 + 64 + FCPS_HEADER_LEN;
         if bytes.len() < MIN_LEN {
             return Err(FrameError::TooShort {
                 len: bytes.len(),
@@ -1555,7 +1566,7 @@ mod tests {
         let request_bad = SymbolRequest::new(
             header,
             ObjectId::from_bytes([0; 32]),
-            zone_id,
+            zone_id.clone(),
             ZoneKeyId::from_bytes([0; 8]),
             0,
             32,
@@ -2186,7 +2197,7 @@ mod tests {
         use semver::Version;
         let zone_id: ZoneId = "z:test".parse().unwrap();
         ObjectHeader {
-            schema: SchemaId::new("fcp.test", "TestObject", Version::new(1, 0, 0)),
+            schema: SchemaId::new("fcp.test", "Testobject", Version::new(1, 0, 0)),
             zone_id: zone_id.clone(),
             created_at: 1_704_067_200,
             provenance: Provenance::new(zone_id),
@@ -2198,7 +2209,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_status_sign_and_verify() {
+    fn decode_status_sign_and_verify_with_helper() {
         let signing_key = Ed25519SigningKey::generate();
         let zone_id: ZoneId = "z:test".parse().unwrap();
         let mut status = DecodeStatus {
@@ -2921,7 +2932,7 @@ mod tests {
         let status = DecodeStatus {
             header: make_test_object_header(),
             object_id: ObjectId::from_bytes([0; 32]),
-            zone_id,
+            zone_id: zone_id.clone(),
             zone_key_id: ZoneKeyId::from_bytes([0; 8]),
             epoch_id: 0,
             received_unique: 0,
@@ -2933,14 +2944,30 @@ mod tests {
         status.validate_hint_bounds().expect("empty vec ok");
         // Empty vec and None both produce zero-length hint data, so transcript is the same
         let status_none = DecodeStatus {
+            header: make_test_object_header(),
+            object_id: ObjectId::from_bytes([0; 32]),
+            zone_id: zone_id.clone(),
+            zone_key_id: ZoneKeyId::from_bytes([0; 8]),
+            epoch_id: 0,
+            received_unique: 0,
+            needed: 0,
+            complete: false,
             missing_hint: None,
-            ..status.clone()
+            signature: Ed25519Signature::from_bytes(&[0; 64]),
         };
         assert_eq!(status.transcript_bytes(), status_none.transcript_bytes());
         // But a non-empty vec differs from both
         let status_with = DecodeStatus {
+            header: make_test_object_header(),
+            object_id: ObjectId::from_bytes([0; 32]),
+            zone_id: zone_id.clone(),
+            zone_key_id: ZoneKeyId::from_bytes([0; 8]),
+            epoch_id: 0,
+            received_unique: 0,
+            needed: 0,
+            complete: false,
             missing_hint: Some(vec![42]),
-            ..status.clone()
+            signature: Ed25519Signature::from_bytes(&[0; 64]),
         };
         assert_ne!(status.transcript_bytes(), status_with.transcript_bytes());
     }

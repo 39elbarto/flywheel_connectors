@@ -1003,8 +1003,10 @@ pub fn validate_mode_consistency(command: &str, mode: RuntimeMode) -> Option<Str
 
     match (cls.truth_source, mode) {
         // LiveHost commands must be Live or Refused — never offline.
-        (CommandTruthSource::LiveHost, RuntimeMode::ExplicitOffline)
-        | (CommandTruthSource::LiveHost, RuntimeMode::DegradedOffline) => {
+        (
+            CommandTruthSource::LiveHost,
+            RuntimeMode::ExplicitOffline | RuntimeMode::DegradedOffline,
+        ) => {
             Some(format!(
                 "Command '{command}' is LiveHost but resolved to offline mode"
             ))
@@ -2687,6 +2689,195 @@ pub fn evaluate_export_readiness(mode: RuntimeMode, host_available: bool) -> Mcp
     }
 }
 
+// ── Transcript and replay artifact contract ──────────────────────────────────
+// Defines the types and helpers for capturing transcript entries, building
+// replay artifacts, and summarising evidence bundles. Every command execution
+// can be recorded as a series of `TranscriptEntry` values tagged with a
+// `TranscriptPhase`. A `ReplayArtifact` groups entries into a reproducible
+// scenario used by truthfulness verification tests.
+
+/// Phase of a transcript entry within a command lifecycle.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptPhase {
+    /// Command is in discovery/introspection phase.
+    Discovery,
+    /// Pre-execution validation/policy check.
+    Preflight,
+    /// Live execution with side effects.
+    Execution,
+    /// Post-execution receipt/evidence collection.
+    PostExecution,
+    /// Operation was cancelled.
+    Cancellation,
+    /// Reconnection after interruption.
+    Reconnect,
+}
+
+#[allow(dead_code)]
+impl TranscriptPhase {
+    /// Stable tag for serialization and display.
+    #[must_use]
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Self::Discovery => "discovery",
+            Self::Preflight => "preflight",
+            Self::Execution => "execution",
+            Self::PostExecution => "post_execution",
+            Self::Cancellation => "cancellation",
+            Self::Reconnect => "reconnect",
+        }
+    }
+
+    /// Returns `true` if this phase may involve live side effects or host
+    /// interaction (discovery, execution, post-execution, reconnect).
+    #[must_use]
+    pub fn is_live_phase(&self) -> bool {
+        matches!(
+            self,
+            Self::Discovery | Self::Execution | Self::PostExecution | Self::Reconnect
+        )
+    }
+}
+
+/// A single transcript entry capturing one step of a command's lifecycle.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TranscriptEntry {
+    /// ISO 8601 timestamp.
+    pub timestamp: String,
+    /// Unique correlation/receipt ID.
+    pub correlation_id: String,
+    /// The fwc command that produced this entry.
+    pub command: String,
+    /// Current phase.
+    pub phase: TranscriptPhase,
+    /// Runtime mode tag (e.g. "live", "explicit-offline").
+    pub mode: String,
+    /// Provenance source tag.
+    pub source_tag: String,
+    /// Whether this entry reflects live host truth.
+    pub authoritative: bool,
+    /// Human-readable detail.
+    pub detail: String,
+}
+
+/// A replay artifact grouping transcript entries for a reproducible scenario.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplayArtifact {
+    /// Unique scenario identifier.
+    pub scenario_id: String,
+    /// Ordered transcript entries.
+    pub entries: Vec<TranscriptEntry>,
+    /// Deterministic hash of test fixtures used.
+    pub fixture_hash: String,
+    /// Whether any entry used live host data.
+    pub live_evidence: bool,
+    /// Whether any entry used offline data.
+    pub offline_evidence: bool,
+}
+
+#[allow(dead_code)]
+impl ReplayArtifact {
+    /// Number of transcript entries.
+    #[must_use]
+    pub fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Returns `true` if the artifact contains both live and offline evidence.
+    #[must_use]
+    pub fn has_mixed_sources(&self) -> bool {
+        self.live_evidence && self.offline_evidence
+    }
+
+    /// Returns `true` if the artifact is safe for deterministic replay, i.e.
+    /// it does not mix live and offline sources.
+    #[must_use]
+    pub fn is_replay_safe(&self) -> bool {
+        !self.has_mixed_sources()
+    }
+}
+
+/// Metadata summary for an evidence bundle derived from a replay artifact.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvidenceBundleMetadata {
+    /// When the bundle was created.
+    pub created_at: String,
+    /// Number of commands in the bundle.
+    pub command_count: usize,
+    /// Number of live-evidence entries.
+    pub live_count: usize,
+    /// Number of offline-evidence entries.
+    pub offline_count: usize,
+    /// Whether the bundle is safe for sharing.
+    pub redaction_safe: bool,
+}
+
+/// Build a [`TranscriptEntry`] with a generated correlation ID and timestamp
+/// placeholder.
+#[allow(dead_code)]
+#[must_use]
+pub fn transcript_entry(
+    command: &str,
+    phase: TranscriptPhase,
+    mode: &str,
+    source_tag: &str,
+    authoritative: bool,
+    detail: &str,
+) -> TranscriptEntry {
+    TranscriptEntry {
+        timestamp: "1970-01-01T00:00:00Z".to_owned(),
+        correlation_id: format!("tx-{}-0000", command),
+        command: command.to_owned(),
+        phase,
+        mode: mode.to_owned(),
+        source_tag: source_tag.to_owned(),
+        authoritative,
+        detail: detail.to_owned(),
+    }
+}
+
+/// Build a [`ReplayArtifact`], deriving `live_evidence` and
+/// `offline_evidence` from the entries.
+#[allow(dead_code)]
+#[must_use]
+pub fn build_replay_artifact(
+    scenario_id: &str,
+    entries: Vec<TranscriptEntry>,
+) -> ReplayArtifact {
+    let live_evidence = entries.iter().any(|e| e.authoritative);
+    let offline_evidence = entries.iter().any(|e| !e.authoritative);
+    ReplayArtifact {
+        scenario_id: scenario_id.to_owned(),
+        entries,
+        fixture_hash: "0000000000000000".to_owned(),
+        live_evidence,
+        offline_evidence,
+    }
+}
+
+/// Build [`EvidenceBundleMetadata`] from a replay artifact.
+#[allow(dead_code)]
+#[must_use]
+pub fn evidence_bundle_metadata(
+    artifact: &ReplayArtifact,
+    redaction_safe: bool,
+) -> EvidenceBundleMetadata {
+    let live_count = artifact.entries.iter().filter(|e| e.authoritative).count();
+    let offline_count = artifact.entries.iter().filter(|e| !e.authoritative).count();
+    EvidenceBundleMetadata {
+        created_at: "1970-01-01T00:00:00Z".to_owned(),
+        command_count: artifact.entry_count(),
+        live_count,
+        offline_count,
+        redaction_safe,
+    }
+}
+
 pub const COMMANDS: &[&str] = &[
     "guide",
     "task",
@@ -3205,6 +3396,10 @@ mod tests {
     use super::{
         EXPORT_COMMANDS, ExportedToolProvenance, McpSurfaceState, ToolAvailability,
         ToolInventorySource, evaluate_export_readiness, is_export_command, tool_provenance,
+    };
+    use super::{
+        EvidenceBundleMetadata, ReplayArtifact, TranscriptEntry, TranscriptPhase,
+        build_replay_artifact, evidence_bundle_metadata, transcript_entry,
     };
     use serde_json::json;
 
@@ -8718,5 +8913,815 @@ mod tests {
     fn export_readiness_refused_mode() {
         let state = evaluate_export_readiness(RuntimeMode::Refused, false);
         assert_eq!(state, McpSurfaceState::Refused);
+    }
+
+    // ── TranscriptPhase tests ────────────────────────────────────────────
+
+    #[test]
+    fn transcript_phase_tags_stable() {
+        assert_eq!(TranscriptPhase::Discovery.tag(), "discovery");
+        assert_eq!(TranscriptPhase::Preflight.tag(), "preflight");
+        assert_eq!(TranscriptPhase::Execution.tag(), "execution");
+        assert_eq!(TranscriptPhase::PostExecution.tag(), "post_execution");
+        assert_eq!(TranscriptPhase::Cancellation.tag(), "cancellation");
+        assert_eq!(TranscriptPhase::Reconnect.tag(), "reconnect");
+    }
+
+    #[test]
+    fn transcript_phase_execution_is_live() {
+        assert!(TranscriptPhase::Execution.is_live_phase());
+    }
+
+    #[test]
+    fn transcript_phase_discovery_is_live() {
+        assert!(TranscriptPhase::Discovery.is_live_phase());
+    }
+
+    #[test]
+    fn transcript_phase_cancellation_is_not_live() {
+        assert!(!TranscriptPhase::Cancellation.is_live_phase());
+    }
+
+    #[test]
+    fn transcript_phase_preflight_is_not_live() {
+        assert!(!TranscriptPhase::Preflight.is_live_phase());
+    }
+
+    #[test]
+    fn transcript_phase_serde_roundtrip() {
+        let phases = [
+            TranscriptPhase::Discovery,
+            TranscriptPhase::Preflight,
+            TranscriptPhase::Execution,
+            TranscriptPhase::PostExecution,
+            TranscriptPhase::Cancellation,
+            TranscriptPhase::Reconnect,
+        ];
+        for phase in &phases {
+            let json = serde_json::to_string(phase).unwrap();
+            let back: TranscriptPhase = serde_json::from_str(&json).unwrap();
+            assert_eq!(*phase, back);
+        }
+    }
+
+    // ── TranscriptEntry tests ────────────────────────────────────────────
+
+    #[test]
+    fn transcript_entry_builds_correctly() {
+        let entry = transcript_entry(
+            "list",
+            TranscriptPhase::Discovery,
+            "live",
+            "host",
+            true,
+            "listing connectors",
+        );
+        assert_eq!(entry.command, "list");
+        assert_eq!(entry.phase, TranscriptPhase::Discovery);
+        assert_eq!(entry.mode, "live");
+        assert_eq!(entry.source_tag, "host");
+        assert!(entry.authoritative);
+        assert_eq!(entry.detail, "listing connectors");
+        assert_eq!(entry.timestamp, "1970-01-01T00:00:00Z");
+        assert_eq!(entry.correlation_id, "tx-list-0000");
+    }
+
+    #[test]
+    fn transcript_entry_serializes_all_fields() {
+        let entry = transcript_entry(
+            "do",
+            TranscriptPhase::Execution,
+            "live",
+            "host",
+            true,
+            "running operation",
+        );
+        let json = serde_json::to_value(&entry).unwrap();
+        assert!(json.get("timestamp").is_some());
+        assert!(json.get("correlation_id").is_some());
+        assert!(json.get("command").is_some());
+        assert!(json.get("phase").is_some());
+        assert!(json.get("mode").is_some());
+        assert!(json.get("source_tag").is_some());
+        assert!(json.get("authoritative").is_some());
+        assert!(json.get("detail").is_some());
+    }
+
+    // ── ReplayArtifact tests ─────────────────────────────────────────────
+
+    #[test]
+    fn replay_artifact_entry_count() {
+        let entries = vec![
+            transcript_entry("list", TranscriptPhase::Discovery, "live", "host", true, "d1"),
+            transcript_entry("do", TranscriptPhase::Execution, "live", "host", true, "e1"),
+        ];
+        let artifact = build_replay_artifact("scenario-1", entries);
+        assert_eq!(artifact.entry_count(), 2);
+    }
+
+    #[test]
+    fn replay_artifact_has_mixed_sources() {
+        let entries = vec![
+            transcript_entry("list", TranscriptPhase::Discovery, "live", "host", true, "live entry"),
+            transcript_entry("list", TranscriptPhase::Discovery, "explicit-offline", "cache", false, "offline entry"),
+        ];
+        let artifact = build_replay_artifact("mixed-scenario", entries);
+        assert!(artifact.has_mixed_sources());
+    }
+
+    #[test]
+    fn replay_artifact_is_replay_safe_when_no_mixed() {
+        let entries = vec![
+            transcript_entry("list", TranscriptPhase::Discovery, "live", "host", true, "live"),
+            transcript_entry("do", TranscriptPhase::Execution, "live", "host", true, "live"),
+        ];
+        let artifact = build_replay_artifact("pure-live", entries);
+        assert!(artifact.is_replay_safe());
+    }
+
+    #[test]
+    fn replay_artifact_empty_has_no_mixed_sources() {
+        let artifact = build_replay_artifact("empty-scenario", vec![]);
+        assert!(!artifact.has_mixed_sources());
+        assert!(artifact.is_replay_safe());
+        assert_eq!(artifact.entry_count(), 0);
+    }
+
+    #[test]
+    fn replay_artifact_serializes() {
+        let entries = vec![
+            transcript_entry("search", TranscriptPhase::Preflight, "live", "host", true, "s"),
+        ];
+        let artifact = build_replay_artifact("ser-test", entries);
+        let json = serde_json::to_string(&artifact).unwrap();
+        let back: ReplayArtifact = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.scenario_id, "ser-test");
+        assert_eq!(back.entry_count(), 1);
+    }
+
+    // ── EvidenceBundleMetadata tests ─────────────────────────────────────
+
+    #[test]
+    fn evidence_bundle_counts_correct() {
+        let entries = vec![
+            transcript_entry("list", TranscriptPhase::Discovery, "live", "host", true, "l"),
+            transcript_entry("list", TranscriptPhase::Discovery, "offline", "cache", false, "o"),
+            transcript_entry("do", TranscriptPhase::Execution, "live", "host", true, "l2"),
+        ];
+        let artifact = build_replay_artifact("count-test", entries);
+        let meta = evidence_bundle_metadata(&artifact, true);
+        assert_eq!(meta.command_count, 3);
+        assert_eq!(meta.live_count, 2);
+        assert_eq!(meta.offline_count, 1);
+        assert!(meta.redaction_safe);
+    }
+
+    #[test]
+    fn evidence_bundle_live_offline_counts_match() {
+        let entries = vec![
+            transcript_entry("a", TranscriptPhase::Discovery, "live", "host", true, "x"),
+            transcript_entry("b", TranscriptPhase::Preflight, "offline", "cache", false, "y"),
+        ];
+        let artifact = build_replay_artifact("match-test", entries);
+        let meta = evidence_bundle_metadata(&artifact, false);
+        assert_eq!(meta.live_count + meta.offline_count, meta.command_count);
+        assert!(!meta.redaction_safe);
+    }
+
+    #[test]
+    fn evidence_bundle_serializes() {
+        let artifact = build_replay_artifact("empty", vec![]);
+        let meta = evidence_bundle_metadata(&artifact, true);
+        let json = serde_json::to_string(&meta).unwrap();
+        let back: EvidenceBundleMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.command_count, 0);
+        assert_eq!(back.live_count, 0);
+        assert_eq!(back.offline_count, 0);
+        assert!(back.redaction_safe);
+    }
+
+    // ── build_replay_artifact derivation tests ───────────────────────────
+
+    #[test]
+    fn build_replay_artifact_derives_live_evidence() {
+        let entries = vec![
+            transcript_entry("do", TranscriptPhase::Execution, "live", "host", true, "exec"),
+        ];
+        let artifact = build_replay_artifact("live-only", entries);
+        assert!(artifact.live_evidence);
+        assert!(!artifact.offline_evidence);
+    }
+
+    #[test]
+    fn build_replay_artifact_derives_offline_evidence() {
+        let entries = vec![
+            transcript_entry("list", TranscriptPhase::Discovery, "explicit-offline", "cache", false, "offline"),
+        ];
+        let artifact = build_replay_artifact("offline-only", entries);
+        assert!(!artifact.live_evidence);
+        assert!(artifact.offline_evidence);
+    }
+
+    // ── Cross-cutting truthfulness tests ─────────────────────────────────
+
+    #[test]
+    fn transcript_never_conflates_live_and_offline_source_tags() {
+        let live_entry = transcript_entry("do", TranscriptPhase::Execution, "live", "host", true, "live op");
+        let offline_entry = transcript_entry("list", TranscriptPhase::Discovery, "explicit-offline", "cache", false, "offline op");
+        // A live entry must have authoritative=true and an offline entry must not
+        assert!(live_entry.authoritative);
+        assert!(!offline_entry.authoritative);
+        // Source tags must differ
+        assert_ne!(live_entry.source_tag, offline_entry.source_tag);
+        // Mode tags must differ
+        assert_ne!(live_entry.mode, offline_entry.mode);
+    }
+
+    #[test]
+    fn replay_artifact_mixed_is_not_replay_safe() {
+        let entries = vec![
+            transcript_entry("do", TranscriptPhase::Execution, "live", "host", true, "live"),
+            transcript_entry("list", TranscriptPhase::Discovery, "offline", "cache", false, "offline"),
+        ];
+        let artifact = build_replay_artifact("mixed", entries);
+        assert!(artifact.has_mixed_sources());
+        assert!(!artifact.is_replay_safe());
+    }
+
+    // ── Cross-cutting truthfulness invariant tests (bead 1g7z0.29.8.4) ──
+
+    // 1. Every live source variant across all source enums must report
+    //    is_authoritative() == true.
+    #[test]
+    fn invariant_all_live_sources_are_authoritative() {
+        // DiscoveryDataSource live variants
+        assert!(DiscoveryDataSource::LiveHostInventory.is_authoritative());
+        assert!(DiscoveryDataSource::LiveHostIntrospection.is_authoritative());
+
+        // TemplateDataSource live variant
+        assert!(TemplateDataSource::LiveHostIntrospection.is_authoritative());
+
+        // ToolInventorySource live variant
+        assert!(ToolInventorySource::LiveHostInventory.is_authoritative());
+
+        // RegistryCatalogSource live variant
+        let live_reg = RegistryCatalogSource::LiveRegistry {
+            endpoint: "https://registry.example.com".to_string(),
+        };
+        assert!(live_reg.is_authoritative());
+
+        // RuntimeMode live variant
+        assert!(RuntimeMode::Live.is_authoritative());
+    }
+
+    // 2. Every offline source variant must report is_authoritative() == false.
+    #[test]
+    fn invariant_all_offline_sources_are_not_authoritative() {
+        // DiscoveryDataSource offline variants
+        assert!(!DiscoveryDataSource::WorkspaceManifest.is_authoritative());
+        assert!(!DiscoveryDataSource::LocalCatalogCache.is_authoritative());
+        assert!(!DiscoveryDataSource::StaticSchema.is_authoritative());
+
+        // TemplateDataSource offline variants
+        assert!(!TemplateDataSource::WorkspaceManifest.is_authoritative());
+        assert!(!TemplateDataSource::StaticSchema.is_authoritative());
+        assert!(!TemplateDataSource::Unknown.is_authoritative());
+
+        // ToolInventorySource offline variants
+        assert!(!ToolInventorySource::WorkspaceManifest.is_authoritative());
+        assert!(!ToolInventorySource::StaticCatalog.is_authoritative());
+        assert!(!ToolInventorySource::Unknown.is_authoritative());
+
+        // RegistryCatalogSource offline variants
+        let cached = RegistryCatalogSource::CachedRegistry {
+            endpoint: "https://r.example.com".to_string(),
+            cached_at: "2026-03-11T00:00:00Z".to_string(),
+        };
+        assert!(!cached.is_authoritative());
+        assert!(!RegistryCatalogSource::LocalManifest.is_authoritative());
+        assert!(!RegistryCatalogSource::Unknown.is_authoritative());
+
+        // RuntimeMode non-live variants
+        assert!(!RuntimeMode::ExplicitOffline.is_authoritative());
+        assert!(!RuntimeMode::DegradedOffline.is_authoritative());
+        assert!(!RuntimeMode::Refused.is_authoritative());
+    }
+
+    // 3. Every variant of every source enum has a non-empty tag().
+    #[test]
+    fn invariant_all_sources_have_nonempty_tags() {
+        // DiscoveryDataSource
+        for src in &[
+            DiscoveryDataSource::LiveHostInventory,
+            DiscoveryDataSource::LiveHostIntrospection,
+            DiscoveryDataSource::WorkspaceManifest,
+            DiscoveryDataSource::LocalCatalogCache,
+            DiscoveryDataSource::StaticSchema,
+        ] {
+            assert!(!src.tag().is_empty(), "DiscoveryDataSource tag empty for {src:?}");
+        }
+
+        // TemplateDataSource
+        for src in &[
+            TemplateDataSource::LiveHostIntrospection,
+            TemplateDataSource::WorkspaceManifest,
+            TemplateDataSource::StaticSchema,
+            TemplateDataSource::Unknown,
+        ] {
+            assert!(!src.tag().is_empty(), "TemplateDataSource tag empty for {src:?}");
+        }
+
+        // ToolInventorySource
+        for src in &[
+            ToolInventorySource::LiveHostInventory,
+            ToolInventorySource::WorkspaceManifest,
+            ToolInventorySource::StaticCatalog,
+            ToolInventorySource::Unknown,
+        ] {
+            assert!(!src.tag().is_empty(), "ToolInventorySource tag empty for {src:?}");
+        }
+
+        // CapabilityTokenSource
+        for src in &[
+            CapabilityTokenSource::HostIssued {
+                endpoint: "x".to_string(),
+            },
+            CapabilityTokenSource::EnvironmentVariable,
+            CapabilityTokenSource::CliFlag,
+            CapabilityTokenSource::TestGenerated,
+            CapabilityTokenSource::Placeholder,
+        ] {
+            assert!(!src.tag().is_empty(), "CapabilityTokenSource tag empty for {src:?}");
+        }
+
+        // RuntimeMode
+        for mode in &[
+            RuntimeMode::Live,
+            RuntimeMode::ExplicitOffline,
+            RuntimeMode::DegradedOffline,
+            RuntimeMode::Refused,
+        ] {
+            assert!(!mode.tag().is_empty(), "RuntimeMode tag empty for {mode:?}");
+        }
+
+        // SimulateCapability
+        for cap in &[
+            SimulateCapability::FullDryRun,
+            SimulateCapability::PreflightOnly,
+            SimulateCapability::Unknown,
+            SimulateCapability::Unsupported,
+        ] {
+            assert!(!cap.tag().is_empty(), "SimulateCapability tag empty for {cap:?}");
+        }
+
+        // PackageArtifactSource
+        for src in &[
+            PackageArtifactSource::LocalDirectory("x".into()),
+            PackageArtifactSource::Registry("x".into()),
+            PackageArtifactSource::MeshBundle("x".into()),
+            PackageArtifactSource::OfflinePrepared("x".into()),
+            PackageArtifactSource::DemoFixture("x".into()),
+            PackageArtifactSource::StubPlaceholder("x".into()),
+        ] {
+            assert!(!src.tag().is_empty(), "PackageArtifactSource tag empty for {src:?}");
+        }
+    }
+
+    // 4. Every source with a freshness_caveat() method returns non-empty.
+    #[test]
+    fn invariant_all_sources_have_nonempty_freshness_caveats() {
+        // DiscoveryDataSource
+        for src in &[
+            DiscoveryDataSource::LiveHostInventory,
+            DiscoveryDataSource::LiveHostIntrospection,
+            DiscoveryDataSource::WorkspaceManifest,
+            DiscoveryDataSource::LocalCatalogCache,
+            DiscoveryDataSource::StaticSchema,
+        ] {
+            assert!(
+                !src.freshness_caveat().is_empty(),
+                "DiscoveryDataSource freshness_caveat empty for {src:?}"
+            );
+        }
+
+        // TemplateDataSource
+        for src in &[
+            TemplateDataSource::LiveHostIntrospection,
+            TemplateDataSource::WorkspaceManifest,
+            TemplateDataSource::StaticSchema,
+            TemplateDataSource::Unknown,
+        ] {
+            assert!(
+                !src.freshness_caveat().is_empty(),
+                "TemplateDataSource freshness_caveat empty for {src:?}"
+            );
+        }
+
+        // ToolInventorySource
+        for src in &[
+            ToolInventorySource::LiveHostInventory,
+            ToolInventorySource::WorkspaceManifest,
+            ToolInventorySource::StaticCatalog,
+            ToolInventorySource::Unknown,
+        ] {
+            assert!(
+                !src.freshness_caveat().is_empty(),
+                "ToolInventorySource freshness_caveat empty for {src:?}"
+            );
+        }
+
+        // RegistryCatalogSource
+        let live_reg = RegistryCatalogSource::LiveRegistry {
+            endpoint: "https://r.example.com".to_string(),
+        };
+        let cached_reg = RegistryCatalogSource::CachedRegistry {
+            endpoint: "https://r.example.com".to_string(),
+            cached_at: "2026-03-11T00:00:00Z".to_string(),
+        };
+        for src in &[
+            live_reg,
+            cached_reg,
+            RegistryCatalogSource::LocalManifest,
+            RegistryCatalogSource::Unknown,
+        ] {
+            assert!(
+                !src.freshness_caveat().is_empty(),
+                "RegistryCatalogSource freshness_caveat empty for {src:?}"
+            );
+        }
+    }
+
+    // 5. discovery_provenance() and template_provenance() derive authoritative
+    //    from their source.
+    #[test]
+    fn invariant_provenance_authoritative_matches_source() {
+        // Discovery: live source -> authoritative
+        let dp_live = discovery_provenance("list", DiscoveryDataSource::LiveHostInventory);
+        assert!(dp_live.authoritative);
+        assert!(dp_live.source.is_authoritative());
+
+        // Discovery: offline source -> not authoritative
+        let dp_offline = discovery_provenance("list", DiscoveryDataSource::WorkspaceManifest);
+        assert!(!dp_offline.authoritative);
+        assert!(!dp_offline.source.is_authoritative());
+
+        // Template: live source -> authoritative
+        let tp_live =
+            template_provenance("template", TemplateDataSource::LiveHostIntrospection);
+        assert!(tp_live.authoritative);
+        assert!(tp_live.source.is_authoritative());
+
+        // Template: offline source -> not authoritative
+        let tp_offline =
+            template_provenance("template", TemplateDataSource::WorkspaceManifest);
+        assert!(!tp_offline.authoritative);
+        assert!(!tp_offline.source.is_authoritative());
+    }
+
+    // 6. Commands classified as LiveHost must fail-fast (Refused) when host is
+    //    absent.
+    #[test]
+    fn invariant_live_mode_commands_refuse_without_host() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            if cls.truth_source == CommandTruthSource::LiveHost {
+                let ctx = RuntimeContext {
+                    command: cls.command.to_string(),
+                    offline_flag: false,
+                    host_resolved: false,
+                    host_reachable: false,
+                };
+                let mode = resolve_runtime_mode(&ctx);
+                assert_eq!(
+                    mode,
+                    RuntimeMode::Refused,
+                    "LiveHost command '{}' should be Refused without host, got {:?}",
+                    cls.command,
+                    mode
+                );
+            }
+        }
+    }
+
+    // 7. Commands classified as OfflineArtifact must be Unaffected by host
+    //    absence (resolve to ExplicitOffline).
+    #[test]
+    fn invariant_offline_commands_unaffected_by_host() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            if cls.truth_source == CommandTruthSource::OfflineArtifact {
+                assert_eq!(
+                    cls.host_absent,
+                    HostAbsentBehavior::Unaffected,
+                    "OfflineArtifact command '{}' should have Unaffected host_absent",
+                    cls.command
+                );
+                let ctx = RuntimeContext {
+                    command: cls.command.to_string(),
+                    offline_flag: false,
+                    host_resolved: false,
+                    host_reachable: false,
+                };
+                let mode = resolve_runtime_mode(&ctx);
+                assert_eq!(
+                    mode,
+                    RuntimeMode::ExplicitOffline,
+                    "OfflineArtifact command '{}' should resolve to ExplicitOffline, got {:?}",
+                    cls.command,
+                    mode
+                );
+            }
+        }
+    }
+
+    // 8. Hybrid commands must DegradedWithWarning or FailFast on host absence.
+    #[test]
+    fn invariant_hybrid_commands_degrade_with_warning() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            if cls.truth_source == CommandTruthSource::Hybrid {
+                match cls.host_absent {
+                    HostAbsentBehavior::DegradedWithWarning => {
+                        // e.g. "do" -- should resolve to DegradedOffline
+                        let ctx = RuntimeContext {
+                            command: cls.command.to_string(),
+                            offline_flag: false,
+                            host_resolved: false,
+                            host_reachable: false,
+                        };
+                        let mode = resolve_runtime_mode(&ctx);
+                        assert_eq!(
+                            mode,
+                            RuntimeMode::DegradedOffline,
+                            "Hybrid+DegradedWithWarning '{}' should resolve to DegradedOffline",
+                            cls.command
+                        );
+                    }
+                    HostAbsentBehavior::FailFast => {
+                        // e.g. "list" -- should resolve to Refused
+                        let ctx = RuntimeContext {
+                            command: cls.command.to_string(),
+                            offline_flag: false,
+                            host_resolved: false,
+                            host_reachable: false,
+                        };
+                        let mode = resolve_runtime_mode(&ctx);
+                        assert_eq!(
+                            mode,
+                            RuntimeMode::Refused,
+                            "Hybrid+FailFast '{}' should resolve to Refused without host",
+                            cls.command
+                        );
+                    }
+                    other => {
+                        panic!(
+                            "Hybrid command '{}' has unexpected host_absent behavior: {other:?}",
+                            cls.command
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // 9. SimulateResult with PreflightOnly never has is_connector_dry_run=true.
+    #[test]
+    fn invariant_simulate_preflight_never_labeled_as_dry_run() {
+        let result = simulate_result(true, SimulateCapability::PreflightOnly);
+        assert!(!result.is_connector_dry_run);
+        assert!(result.downgraded);
+
+        let result2 = simulate_result(false, SimulateCapability::PreflightOnly);
+        assert!(!result2.is_connector_dry_run);
+    }
+
+    // 10. evaluate_simulate_request with Unknown always returns Err.
+    #[test]
+    fn invariant_simulate_unknown_never_produces_success() {
+        assert!(evaluate_simulate_request(SimulateCapability::Unknown, true).is_err());
+        assert!(evaluate_simulate_request(SimulateCapability::Unknown, false).is_err());
+    }
+
+    // 11. validate_capability_token_source rejects Placeholder.
+    #[test]
+    fn invariant_placeholder_tokens_rejected_on_install() {
+        let source = CapabilityTokenSource::Placeholder;
+        assert!(validate_capability_token_source(&source, "invoke").is_err());
+        assert!(validate_capability_token_source(&source, "simulate").is_err());
+        assert!(validate_capability_token_source(&source, "install").is_err());
+    }
+
+    // 12. validate_capability_token_source rejects TestGenerated.
+    #[test]
+    fn invariant_test_generated_tokens_rejected() {
+        let source = CapabilityTokenSource::TestGenerated;
+        assert!(validate_capability_token_source(&source, "invoke").is_err());
+        assert!(validate_capability_token_source(&source, "simulate").is_err());
+        assert!(validate_capability_token_source(&source, "serve-mcp").is_err());
+    }
+
+    // 13. validate_capability_token_source accepts HostIssued.
+    #[test]
+    fn invariant_host_issued_tokens_always_accepted() {
+        let source = CapabilityTokenSource::HostIssued {
+            endpoint: "https://host.example.com".to_string(),
+        };
+        assert!(validate_capability_token_source(&source, "invoke").is_ok());
+        assert!(validate_capability_token_source(&source, "simulate").is_ok());
+        assert!(validate_capability_token_source(&source, "serve-mcp").is_ok());
+        assert!(validate_capability_token_source(&source, "cancel").is_ok());
+
+        // Also verify CliFlag and EnvironmentVariable are accepted
+        assert!(
+            validate_capability_token_source(&CapabilityTokenSource::CliFlag, "invoke").is_ok()
+        );
+        assert!(
+            validate_capability_token_source(
+                &CapabilityTokenSource::EnvironmentVariable,
+                "invoke"
+            )
+            .is_ok()
+        );
+    }
+
+    // 14. validate_package_source rejects DemoFixture for install.
+    #[test]
+    fn invariant_demo_fixture_rejected_on_install() {
+        let source = PackageArtifactSource::DemoFixture("fixture-connector".into());
+        assert!(validate_package_source(&source, "install").is_err());
+        assert!(validate_package_source(&source, "update").is_err());
+
+        let stub = PackageArtifactSource::StubPlaceholder("placeholder".into());
+        assert!(validate_package_source(&stub, "install").is_err());
+    }
+
+    // 15. validate_package_source accepts real sources on install.
+    #[test]
+    fn invariant_real_sources_accepted_on_install() {
+        let real_reg = PackageArtifactSource::Registry("registry:my-connector".into());
+        assert!(validate_package_source(&real_reg, "install").is_ok());
+
+        let real_dir = PackageArtifactSource::LocalDirectory("/opt/packages/my-conn".into());
+        assert!(validate_package_source(&real_dir, "install").is_ok());
+
+        let mesh = PackageArtifactSource::MeshBundle("mesh://bundle-id".into());
+        assert!(validate_package_source(&mesh, "install").is_ok());
+
+        let offline = PackageArtifactSource::OfflinePrepared("/tmp/prepared.tar".into());
+        assert!(validate_package_source(&offline, "update").is_ok());
+    }
+
+    // 16. workflow_can_proceed for "pipe" always returns None (never needs host).
+    #[test]
+    fn invariant_pipe_never_needs_host() {
+        // pipe with no host, no token
+        assert!(workflow_can_proceed("pipe", false, false).is_none());
+        // pipe with host available, no token
+        assert!(workflow_can_proceed("pipe", true, false).is_none());
+        // pipe with host available, token present
+        assert!(workflow_can_proceed("pipe", true, true).is_none());
+        // pipe with no host, token present
+        assert!(workflow_can_proceed("pipe", false, true).is_none());
+    }
+
+    // 17. workflow_can_proceed for "recipe"/"pipeline" returns HostUnavailable
+    //     without host.
+    #[test]
+    fn invariant_orchestrated_workflows_need_host() {
+        for cmd in &["recipe", "pipeline"] {
+            let result = workflow_can_proceed(cmd, false, true);
+            assert_eq!(
+                result,
+                Some(WorkflowStepReality::HostUnavailable),
+                "'{cmd}' without host should return HostUnavailable"
+            );
+
+            // With host but no token -> AuthDenied
+            let result2 = workflow_can_proceed(cmd, true, false);
+            assert_eq!(
+                result2,
+                Some(WorkflowStepReality::AuthDenied),
+                "'{cmd}' with host but no token should return AuthDenied"
+            );
+
+            // With both host and token -> None (can proceed)
+            let result3 = workflow_can_proceed(cmd, true, true);
+            assert!(
+                result3.is_none(),
+                "'{cmd}' with host and token should proceed"
+            );
+        }
+    }
+
+    // 18. classify_intent_action in Live mode with host -> HostBacked.
+    #[test]
+    fn invariant_live_intent_classification_is_host_backed() {
+        for action in INTENT_ACTIONS {
+            let cls = classify_intent_action(action, RuntimeMode::Live, true);
+            assert_eq!(
+                cls.availability,
+                IntentActionAvailability::HostBacked,
+                "Live+host intent '{}' should be HostBacked",
+                action
+            );
+            assert!(cls.host_required);
+        }
+    }
+
+    // 19. classify_intent_action in Refused mode -> Unsupported.
+    #[test]
+    fn invariant_refused_intent_classification_is_unsupported() {
+        for action in INTENT_ACTIONS {
+            let cls = classify_intent_action(action, RuntimeMode::Refused, false);
+            assert_eq!(
+                cls.availability,
+                IntentActionAvailability::Unsupported,
+                "Refused intent '{}' should be Unsupported",
+                action
+            );
+        }
+    }
+
+    // 20. filter_suggestable_actions excludes Unknown availability.
+    #[test]
+    fn invariant_intent_filter_excludes_unknown() {
+        // Unknown availability is not suggestable by design
+        assert!(!IntentActionAvailability::Unknown.is_suggestable());
+
+        // All other availability variants are suggestable
+        assert!(IntentActionAvailability::HostBacked.is_suggestable());
+        assert!(IntentActionAvailability::OfflineOnly.is_suggestable());
+        assert!(IntentActionAvailability::Planned.is_suggestable());
+        assert!(IntentActionAvailability::Unsupported.is_suggestable());
+
+        // filter_suggestable_actions with Live+host returns all known actions
+        let actions: Vec<&str> = INTENT_ACTIONS.to_vec();
+        let filtered = filter_suggestable_actions(&actions, RuntimeMode::Live, true);
+        assert_eq!(
+            filtered.len(),
+            INTENT_ACTIONS.len(),
+            "All known intent actions should be suggestable in Live+host mode"
+        );
+    }
+
+    // 21. evaluate_export_readiness Live+host -> LiveServing.
+    #[test]
+    fn invariant_export_readiness_live_with_host_is_live_serving() {
+        let state = evaluate_export_readiness(RuntimeMode::Live, true);
+        assert_eq!(state, McpSurfaceState::LiveServing);
+        assert!(state.is_healthy());
+    }
+
+    // 22. evaluate_export_readiness Live+no host -> Refused.
+    #[test]
+    fn invariant_export_readiness_live_without_host_is_refused() {
+        let state = evaluate_export_readiness(RuntimeMode::Live, false);
+        assert_eq!(state, McpSurfaceState::Refused);
+        assert!(!state.is_healthy());
+    }
+
+    // 23. COMMANDS list matches COMMAND_CLASSIFICATIONS (every classified
+    //     command exists in COMMANDS).
+    #[test]
+    fn invariant_every_command_is_classified() {
+        // Every entry in COMMAND_CLASSIFICATIONS has a matching entry in COMMANDS
+        for cls in COMMAND_CLASSIFICATIONS {
+            assert!(
+                COMMANDS.contains(&cls.command),
+                "COMMAND_CLASSIFICATIONS has '{}' but COMMANDS does not",
+                cls.command
+            );
+        }
+
+        // Every classified command has a unique name
+        let mut seen = std::collections::HashSet::new();
+        for cls in COMMAND_CLASSIFICATIONS {
+            assert!(
+                seen.insert(cls.command),
+                "Duplicate classification for '{}'",
+                cls.command
+            );
+        }
+    }
+
+    // 24. DISCOVERY_COMMANDS is a subset of COMMANDS.
+    #[test]
+    fn invariant_discovery_commands_subset_of_all_commands() {
+        for cmd in DISCOVERY_COMMANDS {
+            assert!(
+                COMMANDS.contains(cmd),
+                "DISCOVERY_COMMANDS has '{}' which is not in COMMANDS",
+                cmd
+            );
+        }
+    }
+
+    // 25. TEMPLATE_COMMANDS is a subset of COMMANDS.
+    #[test]
+    fn invariant_template_commands_subset_of_all_commands() {
+        for cmd in TEMPLATE_COMMANDS {
+            assert!(
+                COMMANDS.contains(cmd),
+                "TEMPLATE_COMMANDS has '{}' which is not in COMMANDS",
+                cmd
+            );
+        }
     }
 }

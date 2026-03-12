@@ -1521,4 +1521,941 @@ mod tests {
         assert_eq!(loaded.active_reservations()[0].id, reservation_id);
         assert_eq!(loaded.inbox(&agent("GoldenWolf")).len(), 1);
     }
+
+    // ── AgentId additional ──────────────────────────────────────
+
+    #[test]
+    fn agent_id_debug_format() {
+        let a = agent("TestAgent");
+        let dbg = format!("{a:?}");
+        assert!(dbg.contains("TestAgent"));
+    }
+
+    #[test]
+    fn agent_id_from_string_owned() {
+        let name = String::from("OwnedName");
+        let a = AgentId::new(name);
+        assert_eq!(a.as_str(), "OwnedName");
+    }
+
+    #[test]
+    fn agent_id_unicode_name() {
+        let a = agent("Agente\u{00e9}");
+        assert_eq!(a.as_str(), "Agente\u{00e9}");
+        assert_eq!(a.to_string(), "Agente\u{00e9}");
+    }
+
+    #[test]
+    fn agent_id_whitespace_name() {
+        let a = agent("  spaced  ");
+        assert_eq!(a.as_str(), "  spaced  ");
+    }
+
+    #[test]
+    fn agent_id_long_name() {
+        let name = "A".repeat(1000);
+        let a = AgentId::new(name.clone());
+        assert_eq!(a.as_str(), name);
+    }
+
+    #[test]
+    fn agent_id_clone_independence() {
+        let a = agent("Original");
+        let b = a.clone();
+        assert_eq!(a.as_str(), b.as_str());
+        // Both are independent values.
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn agent_id_ne_case_sensitive() {
+        assert_ne!(agent("abc"), agent("ABC"));
+    }
+
+    // ── UsageAnnouncement additional ────────────────────────────
+
+    #[test]
+    fn announcement_clone_independence() {
+        let ann = UsageAnnouncement::new(agent("A"), "github", "test")
+            .with_operation("op1")
+            .with_duration(100);
+        let ann2 = ann.clone();
+        assert_eq!(ann.connector, ann2.connector);
+        assert_eq!(ann.operation, ann2.operation);
+        assert_eq!(ann.expected_duration, ann2.expected_duration);
+        assert_eq!(ann.agent, ann2.agent);
+    }
+
+    #[test]
+    fn announcement_debug_format() {
+        let ann = UsageAnnouncement::new(agent("A"), "github", "test");
+        let dbg = format!("{ann:?}");
+        assert!(dbg.contains("github"));
+        assert!(dbg.contains("UsageAnnouncement"));
+    }
+
+    #[test]
+    fn announcement_empty_connector() {
+        let ann = UsageAnnouncement::new(agent("A"), "", "test");
+        assert_eq!(ann.connector, "");
+    }
+
+    #[test]
+    fn announcement_empty_purpose() {
+        let ann = UsageAnnouncement::new(agent("A"), "github", "");
+        assert_eq!(ann.purpose, "");
+    }
+
+    #[test]
+    fn announcement_max_duration() {
+        let ann = UsageAnnouncement::new(agent("A"), "g", "t").with_duration(u64::MAX);
+        assert_eq!(ann.expected_duration, u64::MAX);
+        // With announced_at being epoch_seconds(), this will never expire via subtraction.
+        assert!(!ann.is_expired());
+    }
+
+    #[test]
+    fn announcement_with_operation_replaces_none() {
+        let ann = UsageAnnouncement::new(agent("A"), "g", "t");
+        assert!(ann.operation.is_none());
+        let ann = ann.with_operation("op");
+        assert_eq!(ann.operation.as_deref(), Some("op"));
+    }
+
+    #[test]
+    fn announcement_chained_with_operation_overwrites() {
+        let ann = UsageAnnouncement::new(agent("A"), "g", "t")
+            .with_operation("first")
+            .with_operation("second");
+        assert_eq!(ann.operation.as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn announcement_chained_with_duration_overwrites() {
+        let ann = UsageAnnouncement::new(agent("A"), "g", "t")
+            .with_duration(100)
+            .with_duration(200);
+        assert_eq!(ann.expected_duration, 200);
+    }
+
+    #[test]
+    fn announcement_serde_preserves_null_operation() {
+        let ann = UsageAnnouncement::new(agent("A"), "github", "test");
+        let json = serde_json::to_string(&ann).unwrap();
+        let ann2: UsageAnnouncement = serde_json::from_str(&json).unwrap();
+        assert!(ann2.operation.is_none());
+    }
+
+    #[test]
+    fn announcement_announced_at_is_recent() {
+        let before = epoch_seconds();
+        let ann = UsageAnnouncement::new(agent("A"), "g", "t");
+        let after = epoch_seconds();
+        assert!(ann.announced_at >= before);
+        assert!(ann.announced_at <= after);
+    }
+
+    // ── ResourceReservation additional ──────────────────────────
+
+    #[test]
+    fn reservation_debug_format() {
+        let res = ResourceReservation {
+            id: "res_99".into(),
+            agent: agent("Z"),
+            connector: "jira".into(),
+            resource: "issue:123".into(),
+            reserved_at: 500,
+            ttl_seconds: 100,
+            exclusive: false,
+        };
+        let dbg = format!("{res:?}");
+        assert!(dbg.contains("res_99"));
+        assert!(dbg.contains("jira"));
+    }
+
+    #[test]
+    fn reservation_clone_independence() {
+        let res = ResourceReservation {
+            id: "res_1".into(),
+            agent: agent("A"),
+            connector: "github".into(),
+            resource: "r".into(),
+            reserved_at: epoch_seconds(),
+            ttl_seconds: 300,
+            exclusive: true,
+        };
+        let res2 = res.clone();
+        assert_eq!(res.id, res2.id);
+        assert_eq!(res.agent, res2.agent);
+        assert_eq!(res.exclusive, res2.exclusive);
+    }
+
+    #[test]
+    fn reservation_zero_reserved_at_with_zero_ttl() {
+        let res = ResourceReservation {
+            id: "r".into(),
+            agent: agent("A"),
+            connector: "c".into(),
+            resource: "x".into(),
+            reserved_at: 0,
+            ttl_seconds: 0,
+            exclusive: false,
+        };
+        assert!(!res.is_expired());
+        assert_eq!(res.remaining_seconds(), u64::MAX);
+    }
+
+    #[test]
+    fn reservation_max_ttl_not_expired() {
+        let res = ResourceReservation {
+            id: "r".into(),
+            agent: agent("A"),
+            connector: "c".into(),
+            resource: "x".into(),
+            reserved_at: epoch_seconds(),
+            ttl_seconds: u64::MAX,
+            exclusive: true,
+        };
+        assert!(!res.is_expired());
+    }
+
+    #[test]
+    fn reservation_remaining_for_active_reservation() {
+        let now = epoch_seconds();
+        let res = ResourceReservation {
+            id: "r".into(),
+            agent: agent("A"),
+            connector: "c".into(),
+            resource: "x".into(),
+            reserved_at: now,
+            ttl_seconds: 600,
+            exclusive: false,
+        };
+        let remaining = res.remaining_seconds();
+        assert!(remaining > 590);
+        assert!(remaining <= 600);
+    }
+
+    // ── AgentMessage additional ─────────────────────────────────
+
+    #[test]
+    fn message_clone_independence() {
+        let msg = AgentMessage {
+            from: agent("A"),
+            to: agent("B"),
+            kind: MessageKind::Info,
+            payload: json!({"key": "value"}),
+            sent_at: 100,
+            read: false,
+        };
+        let msg2 = msg.clone();
+        assert_eq!(msg.from, msg2.from);
+        assert_eq!(msg.to, msg2.to);
+        assert_eq!(msg.kind, msg2.kind);
+        assert_eq!(msg.payload, msg2.payload);
+        assert_eq!(msg.sent_at, msg2.sent_at);
+        assert_eq!(msg.read, msg2.read);
+    }
+
+    #[test]
+    fn message_debug_format() {
+        let msg = AgentMessage {
+            from: agent("Sender"),
+            to: agent("Receiver"),
+            kind: MessageKind::Warning,
+            payload: json!("alert"),
+            sent_at: 999,
+            read: true,
+        };
+        let dbg = format!("{msg:?}");
+        assert!(dbg.contains("Sender"));
+        assert!(dbg.contains("Receiver"));
+        assert!(dbg.contains("Warning"));
+    }
+
+    #[test]
+    fn message_serde_with_string_payload() {
+        let msg = AgentMessage {
+            from: agent("A"),
+            to: agent("B"),
+            kind: MessageKind::Response,
+            payload: json!("just a string"),
+            sent_at: 42,
+            read: false,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let msg2: AgentMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(msg2.payload, json!("just a string"));
+    }
+
+    #[test]
+    fn message_serde_with_array_payload() {
+        let msg = AgentMessage {
+            from: agent("A"),
+            to: agent("B"),
+            kind: MessageKind::Info,
+            payload: json!([1, "two", null, true]),
+            sent_at: 0,
+            read: true,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let msg2: AgentMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(msg2.payload[2], serde_json::Value::Null);
+        assert_eq!(msg2.payload[1], "two");
+    }
+
+    #[test]
+    fn message_serde_with_numeric_payload() {
+        let msg = AgentMessage {
+            from: agent("A"),
+            to: agent("B"),
+            kind: MessageKind::Request,
+            payload: json!(42),
+            sent_at: 0,
+            read: false,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let msg2: AgentMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(msg2.payload, json!(42));
+    }
+
+    #[test]
+    fn message_serde_with_bool_payload() {
+        let msg = AgentMessage {
+            from: agent("A"),
+            to: agent("B"),
+            kind: MessageKind::Release,
+            payload: json!(false),
+            sent_at: 0,
+            read: false,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let msg2: AgentMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(msg2.payload, json!(false));
+    }
+
+    // ── MessageKind additional ──────────────────────────────────
+
+    #[test]
+    fn message_kind_clone() {
+        let k = MessageKind::Warning;
+        let k2 = k.clone();
+        assert_eq!(k, k2);
+    }
+
+    #[test]
+    fn message_kind_debug_format() {
+        let dbg = format!("{:?}", MessageKind::Request);
+        assert_eq!(dbg, "Request");
+        let dbg = format!("{:?}", MessageKind::Release);
+        assert_eq!(dbg, "Release");
+    }
+
+    #[test]
+    fn message_kind_ne() {
+        assert_ne!(MessageKind::Request, MessageKind::Response);
+        assert_ne!(MessageKind::Info, MessageKind::Warning);
+        assert_ne!(MessageKind::Warning, MessageKind::Release);
+    }
+
+    #[test]
+    fn message_kind_deserialize_invalid() {
+        let result = serde_json::from_str::<MessageKind>("\"invalid_kind\"");
+        assert!(result.is_err());
+    }
+
+    // ── CoordinationHub advanced reservation scenarios ───────────
+
+    #[test]
+    fn hub_reserve_many_resources_same_connector() {
+        let mut hub = CoordinationHub::new();
+        for i in 0..10 {
+            hub.reserve(agent("A"), "github", format!("r{i}"), 300, true)
+                .unwrap();
+        }
+        assert_eq!(hub.reservation_count(), 10);
+        assert_eq!(hub.reservations_for("github").len(), 10);
+    }
+
+    #[test]
+    fn hub_reserve_same_resource_different_connectors() {
+        let mut hub = CoordinationHub::new();
+        hub.reserve(agent("A"), "github", "repo:x", 300, true)
+            .unwrap();
+        hub.reserve(agent("A"), "slack", "repo:x", 300, true)
+            .unwrap();
+        assert_eq!(hub.reservation_count(), 2);
+    }
+
+    #[test]
+    fn hub_active_reservations_filters_expired() {
+        let mut hub = CoordinationHub::new();
+        hub.reservations.insert(
+            "expired".into(),
+            ResourceReservation {
+                id: "expired".into(),
+                agent: agent("A"),
+                connector: "g".into(),
+                resource: "r".into(),
+                reserved_at: 1,
+                ttl_seconds: 1,
+                exclusive: true,
+            },
+        );
+        hub.reserve(agent("B"), "g", "r2", 3600, false).unwrap();
+        let active = hub.active_reservations();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].agent, agent("B"));
+    }
+
+    #[test]
+    fn hub_reservation_id_format() {
+        let mut hub = CoordinationHub::new();
+        let id = hub.reserve(agent("A"), "g", "r", 300, false).unwrap();
+        assert!(id.starts_with("res_"));
+        let num: u64 = id.strip_prefix("res_").unwrap().parse().unwrap();
+        assert!(num > 0);
+    }
+
+    #[test]
+    fn hub_exclusive_same_agent_same_resource_conflicts() {
+        let mut hub = CoordinationHub::new();
+        hub.reserve(agent("A"), "g", "r", 300, true).unwrap();
+        // Even the same agent can't double-reserve exclusively.
+        let err = hub.reserve(agent("A"), "g", "r", 300, true).unwrap_err();
+        assert!(matches!(err, CoordError::ResourceConflict { .. }));
+    }
+
+    #[test]
+    fn hub_non_exclusive_multiple_agents_same_resource() {
+        let mut hub = CoordinationHub::new();
+        hub.reserve(agent("A"), "g", "r", 300, false).unwrap();
+        hub.reserve(agent("B"), "g", "r", 300, false).unwrap();
+        hub.reserve(agent("C"), "g", "r", 300, false).unwrap();
+        assert_eq!(hub.reservation_count(), 3);
+    }
+
+    #[test]
+    fn hub_release_then_re_reserve() {
+        let mut hub = CoordinationHub::new();
+        let id = hub.reserve(agent("A"), "g", "r", 300, true).unwrap();
+        hub.release(&id).unwrap();
+        // After release, another agent can exclusively reserve.
+        let id2 = hub.reserve(agent("B"), "g", "r", 300, true).unwrap();
+        assert_ne!(id, id2);
+        assert_eq!(hub.reservation_count(), 1);
+    }
+
+    #[test]
+    fn hub_extend_reservation_zero_seconds() {
+        let mut hub = CoordinationHub::new();
+        let id = hub.reserve(agent("A"), "g", "r", 100, true).unwrap();
+        hub.extend_reservation(&id, 0).unwrap();
+        let reservations = hub.reservations_for("g");
+        assert_eq!(reservations[0].ttl_seconds, 100);
+    }
+
+    #[test]
+    fn hub_release_double_fails() {
+        let mut hub = CoordinationHub::new();
+        let id = hub.reserve(agent("A"), "g", "r", 300, true).unwrap();
+        hub.release(&id).unwrap();
+        let err = hub.release(&id).unwrap_err();
+        assert!(matches!(err, CoordError::ReservationNotFound(_)));
+    }
+
+    // ── CoordinationHub announcements advanced ──────────────────
+
+    #[test]
+    fn hub_many_announcements_same_connector() {
+        let mut hub = CoordinationHub::new();
+        for i in 0..20 {
+            hub.announce(UsageAnnouncement::new(
+                agent(&format!("Agent{i}")),
+                "github",
+                format!("purpose {i}"),
+            ));
+        }
+        assert_eq!(hub.announcement_count(), 20);
+        assert_eq!(hub.announcements_for("github").len(), 20);
+    }
+
+    #[test]
+    fn hub_active_announcements_filters_expired() {
+        let mut hub = CoordinationHub::new();
+        let mut expired = UsageAnnouncement::new(agent("A"), "github", "old");
+        expired.announced_at = 1;
+        expired.expected_duration = 1;
+        hub.announce(expired);
+        hub.announce(UsageAnnouncement::new(agent("B"), "github", "fresh"));
+        let active = hub.active_announcements();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].agent, agent("B"));
+    }
+
+    #[test]
+    fn hub_announcements_for_filters_expired() {
+        let mut hub = CoordinationHub::new();
+        let mut expired = UsageAnnouncement::new(agent("A"), "github", "old");
+        expired.announced_at = 1;
+        expired.expected_duration = 1;
+        hub.announce(expired);
+        hub.announce(UsageAnnouncement::new(agent("B"), "github", "fresh"));
+        assert_eq!(hub.announcements_for("github").len(), 1);
+    }
+
+    // ── CoordinationHub messaging advanced ──────────────────────
+
+    #[test]
+    fn hub_send_message_to_self() {
+        let mut hub = CoordinationHub::new();
+        hub.send(
+            agent("A"),
+            &agent("A"),
+            MessageKind::Info,
+            json!("self-note"),
+        );
+        assert_eq!(hub.unread_count(&agent("A")), 1);
+        let msgs = hub.inbox(&agent("A"));
+        assert_eq!(msgs[0].from, agent("A"));
+        assert_eq!(msgs[0].to, agent("A"));
+    }
+
+    #[test]
+    fn hub_read_inbox_then_new_messages() {
+        let mut hub = CoordinationHub::new();
+        hub.send(agent("A"), &agent("B"), MessageKind::Info, json!("first"));
+        let msgs = hub.read_inbox(&agent("B"));
+        assert_eq!(msgs.len(), 1);
+        // Inbox is now empty.
+        assert_eq!(hub.unread_count(&agent("B")), 0);
+        // New message arrives.
+        hub.send(agent("C"), &agent("B"), MessageKind::Warning, json!("second"));
+        assert_eq!(hub.unread_count(&agent("B")), 1);
+        let msgs2 = hub.read_inbox(&agent("B"));
+        assert_eq!(msgs2.len(), 1);
+        assert_eq!(msgs2[0].from, agent("C"));
+    }
+
+    #[test]
+    fn hub_unread_count_empty_inbox_no_panic() {
+        let hub = CoordinationHub::new();
+        // Agent never received any messages.
+        assert_eq!(hub.unread_count(&agent("ghost")), 0);
+    }
+
+    #[test]
+    fn hub_send_many_messages_ordering() {
+        let mut hub = CoordinationHub::new();
+        for i in 0..5 {
+            hub.send(
+                agent("Sender"),
+                &agent("Receiver"),
+                MessageKind::Info,
+                json!(i),
+            );
+        }
+        let msgs = hub.inbox(&agent("Receiver"));
+        assert_eq!(msgs.len(), 5);
+        // Messages should be in insertion order.
+        for (i, msg) in msgs.iter().enumerate() {
+            assert_eq!(msg.payload, json!(i));
+        }
+    }
+
+    #[test]
+    fn hub_inbox_peek_does_not_consume() {
+        let mut hub = CoordinationHub::new();
+        hub.send(agent("A"), &agent("B"), MessageKind::Info, json!("msg"));
+        let first = hub.inbox(&agent("B"));
+        let second = hub.inbox(&agent("B"));
+        assert_eq!(first.len(), second.len());
+        assert_eq!(hub.unread_count(&agent("B")), 1);
+    }
+
+    #[test]
+    fn hub_messages_from_different_senders() {
+        let mut hub = CoordinationHub::new();
+        hub.send(agent("A"), &agent("D"), MessageKind::Request, json!("a"));
+        hub.send(agent("B"), &agent("D"), MessageKind::Response, json!("b"));
+        hub.send(agent("C"), &agent("D"), MessageKind::Release, json!("c"));
+        let inbox = hub.inbox(&agent("D"));
+        assert_eq!(inbox.len(), 3);
+        assert_eq!(inbox[0].from, agent("A"));
+        assert_eq!(inbox[1].from, agent("B"));
+        assert_eq!(inbox[2].from, agent("C"));
+    }
+
+    // ── Conflict detection additional ───────────────────────────
+
+    #[test]
+    fn conflict_check_warning_and_blocked_prefers_blocked() {
+        let mut hub = CoordinationHub::new();
+        // Add announcement from B (would cause warning).
+        hub.announce(UsageAnnouncement::new(agent("B"), "github", "reading"));
+        // Add exclusive reservation from C (would cause blocked).
+        hub.reserve(agent("C"), "github", "repo:x", 300, true)
+            .unwrap();
+        let result = hub.check_conflict(&agent("A"), "github", Some("repo:x"));
+        // Blocked takes priority.
+        assert!(matches!(result, ConflictCheck::Blocked { .. }));
+    }
+
+    #[test]
+    fn conflict_check_warning_content() {
+        let mut hub = CoordinationHub::new();
+        hub.announce(UsageAnnouncement::new(
+            agent("Bob"),
+            "github",
+            "code review",
+        ));
+        let result = hub.check_conflict(&agent("Alice"), "github", None);
+        match result {
+            ConflictCheck::Warning { warnings } => {
+                assert_eq!(warnings.len(), 1);
+                assert!(warnings[0].contains("Bob"));
+                assert!(warnings[0].contains("github"));
+                assert!(warnings[0].contains("code review"));
+            }
+            other => panic!("Expected Warning, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn conflict_check_blocked_content() {
+        let mut hub = CoordinationHub::new();
+        hub.reserve(agent("Carol"), "github", "repo:main", 300, true)
+            .unwrap();
+        let result = hub.check_conflict(&agent("Dave"), "github", Some("repo:main"));
+        match result {
+            ConflictCheck::Blocked { reason } => {
+                assert!(reason.contains("repo:main"));
+                assert!(reason.contains("Carol"));
+            }
+            other => panic!("Expected Blocked, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn conflict_check_different_resource_not_blocked() {
+        let mut hub = CoordinationHub::new();
+        hub.reserve(agent("B"), "github", "repo:x", 300, true)
+            .unwrap();
+        let result = hub.check_conflict(&agent("A"), "github", Some("repo:y"));
+        assert!(matches!(result, ConflictCheck::Clear));
+    }
+
+    // ── ConflictCheck additional ────────────────────────────────
+
+    #[test]
+    fn conflict_check_clone() {
+        let c1 = ConflictCheck::Warning {
+            warnings: vec!["w1".into()],
+        };
+        let c2 = c1.clone();
+        assert_eq!(c1, c2);
+    }
+
+    #[test]
+    fn conflict_check_debug() {
+        let c = ConflictCheck::Clear;
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("Clear"));
+    }
+
+    #[test]
+    fn conflict_check_blocked_debug() {
+        let c = ConflictCheck::Blocked {
+            reason: "locked".into(),
+        };
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("Blocked"));
+        assert!(dbg.contains("locked"));
+    }
+
+    #[test]
+    fn conflict_check_warning_empty_vec_display() {
+        let c = ConflictCheck::Warning {
+            warnings: vec![],
+        };
+        assert_eq!(c.to_string(), "warning: ");
+    }
+
+    #[test]
+    fn conflict_check_equality_variants() {
+        assert_eq!(ConflictCheck::Clear, ConflictCheck::Clear);
+        assert_ne!(ConflictCheck::Clear, ConflictCheck::Blocked { reason: "x".into() });
+        assert_ne!(
+            ConflictCheck::Warning { warnings: vec!["a".into()] },
+            ConflictCheck::Warning { warnings: vec!["b".into()] }
+        );
+    }
+
+    // ── CoordError additional ───────────────────────────────────
+
+    #[test]
+    fn coord_error_clone() {
+        let e = CoordError::ResourceConflict {
+            resource: "r".into(),
+            held_by: "A".into(),
+        };
+        let e2 = e.clone();
+        assert_eq!(e, e2);
+    }
+
+    #[test]
+    fn coord_error_debug_format() {
+        let e = CoordError::ReservationNotFound("xyz".into());
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("ReservationNotFound"));
+        assert!(dbg.contains("xyz"));
+    }
+
+    #[test]
+    fn coord_error_resource_conflict_debug() {
+        let e = CoordError::ResourceConflict {
+            resource: "repo:hello".into(),
+            held_by: "AgentZ".into(),
+        };
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("ResourceConflict"));
+        assert!(dbg.contains("repo:hello"));
+    }
+
+    #[test]
+    fn coord_error_source_is_none() {
+        let e = CoordError::ReservationNotFound("x".into());
+        let err: &dyn std::error::Error = &e;
+        assert!(err.source().is_none());
+    }
+
+    #[test]
+    fn coord_error_resource_conflict_ne_different_resource() {
+        let e1 = CoordError::ResourceConflict {
+            resource: "r1".into(),
+            held_by: "A".into(),
+        };
+        let e2 = CoordError::ResourceConflict {
+            resource: "r2".into(),
+            held_by: "A".into(),
+        };
+        assert_ne!(e1, e2);
+    }
+
+    #[test]
+    fn coord_error_resource_conflict_ne_different_holder() {
+        let e1 = CoordError::ResourceConflict {
+            resource: "r".into(),
+            held_by: "A".into(),
+        };
+        let e2 = CoordError::ResourceConflict {
+            resource: "r".into(),
+            held_by: "B".into(),
+        };
+        assert_ne!(e1, e2);
+    }
+
+    #[test]
+    fn coord_error_different_variants_ne() {
+        let e1 = CoordError::ReservationNotFound("r".into());
+        let e2 = CoordError::ResourceConflict {
+            resource: "r".into(),
+            held_by: "A".into(),
+        };
+        assert_ne!(e1, e2);
+    }
+
+    // ── cleanup_expired ─────────────────────────────────────────
+
+    #[test]
+    fn hub_cleanup_expired_both_types() {
+        let mut hub = CoordinationHub::new();
+        // Add expired announcement.
+        let mut ann = UsageAnnouncement::new(agent("A"), "github", "old");
+        ann.announced_at = 1;
+        ann.expected_duration = 1;
+        hub.announce(ann);
+        // Add expired reservation.
+        hub.reservations.insert(
+            "expired_r".into(),
+            ResourceReservation {
+                id: "expired_r".into(),
+                agent: agent("B"),
+                connector: "slack".into(),
+                resource: "ch".into(),
+                reserved_at: 1,
+                ttl_seconds: 1,
+                exclusive: false,
+            },
+        );
+        // Add active entries.
+        hub.announce(UsageAnnouncement::new(agent("C"), "jira", "active"));
+        hub.reserve(agent("D"), "jira", "issue:1", 3600, true).unwrap();
+        let removed = hub.cleanup_expired();
+        assert_eq!(removed, 2);
+        assert_eq!(hub.announcement_count(), 1);
+        assert_eq!(hub.reservation_count(), 1);
+    }
+
+    #[test]
+    fn hub_cleanup_expired_nothing_to_remove() {
+        let mut hub = CoordinationHub::new();
+        hub.announce(UsageAnnouncement::new(agent("A"), "g", "active"));
+        hub.reserve(agent("B"), "g", "r", 3600, false).unwrap();
+        assert_eq!(hub.cleanup_expired(), 0);
+    }
+
+    #[test]
+    fn hub_cleanup_expired_empty_hub() {
+        let mut hub = CoordinationHub::new();
+        assert_eq!(hub.cleanup_expired(), 0);
+    }
+
+    // ── CoordinationHub serialization ───────────────────────────
+
+    #[test]
+    fn hub_serde_roundtrip_full_state() {
+        let mut hub = CoordinationHub::new();
+        hub.announce(UsageAnnouncement::new(agent("A"), "github", "triage"));
+        hub.announce(
+            UsageAnnouncement::new(agent("B"), "slack", "posting")
+                .with_operation("send")
+                .with_duration(120),
+        );
+        hub.reserve(agent("A"), "github", "repo:x", 3600, true).unwrap();
+        hub.reserve(agent("B"), "slack", "channel:gen", 600, false).unwrap();
+        hub.send(agent("A"), &agent("B"), MessageKind::Request, json!({"action": "review"}));
+        hub.send(agent("B"), &agent("A"), MessageKind::Response, json!("ok"));
+
+        let json = serde_json::to_string(&hub).unwrap();
+        let hub2: CoordinationHub = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(hub2.announcement_count(), 2);
+        assert_eq!(hub2.reservation_count(), 2);
+        assert_eq!(hub2.inbox(&agent("B")).len(), 1);
+        assert_eq!(hub2.inbox(&agent("A")).len(), 1);
+    }
+
+    #[test]
+    fn hub_serde_empty() {
+        let hub = CoordinationHub::new();
+        let json = serde_json::to_string(&hub).unwrap();
+        let hub2: CoordinationHub = serde_json::from_str(&json).unwrap();
+        assert_eq!(hub2.announcement_count(), 0);
+        assert_eq!(hub2.reservation_count(), 0);
+    }
+
+    #[test]
+    fn hub_debug_format() {
+        let hub = CoordinationHub::new();
+        let dbg = format!("{hub:?}");
+        assert!(dbg.contains("CoordinationHub"));
+    }
+
+    // ── CoordinationStore additional ────────────────────────────
+
+    #[test]
+    fn store_path_returns_configured_path() {
+        let store = CoordinationStore::new("/tmp/test/coord.json");
+        assert_eq!(store.path(), Path::new("/tmp/test/coord.json"));
+    }
+
+    #[test]
+    fn store_save_creates_parent_dirs() {
+        let dir = TempDir::new().unwrap();
+        let nested = dir.path().join("deep").join("nested").join("coord.json");
+        let store = CoordinationStore::new(&nested);
+        let hub = CoordinationHub::new();
+        store.save(&hub).unwrap();
+        assert!(nested.exists());
+    }
+
+    #[test]
+    fn store_save_overwrites_existing() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("coord.json");
+        let store = CoordinationStore::new(&path);
+
+        let mut hub1 = CoordinationHub::new();
+        hub1.announce(UsageAnnouncement::new(agent("A"), "g", "first"));
+        store.save(&hub1).unwrap();
+
+        let mut hub2 = CoordinationHub::new();
+        hub2.announce(UsageAnnouncement::new(agent("B"), "s", "second"));
+        hub2.announce(UsageAnnouncement::new(agent("C"), "j", "third"));
+        store.save(&hub2).unwrap();
+
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.announcement_count(), 2);
+    }
+
+    #[test]
+    fn store_load_corrupt_data_errors() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("coord.json");
+        std::fs::write(&path, "not valid json!!!").unwrap();
+        let store = CoordinationStore::new(&path);
+        assert!(store.load().is_err());
+    }
+
+    #[test]
+    fn store_load_empty_json_object() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("coord.json");
+        // CoordinationHub has defaults, so an object with just the required shape should work.
+        std::fs::write(&path, r#"{"announcements":[],"reservations":{},"inboxes":{},"next_reservation_id":0}"#).unwrap();
+        let store = CoordinationStore::new(&path);
+        let hub = store.load().unwrap();
+        assert_eq!(hub.announcement_count(), 0);
+    }
+
+    #[test]
+    fn store_save_and_load_preserves_messages() {
+        let dir = TempDir::new().unwrap();
+        let store = CoordinationStore::new(dir.path().join("coord.json"));
+        let mut hub = CoordinationHub::new();
+        hub.send(agent("X"), &agent("Y"), MessageKind::Warning, json!({"level": 5}));
+        hub.send(agent("Y"), &agent("X"), MessageKind::Release, json!(null));
+        store.save(&hub).unwrap();
+
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.unread_count(&agent("Y")), 1);
+        assert_eq!(loaded.unread_count(&agent("X")), 1);
+    }
+
+    #[test]
+    fn store_save_and_load_preserves_reservation_ids() {
+        let dir = TempDir::new().unwrap();
+        let store = CoordinationStore::new(dir.path().join("coord.json"));
+        let mut hub = CoordinationHub::new();
+        let id1 = hub.reserve(agent("A"), "g", "r1", 3600, true).unwrap();
+        let id2 = hub.reserve(agent("B"), "g", "r2", 3600, false).unwrap();
+        store.save(&hub).unwrap();
+
+        let loaded = store.load().unwrap();
+        let active = loaded.active_reservations();
+        let ids: Vec<&str> = active.iter().map(|r| r.id.as_str()).collect();
+        assert!(ids.contains(&id1.as_str()));
+        assert!(ids.contains(&id2.as_str()));
+    }
+
+    // ── coordination_tmp_path ───────────────────────────────────
+
+    #[test]
+    fn tmp_path_replaces_extension() {
+        let p = coordination_tmp_path(Path::new("/foo/bar/coord.json"));
+        assert_eq!(p, PathBuf::from("/foo/bar/coord.tmp"));
+    }
+
+    #[test]
+    fn tmp_path_no_extension() {
+        let p = coordination_tmp_path(Path::new("/foo/bar/coord"));
+        assert_eq!(p, PathBuf::from("/foo/bar/coord.tmp"));
+    }
+
+    #[test]
+    fn tmp_path_double_extension() {
+        let p = coordination_tmp_path(Path::new("/foo/bar/coord.json.bak"));
+        assert_eq!(p, PathBuf::from("/foo/bar/coord.json.tmp"));
+    }
 }

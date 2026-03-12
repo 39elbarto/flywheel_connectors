@@ -1215,4 +1215,1133 @@ mod tests {
         assert!(validate_resource("_").is_ok());
         assert!(validate_resource(".").is_ok());
     }
+
+    // ── OpLock: remaining_display boundary ──────────────────────
+
+    #[test]
+    fn remaining_display_one_second() {
+        let lock = OpLock {
+            resource: "r".to_owned(),
+            agent: "a".to_owned(),
+            acquired_at: Utc::now(),
+            expires_at: Utc::now() + Duration::seconds(2),
+            reason: None,
+        };
+        let display = lock.remaining_display();
+        // Should be in seconds range, not minutes
+        assert!(display.ends_with('s'));
+        assert!(!display.contains('m'));
+        assert!(!display.contains('h'));
+    }
+
+    #[test]
+    fn remaining_display_exactly_one_minute() {
+        // 60 seconds exactly should format as minutes
+        let lock = OpLock {
+            resource: "r".to_owned(),
+            agent: "a".to_owned(),
+            acquired_at: Utc::now(),
+            expires_at: Utc::now() + Duration::seconds(60) + Duration::milliseconds(500),
+            reason: None,
+        };
+        let display = lock.remaining_display();
+        assert!(display.contains('m'));
+    }
+
+    #[test]
+    fn remaining_display_59_seconds() {
+        let lock = OpLock {
+            resource: "r".to_owned(),
+            agent: "a".to_owned(),
+            acquired_at: Utc::now(),
+            expires_at: Utc::now() + Duration::seconds(59) + Duration::milliseconds(500),
+            reason: None,
+        };
+        let display = lock.remaining_display();
+        assert!(display.ends_with('s'));
+        assert!(!display.contains('m'));
+    }
+
+    #[test]
+    fn remaining_display_3599_seconds() {
+        // Just under one hour: should show minutes
+        let lock = OpLock {
+            resource: "r".to_owned(),
+            agent: "a".to_owned(),
+            acquired_at: Utc::now(),
+            expires_at: Utc::now() + Duration::seconds(3599) + Duration::milliseconds(500),
+            reason: None,
+        };
+        let display = lock.remaining_display();
+        assert!(display.contains('m'));
+        assert!(!display.contains('h'));
+    }
+
+    #[test]
+    fn remaining_display_exactly_one_hour() {
+        let lock = OpLock {
+            resource: "r".to_owned(),
+            agent: "a".to_owned(),
+            acquired_at: Utc::now(),
+            expires_at: Utc::now() + Duration::seconds(3600) + Duration::milliseconds(500),
+            reason: None,
+        };
+        let display = lock.remaining_display();
+        assert!(display.contains('h'));
+    }
+
+    #[test]
+    fn remaining_display_multiple_hours() {
+        let lock = OpLock {
+            resource: "r".to_owned(),
+            agent: "a".to_owned(),
+            acquired_at: Utc::now(),
+            expires_at: Utc::now() + Duration::hours(5) + Duration::minutes(45),
+            reason: None,
+        };
+        let display = lock.remaining_display();
+        assert!(display.contains('h'));
+        assert!(display.contains('m'));
+    }
+
+    // ── OpLock: serialization edge cases ────────────────────────
+
+    #[test]
+    fn lock_serde_preserves_timestamps() {
+        let now = Utc::now();
+        let lock = OpLock {
+            resource: "ts.test".to_owned(),
+            agent: "Ag".to_owned(),
+            acquired_at: now,
+            expires_at: now + Duration::minutes(10),
+            reason: None,
+        };
+        let json = serde_json::to_string(&lock).unwrap();
+        let restored: OpLock = serde_json::from_str(&json).unwrap();
+        // Timestamps should round-trip (chrono serializes to RFC3339)
+        assert_eq!(
+            restored.acquired_at.timestamp(),
+            lock.acquired_at.timestamp()
+        );
+        assert_eq!(
+            restored.expires_at.timestamp(),
+            lock.expires_at.timestamp()
+        );
+    }
+
+    #[test]
+    fn lock_serde_json_contains_all_fields() {
+        let lock = OpLock {
+            resource: "r".to_owned(),
+            agent: "a".to_owned(),
+            acquired_at: Utc::now(),
+            expires_at: Utc::now() + Duration::minutes(1),
+            reason: Some("why".to_owned()),
+        };
+        let val = serde_json::to_value(&lock).unwrap();
+        assert!(val.get("resource").is_some());
+        assert!(val.get("agent").is_some());
+        assert!(val.get("acquired_at").is_some());
+        assert!(val.get("expires_at").is_some());
+        assert!(val.get("reason").is_some());
+        assert_eq!(val["reason"], "why");
+    }
+
+    #[test]
+    fn lock_serde_null_reason_in_json() {
+        let lock = OpLock {
+            resource: "r".to_owned(),
+            agent: "a".to_owned(),
+            acquired_at: Utc::now(),
+            expires_at: Utc::now() + Duration::minutes(1),
+            reason: None,
+        };
+        let val = serde_json::to_value(&lock).unwrap();
+        assert!(val["reason"].is_null());
+    }
+
+    #[test]
+    fn lock_deserialize_from_known_json() {
+        let json = r#"{
+            "resource": "github.issues",
+            "agent": "TestBot",
+            "acquired_at": "2026-03-12T10:00:00Z",
+            "expires_at": "2026-03-12T10:30:00Z",
+            "reason": "testing"
+        }"#;
+        let lock: OpLock = serde_json::from_str(json).unwrap();
+        assert_eq!(lock.resource, "github.issues");
+        assert_eq!(lock.agent, "TestBot");
+        assert_eq!(lock.reason.as_deref(), Some("testing"));
+    }
+
+    #[test]
+    fn lock_deserialize_null_reason() {
+        let json = r#"{
+            "resource": "r",
+            "agent": "a",
+            "acquired_at": "2026-03-12T10:00:00Z",
+            "expires_at": "2026-03-12T10:30:00Z",
+            "reason": null
+        }"#;
+        let lock: OpLock = serde_json::from_str(json).unwrap();
+        assert!(lock.reason.is_none());
+    }
+
+    // ── OpLock: Clone deep equality ─────────────────────────────
+
+    #[test]
+    fn lock_clone_preserves_all_fields() {
+        let now = Utc::now();
+        let lock = OpLock {
+            resource: "res.x".to_owned(),
+            agent: "agent.y".to_owned(),
+            acquired_at: now,
+            expires_at: now + Duration::minutes(42),
+            reason: Some("deep clone test".to_owned()),
+        };
+        let cloned = lock.clone();
+        assert_eq!(lock.resource, cloned.resource);
+        assert_eq!(lock.agent, cloned.agent);
+        assert_eq!(lock.acquired_at, cloned.acquired_at);
+        assert_eq!(lock.expires_at, cloned.expires_at);
+        assert_eq!(lock.reason, cloned.reason);
+    }
+
+    #[test]
+    fn lock_clone_is_independent() {
+        let lock = OpLock {
+            resource: "r".to_owned(),
+            agent: "a".to_owned(),
+            acquired_at: Utc::now(),
+            expires_at: Utc::now() + Duration::minutes(5),
+            reason: Some("orig".to_owned()),
+        };
+        let mut cloned = lock.clone();
+        cloned.resource = "modified".to_owned();
+        assert_eq!(lock.resource, "r");
+        assert_eq!(cloned.resource, "modified");
+    }
+
+    // ── OpLock: Debug format ────────────────────────────────────
+
+    #[test]
+    fn lock_debug_contains_agent() {
+        let lock = OpLock {
+            resource: "r".to_owned(),
+            agent: "SpecificAgent42".to_owned(),
+            acquired_at: Utc::now(),
+            expires_at: Utc::now() + Duration::minutes(5),
+            reason: None,
+        };
+        let debug = format!("{lock:?}");
+        assert!(debug.contains("SpecificAgent42"));
+    }
+
+    #[test]
+    fn lock_debug_contains_reason() {
+        let lock = OpLock {
+            resource: "r".to_owned(),
+            agent: "a".to_owned(),
+            acquired_at: Utc::now(),
+            expires_at: Utc::now() + Duration::minutes(5),
+            reason: Some("debug-reason".to_owned()),
+        };
+        let debug = format!("{lock:?}");
+        assert!(debug.contains("debug-reason"));
+    }
+
+    // ── AcquireResult: Debug ────────────────────────────────────
+
+    #[test]
+    fn acquire_result_acquired_debug() {
+        let result = AcquireResult::Acquired {
+            lock: OpLock {
+                resource: "r".to_owned(),
+                agent: "a".to_owned(),
+                acquired_at: Utc::now(),
+                expires_at: Utc::now() + Duration::minutes(1),
+                reason: None,
+            },
+        };
+        let debug = format!("{result:?}");
+        assert!(debug.contains("Acquired"));
+    }
+
+    #[test]
+    fn acquire_result_conflict_debug() {
+        let result = AcquireResult::Conflict {
+            held_by: "Agent".to_owned(),
+            expires_at: "t".to_owned(),
+            remaining: "5m".to_owned(),
+        };
+        let debug = format!("{result:?}");
+        assert!(debug.contains("Conflict"));
+        assert!(debug.contains("Agent"));
+    }
+
+    #[test]
+    fn acquire_result_clone_acquired() {
+        let result = AcquireResult::Acquired {
+            lock: OpLock {
+                resource: "r".to_owned(),
+                agent: "a".to_owned(),
+                acquired_at: Utc::now(),
+                expires_at: Utc::now() + Duration::minutes(5),
+                reason: Some("c".to_owned()),
+            },
+        };
+        let cloned = result.clone();
+        assert!(cloned.is_acquired());
+    }
+
+    // ── CheckResult: Debug ──────────────────────────────────────
+
+    #[test]
+    fn check_result_free_debug() {
+        let result = CheckResult::Free;
+        let debug = format!("{result:?}");
+        assert!(debug.contains("Free"));
+    }
+
+    #[test]
+    fn check_result_held_by_self_debug() {
+        let result = CheckResult::HeldBySelf {
+            lock: OpLock {
+                resource: "r".to_owned(),
+                agent: "me".to_owned(),
+                acquired_at: Utc::now(),
+                expires_at: Utc::now() + Duration::minutes(5),
+                reason: None,
+            },
+        };
+        let debug = format!("{result:?}");
+        assert!(debug.contains("HeldBySelf"));
+    }
+
+    #[test]
+    fn check_result_held_by_other_debug() {
+        let result = CheckResult::HeldByOther {
+            held_by: "Other".to_owned(),
+            expires_at: "t".to_owned(),
+            remaining: "2m".to_owned(),
+        };
+        let debug = format!("{result:?}");
+        assert!(debug.contains("HeldByOther"));
+        assert!(debug.contains("Other"));
+    }
+
+    #[test]
+    fn check_result_clone_held_by_self() {
+        let result = CheckResult::HeldBySelf {
+            lock: OpLock {
+                resource: "r".to_owned(),
+                agent: "me".to_owned(),
+                acquired_at: Utc::now(),
+                expires_at: Utc::now() + Duration::minutes(5),
+                reason: Some("testing".to_owned()),
+            },
+        };
+        let cloned = result.clone();
+        let json = serde_json::to_value(&cloned).unwrap();
+        assert_eq!(json["status"], "held_by_self");
+    }
+
+    #[test]
+    fn check_result_clone_held_by_other() {
+        let result = CheckResult::HeldByOther {
+            held_by: "X".to_owned(),
+            expires_at: "t".to_owned(),
+            remaining: "1m".to_owned(),
+        };
+        let cloned = result.clone();
+        let json = serde_json::to_value(&cloned).unwrap();
+        assert_eq!(json["held_by"], "X");
+    }
+
+    // ── LockStore: TTL=0 edge case ─────────────────────────────
+
+    #[test]
+    fn acquire_with_zero_ttl() {
+        let store = temp_store();
+        let result = store.acquire("res", "Agent", 0, None).unwrap();
+        // TTL=0 means expires immediately at acquired_at
+        assert!(result.is_acquired());
+        // But checking right after should show it expired (gc'd)
+        let locks = store.list().unwrap();
+        assert!(locks.is_empty());
+    }
+
+    #[test]
+    fn acquire_with_large_ttl() {
+        let store = temp_store();
+        let result = store.acquire("res", "Agent", u32::MAX, None).unwrap();
+        assert!(result.is_acquired());
+        if let AcquireResult::Acquired { lock } = result {
+            assert!(lock.is_active());
+        }
+    }
+
+    // ── LockStore: corrupted data ───────────────────────────────
+
+    #[test]
+    fn load_corrupted_json_returns_error() {
+        let store = temp_store();
+        std::fs::create_dir_all(store.dir()).unwrap();
+        std::fs::write(store.data_path(), "not valid json!!!").unwrap();
+        let result = store.list();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("corrupted"));
+    }
+
+    #[test]
+    fn load_empty_json_file_returns_error() {
+        let store = temp_store();
+        std::fs::create_dir_all(store.dir()).unwrap();
+        std::fs::write(store.data_path(), "").unwrap();
+        let result = store.list();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn load_partial_json_returns_error() {
+        let store = temp_store();
+        std::fs::create_dir_all(store.dir()).unwrap();
+        std::fs::write(store.data_path(), "{\"locks\": {").unwrap();
+        let result = store.list();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn load_valid_empty_locks_json() {
+        let store = temp_store();
+        std::fs::create_dir_all(store.dir()).unwrap();
+        std::fs::write(store.data_path(), r#"{"locks": {}}"#).unwrap();
+        let locks = store.list().unwrap();
+        assert!(locks.is_empty());
+    }
+
+    // ── LockStore: data_path ────────────────────────────────────
+
+    #[test]
+    fn data_path_ends_with_locks_json() {
+        let store = temp_store();
+        let path = store.data_path();
+        assert!(path.to_str().unwrap().ends_with("locks.json"));
+    }
+
+    // ── LockStore: multiple GC passes ───────────────────────────
+
+    #[test]
+    fn gc_removes_only_expired_locks() {
+        let store = temp_store();
+        let mut data = LockData::default();
+        // Add one expired and one active lock
+        data.locks.insert(
+            "expired.res".to_owned(),
+            OpLock {
+                resource: "expired.res".to_owned(),
+                agent: "Ghost".to_owned(),
+                acquired_at: Utc::now() - Duration::hours(3),
+                expires_at: Utc::now() - Duration::hours(1),
+                reason: None,
+            },
+        );
+        data.locks.insert(
+            "active.res".to_owned(),
+            OpLock {
+                resource: "active.res".to_owned(),
+                agent: "Alive".to_owned(),
+                acquired_at: Utc::now(),
+                expires_at: Utc::now() + Duration::hours(1),
+                reason: None,
+            },
+        );
+        std::fs::create_dir_all(store.dir()).unwrap();
+        let json = serde_json::to_string_pretty(&data).unwrap();
+        std::fs::write(store.data_path(), json).unwrap();
+
+        let locks = store.list().unwrap();
+        assert_eq!(locks.len(), 1);
+        assert_eq!(locks[0].resource, "active.res");
+    }
+
+    #[test]
+    fn gc_all_expired_results_in_empty() {
+        let store = temp_store();
+        let mut data = LockData::default();
+        for i in 0..5 {
+            data.locks.insert(
+                format!("expired.{i}"),
+                OpLock {
+                    resource: format!("expired.{i}"),
+                    agent: format!("Ghost{i}"),
+                    acquired_at: Utc::now() - Duration::hours(3),
+                    expires_at: Utc::now() - Duration::seconds(1),
+                    reason: None,
+                },
+            );
+        }
+        std::fs::create_dir_all(store.dir()).unwrap();
+        let json = serde_json::to_string_pretty(&data).unwrap();
+        std::fs::write(store.data_path(), json).unwrap();
+
+        assert_eq!(store.count().unwrap(), 0);
+    }
+
+    // ── LockStore: refresh semantics ────────────────────────────
+
+    #[test]
+    fn refresh_updates_expiry_time() {
+        let store = temp_store();
+        let r1 = store.acquire("res", "Agent", 10, None).unwrap();
+        let r2 = store.acquire("res", "Agent", 60, None).unwrap();
+        if let (AcquireResult::Acquired { lock: l1 }, AcquireResult::Acquired { lock: l2 }) =
+            (r1, r2)
+        {
+            // Second acquisition should have later expiry
+            assert!(l2.expires_at > l1.expires_at);
+        } else {
+            panic!("both should be acquired");
+        }
+    }
+
+    #[test]
+    fn refresh_updates_reason() {
+        let store = temp_store();
+        store
+            .acquire("res", "Agent", 30, Some("first".to_owned()))
+            .unwrap();
+        let result = store
+            .acquire("res", "Agent", 30, Some("second".to_owned()))
+            .unwrap();
+        if let AcquireResult::Acquired { lock } = result {
+            assert_eq!(lock.reason.as_deref(), Some("second"));
+        } else {
+            panic!("expected Acquired");
+        }
+    }
+
+    #[test]
+    fn refresh_clears_reason_if_none() {
+        let store = temp_store();
+        store
+            .acquire("res", "Agent", 30, Some("has reason".to_owned()))
+            .unwrap();
+        let result = store.acquire("res", "Agent", 30, None).unwrap();
+        if let AcquireResult::Acquired { lock } = result {
+            assert!(lock.reason.is_none());
+        } else {
+            panic!("expected Acquired");
+        }
+    }
+
+    // ── LockStore: conflict details ─────────────────────────────
+
+    #[test]
+    fn conflict_contains_rfc3339_expiry() {
+        let store = temp_store();
+        store.acquire("res", "AgentA", 30, None).unwrap();
+        let result = store.acquire("res", "AgentB", 30, None).unwrap();
+        if let AcquireResult::Conflict { expires_at, .. } = result {
+            // Should be a valid RFC3339 timestamp
+            assert!(expires_at.contains('T'));
+            assert!(expires_at.contains('+') || expires_at.contains('Z'));
+        } else {
+            panic!("expected Conflict");
+        }
+    }
+
+    #[test]
+    fn conflict_remaining_is_nonempty() {
+        let store = temp_store();
+        store.acquire("res", "AgentA", 30, None).unwrap();
+        let result = store.acquire("res", "AgentB", 30, None).unwrap();
+        if let AcquireResult::Conflict { remaining, .. } = result {
+            assert!(!remaining.is_empty());
+        } else {
+            panic!("expected Conflict");
+        }
+    }
+
+    // ── LockStore: release after expired ────────────────────────
+
+    #[test]
+    fn release_expired_lock_returns_false() {
+        let store = temp_store();
+        let mut data = LockData::default();
+        data.locks.insert(
+            "res".to_owned(),
+            OpLock {
+                resource: "res".to_owned(),
+                agent: "Agent".to_owned(),
+                acquired_at: Utc::now() - Duration::hours(2),
+                expires_at: Utc::now() - Duration::hours(1),
+                reason: None,
+            },
+        );
+        std::fs::create_dir_all(store.dir()).unwrap();
+        let json = serde_json::to_string_pretty(&data).unwrap();
+        std::fs::write(store.data_path(), json).unwrap();
+
+        // GC removes the expired lock before release can find it
+        assert!(!store.release("res", "Agent").unwrap());
+    }
+
+    // ── LockStore: check with expired lock ──────────────────────
+
+    #[test]
+    fn check_expired_lock_shows_free() {
+        let store = temp_store();
+        let mut data = LockData::default();
+        data.locks.insert(
+            "res".to_owned(),
+            OpLock {
+                resource: "res".to_owned(),
+                agent: "OldAgent".to_owned(),
+                acquired_at: Utc::now() - Duration::hours(2),
+                expires_at: Utc::now() - Duration::seconds(1),
+                reason: None,
+            },
+        );
+        std::fs::create_dir_all(store.dir()).unwrap();
+        let json = serde_json::to_string_pretty(&data).unwrap();
+        std::fs::write(store.data_path(), json).unwrap();
+
+        let result = store.check("res", "AnyAgent").unwrap();
+        assert!(matches!(result, CheckResult::Free));
+    }
+
+    // ── LockStore: list_by_agent with expired ───────────────────
+
+    #[test]
+    fn list_by_agent_excludes_expired() {
+        let store = temp_store();
+        let mut data = LockData::default();
+        data.locks.insert(
+            "expired.res".to_owned(),
+            OpLock {
+                resource: "expired.res".to_owned(),
+                agent: "Agent".to_owned(),
+                acquired_at: Utc::now() - Duration::hours(2),
+                expires_at: Utc::now() - Duration::seconds(1),
+                reason: None,
+            },
+        );
+        data.locks.insert(
+            "active.res".to_owned(),
+            OpLock {
+                resource: "active.res".to_owned(),
+                agent: "Agent".to_owned(),
+                acquired_at: Utc::now(),
+                expires_at: Utc::now() + Duration::hours(1),
+                reason: None,
+            },
+        );
+        std::fs::create_dir_all(store.dir()).unwrap();
+        let json = serde_json::to_string_pretty(&data).unwrap();
+        std::fs::write(store.data_path(), json).unwrap();
+
+        let locks = store.list_by_agent("Agent").unwrap();
+        assert_eq!(locks.len(), 1);
+        assert_eq!(locks[0].resource, "active.res");
+    }
+
+    // ── LockStore: release_all empty store ──────────────────────
+
+    #[test]
+    fn release_all_on_empty_store() {
+        let store = temp_store();
+        let released = store.release_all("Agent").unwrap();
+        assert_eq!(released, 0);
+    }
+
+    #[test]
+    fn release_all_does_not_save_when_zero() {
+        let store = temp_store();
+        // Don't create the dir - release_all with 0 should not attempt to save
+        let released = store.release_all("Agent").unwrap();
+        assert_eq!(released, 0);
+        // data_path should not exist since no save was needed
+        assert!(!store.data_path().exists());
+    }
+
+    // ── LockStore: count with expired ───────────────────────────
+
+    #[test]
+    fn count_excludes_expired() {
+        let store = temp_store();
+        let mut data = LockData::default();
+        data.locks.insert(
+            "expired".to_owned(),
+            OpLock {
+                resource: "expired".to_owned(),
+                agent: "Ghost".to_owned(),
+                acquired_at: Utc::now() - Duration::hours(2),
+                expires_at: Utc::now() - Duration::seconds(1),
+                reason: None,
+            },
+        );
+        data.locks.insert(
+            "active".to_owned(),
+            OpLock {
+                resource: "active".to_owned(),
+                agent: "Alive".to_owned(),
+                acquired_at: Utc::now(),
+                expires_at: Utc::now() + Duration::hours(1),
+                reason: None,
+            },
+        );
+        std::fs::create_dir_all(store.dir()).unwrap();
+        let json = serde_json::to_string_pretty(&data).unwrap();
+        std::fs::write(store.data_path(), json).unwrap();
+
+        assert_eq!(store.count().unwrap(), 1);
+    }
+
+    // ── LockStore: acquire after expired by different agent ─────
+
+    #[test]
+    fn acquire_after_expired_by_other_agent() {
+        let store = temp_store();
+        let mut data = LockData::default();
+        data.locks.insert(
+            "res".to_owned(),
+            OpLock {
+                resource: "res".to_owned(),
+                agent: "OldAgent".to_owned(),
+                acquired_at: Utc::now() - Duration::hours(2),
+                expires_at: Utc::now() - Duration::seconds(1),
+                reason: None,
+            },
+        );
+        std::fs::create_dir_all(store.dir()).unwrap();
+        let json = serde_json::to_string_pretty(&data).unwrap();
+        std::fs::write(store.data_path(), json).unwrap();
+
+        let result = store.acquire("res", "NewAgent", 30, None).unwrap();
+        assert!(result.is_acquired());
+        if let AcquireResult::Acquired { lock } = result {
+            assert_eq!(lock.agent, "NewAgent");
+        }
+    }
+
+    // ── LockStore: persistence across instances ─────────────────
+
+    #[test]
+    fn locks_persist_across_store_instances() {
+        let dir = std::env::temp_dir().join(format!("fwc-lock-persist-{}", uuid::Uuid::new_v4()));
+        let store1 = LockStore::new(dir.clone());
+        store1.acquire("res", "Agent", 30, None).unwrap();
+
+        let store2 = LockStore::new(dir);
+        let locks = store2.list().unwrap();
+        assert_eq!(locks.len(), 1);
+        assert_eq!(locks[0].resource, "res");
+    }
+
+    #[test]
+    fn release_persists_across_store_instances() {
+        let dir = std::env::temp_dir().join(format!("fwc-lock-relpersist-{}", uuid::Uuid::new_v4()));
+        let store1 = LockStore::new(dir.clone());
+        store1.acquire("res", "Agent", 30, None).unwrap();
+        store1.release("res", "Agent").unwrap();
+
+        let store2 = LockStore::new(dir);
+        assert_eq!(store2.count().unwrap(), 0);
+    }
+
+    // ── LockStore: many resources stress ────────────────────────
+
+    #[test]
+    fn acquire_many_resources() {
+        let store = temp_store();
+        for i in 0..20 {
+            let resource = format!("resource.{i}");
+            let result = store.acquire(&resource, "Agent", 30, None).unwrap();
+            assert!(result.is_acquired());
+        }
+        assert_eq!(store.count().unwrap(), 20);
+        let locks = store.list().unwrap();
+        assert_eq!(locks.len(), 20);
+    }
+
+    #[test]
+    fn release_all_many_resources() {
+        let store = temp_store();
+        for i in 0..10 {
+            store
+                .acquire(&format!("res.{i}"), "Agent", 30, None)
+                .unwrap();
+        }
+        let released = store.release_all("Agent").unwrap();
+        assert_eq!(released, 10);
+        assert_eq!(store.count().unwrap(), 0);
+    }
+
+    // ── LockStore: check after acquire by same agent ────────────
+
+    #[test]
+    fn check_held_by_self_contains_lock_details() {
+        let store = temp_store();
+        store
+            .acquire("res", "Agent", 30, Some("my reason".to_owned()))
+            .unwrap();
+        let result = store.check("res", "Agent").unwrap();
+        match result {
+            CheckResult::HeldBySelf { lock } => {
+                assert_eq!(lock.resource, "res");
+                assert_eq!(lock.agent, "Agent");
+                assert_eq!(lock.reason.as_deref(), Some("my reason"));
+            }
+            other => panic!("expected HeldBySelf, got {other:?}"),
+        }
+    }
+
+    // ── parse_ttl: more edge cases ──────────────────────────────
+
+    #[test]
+    fn parse_ttl_zero_minutes() {
+        assert_eq!(parse_ttl("0m").unwrap(), 0);
+    }
+
+    #[test]
+    fn parse_ttl_zero_hours() {
+        assert_eq!(parse_ttl("0h").unwrap(), 0);
+    }
+
+    #[test]
+    fn parse_ttl_zero_seconds() {
+        assert_eq!(parse_ttl("0s").unwrap(), 0);
+    }
+
+    #[test]
+    fn parse_ttl_zero_plain() {
+        assert_eq!(parse_ttl("0").unwrap(), 0);
+    }
+
+    #[test]
+    fn parse_ttl_huge_minutes() {
+        assert_eq!(parse_ttl("9999m").unwrap(), 9999);
+    }
+
+    #[test]
+    fn parse_ttl_huge_hours() {
+        assert_eq!(parse_ttl("999h").unwrap(), 999 * 60);
+    }
+
+    #[test]
+    fn parse_ttl_1s_rounds_up_to_1() {
+        assert_eq!(parse_ttl("1s").unwrap(), 1);
+    }
+
+    #[test]
+    fn parse_ttl_59s_rounds_up_to_1() {
+        assert_eq!(parse_ttl("59s").unwrap(), 1);
+    }
+
+    #[test]
+    fn parse_ttl_119s_rounds_up_to_2() {
+        assert_eq!(parse_ttl("119s").unwrap(), 2);
+    }
+
+    #[test]
+    fn parse_ttl_121s_rounds_up_to_3() {
+        assert_eq!(parse_ttl("121s").unwrap(), 3);
+    }
+
+    #[test]
+    fn parse_ttl_double_suffix_is_error() {
+        assert!(parse_ttl("30mm").is_err());
+        assert!(parse_ttl("2hh").is_err());
+    }
+
+    #[test]
+    fn parse_ttl_float_is_error() {
+        assert!(parse_ttl("2.5m").is_err());
+        assert!(parse_ttl("1.5h").is_err());
+    }
+
+    #[test]
+    fn parse_ttl_mixed_case_suffix_is_error() {
+        // Only lowercase suffixes are recognized
+        assert!(parse_ttl("30M").is_err());
+        assert!(parse_ttl("2H").is_err());
+        assert!(parse_ttl("60S").is_err());
+    }
+
+    #[test]
+    fn parse_ttl_leading_zeros() {
+        assert_eq!(parse_ttl("030m").unwrap(), 30);
+        assert_eq!(parse_ttl("002h").unwrap(), 120);
+    }
+
+    #[test]
+    fn parse_ttl_only_suffix_is_error() {
+        assert!(parse_ttl("m").is_err());
+        assert!(parse_ttl("h").is_err());
+        assert!(parse_ttl("s").is_err());
+    }
+
+    #[test]
+    fn parse_ttl_error_messages_contain_context() {
+        let err = parse_ttl("badm").unwrap_err();
+        assert!(err.contains("invalid TTL minutes"));
+
+        let err = parse_ttl("badh").unwrap_err();
+        assert!(err.contains("invalid TTL hours"));
+
+        let err = parse_ttl("bads").unwrap_err();
+        assert!(err.contains("invalid TTL seconds"));
+
+        let err = parse_ttl("nope").unwrap_err();
+        assert!(err.contains("invalid TTL"));
+    }
+
+    #[test]
+    fn parse_ttl_empty_string_error_message() {
+        let err = parse_ttl("").unwrap_err();
+        assert!(err.contains("empty"));
+    }
+
+    // ── validate_resource: more edge cases ──────────────────────
+
+    #[test]
+    fn validate_resource_unicode_rejected() {
+        assert!(validate_resource("caf\u{00e9}").is_err());
+        assert!(validate_resource("\u{1f600}").is_err());
+    }
+
+    #[test]
+    fn validate_resource_colon_rejected() {
+        assert!(validate_resource("github:issues").is_err());
+    }
+
+    #[test]
+    fn validate_resource_comma_rejected() {
+        assert!(validate_resource("a,b").is_err());
+    }
+
+    #[test]
+    fn validate_resource_semicolon_rejected() {
+        assert!(validate_resource("a;b").is_err());
+    }
+
+    #[test]
+    fn validate_resource_equals_rejected() {
+        assert!(validate_resource("a=b").is_err());
+    }
+
+    #[test]
+    fn validate_resource_pipe_rejected() {
+        assert!(validate_resource("a|b").is_err());
+    }
+
+    #[test]
+    fn validate_resource_backslash_rejected() {
+        assert!(validate_resource("a\\b").is_err());
+    }
+
+    #[test]
+    fn validate_resource_127_chars_ok() {
+        let s = "a".repeat(127);
+        assert!(validate_resource(&s).is_ok());
+    }
+
+    #[test]
+    fn validate_resource_all_allowed_chars() {
+        // Test every allowed character class
+        assert!(validate_resource("abcdefghijklmnopqrstuvwxyz").is_ok());
+        assert!(validate_resource("ABCDEFGHIJKLMNOPQRSTUVWXYZ").is_ok());
+        assert!(validate_resource("0123456789").is_ok());
+        assert!(validate_resource("-_.*").is_ok());
+    }
+
+    #[test]
+    fn validate_resource_error_message_for_empty() {
+        let err = validate_resource("").unwrap_err();
+        assert!(err.contains("empty"));
+    }
+
+    #[test]
+    fn validate_resource_error_message_for_too_long() {
+        let err = validate_resource(&"a".repeat(200)).unwrap_err();
+        assert!(err.contains("too long"));
+    }
+
+    #[test]
+    fn validate_resource_error_message_for_invalid_chars() {
+        let err = validate_resource("bad!char").unwrap_err();
+        assert!(err.contains("invalid characters"));
+        assert!(err.contains("bad!char"));
+    }
+
+    // ── LockData: Default ───────────────────────────────────────
+
+    #[test]
+    fn lock_data_default_has_empty_locks() {
+        let data = LockData::default();
+        assert!(data.locks.is_empty());
+    }
+
+    #[test]
+    fn lock_data_serde_roundtrip() {
+        let mut data = LockData::default();
+        data.locks.insert(
+            "res".to_owned(),
+            OpLock {
+                resource: "res".to_owned(),
+                agent: "a".to_owned(),
+                acquired_at: Utc::now(),
+                expires_at: Utc::now() + Duration::minutes(5),
+                reason: None,
+            },
+        );
+        let json = serde_json::to_string(&data).unwrap();
+        let restored: LockData = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.locks.len(), 1);
+        assert!(restored.locks.contains_key("res"));
+    }
+
+    #[test]
+    fn lock_data_empty_serde_roundtrip() {
+        let data = LockData::default();
+        let json = serde_json::to_string(&data).unwrap();
+        let restored: LockData = serde_json::from_str(&json).unwrap();
+        assert!(restored.locks.is_empty());
+    }
+
+    // ── LockStore: new constructor ──────────────────────────────
+
+    #[test]
+    fn lock_store_new_with_pathbuf() {
+        let store = LockStore::new(PathBuf::from("/tmp/test-locks"));
+        assert_eq!(store.dir(), Path::new("/tmp/test-locks"));
+    }
+
+    #[test]
+    fn lock_store_new_with_string() {
+        let store = LockStore::new("/tmp/test-locks");
+        assert_eq!(store.dir(), Path::new("/tmp/test-locks"));
+    }
+
+    // ── AcquireResult: serialization tag format ─────────────────
+
+    #[test]
+    fn acquire_result_acquired_json_has_snake_case_tag() {
+        let result = AcquireResult::Acquired {
+            lock: OpLock {
+                resource: "r".to_owned(),
+                agent: "a".to_owned(),
+                acquired_at: Utc::now(),
+                expires_at: Utc::now() + Duration::minutes(1),
+                reason: None,
+            },
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("\"status\":\"acquired\""));
+    }
+
+    #[test]
+    fn acquire_result_conflict_json_has_snake_case_tag() {
+        let result = AcquireResult::Conflict {
+            held_by: "X".to_owned(),
+            expires_at: "t".to_owned(),
+            remaining: "5m".to_owned(),
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("\"status\":\"conflict\""));
+    }
+
+    // ── CheckResult: serialization tag format ───────────────────
+
+    #[test]
+    fn check_result_free_json_has_snake_case_tag() {
+        let result = CheckResult::Free;
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("\"status\":\"free\""));
+    }
+
+    #[test]
+    fn check_result_held_by_self_json_has_snake_case_tag() {
+        let result = CheckResult::HeldBySelf {
+            lock: OpLock {
+                resource: "r".to_owned(),
+                agent: "a".to_owned(),
+                acquired_at: Utc::now(),
+                expires_at: Utc::now() + Duration::minutes(1),
+                reason: None,
+            },
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("\"status\":\"held_by_self\""));
+    }
+
+    #[test]
+    fn check_result_held_by_other_json_has_snake_case_tag() {
+        let result = CheckResult::HeldByOther {
+            held_by: "X".to_owned(),
+            expires_at: "t".to_owned(),
+            remaining: "5m".to_owned(),
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("\"status\":\"held_by_other\""));
+    }
+
+    // ── LockStore: acquire conflict details from check ──────────
+
+    #[test]
+    fn held_by_other_check_matches_acquire_conflict() {
+        let store = temp_store();
+        store
+            .acquire("res", "AgentA", 30, Some("reason".to_owned()))
+            .unwrap();
+
+        // Check from AgentB's perspective
+        let check = store.check("res", "AgentB").unwrap();
+        match check {
+            CheckResult::HeldByOther { held_by, .. } => {
+                assert_eq!(held_by, "AgentA");
+            }
+            other => panic!("expected HeldByOther, got {other:?}"),
+        }
+
+        // Acquire from AgentB should also show conflict
+        let acquire = store.acquire("res", "AgentB", 30, None).unwrap();
+        match acquire {
+            AcquireResult::Conflict { held_by, .. } => {
+                assert_eq!(held_by, "AgentA");
+            }
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+    }
+
+    // ── LockStore: sequential operations ────────────────────────
+
+    #[test]
+    fn acquire_release_acquire_cycle() {
+        let store = temp_store();
+        for _ in 0..5 {
+            let result = store.acquire("res", "Agent", 30, None).unwrap();
+            assert!(result.is_acquired());
+            assert!(store.release("res", "Agent").unwrap());
+            let check = store.check("res", "Agent").unwrap();
+            assert!(matches!(check, CheckResult::Free));
+        }
+    }
+
+    #[test]
+    fn interleaved_acquire_release_multiple_resources() {
+        let store = temp_store();
+        store.acquire("res.a", "Agent", 30, None).unwrap();
+        store.acquire("res.b", "Agent", 30, None).unwrap();
+        assert_eq!(store.count().unwrap(), 2);
+        store.release("res.a", "Agent").unwrap();
+        assert_eq!(store.count().unwrap(), 1);
+        store.acquire("res.c", "Agent", 30, None).unwrap();
+        assert_eq!(store.count().unwrap(), 2);
+        store.release("res.b", "Agent").unwrap();
+        store.release("res.c", "Agent").unwrap();
+        assert_eq!(store.count().unwrap(), 0);
+    }
 }

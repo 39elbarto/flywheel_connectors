@@ -1089,4 +1089,683 @@ mod tests {
         assert!(json.get("recommendation").is_some());
         assert!(json.get("will_exhaust_before_reset").is_some());
     }
+
+    // ── UsageRate Clone/Debug/Serialize ─────────────────────────
+
+    #[test]
+    fn rate_clone_preserves_all_fields() {
+        let rate = UsageRate::from_snapshot("pool-x", 500, 1800);
+        let cloned = rate.clone();
+        assert_eq!(rate.pool, cloned.pool);
+        assert!((rate.requests_per_hour - cloned.requests_per_hour).abs() < f64::EPSILON);
+        assert_eq!(rate.observation_window_secs, cloned.observation_window_secs);
+        assert_eq!(rate.observed_requests, cloned.observed_requests);
+    }
+
+    #[test]
+    fn rate_debug_contains_pool_name() {
+        let rate = UsageRate::from_snapshot("debug-pool", 10, 100);
+        let dbg = format!("{rate:?}");
+        assert!(dbg.contains("debug-pool"));
+        assert!(dbg.contains("UsageRate"));
+    }
+
+    #[test]
+    fn rate_serialize_contains_all_keys() {
+        let rate = UsageRate::from_snapshot("ser", 42, 3600);
+        let json = serde_json::to_value(&rate).unwrap();
+        assert!(json.get("pool").is_some());
+        assert!(json.get("requests_per_hour").is_some());
+        assert!(json.get("observation_window_secs").is_some());
+        assert!(json.get("observed_requests").is_some());
+    }
+
+    #[test]
+    fn rate_serialize_values_correct() {
+        let rate = UsageRate::from_snapshot("p1", 100, 3600);
+        let json = serde_json::to_value(&rate).unwrap();
+        assert_eq!(json["pool"], "p1");
+        assert_eq!(json["observed_requests"], 100);
+        assert_eq!(json["observation_window_secs"], 3600);
+        assert!((json["requests_per_hour"].as_f64().unwrap() - 100.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn rate_from_snapshot_large_window() {
+        // 1 request in 1 week
+        let rate = UsageRate::from_snapshot("slow", 1, 604_800);
+        assert!(rate.requests_per_hour < 0.006);
+        assert!(rate.requests_per_hour > 0.005);
+    }
+
+    #[test]
+    fn rate_from_snapshot_one_second_window() {
+        let rate = UsageRate::from_snapshot("burst", 10, 1);
+        // 10 req/s → 36000 req/hr
+        assert!((rate.requests_per_hour - 36000.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn rate_per_minute_zero_window() {
+        let rate = UsageRate::from_snapshot("zero", 100, 0);
+        assert!(rate.requests_per_minute().abs() < f64::EPSILON);
+        assert!(rate.requests_per_second().abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn rate_display_exactly_1_req_hour() {
+        let rate = UsageRate::from_snapshot("x", 1, 3600);
+        let s = rate.display_rate();
+        // 1.0 req/hour >= 1.0, < 60 → "1 req/hour"
+        assert!(s.contains("req/hour"));
+    }
+
+    #[test]
+    fn rate_display_just_below_1() {
+        let rate = UsageRate::from_snapshot("x", 1, 7200);
+        // 0.5 req/hour < 1.0 → "0.5 req/hour" with decimal
+        let s = rate.display_rate();
+        assert!(s.contains("req/hour"));
+        assert!(s.contains('.'));
+    }
+
+    #[test]
+    fn rate_display_120_req_hour() {
+        let rate = UsageRate::from_snapshot("fast", 120, 3600);
+        // 120 req/hour → 2 req/min
+        let s = rate.display_rate();
+        assert!(s.contains("req/min"));
+        assert!(s.contains('2'));
+    }
+
+    // ── ForecastRecommendation additional ────────────────────────
+
+    #[test]
+    fn recommendation_clone_eq() {
+        let a = ForecastRecommendation::Caution;
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn recommendation_ne_variants() {
+        assert_ne!(ForecastRecommendation::Safe, ForecastRecommendation::Caution);
+        assert_ne!(ForecastRecommendation::SlowDown, ForecastRecommendation::Idle);
+        assert_ne!(
+            ForecastRecommendation::WaitForReset,
+            ForecastRecommendation::Safe
+        );
+    }
+
+    #[test]
+    fn recommendation_debug_format() {
+        let dbg = format!("{:?}", ForecastRecommendation::WaitForReset);
+        assert!(dbg.contains("WaitForReset"));
+    }
+
+    #[test]
+    fn recommendation_deserialize_from_string() {
+        let rec: ForecastRecommendation = serde_json::from_str("\"caution\"").unwrap();
+        assert_eq!(rec, ForecastRecommendation::Caution);
+    }
+
+    #[test]
+    fn recommendation_deserialize_slow_down() {
+        let rec: ForecastRecommendation = serde_json::from_str("\"slow_down\"").unwrap();
+        assert_eq!(rec, ForecastRecommendation::SlowDown);
+    }
+
+    #[test]
+    fn recommendation_deserialize_idle() {
+        let rec: ForecastRecommendation = serde_json::from_str("\"idle\"").unwrap();
+        assert_eq!(rec, ForecastRecommendation::Idle);
+    }
+
+    #[test]
+    fn recommendation_deserialize_wait_for_reset() {
+        let rec: ForecastRecommendation = serde_json::from_str("\"wait_for_reset\"").unwrap();
+        assert_eq!(rec, ForecastRecommendation::WaitForReset);
+    }
+
+    #[test]
+    fn recommendation_deserialize_invalid_returns_error() {
+        let result = serde_json::from_str::<ForecastRecommendation>("\"invalid\"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn recommendation_display_matches_serde() {
+        // Display and serde should produce the same snake_case strings
+        for rec in &[
+            ForecastRecommendation::Safe,
+            ForecastRecommendation::Caution,
+            ForecastRecommendation::SlowDown,
+            ForecastRecommendation::WaitForReset,
+            ForecastRecommendation::Idle,
+        ] {
+            let display = rec.to_string();
+            let serde_str = serde_json::to_value(rec).unwrap();
+            assert_eq!(display, serde_str.as_str().unwrap());
+        }
+    }
+
+    // ── ExhaustionForecast Clone/Debug ──────────────────────────
+
+    #[test]
+    fn forecast_clone_preserves_fields() {
+        let snap = pool_ok();
+        let f = forecast_pool(&snap, 1800);
+        let cloned = f.clone();
+        assert_eq!(f.pool, cloned.pool);
+        assert_eq!(f.remaining, cloned.remaining);
+        assert_eq!(f.recommendation, cloned.recommendation);
+        assert_eq!(f.will_exhaust_before_reset, cloned.will_exhaust_before_reset);
+    }
+
+    #[test]
+    fn forecast_debug_contains_pool() {
+        let snap = pool_ok();
+        let f = forecast_pool(&snap, 1800);
+        let dbg = format!("{f:?}");
+        assert!(dbg.contains("core"));
+        assert!(dbg.contains("ExhaustionForecast"));
+    }
+
+    // ── forecast_pool boundary conditions ───────────────────────
+
+    #[test]
+    fn forecast_idle_threshold_below_001() {
+        // Rate < 0.01 req/hr → idle
+        // 1 request in 400000 seconds = 0.009 req/hr
+        let snap = PoolSnapshot::new("core", 1, 5000, Some(Utc::now() + Duration::hours(1)));
+        let f = forecast_pool(&snap, 400_000);
+        assert_eq!(f.recommendation, ForecastRecommendation::Idle);
+    }
+
+    #[test]
+    fn forecast_exactly_at_001_not_idle() {
+        // Rate == 0.01 req/hr → NOT idle (threshold is strict < 0.01)
+        // 1 request in 360000 seconds = 0.01 req/hr
+        let snap = PoolSnapshot::new("core", 1, 5000, Some(Utc::now() + Duration::hours(1)));
+        let f = forecast_pool(&snap, 360_000);
+        assert_ne!(f.recommendation, ForecastRecommendation::Idle);
+    }
+
+    #[test]
+    fn forecast_just_above_idle_threshold() {
+        // 1 request in 100 seconds = 36 req/hr > 0.01
+        let snap = PoolSnapshot::new("core", 1, 5000, Some(Utc::now() + Duration::hours(1)));
+        let f = forecast_pool(&snap, 100);
+        assert_ne!(f.recommendation, ForecastRecommendation::Idle);
+        assert!(f.exhausts_in.is_some());
+    }
+
+    #[test]
+    fn forecast_zero_window_zero_used() {
+        let snap = PoolSnapshot::new("core", 0, 5000, Some(Utc::now() + Duration::hours(1)));
+        let f = forecast_pool(&snap, 0);
+        assert_eq!(f.recommendation, ForecastRecommendation::Idle);
+    }
+
+    #[test]
+    fn forecast_very_high_rate_small_remaining() {
+        // 4999 used in 1 second, 1 remaining
+        let snap = PoolSnapshot::new("core", 4999, 5000, Some(Utc::now() + Duration::hours(1)));
+        let f = forecast_pool(&snap, 1);
+        assert!(f.will_exhaust_before_reset);
+        assert_eq!(f.recommendation, ForecastRecommendation::SlowDown);
+    }
+
+    #[test]
+    fn forecast_percent_79_not_caution() {
+        // percent < 80, won't exhaust before reset → Safe
+        let snap = PoolSnapshot::new("core", 3950, 5000, Some(Utc::now() + Duration::seconds(5)));
+        // 3950 used in 86400s → ~164.6/hr, 1050 remaining → ~6.38 hours to exhaust
+        // Reset in 5s — won't exhaust before reset, percent=79
+        let f = forecast_pool(&snap, 86400);
+        assert!(!f.will_exhaust_before_reset);
+        assert_eq!(f.recommendation, ForecastRecommendation::Safe);
+    }
+
+    #[test]
+    fn forecast_percent_80_caution() {
+        // percent = 80, won't exhaust before reset → Caution
+        let snap = PoolSnapshot::new("core", 4000, 5000, Some(Utc::now() + Duration::seconds(5)));
+        let f = forecast_pool(&snap, 86400);
+        assert!(!f.will_exhaust_before_reset);
+        assert_eq!(f.recommendation, ForecastRecommendation::Caution);
+    }
+
+    #[test]
+    fn forecast_caution_will_exhaust_more_than_5_min() {
+        // Will exhaust before reset, but > 5 min away → Caution
+        let snap =
+            PoolSnapshot::new("core", 2500, 5000, Some(Utc::now() + Duration::hours(10)));
+        // 2500 used in 3600s → 2500/hr, 2500 remaining → 1 hour to exhaust
+        // Reset in 10 hours → will exhaust before reset, secs_to_exhaust = 3600 > 300
+        let f = forecast_pool(&snap, 3600);
+        assert!(f.will_exhaust_before_reset);
+        assert_eq!(f.recommendation, ForecastRecommendation::Caution);
+    }
+
+    #[test]
+    fn forecast_slow_down_under_5_min_boundary() {
+        // Will exhaust before reset, < 5 min (300 sec) → SlowDown
+        // 4995 used in 60s = 299700/hr, 5 remaining → 0.06s to exhaust
+        let snap = PoolSnapshot::new("core", 4995, 5000, Some(Utc::now() + Duration::hours(1)));
+        let f = forecast_pool(&snap, 60);
+        assert!(f.will_exhaust_before_reset);
+        assert_eq!(f.recommendation, ForecastRecommendation::SlowDown);
+    }
+
+    #[test]
+    fn forecast_rate_per_hour_stored_correctly() {
+        let snap = PoolSnapshot::new("core", 1800, 5000, Some(Utc::now() + Duration::hours(1)));
+        let f = forecast_pool(&snap, 3600);
+        // 1800 in 3600s = 1800/hr
+        assert!((f.rate_per_hour - 1800.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn forecast_exhausted_with_no_reset() {
+        let snap = PoolSnapshot::new("core", 5000, 5000, None);
+        let f = forecast_pool(&snap, 3600);
+        assert_eq!(f.recommendation, ForecastRecommendation::WaitForReset);
+        assert!(f.will_exhaust_before_reset);
+    }
+
+    #[test]
+    fn forecast_large_remaining_low_rate() {
+        // Lots of quota, low usage → Safe
+        let snap = PoolSnapshot::new("core", 10, 1_000_000, Some(Utc::now() + Duration::hours(1)));
+        let f = forecast_pool(&snap, 3600);
+        assert!(!f.will_exhaust_before_reset);
+        assert_eq!(f.recommendation, ForecastRecommendation::Safe);
+    }
+
+    // ── BatchFeasibility additional edge cases ──────────────────
+
+    #[test]
+    fn batch_clone_preserves_fields() {
+        let snap = pool_ok();
+        let f = check_batch_feasibility(&snap, 200);
+        let cloned = f.clone();
+        assert_eq!(f.pool, cloned.pool);
+        assert_eq!(f.ops_requested, cloned.ops_requested);
+        assert_eq!(f.remaining, cloned.remaining);
+        assert_eq!(f.fits_now, cloned.fits_now);
+        assert_eq!(f.ops_before_wait, cloned.ops_before_wait);
+        assert_eq!(f.feasible_in_one_window, cloned.feasible_in_one_window);
+    }
+
+    #[test]
+    fn batch_debug_contains_pool() {
+        let snap = pool_ok();
+        let f = check_batch_feasibility(&snap, 50);
+        let dbg = format!("{f:?}");
+        assert!(dbg.contains("core"));
+        assert!(dbg.contains("BatchFeasibility"));
+    }
+
+    #[test]
+    fn batch_very_large_request() {
+        let snap = PoolSnapshot::new("core", 0, 100, Some(Utc::now() + Duration::hours(1)));
+        let f = check_batch_feasibility(&snap, 1_000_000);
+        assert!(!f.fits_now);
+        assert!(!f.feasible_in_one_window);
+        assert_eq!(f.ops_before_wait, 100);
+    }
+
+    #[test]
+    fn batch_one_op_on_exhausted() {
+        let snap = pool_exhausted();
+        let f = check_batch_feasibility(&snap, 1);
+        assert!(!f.fits_now);
+        assert_eq!(f.ops_before_wait, 0);
+        assert!(f.wait_for_reset.is_some());
+    }
+
+    #[test]
+    fn batch_estimated_completion_multiple_windows() {
+        let snap = PoolSnapshot::new("core", 0, 100, Some(Utc::now() + Duration::hours(1)));
+        // 500 ops, 100 per window → 5 windows
+        let f = check_batch_feasibility(&snap, 500);
+        assert!(!f.fits_now);
+        assert!(!f.feasible_in_one_window);
+        // estimated_completion should be > 0
+        assert!(!f.estimated_completion.is_zero());
+    }
+
+    #[test]
+    fn batch_no_reset_time() {
+        let snap = PoolSnapshot::new("core", 50, 100, None);
+        let f = check_batch_feasibility(&snap, 200);
+        assert!(!f.fits_now);
+        assert!(f.wait_for_reset.is_some());
+        // time_to_reset returns Duration::zero when no reset
+        assert!(f.wait_for_reset.unwrap().is_zero());
+    }
+
+    #[test]
+    fn batch_serializes_all_keys() {
+        let snap = pool_ok();
+        let f = check_batch_feasibility(&snap, 100);
+        let json = serde_json::to_value(&f).unwrap();
+        assert!(json.get("pool").is_some());
+        assert!(json.get("ops_requested").is_some());
+        assert!(json.get("remaining").is_some());
+        assert!(json.get("fits_now").is_some());
+        assert!(json.get("ops_before_wait").is_some());
+        assert!(json.get("estimated_completion").is_some());
+        assert!(json.get("feasible_in_one_window").is_some());
+    }
+
+    #[test]
+    fn batch_ops_before_wait_capped_at_requested() {
+        // When remaining > requested, ops_before_wait should be min(remaining, requested)
+        let snap = PoolSnapshot::new("core", 0, 5000, Some(Utc::now() + Duration::hours(1)));
+        let f = check_batch_feasibility(&snap, 100);
+        assert_eq!(f.ops_before_wait, 100);
+    }
+
+    #[test]
+    fn batch_ops_before_wait_capped_at_remaining() {
+        let snap = PoolSnapshot::new("core", 4800, 5000, Some(Utc::now() + Duration::hours(1)));
+        let f = check_batch_feasibility(&snap, 1000);
+        assert_eq!(f.ops_before_wait, 200);
+    }
+
+    // ── SchedulingSuggestion additional ─────────────────────────
+
+    #[test]
+    fn scheduling_clone_preserves_fields() {
+        let snap = pool_ok();
+        let s = suggest_scheduling(&snap, 100, None);
+        let cloned = s.clone();
+        assert_eq!(s.pool, cloned.pool);
+        assert!((s.suggested_rate_per_hour - cloned.suggested_rate_per_hour).abs() < f64::EPSILON);
+        assert_eq!(s.suggested_delay_ms, cloned.suggested_delay_ms);
+        assert_eq!(s.reasoning, cloned.reasoning);
+    }
+
+    #[test]
+    fn scheduling_debug_output() {
+        let snap = pool_ok();
+        let s = suggest_scheduling(&snap, 100, None);
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("SchedulingSuggestion"));
+        assert!(dbg.contains("core"));
+    }
+
+    #[test]
+    fn scheduling_serializes_all_keys() {
+        let snap = pool_ok();
+        let s = suggest_scheduling(&snap, 100, None);
+        let json = serde_json::to_value(&s).unwrap();
+        assert!(json.get("pool").is_some());
+        assert!(json.get("suggested_rate_per_hour").is_some());
+        assert!(json.get("suggested_delay_ms").is_some());
+        assert!(json.get("reasoning").is_some());
+    }
+
+    #[test]
+    fn scheduling_fits_has_positive_rate() {
+        let snap = PoolSnapshot::new("core", 0, 5000, Some(Utc::now() + Duration::hours(1)));
+        let s = suggest_scheduling(&snap, 100, None);
+        assert!(s.suggested_rate_per_hour > 0.0);
+    }
+
+    #[test]
+    fn scheduling_fits_no_wait() {
+        let snap = PoolSnapshot::new("core", 0, 5000, Some(Utc::now() + Duration::hours(1)));
+        let s = suggest_scheduling(&snap, 50, None);
+        assert!(s.wait_before_start.is_none());
+    }
+
+    #[test]
+    fn scheduling_needs_reset_has_wait() {
+        let snap = PoolSnapshot::new("core", 4500, 5000, Some(Utc::now() + Duration::hours(1)));
+        // Need 1000, only 500 remaining, but 500 + 5000 after reset = 5500 >= 1000
+        let s = suggest_scheduling(&snap, 1000, None);
+        assert!(s.wait_before_start.is_some());
+    }
+
+    #[test]
+    fn scheduling_needs_reset_rate_positive() {
+        let snap = PoolSnapshot::new("core", 4500, 5000, Some(Utc::now() + Duration::hours(1)));
+        let s = suggest_scheduling(&snap, 1000, None);
+        assert!(s.suggested_rate_per_hour > 0.0);
+    }
+
+    #[test]
+    fn scheduling_multi_window_rate() {
+        let snap = PoolSnapshot::new("core", 0, 100, Some(Utc::now() + Duration::hours(1)));
+        let s = suggest_scheduling(&snap, 500, None);
+        // Need multiple windows
+        assert!(s.reasoning.contains("windows"));
+        assert!(s.suggested_rate_per_hour > 0.0);
+    }
+
+    #[test]
+    fn scheduling_deadline_unused_but_accepted() {
+        // Ensure passing a deadline doesn't alter behavior (it's reserved)
+        let snap = pool_ok();
+        let s_no_deadline = suggest_scheduling(&snap, 100, None);
+        let s_deadline = suggest_scheduling(&snap, 100, Some(Duration::hours(2)));
+        assert_eq!(s_no_deadline.reasoning, s_deadline.reasoning);
+    }
+
+    #[test]
+    fn scheduling_one_op_fits_zero_delay() {
+        let snap = PoolSnapshot::new("core", 0, 5000, Some(Utc::now() + Duration::hours(1)));
+        let s = suggest_scheduling(&snap, 1, None);
+        assert_eq!(s.suggested_delay_ms, 0);
+        assert!(s.wait_before_start.is_none());
+    }
+
+    #[test]
+    fn scheduling_exhausted_pool_needs_wait() {
+        let snap = pool_exhausted();
+        let s = suggest_scheduling(&snap, 100, None);
+        assert!(s.wait_before_start.is_some());
+    }
+
+    #[test]
+    fn scheduling_exhausted_needs_more_than_limit() {
+        let snap = pool_exhausted();
+        // limit is 5000, need 10000 → multiple windows
+        let s = suggest_scheduling(&snap, 10000, None);
+        assert!(s.reasoning.contains("windows"));
+    }
+
+    // ── format_duration additional ──────────────────────────────
+
+    #[test]
+    fn format_dur_negative() {
+        // Negative durations produce negative seconds
+        let s = format_duration(Duration::seconds(-10));
+        assert_eq!(s, "-10s");
+    }
+
+    #[test]
+    fn format_dur_1_second() {
+        assert_eq!(format_duration(Duration::seconds(1)), "1s");
+    }
+
+    #[test]
+    fn format_dur_exactly_1_hour() {
+        assert_eq!(format_duration(Duration::hours(1)), "1h 0m");
+    }
+
+    #[test]
+    fn format_dur_1_hour_1_min() {
+        assert_eq!(
+            format_duration(Duration::hours(1) + Duration::minutes(1)),
+            "1h 1m"
+        );
+    }
+
+    #[test]
+    fn format_dur_1_hour_59_min() {
+        assert_eq!(
+            format_duration(Duration::hours(1) + Duration::minutes(59)),
+            "1h 59m"
+        );
+    }
+
+    // ── format_forecast additional ──────────────────────────────
+
+    #[test]
+    fn format_forecast_contains_rate() {
+        let snap = PoolSnapshot::new("core", 100, 5000, Some(Utc::now() + Duration::hours(1)));
+        let f = forecast_pool(&snap, 3600);
+        let s = format_forecast(&f);
+        assert!(s.contains("req/hour"));
+    }
+
+    #[test]
+    fn format_forecast_with_exhaustion_time() {
+        let snap = PoolSnapshot::new("core", 2500, 5000, Some(Utc::now() + Duration::hours(1)));
+        let f = forecast_pool(&snap, 3600);
+        let s = format_forecast(&f);
+        assert!(s.contains("At current rate"));
+    }
+
+    #[test]
+    fn format_forecast_with_reset() {
+        let snap = PoolSnapshot::new("core", 100, 5000, Some(Utc::now() + Duration::hours(1)));
+        let f = forecast_pool(&snap, 3600);
+        let s = format_forecast(&f);
+        assert!(s.contains("Reset:"));
+        assert!(s.contains("full quota restored"));
+    }
+
+    #[test]
+    fn format_forecast_exhausted_recommendation() {
+        let snap = pool_exhausted();
+        let f = forecast_pool(&snap, 3600);
+        let s = format_forecast(&f);
+        assert!(s.contains("Recommendation: wait_for_reset"));
+    }
+
+    // ── format_feasibility additional ───────────────────────────
+
+    #[test]
+    fn format_feasibility_zero_ops() {
+        let snap = pool_ok();
+        let f = check_batch_feasibility(&snap, 0);
+        let s = format_feasibility(&f);
+        assert!(s.contains("fits"));
+        assert!(s.contains("0 ops requested"));
+    }
+
+    #[test]
+    fn format_feasibility_exactly_remaining() {
+        let snap = PoolSnapshot::new("core", 4500, 5000, Some(Utc::now() + Duration::hours(1)));
+        let f = check_batch_feasibility(&snap, 500);
+        let s = format_feasibility(&f);
+        assert!(s.contains("fits"));
+    }
+
+    #[test]
+    fn format_feasibility_large_multi_window() {
+        let snap = PoolSnapshot::new("core", 0, 100, Some(Utc::now() + Duration::hours(1)));
+        let f = check_batch_feasibility(&snap, 50000);
+        let s = format_feasibility(&f);
+        assert!(s.contains("multiple windows"));
+    }
+
+    // ── format_suggestion additional ────────────────────────────
+
+    #[test]
+    fn format_suggestion_multi_window() {
+        let snap = PoolSnapshot::new("core", 4500, 5000, Some(Utc::now() + Duration::hours(1)));
+        let s = suggest_scheduling(&snap, 50000, None);
+        let output = format_suggestion(&s);
+        assert!(output.contains("Wait before starting"));
+    }
+
+    #[test]
+    fn format_suggestion_no_delay_zero_rate_no_extra() {
+        let snap = pool_ok();
+        let s = suggest_scheduling(&snap, 0, None);
+        let output = format_suggestion(&s);
+        // No "Delay" or "Suggested rate" lines for zero ops
+        assert!(!output.contains("Delay"));
+        assert!(!output.contains("Suggested rate"));
+    }
+
+    #[test]
+    fn format_suggestion_fits_shows_reasoning() {
+        let snap = pool_ok();
+        let s = suggest_scheduling(&snap, 10, None);
+        let output = format_suggestion(&s);
+        assert!(output.contains("fits in current window"));
+    }
+
+    // ── Cross-function integration ──────────────────────────────
+
+    #[test]
+    fn forecast_and_batch_agree_on_remaining() {
+        let snap = pool_high();
+        let f = forecast_pool(&snap, 3600);
+        let b = check_batch_feasibility(&snap, 100);
+        assert_eq!(f.remaining, b.remaining);
+    }
+
+    #[test]
+    fn forecast_and_scheduling_use_same_pool() {
+        let snap = pool_ok();
+        let f = forecast_pool(&snap, 3600);
+        let s = suggest_scheduling(&snap, 100, None);
+        assert_eq!(f.pool, s.pool);
+    }
+
+    #[test]
+    fn batch_and_scheduling_agree_on_feasibility() {
+        let snap = pool_ok();
+        let b = check_batch_feasibility(&snap, 100);
+        let s = suggest_scheduling(&snap, 100, None);
+        // If batch fits, scheduling should not require waiting
+        assert!(b.fits_now);
+        assert!(s.wait_before_start.is_none());
+    }
+
+    #[test]
+    fn batch_and_scheduling_both_need_wait() {
+        let snap = pool_high();
+        let b = check_batch_feasibility(&snap, 1000);
+        let s = suggest_scheduling(&snap, 1000, None);
+        assert!(!b.fits_now);
+        assert!(s.wait_before_start.is_some());
+    }
+
+    // ── Empty/unicode pool names ────────────────────────────────
+
+    #[test]
+    fn rate_empty_pool_name() {
+        let rate = UsageRate::from_snapshot("", 100, 3600);
+        assert!(rate.pool.is_empty());
+    }
+
+    #[test]
+    fn forecast_unicode_pool_name() {
+        let snap = PoolSnapshot::new("api-\u{1f680}", 100, 5000, None);
+        let f = forecast_pool(&snap, 3600);
+        assert_eq!(f.pool, "api-\u{1f680}");
+    }
+
+    #[test]
+    fn batch_unicode_pool_name() {
+        let snap = PoolSnapshot::new("\u{00e9}l\u{00e8}ve", 0, 100, None);
+        let f = check_batch_feasibility(&snap, 10);
+        assert_eq!(f.pool, "\u{00e9}l\u{00e8}ve");
+    }
+
+    #[test]
+    fn scheduling_empty_pool_name() {
+        let snap = PoolSnapshot::new("", 0, 100, None);
+        let s = suggest_scheduling(&snap, 10, None);
+        assert!(s.pool.is_empty());
+    }
 }

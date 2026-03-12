@@ -983,4 +983,604 @@ mod tests {
         assert!(msg.contains("https://"));
         assert!(msg.contains("registry.example.com"));
     }
+
+    // ── Send + Sync trait bounds ──
+
+    #[test]
+    fn host_error_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<HostError>();
+    }
+
+    #[test]
+    fn host_error_is_sync() {
+        fn assert_sync<T: Sync>() {}
+        assert_sync::<HostError>();
+    }
+
+    #[test]
+    fn host_error_send_across_thread() {
+        let err = HostError::Internal("thread-safe".into());
+        let handle = std::thread::spawn(move || err.to_string());
+        let msg = handle.join().expect("thread should succeed");
+        assert!(msg.contains("thread-safe"));
+    }
+
+    #[test]
+    fn host_error_sync_shared_ref() {
+        let err = HostError::Unavailable("shared".into());
+        let err_ref = &err;
+        // Prove we can share a reference across scopes (Sync bound)
+        let msg = err_ref.to_string();
+        assert!(msg.contains("shared"));
+        assert!(msg.contains("unavailable"));
+    }
+
+    // ── Downcast from Box<dyn Error> ──
+
+    #[test]
+    fn downcast_connector_not_found() {
+        let err: Box<dyn std::error::Error + Send + Sync> =
+            Box::new(HostError::ConnectorNotFound("abc".into()));
+        let downcasted = err.downcast::<HostError>();
+        assert!(downcasted.is_ok());
+        assert!(downcasted.unwrap().to_string().contains("abc"));
+    }
+
+    #[test]
+    fn downcast_invalid_filter() {
+        let err: Box<dyn std::error::Error + Send + Sync> =
+            Box::new(HostError::InvalidFilter("zone".into()));
+        let downcasted = err.downcast::<HostError>();
+        assert!(downcasted.is_ok());
+    }
+
+    #[test]
+    fn downcast_registry_error() {
+        let err: Box<dyn std::error::Error + Send + Sync> =
+            Box::new(HostError::RegistryError("timeout".into()));
+        let downcasted = err.downcast::<HostError>().unwrap();
+        assert!(downcasted.to_string().contains("timeout"));
+    }
+
+    #[test]
+    fn downcast_preflight_failed() {
+        let err: Box<dyn std::error::Error + Send + Sync> =
+            Box::new(HostError::PreflightFailed("cap".into()));
+        assert!(err.downcast_ref::<HostError>().is_some());
+    }
+
+    #[test]
+    fn downcast_cache_error() {
+        let err: Box<dyn std::error::Error> = Box::new(HostError::CacheError("full".into()));
+        assert!(err.downcast_ref::<HostError>().is_some());
+    }
+
+    #[test]
+    fn downcast_unavailable() {
+        let err: Box<dyn std::error::Error> = Box::new(HostError::Unavailable("maint".into()));
+        assert!(err.downcast_ref::<HostError>().is_some());
+    }
+
+    #[test]
+    fn downcast_internal() {
+        let err: Box<dyn std::error::Error> = Box::new(HostError::Internal("panic".into()));
+        let host_err = err.downcast_ref::<HostError>().unwrap();
+        assert!(host_err.to_string().contains("panic"));
+    }
+
+    #[test]
+    fn downcast_wrong_type_fails() {
+        let err: Box<dyn std::error::Error> = Box::new(HostError::Internal("x".into()));
+        assert!(err.downcast_ref::<std::io::Error>().is_none());
+    }
+
+    // ── Display via write! macro (fmt::Display path) ──
+
+    #[test]
+    fn display_via_write_macro_connector_not_found() {
+        use std::fmt::Write;
+        let err = HostError::ConnectorNotFound("wfmt".into());
+        let mut buf = String::new();
+        write!(buf, "{err}").unwrap();
+        assert_eq!(buf, "connector not found: wfmt");
+    }
+
+    #[test]
+    fn display_via_write_macro_all_variants() {
+        use std::fmt::Write;
+        let variants: Vec<HostError> = vec![
+            HostError::ConnectorNotFound("w".into()),
+            HostError::InvalidFilter("w".into()),
+            HostError::RegistryError("w".into()),
+            HostError::PreflightFailed("w".into()),
+            HostError::CacheError("w".into()),
+            HostError::Unavailable("w".into()),
+            HostError::Internal("w".into()),
+        ];
+        for err in &variants {
+            let mut buf = String::new();
+            write!(buf, "{err}").unwrap();
+            assert!(buf.contains(": w"), "write! output should contain ': w', got '{buf}'");
+        }
+    }
+
+    // ── Alternate Debug format {:#?} ──
+
+    #[test]
+    fn alternate_debug_connector_not_found() {
+        let err = HostError::ConnectorNotFound("alt-dbg".into());
+        let alt = format!("{err:#?}");
+        assert!(alt.contains("ConnectorNotFound"));
+        assert!(alt.contains("alt-dbg"));
+    }
+
+    #[test]
+    fn alternate_debug_all_variants() {
+        let variants: Vec<(&str, HostError)> = vec![
+            ("ConnectorNotFound", HostError::ConnectorNotFound("z".into())),
+            ("InvalidFilter", HostError::InvalidFilter("z".into())),
+            ("RegistryError", HostError::RegistryError("z".into())),
+            ("PreflightFailed", HostError::PreflightFailed("z".into())),
+            ("CacheError", HostError::CacheError("z".into())),
+            ("Unavailable", HostError::Unavailable("z".into())),
+            ("Internal", HostError::Internal("z".into())),
+        ];
+        for (name, err) in &variants {
+            let alt = format!("{err:#?}");
+            assert!(
+                alt.contains(name),
+                "alternate debug should contain '{name}', got '{alt}'"
+            );
+        }
+    }
+
+    // ── matches! discrimination ──
+
+    #[test]
+    fn matches_connector_not_found() {
+        let err = HostError::ConnectorNotFound("m".into());
+        assert!(matches!(err, HostError::ConnectorNotFound(_)));
+        assert!(!matches!(err, HostError::Internal(_)));
+    }
+
+    #[test]
+    fn matches_invalid_filter() {
+        let err = HostError::InvalidFilter("m".into());
+        assert!(matches!(err, HostError::InvalidFilter(_)));
+        assert!(!matches!(err, HostError::ConnectorNotFound(_)));
+    }
+
+    #[test]
+    fn matches_registry_error() {
+        let err = HostError::RegistryError("m".into());
+        assert!(matches!(err, HostError::RegistryError(_)));
+        assert!(!matches!(err, HostError::CacheError(_)));
+    }
+
+    #[test]
+    fn matches_preflight_failed() {
+        let err = HostError::PreflightFailed("m".into());
+        assert!(matches!(err, HostError::PreflightFailed(_)));
+        assert!(!matches!(err, HostError::Unavailable(_)));
+    }
+
+    #[test]
+    fn matches_cache_error() {
+        let err = HostError::CacheError("m".into());
+        assert!(matches!(err, HostError::CacheError(_)));
+        assert!(!matches!(err, HostError::Internal(_)));
+    }
+
+    #[test]
+    fn matches_unavailable() {
+        let err = HostError::Unavailable("m".into());
+        assert!(matches!(err, HostError::Unavailable(_)));
+        assert!(!matches!(err, HostError::PreflightFailed(_)));
+    }
+
+    #[test]
+    fn matches_internal() {
+        let err = HostError::Internal("m".into());
+        assert!(matches!(err, HostError::Internal(_)));
+        assert!(!matches!(err, HostError::InvalidFilter(_)));
+    }
+
+    // ── Error ? propagation across all variants ──
+
+    #[test]
+    fn question_mark_propagation_invalid_filter() {
+        fn inner() -> HostResult<()> {
+            Err(HostError::InvalidFilter("bad".into()))
+        }
+        fn outer() -> HostResult<()> {
+            inner()?;
+            Ok(())
+        }
+        let r = outer();
+        assert!(r.is_err());
+        assert!(r.unwrap_err().to_string().contains("invalid filter"));
+    }
+
+    #[test]
+    fn question_mark_propagation_registry_error() {
+        fn inner() -> HostResult<()> {
+            Err(HostError::RegistryError("down".into()))
+        }
+        fn outer() -> HostResult<()> {
+            inner()?;
+            Ok(())
+        }
+        assert!(matches!(
+            outer().unwrap_err(),
+            HostError::RegistryError(_)
+        ));
+    }
+
+    #[test]
+    fn question_mark_propagation_preflight() {
+        fn inner() -> HostResult<u64> {
+            Err(HostError::PreflightFailed("deny".into()))
+        }
+        fn outer() -> HostResult<u64> {
+            let v = inner()?;
+            Ok(v + 1)
+        }
+        assert!(matches!(
+            outer().unwrap_err(),
+            HostError::PreflightFailed(_)
+        ));
+    }
+
+    #[test]
+    fn question_mark_propagation_cache() {
+        fn inner() -> HostResult<String> {
+            Err(HostError::CacheError("corrupt".into()))
+        }
+        fn outer() -> HostResult<String> {
+            let s = inner()?;
+            Ok(format!("got: {s}"))
+        }
+        assert!(matches!(outer().unwrap_err(), HostError::CacheError(_)));
+    }
+
+    #[test]
+    fn question_mark_propagation_unavailable() {
+        fn inner() -> HostResult<Vec<u8>> {
+            Err(HostError::Unavailable("backoff".into()))
+        }
+        fn outer() -> HostResult<usize> {
+            let v = inner()?;
+            Ok(v.len())
+        }
+        assert!(matches!(outer().unwrap_err(), HostError::Unavailable(_)));
+    }
+
+    // ── HostResult combinators ──
+
+    #[test]
+    fn host_result_ok_method() {
+        let ok: HostResult<u32> = Ok(42);
+        assert_eq!(ok.ok(), Some(42));
+    }
+
+    #[test]
+    fn host_result_err_method() {
+        let err: HostResult<u32> = Err(HostError::Internal("e".into()));
+        let e = err.err().unwrap();
+        assert!(e.to_string().contains("internal error"));
+    }
+
+    #[test]
+    fn host_result_ok_returns_none_for_err() {
+        let r: HostResult<u32> = Err(HostError::Internal("x".into()));
+        assert!(r.ok().is_none());
+    }
+
+    #[test]
+    fn host_result_err_returns_none_for_ok() {
+        let r: HostResult<u32> = Ok(1);
+        assert!(r.err().is_none());
+    }
+
+    #[test]
+    fn host_result_unwrap_or_else_callback() {
+        let r: HostResult<u32> = Err(HostError::CacheError("miss".into()));
+        let val = r.unwrap_or_else(|_| 999);
+        assert_eq!(val, 999);
+    }
+
+    #[test]
+    fn host_result_transpose_some_ok() {
+        let r: HostResult<Option<u32>> = Ok(Some(5));
+        let transposed: Option<HostResult<u32>> = r.transpose();
+        assert_eq!(transposed.unwrap().unwrap(), 5);
+    }
+
+    #[test]
+    fn host_result_transpose_none_ok() {
+        let r: HostResult<Option<u32>> = Ok(None);
+        let transposed: Option<HostResult<u32>> = r.transpose();
+        assert!(transposed.is_none());
+    }
+
+    #[test]
+    fn host_result_transpose_err() {
+        let r: HostResult<Option<u32>> = Err(HostError::Internal("t".into()));
+        let transposed: Option<HostResult<u32>> = r.transpose();
+        assert!(transposed.is_some());
+        assert!(transposed.unwrap().is_err());
+    }
+
+    // ── Size / layout assertions ──
+
+    #[test]
+    fn host_error_size_is_reasonable() {
+        let size = std::mem::size_of::<HostError>();
+        // String is 3 words (ptr + len + cap) = 24 bytes on 64-bit.
+        // Enum discriminant adds 8 bytes (alignment) = 32 bytes total.
+        assert!(size <= 64, "HostError should be compact, got {size} bytes");
+        assert!(size >= 24, "HostError needs at least a String, got {size} bytes");
+    }
+
+    #[test]
+    fn host_error_alignment() {
+        let align = std::mem::align_of::<HostError>();
+        assert!(align <= 8, "alignment should be at most 8, got {align}");
+    }
+
+    // ── Display prefix uniqueness ──
+
+    #[test]
+    fn all_display_prefixes_are_unique() {
+        let variants: Vec<HostError> = vec![
+            HostError::ConnectorNotFound(String::new()),
+            HostError::InvalidFilter(String::new()),
+            HostError::RegistryError(String::new()),
+            HostError::PreflightFailed(String::new()),
+            HostError::CacheError(String::new()),
+            HostError::Unavailable(String::new()),
+            HostError::Internal(String::new()),
+        ];
+        let prefixes: Vec<String> = variants
+            .iter()
+            .map(|e| {
+                let s = e.to_string();
+                s.split(':').next().unwrap_or("").to_string()
+            })
+            .collect();
+        let mut deduped = prefixes.clone();
+        deduped.sort();
+        deduped.dedup();
+        assert_eq!(
+            prefixes.len(),
+            deduped.len(),
+            "all display prefixes should be unique: {prefixes:?}"
+        );
+    }
+
+    // ── Display length includes prefix + separator + message ──
+
+    #[test]
+    fn display_length_connector_not_found() {
+        let msg = "test-id";
+        let err = HostError::ConnectorNotFound(msg.into());
+        let display = err.to_string();
+        // "connector not found: " is 21 chars + msg
+        assert_eq!(display.len(), 21 + msg.len());
+    }
+
+    #[test]
+    fn display_length_invalid_filter() {
+        let msg = "zone";
+        let err = HostError::InvalidFilter(msg.into());
+        let display = err.to_string();
+        // "invalid filter: " is 16 chars
+        assert_eq!(display.len(), 16 + msg.len());
+    }
+
+    #[test]
+    fn display_length_registry_error() {
+        let msg = "dns";
+        let err = HostError::RegistryError(msg.into());
+        let display = err.to_string();
+        // "registry error: " is 16 chars
+        assert_eq!(display.len(), 16 + msg.len());
+    }
+
+    #[test]
+    fn display_length_preflight_failed() {
+        let msg = "cap";
+        let err = HostError::PreflightFailed(msg.into());
+        let display = err.to_string();
+        // "preflight failed: " is 18 chars
+        assert_eq!(display.len(), 18 + msg.len());
+    }
+
+    #[test]
+    fn display_length_cache_error() {
+        let msg = "evict";
+        let err = HostError::CacheError(msg.into());
+        let display = err.to_string();
+        // "cache error: " is 13 chars
+        assert_eq!(display.len(), 13 + msg.len());
+    }
+
+    #[test]
+    fn display_length_unavailable() {
+        let msg = "down";
+        let err = HostError::Unavailable(msg.into());
+        let display = err.to_string();
+        // "unavailable: " is 13 chars
+        assert_eq!(display.len(), 13 + msg.len());
+    }
+
+    #[test]
+    fn display_length_internal() {
+        let msg = "bug";
+        let err = HostError::Internal(msg.into());
+        let display = err.to_string();
+        // "internal error: " is 16 chars
+        assert_eq!(display.len(), 16 + msg.len());
+    }
+
+    // ── Error in collections ──
+
+    #[test]
+    fn host_errors_in_vec_preserves_all() {
+        let errors: Vec<HostError> = vec![
+            HostError::ConnectorNotFound("a".into()),
+            HostError::InvalidFilter("b".into()),
+            HostError::RegistryError("c".into()),
+            HostError::PreflightFailed("d".into()),
+            HostError::CacheError("e".into()),
+            HostError::Unavailable("f".into()),
+            HostError::Internal("g".into()),
+        ];
+        assert_eq!(errors.len(), 7);
+        let messages: Vec<String> = errors.iter().map(ToString::to_string).collect();
+        assert!(messages[0].contains("connector not found"));
+        assert!(messages[1].contains("invalid filter"));
+        assert!(messages[2].contains("registry error"));
+        assert!(messages[3].contains("preflight failed"));
+        assert!(messages[4].contains("cache error"));
+        assert!(messages[5].contains("unavailable"));
+        assert!(messages[6].contains("internal error"));
+    }
+
+    #[test]
+    fn host_result_collect_ok() {
+        let results: Vec<HostResult<u32>> = vec![Ok(1), Ok(2), Ok(3)];
+        let collected: HostResult<Vec<u32>> = results.into_iter().collect();
+        assert_eq!(collected.unwrap(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn host_result_collect_first_err() {
+        let results: Vec<HostResult<u32>> = vec![
+            Ok(1),
+            Err(HostError::Internal("fail".into())),
+            Ok(3),
+        ];
+        let collected: HostResult<Vec<u32>> = results.into_iter().collect();
+        assert!(collected.is_err());
+        assert!(collected.unwrap_err().to_string().contains("fail"));
+    }
+
+    // ── Error message with format-string-like content ──
+
+    #[test]
+    fn error_with_format_string_braces() {
+        let err = HostError::Internal("{0} {1} {name}".into());
+        let msg = err.to_string();
+        assert!(msg.contains("{0}"));
+        assert!(msg.contains("{name}"));
+    }
+
+    #[test]
+    fn error_with_double_braces() {
+        let err = HostError::CacheError("{{escaped}}".into());
+        assert!(err.to_string().contains("{{escaped}}"));
+    }
+
+    // ── Repeated message content ──
+
+    #[test]
+    fn error_with_repeated_colons() {
+        let err = HostError::ConnectorNotFound("a:b:c:d:e".into());
+        let msg = err.to_string();
+        assert_eq!(msg, "connector not found: a:b:c:d:e");
+    }
+
+    #[test]
+    fn error_with_only_colons() {
+        let err = HostError::InvalidFilter(":::".into());
+        assert_eq!(err.to_string(), "invalid filter: :::");
+    }
+
+    // ── Display with format! positional ──
+
+    #[test]
+    fn format_positional_display() {
+        let err = HostError::Internal("pos".into());
+        let formatted = format!("error was: {}", err);
+        assert!(formatted.starts_with("error was: internal error: pos"));
+    }
+
+    #[test]
+    fn format_named_display() {
+        let err = HostError::CacheError("named".into());
+        let formatted = format!("got {err} here");
+        assert!(formatted.contains("cache error: named"));
+    }
+
+    // ── HostResult with Box<dyn Error> ──
+
+    #[test]
+    fn host_result_boxed_error_value() {
+        let r: HostResult<Box<dyn std::error::Error>> =
+            Err(HostError::Unavailable("boxed-val".into()));
+        assert!(r.is_err());
+    }
+
+    // ── Cross-thread HostResult ──
+
+    #[test]
+    fn host_result_send_across_thread() {
+        let r: HostResult<u32> = Err(HostError::Internal("cross-thread".into()));
+        let handle = std::thread::spawn(move || match r {
+            Ok(v) => panic!("expected Err, got Ok({v})"),
+            Err(e) => e.to_string(),
+        });
+        let msg = handle.join().unwrap();
+        assert!(msg.contains("cross-thread"));
+    }
+
+    // ── Multiple errors in a chain ──
+
+    #[test]
+    fn chained_host_result_operations() {
+        fn step1() -> HostResult<u32> {
+            Ok(10)
+        }
+        fn step2(val: u32) -> HostResult<u32> {
+            if val > 5 {
+                Ok(val + 20)
+            } else {
+                Err(HostError::PreflightFailed("too low".into()))
+            }
+        }
+        fn step3(val: u32) -> HostResult<String> {
+            if val > 25 {
+                Ok(format!("result={val}"))
+            } else {
+                Err(HostError::Internal("unexpected".into()))
+            }
+        }
+        let result = step1().and_then(step2).and_then(step3);
+        assert_eq!(result.unwrap(), "result=30");
+    }
+
+    #[test]
+    fn chained_host_result_fails_midway() {
+        fn step1() -> HostResult<u32> {
+            Ok(2)
+        }
+        fn step2(val: u32) -> HostResult<u32> {
+            if val > 5 {
+                Ok(val + 20)
+            } else {
+                Err(HostError::PreflightFailed("too low".into()))
+            }
+        }
+        fn step3(val: u32) -> HostResult<String> {
+            Ok(format!("result={val}"))
+        }
+        let result = step1().and_then(step2).and_then(step3);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            HostError::PreflightFailed(_)
+        ));
+    }
 }

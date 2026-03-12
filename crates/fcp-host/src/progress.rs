@@ -1341,4 +1341,862 @@ mod tests {
             panic!("expected phase payload");
         }
     }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // NEW TESTS — expanded coverage
+    // ══════════════════════════════════════════════════════════════════════
+
+    // ── ProgressUnit: additional variant serde + clone ──
+
+    #[test]
+    fn unit_rows_json_roundtrip() {
+        let u = ProgressUnit::Rows;
+        let json = serde_json::to_string(&u).unwrap();
+        let parsed: ProgressUnit = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, ProgressUnit::Rows);
+    }
+
+    #[test]
+    fn unit_requests_json_roundtrip() {
+        let u = ProgressUnit::Requests;
+        let json = serde_json::to_string(&u).unwrap();
+        let parsed: ProgressUnit = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, ProgressUnit::Requests);
+    }
+
+    #[test]
+    fn unit_items_json_roundtrip() {
+        let u = ProgressUnit::Items;
+        let json = serde_json::to_string(&u).unwrap();
+        let parsed: ProgressUnit = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, ProgressUnit::Items);
+    }
+
+    #[test]
+    fn unit_clone_is_independent() {
+        let original = ProgressUnit::Custom("widgets".into());
+        let cloned = original.clone();
+        assert_eq!(original, cloned);
+    }
+
+    #[test]
+    fn unit_custom_empty_string() {
+        let u = ProgressUnit::Custom(String::new());
+        assert_eq!(u.label(), "");
+        let json = serde_json::to_string(&u).unwrap();
+        let parsed: ProgressUnit = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, u);
+    }
+
+    #[test]
+    fn unit_debug_format() {
+        let u = ProgressUnit::Bytes;
+        let dbg = format!("{u:?}");
+        assert!(dbg.contains("Bytes"));
+    }
+
+    #[test]
+    fn unit_custom_debug_format() {
+        let u = ProgressUnit::Custom("pixels".into());
+        let dbg = format!("{u:?}");
+        assert!(dbg.contains("pixels"));
+    }
+
+    #[test]
+    fn unit_all_variants_inequality() {
+        let variants: Vec<ProgressUnit> = vec![
+            ProgressUnit::Bytes,
+            ProgressUnit::Items,
+            ProgressUnit::Requests,
+            ProgressUnit::Rows,
+            ProgressUnit::Custom("x".into()),
+        ];
+        for (i, a) in variants.iter().enumerate() {
+            for (j, b) in variants.iter().enumerate() {
+                if i == j {
+                    assert_eq!(a, b);
+                } else {
+                    assert_ne!(a, b);
+                }
+            }
+        }
+    }
+
+    // ── ProgressUpdate: edge cases for computed_percentage ──
+
+    #[test]
+    fn computed_percentage_exceeds_100_when_current_over_total() {
+        let u = make_update("over", 200, Some(100));
+        let pct = u.computed_percentage().unwrap();
+        assert!((pct - 200.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn computed_percentage_at_zero_current() {
+        let u = make_update("start", 0, Some(100));
+        let pct = u.computed_percentage().unwrap();
+        assert!(pct.abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn computed_percentage_total_one() {
+        let u = make_update("single", 1, Some(1));
+        let pct = u.computed_percentage().unwrap();
+        assert!((pct - 100.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn computed_percentage_large_values() {
+        let u = make_update("big", 999_999, Some(1_000_000));
+        let pct = u.computed_percentage().unwrap();
+        // Should be very close to 100
+        assert!(pct > 99.99);
+        assert!(pct < 100.0);
+    }
+
+    // ── ProgressUpdate: is_complete edge cases ──
+
+    #[test]
+    fn is_complete_zero_of_zero() {
+        let u = make_update("empty", 0, Some(0));
+        assert!(u.is_complete());
+    }
+
+    #[test]
+    fn is_complete_exactly_at_total() {
+        let u = make_update("exact", 500, Some(500));
+        assert!(u.is_complete());
+    }
+
+    #[test]
+    fn is_complete_one_below_total() {
+        let u = make_update("almost", 499, Some(500));
+        assert!(!u.is_complete());
+    }
+
+    // ── ProgressUpdate: with rate, eta, message ──
+
+    #[test]
+    fn update_with_rate_serialized() {
+        let u = ProgressUpdate {
+            phase: "dl".into(),
+            current: 50,
+            total: Some(100),
+            unit: ProgressUnit::Bytes,
+            percentage: Some(50.0),
+            rate: Some(1024),
+            eta_ms: None,
+            message: None,
+        };
+        let json = serde_json::to_string(&u).unwrap();
+        assert!(json.contains("\"rate\":1024"));
+        assert!(!json.contains("eta_ms"));
+    }
+
+    #[test]
+    fn update_with_eta_serialized() {
+        let u = ProgressUpdate {
+            phase: "dl".into(),
+            current: 50,
+            total: Some(100),
+            unit: ProgressUnit::Bytes,
+            percentage: Some(50.0),
+            rate: None,
+            eta_ms: Some(3000),
+            message: None,
+        };
+        let json = serde_json::to_string(&u).unwrap();
+        assert!(json.contains("\"eta_ms\":3000"));
+        assert!(!json.contains("\"rate\""));
+    }
+
+    #[test]
+    fn update_with_message_serialized() {
+        let u = ProgressUpdate {
+            phase: "work".into(),
+            current: 1,
+            total: Some(10),
+            unit: ProgressUnit::Items,
+            percentage: Some(10.0),
+            rate: None,
+            eta_ms: None,
+            message: Some("Processing item 1 of 10".into()),
+        };
+        let json = serde_json::to_string(&u).unwrap();
+        assert!(json.contains("Processing item 1 of 10"));
+    }
+
+    #[test]
+    fn update_all_optional_fields_present_roundtrip() {
+        let u = ProgressUpdate {
+            phase: "upload".into(),
+            current: 750,
+            total: Some(1000),
+            unit: ProgressUnit::Rows,
+            percentage: Some(75.0),
+            rate: Some(500),
+            eta_ms: Some(500),
+            message: Some("uploading batch".into()),
+        };
+        let json = serde_json::to_string(&u).unwrap();
+        let parsed: ProgressUpdate = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.current, 750);
+        assert_eq!(parsed.total, Some(1000));
+        assert_eq!(parsed.rate, Some(500));
+        assert_eq!(parsed.eta_ms, Some(500));
+        assert_eq!(parsed.message.as_deref(), Some("uploading batch"));
+        assert_eq!(parsed.unit, ProgressUnit::Rows);
+    }
+
+    #[test]
+    fn update_debug_format() {
+        let u = make_update("phase_x", 42, Some(100));
+        let dbg = format!("{u:?}");
+        assert!(dbg.contains("phase_x"));
+        assert!(dbg.contains("42"));
+    }
+
+    // ── PhaseTransition: additional tests ──
+
+    #[test]
+    fn phase_transition_clone() {
+        let pt = PhaseTransition {
+            from_phase: "a".into(),
+            to_phase: "b".into(),
+            phases_remaining: vec!["c".into()],
+            timestamp: fixed_now(),
+        };
+        let cloned = pt.clone();
+        assert_eq!(cloned.from_phase, pt.from_phase);
+        assert_eq!(cloned.to_phase, pt.to_phase);
+        assert_eq!(cloned.phases_remaining, pt.phases_remaining);
+        assert_eq!(cloned.timestamp, pt.timestamp);
+    }
+
+    #[test]
+    fn phase_transition_debug() {
+        let pt = PhaseTransition {
+            from_phase: "download".into(),
+            to_phase: "parse".into(),
+            phases_remaining: vec![],
+            timestamp: fixed_now(),
+        };
+        let dbg = format!("{pt:?}");
+        assert!(dbg.contains("download"));
+        assert!(dbg.contains("parse"));
+    }
+
+    #[test]
+    fn phase_transition_many_remaining() {
+        let remaining: Vec<String> = (0..20).map(|i| format!("phase_{i}")).collect();
+        let pt = PhaseTransition {
+            from_phase: "start".into(),
+            to_phase: "phase_0".into(),
+            phases_remaining: remaining.clone(),
+            timestamp: fixed_now(),
+        };
+        let json = serde_json::to_string(&pt).unwrap();
+        let parsed: PhaseTransition = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.phases_remaining.len(), 20);
+    }
+
+    // ── ProgressOptions: additional serde edge cases ──
+
+    #[test]
+    fn options_from_empty_json_uses_defaults() {
+        let json = "{}";
+        let parsed: ProgressOptions = serde_json::from_str(json).unwrap();
+        assert!(!parsed.stream_progress);
+        assert_eq!(parsed.progress_interval_ms, 500);
+    }
+
+    #[test]
+    fn options_zero_interval() {
+        let opts = ProgressOptions {
+            stream_progress: true,
+            progress_interval_ms: 0,
+        };
+        let json = serde_json::to_string(&opts).unwrap();
+        let parsed: ProgressOptions = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.progress_interval_ms, 0);
+    }
+
+    #[test]
+    fn options_large_interval() {
+        let opts = ProgressOptions {
+            stream_progress: false,
+            progress_interval_ms: u64::MAX,
+        };
+        let json = serde_json::to_string(&opts).unwrap();
+        let parsed: ProgressOptions = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.progress_interval_ms, u64::MAX);
+    }
+
+    #[test]
+    fn options_debug_format() {
+        let opts = ProgressOptions::default();
+        let dbg = format!("{opts:?}");
+        assert!(dbg.contains("ProgressOptions"));
+        assert!(dbg.contains("stream_progress"));
+    }
+
+    #[test]
+    fn options_clone() {
+        let original = ProgressOptions {
+            stream_progress: true,
+            progress_interval_ms: 250,
+        };
+        let cloned = original.clone();
+        assert_eq!(cloned.stream_progress, original.stream_progress);
+        assert_eq!(cloned.progress_interval_ms, original.progress_interval_ms);
+    }
+
+    // ── ProgressController: multiple operations concurrently ──
+
+    #[test]
+    fn controller_multiple_ops_independent_phases() {
+        let ctrl = ProgressController::new();
+        ctrl.start_tracking("a", 1, "init_a", &default_opts());
+        ctrl.start_tracking("b", 2, "init_b", &default_opts());
+
+        ctrl.record_phase_transition("a", "work_a", &[], fixed_now());
+
+        assert_eq!(ctrl.current_phase("a").unwrap(), "work_a");
+        assert_eq!(ctrl.current_phase("b").unwrap(), "init_b");
+    }
+
+    #[test]
+    fn controller_multiple_ops_independent_updates() {
+        let ctrl = ProgressController::new();
+        ctrl.start_tracking("a", 1, "work", &zero_throttle_opts());
+        ctrl.start_tracking("b", 2, "work", &zero_throttle_opts());
+
+        ctrl.record_update("a", make_update("work", 10, Some(100)), fixed_now());
+        ctrl.record_update("b", make_update("work", 90, Some(100)), fixed_now());
+
+        assert_eq!(ctrl.latest_update("a").unwrap().current, 10);
+        assert_eq!(ctrl.latest_update("b").unwrap().current, 90);
+    }
+
+    #[test]
+    fn controller_stop_one_keeps_others() {
+        let ctrl = ProgressController::new();
+        ctrl.start_tracking("a", 1, "init", &zero_throttle_opts());
+        ctrl.start_tracking("b", 2, "init", &zero_throttle_opts());
+        ctrl.start_tracking("c", 3, "init", &zero_throttle_opts());
+
+        ctrl.record_update("b", make_update("init", 50, Some(100)), fixed_now());
+        ctrl.stop_tracking("a");
+
+        assert_eq!(ctrl.tracked_count(), 2);
+        assert!(ctrl.current_phase("a").is_none());
+        assert_eq!(ctrl.latest_update("b").unwrap().current, 50);
+        assert!(ctrl.current_phase("c").is_some());
+    }
+
+    #[test]
+    fn controller_stop_then_restart_same_id() {
+        let ctrl = ProgressController::new();
+        ctrl.start_tracking("op1", 1, "first", &zero_throttle_opts());
+        ctrl.record_update("op1", make_update("first", 10, Some(10)), fixed_now());
+
+        let notifs_first = ctrl.stop_tracking("op1");
+        assert_eq!(notifs_first.len(), 1);
+
+        ctrl.start_tracking("op1", 2, "second", &zero_throttle_opts());
+        assert_eq!(ctrl.current_phase("op1").unwrap(), "second");
+        assert!(ctrl.latest_update("op1").is_none()); // fresh start
+        assert!(ctrl.notifications("op1").is_empty());
+    }
+
+    // ── ProgressController: notification request_id ──
+
+    #[test]
+    fn notification_request_id_matches_start_tracking() {
+        let ctrl = ProgressController::new();
+        ctrl.start_tracking("op1", 42, "init", &zero_throttle_opts());
+        ctrl.record_update("op1", make_update("init", 1, Some(10)), fixed_now());
+        ctrl.record_phase_transition("op1", "done", &[], fixed_now());
+
+        let notifs = ctrl.notifications("op1");
+        for n in &notifs {
+            assert_eq!(n.request_id, 42);
+        }
+    }
+
+    #[test]
+    fn notification_request_id_zero() {
+        let ctrl = ProgressController::new();
+        ctrl.start_tracking("op1", 0, "init", &zero_throttle_opts());
+        ctrl.record_update("op1", make_update("init", 1, Some(1)), fixed_now());
+        let notifs = ctrl.notifications("op1");
+        assert_eq!(notifs[0].request_id, 0);
+    }
+
+    #[test]
+    fn notification_request_id_max() {
+        let ctrl = ProgressController::new();
+        ctrl.start_tracking("op1", u64::MAX, "init", &zero_throttle_opts());
+        ctrl.record_update("op1", make_update("init", 1, Some(1)), fixed_now());
+        let notifs = ctrl.notifications("op1");
+        assert_eq!(notifs[0].request_id, u64::MAX);
+    }
+
+    // ── ProgressController: aggregate with various scenarios ──
+
+    #[test]
+    fn aggregate_all_completed() {
+        let ctrl = ProgressController::new();
+        ctrl.start_tracking("op1", 1, "w", &zero_throttle_opts());
+        ctrl.start_tracking("op2", 2, "w", &zero_throttle_opts());
+
+        ctrl.record_update("op1", make_update("w", 100, Some(100)), fixed_now());
+        ctrl.record_update("op2", make_update("w", 50, Some(50)), fixed_now());
+
+        let agg = ctrl.aggregate();
+        assert_eq!(agg.total_operations, 2);
+        assert_eq!(agg.completed_operations, 2);
+        assert_eq!(agg.in_progress_operations, 0);
+        assert!((agg.overall_percentage.unwrap() - 100.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn aggregate_with_zero_total_op() {
+        let ctrl = ProgressController::new();
+        ctrl.start_tracking("op1", 1, "w", &zero_throttle_opts());
+        // total = 0, current = 0, is_complete returns true
+        ctrl.record_update("op1", make_update("w", 0, Some(0)), fixed_now());
+
+        let agg = ctrl.aggregate();
+        assert_eq!(agg.completed_operations, 1);
+        // computed_percentage returns None for zero total
+        assert!(agg.overall_percentage.is_none());
+    }
+
+    #[test]
+    fn aggregate_many_operations() {
+        let ctrl = ProgressController::new();
+        for i in 0..10 {
+            let id = format!("op{i}");
+            ctrl.start_tracking(&id, i as u64, "w", &zero_throttle_opts());
+            ctrl.record_update(
+                &id,
+                make_update("w", (i + 1) * 10, Some(100)),
+                fixed_now(),
+            );
+        }
+        let agg = ctrl.aggregate();
+        assert_eq!(agg.total_operations, 10);
+        // only op9 (100/100) is complete
+        assert_eq!(agg.completed_operations, 1);
+        assert_eq!(agg.in_progress_operations, 9);
+        // Average = (10+20+30+40+50+60+70+80+90+100)/10 = 55%
+        assert!((agg.overall_percentage.unwrap() - 55.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn aggregate_after_stop_tracking() {
+        let ctrl = ProgressController::new();
+        ctrl.start_tracking("op1", 1, "w", &zero_throttle_opts());
+        ctrl.start_tracking("op2", 2, "w", &zero_throttle_opts());
+
+        ctrl.record_update("op1", make_update("w", 50, Some(100)), fixed_now());
+        ctrl.record_update("op2", make_update("w", 80, Some(100)), fixed_now());
+
+        ctrl.stop_tracking("op1");
+
+        let agg = ctrl.aggregate();
+        assert_eq!(agg.total_operations, 1);
+        assert!((agg.overall_percentage.unwrap() - 80.0).abs() < f64::EPSILON);
+    }
+
+    // ── ProgressController: completed_phases edge cases ──
+
+    #[test]
+    fn completed_phases_empty_before_transition() {
+        let ctrl = ProgressController::new();
+        ctrl.start_tracking("op1", 1, "init", &default_opts());
+        assert!(ctrl.completed_phases("op1").is_empty());
+    }
+
+    #[test]
+    fn completed_phases_single_transition() {
+        let ctrl = ProgressController::new();
+        ctrl.start_tracking("op1", 1, "init", &default_opts());
+        ctrl.record_phase_transition("op1", "work", &[], fixed_now());
+        let completed = ctrl.completed_phases("op1");
+        assert_eq!(completed, vec!["init"]);
+    }
+
+    #[test]
+    fn completed_phases_many_transitions() {
+        let ctrl = ProgressController::new();
+        ctrl.start_tracking("op1", 1, "a", &default_opts());
+        ctrl.record_phase_transition("op1", "b", &["c", "d", "e"], fixed_now());
+        ctrl.record_phase_transition("op1", "c", &["d", "e"], fixed_now());
+        ctrl.record_phase_transition("op1", "d", &["e"], fixed_now());
+        ctrl.record_phase_transition("op1", "e", &[], fixed_now());
+
+        let completed = ctrl.completed_phases("op1");
+        assert_eq!(completed, vec!["a", "b", "c", "d"]);
+        assert_eq!(ctrl.current_phase("op1").unwrap(), "e");
+    }
+
+    // ── ProgressController: elapsed_ms ──
+
+    #[test]
+    fn elapsed_ms_non_negative() {
+        let ctrl = ProgressController::new();
+        ctrl.start_tracking("op1", 1, "init", &default_opts());
+        let elapsed = ctrl.elapsed_ms("op1").unwrap();
+        // Should be very small (just created), definitely non-negative
+        assert!(elapsed < 1000);
+    }
+
+    // ── AggregatedProgress: additional tests ──
+
+    #[test]
+    fn aggregated_progress_clone() {
+        let original = AggregatedProgress {
+            total_operations: 5,
+            completed_operations: 2,
+            in_progress_operations: 3,
+            overall_percentage: Some(60.0),
+        };
+        let cloned = original.clone();
+        assert_eq!(cloned.total_operations, original.total_operations);
+        assert_eq!(cloned.completed_operations, original.completed_operations);
+        assert_eq!(
+            cloned.in_progress_operations,
+            original.in_progress_operations
+        );
+        assert_eq!(cloned.overall_percentage, original.overall_percentage);
+    }
+
+    #[test]
+    fn aggregated_progress_debug() {
+        let agg = AggregatedProgress {
+            total_operations: 1,
+            completed_operations: 0,
+            in_progress_operations: 1,
+            overall_percentage: None,
+        };
+        let dbg = format!("{agg:?}");
+        assert!(dbg.contains("AggregatedProgress"));
+        assert!(dbg.contains("total_operations"));
+    }
+
+    // ── ProgressPayload: tag-based serialization ──
+
+    #[test]
+    fn payload_update_tag_in_json() {
+        let payload = ProgressPayload::Update(make_update("work", 1, Some(10)));
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(json.contains("\"type\":\"update\""));
+    }
+
+    #[test]
+    fn payload_phase_tag_in_json() {
+        let payload = ProgressPayload::Phase(PhaseTransition {
+            from_phase: "a".into(),
+            to_phase: "b".into(),
+            phases_remaining: vec![],
+            timestamp: fixed_now(),
+        });
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(json.contains("\"type\":\"phase\""));
+    }
+
+    #[test]
+    fn payload_update_roundtrip_preserves_data() {
+        let payload = ProgressPayload::Update(ProgressUpdate {
+            phase: "download".into(),
+            current: 999,
+            total: Some(2000),
+            unit: ProgressUnit::Requests,
+            percentage: Some(49.95),
+            rate: Some(100),
+            eta_ms: Some(10_000),
+            message: Some("downloading page 999".into()),
+        });
+        let json = serde_json::to_string(&payload).unwrap();
+        let parsed: ProgressPayload = serde_json::from_str(&json).unwrap();
+        if let ProgressPayload::Update(u) = parsed {
+            assert_eq!(u.current, 999);
+            assert_eq!(u.total, Some(2000));
+            assert_eq!(u.rate, Some(100));
+            assert_eq!(u.eta_ms, Some(10_000));
+            assert_eq!(u.message.as_deref(), Some("downloading page 999"));
+        } else {
+            panic!("expected Update payload");
+        }
+    }
+
+    #[test]
+    fn payload_debug_format() {
+        let payload = ProgressPayload::Update(make_update("x", 0, None));
+        let dbg = format!("{payload:?}");
+        assert!(dbg.contains("Update"));
+    }
+
+    // ── ProgressController: interleaved operations ──
+
+    #[test]
+    fn interleaved_updates_across_operations() {
+        let ctrl = ProgressController::new();
+        ctrl.start_tracking("a", 1, "work", &zero_throttle_opts());
+        ctrl.start_tracking("b", 2, "work", &zero_throttle_opts());
+
+        let t1 = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 1).unwrap();
+
+        ctrl.record_update("a", make_update("work", 10, Some(100)), t1);
+        ctrl.record_update("b", make_update("work", 20, Some(100)), t1);
+        ctrl.record_update("a", make_update("work", 30, Some(100)), t2);
+
+        assert_eq!(ctrl.notifications("a").len(), 2);
+        assert_eq!(ctrl.notifications("b").len(), 1);
+        assert_eq!(ctrl.latest_update("a").unwrap().current, 30);
+        assert_eq!(ctrl.latest_update("b").unwrap().current, 20);
+    }
+
+    #[test]
+    fn phase_transition_interleaved_across_operations() {
+        let ctrl = ProgressController::new();
+        ctrl.start_tracking("a", 1, "init", &default_opts());
+        ctrl.start_tracking("b", 2, "init", &default_opts());
+
+        ctrl.record_phase_transition("a", "work", &["done"], fixed_now());
+        ctrl.record_phase_transition("b", "process", &["finalize"], fixed_now());
+        ctrl.record_phase_transition("a", "done", &[], fixed_now());
+
+        assert_eq!(ctrl.current_phase("a").unwrap(), "done");
+        assert_eq!(ctrl.current_phase("b").unwrap(), "process");
+        assert_eq!(ctrl.completed_phases("a"), vec!["init", "work"]);
+        assert_eq!(ctrl.completed_phases("b"), vec!["init"]);
+    }
+
+    // ── ProgressController: empty string edge cases ──
+
+    #[test]
+    fn empty_operation_id_works() {
+        let ctrl = ProgressController::new();
+        ctrl.start_tracking("", 1, "init", &zero_throttle_opts());
+        assert_eq!(ctrl.tracked_count(), 1);
+        assert_eq!(ctrl.current_phase("").unwrap(), "init");
+        ctrl.record_update("", make_update("init", 5, Some(10)), fixed_now());
+        assert_eq!(ctrl.latest_update("").unwrap().current, 5);
+        ctrl.stop_tracking("");
+        assert_eq!(ctrl.tracked_count(), 0);
+    }
+
+    #[test]
+    fn empty_phase_name_works() {
+        let ctrl = ProgressController::new();
+        ctrl.start_tracking("op1", 1, "", &default_opts());
+        assert_eq!(ctrl.current_phase("op1").unwrap(), "");
+        ctrl.record_phase_transition("op1", "real_phase", &[], fixed_now());
+        let completed = ctrl.completed_phases("op1");
+        assert_eq!(completed, vec![""]);
+    }
+
+    // ── ProgressUpdate: u64 boundary values ──
+
+    #[test]
+    fn update_max_u64_current() {
+        let u = ProgressUpdate {
+            phase: "big".into(),
+            current: u64::MAX,
+            total: Some(u64::MAX),
+            unit: ProgressUnit::Bytes,
+            percentage: None,
+            rate: None,
+            eta_ms: None,
+            message: None,
+        };
+        assert!(u.is_complete());
+        let pct = u.computed_percentage().unwrap();
+        assert!((pct - 100.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn update_json_roundtrip_max_values() {
+        let u = ProgressUpdate {
+            phase: "max".into(),
+            current: u64::MAX,
+            total: Some(u64::MAX),
+            unit: ProgressUnit::Items,
+            percentage: None,
+            rate: Some(u64::MAX),
+            eta_ms: Some(u64::MAX),
+            message: None,
+        };
+        let json = serde_json::to_string(&u).unwrap();
+        let parsed: ProgressUpdate = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.current, u64::MAX);
+        assert_eq!(parsed.total, Some(u64::MAX));
+        assert_eq!(parsed.rate, Some(u64::MAX));
+        assert_eq!(parsed.eta_ms, Some(u64::MAX));
+    }
+
+    // ── ProgressNotification: clone ──
+
+    #[test]
+    fn notification_clone() {
+        let n = ProgressNotification {
+            operation_id: "op1".into(),
+            request_id: 7,
+            payload: ProgressPayload::Update(make_update("work", 5, Some(10))),
+            timestamp: fixed_now(),
+        };
+        let cloned = n.clone();
+        assert_eq!(cloned.operation_id, n.operation_id);
+        assert_eq!(cloned.request_id, n.request_id);
+        assert_eq!(cloned.timestamp, n.timestamp);
+    }
+
+    #[test]
+    fn notification_debug_format() {
+        let n = ProgressNotification {
+            operation_id: "op_dbg".into(),
+            request_id: 99,
+            payload: ProgressPayload::Update(make_update("work", 1, Some(2))),
+            timestamp: fixed_now(),
+        };
+        let dbg = format!("{n:?}");
+        assert!(dbg.contains("op_dbg"));
+        assert!(dbg.contains("99"));
+    }
+
+    // ── ProgressController: throttle behavior edge cases ──
+
+    #[test]
+    fn throttled_update_still_stores_latest_internally() {
+        let ctrl = ProgressController::new();
+        let opts = ProgressOptions {
+            stream_progress: true,
+            progress_interval_ms: 60_000,
+        };
+        ctrl.start_tracking("op1", 1, "w", &opts);
+
+        // First emits
+        ctrl.record_update("op1", make_update("w", 10, Some(100)), fixed_now());
+        // These are throttled
+        ctrl.record_update("op1", make_update("w", 20, Some(100)), fixed_now());
+        ctrl.record_update("op1", make_update("w", 30, Some(100)), fixed_now());
+        ctrl.record_update("op1", make_update("w", 40, Some(100)), fixed_now());
+
+        // Only 1 notification emitted
+        assert_eq!(ctrl.notifications("op1").len(), 1);
+        // But latest is the last recorded
+        assert_eq!(ctrl.latest_update("op1").unwrap().current, 40);
+    }
+
+    #[test]
+    fn phase_transition_does_not_reset_throttle_timer() {
+        let ctrl = ProgressController::new();
+        let opts = ProgressOptions {
+            stream_progress: true,
+            progress_interval_ms: 60_000,
+        };
+        ctrl.start_tracking("op1", 1, "a", &opts);
+
+        // First update emits
+        let first = ctrl.record_update("op1", make_update("a", 10, Some(100)), fixed_now());
+        assert!(first);
+
+        // Phase transition always emits
+        ctrl.record_phase_transition("op1", "b", &[], fixed_now());
+
+        // Next update should still be throttled (phase transition doesn't reset timer)
+        let after = ctrl.record_update("op1", make_update("b", 20, Some(100)), fixed_now());
+        assert!(!after);
+    }
+
+    // ── ProgressController: aggregate with indeterminate mixed ──
+
+    #[test]
+    fn aggregate_mix_determinate_and_indeterminate() {
+        let ctrl = ProgressController::new();
+        ctrl.start_tracking("det", 1, "w", &zero_throttle_opts());
+        ctrl.start_tracking("indet", 2, "w", &zero_throttle_opts());
+
+        ctrl.record_update("det", make_update("w", 60, Some(100)), fixed_now());
+        ctrl.record_update("indet", make_update("w", 500, None), fixed_now());
+
+        let agg = ctrl.aggregate();
+        assert_eq!(agg.total_operations, 2);
+        // Both are in_progress (indeterminate can't be complete)
+        assert_eq!(agg.in_progress_operations, 2);
+        assert_eq!(agg.completed_operations, 0);
+        // Only the determinate contributes to percentage
+        assert!((agg.overall_percentage.unwrap() - 60.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn aggregate_no_updates_at_all() {
+        let ctrl = ProgressController::new();
+        ctrl.start_tracking("op1", 1, "init", &default_opts());
+        ctrl.start_tracking("op2", 2, "init", &default_opts());
+
+        let agg = ctrl.aggregate();
+        assert_eq!(agg.total_operations, 2);
+        assert_eq!(agg.in_progress_operations, 2);
+        assert_eq!(agg.completed_operations, 0);
+        assert!(agg.overall_percentage.is_none());
+    }
+
+    // ── ProgressController: notifications from stop_tracking ──
+
+    #[test]
+    fn stop_tracking_preserves_notification_order() {
+        let ctrl = ProgressController::new();
+        ctrl.start_tracking("op1", 1, "a", &zero_throttle_opts());
+
+        let t1 = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 1).unwrap();
+        let t3 = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 2).unwrap();
+        let t4 = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 3).unwrap();
+
+        ctrl.record_update("op1", make_update("a", 10, Some(100)), t1);
+        ctrl.record_phase_transition("op1", "b", &["c"], t2);
+        ctrl.record_update("op1", make_update("b", 50, Some(100)), t3);
+        ctrl.record_phase_transition("op1", "c", &[], t4);
+
+        let notifs = ctrl.stop_tracking("op1");
+        assert_eq!(notifs.len(), 4);
+        assert_eq!(notifs[0].timestamp, t1);
+        assert_eq!(notifs[1].timestamp, t2);
+        assert_eq!(notifs[2].timestamp, t3);
+        assert_eq!(notifs[3].timestamp, t4);
+    }
+
+    #[test]
+    fn stop_tracking_twice_second_returns_empty() {
+        let ctrl = ProgressController::new();
+        ctrl.start_tracking("op1", 1, "init", &zero_throttle_opts());
+        ctrl.record_update("op1", make_update("init", 1, Some(1)), fixed_now());
+
+        let first = ctrl.stop_tracking("op1");
+        assert_eq!(first.len(), 1);
+
+        let second = ctrl.stop_tracking("op1");
+        assert!(second.is_empty());
+    }
+
+    // ── ProgressController: overwrite tracking ──
+
+    #[test]
+    fn start_tracking_overwrites_clears_notifications() {
+        let ctrl = ProgressController::new();
+        ctrl.start_tracking("op1", 1, "phase_a", &zero_throttle_opts());
+        ctrl.record_update("op1", make_update("phase_a", 50, Some(100)), fixed_now());
+        assert_eq!(ctrl.notifications("op1").len(), 1);
+
+        // Overwrite
+        ctrl.start_tracking("op1", 2, "phase_b", &default_opts());
+        assert!(ctrl.notifications("op1").is_empty());
+        assert!(ctrl.latest_update("op1").is_none());
+        assert!(ctrl.completed_phases("op1").is_empty());
+    }
 }

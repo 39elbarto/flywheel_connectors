@@ -2008,4 +2008,991 @@ mod tests {
         assert_eq!(report.zones[0].zone_id, zone);
         assert_eq!(report.zones[0].budgets[0].used, 250);
     }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS — expanded coverage for budget.rs
+    // ══════════════════════════════════════════════════════════════════
+
+    // ── BudgetReportRequest serde + Default ──
+
+    #[test]
+    fn budget_report_request_default_has_no_zone() {
+        let req = BudgetReportRequest::default();
+        assert!(req.zone_id.is_none());
+    }
+
+    #[test]
+    fn budget_report_request_clone() {
+        let req = BudgetReportRequest {
+            zone_id: Some("zone-alpha".to_string()),
+        };
+        let cloned = req.clone();
+        assert_eq!(cloned.zone_id.as_deref(), Some("zone-alpha"));
+    }
+
+    #[test]
+    fn budget_report_request_debug() {
+        let req = BudgetReportRequest::default();
+        let dbg = format!("{req:?}");
+        assert!(dbg.contains("BudgetReportRequest"));
+    }
+
+    #[test]
+    fn budget_report_request_serde_roundtrip_with_zone() {
+        let req = BudgetReportRequest {
+            zone_id: Some("production".to_string()),
+        };
+        let json = serde_json::to_string(&req).expect("serialize");
+        let parsed: BudgetReportRequest = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.zone_id.as_deref(), Some("production"));
+    }
+
+    #[test]
+    fn budget_report_request_serde_roundtrip_without_zone() {
+        let req = BudgetReportRequest { zone_id: None };
+        let json = serde_json::to_string(&req).expect("serialize");
+        let parsed: BudgetReportRequest = serde_json::from_str(&json).expect("deserialize");
+        assert!(parsed.zone_id.is_none());
+    }
+
+    #[test]
+    fn budget_report_request_deserialize_empty_object() {
+        let parsed: BudgetReportRequest =
+            serde_json::from_str("{}").expect("deserialize empty");
+        assert!(parsed.zone_id.is_none());
+    }
+
+    // ── BudgetReportResponse serde + fields ──
+
+    #[test]
+    fn budget_report_response_schema_version_constant() {
+        assert_eq!(BudgetReportResponse::SCHEMA_VERSION, "1.0.0");
+    }
+
+    #[test]
+    fn budget_report_response_debug() {
+        let resp = BudgetReportResponse {
+            schema_version: "1.0.0".to_string(),
+            generated_at: Utc::now(),
+            zones: vec![],
+        };
+        let dbg = format!("{resp:?}");
+        assert!(dbg.contains("BudgetReportResponse"));
+    }
+
+    #[test]
+    fn budget_report_response_clone() {
+        let resp = BudgetReportResponse {
+            schema_version: "1.0.0".to_string(),
+            generated_at: Utc::now(),
+            zones: vec![],
+        };
+        let cloned = resp.clone();
+        assert_eq!(cloned.schema_version, "1.0.0");
+        assert!(cloned.zones.is_empty());
+    }
+
+    #[test]
+    fn budget_report_response_serde_roundtrip() {
+        let resp = BudgetReportResponse {
+            schema_version: "1.0.0".to_string(),
+            generated_at: Utc::now(),
+            zones: vec![],
+        };
+        let json = serde_json::to_string(&resp).expect("serialize");
+        let parsed: BudgetReportResponse = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.schema_version, "1.0.0");
+        assert!(parsed.zones.is_empty());
+    }
+
+    // ── BudgetTracker: exact-at-limit boundary ──
+
+    #[test]
+    fn budget_tracker_exact_at_limit_is_ok() {
+        let zone = ZoneId::work();
+        let policy = UsageBudgetPolicy {
+            enforcement: BudgetEnforcement::Deny,
+            budgets: vec![UsageBudgetLimit {
+                metric: UsageMetricKind::Tokens,
+                limit: 100,
+                window_seconds: 60,
+            }],
+        };
+        let mut tracker = BudgetTracker::new();
+        let eval = tracker.record_usage(&zone, &policy, &[UsageMetric::tokens(100)]);
+        // used == limit is NOT exceeded (only used > limit triggers exceeded)
+        assert_eq!(eval.action, BudgetAction::Allow);
+        assert_eq!(eval.snapshot.budgets[0].status, BudgetStatus::Ok);
+        assert_eq!(eval.snapshot.budgets[0].remaining, 0);
+    }
+
+    #[test]
+    fn budget_tracker_one_over_limit_is_exceeded() {
+        let zone = ZoneId::work();
+        let policy = UsageBudgetPolicy {
+            enforcement: BudgetEnforcement::Deny,
+            budgets: vec![UsageBudgetLimit {
+                metric: UsageMetricKind::Tokens,
+                limit: 100,
+                window_seconds: 60,
+            }],
+        };
+        let mut tracker = BudgetTracker::new();
+        let eval = tracker.record_usage(&zone, &policy, &[UsageMetric::tokens(101)]);
+        assert_eq!(eval.action, BudgetAction::Deny);
+        assert_eq!(eval.snapshot.budgets[0].status, BudgetStatus::Exceeded);
+    }
+
+    // ── DurationMs metric kind ──
+
+    #[test]
+    fn budget_tracker_duration_ms_metric() {
+        let zone = ZoneId::work();
+        let policy = UsageBudgetPolicy {
+            enforcement: BudgetEnforcement::Deny,
+            budgets: vec![UsageBudgetLimit {
+                metric: UsageMetricKind::DurationMs,
+                limit: 5000,
+                window_seconds: 60,
+            }],
+        };
+        let mut tracker = BudgetTracker::new();
+        let eval = tracker.record_usage(&zone, &policy, &[UsageMetric::duration_ms(3000)]);
+        assert_eq!(eval.action, BudgetAction::Allow);
+        assert_eq!(eval.snapshot.budgets[0].used, 3000);
+        assert_eq!(eval.snapshot.budgets[0].remaining, 2000);
+
+        let eval2 = tracker.record_usage(&zone, &policy, &[UsageMetric::duration_ms(2500)]);
+        assert_eq!(eval2.action, BudgetAction::Deny);
+        assert_eq!(eval2.snapshot.budgets[0].used, 5500);
+    }
+
+    // ── All five metric kinds in a single policy ──
+
+    #[test]
+    fn budget_tracker_all_five_metric_kinds() {
+        let zone = ZoneId::work();
+        let policy = UsageBudgetPolicy {
+            enforcement: BudgetEnforcement::Deny,
+            budgets: vec![
+                UsageBudgetLimit {
+                    metric: UsageMetricKind::Tokens,
+                    limit: 1000,
+                    window_seconds: 60,
+                },
+                UsageBudgetLimit {
+                    metric: UsageMetricKind::Requests,
+                    limit: 50,
+                    window_seconds: 60,
+                },
+                UsageBudgetLimit {
+                    metric: UsageMetricKind::Bytes,
+                    limit: 1_000_000,
+                    window_seconds: 60,
+                },
+                UsageBudgetLimit {
+                    metric: UsageMetricKind::DurationMs,
+                    limit: 10_000,
+                    window_seconds: 60,
+                },
+                UsageBudgetLimit {
+                    metric: UsageMetricKind::ApiCredits,
+                    limit: 100,
+                    window_seconds: 60,
+                },
+            ],
+        };
+        let mut tracker = BudgetTracker::new();
+        let eval = tracker.record_usage(
+            &zone,
+            &policy,
+            &[
+                UsageMetric::tokens(500),
+                UsageMetric::requests(10),
+                UsageMetric::bytes(500_000),
+                UsageMetric::duration_ms(5000),
+                UsageMetric::api_credits(50),
+            ],
+        );
+        assert_eq!(eval.action, BudgetAction::Allow);
+        assert_eq!(eval.snapshot.budgets.len(), 5);
+        for entry in &eval.snapshot.budgets {
+            assert_eq!(entry.status, BudgetStatus::Ok);
+        }
+    }
+
+    // ── Multiple zones with different policies ──
+
+    #[test]
+    fn budget_tracker_different_policies_per_zone() {
+        let zone_a = ZoneId::work();
+        let zone_b = ZoneId::private();
+        let policy_strict = UsageBudgetPolicy {
+            enforcement: BudgetEnforcement::Deny,
+            budgets: vec![UsageBudgetLimit {
+                metric: UsageMetricKind::Tokens,
+                limit: 10,
+                window_seconds: 60,
+            }],
+        };
+        let policy_lenient = UsageBudgetPolicy {
+            enforcement: BudgetEnforcement::Warn,
+            budgets: vec![UsageBudgetLimit {
+                metric: UsageMetricKind::Tokens,
+                limit: 10_000,
+                window_seconds: 60,
+            }],
+        };
+
+        let mut tracker = BudgetTracker::new();
+        let eval_a = tracker.record_usage(&zone_a, &policy_strict, &[UsageMetric::tokens(50)]);
+        assert_eq!(eval_a.action, BudgetAction::Deny);
+
+        let eval_b = tracker.record_usage(&zone_b, &policy_lenient, &[UsageMetric::tokens(50)]);
+        assert_eq!(eval_b.action, BudgetAction::Allow);
+    }
+
+    // ── Snapshot after exceeded state still shows exceeded ──
+
+    #[test]
+    fn budget_tracker_snapshot_after_exceeded_shows_exceeded() {
+        let zone = ZoneId::work();
+        let policy = UsageBudgetPolicy {
+            enforcement: BudgetEnforcement::Deny,
+            budgets: vec![UsageBudgetLimit {
+                metric: UsageMetricKind::Tokens,
+                limit: 100,
+                window_seconds: 60,
+            }],
+        };
+        let mut tracker = BudgetTracker::new();
+        let _ = tracker.record_usage(&zone, &policy, &[UsageMetric::tokens(200)]);
+        let snap = tracker.snapshot(&zone, &policy);
+        assert_eq!(snap.budgets[0].status, BudgetStatus::Exceeded);
+        assert_eq!(snap.budgets[0].used, 200);
+        assert_eq!(snap.budgets[0].remaining, 0);
+    }
+
+    // ── aggregate_metrics: all five kinds at once ──
+
+    #[test]
+    fn aggregate_metrics_all_five_kinds() {
+        let metrics = vec![
+            UsageMetric::tokens(10),
+            UsageMetric::requests(20),
+            UsageMetric::bytes(30),
+            UsageMetric::duration_ms(40),
+            UsageMetric::api_credits(50),
+        ];
+        let result = aggregate_metrics(&metrics);
+        assert_eq!(result.len(), 5);
+        assert_eq!(*result.get(&UsageMetricKind::Tokens).unwrap(), 10);
+        assert_eq!(*result.get(&UsageMetricKind::Requests).unwrap(), 20);
+        assert_eq!(*result.get(&UsageMetricKind::Bytes).unwrap(), 30);
+        assert_eq!(*result.get(&UsageMetricKind::DurationMs).unwrap(), 40);
+        assert_eq!(*result.get(&UsageMetricKind::ApiCredits).unwrap(), 50);
+    }
+
+    #[test]
+    fn aggregate_metrics_zero_amounts() {
+        let metrics = vec![UsageMetric::tokens(0), UsageMetric::tokens(0)];
+        let result = aggregate_metrics(&metrics);
+        assert_eq!(*result.get(&UsageMetricKind::Tokens).unwrap(), 0);
+    }
+
+    #[test]
+    fn aggregate_metrics_multiple_saturate_separately() {
+        let metrics = vec![
+            UsageMetric::tokens(u64::MAX),
+            UsageMetric::tokens(100),
+            UsageMetric::requests(u64::MAX),
+            UsageMetric::requests(1),
+        ];
+        let result = aggregate_metrics(&metrics);
+        assert_eq!(*result.get(&UsageMetricKind::Tokens).unwrap(), u64::MAX);
+        assert_eq!(*result.get(&UsageMetricKind::Requests).unwrap(), u64::MAX);
+    }
+
+    // ── MetricWindow edge cases ──
+
+    #[test]
+    fn metric_window_roll_u64_max_window_seconds() {
+        let mut window = MetricWindow::new(u64::MAX, 0);
+        window.used = 42;
+        // elapsed = 100 < u64::MAX, no roll
+        window.roll_if_needed(100, u64::MAX);
+        assert_eq!(window.used, 42);
+        assert_eq!(window.window_started_at, 0);
+    }
+
+    #[test]
+    fn metric_window_roll_window_seconds_one() {
+        let mut window = MetricWindow::new(1, 1000);
+        window.used = 10;
+        // elapsed = 1 >= window_seconds(1) → rolls
+        window.roll_if_needed(1001, 1);
+        assert_eq!(window.used, 0);
+        assert_eq!(window.window_started_at, 1001);
+    }
+
+    #[test]
+    fn metric_window_roll_many_short_windows() {
+        let mut window = MetricWindow::new(1, 0);
+        window.used = 5;
+        // 100 windows passed
+        window.roll_if_needed(100, 1);
+        assert_eq!(window.used, 0);
+        assert_eq!(window.window_started_at, 100);
+    }
+
+    #[test]
+    fn metric_window_roll_no_change_same_timestamp() {
+        let mut window = MetricWindow::new(60, 1000);
+        window.used = 15;
+        // now == window_started_at → elapsed = 0 < 60, no roll
+        window.roll_if_needed(1000, 60);
+        assert_eq!(window.used, 15);
+        assert_eq!(window.window_started_at, 1000);
+    }
+
+    #[test]
+    fn metric_window_roll_from_nonzero_window_to_zero_resets() {
+        let mut window = MetricWindow::new(60, 1000);
+        window.used = 25;
+        // configured_window = 0 → always resets
+        window.roll_if_needed(1010, 0);
+        assert_eq!(window.used, 0);
+        assert_eq!(window.window_started_at, 1010);
+        assert_eq!(window.window_seconds, 0);
+    }
+
+    // ── BudgetTracker: limit == u64::MAX ──
+
+    #[test]
+    fn budget_tracker_max_limit_allows_large_usage() {
+        let zone = ZoneId::work();
+        let policy = UsageBudgetPolicy {
+            enforcement: BudgetEnforcement::Deny,
+            budgets: vec![UsageBudgetLimit {
+                metric: UsageMetricKind::Tokens,
+                limit: u64::MAX,
+                window_seconds: 60,
+            }],
+        };
+        let mut tracker = BudgetTracker::new();
+        let eval = tracker.record_usage(&zone, &policy, &[UsageMetric::tokens(u64::MAX - 1)]);
+        assert_eq!(eval.action, BudgetAction::Allow);
+        assert_eq!(eval.snapshot.budgets[0].used, u64::MAX - 1);
+        assert_eq!(eval.snapshot.budgets[0].remaining, 1);
+    }
+
+    // ── BudgetTracker: multiple record calls accumulating to exact limit ──
+
+    #[test]
+    fn budget_tracker_accumulate_to_exact_limit() {
+        let zone = ZoneId::work();
+        let policy = UsageBudgetPolicy {
+            enforcement: BudgetEnforcement::Deny,
+            budgets: vec![UsageBudgetLimit {
+                metric: UsageMetricKind::Requests,
+                limit: 5,
+                window_seconds: 60,
+            }],
+        };
+        let mut tracker = BudgetTracker::new();
+        for _ in 0..5 {
+            let eval = tracker.record_usage(&zone, &policy, &[UsageMetric::requests(1)]);
+            assert_eq!(eval.action, BudgetAction::Allow);
+        }
+        // 6th request exceeds
+        let eval = tracker.record_usage(&zone, &policy, &[UsageMetric::requests(1)]);
+        assert_eq!(eval.action, BudgetAction::Deny);
+        assert_eq!(eval.snapshot.budgets[0].used, 6);
+    }
+
+    // ── BudgetEvaluation to_error: multiple exceeded entries returns first ──
+
+    #[test]
+    fn budget_evaluation_to_error_multiple_exceeded_returns_first() {
+        let eval = BudgetEvaluation {
+            action: BudgetAction::Deny,
+            snapshot: UsageBudgetSnapshot {
+                zone_id: ZoneId::work(),
+                enforcement: BudgetEnforcement::Deny,
+                budgets: vec![
+                    UsageBudgetUsage {
+                        metric: UsageMetricKind::Tokens,
+                        used: 200,
+                        limit: 100,
+                        remaining: 0,
+                        window_started_at: 0,
+                        window_resets_at: 60,
+                        status: BudgetStatus::Exceeded,
+                    },
+                    UsageBudgetUsage {
+                        metric: UsageMetricKind::Requests,
+                        used: 20,
+                        limit: 10,
+                        remaining: 0,
+                        window_started_at: 0,
+                        window_resets_at: 60,
+                        status: BudgetStatus::Exceeded,
+                    },
+                ],
+                updated_at: 0,
+            },
+        };
+        let error = eval.to_error().expect("should produce error");
+        // Should find the first exceeded entry (Tokens)
+        if let FcpError::BudgetExceeded { metric, .. } = error {
+            assert_eq!(metric, UsageMetricKind::Tokens);
+        } else {
+            unreachable!("expected BudgetExceeded");
+        }
+    }
+
+    // ── BudgetEvaluation to_error: Warn action with exceeded entries ──
+
+    #[test]
+    fn budget_evaluation_to_error_warn_with_exceeded_returns_none() {
+        let eval = BudgetEvaluation {
+            action: BudgetAction::Warn,
+            snapshot: UsageBudgetSnapshot {
+                zone_id: ZoneId::work(),
+                enforcement: BudgetEnforcement::Warn,
+                budgets: vec![UsageBudgetUsage {
+                    metric: UsageMetricKind::Tokens,
+                    used: 200,
+                    limit: 100,
+                    remaining: 0,
+                    window_started_at: 0,
+                    window_resets_at: 60,
+                    status: BudgetStatus::Exceeded,
+                }],
+                updated_at: 0,
+            },
+        };
+        // Warn action never produces an error
+        assert!(eval.to_error().is_none());
+    }
+
+    // ── BudgetEvaluation to_error: window_seconds = 0 ──
+
+    #[test]
+    fn budget_evaluation_to_error_zero_window() {
+        let eval = BudgetEvaluation {
+            action: BudgetAction::Deny,
+            snapshot: UsageBudgetSnapshot {
+                zone_id: ZoneId::work(),
+                enforcement: BudgetEnforcement::Deny,
+                budgets: vec![UsageBudgetUsage {
+                    metric: UsageMetricKind::Tokens,
+                    used: 10,
+                    limit: 5,
+                    remaining: 0,
+                    window_started_at: 100,
+                    window_resets_at: 100,
+                    status: BudgetStatus::Exceeded,
+                }],
+                updated_at: 100,
+            },
+        };
+        let error = eval.to_error().expect("should produce error");
+        if let FcpError::BudgetExceeded { window_seconds, .. } = error {
+            assert_eq!(window_seconds, 0);
+        } else {
+            unreachable!("expected BudgetExceeded");
+        }
+    }
+
+    // ── BudgetTracker: snapshot does not change zones map size ──
+
+    #[test]
+    fn budget_tracker_snapshot_creates_zone_entry() {
+        let zone = ZoneId::work();
+        let policy = UsageBudgetPolicy {
+            enforcement: BudgetEnforcement::Deny,
+            budgets: vec![UsageBudgetLimit {
+                metric: UsageMetricKind::Tokens,
+                limit: 100,
+                window_seconds: 60,
+            }],
+        };
+        let mut tracker = BudgetTracker::new();
+        assert!(tracker.zones.is_empty());
+        let _ = tracker.snapshot(&zone, &policy);
+        // snapshot creates the zone entry via or_default()
+        assert_eq!(tracker.zones.len(), 1);
+    }
+
+    // ── BudgetTracker: snapshot multiple budgets ──
+
+    #[test]
+    fn budget_tracker_snapshot_multiple_budgets() {
+        let zone = ZoneId::work();
+        let policy = UsageBudgetPolicy {
+            enforcement: BudgetEnforcement::Deny,
+            budgets: vec![
+                UsageBudgetLimit {
+                    metric: UsageMetricKind::Tokens,
+                    limit: 100,
+                    window_seconds: 60,
+                },
+                UsageBudgetLimit {
+                    metric: UsageMetricKind::Bytes,
+                    limit: 1024,
+                    window_seconds: 120,
+                },
+            ],
+        };
+        let mut tracker = BudgetTracker::new();
+        let snap = tracker.snapshot(&zone, &policy);
+        assert_eq!(snap.budgets.len(), 2);
+        assert_eq!(snap.budgets[0].metric, UsageMetricKind::Tokens);
+        assert_eq!(snap.budgets[1].metric, UsageMetricKind::Bytes);
+        assert_eq!(snap.budgets[0].limit, 100);
+        assert_eq!(snap.budgets[1].limit, 1024);
+    }
+
+    // ── BudgetPolicyEngine async: report with no policies ──
+
+    #[fcp_async_core::runtime::test]
+    async fn budget_policy_engine_report_empty_has_no_zones() {
+        let engine = BudgetPolicyEngine::new();
+        let report = engine.report(None).await;
+        assert!(report.zones.is_empty());
+        assert_eq!(report.schema_version, BudgetReportResponse::SCHEMA_VERSION);
+    }
+
+    // ── BudgetPolicyEngine async: report filter on nonexistent zone ──
+
+    #[fcp_async_core::runtime::test]
+    async fn budget_policy_engine_report_filter_nonexistent_zone() {
+        let engine = BudgetPolicyEngine::new();
+        let zone = ZoneId::work();
+        engine
+            .upsert_policy(
+                zone.clone(),
+                UsageBudgetPolicy {
+                    enforcement: BudgetEnforcement::Warn,
+                    budgets: vec![UsageBudgetLimit {
+                        metric: UsageMetricKind::Tokens,
+                        limit: 100,
+                        window_seconds: 60,
+                    }],
+                },
+            )
+            .await;
+        let nonexistent = ZoneId::owner();
+        let report = engine.report(Some(&nonexistent)).await;
+        assert!(report.zones.is_empty());
+    }
+
+    // ── BudgetPolicyEngine async: preflight with zone but no policy ──
+
+    #[fcp_async_core::runtime::test]
+    async fn budget_policy_engine_preflight_zone_without_policy_allows() {
+        let engine = BudgetPolicyEngine::new();
+        let request = PreflightRequest {
+            connector_id: fcp_core::ConnectorId::new("budget", "test", "v1")
+                .expect("connector id"),
+            operation: "invoke".to_string(),
+            params: None,
+            principal: None,
+            zone_id: Some(ZoneId::work()),
+        };
+        let response = engine.evaluate_preflight(&request).await;
+        assert!(response.allowed);
+        assert!(response.reason.is_none());
+        assert!(response.budget_status.is_none());
+    }
+
+    // ── BudgetPolicyEngine async: with_policies multiple zones ──
+
+    #[fcp_async_core::runtime::test]
+    async fn budget_policy_engine_with_policies_multiple_zones() {
+        let mut policies = HashMap::new();
+        policies.insert(
+            ZoneId::work(),
+            UsageBudgetPolicy {
+                enforcement: BudgetEnforcement::Deny,
+                budgets: vec![UsageBudgetLimit {
+                    metric: UsageMetricKind::Tokens,
+                    limit: 100,
+                    window_seconds: 60,
+                }],
+            },
+        );
+        policies.insert(
+            ZoneId::private(),
+            UsageBudgetPolicy {
+                enforcement: BudgetEnforcement::Warn,
+                budgets: vec![UsageBudgetLimit {
+                    metric: UsageMetricKind::Requests,
+                    limit: 50,
+                    window_seconds: 3600,
+                }],
+            },
+        );
+        let engine = BudgetPolicyEngine::with_policies(policies);
+        let snap_work = engine.snapshot(&ZoneId::work()).await.unwrap();
+        assert_eq!(snap_work.enforcement, BudgetEnforcement::Deny);
+        let snap_priv = engine.snapshot(&ZoneId::private()).await.unwrap();
+        assert_eq!(snap_priv.enforcement, BudgetEnforcement::Warn);
+    }
+
+    // ── BudgetPolicyEngine async: record_usage then snapshot consistency ──
+
+    #[fcp_async_core::runtime::test]
+    async fn budget_policy_engine_record_then_snapshot() {
+        let engine = BudgetPolicyEngine::new();
+        let zone = ZoneId::work();
+        engine
+            .upsert_policy(
+                zone.clone(),
+                UsageBudgetPolicy {
+                    enforcement: BudgetEnforcement::Deny,
+                    budgets: vec![UsageBudgetLimit {
+                        metric: UsageMetricKind::Tokens,
+                        limit: 1000,
+                        window_seconds: 60,
+                    }],
+                },
+            )
+            .await;
+        engine
+            .record_usage(&zone, &[UsageMetric::tokens(250)])
+            .await
+            .unwrap();
+        let snap = engine.snapshot(&zone).await.unwrap();
+        assert_eq!(snap.budgets[0].used, 250);
+        assert_eq!(snap.budgets[0].remaining, 750);
+    }
+
+    // ── BudgetPolicyEngine async: report includes usage from recording ──
+
+    #[fcp_async_core::runtime::test]
+    async fn budget_policy_engine_report_reflects_recorded_usage() {
+        let engine = BudgetPolicyEngine::new();
+        let zone = ZoneId::work();
+        engine
+            .upsert_policy(
+                zone.clone(),
+                UsageBudgetPolicy {
+                    enforcement: BudgetEnforcement::Deny,
+                    budgets: vec![UsageBudgetLimit {
+                        metric: UsageMetricKind::Tokens,
+                        limit: 500,
+                        window_seconds: 3600,
+                    }],
+                },
+            )
+            .await;
+        engine
+            .record_usage(&zone, &[UsageMetric::tokens(123)])
+            .await
+            .unwrap();
+        let report = engine.report(None).await;
+        assert_eq!(report.zones.len(), 1);
+        assert_eq!(report.zones[0].budgets[0].used, 123);
+    }
+
+    // ── BudgetPolicyEngine async: upsert preserves existing tracked usage ──
+
+    #[fcp_async_core::runtime::test]
+    async fn budget_policy_engine_upsert_preserves_tracker_state() {
+        let engine = BudgetPolicyEngine::new();
+        let zone = ZoneId::work();
+        let policy = UsageBudgetPolicy {
+            enforcement: BudgetEnforcement::Deny,
+            budgets: vec![UsageBudgetLimit {
+                metric: UsageMetricKind::Tokens,
+                limit: 100,
+                window_seconds: 60,
+            }],
+        };
+        engine.upsert_policy(zone.clone(), policy.clone()).await;
+        engine
+            .record_usage(&zone, &[UsageMetric::tokens(75)])
+            .await
+            .unwrap();
+
+        // Upsert with a new limit, tracker state for this zone still has accumulated usage
+        let new_policy = UsageBudgetPolicy {
+            enforcement: BudgetEnforcement::Deny,
+            budgets: vec![UsageBudgetLimit {
+                metric: UsageMetricKind::Tokens,
+                limit: 200,
+                window_seconds: 60,
+            }],
+        };
+        engine.upsert_policy(zone.clone(), new_policy).await;
+        let snap = engine.snapshot(&zone).await.unwrap();
+        // Usage is still tracked in the BudgetTracker
+        assert_eq!(snap.budgets[0].used, 75);
+        assert_eq!(snap.budgets[0].limit, 200);
+        assert_eq!(snap.budgets[0].remaining, 125);
+    }
+
+    // ── BudgetPolicyEngine async: preflight with budget_status populated ──
+
+    #[fcp_async_core::runtime::test]
+    async fn budget_policy_engine_preflight_populates_budget_status() {
+        let engine = BudgetPolicyEngine::new();
+        let zone = ZoneId::work();
+        engine
+            .upsert_policy(
+                zone.clone(),
+                UsageBudgetPolicy {
+                    enforcement: BudgetEnforcement::Warn,
+                    budgets: vec![UsageBudgetLimit {
+                        metric: UsageMetricKind::Tokens,
+                        limit: 100,
+                        window_seconds: 60,
+                    }],
+                },
+            )
+            .await;
+        engine
+            .record_usage(&zone, &[UsageMetric::tokens(30)])
+            .await
+            .unwrap();
+
+        let request = PreflightRequest {
+            connector_id: fcp_core::ConnectorId::new("budget", "test", "v1")
+                .expect("connector id"),
+            operation: "invoke".to_string(),
+            params: None,
+            principal: None,
+            zone_id: Some(zone.clone()),
+        };
+        let response = engine.evaluate_preflight(&request).await;
+        assert!(response.allowed);
+        let status = response.budget_status.expect("budget_status should be populated");
+        assert_eq!(status.zone_id, zone);
+        assert_eq!(status.budgets[0].used, 30);
+    }
+
+    // ── now_secs returns reasonable value ──
+
+    #[test]
+    fn now_secs_returns_reasonable_timestamp() {
+        let ts = now_secs();
+        // Should be past 2020-01-01 = 1577836800
+        assert!(ts > 1_577_836_800);
+        // Should be before 2100-01-01 = 4102444800
+        assert!(ts < 4_102_444_800);
+    }
+
+    // ── BudgetTracker: record_usage with mixed relevant/irrelevant metrics ──
+
+    #[test]
+    fn budget_tracker_mixed_relevant_irrelevant_metrics() {
+        let zone = ZoneId::work();
+        let policy = UsageBudgetPolicy {
+            enforcement: BudgetEnforcement::Deny,
+            budgets: vec![UsageBudgetLimit {
+                metric: UsageMetricKind::Tokens,
+                limit: 100,
+                window_seconds: 60,
+            }],
+        };
+        let mut tracker = BudgetTracker::new();
+        // Send tokens + requests + bytes, but only tokens is tracked in policy
+        let eval = tracker.record_usage(
+            &zone,
+            &policy,
+            &[
+                UsageMetric::tokens(50),
+                UsageMetric::requests(999),
+                UsageMetric::bytes(999_999),
+            ],
+        );
+        assert_eq!(eval.action, BudgetAction::Allow);
+        assert_eq!(eval.snapshot.budgets[0].used, 50);
+        // Only 1 budget entry for tokens
+        assert_eq!(eval.snapshot.budgets.len(), 1);
+    }
+
+    // ── BudgetTracker: snapshot updated_at is reasonable ──
+
+    #[test]
+    fn budget_tracker_snapshot_updated_at_is_recent() {
+        let zone = ZoneId::work();
+        let policy = UsageBudgetPolicy {
+            enforcement: BudgetEnforcement::Deny,
+            budgets: vec![UsageBudgetLimit {
+                metric: UsageMetricKind::Tokens,
+                limit: 100,
+                window_seconds: 60,
+            }],
+        };
+        let mut tracker = BudgetTracker::new();
+        let snap = tracker.snapshot(&zone, &policy);
+        // updated_at should be a recent timestamp
+        assert!(snap.updated_at > 1_577_836_800);
+    }
+
+    // ── BudgetTracker: record_usage updated_at is reasonable ──
+
+    #[test]
+    fn budget_tracker_record_usage_updated_at_is_recent() {
+        let zone = ZoneId::work();
+        let policy = UsageBudgetPolicy {
+            enforcement: BudgetEnforcement::Deny,
+            budgets: vec![UsageBudgetLimit {
+                metric: UsageMetricKind::Tokens,
+                limit: 100,
+                window_seconds: 60,
+            }],
+        };
+        let mut tracker = BudgetTracker::new();
+        let eval = tracker.record_usage(&zone, &policy, &[UsageMetric::tokens(10)]);
+        assert!(eval.snapshot.updated_at > 1_577_836_800);
+    }
+
+    // ── BudgetPolicyEngine async: generated_at is recent ──
+
+    #[fcp_async_core::runtime::test]
+    async fn budget_policy_engine_report_generated_at_is_recent() {
+        let engine = BudgetPolicyEngine::new();
+        let before = Utc::now();
+        let report = engine.report(None).await;
+        let after = Utc::now();
+        assert!(report.generated_at >= before);
+        assert!(report.generated_at <= after);
+    }
+
+    // ── BudgetPolicyEngine async: warn enforcement + exceeded still allows preflight ──
+
+    #[fcp_async_core::runtime::test]
+    async fn budget_policy_engine_preflight_exceeded_warn_has_budget_status() {
+        let engine = BudgetPolicyEngine::new();
+        let zone = ZoneId::work();
+        engine
+            .upsert_policy(
+                zone.clone(),
+                UsageBudgetPolicy {
+                    enforcement: BudgetEnforcement::Warn,
+                    budgets: vec![UsageBudgetLimit {
+                        metric: UsageMetricKind::Tokens,
+                        limit: 100,
+                        window_seconds: 60,
+                    }],
+                },
+            )
+            .await;
+        engine
+            .record_usage(&zone, &[UsageMetric::tokens(200)])
+            .await
+            .unwrap();
+
+        let request = PreflightRequest {
+            connector_id: fcp_core::ConnectorId::new("budget", "test", "v1")
+                .expect("connector id"),
+            operation: "invoke".to_string(),
+            params: None,
+            principal: None,
+            zone_id: Some(zone),
+        };
+        let response = engine.evaluate_preflight(&request).await;
+        assert!(response.allowed);
+        let status = response.budget_status.expect("should have budget_status");
+        assert_eq!(status.budgets[0].status, BudgetStatus::Exceeded);
+    }
+
+    // ── BudgetTracker: snapshot with zero window_seconds ──
+
+    #[test]
+    fn budget_tracker_zero_window_seconds_always_resets() {
+        let zone = ZoneId::work();
+        let policy = UsageBudgetPolicy {
+            enforcement: BudgetEnforcement::Deny,
+            budgets: vec![UsageBudgetLimit {
+                metric: UsageMetricKind::Tokens,
+                limit: 100,
+                window_seconds: 0,
+            }],
+        };
+        let mut tracker = BudgetTracker::new();
+        // Record some usage
+        let eval1 = tracker.record_usage(&zone, &policy, &[UsageMetric::tokens(50)]);
+        // With window_seconds = 0, roll_if_needed resets on every call
+        // Second call resets the window
+        let eval2 = tracker.record_usage(&zone, &policy, &[UsageMetric::tokens(30)]);
+        // Usage is reset each time due to zero window
+        assert_eq!(eval2.snapshot.budgets[0].used, 30);
+        assert_eq!(eval2.action, BudgetAction::Allow);
+        // But first call accumulated
+        assert_eq!(eval1.snapshot.budgets[0].used, 50);
+    }
+
+    // ── BudgetPolicyEngine async: remove policy then record_usage returns None ──
+
+    #[fcp_async_core::runtime::test]
+    async fn budget_policy_engine_record_after_remove_returns_none() {
+        let engine = BudgetPolicyEngine::new();
+        let zone = ZoneId::work();
+        engine
+            .upsert_policy(
+                zone.clone(),
+                UsageBudgetPolicy {
+                    enforcement: BudgetEnforcement::Deny,
+                    budgets: vec![UsageBudgetLimit {
+                        metric: UsageMetricKind::Tokens,
+                        limit: 100,
+                        window_seconds: 60,
+                    }],
+                },
+            )
+            .await;
+        engine
+            .record_usage(&zone, &[UsageMetric::tokens(50)])
+            .await
+            .unwrap();
+        engine.remove_policy(&zone).await;
+        assert!(
+            engine
+                .record_usage(&zone, &[UsageMetric::tokens(10)])
+                .await
+                .is_none()
+        );
+    }
+
+    // ── BudgetPolicyEngine async: report with three zones sorted ──
+
+    #[fcp_async_core::runtime::test]
+    async fn budget_policy_engine_report_three_zones_sorted() {
+        let engine = BudgetPolicyEngine::new();
+        let policy = UsageBudgetPolicy {
+            enforcement: BudgetEnforcement::Warn,
+            budgets: vec![UsageBudgetLimit {
+                metric: UsageMetricKind::Tokens,
+                limit: 100,
+                window_seconds: 60,
+            }],
+        };
+        // Insert in non-alphabetical order
+        engine
+            .upsert_policy(ZoneId::work(), policy.clone())
+            .await;
+        engine
+            .upsert_policy(ZoneId::owner(), policy.clone())
+            .await;
+        engine
+            .upsert_policy(ZoneId::private(), policy)
+            .await;
+
+        let report = engine.report(None).await;
+        assert_eq!(report.zones.len(), 3);
+        // Zones should be sorted alphabetically
+        let zone_ids: Vec<&str> = report
+            .zones
+            .iter()
+            .map(|z| z.zone_id.as_str())
+            .collect();
+        let mut sorted = zone_ids.clone();
+        sorted.sort();
+        assert_eq!(zone_ids, sorted);
+    }
 }

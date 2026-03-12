@@ -1,11 +1,13 @@
-//! Encrypted credential store for connector authentication.
+//! Keychain-first credential store for connector authentication.
 //!
-//! Stores connector credentials in an encrypted file at `~/.fwc/credentials.enc`
-//! using ChaCha20-Poly1305 with a key derived from machine identity. Credentials
-//! are never written in plaintext and are always redacted in display output.
+//! Prefers the OS keychain via the `keyring` crate and falls back to an
+//! encrypted file at `~/.fwc/credentials.enc` when no supported keychain
+//! service is available. Credentials are never written in plaintext and are
+//! always redacted in display output.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -146,6 +148,73 @@ fn redact_value(value: &str) -> String {
 const KEY_LEN: usize = 32;
 /// Nonce length for ChaCha20-Poly1305 (96 bits).
 const NONCE_LEN: usize = 12;
+/// Service name for OS keychain entries.
+const KEYCHAIN_SERVICE_NAME: &str = "fwc-credentials";
+/// Synthetic keychain entry that stores the connector-id index.
+const KEYCHAIN_INDEX_ENTRY: &str = "__fwc_index__";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BackendPreference {
+    FileOnly,
+    PreferKeychain,
+}
+
+#[derive(Debug)]
+enum KeychainError {
+    NoEntry,
+    Unavailable(String),
+    Other(String),
+}
+
+trait KeychainClient: Send + Sync {
+    fn set_secret(&self, service: &str, account: &str, secret: &[u8]) -> Result<(), KeychainError>;
+
+    fn get_secret(&self, service: &str, account: &str) -> Result<Vec<u8>, KeychainError>;
+
+    fn delete_credential(&self, service: &str, account: &str) -> Result<(), KeychainError>;
+}
+
+struct NativeKeychainClient;
+
+impl NativeKeychainClient {
+    fn map_error(error: keyring::Error) -> KeychainError {
+        match error {
+            keyring::Error::NoEntry => KeychainError::NoEntry,
+            keyring::Error::NoStorageAccess(error) => KeychainError::Unavailable(error.to_string()),
+            keyring::Error::PlatformFailure(error) => {
+                let detail = error.to_string();
+                let lower = detail.to_ascii_lowercase();
+                if lower.contains("servicenotfound")
+                    || lower.contains("service not found")
+                    || lower.contains("nobackendfound")
+                    || lower.contains("no backend found")
+                {
+                    KeychainError::Unavailable(detail)
+                } else {
+                    KeychainError::Other(detail)
+                }
+            }
+            other => KeychainError::Other(other.to_string()),
+        }
+    }
+}
+
+impl KeychainClient for NativeKeychainClient {
+    fn set_secret(&self, service: &str, account: &str, secret: &[u8]) -> Result<(), KeychainError> {
+        let entry = keyring::Entry::new(service, account).map_err(Self::map_error)?;
+        entry.set_secret(secret).map_err(Self::map_error)
+    }
+
+    fn get_secret(&self, service: &str, account: &str) -> Result<Vec<u8>, KeychainError> {
+        let entry = keyring::Entry::new(service, account).map_err(Self::map_error)?;
+        entry.get_secret().map_err(Self::map_error)
+    }
+
+    fn delete_credential(&self, service: &str, account: &str) -> Result<(), KeychainError> {
+        let entry = keyring::Entry::new(service, account).map_err(Self::map_error)?;
+        entry.delete_credential().map_err(Self::map_error)
+    }
+}
 
 /// Derive an encryption key from machine identity.
 ///
@@ -222,10 +291,13 @@ fn decrypt(data: &[u8], key: &[u8; KEY_LEN]) -> Result<Vec<u8>, String> {
 
 // ── Store ──────────────────────────────────────────────────────────
 
-/// The credential store: an encrypted JSON file holding all credentials.
+/// Credential store with a keychain-first backend and encrypted-file fallback.
 pub struct CredentialStore {
     path: PathBuf,
     key: [u8; KEY_LEN],
+    backend_preference: BackendPreference,
+    keychain_service: String,
+    keychain_client: Option<Arc<dyn KeychainClient>>,
 }
 
 /// The inner data structure persisted to disk.
@@ -242,6 +314,9 @@ impl CredentialStore {
         Self {
             path,
             key: derive_key(),
+            backend_preference: BackendPreference::PreferKeychain,
+            keychain_service: KEYCHAIN_SERVICE_NAME.to_owned(),
+            keychain_client: Some(Arc::new(NativeKeychainClient)),
         }
     }
 
@@ -250,47 +325,120 @@ impl CredentialStore {
         Self {
             path: path.into(),
             key,
+            backend_preference: BackendPreference::FileOnly,
+            keychain_service: KEYCHAIN_SERVICE_NAME.to_owned(),
+            keychain_client: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn new_with_keychain(
+        path: impl Into<PathBuf>,
+        key: [u8; KEY_LEN],
+        keychain_client: Arc<dyn KeychainClient>,
+    ) -> Self {
+        Self {
+            path: path.into(),
+            key,
+            backend_preference: BackendPreference::PreferKeychain,
+            keychain_service: KEYCHAIN_SERVICE_NAME.to_owned(),
+            keychain_client: Some(keychain_client),
         }
     }
 
     /// Add or update a credential for a connector.
     pub fn add(&self, credential: Credential) -> Result<(), String> {
-        let mut data = self.load_data()?;
-        data.credentials
-            .insert(credential.connector_id.clone(), credential);
-        self.save_data(&data)
+        if self.prefers_keychain() {
+            match self.add_to_keychain(&credential) {
+                Ok(()) => {
+                    let _ = self.remove_from_file(&credential.connector_id);
+                    return Ok(());
+                }
+                Err(KeychainError::Unavailable(error)) => self.log_keychain_fallback(&error),
+                Err(KeychainError::Other(error)) => {
+                    return Err(format!(
+                        "failed to store credential in OS keychain: {error}"
+                    ));
+                }
+                Err(KeychainError::NoEntry) => {}
+            }
+        }
+        self.add_to_file(credential)
     }
 
     /// Get a credential by connector ID.
     pub fn get(&self, connector_id: &str) -> Result<Option<Credential>, String> {
-        let data = self.load_data()?;
-        Ok(data.credentials.get(connector_id).cloned())
+        if self.prefers_keychain() {
+            match self.get_from_keychain(connector_id) {
+                Ok(Some(credential)) => return Ok(Some(credential)),
+                Ok(None) => {}
+                Err(KeychainError::Unavailable(error)) => self.log_keychain_fallback(&error),
+                Err(KeychainError::Other(error)) => {
+                    return Err(format!(
+                        "failed to read credential from OS keychain: {error}"
+                    ));
+                }
+                Err(KeychainError::NoEntry) => {}
+            }
+        }
+        self.get_from_file(connector_id)
     }
 
     /// Remove a credential by connector ID. Returns `true` if it existed.
     pub fn remove(&self, connector_id: &str) -> Result<bool, String> {
-        let mut data = self.load_data()?;
-        let existed = data.credentials.remove(connector_id).is_some();
-        if existed {
-            self.save_data(&data)?;
+        if self.prefers_keychain() {
+            match self.remove_from_keychain(connector_id) {
+                Ok(true) => {
+                    let _ = self.remove_from_file(connector_id);
+                    return Ok(true);
+                }
+                Ok(false) => {}
+                Err(KeychainError::Unavailable(error)) => self.log_keychain_fallback(&error),
+                Err(KeychainError::Other(error)) => {
+                    return Err(format!(
+                        "failed to remove credential from OS keychain: {error}"
+                    ));
+                }
+                Err(KeychainError::NoEntry) => {}
+            }
         }
-        Ok(existed)
+        self.remove_from_file(connector_id)
     }
 
     /// List all stored credentials (redacted).
     pub fn list(&self) -> Result<Vec<Value>, String> {
-        let data = self.load_data()?;
-        Ok(data
-            .credentials
-            .values()
-            .map(Credential::redacted_view)
-            .collect())
+        if self.prefers_keychain() {
+            match self.list_from_keychain() {
+                Ok(credentials) if !credentials.is_empty() => return Ok(credentials),
+                Ok(_) => {}
+                Err(KeychainError::Unavailable(error)) => self.log_keychain_fallback(&error),
+                Err(KeychainError::Other(error)) => {
+                    return Err(format!(
+                        "failed to list credentials from OS keychain: {error}"
+                    ));
+                }
+                Err(KeychainError::NoEntry) => {}
+            }
+        }
+        self.list_from_file()
     }
 
     /// List all connector IDs that have stored credentials.
     pub fn list_ids(&self) -> Result<Vec<String>, String> {
-        let data = self.load_data()?;
-        Ok(data.credentials.keys().cloned().collect())
+        if self.prefers_keychain() {
+            match self.list_ids_from_keychain() {
+                Ok(ids) if !ids.is_empty() => return Ok(ids),
+                Ok(_) => {}
+                Err(KeychainError::Unavailable(error)) => self.log_keychain_fallback(&error),
+                Err(KeychainError::Other(error)) => {
+                    return Err(format!(
+                        "failed to enumerate credentials from OS keychain: {error}"
+                    ));
+                }
+                Err(KeychainError::NoEntry) => {}
+            }
+        }
+        self.list_ids_from_file()
     }
 
     /// Update specific fields in an existing credential.
@@ -299,40 +447,38 @@ impl CredentialStore {
         connector_id: &str,
         fields: BTreeMap<String, String>,
     ) -> Result<bool, String> {
-        let mut data = self.load_data()?;
-        if let Some(cred) = data.credentials.get_mut(connector_id) {
-            for (k, v) in fields {
-                cred.fields.insert(k, v);
-            }
-            cred.auth_method = AuthMethod::detect(&cred.fields);
-            cred.updated_at = Utc::now();
-            self.save_data(&data)?;
-            Ok(true)
-        } else {
-            Ok(false)
+        let Some(mut credential) = self.get(connector_id)? else {
+            return Ok(false);
+        };
+        for (key, value) in fields {
+            credential.fields.insert(key, value);
         }
+        credential.auth_method = AuthMethod::detect(&credential.fields);
+        credential.updated_at = Utc::now();
+        self.add(credential)?;
+        Ok(true)
     }
 
     /// Mark a credential as used.
     pub fn touch(&self, connector_id: &str) -> Result<bool, String> {
-        let mut data = self.load_data()?;
-        if let Some(cred) = data.credentials.get_mut(connector_id) {
-            cred.touch();
-            self.save_data(&data)?;
-            Ok(true)
-        } else {
-            Ok(false)
-        }
+        let Some(mut credential) = self.get(connector_id)? else {
+            return Ok(false);
+        };
+        credential.touch();
+        self.add(credential)?;
+        Ok(true)
     }
 
     /// Number of stored credentials.
     pub fn count(&self) -> Result<usize, String> {
-        let data = self.load_data()?;
-        Ok(data.credentials.len())
+        Ok(self.list_ids()?.len())
     }
 
     /// Whether the store file exists on disk.
     pub fn exists(&self) -> bool {
+        if self.prefers_keychain() && self.keychain_has_any_entries().unwrap_or(false) {
+            return true;
+        }
         self.path.exists()
     }
 
@@ -343,7 +489,20 @@ impl CredentialStore {
 
     // ── Internal ───────────────────────────────────────────────────
 
-    fn load_data(&self) -> Result<StoreData, String> {
+    fn prefers_keychain(&self) -> bool {
+        self.backend_preference == BackendPreference::PreferKeychain
+            && self.keychain_client.is_some()
+    }
+
+    fn log_keychain_fallback(&self, error: &str) {
+        tracing::warn!(
+            keychain_service = %self.keychain_service,
+            error = %error,
+            "OS keychain unavailable, using encrypted file store."
+        );
+    }
+
+    fn load_file_data(&self) -> Result<StoreData, String> {
         if !self.path.exists() {
             return Ok(StoreData::default());
         }
@@ -353,7 +512,7 @@ impl CredentialStore {
         serde_json::from_slice(&plaintext).map_err(|e| format!("credential store corrupted: {e}"))
     }
 
-    fn save_data(&self, data: &StoreData) -> Result<(), String> {
+    fn save_file_data(&self, data: &StoreData) -> Result<(), String> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("failed to create credential store directory: {e}"))?;
@@ -363,6 +522,170 @@ impl CredentialStore {
         let encrypted = encrypt(&plaintext, &self.key)?;
         std::fs::write(&self.path, encrypted)
             .map_err(|e| format!("failed to write credential store: {e}"))
+    }
+
+    fn add_to_file(&self, credential: Credential) -> Result<(), String> {
+        let mut data = self.load_file_data()?;
+        data.credentials
+            .insert(credential.connector_id.clone(), credential);
+        self.save_file_data(&data)
+    }
+
+    fn get_from_file(&self, connector_id: &str) -> Result<Option<Credential>, String> {
+        let data = self.load_file_data()?;
+        Ok(data.credentials.get(connector_id).cloned())
+    }
+
+    fn remove_from_file(&self, connector_id: &str) -> Result<bool, String> {
+        let mut data = self.load_file_data()?;
+        let existed = data.credentials.remove(connector_id).is_some();
+        if existed {
+            self.save_file_data(&data)?;
+        }
+        Ok(existed)
+    }
+
+    fn list_from_file(&self) -> Result<Vec<Value>, String> {
+        let data = self.load_file_data()?;
+        Ok(data
+            .credentials
+            .values()
+            .map(Credential::redacted_view)
+            .collect())
+    }
+
+    fn list_ids_from_file(&self) -> Result<Vec<String>, String> {
+        let data = self.load_file_data()?;
+        Ok(data.credentials.keys().cloned().collect())
+    }
+
+    fn keychain_client(&self) -> Result<&dyn KeychainClient, KeychainError> {
+        self.keychain_client
+            .as_deref()
+            .ok_or_else(|| KeychainError::Unavailable("keychain client not configured".to_string()))
+    }
+
+    fn load_keychain_index(&self) -> Result<Vec<String>, KeychainError> {
+        match self
+            .keychain_client()?
+            .get_secret(&self.keychain_service, KEYCHAIN_INDEX_ENTRY)
+        {
+            Ok(secret) => serde_json::from_slice::<Vec<String>>(&secret).map_err(|error| {
+                KeychainError::Other(format!("keychain index corrupted: {error}"))
+            }),
+            Err(KeychainError::NoEntry) => Ok(Vec::new()),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn save_keychain_index(&self, ids: &[String]) -> Result<(), KeychainError> {
+        let secret = serde_json::to_vec(ids).map_err(|error| {
+            KeychainError::Other(format!("failed to serialize keychain index: {error}"))
+        })?;
+        self.keychain_client()?
+            .set_secret(&self.keychain_service, KEYCHAIN_INDEX_ENTRY, &secret)
+    }
+
+    fn clear_keychain_index(&self) -> Result<(), KeychainError> {
+        match self
+            .keychain_client()?
+            .delete_credential(&self.keychain_service, KEYCHAIN_INDEX_ENTRY)
+        {
+            Ok(()) | Err(KeychainError::NoEntry) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn get_from_keychain(&self, connector_id: &str) -> Result<Option<Credential>, KeychainError> {
+        match self
+            .keychain_client()?
+            .get_secret(&self.keychain_service, connector_id)
+        {
+            Ok(secret) => serde_json::from_slice::<Credential>(&secret)
+                .map(Some)
+                .map_err(|error| {
+                    KeychainError::Other(format!(
+                        "failed to decode keychain credential for `{connector_id}`: {error}"
+                    ))
+                }),
+            Err(KeychainError::NoEntry) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn add_to_keychain(&self, credential: &Credential) -> Result<(), KeychainError> {
+        let secret = serde_json::to_vec(credential).map_err(|error| {
+            KeychainError::Other(format!(
+                "failed to serialize keychain credential for `{}`: {error}",
+                credential.connector_id
+            ))
+        })?;
+        self.keychain_client()?.set_secret(
+            &self.keychain_service,
+            &credential.connector_id,
+            &secret,
+        )?;
+
+        let mut ids = self.load_keychain_index()?;
+        let mut id_set: BTreeSet<String> = ids.into_iter().collect();
+        id_set.insert(credential.connector_id.clone());
+        ids = id_set.into_iter().collect();
+        self.save_keychain_index(&ids)
+    }
+
+    fn remove_from_keychain(&self, connector_id: &str) -> Result<bool, KeychainError> {
+        let removed = match self
+            .keychain_client()?
+            .delete_credential(&self.keychain_service, connector_id)
+        {
+            Ok(()) => true,
+            Err(KeychainError::NoEntry) => false,
+            Err(error) => return Err(error),
+        };
+        if !removed {
+            return Ok(false);
+        }
+
+        let mut ids = self.load_keychain_index()?;
+        ids.retain(|id| id != connector_id);
+        if ids.is_empty() {
+            self.clear_keychain_index()?;
+        } else {
+            self.save_keychain_index(&ids)?;
+        }
+        Ok(true)
+    }
+
+    fn list_ids_from_keychain(&self) -> Result<Vec<String>, KeychainError> {
+        let ids = self.load_keychain_index()?;
+        Ok(ids)
+    }
+
+    fn list_from_keychain(&self) -> Result<Vec<Value>, KeychainError> {
+        let ids = self.load_keychain_index()?;
+        let original_len = ids.len();
+        let mut repaired_ids = Vec::new();
+        let mut credentials = Vec::new();
+        for connector_id in ids {
+            if let Some(credential) = self.get_from_keychain(&connector_id)? {
+                repaired_ids.push(connector_id);
+                credentials.push(credential.redacted_view());
+            }
+        }
+
+        if repaired_ids.len() != original_len {
+            if repaired_ids.is_empty() {
+                self.clear_keychain_index()?;
+            } else {
+                self.save_keychain_index(&repaired_ids)?;
+            }
+        }
+
+        Ok(credentials)
+    }
+
+    fn keychain_has_any_entries(&self) -> Result<bool, KeychainError> {
+        Ok(!self.load_keychain_index()?.is_empty())
     }
 }
 
@@ -417,6 +740,78 @@ pub fn validate_connector_id(id: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct MockKeychainClient {
+        unavailable: bool,
+        secrets: Mutex<BTreeMap<(String, String), Vec<u8>>>,
+    }
+
+    impl MockKeychainClient {
+        fn available() -> Self {
+            Self::default()
+        }
+
+        fn unavailable() -> Self {
+            Self {
+                unavailable: true,
+                ..Self::default()
+            }
+        }
+    }
+
+    impl KeychainClient for MockKeychainClient {
+        fn set_secret(
+            &self,
+            service: &str,
+            account: &str,
+            secret: &[u8],
+        ) -> Result<(), KeychainError> {
+            if self.unavailable {
+                return Err(KeychainError::Unavailable(
+                    "ServiceNotFound: mock keychain unavailable".to_string(),
+                ));
+            }
+            self.secrets
+                .lock()
+                .unwrap()
+                .insert((service.to_owned(), account.to_owned()), secret.to_vec());
+            Ok(())
+        }
+
+        fn get_secret(&self, service: &str, account: &str) -> Result<Vec<u8>, KeychainError> {
+            if self.unavailable {
+                return Err(KeychainError::Unavailable(
+                    "ServiceNotFound: mock keychain unavailable".to_string(),
+                ));
+            }
+            self.secrets
+                .lock()
+                .unwrap()
+                .get(&(service.to_owned(), account.to_owned()))
+                .cloned()
+                .ok_or(KeychainError::NoEntry)
+        }
+
+        fn delete_credential(&self, service: &str, account: &str) -> Result<(), KeychainError> {
+            if self.unavailable {
+                return Err(KeychainError::Unavailable(
+                    "ServiceNotFound: mock keychain unavailable".to_string(),
+                ));
+            }
+            let removed = self
+                .secrets
+                .lock()
+                .unwrap()
+                .remove(&(service.to_owned(), account.to_owned()));
+            if removed.is_some() {
+                Ok(())
+            } else {
+                Err(KeychainError::NoEntry)
+            }
+        }
+    }
 
     fn test_key() -> [u8; KEY_LEN] {
         let mut key = [0u8; KEY_LEN];
@@ -439,6 +834,18 @@ mod tests {
             .join(format!("fwc-cred-test-{unique}"))
             .join("credentials.enc");
         CredentialStore::new(path, test_key())
+    }
+
+    fn temp_keychain_store(keychain_client: Arc<dyn KeychainClient>) -> CredentialStore {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir()
+            .join(format!("fwc-cred-keychain-test-{unique}"))
+            .join("credentials.enc");
+        CredentialStore::new_with_keychain(path, test_key(), keychain_client)
     }
 
     fn sample_fields() -> BTreeMap<String, String> {
@@ -1170,6 +1577,51 @@ mod tests {
     fn store_path_method() {
         let store = temp_store();
         assert!(store.path().to_str().unwrap().contains("credentials.enc"));
+    }
+
+    #[test]
+    fn keychain_store_add_and_get_without_file_fallback() {
+        let store = temp_keychain_store(Arc::new(MockKeychainClient::available()));
+        store
+            .add(Credential::new("github", sample_fields(), None))
+            .unwrap();
+
+        let loaded = store.get("github").unwrap().unwrap();
+        assert_eq!(loaded.connector_id, "github");
+        assert_eq!(loaded.get_field("token"), Some("ghp_abc123def456"));
+        assert!(!store.path().exists());
+    }
+
+    #[test]
+    fn keychain_store_list_and_remove_use_keychain_index() {
+        let store = temp_keychain_store(Arc::new(MockKeychainClient::available()));
+        store
+            .add(Credential::new("github", sample_fields(), None))
+            .unwrap();
+        store
+            .add(Credential::new("slack", sample_basic_fields(), None))
+            .unwrap();
+
+        let ids = store.list_ids().unwrap();
+        assert_eq!(ids, vec!["github", "slack"]);
+        assert_eq!(store.count().unwrap(), 2);
+
+        assert!(store.remove("github").unwrap());
+        assert_eq!(store.list_ids().unwrap(), vec!["slack"]);
+        assert_eq!(store.count().unwrap(), 1);
+    }
+
+    #[test]
+    fn keychain_unavailable_falls_back_to_encrypted_file_store() {
+        let store = temp_keychain_store(Arc::new(MockKeychainClient::unavailable()));
+        store
+            .add(Credential::new("github", sample_fields(), None))
+            .unwrap();
+
+        assert!(store.path().exists());
+        let loaded = store.get("github").unwrap().unwrap();
+        assert_eq!(loaded.get_field("token"), Some("ghp_abc123def456"));
+        assert_eq!(store.list_ids().unwrap(), vec!["github"]);
     }
 
     #[test]

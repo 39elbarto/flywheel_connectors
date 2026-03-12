@@ -37,6 +37,7 @@ base64.workspace = true
 blake3.workspace = true
 hex.workspace = true
 ipnet = "2.9"
+keyring = { version = "3.6.3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 sha2.workspace = true

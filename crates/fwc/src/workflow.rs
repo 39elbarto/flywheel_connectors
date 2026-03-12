@@ -3148,7 +3148,10 @@ mod tests {
                 }
             }]
         });
-        assert_eq!(execution_failure_capsule_status(&execution), Some("unavailable"));
+        assert_eq!(
+            execution_failure_capsule_status(&execution),
+            Some("unavailable")
+        );
     }
 
     #[test]

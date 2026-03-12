@@ -10174,10 +10174,16 @@ output_schema = { type = "object" }
     fn invariant_provenance_tags_match_serde_names() {
         // Tags must match the kebab-case serde names for stable JSON output.
         let all = [
-            (MetadataProvenance::DeclaredByConnector, "declared-by-connector"),
+            (
+                MetadataProvenance::DeclaredByConnector,
+                "declared-by-connector",
+            ),
             (MetadataProvenance::ObservedByHost, "observed-by-host"),
             (MetadataProvenance::MeasuredAtRuntime, "measured-at-runtime"),
-            (MetadataProvenance::InferredFromPolicy, "inferred-from-policy"),
+            (
+                MetadataProvenance::InferredFromPolicy,
+                "inferred-from-policy",
+            ),
             (MetadataProvenance::Unattributed, "unattributed"),
         ];
         for (prov, expected) in &all {
@@ -10305,31 +10311,46 @@ output_schema = { type = "object" }
     #[test]
     fn invariant_denied_availability_is_recoverable() {
         let env = CommandEnvelope::new(CommandAvailability::Denied, "test");
-        assert!(env.recoverable, "Denied should be recoverable (user can remediate)");
+        assert!(
+            env.recoverable,
+            "Denied should be recoverable (user can remediate)"
+        );
     }
 
     #[test]
     fn invariant_unsupported_availability_is_not_recoverable() {
         let env = CommandEnvelope::new(CommandAvailability::Unsupported, "test");
-        assert!(!env.recoverable, "Unsupported is permanent, not recoverable");
+        assert!(
+            !env.recoverable,
+            "Unsupported is permanent, not recoverable"
+        );
     }
 
     #[test]
     fn invariant_unavailable_availability_is_recoverable() {
         let env = CommandEnvelope::new(CommandAvailability::Unavailable, "test");
-        assert!(env.recoverable, "Unavailable is transient, should be recoverable");
+        assert!(
+            env.recoverable,
+            "Unavailable is transient, should be recoverable"
+        );
     }
 
     #[test]
     fn invariant_unknown_availability_is_recoverable() {
         let env = CommandEnvelope::new(CommandAvailability::Unknown, "test");
-        assert!(env.recoverable, "Unknown should be recoverable (can diagnose)");
+        assert!(
+            env.recoverable,
+            "Unknown should be recoverable (can diagnose)"
+        );
     }
 
     #[test]
     fn invariant_planned_availability_is_not_authoritative() {
         let env = CommandEnvelope::new(CommandAvailability::Planned, "test");
-        assert!(!env.authoritative, "Planned commands cannot be authoritative");
+        assert!(
+            !env.authoritative,
+            "Planned commands cannot be authoritative"
+        );
     }
 
     #[test]
@@ -10409,8 +10430,16 @@ output_schema = { type = "object" }
     fn invariant_no_unclassified_major_commands() {
         // All major command families must appear in the classification table.
         let must_exist = [
-            "invoke", "list", "show", "ops", "schema", "batch",
-            "validate", "export-tools", "config", "status",
+            "invoke",
+            "list",
+            "show",
+            "ops",
+            "schema",
+            "batch",
+            "validate",
+            "export-tools",
+            "config",
+            "status",
         ];
         for name in &must_exist {
             assert!(
@@ -10426,7 +10455,12 @@ output_schema = { type = "object" }
         for mode in &ALL_TRUTH_MODES {
             let tag = mode.tag();
             let json = serde_json::to_string(mode).unwrap();
-            assert_eq!(json, format!("\"{}\"", tag), "Serde vs tag mismatch for {:?}", mode);
+            assert_eq!(
+                json,
+                format!("\"{}\"", tag),
+                "Serde vs tag mismatch for {:?}",
+                mode
+            );
         }
     }
 
@@ -10506,8 +10540,14 @@ output_schema = { type = "object" }
     fn golden_availability_compact_labels() {
         // Pinned golden values — if these change, it's a truthfulness regression.
         assert_eq!(CommandAvailability::LiveRuntime.compact_label(), "LIVE");
-        assert_eq!(CommandAvailability::OfflineArtifact.compact_label(), "OFFLINE");
-        assert_eq!(CommandAvailability::Unsupported.compact_label(), "UNSUPPORTED");
+        assert_eq!(
+            CommandAvailability::OfflineArtifact.compact_label(),
+            "OFFLINE"
+        );
+        assert_eq!(
+            CommandAvailability::Unsupported.compact_label(),
+            "UNSUPPORTED"
+        );
     }
 
     #[test]
@@ -10532,10 +10572,19 @@ output_schema = { type = "object" }
 
     #[test]
     fn golden_provenance_tags() {
-        assert_eq!(MetadataProvenance::DeclaredByConnector.tag(), "declared-by-connector");
+        assert_eq!(
+            MetadataProvenance::DeclaredByConnector.tag(),
+            "declared-by-connector"
+        );
         assert_eq!(MetadataProvenance::ObservedByHost.tag(), "observed-by-host");
-        assert_eq!(MetadataProvenance::MeasuredAtRuntime.tag(), "measured-at-runtime");
-        assert_eq!(MetadataProvenance::InferredFromPolicy.tag(), "inferred-from-policy");
+        assert_eq!(
+            MetadataProvenance::MeasuredAtRuntime.tag(),
+            "measured-at-runtime"
+        );
+        assert_eq!(
+            MetadataProvenance::InferredFromPolicy.tag(),
+            "inferred-from-policy"
+        );
         assert_eq!(MetadataProvenance::Unattributed.tag(), "unattributed");
     }
 

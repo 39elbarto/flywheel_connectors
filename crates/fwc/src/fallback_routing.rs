@@ -86,10 +86,7 @@ impl CircuitBreakerRegistry {
 
     /// Record a success for a connector.
     pub fn record_success(&mut self, connector_id: &str) {
-        let entry = self
-            .breakers
-            .entry(connector_id.to_string())
-            .or_default();
+        let entry = self.breakers.entry(connector_id.to_string()).or_default();
 
         entry.window_requests += 1;
         entry.error_count = 0;
@@ -103,10 +100,7 @@ impl CircuitBreakerRegistry {
 
     /// Record a failure for a connector. Returns the new circuit state.
     pub fn record_failure(&mut self, connector_id: &str, error_code: FcpErrorCode) -> CircuitState {
-        let entry = self
-            .breakers
-            .entry(connector_id.to_string())
-            .or_default();
+        let entry = self.breakers.entry(connector_id.to_string()).or_default();
 
         entry.window_requests += 1;
         entry.window_errors += 1;
@@ -336,9 +330,7 @@ pub fn evaluate_fallback(
     // Filter alternatives: must have closed circuit and positive score.
     let viable: Vec<FallbackCandidate> = alternatives
         .iter()
-        .filter(|(id, score)| {
-            !registry.is_open(id) && *score > 0.0 && id != primary_connector
-        })
+        .filter(|(id, score)| !registry.is_open(id) && *score > 0.0 && id != primary_connector)
         .map(|(id, score)| {
             let state = registry.get_state(id);
             FallbackCandidate {
@@ -363,7 +355,11 @@ pub fn evaluate_fallback(
     // Pick the best viable alternative.
     let best = viable
         .into_iter()
-        .max_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal))
+        .max_by(|a, b| {
+            a.score
+                .partial_cmp(&b.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
         .unwrap(); // safe: viable is non-empty
 
     let alternatives_considered = alternatives.len();
@@ -828,13 +824,8 @@ mod tests {
         reg.record_failure("conn-a", FcpErrorCode::FcpErrUpstreamTimeout);
         reg.record_failure("conn-a", FcpErrorCode::FcpErrUpstreamTimeout);
 
-        let decision = evaluate_fallback(
-            &reg,
-            "conn-a",
-            "read",
-            FallbackEligibility::Eligible,
-            &[],
-        );
+        let decision =
+            evaluate_fallback(&reg, "conn-a", "read", FallbackEligibility::Eligible, &[]);
         assert!(matches!(
             decision,
             FallbackDecision::NoFallbackAvailable { .. }

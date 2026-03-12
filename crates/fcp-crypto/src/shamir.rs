@@ -307,8 +307,17 @@ fn random_poly<R: RngCore + CryptoRng>(rng: &mut R, constant: u8, degree: usize)
     let mut coefficients = Vec::with_capacity(degree + 1);
     coefficients.push(Gf256::new(constant)); // a_0 = secret
 
-    for _ in 0..degree {
-        coefficients.push(Gf256::new(rng.r#gen()));
+    for i in 0..degree {
+        let mut coef: u8 = rng.r#gen();
+        // The highest degree coefficient MUST NOT be zero,
+        // otherwise the polynomial degree is effectively reduced,
+        // which lowers the threshold required to reconstruct the secret!
+        if i == degree - 1 {
+            while coef == 0 {
+                coef = rng.r#gen();
+            }
+        }
+        coefficients.push(Gf256::new(coef));
     }
 
     coefficients

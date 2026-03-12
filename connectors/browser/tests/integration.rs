@@ -27,13 +27,24 @@ use fcp_browser::connector::BrowserConnector;
 // ============================================================================
 
 /// Generate a valid COSE capability token signed by the given key.
-fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> fcp_core::CapabilityToken {
+fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> fcp_core::CapabilityToken {
     let now = Utc::now();
+    let cap = match op {
+        "browser.screenshot" | "browser.render_pdf" => "browser.capture",
+        "browser.extract_text" | "browser.extract_links" | "browser.wait_for_selector" => "browser.extract",
+        "browser.click" | "browser.fill_form" => "browser.interact",
+        "browser.evaluate_js" => "browser.execute",
+        "browser.get_cookies" | "browser.set_cookies" => "browser.cookies",
+        "browser.session.save" | "browser.session.restore" | "browser.session.describe" => "browser.sessions",
+        "browser.set_proxy" | "browser.clear_proxy" => "browser.proxy",
+        "browser.navigate" => "browser.navigate",
+        _ => op,
+    };
     let cose = CapabilityTokenBuilder::new()
         .capability_id(cap)
         .zone_id("z:work")
         .principal("user:test")
-        .operations(&[cap])
+        .operations(&[op])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
         .sign(signing_key)
@@ -73,6 +84,17 @@ fn generate_execution_approval_with_pattern(method_pattern: &str) -> fcp_core::A
 async fn setup_handshake(connector: &mut BrowserConnector, caps: &[&str]) -> Ed25519SigningKey {
     let signing_key = Ed25519SigningKey::generate();
     let verifying_key = signing_key.verifying_key();
+    let mapped_caps: Vec<&str> = caps.iter().map(|&op| match op {
+        "browser.screenshot" | "browser.render_pdf" => "browser.capture",
+        "browser.extract_text" | "browser.extract_links" | "browser.wait_for_selector" => "browser.extract",
+        "browser.click" | "browser.fill_form" => "browser.interact",
+        "browser.evaluate_js" => "browser.execute",
+        "browser.get_cookies" | "browser.set_cookies" => "browser.cookies",
+        "browser.session.save" | "browser.session.restore" | "browser.session.describe" => "browser.sessions",
+        "browser.set_proxy" | "browser.clear_proxy" => "browser.proxy",
+        "browser.navigate" => "browser.navigate",
+        _ => op,
+    }).collect();
 
     connector
         .handle_handshake(json!({
@@ -80,7 +102,7 @@ async fn setup_handshake(connector: &mut BrowserConnector, caps: &[&str]) -> Ed2
             "zone": "z:work",
             "host_public_key": verifying_key.to_bytes(),
             "nonce": vec![0u8; 32],
-            "capabilities_requested": caps
+            "capabilities_requested": mapped_caps
         }))
         .await
         .expect("handshake should succeed");

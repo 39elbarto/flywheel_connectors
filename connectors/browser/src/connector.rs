@@ -1972,13 +1972,17 @@ mod tests {
     use fcp_manifest::ConnectorManifest;
     use std::path::PathBuf;
 
-    fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> CapabilityToken {
+    fn generate_valid_token(
+        signing_key: &Ed25519SigningKey,
+        cap: &str,
+        op: &str,
+    ) -> CapabilityToken {
         let now = Utc::now();
         let cose = CapabilityTokenBuilder::new()
             .capability_id(cap)
             .zone_id("z:work")
             .principal("user:test")
-            .operations(&[cap])
+            .operations(&[op])
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
             .sign(signing_key)
@@ -2026,7 +2030,7 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "browser.navigate");
+        let token = generate_valid_token(&signing_key, "browser.navigate", "browser.navigate");
         let result = connector
             .handle_invoke(json!({
                 "operation": "browser.navigate",
@@ -2062,7 +2066,7 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "browser.click");
+        let token = generate_valid_token(&signing_key, "browser.interact", "browser.click");
         let result = connector
             .handle_invoke(json!({
                 "operation": "browser.click",

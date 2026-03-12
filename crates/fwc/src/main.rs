@@ -8059,7 +8059,19 @@ fn config_dispatch(args: &ConfigArgs, explicit_host: Option<&str>) -> Result<Dis
                 }
             };
             let snapshot = client.config_snapshot(connector.summary.id.as_str())?;
+            let replayable = snapshot.current.is_replayable();
             let config = snapshot.current.payload.clone();
+            let message = if replayable {
+                format!(
+                    "Loaded the live connector config snapshot for `{}` from `fcp-host`.",
+                    connector.slug
+                )
+            } else {
+                format!(
+                    "Loaded the sanitized live connector config snapshot for `{}` from `fcp-host`; redacted inline secrets were withheld, so this view is not replayable as a full replacement document.",
+                    connector.slug
+                )
+            };
 
             let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "config");
             let mut payload = json!({
@@ -8067,13 +8079,11 @@ fn config_dispatch(args: &ConfigArgs, explicit_host: Option<&str>) -> Result<Dis
                 "command": "config",
                 "subcommand": "get",
                 "source": "host-admin-api",
-                "message": format!(
-                    "Loaded the live connector config snapshot for `{}` from `fcp-host`.",
-                    connector.slug
-                ),
+                "message": message,
                 "connector": host_connector_descriptor_json(&connector),
                 "snapshot": snapshot,
                 "config": config,
+                "replayable": replayable,
                 "next_actions": [
                     format!("fwc config doctor {} --host {}", connector.slug, host.endpoint),
                     format!("fwc config export {} --host {} --file <path>", connector.slug, host.endpoint),
@@ -8329,6 +8339,15 @@ fn config_dispatch(args: &ConfigArgs, explicit_host: Option<&str>) -> Result<Dis
             };
             let snapshot = client.config_snapshot(connector.summary.id.as_str())?;
             let imported = read_json_file(import_path)?;
+            let placeholder_paths = config_redacted_placeholder_paths(&imported);
+            if !placeholder_paths.is_empty() {
+                return Ok(config_redacted_placeholder_import_dispatch(
+                    &host,
+                    &connector,
+                    import_path,
+                    placeholder_paths,
+                ));
+            }
 
             let validation = client.config_validate(
                 connector.summary.id.as_str(),
@@ -8411,10 +8430,39 @@ fn config_dispatch(args: &ConfigArgs, explicit_host: Option<&str>) -> Result<Dis
                 }
             };
             let snapshot = client.config_snapshot(connector.summary.id.as_str())?;
+            let replayable = snapshot.current.is_replayable();
             let config = snapshot.current.payload.clone();
             if let Some(path) = &file_args.file {
                 write_json_file(path, &config)?;
             }
+            let message = if replayable {
+                format!(
+                    "Exported the live connector config snapshot for `{}`.",
+                    connector.slug
+                )
+            } else {
+                format!(
+                    "Exported the sanitized live connector config snapshot for `{}`. Redacted inline secrets were withheld, so the exported document is for inspection only and is not replayable as-is.",
+                    connector.slug
+                )
+            };
+            let next_actions = if replayable {
+                vec![
+                    format!("fwc config doctor {} --host {}", connector.slug, host.endpoint),
+                    format!(
+                        "fwc config import {} --host {} --file <path>",
+                        connector.slug, host.endpoint
+                    ),
+                ]
+            } else {
+                vec![
+                    format!("fwc config doctor {} --host {}", connector.slug, host.endpoint),
+                    "Construct a complete replacement config document with all required secrets before attempting an import; the sanitized export is intentionally not replayable as-is."
+                        .to_owned(),
+                    "Move inline secrets into credential references so future incremental edits and exports remain replayable."
+                        .to_owned(),
+                ]
+            };
 
             let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "config");
             let mut payload = json!({
@@ -8422,18 +8470,13 @@ fn config_dispatch(args: &ConfigArgs, explicit_host: Option<&str>) -> Result<Dis
                 "command": "config",
                 "subcommand": "export",
                 "source": "host-admin-api",
-                "message": format!(
-                    "Exported the live connector config snapshot for `{}`.",
-                    connector.slug
-                ),
+                "message": message,
                 "connector": host_connector_descriptor_json(&connector),
                 "output_file": file_args.file.as_ref().map(|path| path.display().to_string()),
                 "snapshot": snapshot,
                 "config": config,
-                "next_actions": [
-                    format!("fwc config doctor {} --host {}", connector.slug, host.endpoint),
-                    format!("fwc config import {} --host {} --file <path>", connector.slug, host.endpoint),
-                ],
+                "replayable": replayable,
+                "next_actions": next_actions,
             });
             envelope.inject_into(&mut payload);
             Ok(DispatchOutcome {
@@ -8656,8 +8699,10 @@ fn config_non_replayable_live_config_dispatch(
             "snapshot": snapshot,
             "details": details,
             "next_actions": [
-                format!("fwc config export {} --host {} --file <path>", connector.slug, host.endpoint),
-                format!("fwc config import {} --host {} --file <path>", connector.slug, host.endpoint),
+                format!("fwc config get {} --host {}", connector.slug, host.endpoint),
+                format!("fwc config doctor {} --host {}", connector.slug, host.endpoint),
+                "Construct a complete replacement config document with all required secrets before attempting an import; the redacted live snapshot is intentionally not replayable as-is."
+                    .to_owned(),
                 "Move inline secrets into credential references so future incremental edits remain replayable."
                     .to_owned(),
             ],
@@ -8698,6 +8743,72 @@ fn config_live_validation_dispatch(
             ],
         }),
         exit_code: CliExitCode::Validation,
+    }
+}
+
+fn config_redacted_placeholder_import_dispatch(
+    host: &ResolvedHostConfig,
+    connector: &HostConnectorRecord,
+    import_path: &Path,
+    placeholder_paths: Vec<String>,
+) -> DispatchOutcome {
+    DispatchOutcome {
+        payload: json!({
+            "status": "invalid",
+            "command": "config",
+            "subcommand": "import",
+            "source": "host-admin-api",
+            "error": {
+                "type": "redacted-placeholder-import",
+                "message": "The import file still contains `[REDACTED]` placeholder values from a sanitized host export. Importing it would overwrite live secrets with placeholders.",
+                "recoverable": true,
+            },
+            "connector": host_connector_descriptor_json(connector),
+            "details": {
+                "input_file": import_path.display().to_string(),
+                "placeholder_paths": placeholder_paths,
+            },
+            "next_actions": [
+                format!("fwc config doctor {} --host {}", connector.slug, host.endpoint),
+                format!(
+                    "Replace every `[REDACTED]` placeholder in {} with the real secret value or a credential reference before rerunning `fwc config import`.",
+                    import_path.display()
+                ),
+            ],
+        }),
+        exit_code: CliExitCode::Validation,
+    }
+}
+
+fn config_redacted_placeholder_paths(value: &Value) -> Vec<String> {
+    let mut paths = Vec::new();
+    collect_config_redacted_placeholder_paths(value, "$", &mut paths);
+    paths
+}
+
+fn collect_config_redacted_placeholder_paths(value: &Value, path: &str, paths: &mut Vec<String>) {
+    match value {
+        Value::String(raw) if raw == "[REDACTED]" => paths.push(path.to_owned()),
+        Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                collect_config_redacted_placeholder_paths(
+                    item,
+                    &format!("{path}[{index}]"),
+                    paths,
+                );
+            }
+        }
+        Value::Object(object) => {
+            for (key, item) in object {
+                let next = if path == "$" {
+                    format!("$.{key}")
+                } else {
+                    format!("{path}.{key}")
+                };
+                collect_config_redacted_placeholder_paths(item, &next, paths);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -21062,7 +21173,50 @@ deny_ptrace = true
         assert_eq!(payload["subcommand"], "get");
         assert_eq!(payload["source"], "host-admin-api");
         assert_eq!(payload["config"]["profile"], "work");
+        assert_eq!(payload["replayable"], true);
         assert_eq!(payload["snapshot"]["active_revision_id"], 41);
+    }
+
+    #[test]
+    fn execute_config_export_redacted_snapshot_is_marked_non_replayable() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "GET /rpc/connectors/fcp.github:enterprise:v1/config".to_owned(),
+                    mock_redacted_config_snapshot_json(json!({
+                        "profile": "work",
+                        "client_secret": "<redacted>"
+                    })),
+                ),
+            ]),
+            2,
+        );
+
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "--host", &host, "config", "export", "github"]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "config");
+        assert_eq!(payload["subcommand"], "export");
+        assert_eq!(payload["replayable"], false);
+        assert!(
+            payload["message"]
+                .as_str()
+                .unwrap()
+                .contains("not replayable as-is")
+        );
+        assert!(
+            payload["next_actions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|entry| !entry.as_str().unwrap().contains("fwc config import"))
+        );
     }
 
     #[test]
@@ -21136,6 +21290,13 @@ deny_ptrace = true
             payload["snapshot"]["current"]["contains_inline_secrets"],
             true
         );
+        assert!(
+            payload["next_actions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|entry| !entry.as_str().unwrap().contains("fwc config import"))
+        );
     }
 
     #[test]
@@ -21167,6 +21328,50 @@ deny_ptrace = true
         assert_eq!(payload["source"], "host-admin-api");
         assert_eq!(payload["status"], "ok");
         assert_eq!(payload["validation"]["valid"], true);
+    }
+
+    #[test]
+    fn execute_config_import_rejects_redacted_placeholder_payload() {
+        let tempdir = tempfile::tempdir().expect("temp config dir");
+        let input_path = tempdir.path().join("github-config.json");
+        std::fs::write(
+            &input_path,
+            "{\n  \"profile\": \"work\",\n  \"client_secret\": \"[REDACTED]\"\n}\n",
+        )
+        .expect("config fixture should write");
+        let input_path = input_path.display().to_string();
+        let (host, server) = spawn_mock_host_sequence(vec![
+            (
+                "POST /rpc/discover".to_owned(),
+                mock_discovery_response_json(),
+            ),
+            (
+                "GET /rpc/connectors/fcp.github:enterprise:v1/config".to_owned(),
+                mock_redacted_config_snapshot_json(json!({
+                    "profile": "work",
+                    "client_secret": "[REDACTED]"
+                })),
+            ),
+        ]);
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "config",
+            "import",
+            "github",
+            "--file",
+            &input_path,
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["command"], "config");
+        assert_eq!(payload["subcommand"], "import");
+        assert_eq!(payload["error"]["type"], "redacted-placeholder-import");
+        assert_eq!(payload["details"]["placeholder_paths"][0], "$.client_secret");
     }
 
     #[test]

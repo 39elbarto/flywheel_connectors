@@ -4,24 +4,28 @@
   <img src="fcp_illustration.webp" alt="FCP - Secure connectors for AI agents with zone-based isolation and capability tokens">
 </div>
 
-> **Specification note:** `FCP_Specification_V2.md` is the *authoritative* interoperability contract.
-> This README is a high-level overview; when diagrams conflict, implement the Spec.
+> **Specification note:** `FCP_Specification_V2.md` is the authoritative interoperability contract,
+> and `FCP_Specification_V3.md` captures the active re-foundation direction. This README mixes
+> current implementation notes with long-term architecture; when descriptions conflict, trust the
+> spec for protocol intent and the code for present-day behavior.
 
-A mesh-native protocol for secure, distributed AI assistant operations across personal device meshes — plus a growing library of production-ready Rust connectors implementing that protocol.
+A secure connector protocol and Rust platform for AI agent operations across zones, hosts, and eventually personal device meshes — plus a large, still-evolving workspace of connector crates and supporting infrastructure.
 
 ---
 
 ## TL;DR
 
-**This project is two things:**
+**This repository currently spans three layers:**
 
-1. **The FCP Protocol** — A mesh-native specification for how AI agents securely interact with external services through zone-isolated, capability-gated connectors distributed across your personal device mesh
+1. **FCP specifications and design direction** — the mesh-native protocol model, security invariants, and the ongoing FCP3 ownership/runtime redesign
 
-2. **Connector Implementations** — Production Rust binaries for Twitter, Linear, Stripe, Telegram, Discord, Gmail, GitHub, browser automation, and more
+2. **A real host-first Rust platform** — today the most concrete operator path is `fwc -> fcp-host HTTP admin API -> connector subprocesses`
 
-**The Vision**: Your personal AI runs on YOUR devices. Your data exists as symbols across YOUR mesh. Any subset of YOUR devices can reconstruct anything. Computation happens wherever optimal. Secrets are never complete anywhere. History is tamper-evident by construction.
+3. **A large connector workspace** — many Rust connector crates and support crates exist already, but maturity varies by connector and subsystem
 
-**This is not a cloud alternative. This is digital sovereignty.**
+**Current reality**: the long-term vision is still personal-device sovereignty, mesh durability, and capability-gated execution across your own infrastructure. But the implemented operator surface today is primarily host-first rather than “every workflow already runs directly over a fully realized mesh kernel.”
+
+**The direction**: keep the strong zone/capability/evidence model, keep pushing toward the mesh-native design, and make the README honest about what is implemented now versus what is still being refounded.
 
 **Registry Note**: Registries are just sources of signed manifests/binaries. Your mesh can mirror and pin connectors as content-addressed objects so installs/updates work offline and without upstream dependency.
 
@@ -35,8 +39,11 @@ A mesh-native protocol for secure, distributed AI assistant operations across pe
 
 ### Why Use FCP?
 
+The most mature operator surface today is the host-first `fwc` + `fcp-host` stack. The table below mixes current strengths with explicit architectural direction; subsystem maturity is not uniform yet.
+
 | Feature | What It Does |
 |---------|--------------|
+| **Host-First Today** | A truthful CLI/host stack already exists for discovery, introspection, lifecycle control, history, and live invocation |
 | **Mesh-Native Architecture** | Every device IS the Hub. No central coordinator. |
 | **Symbol-First Protocol** | RaptorQ fountain codes enable multipath aggregation and offline resilience |
 | **Zone Isolation** | Cryptographic namespaces with integrity/confidentiality axes and Tailscale ACL enforcement |
@@ -810,15 +817,20 @@ Delivers the core safety story ("zones + explicit authority + auditable operatio
 - Hybrid catalog commands such as `list`, `search`, `show`, `ops`, `schema`, `examples`, `suggest`, `template`, `validate`, and `export-tools` require an explicit `--offline` opt-in for artifact-backed behavior when live host truth is unavailable or not desired.
 - Offline results are useful, but they are not authoritative for current runtime state. They must carry provenance markers and stale-data caveats.
 - The no-fakes invariant is part of the CLI contract: placeholder runtime data, guessed simulate support, and local file-edit side channels are bugs, not convenience features. When live truth is unavailable, `fwc` must refuse or require explicit offline mode.
+- Some command families are still transitional hybrids in the current tree (`config`, `recipe`, `pipeline`, `do`, and parts of `serve-mcp` classification). The direction is command-level truthfulness rather than over-broad family labels.
 - Evidence for this model is layered: local semantics in `crates/fwc/src/catalog.rs` and `crates/fwc/src/readiness.rs`, CLI integration coverage in `crates/fwc/tests/cual_integration.rs`, and replayable artifact bundles (`trace.jsonl`, `summary.json`, `environment.json`, `replay.sh`) defined by `crates/fwc/src/test_observability.rs`.
 
 For operator and agent workflows, migration guidance, and evidence-bundle expectations, see [docs/FWC_Host_First_Truthfulness_Playbook.md](docs/FWC_Host_First_Truthfulness_Playbook.md).
 
 ## Project Structure
 
+This is a schematic map, not an exhaustive directory dump. The actual Cargo workspace currently includes 29 crates under `crates/` and 82 connector crates under `connectors/`. Default workspace operations focus on the core platform crates; connector crates are usually targeted explicitly.
+
 ```
 flywheel_connectors/
 ├── crates/
+│   ├── fcp-async-core/        # Transitional async/runtime substrate
+│   ├── fcp-async-core-macros/ # Proc macros for async core
 │   ├── fcp-core/              # Shared domain types: zones, capabilities, provenance, lifecycle
 │   ├── fcp-cbor/              # Deterministic CBOR and schema hashing
 │   ├── fcp-crypto/            # Signing, key exchange, AEAD, HPKE, COSE, Shamir
@@ -835,28 +847,40 @@ flywheel_connectors/
 │   ├── fcp-oauth/             # Shared OAuth flows and token lifecycle support
 │   ├── fcp-graphql/           # Typed GraphQL client infrastructure
 │   ├── fcp-google-discovery/  # Shared Google service metadata/provisioning substrate
+│   ├── fcp-registry/          # Registry/install/update and verification flows
 │   ├── fcp-telemetry/         # Metrics, trace capture, structured logging helpers
+│   ├── fcp-webhook/           # Shared webhook delivery/runtime helpers
 │   ├── fcp-conformance/       # Golden vectors, schema checks, interop tooling
 │   ├── fcp-testkit/           # Shared test harnesses, fixtures, and mock infrastructure
 │   ├── fcp-e2e/               # End-to-end compliance and host-backed scenarios
 │   └── fwc/                   # Sole supported Flywheel connectors CLI
 │
-├── connectors/            # Individual connector implementations
-│   ├── twitter/
-│   ├── linear/
+├── connectors/                # 82 connector crates at varying maturity
+│   ├── github/
+│   ├── gmail/
+│   ├── slack/
 │   ├── stripe/
 │   ├── telegram/
-│   ├── discord/
+│   ├── kubernetes/
+│   ├── mcp-bridge/
 │   └── ...
 │
-├── FCP_Specification_V2.md   # Protocol specification
-├── AGENTS.md                 # AI coding agent guidelines
+├── crates/fcp-conformance/tests/ # Cross-crate conformance coverage
+├── crates/fcp-e2e/tests/         # Host-backed end-to-end scenarios
+├── crates/fcp-host/tests/        # Host/admin integration tests
+├── FCP_Specification_V2.md       # Current authoritative protocol specification
+├── FCP_Specification_V3.md       # Active re-foundation / ownership direction
+├── AGENTS.md                     # AI coding agent guidelines
 └── README.md
 ```
+
+In other words: the repo already contains a broad platform and connector surface, but the most important architectural seams today live in crate-local tests and the `fwc`/`fcp-host` operator stack, not in a single monolithic root `tests/` directory.
 
 ---
 
 ## Current Implementation Topology
+
+Practically, the current implementation behaves like a host-first platform layered over lower-level protocol, mesh, and object-store crates. The primary operator path is `fwc -> fcp-host -> connector subprocesses`, even though the longer-term architecture remains more mesh-native and FCP3-oriented.
 
 The workspace already clusters into a few clear responsibility bands:
 
@@ -873,6 +897,11 @@ That split is useful because it shows what is already coherent versus what is st
 node-local orchestration boundary. `fwc` is now the canonical operational surface.
 The remaining ambiguity is mostly around runtime substrate and where the final FCP3 kernel line
 should be drawn.
+
+Two current-reality notes matter when reading the rest of this README:
+
+- `fcp-core` carries most of the semantic request/response, capability, provenance, and receipt vocabulary, while `fcp-protocol` is much narrower and mostly owns FCPC/FCPS framing plus session/control-plane mechanics.
+- The repo’s integration burden is distributed. The most important end-to-end and conformance coverage lives in crate-local test suites such as `crates/fcp-conformance/tests`, `crates/fcp-e2e/tests`, `crates/fcp-host/tests`, and per-connector integration tests.
 
 ## FCP3 Ownership Direction
 
@@ -923,20 +952,26 @@ FCP integrates with the broader Agent Flywheel ecosystem:
 ### Building
 
 In shared multi-agent sessions, offload CPU-heavy Cargo work through `rch` so local machines do not
-turn into compilation bottlenecks.
+turn into compilation bottlenecks. `rch` fails open to local execution if the worker fleet is unavailable; in swarm-style sessions, abort that local fallback instead of letting heavy Cargo work pile onto the workstation unexpectedly.
 
 ```bash
-# Build all connectors
+# Build the default workspace members (core platform crates)
 rch exec -- cargo build --release
+
+# Build the full workspace, including connector crates
+rch exec -- cargo build --workspace --release
 
 # Build specific connector
 rch exec -- cargo build --release -p fcp-telegram
 
-# Run tests
+# Run tests for the default workspace members
 rch exec -- cargo test
 
-# Run clippy
-rch exec -- cargo clippy --all-targets -- -D warnings
+# Run tests for the full workspace
+rch exec -- cargo test --workspace
+
+# Run clippy for the full workspace
+rch exec -- cargo clippy --workspace --all-targets -- -D warnings
 
 # ASUPERSYNC Tokio guardrail (local + CI parity)
 bash scripts/ci/asupersync_tokio_guard.sh

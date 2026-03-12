@@ -19720,7 +19720,9 @@ depends_on = ["missing"]
             super::op_lock::AcquireResult::Acquired { lock } => {
                 assert_eq!(lock.resource, "github.issues");
             }
-            other => panic!("expected acquired lock, got {other:?}"),
+            other @ super::op_lock::AcquireResult::Conflict { .. } => {
+                panic!("expected acquired lock, got {other:?}");
+            }
         }
 
         let (start_exit, start_payload) = execute_json(&[

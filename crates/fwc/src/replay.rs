@@ -1687,4 +1687,1007 @@ mod tests {
         assert_eq!(plan.effective_input["title"], json!("updated"));
         assert_eq!(plan.overrides_applied.len(), 2);
     }
+
+    // ── ReplayError additional tests ─────────────────────────────────────
+
+    #[test]
+    fn replay_error_clone() {
+        let err = ReplayError::EntryNotFound {
+            entry_id: "e001".to_owned(),
+        };
+        let cloned = err.clone();
+        assert_eq!(err, cloned);
+    }
+
+    #[test]
+    fn replay_error_debug_format() {
+        let err = ReplayError::InputExpired {
+            entry_id: "e001".to_owned(),
+            expired_at: "2026-01-01".to_owned(),
+        };
+        let debug = format!("{err:?}");
+        assert!(debug.contains("InputExpired"));
+        assert!(debug.contains("e001"));
+    }
+
+    #[test]
+    fn replay_error_is_std_error() {
+        let err = ReplayError::EntryNotFound {
+            entry_id: "x".to_owned(),
+        };
+        let _dyn_err: &dyn std::error::Error = &err;
+        // source() should be None for all variants
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    #[test]
+    fn replay_error_serde_tag_format() {
+        let err = ReplayError::EntryNotFound {
+            entry_id: "e1".to_owned(),
+        };
+        let json = serde_json::to_string(&err).unwrap();
+        assert!(json.contains("\"kind\":\"entry_not_found\""));
+    }
+
+    #[test]
+    fn replay_error_serde_input_expired_tag() {
+        let err = ReplayError::InputExpired {
+            entry_id: "e1".to_owned(),
+            expired_at: "now".to_owned(),
+        };
+        let json = serde_json::to_string(&err).unwrap();
+        assert!(json.contains("\"kind\":\"input_expired\""));
+    }
+
+    #[test]
+    fn replay_error_serde_input_not_stored_tag() {
+        let err = ReplayError::InputNotStored {
+            entry_id: "e1".to_owned(),
+        };
+        let json = serde_json::to_string(&err).unwrap();
+        assert!(json.contains("\"kind\":\"input_not_stored\""));
+    }
+
+    #[test]
+    fn replay_error_serde_invalid_override_tag() {
+        let err = ReplayError::InvalidOverride {
+            raw: "x".to_owned(),
+            reason: "y".to_owned(),
+        };
+        let json = serde_json::to_string(&err).unwrap();
+        assert!(json.contains("\"kind\":\"invalid_override\""));
+    }
+
+    #[test]
+    fn replay_error_display_includes_expired_timestamp() {
+        let err = ReplayError::InputExpired {
+            entry_id: "e42".to_owned(),
+            expired_at: "2026-03-01T12:00:00Z".to_owned(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("2026-03-01T12:00:00Z"));
+        assert!(msg.contains("e42"));
+    }
+
+    #[test]
+    fn replay_error_display_invalid_override_includes_raw_and_reason() {
+        let err = ReplayError::InvalidOverride {
+            raw: "foo bar".to_owned(),
+            reason: "no equals sign".to_owned(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("foo bar"));
+        assert!(msg.contains("no equals sign"));
+    }
+
+    // ── OpStatus additional tests ────────────────────────────────────────
+
+    #[test]
+    fn op_status_as_str_all_variants() {
+        assert_eq!(OpStatus::Success.as_str(), "success");
+        assert_eq!(OpStatus::Failure.as_str(), "failure");
+        assert_eq!(OpStatus::Denied.as_str(), "denied");
+        assert_eq!(OpStatus::Timeout.as_str(), "timeout");
+    }
+
+    #[test]
+    fn op_status_copy_semantics() {
+        let status = OpStatus::Success;
+        let copied = status;
+        assert_eq!(status, copied); // Both still usable (Copy)
+    }
+
+    #[test]
+    fn op_status_clone() {
+        let status = OpStatus::Denied;
+        let cloned = status.clone();
+        assert_eq!(status, cloned);
+    }
+
+    #[test]
+    fn op_status_debug_format() {
+        let debug = format!("{:?}", OpStatus::Timeout);
+        assert_eq!(debug, "Timeout");
+    }
+
+    #[test]
+    fn op_status_serde_snake_case() {
+        let json = serde_json::to_string(&OpStatus::Success).unwrap();
+        assert_eq!(json, "\"success\"");
+        let json = serde_json::to_string(&OpStatus::Failure).unwrap();
+        assert_eq!(json, "\"failure\"");
+        let json = serde_json::to_string(&OpStatus::Denied).unwrap();
+        assert_eq!(json, "\"denied\"");
+        let json = serde_json::to_string(&OpStatus::Timeout).unwrap();
+        assert_eq!(json, "\"timeout\"");
+    }
+
+    #[test]
+    fn op_status_deserialize_from_snake_case() {
+        let s: OpStatus = serde_json::from_str("\"success\"").unwrap();
+        assert_eq!(s, OpStatus::Success);
+        let t: OpStatus = serde_json::from_str("\"timeout\"").unwrap();
+        assert_eq!(t, OpStatus::Timeout);
+    }
+
+    #[test]
+    fn op_status_invalid_deserialize() {
+        let result = serde_json::from_str::<OpStatus>("\"unknown\"");
+        assert!(result.is_err());
+    }
+
+    // ── HistoryEntry additional tests ────────────────────────────────────
+
+    #[test]
+    fn history_entry_clone() {
+        let entry = sample_history_entry("e001");
+        let cloned = entry.clone();
+        assert_eq!(cloned.entry_id, "e001");
+        assert_eq!(cloned.connector_id, entry.connector_id);
+        assert_eq!(cloned.operation_id, entry.operation_id);
+        assert_eq!(cloned.input_hash, entry.input_hash);
+    }
+
+    #[test]
+    fn history_entry_serde_roundtrip() {
+        let entry = sample_history_entry("e001");
+        let json = serde_json::to_string(&entry).unwrap();
+        let recovered: HistoryEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(recovered.entry_id, "e001");
+        assert_eq!(recovered.connector_id, "github");
+        assert_eq!(recovered.operation_id, "issues.create");
+        assert_eq!(recovered.status, OpStatus::Success);
+    }
+
+    #[test]
+    fn history_entry_debug() {
+        let entry = sample_history_entry("e001");
+        let debug = format!("{entry:?}");
+        assert!(debug.contains("e001"));
+        assert!(debug.contains("github"));
+    }
+
+    // ── HistoryFilter additional tests ───────────────────────────────────
+
+    #[test]
+    fn history_filter_default_all_none() {
+        let f = HistoryFilter::default();
+        assert!(f.connector_id.is_none());
+        assert!(f.operation_id.is_none());
+        assert!(f.status.is_none());
+        assert!(f.limit.is_none());
+    }
+
+    #[test]
+    fn history_filter_clone() {
+        let f = HistoryFilter {
+            connector_id: Some("github".to_owned()),
+            operation_id: Some("issues.list".to_owned()),
+            status: Some(OpStatus::Success),
+            limit: Some(5),
+        };
+        let cloned = f.clone();
+        assert_eq!(cloned.connector_id.as_deref(), Some("github"));
+        assert_eq!(cloned.limit, Some(5));
+    }
+
+    // ── HistoryStore additional tests ────────────────────────────────────
+
+    #[test]
+    fn history_store_clone() {
+        let mut store = HistoryStore::new();
+        store.append(sample_history_entry("e001"));
+        let cloned = store.clone();
+        assert_eq!(cloned.count(), 1);
+        assert!(cloned.get("e001").is_some());
+    }
+
+    #[test]
+    fn history_store_query_returns_newest_first() {
+        let mut store = HistoryStore::new();
+        for i in 0..5 {
+            store.append(sample_history_entry(&format!("e{i:03}")));
+        }
+        let results = store.query(&HistoryFilter::default());
+        assert_eq!(results.len(), 5);
+        assert_eq!(results[0].entry_id, "e004");
+        assert_eq!(results[4].entry_id, "e000");
+    }
+
+    #[test]
+    fn history_store_query_by_operation_id() {
+        let mut store = HistoryStore::new();
+        let mut e1 = sample_history_entry("e001");
+        e1.operation_id = "repos.list".to_owned();
+        store.append(e1);
+        store.append(sample_history_entry("e002")); // issues.create
+        let mut e3 = sample_history_entry("e003");
+        e3.operation_id = "repos.list".to_owned();
+        store.append(e3);
+
+        let filter = HistoryFilter {
+            operation_id: Some("repos.list".to_owned()),
+            ..HistoryFilter::default()
+        };
+        let results = store.query(&filter);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].entry_id, "e003"); // newest first
+    }
+
+    #[test]
+    fn history_store_query_no_matches() {
+        let mut store = HistoryStore::new();
+        store.append(sample_history_entry("e001"));
+        let filter = HistoryFilter {
+            connector_id: Some("nonexistent".to_owned()),
+            ..HistoryFilter::default()
+        };
+        assert!(store.query(&filter).is_empty());
+    }
+
+    #[test]
+    fn history_store_query_limit_zero() {
+        let mut store = HistoryStore::new();
+        store.append(sample_history_entry("e001"));
+        let filter = HistoryFilter {
+            limit: Some(0),
+            ..HistoryFilter::default()
+        };
+        assert!(store.query(&filter).is_empty());
+    }
+
+    #[test]
+    fn history_store_query_limit_larger_than_results() {
+        let mut store = HistoryStore::new();
+        store.append(sample_history_entry("e001"));
+        let filter = HistoryFilter {
+            limit: Some(100),
+            ..HistoryFilter::default()
+        };
+        assert_eq!(store.query(&filter).len(), 1);
+    }
+
+    #[test]
+    fn history_store_query_combined_connector_operation_status() {
+        let mut store = HistoryStore::new();
+        let mut e1 = sample_history_entry("e001");
+        e1.connector_id = "slack".to_owned();
+        e1.operation_id = "chat.post".to_owned();
+        e1.status = OpStatus::Success;
+        store.append(e1);
+
+        let mut e2 = sample_history_entry("e002");
+        e2.connector_id = "slack".to_owned();
+        e2.operation_id = "chat.post".to_owned();
+        e2.status = OpStatus::Failure;
+        store.append(e2);
+
+        let mut e3 = sample_history_entry("e003");
+        e3.connector_id = "slack".to_owned();
+        e3.operation_id = "chat.update".to_owned();
+        e3.status = OpStatus::Success;
+        store.append(e3);
+
+        let filter = HistoryFilter {
+            connector_id: Some("slack".to_owned()),
+            operation_id: Some("chat.post".to_owned()),
+            status: Some(OpStatus::Success),
+            limit: None,
+        };
+        let results = store.query(&filter);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].entry_id, "e001");
+    }
+
+    #[test]
+    fn history_store_get_returns_correct_fields() {
+        let mut store = HistoryStore::new();
+        let mut entry = sample_history_entry("e001");
+        entry.input_summary = "custom summary".to_owned();
+        store.append(entry);
+        let got = store.get("e001").unwrap();
+        assert_eq!(got.input_summary, "custom summary");
+    }
+
+    #[test]
+    fn history_store_multiple_appends() {
+        let mut store = HistoryStore::new();
+        for i in 0..50 {
+            store.append(sample_history_entry(&format!("e{i:03}")));
+        }
+        assert_eq!(store.count(), 50);
+    }
+
+    // ── content_hash additional tests ────────────────────────────────────
+
+    #[test]
+    fn content_hash_bool_true() {
+        let h = content_hash(&json!(true));
+        assert_eq!(h.len(), 16);
+    }
+
+    #[test]
+    fn content_hash_bool_false() {
+        let h = content_hash(&json!(false));
+        assert_eq!(h.len(), 16);
+        assert_ne!(content_hash(&json!(true)), h);
+    }
+
+    #[test]
+    fn content_hash_number() {
+        let h = content_hash(&json!(42));
+        assert_eq!(h.len(), 16);
+    }
+
+    #[test]
+    fn content_hash_string() {
+        let h = content_hash(&json!("hello"));
+        assert_eq!(h.len(), 16);
+    }
+
+    #[test]
+    fn content_hash_array() {
+        let h = content_hash(&json!([1, 2, 3]));
+        assert_eq!(h.len(), 16);
+    }
+
+    #[test]
+    fn content_hash_nested_object() {
+        let h = content_hash(&json!({"a": {"b": {"c": 1}}}));
+        assert_eq!(h.len(), 16);
+    }
+
+    #[test]
+    fn content_hash_hex_format() {
+        let h = content_hash(&json!({"test": true}));
+        assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn content_hash_empty_array() {
+        let h = content_hash(&json!([]));
+        assert_ne!(h, content_hash(&json!({})));
+    }
+
+    // ── summarize_input additional tests ─────────────────────────────────
+
+    #[test]
+    fn summarize_input_null() {
+        let summary = summarize_input(&Value::Null);
+        assert_eq!(summary, "null");
+    }
+
+    #[test]
+    fn summarize_input_bool_true() {
+        let summary = summarize_input(&json!(true));
+        assert_eq!(summary, "true");
+    }
+
+    #[test]
+    fn summarize_input_bool_false() {
+        let summary = summarize_input(&json!(false));
+        assert_eq!(summary, "false");
+    }
+
+    #[test]
+    fn summarize_input_number_int() {
+        let summary = summarize_input(&json!(42));
+        assert_eq!(summary, "42");
+    }
+
+    #[test]
+    fn summarize_input_number_float() {
+        let summary = summarize_input(&json!(3.14));
+        assert!(summary.contains("3.14"));
+    }
+
+    #[test]
+    fn summarize_input_empty_object() {
+        let summary = summarize_input(&json!({}));
+        assert_eq!(summary, "{}");
+    }
+
+    #[test]
+    fn summarize_input_empty_array() {
+        let summary = summarize_input(&json!([]));
+        assert!(summary.contains("0 items"));
+    }
+
+    #[test]
+    fn summarize_input_exactly_four_keys() {
+        let input = json!({"a": 1, "b": 2, "c": 3, "d": 4});
+        let summary = summarize_input(&input);
+        // 4 keys == take(4).len() == map.len(), so no "... (N keys)" suffix
+        assert!(!summary.contains("keys"));
+    }
+
+    #[test]
+    fn summarize_input_single_key() {
+        let input = json!({"only": "one"});
+        let summary = summarize_input(&input);
+        assert!(summary.contains("only"));
+        assert!(!summary.contains("keys"));
+    }
+
+    #[test]
+    fn summarize_input_string_exactly_40_chars() {
+        let s = "a".repeat(40);
+        let summary = summarize_input(&Value::String(s.clone()));
+        // 40 chars is not > 40, so should not be truncated
+        assert!(!summary.contains("..."));
+        assert!(summary.contains(&s));
+    }
+
+    #[test]
+    fn summarize_input_string_41_chars_truncated() {
+        let s = "b".repeat(41);
+        let summary = summarize_input(&Value::String(s));
+        assert!(summary.contains("..."));
+    }
+
+    #[test]
+    fn summarize_input_empty_string() {
+        let summary = summarize_input(&json!(""));
+        assert_eq!(summary, "\"\"");
+    }
+
+    #[test]
+    fn summarize_input_large_array() {
+        let input = Value::Array(vec![json!(1); 1000]);
+        let summary = summarize_input(&input);
+        assert!(summary.contains("1000 items"));
+    }
+
+    // ── StoredInput additional tests ─────────────────────────────────────
+
+    #[test]
+    fn stored_input_clone() {
+        let stored = StoredInput {
+            entry_id: "e1".to_owned(),
+            connector_id: "test".to_owned(),
+            operation_id: "op".to_owned(),
+            input: json!({"key": "val"}),
+            stored_at: "2026-01-01T00:00:00Z".to_owned(),
+            expires_at: "2026-01-08T00:00:00Z".to_owned(),
+        };
+        let cloned = stored.clone();
+        assert_eq!(cloned.entry_id, "e1");
+        assert_eq!(cloned.input, json!({"key": "val"}));
+    }
+
+    #[test]
+    fn stored_input_serde_roundtrip() {
+        let stored = StoredInput {
+            entry_id: "e1".to_owned(),
+            connector_id: "github".to_owned(),
+            operation_id: "issues.create".to_owned(),
+            input: json!({"a": [1, 2]}),
+            stored_at: "2026-01-01T00:00:00Z".to_owned(),
+            expires_at: "2026-01-08T00:00:00Z".to_owned(),
+        };
+        let json = serde_json::to_string(&stored).unwrap();
+        let recovered: StoredInput = serde_json::from_str(&json).unwrap();
+        assert_eq!(recovered.entry_id, "e1");
+        assert_eq!(recovered.input, json!({"a": [1, 2]}));
+    }
+
+    #[test]
+    fn stored_input_debug() {
+        let stored = StoredInput {
+            entry_id: "e1".to_owned(),
+            connector_id: "test".to_owned(),
+            operation_id: "op".to_owned(),
+            input: json!(null),
+            stored_at: "t1".to_owned(),
+            expires_at: "t2".to_owned(),
+        };
+        let debug = format!("{stored:?}");
+        assert!(debug.contains("e1"));
+    }
+
+    // ── ReplayRequest additional tests ───────────────────────────────────
+
+    #[test]
+    fn replay_request_simple_defaults() {
+        let req = ReplayRequest::simple("e001");
+        assert_eq!(req.entry_id, "e001");
+        assert!(req.overrides.is_empty());
+        assert!(!req.dry_run);
+    }
+
+    #[test]
+    fn replay_request_clone() {
+        let req = ReplayRequest::simple("e001")
+            .with_override("key", json!("val"))
+            .dry_run();
+        let cloned = req.clone();
+        assert_eq!(cloned.entry_id, "e001");
+        assert!(cloned.dry_run);
+        assert_eq!(cloned.overrides["key"], json!("val"));
+    }
+
+    #[test]
+    fn replay_request_override_replaces_same_key() {
+        let req = ReplayRequest::simple("e001")
+            .with_override("x", json!(1))
+            .with_override("x", json!(2));
+        assert_eq!(req.overrides.len(), 1);
+        assert_eq!(req.overrides["x"], json!(2));
+    }
+
+    #[test]
+    fn replay_request_serde_no_overrides() {
+        let req = ReplayRequest::simple("e001");
+        let json = serde_json::to_string(&req).unwrap();
+        let recovered: ReplayRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(recovered.entry_id, "e001");
+        assert!(recovered.overrides.is_empty());
+        assert!(!recovered.dry_run);
+    }
+
+    #[test]
+    fn replay_request_debug() {
+        let req = ReplayRequest::simple("e001");
+        let debug = format!("{req:?}");
+        assert!(debug.contains("e001"));
+    }
+
+    // ── ReplayPlan additional tests ──────────────────────────────────────
+
+    #[test]
+    fn replay_plan_clone() {
+        let plan = ReplayPlan {
+            original: StoredInput {
+                entry_id: "e1".to_owned(),
+                connector_id: "gh".to_owned(),
+                operation_id: "op".to_owned(),
+                input: json!({}),
+                stored_at: "t1".to_owned(),
+                expires_at: "t2".to_owned(),
+            },
+            effective_input: json!({"x": 1}),
+            overrides_applied: vec!["x".to_owned()],
+            connector_id: "gh".to_owned(),
+            operation_id: "op".to_owned(),
+            dry_run: true,
+        };
+        let cloned = plan.clone();
+        assert_eq!(cloned.connector_id, "gh");
+        assert!(cloned.dry_run);
+        assert_eq!(cloned.overrides_applied, vec!["x"]);
+    }
+
+    #[test]
+    fn replay_plan_serde_empty_overrides() {
+        let plan = ReplayPlan {
+            original: StoredInput {
+                entry_id: "e1".to_owned(),
+                connector_id: "test".to_owned(),
+                operation_id: "op".to_owned(),
+                input: json!(42),
+                stored_at: "t1".to_owned(),
+                expires_at: "t2".to_owned(),
+            },
+            effective_input: json!(42),
+            overrides_applied: vec![],
+            connector_id: "test".to_owned(),
+            operation_id: "op".to_owned(),
+            dry_run: false,
+        };
+        let json = serde_json::to_string(&plan).unwrap();
+        let recovered: ReplayPlan = serde_json::from_str(&json).unwrap();
+        assert!(recovered.overrides_applied.is_empty());
+        assert_eq!(recovered.effective_input, json!(42));
+    }
+
+    #[test]
+    fn replay_plan_debug() {
+        let plan = ReplayPlan {
+            original: StoredInput {
+                entry_id: "e1".to_owned(),
+                connector_id: "c".to_owned(),
+                operation_id: "o".to_owned(),
+                input: json!(null),
+                stored_at: "t1".to_owned(),
+                expires_at: "t2".to_owned(),
+            },
+            effective_input: json!(null),
+            overrides_applied: vec![],
+            connector_id: "c".to_owned(),
+            operation_id: "o".to_owned(),
+            dry_run: false,
+        };
+        let debug = format!("{plan:?}");
+        assert!(debug.contains("ReplayPlan"));
+    }
+
+    // ── parse_override additional tests ──────────────────────────────────
+
+    #[test]
+    fn parse_override_deeply_nested_path() {
+        let (key, value) = parse_override("a.b.c.d.e=42").unwrap();
+        assert_eq!(key, "a.b.c.d.e");
+        assert_eq!(value, json!(42));
+    }
+
+    #[test]
+    fn parse_override_json_string_value() {
+        let (key, value) = parse_override(r#"name="quoted""#).unwrap();
+        assert_eq!(key, "name");
+        assert_eq!(value, json!("quoted"));
+    }
+
+    #[test]
+    fn parse_override_negative_number() {
+        let (key, value) = parse_override("offset=-10").unwrap();
+        assert_eq!(key, "offset");
+        assert_eq!(value, json!(-10));
+    }
+
+    #[test]
+    fn parse_override_float_value() {
+        let (key, value) = parse_override("rate=3.14").unwrap();
+        assert_eq!(key, "rate");
+        assert_eq!(value, json!(3.14));
+    }
+
+    #[test]
+    fn parse_override_false_value() {
+        let (key, value) = parse_override("enabled=false").unwrap();
+        assert_eq!(key, "enabled");
+        assert_eq!(value, json!(false));
+    }
+
+    #[test]
+    fn parse_override_whitespace_only_key() {
+        let result = parse_override("   =value");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ReplayError::InvalidOverride { reason, .. } => assert!(reason.contains("empty")),
+            other => panic!("expected InvalidOverride, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_override_json_nested_object() {
+        let (key, value) = parse_override(r#"conf={"a":{"b":1}}"#).unwrap();
+        assert_eq!(key, "conf");
+        assert_eq!(value, json!({"a": {"b": 1}}));
+    }
+
+    // ── apply_overrides additional tests ─────────────────────────────────
+
+    #[test]
+    fn apply_override_set_to_null() {
+        let input = json!({"key": "value"});
+        let overrides = vec![("key".to_owned(), Value::Null)];
+        let result = apply_overrides(&input, &overrides).unwrap();
+        assert_eq!(result["key"], Value::Null);
+    }
+
+    #[test]
+    fn apply_override_replace_object_with_scalar() {
+        let input = json!({"config": {"a": 1, "b": 2}});
+        let overrides = vec![("config".to_owned(), json!("replaced"))];
+        let result = apply_overrides(&input, &overrides).unwrap();
+        assert_eq!(result["config"], json!("replaced"));
+    }
+
+    #[test]
+    fn apply_override_deeply_nested_from_null_root() {
+        let input = Value::Null;
+        let overrides = vec![("a.b.c".to_owned(), json!(42))];
+        let result = apply_overrides(&input, &overrides).unwrap();
+        assert_eq!(result["a"]["b"]["c"], json!(42));
+    }
+
+    #[test]
+    fn apply_override_same_key_twice_last_wins() {
+        let input = json!({"x": 0});
+        let overrides = vec![
+            ("x".to_owned(), json!(1)),
+            ("x".to_owned(), json!(2)),
+        ];
+        let result = apply_overrides(&input, &overrides).unwrap();
+        assert_eq!(result["x"], json!(2));
+    }
+
+    #[test]
+    fn apply_override_traverse_array_fails() {
+        let input = json!({"arr": [1, 2, 3]});
+        let overrides = vec![("arr.0".to_owned(), json!(99))];
+        let result = apply_overrides(&input, &overrides);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn apply_override_traverse_bool_fails() {
+        let input = json!({"flag": true});
+        let overrides = vec![("flag.sub".to_owned(), json!(1))];
+        let result = apply_overrides(&input, &overrides);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn apply_override_traverse_number_fails() {
+        let input = json!({"count": 42});
+        let overrides = vec![("count.sub".to_owned(), json!(1))];
+        let result = apply_overrides(&input, &overrides);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn apply_override_traverse_string_fails() {
+        let input = json!({"name": "text"});
+        let overrides = vec![("name.sub".to_owned(), json!(1))];
+        let result = apply_overrides(&input, &overrides);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn apply_override_create_multiple_levels() {
+        let input = json!({});
+        let overrides = vec![("a.b.c.d".to_owned(), json!("deep"))];
+        let result = apply_overrides(&input, &overrides).unwrap();
+        assert_eq!(result["a"]["b"]["c"]["d"], json!("deep"));
+    }
+
+    #[test]
+    fn apply_override_preserves_sibling_nested_keys() {
+        let input = json!({"config": {"timeout": 30, "retry": true, "batch_size": 10}});
+        let overrides = vec![("config.timeout".to_owned(), json!(60))];
+        let result = apply_overrides(&input, &overrides).unwrap();
+        assert_eq!(result["config"]["timeout"], json!(60));
+        assert_eq!(result["config"]["retry"], json!(true));
+        assert_eq!(result["config"]["batch_size"], json!(10));
+    }
+
+    // ── ReplayStore additional tests ─────────────────────────────────────
+
+    #[test]
+    fn replay_store_root_dir() {
+        let dir = std::env::temp_dir().join("fwc-test-root");
+        let store = ReplayStore::at_path(dir.clone());
+        assert_eq!(store.root_dir(), dir);
+    }
+
+    #[test]
+    fn replay_store_with_ttl() {
+        let dir = std::env::temp_dir().join("fwc-test-ttl");
+        let store = ReplayStore::at_path(dir).with_ttl(14);
+        // TTL is internal; just verify creation doesn't panic
+        assert_eq!(store.ttl_days, 14);
+    }
+
+    #[test]
+    fn replay_store_store_empty_object() {
+        let store = temp_store();
+        store.store_input("e1", "c", "o", &json!({})).unwrap();
+        let stored = store.get_stored_input("e1").unwrap().unwrap();
+        assert_eq!(stored.input, json!({}));
+    }
+
+    #[test]
+    fn replay_store_store_null_input() {
+        let store = temp_store();
+        store.store_input("e1", "c", "o", &Value::Null).unwrap();
+        let stored = store.get_stored_input("e1").unwrap().unwrap();
+        assert_eq!(stored.input, Value::Null);
+    }
+
+    #[test]
+    fn replay_store_store_large_input() {
+        let store = temp_store();
+        let big = json!({"data": "x".repeat(10_000)});
+        store.store_input("e-big", "c", "o", &big).unwrap();
+        let stored = store.get_stored_input("e-big").unwrap().unwrap();
+        assert_eq!(stored.input, big);
+    }
+
+    #[test]
+    fn replay_store_multiple_entries_with_different_connectors() {
+        let store = temp_store();
+        store.store_input("e1", "github", "issues.create", &json!({"a": 1})).unwrap();
+        store.store_input("e2", "slack", "chat.post", &json!({"b": 2})).unwrap();
+        store.store_input("e3", "jira", "issue.get", &json!({"c": 3})).unwrap();
+
+        let s1 = store.get_stored_input("e1").unwrap().unwrap();
+        assert_eq!(s1.connector_id, "github");
+        let s2 = store.get_stored_input("e2").unwrap().unwrap();
+        assert_eq!(s2.connector_id, "slack");
+        let s3 = store.get_stored_input("e3").unwrap().unwrap();
+        assert_eq!(s3.connector_id, "jira");
+    }
+
+    #[test]
+    fn replay_store_stored_input_has_valid_timestamps() {
+        let store = temp_store();
+        store.store_input("e1", "c", "o", &json!({"x": 1})).unwrap();
+        let stored = store.get_stored_input("e1").unwrap().unwrap();
+        // Timestamps should parse as valid DateTimes
+        let stored_at = stored.stored_at.parse::<DateTime<Utc>>();
+        assert!(stored_at.is_ok());
+        let expires_at = stored.expires_at.parse::<DateTime<Utc>>();
+        assert!(expires_at.is_ok());
+        // expires_at should be after stored_at
+        assert!(expires_at.unwrap() > stored_at.unwrap());
+    }
+
+    #[test]
+    fn replay_store_clone() {
+        let store = temp_store();
+        let cloned = store.clone();
+        assert_eq!(store.root_dir(), cloned.root_dir());
+    }
+
+    #[test]
+    fn replay_store_list_ignores_non_json_files() {
+        let store = temp_store();
+        store.store_input("e1", "c", "o", &json!(1)).unwrap();
+        // Create a non-json file in the replay dir
+        let non_json = store.replay_dir().join("notes.txt");
+        fs::write(&non_json, b"some notes").unwrap();
+        let ids = store.list_entry_ids();
+        assert_eq!(ids.len(), 1);
+        assert!(ids.contains(&"e1".to_owned()));
+    }
+
+    // ── plan_replay additional tests ─────────────────────────────────────
+
+    #[test]
+    fn plan_replay_dry_run_with_overrides() {
+        let store = temp_store();
+        let input = json!({"title": "original"});
+        let mut history = HistoryStore::new();
+        history.append(sample_history_entry("e001"));
+        store.store_input("e001", "github", "issues.create", &input).unwrap();
+
+        let request = ReplayRequest::simple("e001")
+            .with_override("title", json!("modified"))
+            .dry_run();
+        let plan = plan_replay(&request, &store, &history).unwrap();
+        assert!(plan.dry_run);
+        assert_eq!(plan.effective_input["title"], json!("modified"));
+        assert!(plan.overrides_applied.contains(&"title".to_owned()));
+    }
+
+    #[test]
+    fn plan_replay_preserves_original_input() {
+        let store = temp_store();
+        let input = json!({"title": "original", "body": "text"});
+        let mut history = HistoryStore::new();
+        history.append(sample_history_entry("e001"));
+        store.store_input("e001", "github", "issues.create", &input).unwrap();
+
+        let request = ReplayRequest::simple("e001").with_override("title", json!("new"));
+        let plan = plan_replay(&request, &store, &history).unwrap();
+        // Original should still have the old value
+        assert_eq!(plan.original.input["title"], json!("original"));
+        assert_eq!(plan.effective_input["title"], json!("new"));
+    }
+
+    #[test]
+    fn plan_replay_sets_connector_and_operation() {
+        let store = temp_store();
+        let input = json!({"x": 1});
+        let mut history = HistoryStore::new();
+        let mut entry = sample_history_entry("e001");
+        entry.connector_id = "slack".to_owned();
+        entry.operation_id = "chat.post".to_owned();
+        history.append(entry);
+        store.store_input("e001", "slack", "chat.post", &input).unwrap();
+
+        let request = ReplayRequest::simple("e001");
+        let plan = plan_replay(&request, &store, &history).unwrap();
+        assert_eq!(plan.connector_id, "slack");
+        assert_eq!(plan.operation_id, "chat.post");
+    }
+
+    // ── find_last_of additional tests ────────────────────────────────────
+
+    #[test]
+    fn find_last_of_with_mixed_operations() {
+        let mut history = HistoryStore::new();
+        for i in 0..10 {
+            let mut entry = sample_history_entry(&format!("e{i:03}"));
+            entry.operation_id = if i % 2 == 0 {
+                "issues.create".to_owned()
+            } else {
+                "repos.list".to_owned()
+            };
+            history.append(entry);
+        }
+        let found = find_last_of("repos.list", &history).unwrap();
+        assert_eq!(found.entry_id, "e009"); // last odd index
+    }
+
+    #[test]
+    fn find_last_of_single_entry() {
+        let mut history = HistoryStore::new();
+        history.append(sample_history_entry("e001"));
+        let found = find_last_of("issues.create", &history).unwrap();
+        assert_eq!(found.entry_id, "e001");
+    }
+
+    // ── value_type_name coverage ─────────────────────────────────────────
+
+    #[test]
+    fn value_type_name_all_variants() {
+        assert_eq!(value_type_name(&Value::Null), "null");
+        assert_eq!(value_type_name(&json!(true)), "bool");
+        assert_eq!(value_type_name(&json!(42)), "number");
+        assert_eq!(value_type_name(&json!("str")), "string");
+        assert_eq!(value_type_name(&json!([1])), "array");
+        assert_eq!(value_type_name(&json!({"k": "v"})), "object");
+    }
+
+    // ── StoredInputDisk round-trip edge cases ────────────────────────────
+
+    #[test]
+    fn stored_input_disk_roundtrip_with_nested_arrays() {
+        let stored = StoredInput {
+            entry_id: "e-arr".to_owned(),
+            connector_id: "test".to_owned(),
+            operation_id: "op".to_owned(),
+            input: json!({"data": [[1, 2], [3, 4]], "meta": {"tags": ["a", "b"]}}),
+            stored_at: "2026-01-01T00:00:00Z".to_owned(),
+            expires_at: "2026-01-08T00:00:00Z".to_owned(),
+        };
+        let disk = StoredInputDisk::from_stored(&stored).unwrap();
+        let recovered = disk.into_stored().unwrap();
+        assert_eq!(recovered.input, stored.input);
+    }
+
+    #[test]
+    fn stored_input_disk_roundtrip_with_special_chars() {
+        let stored = StoredInput {
+            entry_id: "e-special".to_owned(),
+            connector_id: "test".to_owned(),
+            operation_id: "op".to_owned(),
+            input: json!({"msg": "line1\nline2\ttab", "emoji": "\u{1f600}"}),
+            stored_at: "2026-01-01T00:00:00Z".to_owned(),
+            expires_at: "2026-01-08T00:00:00Z".to_owned(),
+        };
+        let disk = StoredInputDisk::from_stored(&stored).unwrap();
+        let recovered = disk.into_stored().unwrap();
+        assert_eq!(recovered.input, stored.input);
+    }
+
+    #[test]
+    fn stored_input_disk_base64_is_valid() {
+        let stored = StoredInput {
+            entry_id: "e1".to_owned(),
+            connector_id: "test".to_owned(),
+            operation_id: "op".to_owned(),
+            input: json!({"hello": "world"}),
+            stored_at: "t1".to_owned(),
+            expires_at: "t2".to_owned(),
+        };
+        let disk = StoredInputDisk::from_stored(&stored).unwrap();
+        // The base64 should decode without error
+        let decoded = base64::engine::general_purpose::STANDARD.decode(&disk.input_b64);
+        assert!(decoded.is_ok());
+        let json: Value = serde_json::from_slice(&decoded.unwrap()).unwrap();
+        assert_eq!(json, json!({"hello": "world"}));
+    }
 }

@@ -1517,4 +1517,718 @@ mod tests {
         assert!(comp.purl.contains(&comp.name));
         assert!(comp.purl.contains(&comp.version));
     }
+
+    // ── PackageOutput: deserialization edge cases ─────────────
+
+    #[test]
+    fn package_output_deserialize_sbom_path_as_string() {
+        let json = r#"{
+            "output_dir": "/a",
+            "binary_path": "/b",
+            "manifest_path": "/c",
+            "sbom_path": "/some/path/sbom.json",
+            "build_metadata_path": "/d",
+            "binary_sha256": "abc",
+            "connector_id": "c:t:1",
+            "version": "1"
+        }"#;
+        let output: PackageOutput = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            output.sbom_path,
+            Some(PathBuf::from("/some/path/sbom.json"))
+        );
+    }
+
+    #[test]
+    fn package_output_deserialization_missing_required_field_fails() {
+        // Missing binary_sha256
+        let json = r#"{
+            "output_dir": "/a",
+            "binary_path": "/b",
+            "manifest_path": "/c",
+            "build_metadata_path": "/d",
+            "connector_id": "c:t:1",
+            "version": "1"
+        }"#;
+        let result: Result<PackageOutput, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn package_output_deserialization_missing_output_dir_fails() {
+        let json = r#"{
+            "binary_path": "/b",
+            "manifest_path": "/c",
+            "build_metadata_path": "/d",
+            "binary_sha256": "abc",
+            "connector_id": "c:t:1",
+            "version": "1"
+        }"#;
+        let result: Result<PackageOutput, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn package_output_deserialization_missing_connector_id_fails() {
+        let json = r#"{
+            "output_dir": "/a",
+            "binary_path": "/b",
+            "manifest_path": "/c",
+            "build_metadata_path": "/d",
+            "binary_sha256": "abc",
+            "version": "1"
+        }"#;
+        let result: Result<PackageOutput, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn package_output_deserialization_missing_version_fails() {
+        let json = r#"{
+            "output_dir": "/a",
+            "binary_path": "/b",
+            "manifest_path": "/c",
+            "build_metadata_path": "/d",
+            "binary_sha256": "abc",
+            "connector_id": "c:t:1"
+        }"#;
+        let result: Result<PackageOutput, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    // ── BuildMetadata: deserialization edge cases ─────────────
+
+    #[test]
+    fn build_metadata_deserialization_missing_required_field_fails() {
+        // Missing rust_version
+        let json = r#"{
+            "cargo_version": "1.85.0",
+            "target_triple": "x86_64",
+            "build_timestamp": "now",
+            "profile": "debug",
+            "features": [],
+            "build_env": {},
+            "cargo_flags": []
+        }"#;
+        let result: Result<BuildMetadata, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn build_metadata_deserialization_missing_features_fails() {
+        let json = r#"{
+            "rust_version": "1.85.0",
+            "cargo_version": "1.85.0",
+            "target_triple": "x86_64",
+            "build_timestamp": "now",
+            "profile": "debug",
+            "build_env": {},
+            "cargo_flags": []
+        }"#;
+        let result: Result<BuildMetadata, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn build_metadata_deserialization_wrong_type_for_features_fails() {
+        let json = r#"{
+            "rust_version": "1.85.0",
+            "cargo_version": "1.85.0",
+            "target_triple": "x86_64",
+            "build_timestamp": "now",
+            "profile": "debug",
+            "features": "not-an-array",
+            "build_env": {},
+            "cargo_flags": []
+        }"#;
+        let result: Result<BuildMetadata, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn build_metadata_deserialization_wrong_type_for_build_env_fails() {
+        let json = r#"{
+            "rust_version": "1.85.0",
+            "cargo_version": "1.85.0",
+            "target_triple": "x86_64",
+            "build_timestamp": "now",
+            "profile": "debug",
+            "features": [],
+            "build_env": "not-an-object",
+            "cargo_flags": []
+        }"#;
+        let result: Result<BuildMetadata, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn build_metadata_git_dirty_true_and_false_roundtrip() {
+        for dirty in [true, false] {
+            let meta = BuildMetadata {
+                rust_version: "1.85.0".to_string(),
+                cargo_version: "1.85.0".to_string(),
+                target_triple: "x86_64".to_string(),
+                build_timestamp: "now".to_string(),
+                profile: "release".to_string(),
+                git_commit: None,
+                git_dirty: Some(dirty),
+                features: vec![],
+                build_env: std::collections::HashMap::new(),
+                cargo_flags: vec![],
+            };
+            let json = serde_json::to_string(&meta).unwrap();
+            let back: BuildMetadata = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.git_dirty, Some(dirty));
+        }
+    }
+
+    #[test]
+    fn build_metadata_empty_strings_roundtrip() {
+        let meta = BuildMetadata {
+            rust_version: String::new(),
+            cargo_version: String::new(),
+            target_triple: String::new(),
+            build_timestamp: String::new(),
+            profile: String::new(),
+            git_commit: Some(String::new()),
+            git_dirty: None,
+            features: vec![String::new()],
+            build_env: std::collections::HashMap::new(),
+            cargo_flags: vec![String::new()],
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        let back: BuildMetadata = serde_json::from_str(&json).unwrap();
+        assert!(back.rust_version.is_empty());
+        assert_eq!(back.git_commit, Some(String::new()));
+        assert_eq!(back.features, vec![""]);
+        assert_eq!(back.cargo_flags, vec![""]);
+    }
+
+    // ── SimpleSbom: deserialization failures ──────────────────
+
+    #[test]
+    fn simple_sbom_deserialization_missing_component_fails() {
+        let json = r#"{
+            "format_version": "1.0",
+            "created": "now",
+            "tool": "fwc",
+            "dependencies": []
+        }"#;
+        let result: Result<SimpleSbom, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn simple_sbom_deserialization_missing_dependencies_fails() {
+        let json = r#"{
+            "format_version": "1.0",
+            "created": "now",
+            "tool": "fwc",
+            "component": {
+                "component_type": "application",
+                "name": "test",
+                "version": "1.0.0",
+                "purl": "pkg:fcp/test@1.0.0"
+            }
+        }"#;
+        let result: Result<SimpleSbom, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    // ── SbomComponent: deserialization failures ──────────────
+
+    #[test]
+    fn sbom_component_deserialization_missing_name_fails() {
+        let json = r#"{
+            "component_type": "application",
+            "version": "1.0.0",
+            "purl": "pkg:fcp/test@1.0.0"
+        }"#;
+        let result: Result<SbomComponent, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sbom_component_deserialization_missing_purl_fails() {
+        let json = r#"{
+            "component_type": "application",
+            "name": "test",
+            "version": "1.0.0"
+        }"#;
+        let result: Result<SbomComponent, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    // ── SbomDependency: deserialization failures ─────────────
+
+    #[test]
+    fn sbom_dependency_deserialization_missing_source_fails() {
+        let json = r#"{
+            "name": "serde",
+            "version": "1.0.0",
+            "purl": "pkg:cargo/serde@1.0.0"
+        }"#;
+        let result: Result<SbomDependency, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sbom_dependency_deserialization_missing_name_fails() {
+        let json = r#"{
+            "version": "1.0.0",
+            "purl": "pkg:cargo/serde@1.0.0",
+            "source": "crates.io"
+        }"#;
+        let result: Result<SbomDependency, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    // ── SbomDependency: unicode and special chars ────────────
+
+    #[test]
+    fn sbom_dependency_unicode_name() {
+        let dep = SbomDependency {
+            name: "\u{00e4}\u{00f6}\u{00fc}-lib".to_string(),
+            version: "1.0.0".to_string(),
+            purl: "pkg:cargo/aou-lib@1.0.0".to_string(),
+            source: "crates.io".to_string(),
+        };
+        let json = serde_json::to_string(&dep).unwrap();
+        let back: SbomDependency = serde_json::from_str(&json).unwrap();
+        assert!(back.name.contains('\u{00e4}'));
+    }
+
+    #[test]
+    fn sbom_dependency_source_with_query_params() {
+        let dep = SbomDependency {
+            name: "lib".to_string(),
+            version: "1.0.0".to_string(),
+            purl: "pkg:cargo/lib@1.0.0".to_string(),
+            source: "registry+https://example.com/index?token=abc".to_string(),
+        };
+        let json = serde_json::to_string(&dep).unwrap();
+        let back: SbomDependency = serde_json::from_str(&json).unwrap();
+        assert!(back.source.contains("token=abc"));
+    }
+
+    // ── SbomComponent: unicode fields ────────────────────────
+
+    #[test]
+    fn sbom_component_unicode_name() {
+        let comp = SbomComponent {
+            component_type: "application".to_string(),
+            name: "connector-\u{65e5}\u{672c}\u{8a9e}".to_string(),
+            version: "1.0.0".to_string(),
+            purl: "pkg:fcp/connector-ja@1.0.0".to_string(),
+        };
+        let json = serde_json::to_string(&comp).unwrap();
+        let back: SbomComponent = serde_json::from_str(&json).unwrap();
+        assert!(back.name.contains('\u{65e5}'));
+    }
+
+    #[test]
+    fn sbom_component_long_purl() {
+        let long_name = "x".repeat(500);
+        let comp = SbomComponent {
+            component_type: "application".to_string(),
+            name: long_name.clone(),
+            version: "1.0.0".to_string(),
+            purl: format!("pkg:fcp/{long_name}@1.0.0"),
+        };
+        let json = serde_json::to_string(&comp).unwrap();
+        let back: SbomComponent = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.name.len(), 500);
+        assert!(back.purl.len() > 500);
+    }
+
+    // ── PackageArgs: additional coverage ─────────────────────
+
+    #[test]
+    fn package_args_output_none_vs_some() {
+        let without = PackageArgs {
+            path: PathBuf::from("."),
+            output: None,
+            skip_sbom: false,
+            release: true,
+            cargo_flags: vec![],
+            format: OutputFormat::Human,
+        };
+        let with = PackageArgs {
+            path: PathBuf::from("."),
+            output: Some(PathBuf::from("/custom/output")),
+            skip_sbom: false,
+            release: true,
+            cargo_flags: vec![],
+            format: OutputFormat::Human,
+        };
+        assert!(without.output.is_none());
+        assert_eq!(with.output, Some(PathBuf::from("/custom/output")));
+    }
+
+    #[test]
+    fn package_args_release_false() {
+        let args = PackageArgs {
+            path: PathBuf::from("."),
+            output: None,
+            skip_sbom: false,
+            release: false,
+            cargo_flags: vec![],
+            format: OutputFormat::Human,
+        };
+        assert!(!args.release);
+    }
+
+    #[test]
+    fn package_args_all_boolean_combinations() {
+        for skip in [false, true] {
+            for release in [false, true] {
+                let args = PackageArgs {
+                    path: PathBuf::from("."),
+                    output: None,
+                    skip_sbom: skip,
+                    release,
+                    cargo_flags: vec![],
+                    format: OutputFormat::Human,
+                };
+                assert_eq!(args.skip_sbom, skip);
+                assert_eq!(args.release, release);
+            }
+        }
+    }
+
+    #[test]
+    fn package_args_debug_format_shows_path() {
+        let args = PackageArgs {
+            path: PathBuf::from("/specific/project/path"),
+            output: None,
+            skip_sbom: false,
+            release: true,
+            cargo_flags: vec![],
+            format: OutputFormat::Human,
+        };
+        let dbg = format!("{args:?}");
+        assert!(dbg.contains("/specific/project/path"));
+    }
+
+    // ── OutputFormat: all variants ───────────────────────────
+
+    #[test]
+    fn output_format_both_variants_different_debug() {
+        let h = format!("{:?}", OutputFormat::Human);
+        let j = format!("{:?}", OutputFormat::Json);
+        assert_ne!(h, j);
+    }
+
+    // ── PackageOutput: pretty JSON indentation ───────────────
+
+    #[test]
+    fn package_output_pretty_json_is_multiline() {
+        let output = PackageOutput {
+            output_dir: PathBuf::from("/a"),
+            binary_path: PathBuf::from("/b"),
+            manifest_path: PathBuf::from("/c"),
+            sbom_path: None,
+            build_metadata_path: PathBuf::from("/d"),
+            binary_sha256: "abc".to_string(),
+            connector_id: "c:t:1".to_string(),
+            version: "1".to_string(),
+        };
+        let json = serde_json::to_string_pretty(&output).unwrap();
+        assert!(json.contains('\n'));
+        assert!(json.lines().count() > 1);
+    }
+
+    // ── BuildMetadata: JSON size relationships ───────────────
+
+    #[test]
+    fn build_metadata_json_with_git_larger_than_without() {
+        let without = BuildMetadata {
+            rust_version: "1.85.0".to_string(),
+            cargo_version: "1.85.0".to_string(),
+            target_triple: "x86_64".to_string(),
+            build_timestamp: "now".to_string(),
+            profile: "release".to_string(),
+            git_commit: None,
+            git_dirty: None,
+            features: vec![],
+            build_env: std::collections::HashMap::new(),
+            cargo_flags: vec![],
+        };
+        let with = BuildMetadata {
+            git_commit: Some("a".repeat(40)),
+            git_dirty: Some(true),
+            ..without.clone()
+        };
+        let j_without = serde_json::to_string(&without).unwrap();
+        let j_with = serde_json::to_string(&with).unwrap();
+        assert!(
+            j_with.len() > j_without.len(),
+            "JSON with git fields should be larger"
+        );
+    }
+
+    // ── SimpleSbom: format_version values ────────────────────
+
+    #[test]
+    fn simple_sbom_format_version_is_string_in_json() {
+        let sbom = SimpleSbom {
+            format_version: "2.0".to_string(),
+            created: "now".to_string(),
+            tool: "fwc".to_string(),
+            component: SbomComponent {
+                component_type: "application".to_string(),
+                name: "t".to_string(),
+                version: "1".to_string(),
+                purl: "pkg:fcp/t@1".to_string(),
+            },
+            dependencies: vec![],
+        };
+        let v: serde_json::Value = serde_json::to_value(&sbom).unwrap();
+        assert!(v["format_version"].is_string());
+        assert_eq!(v["format_version"].as_str().unwrap(), "2.0");
+    }
+
+    // ── SimpleSbom: dependencies array structure ─────────────
+
+    #[test]
+    fn simple_sbom_dependencies_are_objects_in_json() {
+        let sbom = SimpleSbom {
+            format_version: "1.0".to_string(),
+            created: "now".to_string(),
+            tool: "fwc".to_string(),
+            component: SbomComponent {
+                component_type: "application".to_string(),
+                name: "t".to_string(),
+                version: "1".to_string(),
+                purl: "pkg:fcp/t@1".to_string(),
+            },
+            dependencies: vec![SbomDependency {
+                name: "dep".to_string(),
+                version: "1.0.0".to_string(),
+                purl: "pkg:cargo/dep@1.0.0".to_string(),
+                source: "crates.io".to_string(),
+            }],
+        };
+        let v: serde_json::Value = serde_json::to_value(&sbom).unwrap();
+        let deps = v["dependencies"].as_array().unwrap();
+        assert_eq!(deps.len(), 1);
+        assert!(deps[0].is_object());
+        assert!(deps[0]["name"].is_string());
+    }
+
+    // ── PackageOutput: empty JSON object fails ───────────────
+
+    #[test]
+    fn package_output_deserialize_empty_object_fails() {
+        let json = "{}";
+        let result: Result<PackageOutput, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    // ── BuildMetadata: empty JSON object fails ───────────────
+
+    #[test]
+    fn build_metadata_deserialize_empty_object_fails() {
+        let json = "{}";
+        let result: Result<BuildMetadata, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    // ── SimpleSbom: empty JSON object fails ──────────────────
+
+    #[test]
+    fn simple_sbom_deserialize_empty_object_fails() {
+        let json = "{}";
+        let result: Result<SimpleSbom, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    // ── SbomComponent: empty JSON object fails ───────────────
+
+    #[test]
+    fn sbom_component_deserialize_empty_object_fails() {
+        let json = "{}";
+        let result: Result<SbomComponent, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    // ── SbomDependency: empty JSON object fails ──────────────
+
+    #[test]
+    fn sbom_dependency_deserialize_empty_object_fails() {
+        let json = "{}";
+        let result: Result<SbomDependency, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    // ── BuildMetadata: clone deep equality ───────────────────
+
+    #[test]
+    fn build_metadata_clone_deep_equality() {
+        let mut env = std::collections::HashMap::new();
+        env.insert("K1".to_string(), "V1".to_string());
+        env.insert("K2".to_string(), "V2".to_string());
+        let meta = BuildMetadata {
+            rust_version: "nightly-2026-03-12".to_string(),
+            cargo_version: "1.85.0-nightly".to_string(),
+            target_triple: "aarch64-apple-darwin".to_string(),
+            build_timestamp: "2026-03-12T12:00:00Z".to_string(),
+            profile: "release".to_string(),
+            git_commit: Some("deadbeefcafe".to_string()),
+            git_dirty: Some(true),
+            features: vec!["a".to_string(), "b".to_string(), "c".to_string()],
+            build_env: env,
+            cargo_flags: vec!["--release".to_string(), "--locked".to_string()],
+        };
+        let cloned = meta.clone();
+        assert_eq!(
+            serde_json::to_string(&meta).unwrap(),
+            serde_json::to_string(&cloned).unwrap()
+        );
+    }
+
+    // ── PackageOutput: clone deep equality ───────────────────
+
+    #[test]
+    fn package_output_clone_deep_json_equality() {
+        let output = PackageOutput {
+            output_dir: PathBuf::from("/deep/clone/test"),
+            binary_path: PathBuf::from("/deep/clone/test/bin"),
+            manifest_path: PathBuf::from("/deep/clone/test/m.toml"),
+            sbom_path: Some(PathBuf::from("/deep/clone/test/sbom.json")),
+            build_metadata_path: PathBuf::from("/deep/clone/test/build.json"),
+            binary_sha256: "0123456789abcdef".to_string(),
+            connector_id: "deep:clone:1.0.0".to_string(),
+            version: "1.0.0".to_string(),
+        };
+        let cloned = output.clone();
+        assert_eq!(
+            serde_json::to_string(&output).unwrap(),
+            serde_json::to_string(&cloned).unwrap()
+        );
+    }
+
+    // ── SimpleSbom: clone deep equality ──────────────────────
+
+    #[test]
+    fn simple_sbom_clone_deep_json_equality() {
+        let sbom = SimpleSbom {
+            format_version: "1.0".to_string(),
+            created: "2026-03-12T00:00:00Z".to_string(),
+            tool: "fwc 1.0.0".to_string(),
+            component: SbomComponent {
+                component_type: "application".to_string(),
+                name: "clone-test".to_string(),
+                version: "1.0.0".to_string(),
+                purl: "pkg:fcp/clone-test@1.0.0".to_string(),
+            },
+            dependencies: vec![
+                SbomDependency {
+                    name: "a".to_string(),
+                    version: "1.0.0".to_string(),
+                    purl: "pkg:cargo/a@1.0.0".to_string(),
+                    source: "crates.io".to_string(),
+                },
+                SbomDependency {
+                    name: "b".to_string(),
+                    version: "2.0.0".to_string(),
+                    purl: "pkg:cargo/b@2.0.0".to_string(),
+                    source: "git+https://github.com/org/b".to_string(),
+                },
+            ],
+        };
+        let cloned = sbom.clone();
+        assert_eq!(
+            serde_json::to_string(&sbom).unwrap(),
+            serde_json::to_string(&cloned).unwrap()
+        );
+    }
+
+    // ── PackageOutput: deserialization from invalid JSON ──────
+
+    #[test]
+    fn package_output_deserialize_from_array_fails() {
+        let json = "[]";
+        let result: Result<PackageOutput, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn package_output_deserialize_from_string_fails() {
+        let json = r#""just a string""#;
+        let result: Result<PackageOutput, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn package_output_deserialize_from_number_fails() {
+        let json = "42";
+        let result: Result<PackageOutput, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    // ── SimpleSbom: deserialization from wrong JSON types ─────
+
+    #[test]
+    fn simple_sbom_deserialize_from_array_fails() {
+        let json = "[]";
+        let result: Result<SimpleSbom, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    // ── SbomDependency: version formats ──────────────────────
+
+    #[test]
+    fn sbom_dependency_prerelease_version() {
+        let dep = SbomDependency {
+            name: "beta-lib".to_string(),
+            version: "0.1.0-alpha.1".to_string(),
+            purl: "pkg:cargo/beta-lib@0.1.0-alpha.1".to_string(),
+            source: "crates.io".to_string(),
+        };
+        let json = serde_json::to_string(&dep).unwrap();
+        let back: SbomDependency = serde_json::from_str(&json).unwrap();
+        assert!(back.version.contains("-alpha"));
+    }
+
+    #[test]
+    fn sbom_dependency_version_with_build_metadata() {
+        let dep = SbomDependency {
+            name: "build-lib".to_string(),
+            version: "1.0.0+build.123".to_string(),
+            purl: "pkg:cargo/build-lib@1.0.0+build.123".to_string(),
+            source: "crates.io".to_string(),
+        };
+        let json = serde_json::to_string(&dep).unwrap();
+        let back: SbomDependency = serde_json::from_str(&json).unwrap();
+        assert!(back.version.contains('+'));
+    }
+
+    // ── SbomComponent: version edge cases ────────────────────
+
+    #[test]
+    fn sbom_component_version_zero() {
+        let comp = SbomComponent {
+            component_type: "application".to_string(),
+            name: "zero-ver".to_string(),
+            version: "0.0.0".to_string(),
+            purl: "pkg:fcp/zero-ver@0.0.0".to_string(),
+        };
+        let json = serde_json::to_string(&comp).unwrap();
+        let back: SbomComponent = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.version, "0.0.0");
+    }
+
+    #[test]
+    fn sbom_component_very_high_version() {
+        let comp = SbomComponent {
+            component_type: "application".to_string(),
+            name: "high-ver".to_string(),
+            version: "999.999.999".to_string(),
+            purl: "pkg:fcp/high-ver@999.999.999".to_string(),
+        };
+        let json = serde_json::to_string(&comp).unwrap();
+        let back: SbomComponent = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.version, "999.999.999");
+    }
 }

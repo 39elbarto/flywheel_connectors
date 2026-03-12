@@ -1470,4 +1470,1001 @@ mod tests {
         assert!(!json.contains("ghp_abc123xyz789"));
         assert!(json.contains("****"));
     }
+
+    // ── Additional AuthType tests ───────────────────────────────────────
+
+    #[test]
+    fn auth_type_from_str_label_api_token_alias() {
+        assert_eq!(AuthType::from_str_label("token"), Some(AuthType::ApiToken));
+        assert_eq!(
+            AuthType::from_str_label("api-token"),
+            Some(AuthType::ApiToken)
+        );
+    }
+
+    #[test]
+    fn auth_type_from_str_label_basic_auth_aliases() {
+        assert_eq!(
+            AuthType::from_str_label("basic_auth"),
+            Some(AuthType::BasicAuth)
+        );
+        assert_eq!(
+            AuthType::from_str_label("basic-auth"),
+            Some(AuthType::BasicAuth)
+        );
+    }
+
+    #[test]
+    fn auth_type_from_str_label_session_aliases() {
+        assert_eq!(
+            AuthType::from_str_label("session_token"),
+            Some(AuthType::SessionToken)
+        );
+        assert_eq!(
+            AuthType::from_str_label("session-token"),
+            Some(AuthType::SessionToken)
+        );
+    }
+
+    #[test]
+    fn auth_type_from_str_label_credential_ref_aliases() {
+        assert_eq!(
+            AuthType::from_str_label("credential_ref"),
+            Some(AuthType::CredentialRef)
+        );
+        assert_eq!(
+            AuthType::from_str_label("credential-ref"),
+            Some(AuthType::CredentialRef)
+        );
+        assert_eq!(AuthType::from_str_label("ref"), Some(AuthType::CredentialRef));
+    }
+
+    #[test]
+    fn auth_type_from_str_label_no_auth_aliases() {
+        assert_eq!(AuthType::from_str_label("no_auth"), Some(AuthType::NoAuth));
+        assert_eq!(AuthType::from_str_label("no-auth"), Some(AuthType::NoAuth));
+    }
+
+    #[test]
+    fn auth_type_from_str_label_empty_string() {
+        assert_eq!(AuthType::from_str_label(""), None);
+    }
+
+    #[test]
+    fn auth_type_from_str_label_case_sensitive() {
+        assert_eq!(AuthType::from_str_label("OAuth"), None);
+        assert_eq!(AuthType::from_str_label("BEARER"), None);
+        assert_eq!(AuthType::from_str_label("Basic"), None);
+    }
+
+    #[test]
+    fn auth_type_copy_semantics() {
+        let t = AuthType::ApiToken;
+        let t2 = t;
+        assert_eq!(t, t2);
+    }
+
+    #[test]
+    fn auth_type_clone_semantics() {
+        let t = AuthType::OAuth;
+        let t2 = t.clone();
+        assert_eq!(t, t2);
+    }
+
+    #[test]
+    fn auth_type_debug_format() {
+        let debug = format!("{:?}", AuthType::ApiToken);
+        assert!(debug.contains("ApiToken"));
+    }
+
+    #[test]
+    fn auth_type_display_all_variants() {
+        assert_eq!(format!("{}", AuthType::BasicAuth), "basic_auth");
+        assert_eq!(format!("{}", AuthType::SessionToken), "session_token");
+        assert_eq!(format!("{}", AuthType::CredentialRef), "credential_ref");
+        assert_eq!(format!("{}", AuthType::NoAuth), "no_auth");
+    }
+
+    #[test]
+    fn auth_type_serde_rename_all_snake_case() {
+        let json = serde_json::to_string(&AuthType::ApiToken).unwrap();
+        assert_eq!(json, "\"api_token\"");
+        let json = serde_json::to_string(&AuthType::BasicAuth).unwrap();
+        assert_eq!(json, "\"basic_auth\"");
+        let json = serde_json::to_string(&AuthType::SessionToken).unwrap();
+        assert_eq!(json, "\"session_token\"");
+        let json = serde_json::to_string(&AuthType::CredentialRef).unwrap();
+        assert_eq!(json, "\"credential_ref\"");
+        let json = serde_json::to_string(&AuthType::NoAuth).unwrap();
+        assert_eq!(json, "\"no_auth\"");
+    }
+
+    #[test]
+    fn auth_type_serde_deserialize_invalid() {
+        let result = serde_json::from_str::<AuthType>("\"invalid_type\"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn auth_type_eq_different_variants() {
+        assert_ne!(AuthType::ApiToken, AuthType::OAuth);
+        assert_ne!(AuthType::BasicAuth, AuthType::SessionToken);
+        assert_ne!(AuthType::NoAuth, AuthType::CredentialRef);
+    }
+
+    // ── Additional mask_secret tests ────────────────────────────────────
+
+    #[test]
+    fn mask_secret_exactly_one_char() {
+        assert_eq!(mask_secret("x"), "****");
+    }
+
+    #[test]
+    fn mask_secret_exactly_three_chars() {
+        assert_eq!(mask_secret("abc"), "****");
+    }
+
+    #[test]
+    fn mask_secret_exactly_four_chars() {
+        assert_eq!(mask_secret("abcd"), "****");
+    }
+
+    #[test]
+    fn mask_secret_six_chars() {
+        assert_eq!(mask_secret("123456"), "****3456");
+    }
+
+    #[test]
+    fn mask_secret_long_value() {
+        let long = "a".repeat(1000);
+        let masked = mask_secret(&long);
+        assert_eq!(masked, "****aaaa");
+    }
+
+    #[test]
+    fn mask_secret_unicode_multibyte() {
+        // 5 multi-byte chars, should show last 4.
+        let val = "\u{1F600}\u{1F601}\u{1F602}\u{1F603}\u{1F604}";
+        let masked = mask_secret(val);
+        assert!(masked.starts_with("****"));
+        assert!(masked.contains('\u{1F604}'));
+    }
+
+    #[test]
+    fn mask_secret_unicode_exactly_five() {
+        let masked = mask_secret("\u{00E9}\u{00E9}\u{00E9}\u{00E9}\u{00E9}");
+        assert!(masked.starts_with("****"));
+    }
+
+    #[test]
+    fn mask_secret_whitespace_only() {
+        assert_eq!(mask_secret("     "), "****    ");
+    }
+
+    #[test]
+    fn mask_secret_newlines() {
+        let masked = mask_secret("abc\ndef\nghi");
+        assert!(masked.starts_with("****"));
+    }
+
+    // ── Additional CredentialEntry tests ────────────────────────────────
+
+    #[test]
+    fn credential_entry_clone() {
+        let entry = CredentialEntry::new("github", AuthType::ApiToken, sample_fields());
+        let cloned = entry.clone();
+        assert_eq!(entry.connector_id, cloned.connector_id);
+        assert_eq!(entry.auth_type, cloned.auth_type);
+        assert_eq!(entry.fields, cloned.fields);
+        assert_eq!(entry.created_at, cloned.created_at);
+    }
+
+    #[test]
+    fn credential_entry_debug_format() {
+        let entry = CredentialEntry::new("github", AuthType::ApiToken, sample_fields());
+        let debug = format!("{:?}", entry);
+        assert!(debug.contains("github"));
+        assert!(debug.contains("ApiToken"));
+    }
+
+    #[test]
+    fn credential_entry_new_with_string_owned() {
+        let name = String::from("my-connector");
+        let entry = CredentialEntry::new(name, AuthType::NoAuth, BTreeMap::new());
+        assert_eq!(entry.connector_id, "my-connector");
+    }
+
+    #[test]
+    fn credential_entry_multiple_fields() {
+        let mut fields = BTreeMap::new();
+        fields.insert("key1".to_owned(), "val1".to_owned());
+        fields.insert("key2".to_owned(), "val2".to_owned());
+        fields.insert("key3".to_owned(), "val3".to_owned());
+        let entry = CredentialEntry::new("multi", AuthType::ApiToken, fields);
+        assert_eq!(entry.fields.len(), 3);
+        let redacted = entry.redacted();
+        assert_eq!(redacted.fields.len(), 3);
+    }
+
+    #[test]
+    fn credential_entry_mark_verified_updates_timestamp() {
+        let mut entry = CredentialEntry::new("github", AuthType::ApiToken, sample_fields());
+        assert!(entry.last_verified.is_none());
+        entry.mark_verified();
+        let first_verified = entry.last_verified.clone().unwrap();
+        assert!(!first_verified.is_empty());
+        entry.mark_verified();
+        // Should have a valid timestamp each time.
+        assert!(entry.last_verified.is_some());
+    }
+
+    #[test]
+    fn credential_entry_touch_does_not_change_fields() {
+        let mut entry = CredentialEntry::new("github", AuthType::ApiToken, sample_fields());
+        let original_fields = entry.fields.clone();
+        entry.touch();
+        assert_eq!(entry.fields, original_fields);
+    }
+
+    #[test]
+    fn credential_entry_serde_with_last_verified() {
+        let mut entry = CredentialEntry::new("github", AuthType::ApiToken, sample_fields());
+        entry.mark_verified();
+        let json = serde_json::to_string(&entry).unwrap();
+        let deserialized: CredentialEntry = serde_json::from_str(&json).unwrap();
+        assert!(deserialized.last_verified.is_some());
+        assert_eq!(deserialized.last_verified, entry.last_verified);
+    }
+
+    #[test]
+    fn credential_entry_serde_preserves_all_fields() {
+        let mut fields = BTreeMap::new();
+        fields.insert("a".to_owned(), "1".to_owned());
+        fields.insert("b".to_owned(), "2".to_owned());
+        let entry = CredentialEntry::new("test", AuthType::BasicAuth, fields.clone());
+        let json = serde_json::to_string(&entry).unwrap();
+        let deserialized: CredentialEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.fields, fields);
+        assert_eq!(deserialized.auth_type, AuthType::BasicAuth);
+    }
+
+    #[test]
+    fn credential_entry_redacted_preserves_metadata() {
+        let mut entry = CredentialEntry::new("slack", AuthType::ApiToken, sample_fields());
+        entry.mark_verified();
+        let redacted = entry.redacted();
+        assert_eq!(redacted.connector_id, "slack");
+        assert_eq!(redacted.auth_type, AuthType::ApiToken);
+        assert_eq!(redacted.created_at, entry.created_at);
+        assert_eq!(redacted.updated_at, entry.updated_at);
+        assert_eq!(redacted.last_verified, entry.last_verified);
+    }
+
+    // ── Additional RedactedCredential tests ─────────────────────────────
+
+    #[test]
+    fn redacted_credential_display_empty_fields() {
+        let entry = CredentialEntry::new("public", AuthType::NoAuth, BTreeMap::new());
+        let redacted = entry.redacted();
+        let display = format!("{redacted}");
+        assert!(display.contains("public"));
+        assert!(display.contains("no_auth"));
+        assert!(display.contains("fields=[]"));
+    }
+
+    #[test]
+    fn redacted_credential_display_multiple_fields() {
+        let mut fields = BTreeMap::new();
+        fields.insert("key1".to_owned(), "secret1_long_value".to_owned());
+        fields.insert("key2".to_owned(), "secret2_long_value".to_owned());
+        let entry = CredentialEntry::new("multi", AuthType::ApiToken, fields);
+        let redacted = entry.redacted();
+        let display = format!("{redacted}");
+        assert!(display.contains("key1="));
+        assert!(display.contains("key2="));
+        assert!(display.contains(", "));
+    }
+
+    #[test]
+    fn redacted_credential_clone() {
+        let entry = CredentialEntry::new("github", AuthType::ApiToken, sample_fields());
+        let redacted = entry.redacted();
+        let cloned = redacted.clone();
+        assert_eq!(redacted.connector_id, cloned.connector_id);
+        assert_eq!(redacted.auth_type, cloned.auth_type);
+        assert_eq!(redacted.fields, cloned.fields);
+    }
+
+    #[test]
+    fn redacted_credential_debug_format() {
+        let entry = CredentialEntry::new("github", AuthType::ApiToken, sample_fields());
+        let redacted = entry.redacted();
+        let debug = format!("{:?}", redacted);
+        assert!(debug.contains("github"));
+        assert!(debug.contains("ApiToken"));
+    }
+
+    #[test]
+    fn redacted_credential_serde_no_raw_secrets() {
+        let mut fields = BTreeMap::new();
+        fields.insert("password".to_owned(), "super_secret_password_123".to_owned());
+        fields.insert("username".to_owned(), "admin_user_name".to_owned());
+        let entry = CredentialEntry::new("db", AuthType::BasicAuth, fields);
+        let redacted = entry.redacted();
+        let json = serde_json::to_string(&redacted).unwrap();
+        assert!(!json.contains("super_secret_password_123"));
+        assert!(!json.contains("admin_user_name"));
+        assert!(json.contains("****"));
+    }
+
+    // ── Additional store lifecycle tests ────────────────────────────────
+
+    #[test]
+    fn store_update_touches_timestamp() {
+        let store = mem_store();
+        store
+            .add("github", AuthType::ApiToken, sample_fields())
+            .unwrap();
+        let original = store.get("github").unwrap().unwrap();
+        let original_updated = original.updated_at.clone();
+        let mut update = BTreeMap::new();
+        update.insert("scope".to_owned(), "repo".to_owned());
+        store.update("github", update).unwrap();
+        let updated = store.get("github").unwrap().unwrap();
+        // created_at should not change.
+        assert_eq!(updated.created_at, original.created_at);
+        // updated_at should be set (may or may not differ if within same second).
+        assert!(!updated.updated_at.is_empty());
+        let _ = original_updated; // used above for reference
+    }
+
+    #[test]
+    fn store_update_preserves_auth_type() {
+        let store = mem_store();
+        store
+            .add("jira", AuthType::BasicAuth, {
+                let mut f = BTreeMap::new();
+                f.insert("username".to_owned(), "user".to_owned());
+                f.insert("password".to_owned(), "pass".to_owned());
+                f
+            })
+            .unwrap();
+        let mut update = BTreeMap::new();
+        update.insert("password".to_owned(), "new_pass".to_owned());
+        store.update("jira", update).unwrap();
+        let entry = store.get("jira").unwrap().unwrap();
+        assert_eq!(entry.auth_type, AuthType::BasicAuth);
+        assert_eq!(entry.fields.get("username").unwrap(), "user");
+        assert_eq!(entry.fields.get("password").unwrap(), "new_pass");
+    }
+
+    #[test]
+    fn store_get_secret_after_update() {
+        let store = mem_store();
+        store
+            .add("github", AuthType::ApiToken, sample_fields())
+            .unwrap();
+        let mut update = BTreeMap::new();
+        update.insert("token".to_owned(), "updated_token_value".to_owned());
+        store.update("github", update).unwrap();
+        let secret = store.get_secret("github", "token").unwrap().unwrap();
+        assert_eq!(secret, "updated_token_value");
+    }
+
+    #[test]
+    fn store_list_sorted_order() {
+        let store = mem_store();
+        store
+            .add("zebra", AuthType::NoAuth, BTreeMap::new())
+            .unwrap();
+        store
+            .add("alpha", AuthType::NoAuth, BTreeMap::new())
+            .unwrap();
+        store
+            .add("middle", AuthType::NoAuth, BTreeMap::new())
+            .unwrap();
+        let list = store.list().unwrap();
+        let ids: Vec<&str> = list.iter().map(|r| r.connector_id.as_str()).collect();
+        assert_eq!(ids, vec!["alpha", "middle", "zebra"]);
+    }
+
+    #[test]
+    fn store_add_different_auth_types() {
+        let store = mem_store();
+        store
+            .add("a", AuthType::ApiToken, sample_fields())
+            .unwrap();
+        store
+            .add("b", AuthType::OAuth, {
+                let mut f = BTreeMap::new();
+                f.insert("access_token".to_owned(), "tok".to_owned());
+                f
+            })
+            .unwrap();
+        store
+            .add("c", AuthType::NoAuth, BTreeMap::new())
+            .unwrap();
+        let list = store.list().unwrap();
+        assert_eq!(list.len(), 3);
+        assert_eq!(list[0].auth_type, AuthType::ApiToken);
+        assert_eq!(list[1].auth_type, AuthType::OAuth);
+        assert_eq!(list[2].auth_type, AuthType::NoAuth);
+    }
+
+    #[test]
+    fn store_add_then_remove_then_add() {
+        let store = mem_store();
+        store
+            .add("github", AuthType::ApiToken, sample_fields())
+            .unwrap();
+        store.remove("github").unwrap();
+        let mut new_fields = BTreeMap::new();
+        new_fields.insert("token".to_owned(), "brand_new_token".to_owned());
+        store.add("github", AuthType::ApiToken, new_fields).unwrap();
+        let entry = store.get("github").unwrap().unwrap();
+        assert_eq!(entry.fields.get("token").unwrap(), "brand_new_token");
+    }
+
+    #[test]
+    fn store_list_after_remove() {
+        let store = mem_store();
+        store
+            .add("a", AuthType::NoAuth, BTreeMap::new())
+            .unwrap();
+        store
+            .add("b", AuthType::NoAuth, BTreeMap::new())
+            .unwrap();
+        store
+            .add("c", AuthType::NoAuth, BTreeMap::new())
+            .unwrap();
+        store.remove("b").unwrap();
+        let list = store.list().unwrap();
+        let ids: Vec<&str> = list.iter().map(|r| r.connector_id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "c"]);
+    }
+
+    #[test]
+    fn store_get_secret_multiple_fields() {
+        let store = mem_store();
+        let mut fields = BTreeMap::new();
+        fields.insert("username".to_owned(), "admin".to_owned());
+        fields.insert("password".to_owned(), "s3cret".to_owned());
+        store.add("db", AuthType::BasicAuth, fields).unwrap();
+        assert_eq!(
+            store.get_secret("db", "username").unwrap().unwrap(),
+            "admin"
+        );
+        assert_eq!(
+            store.get_secret("db", "password").unwrap().unwrap(),
+            "s3cret"
+        );
+    }
+
+    #[test]
+    fn store_overwrite_changes_auth_type() {
+        let store = mem_store();
+        store
+            .add("conn", AuthType::ApiToken, sample_fields())
+            .unwrap();
+        let mut oauth_fields = BTreeMap::new();
+        oauth_fields.insert("access_token".to_owned(), "tok".to_owned());
+        store.add("conn", AuthType::OAuth, oauth_fields).unwrap();
+        let entry = store.get("conn").unwrap().unwrap();
+        assert_eq!(entry.auth_type, AuthType::OAuth);
+        // Old fields should be gone since it was an overwrite.
+        assert!(entry.fields.get("token").is_none());
+    }
+
+    // ── Additional file backend tests ───────────────────────────────────
+
+    #[test]
+    fn file_backend_base_dir_accessor() {
+        let dir = PathBuf::from("/tmp/test-cred-dir");
+        let backend = FileBackend::new(&dir);
+        assert_eq!(backend.base_dir(), dir.as_path());
+    }
+
+    #[test]
+    fn file_backend_remove_nonexistent() {
+        let (store, dir) = file_store();
+        assert!(!store.remove("nonexistent").unwrap());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_backend_double_remove() {
+        let (store, dir) = file_store();
+        store
+            .add("github", AuthType::ApiToken, sample_fields())
+            .unwrap();
+        assert!(store.remove("github").unwrap());
+        assert!(!store.remove("github").unwrap());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_backend_get_secret() {
+        let (store, dir) = file_store();
+        store
+            .add("github", AuthType::ApiToken, sample_fields())
+            .unwrap();
+        let secret = store.get_secret("github", "token").unwrap().unwrap();
+        assert_eq!(secret, "ghp_abc123xyz789");
+        assert!(store.get_secret("github", "nope").unwrap().is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_backend_multiple_auth_types() {
+        let (store, dir) = file_store();
+        store
+            .add("a", AuthType::ApiToken, sample_fields())
+            .unwrap();
+        let mut basic = BTreeMap::new();
+        basic.insert("username".to_owned(), "u".to_owned());
+        basic.insert("password".to_owned(), "p".to_owned());
+        store.add("b", AuthType::BasicAuth, basic).unwrap();
+        store
+            .add("c", AuthType::NoAuth, BTreeMap::new())
+            .unwrap();
+        let list = store.list().unwrap();
+        assert_eq!(list.len(), 3);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_backend_dir_permissions() {
+        let (store, dir) = file_store();
+        store
+            .add("github", AuthType::ApiToken, sample_fields())
+            .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let meta = fs::metadata(&dir).unwrap();
+            let mode = meta.permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "credential dir should be 0700");
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_backend_empty_value_field() {
+        let (store, dir) = file_store();
+        let mut fields = BTreeMap::new();
+        fields.insert("token".to_owned(), String::new());
+        store.add("empty", AuthType::ApiToken, fields).unwrap();
+        let entry = store.get("empty").unwrap().unwrap();
+        assert_eq!(entry.fields.get("token").unwrap(), "");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_backend_unicode_value() {
+        let (store, dir) = file_store();
+        let mut fields = BTreeMap::new();
+        fields.insert("token".to_owned(), "tok_\u{00E9}\u{00E8}\u{00EA}".to_owned());
+        store.add("unicode", AuthType::ApiToken, fields).unwrap();
+        let entry = store.get("unicode").unwrap().unwrap();
+        assert_eq!(
+            entry.fields.get("token").unwrap(),
+            "tok_\u{00E9}\u{00E8}\u{00EA}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ── Additional base64 encode/decode tests ───────────────────────────
+
+    #[test]
+    fn base64_encode_decode_empty_value() {
+        let mut fields = BTreeMap::new();
+        fields.insert("key".to_owned(), String::new());
+        let encoded = FileBackend::encode_fields(&fields);
+        let decoded = FileBackend::decode_fields(&encoded).unwrap();
+        assert_eq!(fields, decoded);
+    }
+
+    #[test]
+    fn base64_encode_decode_unicode_value() {
+        let mut fields = BTreeMap::new();
+        fields.insert("key".to_owned(), "\u{1F600}\u{1F601}\u{1F602}".to_owned());
+        let encoded = FileBackend::encode_fields(&fields);
+        let decoded = FileBackend::decode_fields(&encoded).unwrap();
+        assert_eq!(fields, decoded);
+    }
+
+    #[test]
+    fn base64_encode_decode_many_fields() {
+        let mut fields = BTreeMap::new();
+        for i in 0..20 {
+            fields.insert(format!("key_{i}"), format!("value_{i}"));
+        }
+        let encoded = FileBackend::encode_fields(&fields);
+        let decoded = FileBackend::decode_fields(&encoded).unwrap();
+        assert_eq!(fields, decoded);
+    }
+
+    #[test]
+    fn base64_decode_invalid_base64() {
+        let mut fields = BTreeMap::new();
+        fields.insert("key".to_owned(), "not!valid@base64###".to_owned());
+        let result = FileBackend::decode_fields(&fields);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn base64_encode_produces_valid_base64() {
+        let mut fields = BTreeMap::new();
+        fields.insert("token".to_owned(), "my_secret".to_owned());
+        let encoded = FileBackend::encode_fields(&fields);
+        let encoded_val = encoded.get("token").unwrap();
+        // Valid base64 should be decodable.
+        let decoded_bytes = BASE64.decode(encoded_val.as_bytes()).unwrap();
+        assert_eq!(String::from_utf8(decoded_bytes).unwrap(), "my_secret");
+    }
+
+    // ── Additional verification tests ───────────────────────────────────
+
+    #[test]
+    fn verify_session_token_missing() {
+        let entry = CredentialEntry::new("metabase", AuthType::SessionToken, BTreeMap::new());
+        let result = verify_credential(&entry);
+        assert_eq!(result.status, AuthStatus::Invalid);
+        assert!(result.message.contains("session_token"));
+    }
+
+    #[test]
+    fn verify_session_token_empty() {
+        let mut fields = BTreeMap::new();
+        fields.insert("session_token".to_owned(), "  ".to_owned());
+        let entry = CredentialEntry::new("metabase", AuthType::SessionToken, fields);
+        let result = verify_credential(&entry);
+        assert_eq!(result.status, AuthStatus::Invalid);
+    }
+
+    #[test]
+    fn verify_oauth_missing_access_token() {
+        let mut fields = BTreeMap::new();
+        fields.insert("refresh_token".to_owned(), "refresh".to_owned());
+        let entry = CredentialEntry::new("google", AuthType::OAuth, fields);
+        let result = verify_credential(&entry);
+        assert_eq!(result.status, AuthStatus::Invalid);
+        assert!(result.message.contains("access_token"));
+    }
+
+    #[test]
+    fn verify_credential_ref_empty_ref() {
+        let mut fields = BTreeMap::new();
+        fields.insert("ref".to_owned(), "  ".to_owned());
+        let entry = CredentialEntry::new("vault", AuthType::CredentialRef, fields);
+        let result = verify_credential(&entry);
+        assert_eq!(result.status, AuthStatus::Invalid);
+    }
+
+    #[test]
+    fn verify_no_auth_ignores_extra_fields() {
+        let mut fields = BTreeMap::new();
+        fields.insert("bonus".to_owned(), "field".to_owned());
+        let entry = CredentialEntry::new("public", AuthType::NoAuth, fields);
+        let result = verify_credential(&entry);
+        assert_eq!(result.status, AuthStatus::Valid);
+    }
+
+    #[test]
+    fn verify_api_token_with_extra_fields_valid() {
+        let mut fields = sample_fields();
+        fields.insert("org".to_owned(), "my-org".to_owned());
+        let entry = CredentialEntry::new("github", AuthType::ApiToken, fields);
+        let result = verify_credential(&entry);
+        assert_eq!(result.status, AuthStatus::Valid);
+    }
+
+    #[test]
+    fn verify_oauth_expiry_far_future() {
+        let far_future =
+            (Utc::now() + chrono::Duration::days(365)).to_rfc3339_opts(SecondsFormat::Secs, true);
+        let entry = CredentialEntry::new("google", AuthType::OAuth, oauth_fields(&far_future));
+        let result = verify_credential(&entry);
+        assert_eq!(result.status, AuthStatus::Valid);
+        let expiry = result.expiry_info.unwrap();
+        assert!(expiry.days_remaining >= 364);
+    }
+
+    #[test]
+    fn verify_oauth_expired_long_ago() {
+        let old_past =
+            (Utc::now() - chrono::Duration::days(365)).to_rfc3339_opts(SecondsFormat::Secs, true);
+        let entry = CredentialEntry::new("google", AuthType::OAuth, oauth_fields(&old_past));
+        let result = verify_credential(&entry);
+        assert_eq!(result.status, AuthStatus::Expired);
+        let expiry = result.expiry_info.unwrap();
+        assert!(expiry.days_remaining <= -364);
+    }
+
+    #[test]
+    fn verify_result_connector_id_matches() {
+        let entry = CredentialEntry::new("my-service", AuthType::ApiToken, sample_fields());
+        let result = verify_credential(&entry);
+        assert_eq!(result.connector_id, "my-service");
+    }
+
+    #[test]
+    fn verify_from_store_expired_oauth() {
+        let store = mem_store();
+        let past =
+            (Utc::now() - chrono::Duration::days(5)).to_rfc3339_opts(SecondsFormat::Secs, true);
+        store
+            .add("google", AuthType::OAuth, oauth_fields(&past))
+            .unwrap();
+        let result = verify_from_store(&store, "google");
+        assert_eq!(result.status, AuthStatus::Expired);
+    }
+
+    #[test]
+    fn verify_from_store_invalid_missing_fields() {
+        let store = mem_store();
+        store
+            .add("jira", AuthType::BasicAuth, BTreeMap::new())
+            .unwrap();
+        let result = verify_from_store(&store, "jira");
+        assert_eq!(result.status, AuthStatus::Invalid);
+    }
+
+    // ── AuthStatus tests ────────────────────────────────────────────────
+
+    #[test]
+    fn auth_status_clone() {
+        let s = AuthStatus::Valid;
+        let s2 = s.clone();
+        assert_eq!(s, s2);
+    }
+
+    #[test]
+    fn auth_status_copy() {
+        let s = AuthStatus::Expired;
+        let s2 = s;
+        assert_eq!(s, s2);
+    }
+
+    #[test]
+    fn auth_status_debug() {
+        let debug = format!("{:?}", AuthStatus::NoCredential);
+        assert!(debug.contains("NoCredential"));
+    }
+
+    #[test]
+    fn auth_status_eq_different() {
+        assert_ne!(AuthStatus::Valid, AuthStatus::Invalid);
+        assert_ne!(AuthStatus::Expired, AuthStatus::Error);
+        assert_ne!(AuthStatus::NoCredential, AuthStatus::Valid);
+    }
+
+    #[test]
+    fn auth_status_serde_all_variants() {
+        let variants = [
+            AuthStatus::Valid,
+            AuthStatus::Expired,
+            AuthStatus::Invalid,
+            AuthStatus::NoCredential,
+            AuthStatus::Error,
+        ];
+        for v in variants {
+            let json = serde_json::to_string(&v).unwrap();
+            assert!(json.starts_with('"'));
+            assert!(json.ends_with('"'));
+        }
+    }
+
+    #[test]
+    fn auth_status_serde_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&AuthStatus::NoCredential).unwrap(),
+            "\"no_credential\""
+        );
+    }
+
+    // ── ExpiryInfo tests ────────────────────────────────────────────────
+
+    #[test]
+    fn expiry_info_clone() {
+        let info = ExpiryInfo {
+            expires_at: "2026-04-01T00:00:00Z".to_owned(),
+            days_remaining: 30,
+        };
+        let cloned = info.clone();
+        assert_eq!(cloned.expires_at, info.expires_at);
+        assert_eq!(cloned.days_remaining, info.days_remaining);
+    }
+
+    #[test]
+    fn expiry_info_debug() {
+        let info = ExpiryInfo {
+            expires_at: "2026-04-01T00:00:00Z".to_owned(),
+            days_remaining: 10,
+        };
+        let debug = format!("{:?}", info);
+        assert!(debug.contains("2026-04-01"));
+        assert!(debug.contains("10"));
+    }
+
+    #[test]
+    fn expiry_info_negative_days() {
+        let info = ExpiryInfo {
+            expires_at: "2025-01-01T00:00:00Z".to_owned(),
+            days_remaining: -400,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains("-400"));
+    }
+
+    #[test]
+    fn expiry_info_zero_days() {
+        let info = ExpiryInfo {
+            expires_at: "2026-03-12T00:00:00Z".to_owned(),
+            days_remaining: 0,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains(":0"));
+    }
+
+    // ── AuthTestResult tests ────────────────────────────────────────────
+
+    #[test]
+    fn auth_test_result_clone() {
+        let result = AuthTestResult {
+            connector_id: "github".to_owned(),
+            status: AuthStatus::Valid,
+            message: "ok".to_owned(),
+            expiry_info: None,
+        };
+        let cloned = result.clone();
+        assert_eq!(cloned.connector_id, "github");
+        assert_eq!(cloned.status, AuthStatus::Valid);
+    }
+
+    #[test]
+    fn auth_test_result_debug() {
+        let result = AuthTestResult {
+            connector_id: "github".to_owned(),
+            status: AuthStatus::Error,
+            message: "something went wrong".to_owned(),
+            expiry_info: None,
+        };
+        let debug = format!("{:?}", result);
+        assert!(debug.contains("github"));
+        assert!(debug.contains("Error"));
+    }
+
+    #[test]
+    fn auth_test_result_serde_with_expiry() {
+        let result = AuthTestResult {
+            connector_id: "google".to_owned(),
+            status: AuthStatus::Valid,
+            message: "ok".to_owned(),
+            expiry_info: Some(ExpiryInfo {
+                expires_at: "2026-12-31T00:00:00Z".to_owned(),
+                days_remaining: 100,
+            }),
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("2026-12-31"));
+        assert!(json.contains("100"));
+        assert!(json.contains("\"valid\""));
+    }
+
+    #[test]
+    fn auth_test_result_serde_no_expiry() {
+        let result = AuthTestResult {
+            connector_id: "test".to_owned(),
+            status: AuthStatus::NoCredential,
+            message: "missing".to_owned(),
+            expiry_info: None,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("null"));
+        assert!(json.contains("\"no_credential\""));
+    }
+
+    // ── Required fields tests ───────────────────────────────────────────
+
+    #[test]
+    fn required_fields_session_token() {
+        assert_eq!(
+            required_fields(AuthType::SessionToken),
+            &["session_token"]
+        );
+    }
+
+    #[test]
+    fn required_fields_credential_ref() {
+        assert_eq!(required_fields(AuthType::CredentialRef), &["ref"]);
+    }
+
+    // ── MemoryBackend direct tests ──────────────────────────────────────
+
+    #[test]
+    fn memory_backend_default() {
+        let backend = MemoryBackend::default();
+        assert!(backend.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn memory_backend_store_and_retrieve() {
+        let backend = MemoryBackend::new();
+        let entry = CredentialEntry::new("test", AuthType::NoAuth, BTreeMap::new());
+        backend.store(&entry).unwrap();
+        let retrieved = backend.get("test").unwrap().unwrap();
+        assert_eq!(retrieved.connector_id, "test");
+    }
+
+    #[test]
+    fn memory_backend_remove_returns_correct_bool() {
+        let backend = MemoryBackend::new();
+        assert!(!backend.remove("nonexistent").unwrap());
+        let entry = CredentialEntry::new("x", AuthType::NoAuth, BTreeMap::new());
+        backend.store(&entry).unwrap();
+        assert!(backend.remove("x").unwrap());
+        assert!(!backend.remove("x").unwrap());
+    }
+
+    #[test]
+    fn memory_backend_list_sorted() {
+        let backend = MemoryBackend::new();
+        let e1 = CredentialEntry::new("z", AuthType::NoAuth, BTreeMap::new());
+        let e2 = CredentialEntry::new("a", AuthType::NoAuth, BTreeMap::new());
+        backend.store(&e1).unwrap();
+        backend.store(&e2).unwrap();
+        let list = backend.list().unwrap();
+        assert_eq!(list, vec!["a", "z"]);
+    }
+
+    #[test]
+    fn memory_backend_overwrite() {
+        let backend = MemoryBackend::new();
+        let e1 = CredentialEntry::new("x", AuthType::ApiToken, sample_fields());
+        backend.store(&e1).unwrap();
+        let mut new_fields = BTreeMap::new();
+        new_fields.insert("token".to_owned(), "new_value".to_owned());
+        let e2 = CredentialEntry::new("x", AuthType::ApiToken, new_fields);
+        backend.store(&e2).unwrap();
+        let retrieved = backend.get("x").unwrap().unwrap();
+        assert_eq!(retrieved.fields.get("token").unwrap(), "new_value");
+    }
+
+    // ── Verify message content tests ────────────────────────────────────
+
+    #[test]
+    fn verify_valid_message_contains_auth_type() {
+        let entry = CredentialEntry::new("github", AuthType::ApiToken, sample_fields());
+        let result = verify_credential(&entry);
+        assert!(result.message.contains("api_token"));
+    }
+
+    #[test]
+    fn verify_expired_message_contains_days() {
+        let past =
+            (Utc::now() - chrono::Duration::days(7)).to_rfc3339_opts(SecondsFormat::Secs, true);
+        let entry = CredentialEntry::new("google", AuthType::OAuth, oauth_fields(&past));
+        let result = verify_credential(&entry);
+        assert!(result.message.contains("7"));
+        assert!(result.message.contains("expired"));
+    }
+
+    #[test]
+    fn verify_valid_oauth_message_contains_days_remaining() {
+        let future =
+            (Utc::now() + chrono::Duration::days(15)).to_rfc3339_opts(SecondsFormat::Secs, true);
+        let entry = CredentialEntry::new("google", AuthType::OAuth, oauth_fields(&future));
+        let result = verify_credential(&entry);
+        assert!(result.message.contains("valid"));
+        assert!(result.message.contains("remaining"));
+    }
+
+    #[test]
+    fn verify_no_credential_message() {
+        let store = mem_store();
+        let result = verify_from_store(&store, "unknown_service");
+        assert_eq!(result.connector_id, "unknown_service");
+        assert_eq!(result.status, AuthStatus::NoCredential);
+    }
 }

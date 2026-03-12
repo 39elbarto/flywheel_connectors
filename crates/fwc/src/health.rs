@@ -1388,4 +1388,1002 @@ mod tests {
         assert_eq!(back.status, HealthStatus::Healthy);
         assert_eq!(back.latency_ms, Some(45));
     }
+
+    // ── HealthStatus clone/copy/hash tests ────────────────────────
+
+    #[test]
+    fn health_status_clone() {
+        let status = HealthStatus::Degraded;
+        let cloned = status;
+        assert_eq!(status, cloned);
+    }
+
+    #[test]
+    fn health_status_copy_semantics() {
+        let a = HealthStatus::Error;
+        let b = a;
+        // Both still usable because Copy.
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn health_status_hash_consistent() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(HealthStatus::Healthy);
+        set.insert(HealthStatus::Healthy);
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn health_status_hash_all_variants_distinct() {
+        use std::collections::HashSet;
+        let set: HashSet<HealthStatus> = [
+            HealthStatus::Healthy,
+            HealthStatus::Degraded,
+            HealthStatus::Error,
+            HealthStatus::Unknown,
+            HealthStatus::Unconfigured,
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(set.len(), 5);
+    }
+
+    #[test]
+    fn health_status_debug_format() {
+        let dbg = format!("{:?}", HealthStatus::Healthy);
+        assert_eq!(dbg, "Healthy");
+    }
+
+    #[test]
+    fn health_status_eq_same() {
+        assert_eq!(HealthStatus::Error, HealthStatus::Error);
+    }
+
+    #[test]
+    fn health_status_ne_different() {
+        assert_ne!(HealthStatus::Healthy, HealthStatus::Error);
+    }
+
+    #[test]
+    fn health_status_ordering_full_chain() {
+        let mut statuses = vec![
+            HealthStatus::Unconfigured,
+            HealthStatus::Healthy,
+            HealthStatus::Error,
+            HealthStatus::Degraded,
+            HealthStatus::Unknown,
+        ];
+        statuses.sort();
+        assert_eq!(
+            statuses,
+            vec![
+                HealthStatus::Healthy,
+                HealthStatus::Degraded,
+                HealthStatus::Error,
+                HealthStatus::Unknown,
+                HealthStatus::Unconfigured,
+            ]
+        );
+    }
+
+    #[test]
+    fn health_status_deserialize_kebab_case() {
+        let s: HealthStatus = serde_json::from_str("\"healthy\"").unwrap();
+        assert_eq!(s, HealthStatus::Healthy);
+        let s: HealthStatus = serde_json::from_str("\"degraded\"").unwrap();
+        assert_eq!(s, HealthStatus::Degraded);
+        let s: HealthStatus = serde_json::from_str("\"error\"").unwrap();
+        assert_eq!(s, HealthStatus::Error);
+        let s: HealthStatus = serde_json::from_str("\"unknown\"").unwrap();
+        assert_eq!(s, HealthStatus::Unknown);
+        let s: HealthStatus = serde_json::from_str("\"unconfigured\"").unwrap();
+        assert_eq!(s, HealthStatus::Unconfigured);
+    }
+
+    #[test]
+    fn health_status_deserialize_invalid_rejects() {
+        let result = serde_json::from_str::<HealthStatus>("\"bogus\"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn health_status_serialize_kebab_case_values() {
+        assert_eq!(
+            serde_json::to_string(&HealthStatus::Healthy).unwrap(),
+            "\"healthy\""
+        );
+        assert_eq!(
+            serde_json::to_string(&HealthStatus::Unconfigured).unwrap(),
+            "\"unconfigured\""
+        );
+    }
+
+    // ── AuthCheckResult extended tests ────────────────────────────
+
+    #[test]
+    fn auth_clone() {
+        let a = AuthCheckResult::Expired { days_ago: 10 };
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn auth_debug_format() {
+        let dbg = format!("{:?}", AuthCheckResult::Valid);
+        assert!(dbg.contains("Valid"));
+    }
+
+    #[test]
+    fn auth_expired_zero_days() {
+        let auth = AuthCheckResult::Expired { days_ago: 0 };
+        let json = serde_json::to_string(&auth).unwrap();
+        assert!(json.contains('0'));
+        let back: AuthCheckResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, auth);
+    }
+
+    #[test]
+    fn auth_expired_large_days() {
+        let auth = AuthCheckResult::Expired { days_ago: 9999 };
+        let json = serde_json::to_string(&auth).unwrap();
+        let back: AuthCheckResult = serde_json::from_str(&json).unwrap();
+        if let AuthCheckResult::Expired { days_ago } = back {
+            assert_eq!(days_ago, 9999);
+        } else {
+            panic!("Expected Expired variant");
+        }
+    }
+
+    #[test]
+    fn auth_serialization_all_variants_roundtrip() {
+        for auth in [
+            AuthCheckResult::Valid,
+            AuthCheckResult::Expired { days_ago: 1 },
+            AuthCheckResult::Invalid,
+            AuthCheckResult::NotConfigured,
+            AuthCheckResult::Unknown,
+        ] {
+            let json = serde_json::to_string(&auth).unwrap();
+            let back: AuthCheckResult = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, auth);
+        }
+    }
+
+    #[test]
+    fn auth_ne_different_variants() {
+        assert_ne!(AuthCheckResult::Valid, AuthCheckResult::Invalid);
+        assert_ne!(AuthCheckResult::Unknown, AuthCheckResult::NotConfigured);
+    }
+
+    #[test]
+    fn auth_expired_ne_different_days() {
+        assert_ne!(
+            AuthCheckResult::Expired { days_ago: 1 },
+            AuthCheckResult::Expired { days_ago: 2 }
+        );
+    }
+
+    #[test]
+    fn auth_tagged_json_structure() {
+        let json = serde_json::to_string(&AuthCheckResult::Valid).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["status"], "valid");
+    }
+
+    #[test]
+    fn auth_expired_tagged_json_structure() {
+        let json = serde_json::to_string(&AuthCheckResult::Expired { days_ago: 3 }).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["status"], "expired");
+        assert_eq!(v["days_ago"], 3);
+    }
+
+    // ── IssueSeverity extended tests ──────────────────────────────
+
+    #[test]
+    fn issue_severity_clone() {
+        let s = IssueSeverity::Critical;
+        let c = s;
+        assert_eq!(s, c);
+    }
+
+    #[test]
+    fn issue_severity_hash_distinct() {
+        use std::collections::HashSet;
+        let set: HashSet<IssueSeverity> = [
+            IssueSeverity::Info,
+            IssueSeverity::Warning,
+            IssueSeverity::Error,
+            IssueSeverity::Critical,
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(set.len(), 4);
+    }
+
+    #[test]
+    fn issue_severity_serialization_roundtrip_all() {
+        for sev in [
+            IssueSeverity::Info,
+            IssueSeverity::Warning,
+            IssueSeverity::Error,
+            IssueSeverity::Critical,
+        ] {
+            let json = serde_json::to_string(&sev).unwrap();
+            let back: IssueSeverity = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, sev);
+        }
+    }
+
+    #[test]
+    fn issue_severity_debug_format() {
+        assert_eq!(format!("{:?}", IssueSeverity::Info), "Info");
+        assert_eq!(format!("{:?}", IssueSeverity::Critical), "Critical");
+    }
+
+    #[test]
+    fn issue_severity_deserialize_invalid_rejects() {
+        let result = serde_json::from_str::<IssueSeverity>("\"fatal\"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn issue_severity_sort() {
+        let mut sevs = vec![
+            IssueSeverity::Critical,
+            IssueSeverity::Info,
+            IssueSeverity::Error,
+            IssueSeverity::Warning,
+        ];
+        sevs.sort();
+        assert_eq!(
+            sevs,
+            vec![
+                IssueSeverity::Info,
+                IssueSeverity::Warning,
+                IssueSeverity::Error,
+                IssueSeverity::Critical,
+            ]
+        );
+    }
+
+    // ── HealthIssue extended tests ────────────────────────────────
+
+    #[test]
+    fn health_issue_clone() {
+        let issue = HealthIssue::new(IssueSeverity::Error, "clone test");
+        let cloned = issue.clone();
+        assert_eq!(issue, cloned);
+    }
+
+    #[test]
+    fn health_issue_eq() {
+        let a = HealthIssue::new(IssueSeverity::Warning, "msg");
+        let b = HealthIssue::new(IssueSeverity::Warning, "msg");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn health_issue_ne_severity() {
+        let a = HealthIssue::new(IssueSeverity::Warning, "msg");
+        let b = HealthIssue::new(IssueSeverity::Error, "msg");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn health_issue_ne_message() {
+        let a = HealthIssue::new(IssueSeverity::Warning, "msg1");
+        let b = HealthIssue::new(IssueSeverity::Warning, "msg2");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn health_issue_from_string_owned() {
+        let msg = String::from("owned message");
+        let issue = HealthIssue::new(IssueSeverity::Info, msg);
+        assert_eq!(issue.message, "owned message");
+    }
+
+    #[test]
+    fn health_issue_serialization_roundtrip() {
+        let issue = HealthIssue::new(IssueSeverity::Critical, "test roundtrip");
+        let json = serde_json::to_string(&issue).unwrap();
+        let back: HealthIssue = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, issue);
+    }
+
+    #[test]
+    fn health_issue_empty_message() {
+        let issue = HealthIssue::new(IssueSeverity::Info, "");
+        assert_eq!(issue.message, "");
+    }
+
+    #[test]
+    fn health_issue_debug_format() {
+        let issue = HealthIssue::new(IssueSeverity::Warning, "test");
+        let dbg = format!("{:?}", issue);
+        assert!(dbg.contains("Warning"));
+        assert!(dbg.contains("test"));
+    }
+
+    // ── ConnectorHealth extended tests ────────────────────────────
+
+    #[test]
+    fn connector_health_clone() {
+        let t = fixed_time();
+        let h = make_healthy("github", t);
+        let cloned = h.clone();
+        assert_eq!(cloned.connector_id, "github");
+        assert_eq!(cloned.status, HealthStatus::Healthy);
+        assert_eq!(cloned.latency_ms, h.latency_ms);
+    }
+
+    #[test]
+    fn connector_health_with_string_id() {
+        let t = fixed_time();
+        let id = String::from("dynamic-connector");
+        let h = ConnectorHealth::new(id, HealthStatus::Healthy, t);
+        assert_eq!(h.connector_id, "dynamic-connector");
+    }
+
+    #[test]
+    fn connector_health_with_zero_latency() {
+        let t = fixed_time();
+        let h = ConnectorHealth::new("test", HealthStatus::Healthy, t).with_latency(0);
+        assert_eq!(h.latency_ms, Some(0));
+    }
+
+    #[test]
+    fn connector_health_with_max_latency() {
+        let t = fixed_time();
+        let h = ConnectorHealth::new("test", HealthStatus::Healthy, t).with_latency(u64::MAX);
+        assert_eq!(h.latency_ms, Some(u64::MAX));
+    }
+
+    #[test]
+    fn connector_health_serialization_with_issues() {
+        let t = fixed_time();
+        let h = ConnectorHealth::new("test", HealthStatus::Error, t)
+            .with_auth(AuthCheckResult::Invalid)
+            .with_issue(HealthIssue::new(IssueSeverity::Critical, "auth failed"));
+        let json = serde_json::to_string(&h).unwrap();
+        let back: ConnectorHealth = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.issues.len(), 1);
+        assert_eq!(back.issues[0].message, "auth failed");
+        assert_eq!(back.auth_status, AuthCheckResult::Invalid);
+    }
+
+    #[test]
+    fn connector_health_serialization_no_latency() {
+        let t = fixed_time();
+        let h = ConnectorHealth::new("test", HealthStatus::Unknown, t);
+        let json = serde_json::to_string(&h).unwrap();
+        assert!(json.contains("null") || json.contains("latency_ms"));
+        let back: ConnectorHealth = serde_json::from_str(&json).unwrap();
+        assert!(back.latency_ms.is_none());
+    }
+
+    #[test]
+    fn connector_health_debug_contains_id() {
+        let t = fixed_time();
+        let h = ConnectorHealth::new("myconn", HealthStatus::Healthy, t);
+        let dbg = format!("{:?}", h);
+        assert!(dbg.contains("myconn"));
+    }
+
+    // ── DashboardSummary extended tests ───────────────────────────
+
+    #[test]
+    fn dashboard_summary_default() {
+        let s = DashboardSummary::default();
+        assert_eq!(s.total, 0);
+        assert_eq!(s.healthy, 0);
+        assert_eq!(s.degraded, 0);
+        assert_eq!(s.error, 0);
+        assert_eq!(s.unknown, 0);
+        assert_eq!(s.auth_issues, 0);
+    }
+
+    #[test]
+    fn dashboard_summary_eq() {
+        let a = DashboardSummary::default();
+        let b = DashboardSummary::default();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn dashboard_summary_ne() {
+        let a = DashboardSummary::default();
+        let mut b = DashboardSummary::default();
+        b.total = 1;
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn dashboard_summary_clone() {
+        let t = fixed_time();
+        let connectors = vec![make_healthy("a", t), make_error("b", t)];
+        let summary = DashboardSummary::from_connectors(&connectors);
+        let cloned = summary.clone();
+        assert_eq!(summary, cloned);
+    }
+
+    #[test]
+    fn dashboard_summary_serialization_roundtrip() {
+        let t = fixed_time();
+        let connectors = vec![make_healthy("a", t), make_degraded("b", t), make_error("c", t)];
+        let summary = DashboardSummary::from_connectors(&connectors);
+        let json = serde_json::to_string(&summary).unwrap();
+        let back: DashboardSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, summary);
+    }
+
+    #[test]
+    fn dashboard_summary_all_degraded() {
+        let t = fixed_time();
+        let connectors = vec![make_degraded("a", t), make_degraded("b", t)];
+        let summary = DashboardSummary::from_connectors(&connectors);
+        assert_eq!(summary.total, 2);
+        assert_eq!(summary.degraded, 2);
+        assert_eq!(summary.healthy, 0);
+        assert_eq!(summary.error, 0);
+    }
+
+    #[test]
+    fn dashboard_summary_all_error() {
+        let t = fixed_time();
+        let connectors = vec![make_error("a", t), make_error("b", t), make_error("c", t)];
+        let summary = DashboardSummary::from_connectors(&connectors);
+        assert_eq!(summary.error, 3);
+        assert_eq!(summary.auth_issues, 3); // all have Expired auth
+    }
+
+    #[test]
+    fn dashboard_summary_auth_issues_not_counted_for_valid() {
+        let t = fixed_time();
+        let connectors = vec![
+            ConnectorHealth::new("a", HealthStatus::Healthy, t).with_auth(AuthCheckResult::Valid),
+            ConnectorHealth::new("b", HealthStatus::Healthy, t)
+                .with_auth(AuthCheckResult::Unknown),
+            ConnectorHealth::new("c", HealthStatus::Healthy, t)
+                .with_auth(AuthCheckResult::NotConfigured),
+        ];
+        let summary = DashboardSummary::from_connectors(&connectors);
+        assert_eq!(summary.auth_issues, 0);
+    }
+
+    #[test]
+    fn dashboard_summary_large_set() {
+        let t = fixed_time();
+        let connectors: Vec<ConnectorHealth> = (0..100)
+            .map(|i| make_healthy(&format!("conn-{i}"), t))
+            .collect();
+        let summary = DashboardSummary::from_connectors(&connectors);
+        assert_eq!(summary.total, 100);
+        assert_eq!(summary.healthy, 100);
+    }
+
+    // ── HealthFilter tests ────────────────────────────────────────
+
+    #[test]
+    fn health_filter_default() {
+        let f = HealthFilter::default();
+        assert!(!f.unhealthy_only);
+        assert!(f.connector_id.is_none());
+    }
+
+    #[test]
+    fn health_filter_clone() {
+        let f = HealthFilter {
+            unhealthy_only: true,
+            connector_id: Some("test".to_owned()),
+        };
+        let cloned = f.clone();
+        assert_eq!(cloned.unhealthy_only, true);
+        assert_eq!(cloned.connector_id.as_deref(), Some("test"));
+    }
+
+    #[test]
+    fn health_filter_serialization_roundtrip() {
+        let f = HealthFilter {
+            unhealthy_only: true,
+            connector_id: Some("github".to_owned()),
+        };
+        let json = serde_json::to_string(&f).unwrap();
+        let back: HealthFilter = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.unhealthy_only, true);
+        assert_eq!(back.connector_id.as_deref(), Some("github"));
+    }
+
+    #[test]
+    fn health_filter_debug_format() {
+        let f = HealthFilter::default();
+        let dbg = format!("{:?}", f);
+        assert!(dbg.contains("HealthFilter"));
+    }
+
+    // ── HealthDashboard extended tests ────────────────────────────
+
+    #[test]
+    fn dashboard_from_connectors_at_preserves_timestamp() {
+        let t = fixed_time();
+        let dashboard = HealthDashboard::from_connectors_at(vec![make_healthy("a", t)], t);
+        assert_eq!(dashboard.checked_at, t);
+    }
+
+    #[test]
+    fn dashboard_clone() {
+        let t = fixed_time();
+        let dashboard = HealthDashboard::from_connectors_at(
+            vec![make_healthy("a", t), make_error("b", t)],
+            t,
+        );
+        let cloned = dashboard.clone();
+        assert_eq!(cloned.connectors.len(), 2);
+        assert_eq!(cloned.checked_at, t);
+        assert_eq!(cloned.summary.total, 2);
+    }
+
+    #[test]
+    fn dashboard_serialization_roundtrip() {
+        let t = fixed_time();
+        let dashboard = HealthDashboard::from_connectors_at(
+            vec![
+                make_healthy("github", t),
+                make_degraded("slack", t),
+                make_error("jira", t),
+            ],
+            t,
+        );
+        let json = serde_json::to_string(&dashboard).unwrap();
+        let back: HealthDashboard = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.connectors.len(), 3);
+        assert_eq!(back.summary.total, 3);
+        assert_eq!(back.checked_at, t);
+    }
+
+    #[test]
+    fn dashboard_filter_unhealthy_only_with_all_healthy() {
+        let t = fixed_time();
+        let dashboard = HealthDashboard::from_connectors_at(
+            vec![make_healthy("a", t), make_healthy("b", t)],
+            t,
+        );
+        let filter = HealthFilter {
+            unhealthy_only: true,
+            connector_id: None,
+        };
+        let filtered = dashboard.filter(&filter);
+        assert!(filtered.connectors.is_empty());
+        assert_eq!(filtered.summary.total, 0);
+    }
+
+    #[test]
+    fn dashboard_filter_by_id_with_unhealthy_match() {
+        let t = fixed_time();
+        let dashboard = HealthDashboard::from_connectors_at(
+            vec![make_healthy("a", t), make_error("b", t)],
+            t,
+        );
+        let filter = HealthFilter {
+            unhealthy_only: true,
+            connector_id: Some("b".to_owned()),
+        };
+        let filtered = dashboard.filter(&filter);
+        assert_eq!(filtered.connectors.len(), 1);
+        assert_eq!(filtered.connectors[0].connector_id, "b");
+    }
+
+    #[test]
+    fn dashboard_filter_preserves_checked_at() {
+        let t = fixed_time();
+        let dashboard = HealthDashboard::from_connectors_at(vec![make_healthy("a", t)], t);
+        let filtered = dashboard.filter(&HealthFilter::default());
+        assert_eq!(filtered.checked_at, t);
+    }
+
+    #[test]
+    fn dashboard_debug_contains_connectors() {
+        let t = fixed_time();
+        let dashboard = HealthDashboard::from_connectors_at(vec![make_healthy("x", t)], t);
+        let dbg = format!("{:?}", dashboard);
+        assert!(dbg.contains("HealthDashboard"));
+    }
+
+    // ── detect_issues extended tests ──────────────────────────────
+
+    #[test]
+    fn detect_issues_no_latency_no_issue() {
+        let t = fixed_time();
+        let mut h =
+            ConnectorHealth::new("test", HealthStatus::Healthy, t).with_auth(AuthCheckResult::Valid);
+        detect_issues(&mut h);
+        assert_eq!(h.status, HealthStatus::Healthy);
+        assert!(h.issues.is_empty());
+    }
+
+    #[test]
+    fn detect_issues_auth_unknown_no_issue() {
+        let t = fixed_time();
+        let mut h = ConnectorHealth::new("test", HealthStatus::Healthy, t)
+            .with_auth(AuthCheckResult::Unknown);
+        detect_issues(&mut h);
+        assert_eq!(h.status, HealthStatus::Healthy);
+        assert!(h.issues.is_empty());
+    }
+
+    #[test]
+    fn detect_issues_error_status_not_downgraded_by_latency() {
+        let t = fixed_time();
+        let mut h = ConnectorHealth::new("test", HealthStatus::Error, t)
+            .with_auth(AuthCheckResult::Expired { days_ago: 1 })
+            .with_latency(600);
+        detect_issues(&mut h);
+        // Status should remain Error (not downgraded to Degraded by latency).
+        assert_eq!(h.status, HealthStatus::Error);
+    }
+
+    #[test]
+    fn detect_issues_degraded_status_not_upgraded_to_healthy() {
+        let t = fixed_time();
+        let mut h = ConnectorHealth::new("test", HealthStatus::Degraded, t)
+            .with_auth(AuthCheckResult::Valid)
+            .with_latency(100);
+        detect_issues(&mut h);
+        // Status stays degraded, not changed to Healthy.
+        assert_eq!(h.status, HealthStatus::Degraded);
+    }
+
+    #[test]
+    fn detect_issues_already_degraded_with_high_latency() {
+        let t = fixed_time();
+        let mut h = ConnectorHealth::new("test", HealthStatus::Degraded, t)
+            .with_auth(AuthCheckResult::Valid)
+            .with_latency(700);
+        detect_issues(&mut h);
+        assert_eq!(h.status, HealthStatus::Degraded);
+        assert!(h.issues.iter().any(|i| i.message.contains("High latency")));
+    }
+
+    #[test]
+    fn detect_issues_expired_from_degraded_becomes_error() {
+        let t = fixed_time();
+        let mut h = ConnectorHealth::new("test", HealthStatus::Degraded, t)
+            .with_auth(AuthCheckResult::Expired { days_ago: 5 });
+        detect_issues(&mut h);
+        assert_eq!(h.status, HealthStatus::Error);
+    }
+
+    #[test]
+    fn detect_issues_invalid_from_degraded_becomes_error() {
+        let t = fixed_time();
+        let mut h = ConnectorHealth::new("test", HealthStatus::Degraded, t)
+            .with_auth(AuthCheckResult::Invalid);
+        detect_issues(&mut h);
+        assert_eq!(h.status, HealthStatus::Error);
+    }
+
+    #[test]
+    fn detect_issues_error_with_existing_critical_no_duplicate() {
+        let t = fixed_time();
+        let mut h = ConnectorHealth::new("test", HealthStatus::Error, t)
+            .with_auth(AuthCheckResult::Valid)
+            .with_issue(HealthIssue::new(
+                IssueSeverity::Critical,
+                "Pre-existing critical",
+            ));
+        detect_issues(&mut h);
+        // Should NOT add "Connector is in error state" because there's already a Critical issue.
+        assert!(!h.issues.iter().any(|i| i.message.contains("error state")));
+    }
+
+    #[test]
+    fn detect_issues_error_with_existing_error_issue_no_duplicate() {
+        let t = fixed_time();
+        let mut h = ConnectorHealth::new("test", HealthStatus::Error, t)
+            .with_auth(AuthCheckResult::Valid)
+            .with_issue(HealthIssue::new(IssueSeverity::Error, "Known error"));
+        detect_issues(&mut h);
+        assert!(!h.issues.iter().any(|i| i.message.contains("error state")));
+    }
+
+    #[test]
+    fn detect_issues_unknown_status_unchanged() {
+        let t = fixed_time();
+        let mut h = ConnectorHealth::new("test", HealthStatus::Unknown, t)
+            .with_auth(AuthCheckResult::Valid);
+        detect_issues(&mut h);
+        assert_eq!(h.status, HealthStatus::Unknown);
+    }
+
+    #[test]
+    fn detect_issues_unconfigured_status_unchanged() {
+        let t = fixed_time();
+        let mut h = ConnectorHealth::new("test", HealthStatus::Unconfigured, t)
+            .with_auth(AuthCheckResult::NotConfigured);
+        detect_issues(&mut h);
+        assert_eq!(h.status, HealthStatus::Unconfigured);
+    }
+
+    #[test]
+    fn detect_issues_expired_message_contains_days() {
+        let t = fixed_time();
+        let mut h = ConnectorHealth::new("test", HealthStatus::Healthy, t)
+            .with_auth(AuthCheckResult::Expired { days_ago: 42 });
+        detect_issues(&mut h);
+        assert!(h.issues.iter().any(|i| i.message.contains("42")));
+    }
+
+    #[test]
+    fn detect_issues_very_high_latency_message_contains_value() {
+        let t = fixed_time();
+        let mut h = ConnectorHealth::new("test", HealthStatus::Healthy, t).with_latency(2500);
+        detect_issues(&mut h);
+        assert!(h.issues.iter().any(|i| i.message.contains("2500")));
+    }
+
+    #[test]
+    fn detect_issues_warn_latency_message_contains_value() {
+        let t = fixed_time();
+        let mut h = ConnectorHealth::new("test", HealthStatus::Healthy, t).with_latency(750);
+        detect_issues(&mut h);
+        assert!(h.issues.iter().any(|i| i.message.contains("750")));
+    }
+
+    // ── Merge extended tests ──────────────────────────────────────
+
+    #[test]
+    fn merge_one_empty_one_populated() {
+        let t = fixed_time();
+        let a = HealthDashboard::from_connectors_at(vec![], t);
+        let b = HealthDashboard::from_connectors_at(vec![make_healthy("github", t)], t);
+        let merged = merge_dashboards(&a, &b);
+        assert_eq!(merged.connectors.len(), 1);
+        assert_eq!(merged.connectors[0].connector_id, "github");
+    }
+
+    #[test]
+    fn merge_populated_one_empty() {
+        let t = fixed_time();
+        let a = HealthDashboard::from_connectors_at(vec![make_healthy("github", t)], t);
+        let b = HealthDashboard::from_connectors_at(vec![], t);
+        let merged = merge_dashboards(&a, &b);
+        assert_eq!(merged.connectors.len(), 1);
+    }
+
+    #[test]
+    fn merge_multiple_overlapping() {
+        let t1 = fixed_time();
+        let t2 = t1 + chrono::Duration::minutes(5);
+        let t3 = t1 + chrono::Duration::minutes(10);
+
+        let a = HealthDashboard::from_connectors_at(
+            vec![
+                ConnectorHealth::new("a", HealthStatus::Healthy, t1),
+                ConnectorHealth::new("b", HealthStatus::Degraded, t2),
+            ],
+            t3,
+        );
+        let b = HealthDashboard::from_connectors_at(
+            vec![
+                ConnectorHealth::new("a", HealthStatus::Error, t3),
+                ConnectorHealth::new("c", HealthStatus::Healthy, t1),
+            ],
+            t3,
+        );
+        let merged = merge_dashboards(&a, &b);
+        assert_eq!(merged.connectors.len(), 3);
+        // "a" from b wins (t3 > t1).
+        let a_entry = merged
+            .connectors
+            .iter()
+            .find(|c| c.connector_id == "a")
+            .unwrap();
+        assert_eq!(a_entry.status, HealthStatus::Error);
+    }
+
+    #[test]
+    fn merge_summary_recomputed() {
+        let t = fixed_time();
+        let a = HealthDashboard::from_connectors_at(vec![make_healthy("a", t)], t);
+        let b = HealthDashboard::from_connectors_at(vec![make_error("b", t)], t);
+        let merged = merge_dashboards(&a, &b);
+        assert_eq!(merged.summary.total, 2);
+        assert_eq!(merged.summary.healthy, 1);
+        assert_eq!(merged.summary.error, 1);
+    }
+
+    #[test]
+    fn merge_same_timestamp_both_directions() {
+        let t = fixed_time();
+        let a = HealthDashboard::from_connectors_at(
+            vec![ConnectorHealth::new("x", HealthStatus::Healthy, t)],
+            t,
+        );
+        let b = HealthDashboard::from_connectors_at(
+            vec![ConnectorHealth::new("x", HealthStatus::Error, t)],
+            t,
+        );
+        // When same last_check, a's entry wins (b doesn't override because !(t > t)).
+        let merged_ab = merge_dashboards(&a, &b);
+        assert_eq!(merged_ab.connectors[0].status, HealthStatus::Healthy);
+
+        // Reversed: b's entry first, a doesn't override.
+        let merged_ba = merge_dashboards(&b, &a);
+        assert_eq!(merged_ba.connectors[0].status, HealthStatus::Error);
+    }
+
+    #[test]
+    fn merge_connectors_sorted_by_id() {
+        let t = fixed_time();
+        let a = HealthDashboard::from_connectors_at(
+            vec![
+                make_healthy("zebra", t),
+                make_healthy("alpha", t),
+            ],
+            t,
+        );
+        let b = HealthDashboard::from_connectors_at(
+            vec![make_healthy("middle", t)],
+            t,
+        );
+        let merged = merge_dashboards(&a, &b);
+        // BTreeMap produces sorted order.
+        let ids: Vec<&str> = merged.connectors.iter().map(|c| c.connector_id.as_str()).collect();
+        assert_eq!(ids, vec!["alpha", "middle", "zebra"]);
+    }
+
+    // ── format_time_ago extended tests ────────────────────────────
+
+    #[test]
+    fn time_ago_boundary_59m_is_minutes() {
+        let now = fixed_time();
+        let dt = now - chrono::Duration::minutes(59);
+        assert_eq!(format_time_ago(dt, now), "59m ago");
+    }
+
+    #[test]
+    fn time_ago_boundary_60m_is_hours() {
+        let now = fixed_time();
+        let dt = now - chrono::Duration::minutes(60);
+        assert_eq!(format_time_ago(dt, now), "1h ago");
+    }
+
+    #[test]
+    fn time_ago_boundary_23h_is_hours() {
+        let now = fixed_time();
+        let dt = now - chrono::Duration::hours(23);
+        assert_eq!(format_time_ago(dt, now), "23h ago");
+    }
+
+    #[test]
+    fn time_ago_boundary_24h_is_days() {
+        let now = fixed_time();
+        let dt = now - chrono::Duration::hours(24);
+        assert_eq!(format_time_ago(dt, now), "1d ago");
+    }
+
+    #[test]
+    fn time_ago_large_days() {
+        let now = fixed_time();
+        let dt = now - chrono::Duration::days(365);
+        assert_eq!(format_time_ago(dt, now), "365d ago");
+    }
+
+    #[test]
+    fn time_ago_1s_is_just_now() {
+        let now = fixed_time();
+        let dt = now - chrono::Duration::seconds(1);
+        assert_eq!(format_time_ago(dt, now), "just now");
+    }
+
+    // ── TOON format extended tests ────────────────────────────────
+
+    #[test]
+    fn toon_format_no_auth_issues_no_suffix() {
+        let t = fixed_time();
+        let dashboard = HealthDashboard::from_connectors_at(vec![make_healthy("github", t)], t);
+        let output = format_dashboard_toon(&dashboard);
+        assert!(!output.contains("auth issue"));
+    }
+
+    #[test]
+    fn toon_format_contains_separator_line() {
+        let t = fixed_time();
+        let dashboard = HealthDashboard::from_connectors_at(vec![make_healthy("github", t)], t);
+        let output = format_dashboard_toon(&dashboard);
+        assert!(output.contains(&"-".repeat(76)));
+    }
+
+    #[test]
+    fn toon_format_shows_latency_value() {
+        let t = fixed_time();
+        let h = ConnectorHealth::new("fast", HealthStatus::Healthy, t)
+            .with_auth(AuthCheckResult::Valid)
+            .with_latency(1);
+        let dashboard = HealthDashboard::from_connectors_at(vec![h], t);
+        let output = format_dashboard_toon(&dashboard);
+        assert!(output.contains("1ms"));
+    }
+
+    #[test]
+    fn toon_format_shows_zero_latency() {
+        let t = fixed_time();
+        let h = ConnectorHealth::new("local", HealthStatus::Healthy, t)
+            .with_auth(AuthCheckResult::Valid)
+            .with_latency(0);
+        let dashboard = HealthDashboard::from_connectors_at(vec![h], t);
+        let output = format_dashboard_toon(&dashboard);
+        assert!(output.contains("0ms"));
+    }
+
+    #[test]
+    fn toon_format_connector_with_no_issues_shows_dash() {
+        let t = fixed_time();
+        let h = ConnectorHealth::new("clean", HealthStatus::Healthy, t)
+            .with_auth(AuthCheckResult::Valid)
+            .with_latency(10);
+        let dashboard = HealthDashboard::from_connectors_at(vec![h], t);
+        let output = format_dashboard_toon(&dashboard);
+        // The issues column shows "-" when no issues.
+        let lines: Vec<&str> = output.lines().collect();
+        let data_line = lines.iter().find(|l| l.contains("clean")).unwrap();
+        assert!(data_line.ends_with('-'));
+    }
+
+    // ── JSON format extended tests ────────────────────────────────
+
+    #[test]
+    fn json_format_connector_fields() {
+        let t = fixed_time();
+        let h = make_degraded("slack", t);
+        let dashboard = HealthDashboard::from_connectors_at(vec![h], t);
+        let json = format_dashboard_json(&dashboard).unwrap();
+        let conn = &json["connectors"][0];
+        assert_eq!(conn["connector_id"], "slack");
+        assert_eq!(conn["status"], "degraded");
+        assert_eq!(conn["latency_ms"], 890);
+    }
+
+    #[test]
+    fn json_format_summary_fields() {
+        let t = fixed_time();
+        let dashboard = HealthDashboard::from_connectors_at(
+            vec![make_healthy("a", t), make_error("b", t)],
+            t,
+        );
+        let json = format_dashboard_json(&dashboard).unwrap();
+        let summary = &json["summary"];
+        assert_eq!(summary["total"], 2);
+        assert_eq!(summary["healthy"], 1);
+        assert_eq!(summary["error"], 1);
+    }
+
+    #[test]
+    fn json_format_issues_array() {
+        let t = fixed_time();
+        let h = ConnectorHealth::new("test", HealthStatus::Degraded, t)
+            .with_issue(HealthIssue::new(IssueSeverity::Warning, "issue1"))
+            .with_issue(HealthIssue::new(IssueSeverity::Error, "issue2"));
+        let dashboard = HealthDashboard::from_connectors_at(vec![h], t);
+        let json = format_dashboard_json(&dashboard).unwrap();
+        let issues = json["connectors"][0]["issues"].as_array().unwrap();
+        assert_eq!(issues.len(), 2);
+        assert_eq!(issues[0]["message"], "issue1");
+        assert_eq!(issues[1]["severity"], "error");
+    }
+
+    #[test]
+    fn json_format_auth_status_tagged() {
+        let t = fixed_time();
+        let h = ConnectorHealth::new("test", HealthStatus::Healthy, t)
+            .with_auth(AuthCheckResult::Expired { days_ago: 7 });
+        let dashboard = HealthDashboard::from_connectors_at(vec![h], t);
+        let json = format_dashboard_json(&dashboard).unwrap();
+        let auth = &json["connectors"][0]["auth_status"];
+        assert_eq!(auth["status"], "expired");
+        assert_eq!(auth["days_ago"], 7);
+    }
 }

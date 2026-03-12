@@ -1285,4 +1285,661 @@ version = "1.0.0"
         let back: PackageOutput = serde_json::from_str(&json).unwrap();
         assert_eq!(back.output_dir, PathBuf::from("/path with spaces/output"));
     }
+
+    // ── compute_sha256: additional coverage ──────────────────
+
+    #[test]
+    fn compute_sha256_repeated_content_same_hash() {
+        let dir = std::env::temp_dir().join("fcp-test-sha256-repeat");
+        let _ = fs::create_dir_all(&dir);
+        let f1 = dir.join("r1.txt");
+        let f2 = dir.join("r2.txt");
+        fs::write(&f1, b"same content here").unwrap();
+        fs::write(&f2, b"same content here").unwrap();
+        let h1 = compute_sha256(&f1).unwrap();
+        let h2 = compute_sha256(&f2).unwrap();
+        assert_eq!(h1, h2, "identical content must produce identical hashes");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn compute_sha256_unicode_filename() {
+        let dir = std::env::temp_dir().join("fcp-test-sha256-unicode-fn");
+        let _ = fs::create_dir_all(&dir);
+        let file = dir.join("datos_espa\u{f1}oles.bin");
+        fs::write(&file, b"unicode filename test").unwrap();
+        let hash = compute_sha256(&file).unwrap();
+        assert_eq!(hash.len(), 64);
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn compute_sha256_all_0xff_bytes() {
+        let dir = std::env::temp_dir().join("fcp-test-sha256-0xff");
+        let _ = fs::create_dir_all(&dir);
+        let file = dir.join("all-ff.bin");
+        fs::write(&file, vec![0xffu8; 256]).unwrap();
+        let hash = compute_sha256(&file).unwrap();
+        assert_eq!(hash.len(), 64);
+        // Different from all-zeros file
+        let z_file = dir.join("all-00.bin");
+        fs::write(&z_file, vec![0x00u8; 256]).unwrap();
+        let z_hash = compute_sha256(&z_file).unwrap();
+        assert_ne!(hash, z_hash);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn compute_sha256_multibyte_utf8_content() {
+        let dir = std::env::temp_dir().join("fcp-test-sha256-utf8");
+        let _ = fs::create_dir_all(&dir);
+        let file = dir.join("utf8.txt");
+        fs::write(&file, "\u{1f600}\u{1f4a9}\u{2603}").unwrap();
+        let hash = compute_sha256(&file).unwrap();
+        assert_eq!(hash.len(), 64);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ── extract_manifest_metadata: more edge cases ───────────
+
+    #[test]
+    fn extract_manifest_metadata_with_inline_tables() {
+        let toml = r#"
+[connector]
+id = "inline:test:1.0.0"
+version = "1.0.0"
+metadata = { author = "test", license = "MIT" }
+"#;
+        let (id, version) = extract_manifest_metadata(toml).unwrap();
+        assert_eq!(id, "inline:test:1.0.0");
+        assert_eq!(version, "1.0.0");
+    }
+
+    #[test]
+    fn extract_manifest_metadata_with_comments() {
+        let toml = r#"
+# This is a comment
+[connector]
+# Another comment
+id = "commented:conn:2.0.0" # inline comment
+version = "2.0.0"
+"#;
+        let (id, version) = extract_manifest_metadata(toml).unwrap();
+        assert_eq!(id, "commented:conn:2.0.0");
+        assert_eq!(version, "2.0.0");
+    }
+
+    #[test]
+    fn extract_manifest_metadata_multiline_string_id() {
+        // Multiline basic string in TOML
+        let toml = r#"
+[connector]
+id = """multi:line:1.0.0"""
+version = """1.0.0"""
+"#;
+        let (id, version) = extract_manifest_metadata(toml).unwrap();
+        assert_eq!(id, "multi:line:1.0.0");
+        assert_eq!(version, "1.0.0");
+    }
+
+    #[test]
+    fn extract_manifest_metadata_special_chars_in_id() {
+        let toml = r#"
+[connector]
+id = "org/repo@branch:conn:1.0.0"
+version = "1.0.0"
+"#;
+        let (id, _) = extract_manifest_metadata(toml).unwrap();
+        assert!(id.contains('/'));
+        assert!(id.contains('@'));
+    }
+
+    #[test]
+    fn extract_manifest_metadata_literal_string_id() {
+        // TOML literal string (single quotes)
+        let toml = r#"
+[connector]
+id = 'literal:conn:1.0.0'
+version = '1.0.0'
+"#;
+        let (id, version) = extract_manifest_metadata(toml).unwrap();
+        assert_eq!(id, "literal:conn:1.0.0");
+        assert_eq!(version, "1.0.0");
+    }
+
+    #[test]
+    fn extract_manifest_metadata_connector_is_array_fails() {
+        let toml = r#"
+[[connector]]
+id = "arr:conn:1"
+version = "1"
+"#;
+        // Array of tables, connector becomes an array not a table
+        let result = extract_manifest_metadata(toml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn extract_manifest_metadata_id_is_boolean_fails() {
+        let toml = r#"
+[connector]
+id = true
+version = "1.0.0"
+"#;
+        let result = extract_manifest_metadata(toml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn extract_manifest_metadata_version_is_float_fails() {
+        let toml = r#"
+[connector]
+id = "test:conn:1"
+version = 1.0
+"#;
+        let result = extract_manifest_metadata(toml);
+        assert!(result.is_err());
+    }
+
+    // ── find_manifest: additional coverage ────────────────────
+
+    #[test]
+    fn find_manifest_only_connector_manifest_toml() {
+        let dir = std::env::temp_dir().join("fcp-test-find-manifest-only-conn");
+        let _ = fs::create_dir_all(&dir);
+        let _ = fs::remove_file(dir.join("manifest.toml"));
+        let _ = fs::remove_file(dir.join("fcp-manifest.toml"));
+        fs::write(dir.join("connector-manifest.toml"), "# only connector").unwrap();
+        let result = find_manifest(&dir).unwrap();
+        assert_eq!(result, dir.join("connector-manifest.toml"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn find_manifest_all_three_present_picks_first() {
+        let dir = std::env::temp_dir().join("fcp-test-find-manifest-all-three");
+        let _ = fs::create_dir_all(&dir);
+        fs::write(dir.join("manifest.toml"), "# primary").unwrap();
+        fs::write(dir.join("fcp-manifest.toml"), "# secondary").unwrap();
+        fs::write(dir.join("connector-manifest.toml"), "# tertiary").unwrap();
+        let result = find_manifest(&dir).unwrap();
+        assert_eq!(result, dir.join("manifest.toml"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn find_manifest_ignores_non_manifest_toml_files() {
+        let dir = std::env::temp_dir().join("fcp-test-find-manifest-ignore-other");
+        let _ = fs::create_dir_all(&dir);
+        let _ = fs::remove_file(dir.join("manifest.toml"));
+        let _ = fs::remove_file(dir.join("fcp-manifest.toml"));
+        let _ = fs::remove_file(dir.join("connector-manifest.toml"));
+        fs::write(dir.join("Cargo.toml"), "[package]").unwrap();
+        fs::write(dir.join("config.toml"), "# config").unwrap();
+        let result = find_manifest(&dir);
+        assert!(result.is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ── resolve_target_dir: additional coverage ──────────────
+
+    #[test]
+    fn resolve_target_dir_with_trailing_slash_path() {
+        let resolved = resolve_target_dir(Path::new("/proj/"), "release");
+        assert!(resolved.to_string_lossy().contains("target"));
+        assert!(resolved.to_string_lossy().contains("release"));
+    }
+
+    #[test]
+    fn resolve_target_dir_hyphenated_profile_name() {
+        let resolved = resolve_target_dir(Path::new("/proj"), "release-opt");
+        assert_eq!(resolved, Path::new("/proj/target/release-opt"));
+    }
+
+    #[test]
+    fn resolve_target_dir_deeply_nested_crate() {
+        let resolved =
+            resolve_target_dir(Path::new("/a/b/c/d/e/f/g/h/i/j/k/crate"), "release");
+        assert_eq!(
+            resolved,
+            Path::new("/a/b/c/d/e/f/g/h/i/j/k/crate/target/release")
+        );
+    }
+
+    // ── print_human_output: additional coverage ──────────────
+
+    #[test]
+    fn print_human_output_very_long_paths_does_not_panic() {
+        let long_segment = "x".repeat(500);
+        let output = PackageOutput {
+            output_dir: PathBuf::from(format!("/tmp/{long_segment}")),
+            binary_path: PathBuf::from(format!("/tmp/{long_segment}/bin")),
+            manifest_path: PathBuf::from(format!("/tmp/{long_segment}/manifest.toml")),
+            sbom_path: Some(PathBuf::from(format!("/tmp/{long_segment}/sbom.json"))),
+            build_metadata_path: PathBuf::from(format!("/tmp/{long_segment}/build.json")),
+            binary_sha256: "a".repeat(64),
+            connector_id: "long-path:test:1.0.0".to_string(),
+            version: "1.0.0".to_string(),
+        };
+        print_human_output(&output);
+    }
+
+    #[test]
+    fn print_human_output_special_chars_in_version() {
+        let output = PackageOutput {
+            output_dir: PathBuf::from("/tmp"),
+            binary_path: PathBuf::from("/tmp/bin"),
+            manifest_path: PathBuf::from("/tmp/manifest.toml"),
+            sbom_path: None,
+            build_metadata_path: PathBuf::from("/tmp/build.json"),
+            binary_sha256: "abc".to_string(),
+            connector_id: "test:conn:0.1.0-alpha+build.123".to_string(),
+            version: "0.1.0-alpha+build.123".to_string(),
+        };
+        print_human_output(&output);
+    }
+
+    // ── PackageOutput: additional serde edge cases ───────────
+
+    #[test]
+    fn package_output_deserialize_all_paths_absolute() {
+        let json = r#"{
+            "output_dir": "/absolute/path",
+            "binary_path": "/absolute/path/bin",
+            "manifest_path": "/absolute/path/manifest.toml",
+            "sbom_path": "/absolute/path/sbom.json",
+            "build_metadata_path": "/absolute/path/build.json",
+            "binary_sha256": "abcdef",
+            "connector_id": "test:conn:1.0.0",
+            "version": "1.0.0"
+        }"#;
+        let output: PackageOutput = serde_json::from_str(json).unwrap();
+        assert!(output.output_dir.is_absolute());
+        assert!(output.binary_path.is_absolute());
+        assert!(output.manifest_path.is_absolute());
+        assert!(output.sbom_path.unwrap().is_absolute());
+        assert!(output.build_metadata_path.is_absolute());
+    }
+
+    #[test]
+    fn package_output_deserialize_relative_paths() {
+        let json = r#"{
+            "output_dir": "relative/output",
+            "binary_path": "relative/output/bin",
+            "manifest_path": "relative/manifest.toml",
+            "build_metadata_path": "relative/build.json",
+            "binary_sha256": "abc",
+            "connector_id": "c:t:1",
+            "version": "1"
+        }"#;
+        let output: PackageOutput = serde_json::from_str(json).unwrap();
+        assert!(output.output_dir.is_relative());
+    }
+
+    #[test]
+    fn package_output_json_roundtrip_with_long_hash() {
+        let hash = "a".repeat(64);
+        let output = PackageOutput {
+            output_dir: PathBuf::from("/out"),
+            binary_path: PathBuf::from("/out/bin"),
+            manifest_path: PathBuf::from("/out/m.toml"),
+            sbom_path: None,
+            build_metadata_path: PathBuf::from("/out/build.json"),
+            binary_sha256: hash.clone(),
+            connector_id: "c:t:1".to_string(),
+            version: "1".to_string(),
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        let back: PackageOutput = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.binary_sha256, hash);
+    }
+
+    #[test]
+    fn package_output_debug_contains_all_fields() {
+        let output = PackageOutput {
+            output_dir: PathBuf::from("/debug/test"),
+            binary_path: PathBuf::from("/debug/test/bin"),
+            manifest_path: PathBuf::from("/debug/test/m.toml"),
+            sbom_path: Some(PathBuf::from("/debug/test/sbom.json")),
+            build_metadata_path: PathBuf::from("/debug/test/build.json"),
+            binary_sha256: "debug123".to_string(),
+            connector_id: "dbg:conn:1.0.0".to_string(),
+            version: "1.0.0".to_string(),
+        };
+        let dbg = format!("{output:?}");
+        assert!(dbg.contains("debug123"));
+        assert!(dbg.contains("dbg:conn:1.0.0"));
+        assert!(dbg.contains("1.0.0"));
+    }
+
+    // ── BuildMetadata: additional coverage ────────────────────
+
+    #[test]
+    fn build_metadata_json_roundtrip_with_all_env_keys() {
+        let mut env = HashMap::new();
+        env.insert("RUSTFLAGS".to_string(), "-C opt-level=3".to_string());
+        env.insert(
+            "CARGO_ENCODED_RUSTFLAGS".to_string(),
+            "-Cdebuginfo=0".to_string(),
+        );
+        env.insert("CARGO_INCREMENTAL".to_string(), "0".to_string());
+        env.insert("CC".to_string(), "clang".to_string());
+        env.insert("CXX".to_string(), "clang++".to_string());
+        env.insert(
+            "TARGET".to_string(),
+            "x86_64-unknown-linux-gnu".to_string(),
+        );
+        let meta = BuildMetadata {
+            rust_version: "1.85.0-nightly".to_string(),
+            cargo_version: "1.85.0-nightly".to_string(),
+            target_triple: "x86_64-unknown-linux-gnu".to_string(),
+            build_timestamp: "2026-03-12T00:00:00Z".to_string(),
+            profile: "release".to_string(),
+            git_commit: Some("abc123def456".to_string()),
+            git_dirty: Some(false),
+            features: vec!["default".to_string(), "tls".to_string()],
+            build_env: env,
+            cargo_flags: vec!["--release".to_string(), "--locked".to_string()],
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        let back: BuildMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.build_env.len(), 6);
+        assert_eq!(back.build_env["CC"], "clang");
+        assert_eq!(back.build_env["CXX"], "clang++");
+        assert_eq!(back.features.len(), 2);
+    }
+
+    #[test]
+    fn build_metadata_debug_profile_string() {
+        let meta = BuildMetadata {
+            rust_version: "1.85.0".to_string(),
+            cargo_version: "1.85.0".to_string(),
+            target_triple: "x86_64".to_string(),
+            build_timestamp: "now".to_string(),
+            profile: "debug".to_string(),
+            git_commit: None,
+            git_dirty: None,
+            features: vec![],
+            build_env: HashMap::new(),
+            cargo_flags: vec![],
+        };
+        assert_eq!(meta.profile, "debug");
+        let dbg = format!("{meta:?}");
+        assert!(dbg.contains("profile"));
+        assert!(dbg.contains("debug"));
+    }
+
+    #[test]
+    fn build_metadata_release_profile_string() {
+        let meta = BuildMetadata {
+            rust_version: "1.85.0".to_string(),
+            cargo_version: "1.85.0".to_string(),
+            target_triple: "aarch64-apple-darwin".to_string(),
+            build_timestamp: "now".to_string(),
+            profile: "release".to_string(),
+            git_commit: None,
+            git_dirty: None,
+            features: vec![],
+            build_env: HashMap::new(),
+            cargo_flags: vec![],
+        };
+        assert_eq!(meta.profile, "release");
+    }
+
+    #[test]
+    fn build_metadata_clone_is_independent() {
+        let mut env = HashMap::new();
+        env.insert("CC".to_string(), "gcc".to_string());
+        let meta = BuildMetadata {
+            rust_version: "1.85.0".to_string(),
+            cargo_version: "1.85.0".to_string(),
+            target_triple: "x86_64".to_string(),
+            build_timestamp: "now".to_string(),
+            profile: "release".to_string(),
+            git_commit: Some("abc".to_string()),
+            git_dirty: Some(false),
+            features: vec!["default".to_string()],
+            build_env: env,
+            cargo_flags: vec!["--release".to_string()],
+        };
+        let mut cloned = meta.clone();
+        cloned.features.push("extra".to_string());
+        cloned
+            .build_env
+            .insert("NEW".to_string(), "val".to_string());
+        cloned.cargo_flags.push("--locked".to_string());
+        // Original should be unchanged
+        assert_eq!(meta.features.len(), 1);
+        assert_eq!(meta.build_env.len(), 1);
+        assert_eq!(meta.cargo_flags.len(), 1);
+    }
+
+    #[test]
+    fn build_metadata_git_commit_long_hash() {
+        let long_hash = "a".repeat(40); // typical full SHA-1
+        let meta = BuildMetadata {
+            rust_version: "1.85.0".to_string(),
+            cargo_version: "1.85.0".to_string(),
+            target_triple: "x86_64".to_string(),
+            build_timestamp: "now".to_string(),
+            profile: "release".to_string(),
+            git_commit: Some(long_hash.clone()),
+            git_dirty: Some(false),
+            features: vec![],
+            build_env: HashMap::new(),
+            cargo_flags: vec![],
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        let back: BuildMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.git_commit.unwrap().len(), 40);
+    }
+
+    #[test]
+    fn build_metadata_timestamp_iso8601_format() {
+        let meta = BuildMetadata {
+            rust_version: "1.85.0".to_string(),
+            cargo_version: "1.85.0".to_string(),
+            target_triple: "x86_64".to_string(),
+            build_timestamp: "2026-03-12T15:30:00+00:00".to_string(),
+            profile: "release".to_string(),
+            git_commit: None,
+            git_dirty: None,
+            features: vec![],
+            build_env: HashMap::new(),
+            cargo_flags: vec![],
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        let back: BuildMetadata = serde_json::from_str(&json).unwrap();
+        assert!(back.build_timestamp.contains('T'));
+        assert!(back.build_timestamp.contains("2026"));
+    }
+
+    // ── PACKAGE_OUTPUT_FILENAME: additional coverage ─────────
+
+    #[test]
+    fn package_output_filename_has_no_whitespace() {
+        assert!(!PACKAGE_OUTPUT_FILENAME.contains(' '));
+        assert!(!PACKAGE_OUTPUT_FILENAME.contains('\t'));
+        assert!(!PACKAGE_OUTPUT_FILENAME.contains('\n'));
+    }
+
+    #[test]
+    fn package_output_filename_is_ascii() {
+        assert!(PACKAGE_OUTPUT_FILENAME.is_ascii());
+    }
+
+    #[test]
+    fn package_output_filename_starts_with_package() {
+        assert!(PACKAGE_OUTPUT_FILENAME.starts_with("package"));
+    }
+
+    // ── PackageOutput: sbom_path serde behavior ──────────────
+
+    #[test]
+    fn package_output_sbom_path_present_serializes_as_string() {
+        let output = PackageOutput {
+            output_dir: PathBuf::from("/a"),
+            binary_path: PathBuf::from("/b"),
+            manifest_path: PathBuf::from("/c"),
+            sbom_path: Some(PathBuf::from("/d/sbom.json")),
+            build_metadata_path: PathBuf::from("/e"),
+            binary_sha256: "fff".to_string(),
+            connector_id: "x:y:1".to_string(),
+            version: "1".to_string(),
+        };
+        let v: serde_json::Value = serde_json::to_value(&output).unwrap();
+        assert_eq!(v["sbom_path"].as_str().unwrap(), "/d/sbom.json");
+    }
+
+    #[test]
+    fn package_output_clone_preserves_sbom_some_value() {
+        let output = PackageOutput {
+            output_dir: PathBuf::from("/a"),
+            binary_path: PathBuf::from("/b"),
+            manifest_path: PathBuf::from("/c"),
+            sbom_path: Some(PathBuf::from("/d")),
+            build_metadata_path: PathBuf::from("/e"),
+            binary_sha256: "xyz".to_string(),
+            connector_id: "x:y:1".to_string(),
+            version: "1".to_string(),
+        };
+        let cloned = output.clone();
+        assert_eq!(cloned.sbom_path, Some(PathBuf::from("/d")));
+    }
+
+    // ── PackageOutput: version edge cases ────────────────────
+
+    #[test]
+    fn package_output_version_with_build_metadata() {
+        let output = PackageOutput {
+            output_dir: PathBuf::from("/a"),
+            binary_path: PathBuf::from("/b"),
+            manifest_path: PathBuf::from("/c"),
+            sbom_path: None,
+            build_metadata_path: PathBuf::from("/d"),
+            binary_sha256: "abc".to_string(),
+            connector_id: "c:t:1.2.3+build.456".to_string(),
+            version: "1.2.3+build.456".to_string(),
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        let back: PackageOutput = serde_json::from_str(&json).unwrap();
+        assert!(back.version.contains('+'));
+        assert_eq!(back.version, "1.2.3+build.456");
+    }
+
+    #[test]
+    fn package_output_version_prerelease() {
+        let output = PackageOutput {
+            output_dir: PathBuf::from("/a"),
+            binary_path: PathBuf::from("/b"),
+            manifest_path: PathBuf::from("/c"),
+            sbom_path: None,
+            build_metadata_path: PathBuf::from("/d"),
+            binary_sha256: "abc".to_string(),
+            connector_id: "c:t:0.0.1-dev.3".to_string(),
+            version: "0.0.1-dev.3".to_string(),
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        let back: PackageOutput = serde_json::from_str(&json).unwrap();
+        assert!(back.version.contains("-dev"));
+    }
+
+    // ── BuildMetadata: JSON field order stability ─────────────
+
+    #[test]
+    fn build_metadata_json_value_types() {
+        let mut env = HashMap::new();
+        env.insert("KEY".to_string(), "val".to_string());
+        let meta = BuildMetadata {
+            rust_version: "1.85.0".to_string(),
+            cargo_version: "1.85.0".to_string(),
+            target_triple: "x86_64".to_string(),
+            build_timestamp: "now".to_string(),
+            profile: "release".to_string(),
+            git_commit: Some("abc".to_string()),
+            git_dirty: Some(true),
+            features: vec!["f1".to_string()],
+            build_env: env,
+            cargo_flags: vec!["--release".to_string()],
+        };
+        let v: serde_json::Value = serde_json::to_value(&meta).unwrap();
+        assert!(v["rust_version"].is_string());
+        assert!(v["cargo_version"].is_string());
+        assert!(v["target_triple"].is_string());
+        assert!(v["build_timestamp"].is_string());
+        assert!(v["profile"].is_string());
+        assert!(v["git_commit"].is_string());
+        assert!(v["git_dirty"].is_boolean());
+        assert!(v["features"].is_array());
+        assert!(v["build_env"].is_object());
+        assert!(v["cargo_flags"].is_array());
+    }
+
+    // ── PackageOutput: connector_id edge cases ───────────────
+
+    #[test]
+    fn package_output_connector_id_with_many_colons() {
+        let output = PackageOutput {
+            output_dir: PathBuf::from("/a"),
+            binary_path: PathBuf::from("/b"),
+            manifest_path: PathBuf::from("/c"),
+            sbom_path: None,
+            build_metadata_path: PathBuf::from("/d"),
+            binary_sha256: "abc".to_string(),
+            connector_id: "a:b:c:d:e:1.0.0".to_string(),
+            version: "1.0.0".to_string(),
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        let back: PackageOutput = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back.connector_id.matches(':').count(),
+            5,
+            "all colons should survive roundtrip"
+        );
+    }
+
+    #[test]
+    fn package_output_empty_version_roundtrip() {
+        let output = PackageOutput {
+            output_dir: PathBuf::from("/a"),
+            binary_path: PathBuf::from("/b"),
+            manifest_path: PathBuf::from("/c"),
+            sbom_path: None,
+            build_metadata_path: PathBuf::from("/d"),
+            binary_sha256: "abc".to_string(),
+            connector_id: "c:t:".to_string(),
+            version: String::new(),
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        let back: PackageOutput = serde_json::from_str(&json).unwrap();
+        assert!(back.version.is_empty());
+    }
+
+    // ── find_manifest: returns expected file path type ────────
+
+    #[test]
+    fn find_manifest_returns_absolute_path_for_absolute_input() {
+        let dir = std::env::temp_dir().join("fcp-test-find-manifest-abs");
+        let _ = fs::create_dir_all(&dir);
+        fs::write(dir.join("manifest.toml"), "# test").unwrap();
+        let result = find_manifest(&dir).unwrap();
+        assert!(result.is_absolute());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ── compute_sha256: consistency across reads ─────────────
+
+    #[test]
+    fn compute_sha256_consistent_across_ten_reads() {
+        let dir = std::env::temp_dir().join("fcp-test-sha256-ten");
+        let _ = fs::create_dir_all(&dir);
+        let file = dir.join("ten.txt");
+        fs::write(&file, b"consistency check").unwrap();
+        let first = compute_sha256(&file).unwrap();
+        for _ in 0..9 {
+            assert_eq!(compute_sha256(&file).unwrap(), first);
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

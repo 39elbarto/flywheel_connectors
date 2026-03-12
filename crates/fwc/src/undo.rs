@@ -1225,4 +1225,822 @@ mod tests {
         let g = reg.guidance("stripe.charge").unwrap();
         assert!(g.contains("refund"));
     }
+
+    // ── Clone impls ──────────────────────────────────────────────────────
+
+    #[test]
+    fn undo_error_clone() {
+        let err = UndoError::MissingOutputField("ts".to_owned());
+        let cloned = err.clone();
+        assert_eq!(err, cloned);
+    }
+
+    #[test]
+    fn undo_error_clone_no_inverse() {
+        let err = UndoError::NoInverse;
+        let cloned = err.clone();
+        assert_eq!(err, cloned);
+    }
+
+    #[test]
+    fn undo_error_clone_operation_not_found() {
+        let err = UndoError::OperationNotFound;
+        let cloned = err.clone();
+        assert_eq!(err, cloned);
+    }
+
+    #[test]
+    fn undo_error_clone_input_mapping_failed() {
+        let err = UndoError::InputMappingFailed("path broken".to_owned());
+        let cloned = err.clone();
+        assert_eq!(err, cloned);
+    }
+
+    #[test]
+    fn inverse_mapping_clone() {
+        let mapping = InverseMapping {
+            inverse_operation: "github.close_issue".to_owned(),
+            input_mapping: BTreeMap::from([("owner".to_owned(), "$.input.owner".to_owned())]),
+        };
+        let cloned = mapping.clone();
+        assert_eq!(mapping, cloned);
+    }
+
+    #[test]
+    fn undo_plan_clone() {
+        let plan = UndoPlan {
+            original_entry_id: "e1".to_owned(),
+            original_operation: "op.a".to_owned(),
+            inverse_operation: "op.b".to_owned(),
+            inverse_input: json!({"x": 1}),
+            risk_level: "low".to_owned(),
+            requires_confirmation: false,
+            warnings: vec!["w1".to_owned()],
+        };
+        let cloned = plan.clone();
+        assert_eq!(plan, cloned);
+    }
+
+    #[test]
+    fn reversibility_check_clone() {
+        let check = ReversibilityCheck {
+            operation_id: "test.op".to_owned(),
+            reversible: true,
+            inverse_operation: Some("test.inv".to_owned()),
+            guidance: "ok".to_owned(),
+        };
+        let cloned = check.clone();
+        assert_eq!(check, cloned);
+    }
+
+    #[test]
+    fn undo_registry_clone() {
+        let reg = UndoRegistry::new();
+        let cloned = reg.clone();
+        assert_eq!(reg.len(), cloned.len());
+        // Verify a lookup works on clone
+        assert!(cloned.lookup("github.create_issue").is_some());
+    }
+
+    // ── Debug impls ──────────────────────────────────────────────────────
+
+    #[test]
+    fn undo_error_debug() {
+        let err = UndoError::NoInverse;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("NoInverse"));
+    }
+
+    #[test]
+    fn inverse_mapping_debug() {
+        let mapping = InverseMapping {
+            inverse_operation: "test.inv".to_owned(),
+            input_mapping: BTreeMap::new(),
+        };
+        let dbg = format!("{mapping:?}");
+        assert!(dbg.contains("test.inv"));
+    }
+
+    #[test]
+    fn undo_plan_debug() {
+        let plan = UndoPlan {
+            original_entry_id: "e1".to_owned(),
+            original_operation: "op.a".to_owned(),
+            inverse_operation: "op.b".to_owned(),
+            inverse_input: json!({}),
+            risk_level: "low".to_owned(),
+            requires_confirmation: false,
+            warnings: vec![],
+        };
+        let dbg = format!("{plan:?}");
+        assert!(dbg.contains("op.a"));
+    }
+
+    #[test]
+    fn reversibility_check_debug() {
+        let check = ReversibilityCheck {
+            operation_id: "x".to_owned(),
+            reversible: false,
+            inverse_operation: None,
+            guidance: "none".to_owned(),
+        };
+        let dbg = format!("{check:?}");
+        assert!(dbg.contains("reversible"));
+    }
+
+    #[test]
+    fn undo_registry_debug() {
+        let reg = UndoRegistry::new();
+        let dbg = format!("{reg:?}");
+        assert!(dbg.contains("UndoRegistry"));
+    }
+
+    // ── UndoError as std::error::Error ───────────────────────────────────
+
+    #[test]
+    fn undo_error_is_error_trait() {
+        let err: Box<dyn std::error::Error> = Box::new(UndoError::NoInverse);
+        assert!(err.to_string().contains("no known inverse"));
+    }
+
+    #[test]
+    fn undo_error_source_is_none() {
+        use std::error::Error;
+        let err = UndoError::NoInverse;
+        assert!(err.source().is_none());
+    }
+
+    // ── More path evaluation edge cases ──────────────────────────────────
+
+    #[test]
+    fn path_eval_output_root_returns_whole_output() {
+        let input = json!({});
+        let output = json!({"result": "ok"});
+        let val = evaluate_path("$.output", &input, &output).unwrap();
+        assert_eq!(val, json!({"result": "ok"}));
+    }
+
+    #[test]
+    fn path_eval_numeric_value() {
+        let input = json!({"count": 42});
+        let output = json!({});
+        let val = evaluate_path("$.input.count", &input, &output).unwrap();
+        assert_eq!(val, json!(42));
+    }
+
+    #[test]
+    fn path_eval_float_value() {
+        let input = json!({"price": 9.99});
+        let output = json!({});
+        let val = evaluate_path("$.input.price", &input, &output).unwrap();
+        assert_eq!(val, json!(9.99));
+    }
+
+    #[test]
+    fn path_eval_nested_object_returned_as_object() {
+        let input = json!({});
+        let output = json!({"meta": {"key": "val", "num": 1}});
+        let val = evaluate_path("$.output.meta", &input, &output).unwrap();
+        assert!(val.is_object());
+        assert_eq!(val["key"], json!("val"));
+    }
+
+    #[test]
+    fn path_eval_array_returned_as_array() {
+        let input = json!({"tags": ["a", "b"]});
+        let output = json!({});
+        let val = evaluate_path("$.input.tags", &input, &output).unwrap();
+        assert!(val.is_array());
+        assert_eq!(val.as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn path_eval_nested_array_index() {
+        let input = json!({});
+        let output = json!({"data": {"items": [100, 200, 300]}});
+        let val = evaluate_path("$.output.data.items[2]", &input, &output).unwrap();
+        assert_eq!(val, json!(300));
+    }
+
+    #[test]
+    fn path_eval_empty_string_value() {
+        let input = json!({"name": ""});
+        let output = json!({});
+        let val = evaluate_path("$.input.name", &input, &output).unwrap();
+        assert_eq!(val, json!(""));
+    }
+
+    #[test]
+    fn path_eval_empty_array_at_field() {
+        let input = json!({"items": []});
+        let output = json!({});
+        let val = evaluate_path("$.input.items", &input, &output).unwrap();
+        assert_eq!(val, json!([]));
+    }
+
+    #[test]
+    fn path_eval_empty_array_index_out_of_bounds() {
+        let input = json!({"items": []});
+        let output = json!({});
+        let err = evaluate_path("$.input.items[0]", &input, &output).unwrap_err();
+        assert!(err.contains("out of bounds"), "got: {err}");
+    }
+
+    #[test]
+    fn path_eval_bare_array_index_on_root_array() {
+        // When root itself might need indexing — but evaluate_path requires $.input/output first
+        let input = json!({"arr": [[1, 2], [3, 4]]});
+        let output = json!({});
+        let val = evaluate_path("$.input.arr[1]", &input, &output).unwrap();
+        assert_eq!(val, json!([3, 4]));
+    }
+
+    #[test]
+    fn path_eval_nested_object_in_array() {
+        let input = json!({});
+        let output = json!({"results": [{"id": "a"}, {"id": "b"}]});
+        let val = evaluate_path("$.output.results[1]", &input, &output).unwrap();
+        assert_eq!(val, json!({"id": "b"}));
+    }
+
+    #[test]
+    fn path_eval_dollar_only_is_error() {
+        let err = evaluate_path("$", &json!({}), &json!({})).unwrap_err();
+        assert!(err.contains("must start with"), "got: {err}");
+    }
+
+    #[test]
+    fn path_eval_dollar_dot_only_unknown_root() {
+        // "$." means rest="" → root_name="" which is unknown
+        let err = evaluate_path("$.", &json!({}), &json!({})).unwrap_err();
+        assert!(err.contains("unknown root"), "got: {err}");
+    }
+
+    #[test]
+    fn path_eval_triple_nested_field() {
+        let input = json!({});
+        let output = json!({"level1": {"level2": {"level3": {"level4": 999}}}});
+        let val = evaluate_path("$.output.level1.level2.level3.level4", &input, &output).unwrap();
+        assert_eq!(val, json!(999));
+    }
+
+    #[test]
+    fn path_eval_field_not_found_on_non_object() {
+        let input = json!({"x": 42});
+        let output = json!({});
+        let err = evaluate_path("$.input.x.y", &input, &output).unwrap_err();
+        assert!(err.contains("not found"), "got: {err}");
+    }
+
+    // ── More plan_undo scenarios ─────────────────────────────────────────
+
+    #[test]
+    fn plan_discord_inverse() {
+        let reg = UndoRegistry::new();
+        let input = json!({"channel_id": "ch-1"});
+        let output = json!({"id": "msg-42"});
+        let plan = plan_undo(&reg, "discord.send_message", &input, &output).unwrap();
+        assert_eq!(plan.inverse_operation, "discord.delete_message");
+        assert_eq!(plan.inverse_input["channel_id"], json!("ch-1"));
+        assert_eq!(plan.inverse_input["message_id"], json!("msg-42"));
+        assert_eq!(plan.risk_level, "high");
+    }
+
+    #[test]
+    fn plan_todoist_inverse() {
+        let reg = UndoRegistry::new();
+        let input = json!({});
+        let output = json!({"id": "task-99"});
+        let plan = plan_undo(&reg, "todoist.create_task", &input, &output).unwrap();
+        assert_eq!(plan.inverse_operation, "todoist.close_task");
+        assert_eq!(plan.inverse_input["task_id"], json!("task-99"));
+    }
+
+    #[test]
+    fn plan_linear_inverse() {
+        let reg = UndoRegistry::new();
+        let input = json!({});
+        let output = json!({"id": "LIN-42"});
+        let plan = plan_undo(&reg, "linear.create_issue", &input, &output).unwrap();
+        assert_eq!(plan.inverse_operation, "linear.close_issue");
+        assert_eq!(plan.inverse_input["issue_id"], json!("LIN-42"));
+    }
+
+    #[test]
+    fn plan_notion_inverse() {
+        let reg = UndoRegistry::new();
+        let input = json!({});
+        let output = json!({"id": "page-abc"});
+        let plan = plan_undo(&reg, "notion.create_page", &input, &output).unwrap();
+        assert_eq!(plan.inverse_operation, "notion.archive_page");
+        assert_eq!(plan.inverse_input["page_id"], json!("page-abc"));
+        assert_eq!(plan.risk_level, "medium");
+    }
+
+    #[test]
+    fn plan_jira_inverse() {
+        let reg = UndoRegistry::new();
+        let input = json!({"project": "PROJ"});
+        let output = json!({"key": "PROJ-123"});
+        let plan = plan_undo(&reg, "jira.create_issue", &input, &output).unwrap();
+        assert_eq!(plan.inverse_operation, "jira.close_issue");
+        assert_eq!(plan.inverse_input["issue_key"], json!("PROJ-123"));
+        assert_eq!(plan.inverse_input["project"], json!("PROJ"));
+    }
+
+    #[test]
+    fn plan_trello_inverse() {
+        let reg = UndoRegistry::new();
+        let input = json!({});
+        let output = json!({"id": "card-7"});
+        let plan = plan_undo(&reg, "trello.create_card", &input, &output).unwrap();
+        assert_eq!(plan.inverse_operation, "trello.archive_card");
+        assert_eq!(plan.inverse_input["card_id"], json!("card-7"));
+    }
+
+    #[test]
+    fn plan_asana_inverse() {
+        let reg = UndoRegistry::new();
+        let input = json!({});
+        let output = json!({"gid": "12345"});
+        let plan = plan_undo(&reg, "asana.create_task", &input, &output).unwrap();
+        assert_eq!(plan.inverse_operation, "asana.close_task");
+        assert_eq!(plan.inverse_input["task_gid"], json!("12345"));
+    }
+
+    #[test]
+    fn plan_kubernetes_inverse() {
+        let reg = UndoRegistry::new();
+        let input = json!({"namespace": "default", "name": "my-pod"});
+        let output = json!({});
+        let plan = plan_undo(&reg, "kubernetes.create_pod", &input, &output).unwrap();
+        assert_eq!(plan.inverse_operation, "kubernetes.delete_pod");
+        assert_eq!(plan.inverse_input["namespace"], json!("default"));
+        assert_eq!(plan.inverse_input["name"], json!("my-pod"));
+        assert_eq!(plan.risk_level, "high");
+        assert!(plan.requires_confirmation);
+    }
+
+    #[test]
+    fn plan_terraform_inverse() {
+        let reg = UndoRegistry::new();
+        let input = json!({"workspace": "prod", "config_dir": "/infra"});
+        let output = json!({});
+        let plan = plan_undo(&reg, "terraform.apply", &input, &output).unwrap();
+        assert_eq!(plan.inverse_operation, "terraform.destroy");
+        assert_eq!(plan.inverse_input["workspace"], json!("prod"));
+        assert_eq!(plan.inverse_input["config_dir"], json!("/infra"));
+        assert_eq!(plan.risk_level, "high");
+        assert!(plan.requires_confirmation);
+    }
+
+    #[test]
+    fn plan_s3_inverse() {
+        let reg = UndoRegistry::new();
+        let input = json!({"bucket": "my-bucket", "key": "path/to/file.txt"});
+        let output = json!({});
+        let plan = plan_undo(&reg, "s3.upload_object", &input, &output).unwrap();
+        assert_eq!(plan.inverse_operation, "s3.delete_object");
+        assert_eq!(plan.inverse_input["bucket"], json!("my-bucket"));
+        assert_eq!(plan.inverse_input["key"], json!("path/to/file.txt"));
+    }
+
+    #[test]
+    fn plan_stripe_inverse() {
+        let reg = UndoRegistry::new();
+        let input = json!({});
+        let output = json!({"id": "sub_abc123"});
+        let plan = plan_undo(&reg, "stripe.create_subscription", &input, &output).unwrap();
+        assert_eq!(plan.inverse_operation, "stripe.cancel_subscription");
+        assert_eq!(plan.inverse_input["subscription_id"], json!("sub_abc123"));
+        assert_eq!(plan.risk_level, "medium");
+    }
+
+    #[test]
+    fn plan_spotify_inverse() {
+        let reg = UndoRegistry::new();
+        let input = json!({"playlist_id": "pl-42"});
+        let output = json!({});
+        let plan = plan_undo(&reg, "spotify.follow_playlist", &input, &output).unwrap();
+        assert_eq!(plan.inverse_operation, "spotify.unfollow_playlist");
+        assert_eq!(plan.inverse_input["playlist_id"], json!("pl-42"));
+    }
+
+    #[test]
+    fn plan_generic_create_inverse() {
+        let reg = UndoRegistry::new();
+        let input = json!({});
+        let output = json!({"id": "gen-1"});
+        let plan = plan_undo(&reg, "generic.create", &input, &output).unwrap();
+        assert_eq!(plan.inverse_operation, "generic.delete");
+        assert_eq!(plan.inverse_input["id"], json!("gen-1"));
+        assert_eq!(plan.risk_level, "high");
+    }
+
+    #[test]
+    fn plan_generic_enable_inverse() {
+        let reg = UndoRegistry::new();
+        let input = json!({"id": "feat-1"});
+        let output = json!({});
+        let plan = plan_undo(&reg, "generic.enable", &input, &output).unwrap();
+        assert_eq!(plan.inverse_operation, "generic.disable");
+        assert_eq!(plan.inverse_input["id"], json!("feat-1"));
+        assert_eq!(plan.risk_level, "medium");
+    }
+
+    #[test]
+    fn plan_generic_add_inverse() {
+        let reg = UndoRegistry::new();
+        let input = json!({"id": "item-1"});
+        let output = json!({});
+        let plan = plan_undo(&reg, "generic.add", &input, &output).unwrap();
+        assert_eq!(plan.inverse_operation, "generic.remove");
+        assert_eq!(plan.inverse_input["id"], json!("item-1"));
+        assert_eq!(plan.risk_level, "medium");
+    }
+
+    #[test]
+    fn plan_generic_start_inverse() {
+        let reg = UndoRegistry::new();
+        let input = json!({"id": "proc-1"});
+        let output = json!({});
+        let plan = plan_undo(&reg, "generic.start", &input, &output).unwrap();
+        assert_eq!(plan.inverse_operation, "generic.stop");
+        assert_eq!(plan.inverse_input["id"], json!("proc-1"));
+        assert_eq!(plan.risk_level, "medium");
+    }
+
+    #[test]
+    fn plan_generic_subscribe_inverse() {
+        let reg = UndoRegistry::new();
+        let input = json!({});
+        let output = json!({"id": "sub-1"});
+        let plan = plan_undo(&reg, "generic.subscribe", &input, &output).unwrap();
+        assert_eq!(plan.inverse_operation, "generic.unsubscribe");
+        assert_eq!(plan.inverse_input["subscription_id"], json!("sub-1"));
+    }
+
+    #[test]
+    fn plan_github_add_label_inverse() {
+        let reg = UndoRegistry::new();
+        let input = json!({"owner": "acme", "repo": "w", "issue_number": 5, "label": "bug"});
+        let output = json!({});
+        let plan = plan_undo(&reg, "github.add_label", &input, &output).unwrap();
+        assert_eq!(plan.inverse_operation, "github.remove_label");
+        assert_eq!(plan.inverse_input["label"], json!("bug"));
+        assert_eq!(plan.inverse_input["issue_number"], json!(5));
+        assert_eq!(plan.risk_level, "medium");
+    }
+
+    #[test]
+    fn plan_github_pr_inverse() {
+        let reg = UndoRegistry::new();
+        let input = json!({"owner": "acme", "repo": "widgets"});
+        let output = json!({"pull_request": {"number": 101}});
+        let plan = plan_undo(&reg, "github.create_pull_request", &input, &output).unwrap();
+        assert_eq!(plan.inverse_operation, "github.close_pull_request");
+        assert_eq!(plan.inverse_input["pull_number"], json!(101));
+    }
+
+    #[test]
+    fn plan_github_create_repo_inverse() {
+        let reg = UndoRegistry::new();
+        let input = json!({});
+        let output = json!({"owner": {"login": "acme"}, "name": "new-repo"});
+        let plan = plan_undo(&reg, "github.create_repo", &input, &output).unwrap();
+        assert_eq!(plan.inverse_operation, "github.delete_repo");
+        assert_eq!(plan.inverse_input["owner"], json!("acme"));
+        assert_eq!(plan.inverse_input["repo"], json!("new-repo"));
+    }
+
+    // ── Multiple warnings ────────────────────────────────────────────────
+
+    #[test]
+    fn plan_multiple_null_fields_generate_multiple_warnings() {
+        let mut reg = UndoRegistry::new();
+        reg.register(
+            "test.multi_null",
+            InverseMapping {
+                inverse_operation: "test.inv".to_owned(),
+                input_mapping: BTreeMap::from([
+                    ("a".to_owned(), "$.input.a".to_owned()),
+                    ("b".to_owned(), "$.input.b".to_owned()),
+                    ("c".to_owned(), "$.input.c".to_owned()),
+                ]),
+            },
+        );
+        let plan = plan_undo(
+            &reg,
+            "test.multi_null",
+            &json!({"a": null, "b": null, "c": "ok"}),
+            &json!({}),
+        )
+        .unwrap();
+        assert_eq!(plan.warnings.len(), 2);
+    }
+
+    #[test]
+    fn plan_no_warnings_when_all_fields_present() {
+        let reg = UndoRegistry::new();
+        let input = json!({"channel": "C1"});
+        let output = json!({"ts": "123"});
+        let plan = plan_undo(&reg, "slack.send_message", &input, &output).unwrap();
+        assert!(plan.warnings.is_empty());
+    }
+
+    // ── Registry chaining ────────────────────────────────────────────────
+
+    #[test]
+    fn registry_register_chaining() {
+        let mut reg = UndoRegistry::new();
+        let before = reg.len();
+        reg.register(
+            "chain.a",
+            InverseMapping {
+                inverse_operation: "chain.a_inv".to_owned(),
+                input_mapping: BTreeMap::new(),
+            },
+        )
+        .register(
+            "chain.b",
+            InverseMapping {
+                inverse_operation: "chain.b_inv".to_owned(),
+                input_mapping: BTreeMap::new(),
+            },
+        );
+        assert_eq!(reg.len(), before + 2);
+        assert!(reg.lookup("chain.a").is_some());
+        assert!(reg.lookup("chain.b").is_some());
+    }
+
+    // ── classify_risk edge cases ─────────────────────────────────────────
+
+    #[test]
+    fn classify_risk_delete_uppercase_is_high() {
+        assert_eq!(classify_risk("s3.DELETE_object"), "high");
+    }
+
+    #[test]
+    fn classify_risk_close_is_medium() {
+        assert_eq!(classify_risk("github.close_issue"), "medium");
+    }
+
+    #[test]
+    fn classify_risk_cancel_is_medium() {
+        assert_eq!(classify_risk("stripe.cancel_subscription"), "medium");
+    }
+
+    #[test]
+    fn classify_risk_disable_is_medium() {
+        assert_eq!(classify_risk("generic.disable"), "medium");
+    }
+
+    #[test]
+    fn classify_risk_stop_is_medium() {
+        assert_eq!(classify_risk("generic.stop"), "medium");
+    }
+
+    #[test]
+    fn classify_risk_remove_is_medium() {
+        assert_eq!(classify_risk("github.remove_label"), "medium");
+    }
+
+    #[test]
+    fn classify_risk_unknown_verb_is_low() {
+        assert_eq!(classify_risk("custom.frobnicate"), "low");
+    }
+
+    #[test]
+    fn classify_risk_empty_string_is_low() {
+        assert_eq!(classify_risk(""), "low");
+    }
+
+    #[test]
+    fn classify_risk_mixed_case_destroy() {
+        assert_eq!(classify_risk("infra.DeStRoY_all"), "high");
+    }
+
+    // ── Reversibility check for more builtins ────────────────────────────
+
+    #[test]
+    fn reversibility_slack_send_message() {
+        let reg = UndoRegistry::new();
+        let check = check_reversibility(&reg, "slack.send_message");
+        assert!(check.reversible);
+        assert_eq!(check.inverse_operation.as_deref(), Some("slack.delete_message"));
+    }
+
+    #[test]
+    fn reversibility_kubernetes_create_pod() {
+        let reg = UndoRegistry::new();
+        let check = check_reversibility(&reg, "kubernetes.create_pod");
+        assert!(check.reversible);
+        assert_eq!(check.inverse_operation.as_deref(), Some("kubernetes.delete_pod"));
+    }
+
+    #[test]
+    fn reversibility_stripe_charge_not_reversible() {
+        let reg = UndoRegistry::new();
+        let check = check_reversibility(&reg, "stripe.charge");
+        assert!(!check.reversible);
+        assert!(check.guidance.contains("refund"));
+    }
+
+    #[test]
+    fn reversibility_twilio_send_sms_not_reversible() {
+        let reg = UndoRegistry::new();
+        let check = check_reversibility(&reg, "twilio.send_sms");
+        assert!(!check.reversible);
+        assert!(check.guidance.contains("recalled"));
+    }
+
+    #[test]
+    fn reversibility_terraform_apply() {
+        let reg = UndoRegistry::new();
+        let check = check_reversibility(&reg, "terraform.apply");
+        assert!(check.reversible);
+        assert_eq!(check.inverse_operation.as_deref(), Some("terraform.destroy"));
+    }
+
+    #[test]
+    fn reversibility_check_operation_id_preserved() {
+        let reg = UndoRegistry::new();
+        let check = check_reversibility(&reg, "github.create_issue");
+        assert_eq!(check.operation_id, "github.create_issue");
+    }
+
+    #[test]
+    fn reversibility_check_guidance_format_for_reversible() {
+        let reg = UndoRegistry::new();
+        let check = check_reversibility(&reg, "s3.upload_object");
+        assert!(check.guidance.starts_with("Can be reversed via"));
+    }
+
+    // ── Serde edge cases ─────────────────────────────────────────────────
+
+    #[test]
+    fn undo_plan_serde_with_empty_warnings() {
+        let plan = UndoPlan {
+            original_entry_id: String::new(),
+            original_operation: "op".to_owned(),
+            inverse_operation: "inv".to_owned(),
+            inverse_input: json!({}),
+            risk_level: "low".to_owned(),
+            requires_confirmation: false,
+            warnings: vec![],
+        };
+        let json_str = serde_json::to_string(&plan).unwrap();
+        let restored: UndoPlan = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(plan, restored);
+        assert!(restored.warnings.is_empty());
+    }
+
+    #[test]
+    fn undo_plan_serde_with_complex_inverse_input() {
+        let plan = UndoPlan {
+            original_entry_id: "e".to_owned(),
+            original_operation: "op".to_owned(),
+            inverse_operation: "inv".to_owned(),
+            inverse_input: json!({"nested": {"deep": [1, 2, 3]}, "flag": true}),
+            risk_level: "high".to_owned(),
+            requires_confirmation: true,
+            warnings: vec!["w1".to_owned(), "w2".to_owned()],
+        };
+        let json_str = serde_json::to_string(&plan).unwrap();
+        let restored: UndoPlan = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(plan, restored);
+    }
+
+    #[test]
+    fn inverse_mapping_serde_empty_input_mapping() {
+        let mapping = InverseMapping {
+            inverse_operation: "test.inv".to_owned(),
+            input_mapping: BTreeMap::new(),
+        };
+        let json_str = serde_json::to_string(&mapping).unwrap();
+        let restored: InverseMapping = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(mapping, restored);
+    }
+
+    #[test]
+    fn reversibility_check_serde_not_reversible() {
+        let check = ReversibilityCheck {
+            operation_id: "gmail.send_email".to_owned(),
+            reversible: false,
+            inverse_operation: None,
+            guidance: "Cannot be unsent.".to_owned(),
+        };
+        let json_str = serde_json::to_string(&check).unwrap();
+        let restored: ReversibilityCheck = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(check, restored);
+    }
+
+    // ── Equality / inequality ────────────────────────────────────────────
+
+    #[test]
+    fn undo_error_ne_different_variants() {
+        assert_ne!(UndoError::NoInverse, UndoError::OperationNotFound);
+    }
+
+    #[test]
+    fn undo_error_ne_different_fields() {
+        assert_ne!(
+            UndoError::MissingOutputField("a".to_owned()),
+            UndoError::MissingOutputField("b".to_owned()),
+        );
+    }
+
+    #[test]
+    fn undo_plan_ne_different_risk() {
+        let plan_a = UndoPlan {
+            original_entry_id: String::new(),
+            original_operation: "op".to_owned(),
+            inverse_operation: "inv".to_owned(),
+            inverse_input: json!({}),
+            risk_level: "low".to_owned(),
+            requires_confirmation: false,
+            warnings: vec![],
+        };
+        let mut plan_b = plan_a.clone();
+        plan_b.risk_level = "high".to_owned();
+        assert_ne!(plan_a, plan_b);
+    }
+
+    // ── Builtin mapping field counts ─────────────────────────────────────
+
+    #[test]
+    fn github_create_issue_mapping_has_three_fields() {
+        let reg = UndoRegistry::new();
+        let m = reg.lookup("github.create_issue").unwrap();
+        assert_eq!(m.input_mapping.len(), 3);
+    }
+
+    #[test]
+    fn slack_mapping_has_two_fields() {
+        let reg = UndoRegistry::new();
+        let m = reg.lookup("slack.send_message").unwrap();
+        assert_eq!(m.input_mapping.len(), 2);
+    }
+
+    #[test]
+    fn todoist_mapping_has_one_field() {
+        let reg = UndoRegistry::new();
+        let m = reg.lookup("todoist.create_task").unwrap();
+        assert_eq!(m.input_mapping.len(), 1);
+    }
+
+    #[test]
+    fn github_add_label_mapping_has_four_fields() {
+        let reg = UndoRegistry::new();
+        let m = reg.lookup("github.add_label").unwrap();
+        assert_eq!(m.input_mapping.len(), 4);
+    }
+
+    #[test]
+    fn terraform_mapping_has_two_fields() {
+        let reg = UndoRegistry::new();
+        let m = reg.lookup("terraform.apply").unwrap();
+        assert_eq!(m.input_mapping.len(), 2);
+    }
+
+    // ── plan_undo original_entry_id is empty ─────────────────────────────
+
+    #[test]
+    fn plan_original_entry_id_is_empty() {
+        let reg = UndoRegistry::new();
+        let input = json!({"channel": "C1"});
+        let output = json!({"ts": "t1"});
+        let plan = plan_undo(&reg, "slack.send_message", &input, &output).unwrap();
+        assert!(plan.original_entry_id.is_empty());
+    }
+
+    // ── path evaluation with special characters ──────────────────────────
+
+    #[test]
+    fn path_eval_value_with_special_chars() {
+        let input = json!({"msg": "hello world! @#$%"});
+        let output = json!({});
+        let val = evaluate_path("$.input.msg", &input, &output).unwrap();
+        assert_eq!(val, json!("hello world! @#$%"));
+    }
+
+    #[test]
+    fn path_eval_unicode_value() {
+        let input = json!({"name": "caf\u{00e9}"});
+        let output = json!({});
+        let val = evaluate_path("$.input.name", &input, &output).unwrap();
+        assert_eq!(val, json!("caf\u{00e9}"));
+    }
+
+    #[test]
+    fn path_eval_large_array_index() {
+        let mut arr = Vec::new();
+        for i in 0..50 {
+            arr.push(json!(i));
+        }
+        let input = json!({"big": arr});
+        let output = json!({});
+        let val = evaluate_path("$.input.big[49]", &input, &output).unwrap();
+        assert_eq!(val, json!(49));
+    }
 }

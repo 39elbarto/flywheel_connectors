@@ -1236,4 +1236,998 @@ mod tests {
         assert_eq!(loaded.progress.total, 0);
         assert!(loaded.results.is_empty());
     }
+
+    // ── BatchPhase extended tests ─────────────────────────────────
+
+    #[test]
+    fn phase_clone_all_variants() {
+        for phase in [
+            BatchPhase::Preparing,
+            BatchPhase::Running,
+            BatchPhase::Completed,
+            BatchPhase::Interrupted,
+            BatchPhase::Failed,
+        ] {
+            let cloned = phase.clone();
+            assert_eq!(phase, cloned);
+        }
+    }
+
+    #[test]
+    fn phase_debug_all_variants() {
+        assert_eq!(format!("{:?}", BatchPhase::Running), "Running");
+        assert_eq!(format!("{:?}", BatchPhase::Completed), "Completed");
+        assert_eq!(format!("{:?}", BatchPhase::Interrupted), "Interrupted");
+    }
+
+    #[test]
+    fn phase_display_matches_serde() {
+        for phase in [
+            BatchPhase::Preparing,
+            BatchPhase::Running,
+            BatchPhase::Completed,
+            BatchPhase::Interrupted,
+            BatchPhase::Failed,
+        ] {
+            let display = phase.to_string();
+            let serde_str = serde_json::to_string(&phase).unwrap();
+            // serde wraps in quotes
+            assert_eq!(format!("\"{display}\""), serde_str);
+        }
+    }
+
+    #[test]
+    fn phase_deserialize_from_string() {
+        let p: BatchPhase = serde_json::from_str("\"preparing\"").unwrap();
+        assert_eq!(p, BatchPhase::Preparing);
+        let p: BatchPhase = serde_json::from_str("\"failed\"").unwrap();
+        assert_eq!(p, BatchPhase::Failed);
+    }
+
+    #[test]
+    fn phase_deserialize_invalid_variant() {
+        let result = serde_json::from_str::<BatchPhase>("\"unknown_phase\"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn phase_deserialize_not_a_string() {
+        let result = serde_json::from_str::<BatchPhase>("42");
+        assert!(result.is_err());
+    }
+
+    // ── BatchProgress extended tests ──────────────────────────────
+
+    #[test]
+    fn progress_new_sets_timestamps() {
+        let before = epoch_seconds();
+        let p = BatchProgress::new(5);
+        let after = epoch_seconds();
+        assert!(p.started_at >= before && p.started_at <= after);
+        assert!(p.updated_at >= before && p.updated_at <= after);
+    }
+
+    #[test]
+    fn progress_start_resets_started_at() {
+        let p1 = BatchProgress::new(5);
+        let original_start = p1.started_at;
+        let mut p2 = p1;
+        // started_at should be updated on start
+        p2.start();
+        assert!(p2.started_at >= original_start);
+        assert_eq!(p2.started_at, p2.updated_at);
+    }
+
+    #[test]
+    fn progress_record_success_decrements_pending() {
+        let mut p = BatchProgress::new(5);
+        p.start();
+        for i in 0..5 {
+            p.record_success();
+            assert_eq!(p.pending, 5 - (i + 1));
+        }
+        assert_eq!(p.pending, 0);
+    }
+
+    #[test]
+    fn progress_record_failure_decrements_pending() {
+        let mut p = BatchProgress::new(3);
+        p.start();
+        p.record_failure();
+        assert_eq!(p.pending, 2);
+        p.record_failure();
+        assert_eq!(p.pending, 1);
+        p.record_failure();
+        assert_eq!(p.pending, 0);
+    }
+
+    #[test]
+    fn progress_record_skip_decrements_pending() {
+        let mut p = BatchProgress::new(2);
+        p.start();
+        p.record_skip();
+        assert_eq!(p.pending, 1);
+        p.record_skip();
+        assert_eq!(p.pending, 0);
+    }
+
+    #[test]
+    fn progress_skip_does_not_increment_completed() {
+        let mut p = BatchProgress::new(3);
+        p.start();
+        p.record_skip();
+        assert_eq!(p.completed, 0);
+        assert_eq!(p.skipped, 1);
+    }
+
+    #[test]
+    fn progress_fraction_one_of_one() {
+        let mut p = BatchProgress::new(1);
+        p.start();
+        p.record_success();
+        assert!((p.fraction() - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn progress_fraction_none_completed() {
+        let p = BatchProgress::new(10);
+        assert!((p.fraction() - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn progress_fraction_all_skipped() {
+        let mut p = BatchProgress::new(3);
+        p.start();
+        p.record_skip();
+        p.record_skip();
+        p.record_skip();
+        assert!((p.fraction() - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn progress_fraction_mixed_complete_and_skip() {
+        let mut p = BatchProgress::new(10);
+        p.start();
+        for _ in 0..3 {
+            p.record_success();
+        }
+        for _ in 0..2 {
+            p.record_skip();
+        }
+        // fraction = (3 completed + 2 skipped) / 10 = 0.5
+        assert!((p.fraction() - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn progress_percent_quarter() {
+        let mut p = BatchProgress::new(4);
+        p.start();
+        p.record_success();
+        assert_eq!(p.percent(), 25);
+    }
+
+    #[test]
+    fn progress_percent_three_quarters() {
+        let mut p = BatchProgress::new(4);
+        p.start();
+        p.record_success();
+        p.record_success();
+        p.record_skip();
+        assert_eq!(p.percent(), 75);
+    }
+
+    #[test]
+    fn progress_percent_zero_total_returns_100() {
+        let p = BatchProgress::new(0);
+        assert_eq!(p.percent(), 100);
+    }
+
+    #[test]
+    fn progress_complete_zeros_pending_regardless() {
+        let mut p = BatchProgress::new(10);
+        p.start();
+        p.record_success();
+        // Only 1 done, but complete() forces pending = 0
+        p.complete();
+        assert_eq!(p.pending, 0);
+    }
+
+    #[test]
+    fn progress_interrupt_does_not_change_pending() {
+        let mut p = BatchProgress::new(5);
+        p.start();
+        p.record_success();
+        let pending_before = p.pending;
+        p.interrupt();
+        assert_eq!(p.pending, pending_before);
+    }
+
+    #[test]
+    fn progress_fail_does_not_change_pending() {
+        let mut p = BatchProgress::new(5);
+        p.start();
+        p.record_failure();
+        let pending_before = p.pending;
+        p.fail();
+        assert_eq!(p.pending, pending_before);
+    }
+
+    #[test]
+    fn progress_saturating_sub_on_overcount() {
+        let mut p = BatchProgress::new(1);
+        p.start();
+        p.record_success();
+        p.record_success();
+        p.record_success();
+        // pending should saturate at 0, not underflow
+        assert_eq!(p.pending, 0);
+        assert_eq!(p.completed, 3);
+    }
+
+    #[test]
+    fn progress_throughput_none_initially() {
+        let p = BatchProgress::new(10);
+        assert!(p.throughput.is_none());
+    }
+
+    #[test]
+    fn progress_eta_none_initially() {
+        let p = BatchProgress::new(10);
+        assert!(p.eta_seconds.is_none());
+    }
+
+    #[test]
+    fn progress_serde_running_phase_preserved() {
+        let mut p = BatchProgress::new(5);
+        p.start();
+        let json = serde_json::to_string(&p).unwrap();
+        let back: BatchProgress = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.phase, BatchPhase::Running);
+    }
+
+    #[test]
+    fn progress_serde_completed_phase_preserved() {
+        let mut p = BatchProgress::new(1);
+        p.start();
+        p.record_success();
+        p.complete();
+        let json = serde_json::to_string(&p).unwrap();
+        let back: BatchProgress = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.phase, BatchPhase::Completed);
+        assert_eq!(back.eta_seconds, Some(0));
+    }
+
+    #[test]
+    fn progress_serde_interrupted_phase_preserved() {
+        let mut p = BatchProgress::new(5);
+        p.start();
+        p.interrupt();
+        let json = serde_json::to_string(&p).unwrap();
+        let back: BatchProgress = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.phase, BatchPhase::Interrupted);
+    }
+
+    #[test]
+    fn progress_serde_failed_phase_preserved() {
+        let mut p = BatchProgress::new(5);
+        p.start();
+        p.fail();
+        let json = serde_json::to_string(&p).unwrap();
+        let back: BatchProgress = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.phase, BatchPhase::Failed);
+    }
+
+    #[test]
+    fn progress_serde_all_fields_present_when_set() {
+        let mut p = BatchProgress::new(3);
+        p.start();
+        p.throughput = Some(10.0);
+        p.eta_seconds = Some(42);
+        let json = serde_json::to_value(&p).unwrap();
+        assert!(json.get("throughput").is_some());
+        assert!(json.get("eta_seconds").is_some());
+        assert_eq!(json["throughput"], 10.0);
+        assert_eq!(json["eta_seconds"], 42);
+    }
+
+    #[test]
+    fn progress_debug_format_contains_fields() {
+        let p = BatchProgress::new(5);
+        let dbg = format!("{p:?}");
+        assert!(dbg.contains("Preparing"));
+        assert!(dbg.contains("total: 5"));
+    }
+
+    #[test]
+    fn progress_clone_independence() {
+        let mut p = BatchProgress::new(5);
+        p.start();
+        p.record_success();
+        let mut cloned = p.clone();
+        cloned.record_success();
+        // Original should not be affected
+        assert_eq!(p.succeeded, 1);
+        assert_eq!(cloned.succeeded, 2);
+    }
+
+    #[test]
+    fn progress_elapsed_seconds_after_start() {
+        let mut p = BatchProgress::new(5);
+        p.start();
+        // elapsed should be very small (< 2s)
+        assert!(p.elapsed_seconds() < 2);
+    }
+
+    #[test]
+    fn progress_elapsed_with_past_start() {
+        let mut p = BatchProgress::new(5);
+        p.started_at = epoch_seconds().saturating_sub(100);
+        assert!(p.elapsed_seconds() >= 100);
+    }
+
+    // ── PartialResult extended tests ─────────────────────────────
+
+    #[test]
+    fn partial_result_debug_format() {
+        let r = PartialResult {
+            index: 7,
+            id: "test-7".to_owned(),
+            success: false,
+            payload: json!("err"),
+            completed_at: 500,
+        };
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("index: 7"));
+        assert!(dbg.contains("test-7"));
+        assert!(dbg.contains("false"));
+    }
+
+    #[test]
+    fn partial_result_with_nested_payload() {
+        let r = PartialResult {
+            index: 0,
+            id: "nested".to_owned(),
+            success: true,
+            payload: json!({"outer": {"inner": [1, 2, 3]}}),
+            completed_at: 100,
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        let back: PartialResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.payload["outer"]["inner"][1], 2);
+    }
+
+    #[test]
+    fn partial_result_with_string_payload() {
+        let r = PartialResult {
+            index: 0,
+            id: "str".to_owned(),
+            success: true,
+            payload: json!("hello world"),
+            completed_at: 100,
+        };
+        let json = serde_json::to_value(&r).unwrap();
+        assert_eq!(json["payload"], "hello world");
+    }
+
+    #[test]
+    fn partial_result_with_boolean_payload() {
+        let r = PartialResult {
+            index: 0,
+            id: "bool".to_owned(),
+            success: false,
+            payload: json!(false),
+            completed_at: 100,
+        };
+        let json = serde_json::to_value(&r).unwrap();
+        assert_eq!(json["payload"], false);
+    }
+
+    #[test]
+    fn partial_result_with_numeric_payload() {
+        let r = PartialResult {
+            index: 0,
+            id: "num".to_owned(),
+            success: true,
+            payload: json!(3.14),
+            completed_at: 100,
+        };
+        let json = serde_json::to_value(&r).unwrap();
+        let val = json["payload"].as_f64().unwrap();
+        assert!((val - 3.14).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn partial_result_with_empty_object_payload() {
+        let r = PartialResult {
+            index: 0,
+            id: "empty_obj".to_owned(),
+            success: true,
+            payload: json!({}),
+            completed_at: 0,
+        };
+        let json = serde_json::to_value(&r).unwrap();
+        assert!(json["payload"].is_object());
+        assert!(json["payload"].as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn partial_result_with_empty_array_payload() {
+        let r = PartialResult {
+            index: 0,
+            id: "empty_arr".to_owned(),
+            success: true,
+            payload: json!([]),
+            completed_at: 0,
+        };
+        let json = serde_json::to_value(&r).unwrap();
+        assert!(json["payload"].is_array());
+        assert!(json["payload"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn partial_result_clone_independence() {
+        let r = PartialResult {
+            index: 0,
+            id: "orig".to_owned(),
+            success: true,
+            payload: json!({"k": "v"}),
+            completed_at: 1000,
+        };
+        let mut cloned = r.clone();
+        cloned.id = "cloned".to_owned();
+        cloned.index = 99;
+        assert_eq!(r.id, "orig");
+        assert_eq!(r.index, 0);
+    }
+
+    #[test]
+    fn partial_result_large_index() {
+        let r = PartialResult {
+            index: usize::MAX,
+            id: "max".to_owned(),
+            success: true,
+            payload: json!(null),
+            completed_at: 0,
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        let back: PartialResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.index, usize::MAX);
+    }
+
+    #[test]
+    fn partial_result_empty_id() {
+        let r = PartialResult {
+            index: 0,
+            id: String::new(),
+            success: true,
+            payload: json!(null),
+            completed_at: 0,
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        let back: PartialResult = serde_json::from_str(&json).unwrap();
+        assert!(back.id.is_empty());
+    }
+
+    // ── ProgressFile extended tests ──────────────────────────────
+
+    #[test]
+    fn progress_file_record_out_of_order() {
+        let mut pf = ProgressFile::new("op", 5);
+        pf.progress.start();
+        // Record indices out of order: 4, 1, 3
+        for idx in [4, 1, 3] {
+            pf.record_result(PartialResult {
+                index: idx,
+                id: format!("{idx}"),
+                success: true,
+                payload: json!({}),
+                completed_at: 100,
+            });
+        }
+        assert_eq!(pf.results.len(), 3);
+        assert_eq!(pf.pending_indices, vec![0, 2]);
+    }
+
+    #[test]
+    fn progress_file_record_duplicate_index() {
+        let mut pf = ProgressFile::new("op", 3);
+        pf.progress.start();
+        let result = PartialResult {
+            index: 1,
+            id: "1".to_owned(),
+            success: true,
+            payload: json!({}),
+            completed_at: 100,
+        };
+        pf.record_result(result.clone());
+        pf.record_result(result);
+        // The duplicate retain call won't find index 1 again, so results grows
+        assert_eq!(pf.results.len(), 2);
+        // But pending_indices won't have 1 in it
+        assert!(!pf.pending_indices.contains(&1));
+    }
+
+    #[test]
+    fn progress_file_clone() {
+        let mut pf = ProgressFile::new("op", 3);
+        pf.progress.start();
+        pf.record_result(PartialResult {
+            index: 0,
+            id: "0".to_owned(),
+            success: true,
+            payload: json!({}),
+            completed_at: 100,
+        });
+        let cloned = pf.clone();
+        assert_eq!(cloned.operation, pf.operation);
+        assert_eq!(cloned.results.len(), pf.results.len());
+        assert_eq!(cloned.pending_indices, pf.pending_indices);
+    }
+
+    #[test]
+    fn progress_file_clone_independence() {
+        let mut pf = ProgressFile::new("op", 3);
+        pf.progress.start();
+        let mut cloned = pf.clone();
+        cloned.record_result(PartialResult {
+            index: 0,
+            id: "0".to_owned(),
+            success: true,
+            payload: json!({}),
+            completed_at: 100,
+        });
+        // Original should not be affected
+        assert!(pf.results.is_empty());
+        assert_eq!(cloned.results.len(), 1);
+    }
+
+    #[test]
+    fn progress_file_not_resumable_when_preparing() {
+        let pf = ProgressFile::new("op", 3);
+        // Phase is Preparing, which is not resumable
+        assert!(!pf.is_resumable());
+    }
+
+    #[test]
+    fn progress_file_not_resumable_after_interrupt_all_done() {
+        let mut pf = ProgressFile::new("op", 2);
+        pf.progress.start();
+        pf.record_result(PartialResult {
+            index: 0,
+            id: "0".to_owned(),
+            success: true,
+            payload: json!({}),
+            completed_at: 100,
+        });
+        pf.record_result(PartialResult {
+            index: 1,
+            id: "1".to_owned(),
+            success: true,
+            payload: json!({}),
+            completed_at: 101,
+        });
+        pf.progress.interrupt();
+        // Interrupted but no pending items
+        assert!(!pf.is_resumable());
+    }
+
+    #[test]
+    fn progress_file_debug_format() {
+        let pf = ProgressFile::new("test.op", 2);
+        let dbg = format!("{pf:?}");
+        assert!(dbg.contains("test.op"));
+        assert!(dbg.contains("ProgressFile"));
+    }
+
+    #[test]
+    fn progress_file_large_batch() {
+        let pf = ProgressFile::new("op", 1000);
+        assert_eq!(pf.pending_indices.len(), 1000);
+        assert_eq!(*pf.pending_indices.last().unwrap(), 999);
+    }
+
+    #[test]
+    fn progress_file_all_results_failure() {
+        let mut pf = ProgressFile::new("op", 3);
+        pf.progress.start();
+        for i in 0..3 {
+            pf.record_result(PartialResult {
+                index: i,
+                id: format!("{i}"),
+                success: false,
+                payload: json!({"error": "fail"}),
+                completed_at: 100 + i as u64,
+            });
+        }
+        assert_eq!(pf.progress.failed, 3);
+        assert_eq!(pf.progress.succeeded, 0);
+        assert!(pf.pending_indices.is_empty());
+    }
+
+    #[test]
+    fn progress_file_write_to_invalid_path() {
+        let result = ProgressFile::new("op", 1).write_to(Path::new("/nonexistent/dir/file.json"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("write error"));
+    }
+
+    #[test]
+    fn progress_file_read_invalid_json() {
+        let dir = std::env::temp_dir().join("fwc-bp-invalid-json");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("invalid.json");
+        std::fs::write(&path, "not valid json").unwrap();
+        let result = ProgressFile::read_from(&path);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("parse error"));
+    }
+
+    #[test]
+    fn progress_file_write_read_with_results() {
+        let dir = std::env::temp_dir().join("fwc-bp-results-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("results_progress.json");
+
+        let mut pf = ProgressFile::new("batch.process", 5);
+        pf.progress.start();
+        for i in 0..3 {
+            pf.record_result(PartialResult {
+                index: i,
+                id: format!("item-{i}"),
+                success: i != 1,
+                payload: json!({"idx": i}),
+                completed_at: 200 + i as u64,
+            });
+        }
+        pf.progress.interrupt();
+        pf.write_to(&path).unwrap();
+
+        let loaded = ProgressFile::read_from(&path).unwrap();
+        assert_eq!(loaded.results.len(), 3);
+        assert_eq!(loaded.pending_indices, vec![3, 4]);
+        assert_eq!(loaded.progress.succeeded, 2);
+        assert_eq!(loaded.progress.failed, 1);
+        assert!(loaded.is_resumable());
+    }
+
+    #[test]
+    fn progress_file_remaining_indices_empty_when_done() {
+        let mut pf = ProgressFile::new("op", 2);
+        pf.progress.start();
+        pf.record_result(PartialResult {
+            index: 0,
+            id: "0".to_owned(),
+            success: true,
+            payload: json!({}),
+            completed_at: 100,
+        });
+        pf.record_result(PartialResult {
+            index: 1,
+            id: "1".to_owned(),
+            success: true,
+            payload: json!({}),
+            completed_at: 101,
+        });
+        assert!(pf.remaining_indices().is_empty());
+    }
+
+    // ── ResumePlan extended tests ────────────────────────────────
+
+    #[test]
+    fn resume_plan_clone() {
+        let pf = ProgressFile::new("op", 5);
+        let plan = ResumePlan::from_progress(Path::new("p.json"), &pf);
+        let cloned = plan.clone();
+        assert_eq!(cloned.total, plan.total);
+        assert_eq!(cloned.operation, plan.operation);
+        assert_eq!(cloned.remaining_indices, plan.remaining_indices);
+    }
+
+    #[test]
+    fn resume_plan_debug_format() {
+        let pf = ProgressFile::new("test.op", 3);
+        let plan = ResumePlan::from_progress(Path::new("debug.json"), &pf);
+        let dbg = format!("{plan:?}");
+        assert!(dbg.contains("test.op"));
+        assert!(dbg.contains("ResumePlan"));
+    }
+
+    #[test]
+    fn resume_plan_serialize_all_fields() {
+        let plan = ResumePlan {
+            progress_file: PathBuf::from("/data/progress.json"),
+            operation: "github.get_issues".to_owned(),
+            total: 100,
+            completed: 42,
+            remaining: 58,
+            remaining_indices: (42..100).collect(),
+        };
+        let json = serde_json::to_value(&plan).unwrap();
+        assert_eq!(json["progress_file"], "/data/progress.json");
+        assert_eq!(json["operation"], "github.get_issues");
+        assert_eq!(json["total"], 100);
+        assert_eq!(json["completed"], 42);
+        assert_eq!(json["remaining"], 58);
+        assert_eq!(json["remaining_indices"].as_array().unwrap().len(), 58);
+    }
+
+    #[test]
+    fn resume_plan_from_partial_progress() {
+        let mut pf = ProgressFile::new("op", 10);
+        pf.progress.start();
+        // Complete indices 0, 2, 4, 6, 8 (evens)
+        for i in (0..10).step_by(2) {
+            pf.record_result(PartialResult {
+                index: i,
+                id: format!("{i}"),
+                success: true,
+                payload: json!({}),
+                completed_at: 100,
+            });
+        }
+        pf.progress.interrupt();
+        let plan = ResumePlan::from_progress(Path::new("p.json"), &pf);
+        assert_eq!(plan.completed, 5);
+        assert_eq!(plan.remaining, 5);
+        assert_eq!(plan.remaining_indices, vec![1, 3, 5, 7, 9]);
+    }
+
+    #[test]
+    fn resume_plan_zero_total() {
+        let pf = ProgressFile::new("op", 0);
+        let plan = ResumePlan::from_progress(Path::new("p.json"), &pf);
+        assert_eq!(plan.total, 0);
+        assert_eq!(plan.completed, 0);
+        assert_eq!(plan.remaining, 0);
+        assert!(plan.remaining_indices.is_empty());
+    }
+
+    #[test]
+    fn resume_plan_preserves_path_with_spaces() {
+        let pf = ProgressFile::new("op", 1);
+        let plan = ResumePlan::from_progress(Path::new("/my path/with spaces/p.json"), &pf);
+        assert_eq!(
+            plan.progress_file,
+            PathBuf::from("/my path/with spaces/p.json")
+        );
+    }
+
+    // ── Rendering extended tests ─────────────────────────────────
+
+    #[test]
+    fn render_bar_single_width() {
+        let p = BatchProgress::new(2);
+        let bar = render_progress_bar(&p, 1);
+        assert!(bar.contains('['));
+        assert!(bar.contains(']'));
+    }
+
+    #[test]
+    fn render_bar_large_width() {
+        let mut p = BatchProgress::new(4);
+        p.start();
+        p.record_success();
+        p.record_success();
+        let bar = render_progress_bar(&p, 100);
+        // Should have ~50 filled blocks
+        let filled_count = bar.chars().filter(|&c| c == '█').count();
+        assert_eq!(filled_count, 50);
+    }
+
+    #[test]
+    fn render_bar_zero_total() {
+        let p = BatchProgress::new(0);
+        let bar = render_progress_bar(&p, 10);
+        // fraction=1.0 for zero total, so 100%
+        assert!(bar.contains("100%"));
+    }
+
+    #[test]
+    fn render_bar_eta_with_seconds() {
+        let mut p = BatchProgress::new(10);
+        p.start();
+        p.eta_seconds = Some(30);
+        let bar = render_progress_bar(&p, 10);
+        assert!(bar.contains("ETA: 30s"));
+    }
+
+    #[test]
+    fn render_bar_eta_done() {
+        let mut p = BatchProgress::new(1);
+        p.start();
+        p.record_success();
+        p.complete();
+        let bar = render_progress_bar(&p, 10);
+        assert!(bar.contains("ETA: done"));
+    }
+
+    #[test]
+    fn render_bar_format_structure() {
+        let mut p = BatchProgress::new(3);
+        p.start();
+        p.record_success();
+        let bar = render_progress_bar(&p, 10);
+        // Should contain the structure: [bar] pct% (done/total) ...
+        assert!(bar.starts_with('['));
+        assert!(bar.contains(']'));
+        assert!(bar.contains('/'));
+        assert!(bar.contains('%'));
+    }
+
+    #[test]
+    fn render_bar_empty_bar_chars() {
+        let p = BatchProgress::new(5);
+        let bar = render_progress_bar(&p, 10);
+        let empty_count = bar.chars().filter(|&c| c == '░').count();
+        assert_eq!(empty_count, 10);
+    }
+
+    #[test]
+    fn render_bar_full_bar_chars() {
+        let mut p = BatchProgress::new(2);
+        p.start();
+        p.record_success();
+        p.record_success();
+        p.complete();
+        let bar = render_progress_bar(&p, 10);
+        let filled_count = bar.chars().filter(|&c| c == '█').count();
+        assert_eq!(filled_count, 10);
+        let empty_count = bar.chars().filter(|&c| c == '░').count();
+        assert_eq!(empty_count, 0);
+    }
+
+    #[test]
+    fn render_json_roundtrip() {
+        let mut p = BatchProgress::new(5);
+        p.start();
+        p.record_success();
+        p.record_failure();
+        let json_str = render_progress_json(&p);
+        let back: BatchProgress = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(back.succeeded, 1);
+        assert_eq!(back.failed, 1);
+        assert_eq!(back.total, 5);
+    }
+
+    #[test]
+    fn render_json_includes_all_counts() {
+        let mut p = BatchProgress::new(10);
+        p.start();
+        p.record_success();
+        p.record_failure();
+        p.record_skip();
+        let json_str = render_progress_json(&p);
+        let parsed: Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(parsed["succeeded"], 1);
+        assert_eq!(parsed["failed"], 1);
+        assert_eq!(parsed["skipped"], 1);
+        assert_eq!(parsed["pending"], 7);
+    }
+
+    #[test]
+    fn render_json_completed_state() {
+        let mut p = BatchProgress::new(1);
+        p.start();
+        p.record_success();
+        p.complete();
+        let json_str = render_progress_json(&p);
+        let parsed: Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(parsed["phase"], "completed");
+        assert_eq!(parsed["pending"], 0);
+    }
+
+    // ── End-to-end scenario tests ────────────────────────────────
+
+    #[test]
+    fn scenario_full_lifecycle_success() {
+        let mut pf = ProgressFile::new("github.list_repos", 3);
+        assert_eq!(pf.progress.phase, BatchPhase::Preparing);
+
+        pf.progress.start();
+        assert_eq!(pf.progress.phase, BatchPhase::Running);
+
+        for i in 0..3 {
+            pf.record_result(PartialResult {
+                index: i,
+                id: format!("repo-{i}"),
+                success: true,
+                payload: json!({"name": format!("repo-{i}")}),
+                completed_at: epoch_seconds(),
+            });
+        }
+        pf.progress.complete();
+
+        assert!(pf.progress.is_done());
+        assert_eq!(pf.progress.succeeded, 3);
+        assert_eq!(pf.progress.failed, 0);
+        assert_eq!(pf.progress.pending, 0);
+        assert!(pf.pending_indices.is_empty());
+        assert!(!pf.is_resumable());
+    }
+
+    #[test]
+    fn scenario_interrupt_and_resume() {
+        let dir = std::env::temp_dir().join("fwc-bp-resume-scenario");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("resume_scenario.json");
+
+        // Phase 1: Run and get interrupted
+        let mut pf = ProgressFile::new("slack.send_message", 5);
+        pf.progress.start();
+        pf.record_result(PartialResult {
+            index: 0,
+            id: "msg-0".to_owned(),
+            success: true,
+            payload: json!({"ok": true}),
+            completed_at: epoch_seconds(),
+        });
+        pf.record_result(PartialResult {
+            index: 1,
+            id: "msg-1".to_owned(),
+            success: true,
+            payload: json!({"ok": true}),
+            completed_at: epoch_seconds(),
+        });
+        pf.progress.interrupt();
+        pf.write_to(&path).unwrap();
+
+        // Phase 2: Load and build resume plan
+        let loaded = ProgressFile::read_from(&path).unwrap();
+        assert!(loaded.is_resumable());
+        let plan = ResumePlan::from_progress(&path, &loaded);
+        assert_eq!(plan.completed, 2);
+        assert_eq!(plan.remaining, 3);
+        assert_eq!(plan.remaining_indices, vec![2, 3, 4]);
+    }
+
+    #[test]
+    fn scenario_mixed_results_with_rendering() {
+        let mut p = BatchProgress::new(6);
+        p.start();
+        p.record_success();
+        p.record_success();
+        p.record_failure();
+        p.record_skip();
+
+        let bar = render_progress_bar(&p, 12);
+        assert!(bar.contains("✓2"));
+        assert!(bar.contains("✗1"));
+        assert!(bar.contains("◇1"));
+        assert!(bar.contains("4/6"));
+        assert!(bar.contains("66%"));
+
+        let json_str = render_progress_json(&p);
+        let parsed: Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(parsed["succeeded"], 2);
+        assert_eq!(parsed["failed"], 1);
+        assert_eq!(parsed["skipped"], 1);
+        assert_eq!(parsed["pending"], 2);
+    }
+
+    #[test]
+    fn scenario_all_skipped_batch() {
+        let mut pf = ProgressFile::new("filter.apply", 4);
+        pf.progress.start();
+        for i in 0..4 {
+            pf.progress.record_skip();
+            pf.pending_indices.retain(|&idx| idx != i);
+        }
+        pf.progress.complete();
+
+        assert_eq!(pf.progress.skipped, 4);
+        assert_eq!(pf.progress.completed, 0);
+        assert_eq!(pf.progress.succeeded, 0);
+        assert_eq!(pf.progress.pending, 0);
+        assert!(pf.pending_indices.is_empty());
+    }
+
+    // ── epoch_seconds helper test ────────────────────────────────
+
+    #[test]
+    fn epoch_seconds_is_reasonable() {
+        let now = epoch_seconds();
+        // Should be after 2024-01-01 (1704067200) and before 2100-01-01 (4102444800)
+        assert!(now > 1_704_067_200);
+        assert!(now < 4_102_444_800);
+    }
 }

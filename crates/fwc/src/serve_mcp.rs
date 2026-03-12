@@ -19,6 +19,10 @@ use crate::mcp_resources::{
     ParsedUri,
 };
 use crate::readiness::DiscoveredConnector;
+use crate::zone_scope::{
+    CapabilityToken, ViolationReason, ZoneId, ZoneRegistry, ZoneScopedTool, ZoneViolation,
+    validate_tool_call,
+};
 
 // ── JSON-RPC 2.0 Error Codes ────────────────────────────────────────────
 
@@ -327,6 +331,9 @@ pub struct McpToolDefinition {
     pub connector_id: String,
     /// Operation within the connector.
     pub operation_id: String,
+    /// Zones where this tool may be exposed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supported_zones: Vec<String>,
 }
 
 impl McpToolDefinition {
@@ -344,6 +351,7 @@ impl McpToolDefinition {
             input_schema,
             connector_id: connector_id.into(),
             operation_id: operation_id.into(),
+            supported_zones: Vec::new(),
         }
     }
 
@@ -360,6 +368,28 @@ impl McpToolDefinition {
     /// Return the operation id.
     pub fn operation_id(&self) -> &str {
         &self.operation_id
+    }
+
+    /// Builder: attach supported zones to this tool.
+    pub fn with_supported_zones(mut self, mut supported_zones: Vec<String>) -> Self {
+        supported_zones.sort();
+        supported_zones.dedup();
+        self.supported_zones = supported_zones;
+        self
+    }
+
+    /// Return the supported zones.
+    pub fn supported_zones(&self) -> &[String] {
+        &self.supported_zones
+    }
+
+    /// Whether the tool can be exposed in the given zone.
+    pub fn supports_zone(&self, zone: &str) -> bool {
+        self.supported_zones.is_empty()
+            || self
+                .supported_zones
+                .iter()
+                .any(|candidate| candidate == zone)
     }
 }
 
@@ -627,6 +657,7 @@ pub fn state_from_connectors(
                 connector.slug.clone(),
                 operation.preferred_selector.clone(),
             )
+            .with_supported_zones(connector.supported_zones.clone())
         })
     });
     state_from_tools(tools, config)
@@ -673,6 +704,138 @@ fn registry_from_tools(tools: &[McpToolDefinition]) -> McpResourceRegistry {
         registry.register_global_resources();
     }
     registry
+}
+
+fn tool_matches_server_filters(tool: &McpToolDefinition, config: &McpServerConfig) -> bool {
+    let connector_ok = config
+        .connector_filter
+        .as_deref()
+        .is_none_or(|connector| tool.connector_id() == connector);
+    let zone_ok = config
+        .zone_filter
+        .as_deref()
+        .is_none_or(|zone| tool.supports_zone(zone));
+    connector_ok && zone_ok
+}
+
+fn capability_token_from_params(params: &Value) -> Result<Option<CapabilityToken>, JsonRpcError> {
+    let meta = params.get("meta").and_then(Value::as_object);
+    let candidates = [
+        params.get("capability_token"),
+        params.get("capabilityToken"),
+        meta.and_then(|inner| inner.get("capability_token")),
+        meta.and_then(|inner| inner.get("capabilityToken")),
+    ];
+
+    for candidate in candidates.into_iter().flatten() {
+        let token = serde_json::from_value(candidate.clone()).map_err(|error| {
+            JsonRpcError::invalid_params(format!("Invalid capability token: {error}"))
+        })?;
+        return Ok(Some(token));
+    }
+
+    Ok(None)
+}
+
+fn zone_registry_for_tools(tools: &[McpToolDefinition], default_zone: &str) -> ZoneRegistry {
+    let mut registry = ZoneRegistry::new();
+    for tool in tools {
+        let mut scoped = ZoneScopedTool::new(tool.connector_id.clone(), tool.operation_id.clone())
+            .with_description(tool.description.clone());
+        if tool.supported_zones.is_empty() {
+            scoped = scoped.with_zone(ZoneId::new(default_zone.to_owned()));
+        } else {
+            for zone in &tool.supported_zones {
+                scoped = scoped.with_zone(ZoneId::new(zone.clone()));
+            }
+        }
+        registry.register_tool(scoped);
+    }
+    registry
+}
+
+fn zone_violation_error(
+    tool: &McpToolDefinition,
+    violation: ZoneViolation,
+    token: Option<&CapabilityToken>,
+) -> JsonRpcError {
+    let available_zones = violation
+        .available_in
+        .iter()
+        .map(|zone| zone.as_str().to_owned())
+        .collect::<Vec<_>>();
+    let available_capabilities = token
+        .map(|current| {
+            current
+                .allowed_connectors
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    JsonRpcError::invalid_params(violation.message.clone()).with_data(json!({
+        "type": "zone-violation",
+        "tool": tool.name(),
+        "connector_id": tool.connector_id(),
+        "operation_id": tool.operation_id(),
+        "zone_id": violation.zone.as_str(),
+        "reason": violation.reason,
+        "required_capability": tool.name(),
+        "available_capabilities": available_capabilities,
+        "available_zones": available_zones,
+    }))
+}
+
+fn validate_tool_access(
+    state: &McpServerState,
+    tool: &McpToolDefinition,
+    params: &Value,
+) -> Result<(), JsonRpcError> {
+    if let Some(connector_filter) = state.config.connector_filter.as_deref()
+        && tool.connector_id() != connector_filter
+    {
+        return Err(JsonRpcError::invalid_params(format!(
+            "Tool `{}` is hidden by the active connector filter.",
+            tool.name()
+        ))
+        .with_data(json!({
+            "type": "connector-filter-mismatch",
+            "tool": tool.name(),
+            "connector_id": tool.connector_id(),
+            "required_connector": connector_filter,
+        })));
+    }
+
+    let Some(zone) = state.config.zone_filter.as_deref() else {
+        return Ok(());
+    };
+
+    if !tool.supports_zone(zone) {
+        let violation = ZoneViolation::new(
+            tool.name().to_owned(),
+            ZoneId::new(zone.to_owned()),
+            ViolationReason::ConnectorNotInZone,
+        )
+        .with_available_in(
+            tool.supported_zones()
+                .iter()
+                .cloned()
+                .map(ZoneId::new)
+                .collect(),
+        );
+        return Err(zone_violation_error(tool, violation, None));
+    }
+
+    let token = capability_token_from_params(params)?;
+    let registry = zone_registry_for_tools(std::slice::from_ref(tool), zone);
+    validate_tool_call(
+        &registry,
+        tool.name(),
+        &ZoneId::new(zone.to_owned()),
+        token.as_ref(),
+    )
+    .map_err(|violation| zone_violation_error(tool, violation, token.as_ref()))
 }
 
 // ── Builder ─────────────────────────────────────────────────────────────
@@ -852,6 +1015,10 @@ where
         );
     };
 
+    if let Err(error) = validate_tool_access(state, tool, params) {
+        return JsonRpcResponse::error(id, error);
+    }
+
     let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
     tool_handler(tool, id, arguments)
 }
@@ -892,6 +1059,7 @@ fn handle_tools_list(state: &McpServerState, id: Value) -> JsonRpcResponse {
     let tools: Vec<Value> = state
         .tools
         .iter()
+        .filter(|tool| tool_matches_server_filters(tool, &state.config))
         .map(|t| {
             json!({
                 "name": t.name,
@@ -930,6 +1098,10 @@ fn handle_tools_call(state: &McpServerState, id: Value, params: Option<&Value>) 
             JsonRpcError::invalid_params(format!("Tool not found: {tool_name}")),
         );
     };
+
+    if let Err(error) = validate_tool_access(state, tool, params) {
+        return JsonRpcResponse::error(id, error);
+    }
 
     let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
 
@@ -1501,6 +1673,32 @@ mod tests {
             "github",
             "list_issues",
         )
+        .with_supported_zones(vec!["z:work".to_owned()])
+    }
+
+    fn sample_private_tool() -> McpToolDefinition {
+        McpToolDefinition::new(
+            "vault.get_secret",
+            "Read a secret from vault",
+            json!({
+                "type": "object",
+                "required": ["path"],
+                "properties": {
+                    "path": { "type": "string" }
+                }
+            }),
+            "vault",
+            "get_secret",
+        )
+        .with_supported_zones(vec!["z:private".to_owned()])
+    }
+
+    fn sample_token(zone: &str) -> Value {
+        serde_json::to_value(
+            CapabilityToken::new(ZoneId::new(zone.to_owned()), "agent:test")
+                .with_connector("github"),
+        )
+        .expect("sample capability token")
     }
 
     fn sample_resource() -> McpResourceEntry {
@@ -1861,6 +2059,7 @@ mod tests {
         let back: McpToolDefinition = serde_json::from_str(&json).unwrap();
         assert_eq!(back.name, t.name);
         assert_eq!(back.connector_id, t.connector_id);
+        assert_eq!(back.supported_zones, t.supported_zones);
     }
 
     #[test]
@@ -2296,6 +2495,21 @@ mod tests {
         assert!(tool["inputSchema"]["properties"]["owner"].is_object());
     }
 
+    #[test]
+    fn handle_tools_list_respects_zone_filter() {
+        let state = McpServerState::builder()
+            .with_config(McpServerConfig::new().with_zone_filter("z:work"))
+            .with_tool(sample_tool())
+            .with_tool(sample_private_tool())
+            .build();
+        let req = make_request("tools/list", None);
+        let resp = handle_request(&state, &req);
+        let result = resp.result().unwrap();
+        let tools = result["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["name"], "github.list_issues");
+    }
+
     // ── handle_request: tools/call ──────────────────────────────────
 
     #[test]
@@ -2367,6 +2581,31 @@ mod tests {
         let data = error.data.as_ref().unwrap();
         assert_eq!(data["tool"], "github.list_issues");
         assert!(data["arguments"].is_null());
+    }
+
+    #[test]
+    fn handle_tools_call_returns_zone_violation_when_tool_not_in_active_zone() {
+        let state = McpServerState::builder()
+            .with_config(McpServerConfig::new().with_zone_filter("z:work"))
+            .with_tool(sample_private_tool())
+            .build();
+        let req = make_request(
+            "tools/call",
+            Some(json!({
+                "name": "vault.get_secret",
+                "arguments": {"path": "prod/api"},
+                "capabilityToken": sample_token("z:work"),
+            })),
+        );
+        let resp = handle_request(&state, &req);
+        assert!(resp.is_error());
+        let error = resp.error.as_ref().unwrap();
+        assert_eq!(error.code(), INVALID_PARAMS);
+        let data = error.data.as_ref().unwrap();
+        assert_eq!(data["type"], "zone-violation");
+        assert_eq!(data["zone_id"], "z:work");
+        assert_eq!(data["reason"], "connector_not_in_zone");
+        assert_eq!(data["available_zones"][0], "z:private");
     }
 
     // ── handle_request: resources/list ──────────────────────────────
@@ -2893,6 +3132,74 @@ mod tests {
         assert_eq!(
             response.result().unwrap()["content"][0]["text"],
             "planned github list_issues"
+        );
+    }
+
+    #[tokio::test]
+    async fn stdio_transport_rejects_zone_scoped_call_without_capability_token() {
+        let output = drive_stdio_transport(
+            McpServerState::builder()
+                .with_config(McpServerConfig::new().with_zone_filter("z:work"))
+                .with_tool(sample_tool())
+                .build(),
+            "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"github.list_issues\",\"arguments\":{\"owner\":\"openai\",\"repo\":\"gpt\"}}}\n",
+            |tool, id, _arguments| {
+                JsonRpcResponse::success(
+                    id,
+                    json!({
+                        "content": [{
+                            "type": "text",
+                            "text": format!("unexpected tool call: {}", tool.name()),
+                        }],
+                        "isError": true,
+                    }),
+                )
+            },
+        )
+        .await;
+
+        let response: JsonRpcResponse = serde_json::from_str(output.trim()).unwrap();
+        let error = response.error.as_ref().unwrap();
+        assert_eq!(error.code(), INVALID_PARAMS);
+        let data = error.data.as_ref().unwrap();
+        assert_eq!(data["type"], "zone-violation");
+        assert_eq!(data["reason"], "no_token");
+        assert_eq!(data["zone_id"], "z:work");
+    }
+
+    #[tokio::test]
+    async fn stdio_transport_allows_zone_scoped_call_with_valid_capability_token() {
+        let output = drive_stdio_transport(
+            McpServerState::builder()
+                .with_config(McpServerConfig::new().with_zone_filter("z:work"))
+                .with_tool(sample_tool())
+                .build(),
+            &format!(
+                "{{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"tools/call\",\"params\":{{\"name\":\"github.list_issues\",\"arguments\":{{\"owner\":\"openai\",\"repo\":\"gpt\"}},\"capabilityToken\":{}}}}}\n",
+                sample_token("z:work")
+            ),
+            |tool, id, arguments| {
+                assert_eq!(tool.connector_id(), "github");
+                assert_eq!(tool.operation_id(), "list_issues");
+                assert_eq!(arguments["repo"], "gpt");
+                JsonRpcResponse::success(
+                    id,
+                    json!({
+                        "content": [{
+                            "type": "text",
+                            "text": format!("zone-ok {}", tool.name()),
+                        }],
+                        "isError": false,
+                    }),
+                )
+            },
+        )
+        .await;
+
+        let response: JsonRpcResponse = serde_json::from_str(output.trim()).unwrap();
+        assert_eq!(
+            response.result().unwrap()["content"][0]["text"],
+            "zone-ok github.list_issues"
         );
     }
 

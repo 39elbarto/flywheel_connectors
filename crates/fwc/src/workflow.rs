@@ -1288,6 +1288,7 @@ fn now_rfc3339() -> String {
 mod tests {
     use super::{
         ResolutionPatch, TaskStore, WorkflowRequest, current_workflow_truth, effective_bindings,
+        execution_failure_capsule_status, execution_failure_truth, parse_command_availability,
         ready_for_execution, resolution_patch, resolution_patch_would_change,
         validate_binding_entries,
     };
@@ -3012,5 +3013,177 @@ mod tests {
         };
         let compiled = request.compile(false);
         assert_eq!(compiled.zone.as_deref(), Some("z:work"));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Bead 29.7.2: Workflow truth — execution failure parsing tests
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn parse_all_seven_availability_tags() {
+        let tags = [
+            ("live-runtime", CommandAvailability::LiveRuntime),
+            ("offline-artifact", CommandAvailability::OfflineArtifact),
+            ("unsupported", CommandAvailability::Unsupported),
+            ("planned", CommandAvailability::Planned),
+            ("unavailable", CommandAvailability::Unavailable),
+            ("denied", CommandAvailability::Denied),
+            ("unknown", CommandAvailability::Unknown),
+        ];
+        for (tag, expected) in &tags {
+            assert_eq!(
+                parse_command_availability(tag),
+                Some(expected.clone()),
+                "Failed to parse tag '{tag}'",
+            );
+        }
+    }
+
+    #[test]
+    fn parse_invalid_availability_tag_returns_none() {
+        assert!(parse_command_availability("invalid").is_none());
+        assert!(parse_command_availability("").is_none());
+        assert!(parse_command_availability("LIVE-RUNTIME").is_none());
+    }
+
+    #[test]
+    fn execution_failure_truth_extracts_denied() {
+        let execution = serde_json::json!({
+            "executed_steps": [{
+                "result": {
+                    "availability": {
+                        "availability": "denied",
+                        "authoritative": false,
+                        "recoverable": true,
+                        "explanation": "Policy blocks this operation"
+                    }
+                }
+            }]
+        });
+        let truth = execution_failure_truth(&execution).unwrap();
+        assert_eq!(truth.availability, CommandAvailability::Denied);
+        assert!(!truth.authoritative);
+        assert!(truth.recoverable);
+        assert!(truth.explanation.contains("Policy"));
+    }
+
+    #[test]
+    fn execution_failure_truth_extracts_unavailable() {
+        let execution = serde_json::json!({
+            "executed_steps": [{
+                "result": {
+                    "availability": {
+                        "availability": "unavailable",
+                        "authoritative": false,
+                        "recoverable": true,
+                        "explanation": "Host unreachable"
+                    }
+                }
+            }]
+        });
+        let truth = execution_failure_truth(&execution).unwrap();
+        assert_eq!(truth.availability, CommandAvailability::Unavailable);
+        assert!(truth.recoverable);
+    }
+
+    #[test]
+    fn execution_failure_truth_extracts_unsupported() {
+        let execution = serde_json::json!({
+            "executed_steps": [{
+                "result": {
+                    "availability": {
+                        "availability": "unsupported",
+                        "authoritative": false,
+                        "recoverable": false,
+                        "explanation": "Not supported"
+                    }
+                }
+            }]
+        });
+        let truth = execution_failure_truth(&execution).unwrap();
+        assert_eq!(truth.availability, CommandAvailability::Unsupported);
+        assert!(!truth.recoverable);
+    }
+
+    #[test]
+    fn execution_failure_truth_returns_none_for_empty_steps() {
+        let execution = serde_json::json!({"executed_steps": []});
+        assert!(execution_failure_truth(&execution).is_none());
+    }
+
+    #[test]
+    fn execution_failure_truth_returns_none_for_missing_availability() {
+        let execution = serde_json::json!({
+            "executed_steps": [{"result": {"data": "ok"}}]
+        });
+        assert!(execution_failure_truth(&execution).is_none());
+    }
+
+    #[test]
+    fn execution_failure_capsule_status_denied() {
+        let execution = serde_json::json!({
+            "executed_steps": [{
+                "result": {
+                    "availability": {
+                        "availability": "denied",
+                        "recoverable": true,
+                        "explanation": "Blocked"
+                    }
+                }
+            }]
+        });
+        assert_eq!(execution_failure_capsule_status(&execution), Some("denied"));
+    }
+
+    #[test]
+    fn execution_failure_capsule_status_unavailable() {
+        let execution = serde_json::json!({
+            "executed_steps": [{
+                "result": {
+                    "availability": {
+                        "availability": "unavailable",
+                        "recoverable": true,
+                        "explanation": "Timeout"
+                    }
+                }
+            }]
+        });
+        assert_eq!(execution_failure_capsule_status(&execution), Some("unavailable"));
+    }
+
+    #[test]
+    fn execution_failure_capsule_status_live_runtime_returns_none() {
+        let execution = serde_json::json!({
+            "executed_steps": [{
+                "result": {
+                    "availability": {
+                        "availability": "live-runtime",
+                        "authoritative": true,
+                        "recoverable": false,
+                        "explanation": "Success"
+                    }
+                }
+            }]
+        });
+        // Success states don't produce a failure capsule status
+        assert!(execution_failure_capsule_status(&execution).is_none());
+    }
+
+    #[test]
+    fn execution_failure_defaults_authoritative_from_availability() {
+        // When authoritative is missing, should default from availability
+        let execution = serde_json::json!({
+            "executed_steps": [{
+                "result": {
+                    "availability": {
+                        "availability": "live-runtime",
+                        "explanation": "Host responded"
+                    }
+                }
+            }]
+        });
+        let truth = execution_failure_truth(&execution).unwrap();
+        // LiveRuntime.is_authoritative() == true
+        assert!(truth.authoritative);
     }
 }

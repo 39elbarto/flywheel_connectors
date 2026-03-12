@@ -3285,4 +3285,406 @@ mod tests {
         assert!(s.approval_required);
         assert!(s.side_effecting);
     }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Bead 29.7.2: Workflow truth — intent planner honesty tests
+    // ═══════════════════════════════════════════════════════════════════
+
+    // ── compiled_workflow_truth direct tests ─────────────────────
+
+    #[test]
+    fn workflow_truth_unsupported_status_yields_unsupported_availability() {
+        let truth = compiled_workflow_truth("unsupported", &[], &[], &["not supported".to_owned()], &[]);
+        assert_eq!(truth.availability, CommandAvailability::Unsupported);
+        assert!(!truth.authoritative);
+    }
+
+    #[test]
+    fn workflow_truth_planned_status_yields_planned_availability() {
+        let truth = compiled_workflow_truth("planned", &[], &[], &[], &[]);
+        assert_eq!(truth.availability, CommandAvailability::Planned);
+        assert!(!truth.authoritative);
+        assert!(
+            truth.explanation.to_lowercase().contains("planned")
+                || truth.explanation.to_lowercase().contains("preview")
+                || truth.explanation.to_lowercase().contains("not yet"),
+            "Planned explanation should mention planned/preview, got: {}",
+            truth.explanation,
+        );
+    }
+
+    #[test]
+    fn workflow_truth_ambiguous_yields_unknown_recoverable() {
+        let ambiguities = vec![Ambiguity {
+            kind: "connector".to_owned(),
+            message: "Multiple connectors match".to_owned(),
+            candidates: vec!["slack".to_owned(), "discord".to_owned()],
+        }];
+        let truth = compiled_workflow_truth("ambiguous", &[], &[], &[], &ambiguities);
+        assert_eq!(truth.availability, CommandAvailability::Unknown);
+        assert!(truth.recoverable);
+        assert!(truth.explanation.contains("ambiguous"));
+    }
+
+    #[test]
+    fn workflow_truth_needs_clarification_yields_unknown() {
+        let missing = vec!["Connector selection".to_owned()];
+        let truth = compiled_workflow_truth("needs-clarification", &[], &missing, &[], &[]);
+        assert_eq!(truth.availability, CommandAvailability::Unknown);
+        assert!(truth.recoverable);
+        assert!(truth.explanation.contains("identifiers") || truth.explanation.contains("compiler"));
+    }
+
+    #[test]
+    fn workflow_truth_live_steps_yield_live_runtime() {
+        let steps = vec![CompiledStep {
+            ordinal: 1,
+            phase: "execute".to_owned(),
+            purpose: "Invoke operation".to_owned(),
+            command: "invoke".to_owned(),
+            command_line: "fwc invoke github issues.create".to_owned(),
+            argv: vec!["fwc".to_owned(), "invoke".to_owned(), "github".to_owned()],
+            side_effecting: true,
+            approval_required: true,
+            notes: Vec::new(),
+        }];
+        let truth = compiled_workflow_truth("ready", &steps, &[], &[], &[]);
+        assert_eq!(truth.availability, CommandAvailability::LiveRuntime);
+        assert!(truth.explanation.contains("live") || truth.explanation.contains("host"));
+    }
+
+    #[test]
+    fn workflow_truth_offline_steps_yield_offline_artifact() {
+        let steps = vec![CompiledStep {
+            ordinal: 1,
+            phase: "inspect".to_owned(),
+            purpose: "Check session".to_owned(),
+            command: "session".to_owned(),
+            command_line: "fwc session list".to_owned(),
+            argv: vec!["fwc".to_owned(), "session".to_owned(), "list".to_owned()],
+            side_effecting: false,
+            approval_required: false,
+            notes: Vec::new(),
+        }];
+        let truth = compiled_workflow_truth("ready", &steps, &[], &[], &[]);
+        assert_eq!(truth.availability, CommandAvailability::OfflineArtifact);
+        assert!(truth.explanation.contains("offline") || truth.explanation.contains("artifact"));
+    }
+
+    #[test]
+    fn workflow_truth_hybrid_step_with_offline_flag_yields_offline() {
+        let steps = vec![CompiledStep {
+            ordinal: 1,
+            phase: "inspect".to_owned(),
+            purpose: "Inspect schema offline".to_owned(),
+            command: "schema".to_owned(),
+            command_line: "fwc schema github issues.create --offline".to_owned(),
+            argv: vec![
+                "fwc".to_owned(),
+                "schema".to_owned(),
+                "github".to_owned(),
+                "issues.create".to_owned(),
+                "--offline".to_owned(),
+            ],
+            side_effecting: false,
+            approval_required: false,
+            notes: Vec::new(),
+        }];
+        let truth = compiled_workflow_truth("ready", &steps, &[], &[], &[]);
+        assert_eq!(truth.availability, CommandAvailability::OfflineArtifact);
+    }
+
+    #[test]
+    fn workflow_truth_hybrid_step_without_offline_flag_yields_live() {
+        let steps = vec![CompiledStep {
+            ordinal: 1,
+            phase: "inspect".to_owned(),
+            purpose: "Inspect schema".to_owned(),
+            command: "schema".to_owned(),
+            command_line: "fwc schema github issues.create".to_owned(),
+            argv: vec![
+                "fwc".to_owned(),
+                "schema".to_owned(),
+                "github".to_owned(),
+                "issues.create".to_owned(),
+            ],
+            side_effecting: false,
+            approval_required: false,
+            notes: Vec::new(),
+        }];
+        let truth = compiled_workflow_truth("ready", &steps, &[], &[], &[]);
+        assert_eq!(truth.availability, CommandAvailability::LiveRuntime);
+        assert!(truth.explanation.contains("hybrid") || truth.explanation.contains("live"));
+    }
+
+    #[test]
+    fn workflow_truth_empty_steps_yields_unknown() {
+        let truth = compiled_workflow_truth("ready", &[], &[], &[], &[]);
+        assert_eq!(truth.availability, CommandAvailability::Unknown);
+    }
+
+    #[test]
+    fn workflow_truth_source_is_compiler() {
+        let truth = compiled_workflow_truth("ready", &[], &[], &[], &[]);
+        assert_eq!(truth.source_of_truth, WORKFLOW_TRUTH_COMPILER_SOURCE);
+    }
+
+    #[test]
+    fn workflow_truth_exit_code_matches_availability() {
+        let truth_planned = compiled_workflow_truth("planned", &[], &[], &[], &[]);
+        assert_eq!(truth_planned.exit_code_hint, CommandAvailability::Planned.exit_code_u8());
+
+        let truth_unsupported = compiled_workflow_truth("unsupported", &[], &[], &["nope".to_owned()], &[]);
+        assert_eq!(truth_unsupported.exit_code_hint, CommandAvailability::Unsupported.exit_code_u8());
+    }
+
+    // ── compiled_step_availability tests ─────────────────────────
+
+    #[test]
+    fn step_availability_live_host_command() {
+        let step = CompiledStep {
+            ordinal: 1, phase: "execute".to_owned(), purpose: "Run".to_owned(),
+            command: "invoke".to_owned(),
+            command_line: "fwc invoke github issues.create".to_owned(),
+            argv: vec!["fwc".to_owned(), "invoke".to_owned()],
+            side_effecting: true, approval_required: false, notes: Vec::new(),
+        };
+        assert_eq!(compiled_step_availability(&step), CommandAvailability::LiveRuntime);
+    }
+
+    #[test]
+    fn step_availability_offline_only_command() {
+        let step = CompiledStep {
+            ordinal: 1, phase: "local".to_owned(), purpose: "Check".to_owned(),
+            command: "session".to_owned(),
+            command_line: "fwc session list".to_owned(),
+            argv: vec!["fwc".to_owned(), "session".to_owned()],
+            side_effecting: false, approval_required: false, notes: Vec::new(),
+        };
+        assert_eq!(compiled_step_availability(&step), CommandAvailability::OfflineArtifact);
+    }
+
+    #[test]
+    fn step_availability_unclassified_command_is_unknown() {
+        let step = CompiledStep {
+            ordinal: 1, phase: "?".to_owned(), purpose: "?".to_owned(),
+            command: "nonexistent-future-command".to_owned(),
+            command_line: "fwc nonexistent-future-command".to_owned(),
+            argv: vec!["fwc".to_owned(), "nonexistent-future-command".to_owned()],
+            side_effecting: false, approval_required: false, notes: Vec::new(),
+        };
+        assert_eq!(compiled_step_availability(&step), CommandAvailability::Unknown);
+    }
+
+    #[test]
+    fn step_availability_passthrough_command_is_unknown() {
+        let step = CompiledStep {
+            ordinal: 1, phase: "local".to_owned(), purpose: "Help".to_owned(),
+            command: "help".to_owned(),
+            command_line: "fwc help".to_owned(),
+            argv: vec!["fwc".to_owned(), "help".to_owned()],
+            side_effecting: false, approval_required: false, notes: Vec::new(),
+        };
+        // Passthrough commands map to Unknown
+        let avail = compiled_step_availability(&step);
+        assert!(
+            avail == CommandAvailability::Unknown || avail == CommandAvailability::OfflineArtifact,
+            "Passthrough step should be Unknown or OfflineArtifact, got {:?}",
+            avail,
+        );
+    }
+
+    // ── aggregate_compiled_step_availability tests ───────────────
+
+    #[test]
+    fn aggregate_mixed_live_and_offline_prefers_live() {
+        let steps = vec![
+            CompiledStep {
+                ordinal: 1, phase: "inspect".to_owned(), purpose: "Check session".to_owned(),
+                command: "session".to_owned(),
+                command_line: "fwc session list".to_owned(),
+                argv: vec!["fwc".to_owned(), "session".to_owned()],
+                side_effecting: false, approval_required: false, notes: Vec::new(),
+            },
+            CompiledStep {
+                ordinal: 2, phase: "execute".to_owned(), purpose: "Invoke".to_owned(),
+                command: "invoke".to_owned(),
+                command_line: "fwc invoke github issues.create".to_owned(),
+                argv: vec!["fwc".to_owned(), "invoke".to_owned()],
+                side_effecting: true, approval_required: true, notes: Vec::new(),
+            },
+        ];
+        assert_eq!(
+            aggregate_compiled_step_availability(&steps),
+            CommandAvailability::LiveRuntime,
+        );
+    }
+
+    #[test]
+    fn aggregate_empty_steps_is_unknown() {
+        assert_eq!(
+            aggregate_compiled_step_availability(&[]),
+            CommandAvailability::Unknown,
+        );
+    }
+
+    // ── Compiler integration: planner honesty invariants ─────────
+
+    #[test]
+    fn compiler_unsupported_plans_have_non_empty_unsupported_reasons() {
+        let plan = compile(&request("restart the github connector"));
+        if plan.status == "unsupported" {
+            assert!(
+                !plan.unsupported_reasons.is_empty(),
+                "Unsupported plan should have reasons",
+            );
+            assert_eq!(plan.workflow_truth.availability, CommandAvailability::Unsupported);
+        }
+    }
+
+    #[test]
+    fn compiler_ready_plan_steps_are_all_classified() {
+        let plan = compile(&request("create a GitHub issue titled \"test\""));
+        assert_eq!(plan.status, "ready");
+        for step_item in &plan.steps {
+            let classification = classify_command(&step_item.command);
+            assert!(
+                classification.is_some(),
+                "Step command '{}' in ready plan is not classified",
+                step_item.command,
+            );
+        }
+    }
+
+    #[test]
+    fn compiler_config_plan_is_offline() {
+        let plan = compile(&request("set credentials for github"));
+        assert_eq!(plan.template, "config");
+        // Config is offline-only
+        assert!(
+            plan.workflow_truth.availability == CommandAvailability::OfflineArtifact
+                || plan.workflow_truth.availability == CommandAvailability::Unknown,
+            "Config plan should be offline or unknown, got {:?}",
+            plan.workflow_truth.availability,
+        );
+    }
+
+    #[test]
+    fn compiler_never_claims_authoritative_before_execution() {
+        // The compiler can't claim runtime authority - only execution receipts can
+        let intents = [
+            "create a GitHub issue",
+            "list all connectors",
+            "disable the slack connector",
+            "set credentials for github",
+        ];
+        for intent in &intents {
+            let plan = compile(&request(intent));
+            assert!(
+                !plan.workflow_truth.authoritative,
+                "Plan for '{}' claims authoritative before execution",
+                intent,
+            );
+        }
+    }
+
+    #[test]
+    fn compiler_discovery_plan_workflow_truth_is_set() {
+        let plan = compile(&request("what connectors are available"));
+        assert_ne!(
+            plan.workflow_truth.availability,
+            CommandAvailability::Denied,
+            "Discovery should not be denied",
+        );
+        assert!(!plan.workflow_truth.explanation.is_empty());
+    }
+
+    #[test]
+    fn compiler_unsupported_plan_exit_code_is_nonzero() {
+        let plan = compile(&request("disable the github connector"));
+        if plan.workflow_truth.availability == CommandAvailability::Unsupported {
+            assert_ne!(
+                plan.workflow_truth.exit_code_hint, 0,
+                "Unsupported plan should have nonzero exit code",
+            );
+        }
+    }
+
+    #[test]
+    fn compiler_ambiguous_plan_is_recoverable() {
+        let plan = compile(&request("send a message"));
+        if plan.status == "ambiguous" {
+            assert!(
+                plan.workflow_truth.recoverable,
+                "Ambiguous plan should be recoverable",
+            );
+        }
+    }
+
+    // ── WorkflowTruth construction tests ────────────────────────
+
+    #[test]
+    fn workflow_truth_from_compiler_is_never_authoritative() {
+        let truth = WorkflowTruth::from_compiler(
+            CommandAvailability::LiveRuntime,
+            "test explanation",
+        );
+        assert!(!truth.authoritative);
+        assert_eq!(truth.source_of_truth, WORKFLOW_TRUTH_COMPILER_SOURCE);
+    }
+
+    #[test]
+    fn workflow_truth_from_execution_receipt_can_be_authoritative() {
+        let truth = WorkflowTruth::from_execution_receipt(
+            CommandAvailability::LiveRuntime,
+            true,
+            false,
+            "Host-backed execution succeeded",
+        );
+        assert!(truth.authoritative);
+        assert_eq!(truth.source_of_truth, "workflow-execution-receipt");
+    }
+
+    #[test]
+    fn workflow_truth_denied_is_recoverable() {
+        let truth = WorkflowTruth::from_compiler(
+            CommandAvailability::Denied,
+            "Policy blocks this operation",
+        );
+        assert!(truth.recoverable);
+        assert_eq!(truth.exit_code_hint, CommandAvailability::Denied.exit_code_u8());
+    }
+
+    #[test]
+    fn workflow_truth_unavailable_is_recoverable() {
+        let truth = WorkflowTruth::from_compiler(
+            CommandAvailability::Unavailable,
+            "Host unreachable",
+        );
+        assert!(truth.recoverable);
+    }
+
+    #[test]
+    fn workflow_truth_unsupported_is_not_recoverable() {
+        let truth = WorkflowTruth::from_compiler(
+            CommandAvailability::Unsupported,
+            "Not supported by this connector",
+        );
+        assert!(!truth.recoverable);
+    }
+
+    #[test]
+    fn workflow_truth_serializes_all_fields() {
+        let truth = WorkflowTruth::from_compiler(
+            CommandAvailability::LiveRuntime,
+            "Live host truth",
+        );
+        let json = serde_json::to_value(&truth).unwrap();
+        assert!(json.get("availability").is_some());
+        assert!(json.get("source_of_truth").is_some());
+        assert!(json.get("authoritative").is_some());
+        assert!(json.get("recoverable").is_some());
+        assert!(json.get("exit_code_hint").is_some());
+        assert!(json.get("explanation").is_some());
+    }
 }

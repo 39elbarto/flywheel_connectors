@@ -11,6 +11,7 @@
 #![allow(clippy::too_many_arguments)] // test harness functions need many parameters
 #![allow(clippy::needless_pass_by_value)] // API ergonomics for TimedResult/TimedValue
 
+pub mod evidence;
 mod logging;
 mod subprocess;
 

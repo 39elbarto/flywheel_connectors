@@ -55,6 +55,7 @@ mod harness;
 mod log_scan;
 mod mock_server;
 pub mod supervisor_examples;
+pub mod coverage_rules;
 mod tracing_config;
 
 pub use assertions::*;

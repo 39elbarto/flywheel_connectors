@@ -26,13 +26,22 @@ use fcp_gmail::{client::GmailClient, connector::GmailConnector, error::GmailErro
 // Helpers
 // ============================================================================
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> CapabilityToken {
+fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+    let cap = match op {
+        "gmail.send_message" | "gmail.send_draft" => "gmail.messages.send",
+        "gmail.get_message" | "gmail.list_messages" | "gmail.get_draft" => "gmail.messages.read",
+        "gmail.sync_history" => "gmail.history.read",
+        "gmail.modify_message" | "gmail.trash_message" => "gmail.messages.modify",
+        "gmail.get_thread" => "gmail.threads.read",
+        "gmail.list_labels" => "gmail.labels.manage",
+        _ => "gmail.messages.read",
+    };
     let now = Utc::now();
     let cose = CapabilityTokenBuilder::new()
         .capability_id(cap)
         .zone_id("z:work")
         .principal("user:test")
-        .operations(&[cap])
+        .operations(&[op])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
         .sign(signing_key)

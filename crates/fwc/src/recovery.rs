@@ -305,6 +305,8 @@ pub fn is_readonly_command(command: &str) -> bool {
             | "status"
             | "simulate"
             | "preflight"
+            | "tail"
+            | "watch"
             | "plan"
             | "explain"
     )
@@ -977,6 +979,8 @@ mod tests {
             "invoke",
             "simulate",
             "preflight",
+            "tail",
+            "watch",
         ];
         for cmd in all_commands {
             assert!(
@@ -1215,6 +1219,8 @@ mod tests {
             "invoke",
             "simulate",
             "preflight",
+            "tail",
+            "watch",
         ];
         let test_aliases = [
             "info",
@@ -1319,6 +1325,8 @@ mod tests {
             "invoke",
             "simulate",
             "preflight",
+            "tail",
+            "watch",
             "pin",
             "unpin",
         ];

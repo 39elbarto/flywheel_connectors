@@ -1005,6 +1005,14 @@ pub const COMMAND_FAMILY_CLASSIFICATION: &[CommandFamilyEntry] = &[
         name: "new",
         mode: CommandTruthMode::Passthrough,
     },
+    CommandFamilyEntry {
+        name: "tail",
+        mode: CommandTruthMode::LiveOnly,
+    },
+    CommandFamilyEntry {
+        name: "watch",
+        mode: CommandTruthMode::LiveOnly,
+    },
     // ── Additional live-only service surfaces ───────────────────────
     CommandFamilyEntry {
         name: "serve-mcp",
@@ -9261,7 +9269,7 @@ output_schema = { type = "object" }
             .iter()
             .filter(|e| e.mode == CommandTruthMode::LiveOnly)
             .count();
-        assert_eq!(count, 15, "Expected 15 live-only commands, got {count}");
+        assert_eq!(count, 17, "Expected 17 live-only commands, got {count}");
     }
 
     #[test]
@@ -10008,6 +10016,8 @@ output_schema = { type = "object" }
             "trace",
             "policy",
             "package",
+            "tail",
+            "watch",
             "serve-mcp",
         ];
         for cmd in &expected {
@@ -10722,7 +10732,7 @@ output_schema = { type = "object" }
     #[test]
     fn golden_classification_count() {
         // Pinned count — if commands are added/removed, update this.
-        assert_eq!(COMMAND_FAMILY_CLASSIFICATION.len(), 50);
+        assert_eq!(COMMAND_FAMILY_CLASSIFICATION.len(), 52);
     }
 
     #[test]

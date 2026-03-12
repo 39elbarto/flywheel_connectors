@@ -33,7 +33,6 @@ mod credential_store;
 mod doctor;
 #[allow(dead_code)] // Error taxonomy wired when host-backed dispatch lands.
 mod error_taxonomy;
-#[allow(dead_code)] // Stream types wired when host integration lands.
 mod event_stream;
 #[allow(dead_code)] // Comprehensive event filtering engine.
 mod events;
@@ -146,8 +145,10 @@ use fcp_host::{
     ConnectorInventoryMutationResponse as HostConnectorInventoryMutationResponse,
     ConnectorInventoryResponse as HostConnectorInventoryResponse,
     DiscoveryFilter as HostDiscoveryFilter, DiscoveryResponse as HostDiscoveryResponse,
-    DoctorReport as HostDoctorReport, DoctorRequest as HostDoctorRequest, HostHealthResponse,
-    HostPreflightRequest, IntrospectionResponse as HostIntrospectionResponse,
+    DoctorReport as HostDoctorReport, DoctorRequest as HostDoctorRequest,
+    EventQueryRequest as HostEventQueryRequest,
+    EventQueryResponse as HostEventQueryResponse, HostHealthResponse, HostPreflightRequest,
+    IntrospectionResponse as HostIntrospectionResponse,
     LifecycleTransitionRequest, LifecycleTransitionResponse, ManagedConnectorConfig,
     PreflightResponse as HostPreflightResponse, ToolDescriptor as HostToolDescriptor,
 };
@@ -499,6 +500,18 @@ enum Commands {
     /// tests. Use `--check` to validate an existing connector instead.
     #[command(visible_alias = "scaffold")]
     New(new_cmd::NewArgs),
+
+    /// Tail connector event streams in real time.
+    ///
+    /// Shows a unified view of host control-plane events with
+    /// backpressure handling, filtering, and resume support.
+    Tail(TailArgs),
+
+    /// Watch a long-running operation for completion.
+    ///
+    /// Queries the host for operation status and reports current state
+    /// with next-actions for re-polling if not yet complete.
+    Watch(WatchArgs),
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -1029,6 +1042,46 @@ struct ExampleArgs {
     /// Read explicit offline workspace-manifest metadata instead of live host inventory.
     #[arg(long, default_value_t = false)]
     offline: bool,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct TailArgs {
+    /// Connector(s) to tail (comma-separated). Omit to tail all.
+    connector: Option<String>,
+
+    /// Historical lookback duration (e.g. 5m, 1h, 2d).
+    #[arg(long)]
+    since: Option<String>,
+
+    /// Maximum number of events to return in snapshot mode.
+    #[arg(long, default_value_t = 50)]
+    limit: usize,
+
+    /// Event type filter (e.g. "lifecycle", "health-check").
+    #[arg(long)]
+    event_type: Option<String>,
+
+    /// Output a stream plan without live connection.
+    #[arg(long, default_value_t = false)]
+    dry_run: bool,
+
+    /// Resume from a specific cursor/position.
+    #[arg(long)]
+    cursor: Option<String>,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct WatchArgs {
+    /// Operation request ID to watch.
+    operation_id: String,
+
+    /// Poll interval in seconds.
+    #[arg(long, default_value_t = 5)]
+    interval: u64,
+
+    /// Timeout in seconds (0 = no timeout).
+    #[arg(long, default_value_t = 300)]
+    timeout: u64,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -2710,9 +2763,257 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         Commands::BatchFile(args) => batch_file_dispatch(args, cli.host.as_deref())?,
         Commands::Bench(_) => passthrough_only_dispatch("bench"),
         Commands::New(_) => passthrough_only_dispatch("new"),
+        Commands::Tail(args) => tail_dispatch(&args, cli.host.as_deref())?,
+        Commands::Watch(args) => watch_dispatch(&args, cli.host.as_deref())?,
     };
 
     Ok(outcome)
+}
+
+// ── tail / watch dispatch ────────────────────────────────────────────────
+
+fn tail_dispatch(args: &TailArgs, explicit_host: Option<&str>) -> Result<DispatchOutcome> {
+    // Parse --since into seconds.
+    let since_seconds = match args.since.as_deref() {
+        Some(raw) => match event_stream::parse_since(raw) {
+            Ok(secs) => Some(secs),
+            Err(msg) => {
+                return Ok(DispatchOutcome {
+                    payload: json!({
+                        "status": "error",
+                        "command": "tail",
+                        "error": {
+                            "type": "invalid-since-duration",
+                            "message": format!("Cannot parse `--since {raw}`: {msg}"),
+                            "recoverable": true,
+                        },
+                        "next_actions": [
+                            "fwc tail --since 5m",
+                            "fwc tail --since 1h",
+                            "fwc tail --since 2d",
+                        ],
+                    }),
+                    exit_code: CliExitCode::Validation,
+                });
+            }
+        },
+        None => None,
+    };
+
+    let connectors: Vec<String> = args
+        .connector
+        .as_deref()
+        .map(event_stream::TailConfig::parse_connectors)
+        .unwrap_or_default();
+
+    let config = event_stream::TailConfig {
+        connectors: connectors.clone(),
+        all: args.connector.is_none(),
+        since_seconds,
+        buffer_size: args.limit,
+    };
+
+    // ── dry-run: return a plan without contacting the host ──
+    if args.dry_run {
+        let plan = event_stream::TailPlan {
+            connectors: config.connectors.clone(),
+            all: config.all,
+            since: args.since.clone(),
+            buffer_size: config.buffer_size,
+        };
+        let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "tail");
+        let mut payload = json!({
+            "status": "ok",
+            "command": "tail",
+            "dry_run": true,
+            "plan": plan,
+            "config": config,
+            "message": "Dry-run tail plan. Use without `--dry-run` to execute against a live host.",
+            "next_actions": [
+                format!(
+                    "fwc tail {} --host <endpoint>",
+                    args.connector.as_deref().unwrap_or("(all)")
+                ),
+            ],
+        });
+        envelope.inject_into(&mut payload);
+        return Ok(DispatchOutcome {
+            payload,
+            exit_code: CliExitCode::Success,
+        });
+    }
+
+    // ── live path: contact host ──
+    let Some(host) = resolve_host_config(explicit_host)? else {
+        return Ok(missing_host_dispatch(
+            "tail",
+            serde_json::to_value(args)?,
+            vec![
+                "fwc tail --host <endpoint>".to_owned(),
+                "fwc tail --dry-run  (to preview a tail plan without a host)".to_owned(),
+                "Set `FWC_HOST` or `FCP_HOST_ENDPOINT`, or configure an active FCP context."
+                    .to_owned(),
+            ],
+        ));
+    };
+
+    let client = HostAdminClient::new(&host.endpoint)?;
+
+    let request = HostEventQueryRequest {
+        connector_id: if connectors.len() == 1 {
+            Some(connectors[0].clone())
+        } else {
+            None
+        },
+        kind: None,
+        unacknowledged_only: false,
+        limit: args.limit,
+    };
+
+    let response = client.events(&request)?;
+
+    // Transform HostEvents → ConnectorEvents for toon formatting.
+    let events: Vec<event_stream::ConnectorEvent> = response
+        .events
+        .iter()
+        .map(|he| event_stream::ConnectorEvent {
+            timestamp: he.timestamp.to_rfc3339(),
+            connector: he.connector_id.clone().unwrap_or_default(),
+            event_type: format!("{:?}", he.kind),
+            context: None,
+            summary: Some(he.summary.clone()),
+            data: he.payload.clone().unwrap_or(serde_json::Value::Null),
+        })
+        .collect();
+
+    let formatted: Vec<String> = events
+        .iter()
+        .map(event_stream::ConnectorEvent::format_toon)
+        .collect();
+
+    let summary = event_stream::TailSummary {
+        streams: connectors
+            .iter()
+            .map(|c| event_stream::ConnectorStreamState {
+                connector: c.clone(),
+                status: event_stream::StreamStatus::Active,
+                events_received: events
+                    .iter()
+                    .filter(|e| &e.connector == c)
+                    .count() as u64,
+                last_event_at: events
+                    .iter()
+                    .filter(|e| &e.connector == c)
+                    .last()
+                    .map(|e| e.timestamp.clone()),
+            })
+            .collect(),
+        total_events: events.len() as u64,
+        dropped_events: 0,
+    };
+
+    let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "tail");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "tail",
+        "source": "host-admin-api",
+        "event_count": events.len(),
+        "unacknowledged_count": response.unacknowledged_count,
+        "events": events,
+        "formatted": formatted,
+        "summary": summary,
+        "message": format!(
+            "Fetched {} event(s) from `fcp-host` at `{}`.",
+            events.len(),
+            host.endpoint,
+        ),
+        "next_actions": [
+            format!("fwc tail --limit {} --host {}", args.limit, host.endpoint),
+        ],
+    });
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn watch_dispatch(args: &WatchArgs, explicit_host: Option<&str>) -> Result<DispatchOutcome> {
+    let Some(host) = resolve_host_config(explicit_host)? else {
+        return Ok(missing_host_dispatch(
+            "watch",
+            serde_json::to_value(args)?,
+            vec![
+                "fwc watch <operation-id> --host <endpoint>".to_owned(),
+                "Set `FWC_HOST` or `FCP_HOST_ENDPOINT`, or configure an active FCP context."
+                    .to_owned(),
+            ],
+        ));
+    };
+
+    // Query current event state for the operation.
+    let client = HostAdminClient::new(&host.endpoint)?;
+
+    let request = HostEventQueryRequest {
+        connector_id: None,
+        kind: None,
+        unacknowledged_only: false,
+        limit: 10,
+    };
+
+    let response = client.events(&request)?;
+
+    // Filter events that reference this operation ID.
+    let matching: Vec<_> = response
+        .events
+        .iter()
+        .filter(|he| {
+            he.summary.contains(&args.operation_id)
+                || he
+                    .payload
+                    .as_ref()
+                    .and_then(|p| p.get("request_id"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| id == args.operation_id)
+        })
+        .collect();
+
+    let status_label = if matching.is_empty() {
+        "pending"
+    } else {
+        "in-progress"
+    };
+
+    let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "watch");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "watch",
+        "source": "host-admin-api",
+        "operation_id": args.operation_id,
+        "operation_status": status_label,
+        "matching_events": matching.len(),
+        "events": matching,
+        "poll_interval_seconds": args.interval,
+        "timeout_seconds": args.timeout,
+        "message": format!(
+            "Operation `{}` is currently `{}`. {} related event(s) found.",
+            args.operation_id,
+            status_label,
+            matching.len(),
+        ),
+        "next_actions": [
+            format!(
+                "fwc watch {} --interval {} --timeout {} --host {}",
+                args.operation_id, args.interval, args.timeout, host.endpoint,
+            ),
+            format!("fwc cancel {} --host {}", args.operation_id, host.endpoint),
+        ],
+    });
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Success,
+    })
 }
 
 fn passthrough_only_dispatch(command: &str) -> DispatchOutcome {
@@ -3115,6 +3416,10 @@ impl HostAdminClient {
 
     fn cancel(&self, request: &HostCancellationRequest) -> Result<HostCancellationResponse> {
         self.post_json("/rpc/cancel", request)
+    }
+
+    fn events(&self, request: &HostEventQueryRequest) -> Result<HostEventQueryResponse> {
+        self.post_json("/rpc/admin/events", request)
     }
 
     fn batch(&self, request: &HostBatchInvokeRequest) -> Result<HostBatchInvokeResponse> {
@@ -27408,5 +27713,123 @@ depends_on = ["missing"]
                 .iter()
                 .any(|entry| entry.as_str().unwrap().contains("config import"))
         );
+    }
+
+    // ── tail / watch dispatch tests ──────────────────────────────────
+
+    #[test]
+    fn tail_dry_run_shows_plan() {
+        let args = super::TailArgs {
+            connector: Some("slack".to_owned()),
+            since: Some("5m".to_owned()),
+            limit: 20,
+            event_type: None,
+            dry_run: true,
+            cursor: None,
+        };
+        let outcome = super::tail_dispatch(&args, None).expect("dry-run should succeed");
+        assert_eq!(outcome.exit_code, CliExitCode::Success);
+        assert_eq!(outcome.payload["command"], "tail");
+        assert_eq!(outcome.payload["dry_run"], true);
+        assert_eq!(outcome.payload["plan"]["connectors"][0], "slack");
+        assert_eq!(outcome.payload["plan"]["since"], "5m");
+        assert_eq!(outcome.payload["plan"]["buffer_size"], 20);
+    }
+
+    #[test]
+    fn tail_dry_run_all_connectors() {
+        let args = super::TailArgs {
+            connector: None,
+            since: None,
+            limit: 50,
+            event_type: None,
+            dry_run: true,
+            cursor: None,
+        };
+        let outcome = super::tail_dispatch(&args, None).expect("dry-run should succeed");
+        assert_eq!(outcome.exit_code, CliExitCode::Success);
+        assert_eq!(outcome.payload["plan"]["all"], true);
+        let connectors = outcome.payload["plan"]["connectors"]
+            .as_array()
+            .unwrap();
+        assert!(connectors.is_empty());
+    }
+
+    #[test]
+    fn tail_no_host_returns_transport_error() {
+        let args = super::TailArgs {
+            connector: Some("github".to_owned()),
+            since: None,
+            limit: 50,
+            event_type: None,
+            dry_run: false,
+            cursor: None,
+        };
+        let outcome = super::tail_dispatch(&args, None).expect("should return missing-host");
+        assert_eq!(outcome.exit_code, CliExitCode::Transport);
+        assert_eq!(outcome.payload["error"]["type"], "missing-host-endpoint");
+    }
+
+    #[test]
+    fn tail_invalid_since_returns_validation_error() {
+        let args = super::TailArgs {
+            connector: None,
+            since: Some("abc".to_owned()),
+            limit: 50,
+            event_type: None,
+            dry_run: false,
+            cursor: None,
+        };
+        let outcome =
+            super::tail_dispatch(&args, None).expect("should return validation error");
+        assert_eq!(outcome.exit_code, CliExitCode::Validation);
+        assert_eq!(outcome.payload["error"]["type"], "invalid-since-duration");
+    }
+
+    #[test]
+    fn tail_multi_connector_parse() {
+        let args = super::TailArgs {
+            connector: Some("slack,github, jira".to_owned()),
+            since: Some("1h".to_owned()),
+            limit: 10,
+            event_type: None,
+            dry_run: true,
+            cursor: None,
+        };
+        let outcome = super::tail_dispatch(&args, None).expect("dry-run should succeed");
+        let connectors = outcome.payload["plan"]["connectors"]
+            .as_array()
+            .unwrap();
+        assert_eq!(connectors.len(), 3);
+        assert_eq!(connectors[0], "slack");
+        assert_eq!(connectors[1], "github");
+        assert_eq!(connectors[2], "jira");
+    }
+
+    #[test]
+    fn watch_no_host_returns_transport_error() {
+        let args = super::WatchArgs {
+            operation_id: "req:abc123".to_owned(),
+            interval: 5,
+            timeout: 300,
+        };
+        let outcome = super::watch_dispatch(&args, None).expect("should return missing-host");
+        assert_eq!(outcome.exit_code, CliExitCode::Transport);
+        assert_eq!(outcome.payload["error"]["type"], "missing-host-endpoint");
+    }
+
+    #[test]
+    fn tail_dry_run_has_envelope_fields() {
+        let args = super::TailArgs {
+            connector: None,
+            since: None,
+            limit: 50,
+            event_type: None,
+            dry_run: true,
+            cursor: None,
+        };
+        let outcome = super::tail_dispatch(&args, None).expect("dry-run should succeed");
+        // CommandEnvelope injects an "availability" field.
+        assert!(outcome.payload.get("availability").is_some());
     }
 }

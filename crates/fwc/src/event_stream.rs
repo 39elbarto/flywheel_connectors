@@ -53,6 +53,7 @@ impl ConnectorEvent {
     }
 
     /// Format as a single-line JSON string.
+    #[allow(dead_code)] // Used in tests and available for JSON output mode.
     pub fn format_json(&self) -> String {
         serde_json::to_string(self).unwrap_or_default()
     }
@@ -108,12 +109,14 @@ pub fn parse_since(s: &str) -> Result<u64, String> {
 ///
 /// When full, the oldest events are dropped to make room for new ones.
 #[derive(Debug)]
+#[allow(dead_code)] // Used in tests; wired for live streaming in later beads.
 pub struct EventBuffer {
     events: VecDeque<ConnectorEvent>,
     capacity: usize,
     dropped: u64,
 }
 
+#[allow(dead_code)] // Used in tests; wired for live streaming in later beads.
 impl EventBuffer {
     /// Create a new buffer with the given capacity.
     pub fn new(capacity: usize) -> Self {

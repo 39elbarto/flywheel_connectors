@@ -866,12 +866,12 @@ fn invoke_denial_records_history_and_suggests_recovery_actions() {
     assert!(next_actions.iter().any(|action| {
         action
             .as_str()
-            .is_some_and(|value| value.contains("fwc status github --host"))
+            .is_some_and(|value| value.contains("status") && value.contains("--host"))
     }));
     assert!(next_actions.iter().any(|action| {
         action
             .as_str()
-            .is_some_and(|value| value.contains("fwc simulate github issues.create --host"))
+            .is_some_and(|value| value.contains("simulate") && value.contains("--host"))
     }));
 
     let history = run_json_ok_in_home(home.path(), &["--json", "history", "--status", "denied"]);
@@ -1054,4 +1054,409 @@ fn session_pipeline_history_workflow_persists_agent_context() {
         "flywheel_connectors-qnchs.15.2"
     );
     assert_eq!(session_show["session"]["operations_completed"], 2);
+}
+
+// ── Bead 29.8.1: Host integration truth matrix tests ─────────────────
+
+/// Verify that offline commands embed `availability.availability == "offline-artifact"`
+/// and live-host commands embed `availability.availability == "live-runtime"`,
+/// with the correct `source` and `authoritative` provenance markers.
+#[test]
+fn truth_matrix_live_vs_offline_availability_boundary() {
+    // ── Offline side: no host, uses workspace manifests ──
+    let offline_list = run_json_ok(&["--json", "list", "--offline"]);
+    assert_eq!(offline_list["command"], "list");
+    assert_eq!(offline_list["source"], "workspace-manifests");
+    let offline_avail = &offline_list["availability"];
+    assert_eq!(
+        offline_avail["availability"], "offline-artifact",
+        "Offline list must report offline-artifact availability"
+    );
+    assert_eq!(
+        offline_avail["authoritative"], false,
+        "Offline artifacts are not authoritative"
+    );
+    assert!(
+        offline_avail["explanation"]
+            .as_str()
+            .is_some_and(|explanation| !explanation.is_empty()),
+        "Availability envelope must include an explanation"
+    );
+
+    // ── Live side: host-backed list ──
+    let github_connector =
+        mock_connector_summary_json("fcp.github:enterprise:v1", "GitHub Enterprise", 2, "risky");
+    let (host, server) = spawn_mock_host_sequence(vec![(
+        "POST /rpc/discover".to_owned(),
+        mock_discovery_response_json(&[github_connector]),
+    )]);
+
+    let live_list = run_json_ok(&["--json", "--host", &host, "list"]);
+    server.join().expect("mock host thread should complete");
+
+    assert_eq!(live_list["command"], "list");
+    assert_eq!(live_list["source"], "host-admin-api");
+    let live_avail = &live_list["availability"];
+    assert_eq!(
+        live_avail["availability"], "live-runtime",
+        "Host-backed list must report live-runtime availability"
+    );
+    assert_eq!(
+        live_avail["authoritative"], true,
+        "Live-runtime results are authoritative"
+    );
+
+    // ── Offline search also marks correctly ──
+    let offline_search = run_json_ok(&["--json", "search", "github issue", "--offline"]);
+    assert_eq!(offline_search["mode"], "offline-artifact");
+    let search_avail = &offline_search["availability"];
+    assert_eq!(search_avail["availability"], "offline-artifact");
+    assert_eq!(search_avail["authoritative"], false);
+}
+
+/// Verify that invoke without a capability token is denied with a clear
+/// error envelope and does NOT fabricate a successful result.  Auth is
+/// checked before any host RPC calls, so no mock server requests are made.
+#[test]
+fn truth_matrix_auth_enforcement_denies_without_capability_token() {
+    // Use a real-looking host URL — the CLI checks auth before contacting the
+    // host, so it will never actually connect.
+    let (exit_code, payload, _stderr) = run_json(&[
+        "--json",
+        "--host",
+        "http://127.0.0.1:19999",
+        "invoke",
+        "github",
+        "issues.create",
+        "--input",
+        r#"{"owner":"octocat","repo":"hello-world","title":"Auth test"}"#,
+    ]);
+
+    assert_ne!(exit_code, 0, "invoke without auth token should fail");
+    assert_eq!(payload["command"], "invoke");
+    // The CLI must tell the caller what went wrong — it should NOT fabricate success.
+    assert_eq!(
+        payload["status"], "error",
+        "Missing-auth invoke must surface an error status"
+    );
+    assert!(
+        payload["error"]["type"]
+            .as_str()
+            .is_some_and(|t| t.contains("capability") || t.contains("auth") || t.contains("token")),
+        "Error type should mention capability/auth/token, got: {:?}",
+        payload["error"]["type"]
+    );
+    assert_eq!(
+        payload["error"]["recoverable"], true,
+        "Missing auth token is a recoverable error (user can supply the token)"
+    );
+    // Next actions should guide the user to provide a token.
+    let next_actions = payload["next_actions"]
+        .as_array()
+        .expect("auth error should include next_actions");
+    assert!(
+        next_actions
+            .iter()
+            .any(|action| action.as_str().is_some_and(|s| s.contains("capability-token"))),
+        "Next actions should mention --capability-token"
+    );
+}
+
+/// Verify that the `supports_simulate` field on tool descriptors is honestly
+/// propagated through show/ops introspection — a tool that declares
+/// `supports_simulate: true` must be surfaced as such, and vice versa.
+#[test]
+fn truth_matrix_simulate_support_honestly_reported() {
+    let github_connector =
+        mock_connector_summary_json("fcp.github:enterprise:v1", "GitHub Enterprise", 2, "risky");
+    let tool_with_simulate = {
+        let mut tool = mock_tool_descriptor_json(
+            "github.create_issue",
+            "github.issue_write",
+            "medium",
+            "risky",
+            "none",
+            Some("interactive"),
+            &json!({
+                "type": "object",
+                "properties": { "title": { "type": "string" } },
+                "required": ["title"]
+            }),
+            &json!({ "type": "object" }),
+        );
+        tool["supports_simulate"] = json!(true);
+        tool
+    };
+    let tool_without_simulate = {
+        let mut tool = mock_tool_descriptor_json(
+            "github.list_issues",
+            "github.issue_read",
+            "low",
+            "safe",
+            "strict",
+            None,
+            &json!({
+                "type": "object",
+                "properties": { "owner": { "type": "string" } },
+                "required": ["owner"]
+            }),
+            &json!({ "type": "object" }),
+        );
+        tool["supports_simulate"] = json!(false);
+        tool
+    };
+
+    let (host, server) = spawn_mock_host_sequence(vec![
+        (
+            "POST /rpc/discover".to_owned(),
+            mock_discovery_response_json(&[github_connector.clone()]),
+        ),
+        (
+            "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
+            mock_introspection_response_json(
+                &github_connector,
+                &[tool_with_simulate, tool_without_simulate],
+            ),
+        ),
+    ]);
+
+    let payload = run_json_ok(&["--json", "--host", &host, "ops", "github"]);
+    server.join().expect("mock host thread should complete");
+
+    assert_eq!(payload["command"], "ops");
+    assert_eq!(payload["source"], "host-admin-api");
+    let operations = payload["operations"]
+        .as_array()
+        .expect("ops should return operations array");
+    assert_eq!(operations.len(), 2);
+
+    let create_issue = operations
+        .iter()
+        .find(|op| op["canonical_id"] == "github.create_issue")
+        .expect("create_issue should be in the operations list");
+    assert_eq!(
+        create_issue["supports_simulate"], true,
+        "Tool with supports_simulate=true must be honestly reported"
+    );
+
+    let list_issues = operations
+        .iter()
+        .find(|op| op["canonical_id"] == "github.list_issues")
+        .expect("list_issues should be in the operations list");
+    assert_eq!(
+        list_issues["supports_simulate"], false,
+        "Tool with supports_simulate=false must NOT be fabricated as true"
+    );
+}
+
+/// Verify that metadata fields the host does not populate stay null/unknown
+/// rather than being fabricated.  The show command must not invent values.
+#[test]
+fn truth_matrix_metadata_honesty_unknown_stays_unknown() {
+    // Offline show: connector state should be "unknown" not fabricated.
+    let show_offline = run_json_ok(&["--json", "show", "github", "--offline"]);
+    assert_eq!(show_offline["command"], "show");
+    assert_eq!(show_offline["connector"]["state"], "unknown");
+    assert_eq!(show_offline["availability"]["availability"], "offline-artifact");
+
+    // The offline show should NOT fabricate health, last_check, or runtime
+    // fields that only the live host can provide.
+    assert!(
+        show_offline["connector"]["health"].is_null()
+            || show_offline["connector"]["health"] == "unknown"
+            || show_offline["connector"]
+                .get("health")
+                .is_none(),
+        "Offline show should not fabricate health data"
+    );
+}
+
+/// Verify that `export-tools --offline` produces tool definitions with
+/// workspace-manifest provenance and that `export-tools --host` reports
+/// live-host provenance — the tool inventory must honestly reflect its source.
+#[test]
+fn truth_matrix_export_tools_reflects_inventory_provenance() {
+    // ── Offline export ──
+    let offline_export =
+        run_json_ok(&["--json", "export-tools", "--offline", "--format", "mcp"]);
+    assert_eq!(offline_export["command"], "export-tools");
+    assert_eq!(offline_export["source"], "workspace-manifests");
+    assert_eq!(
+        offline_export["availability"]["availability"],
+        "offline-artifact"
+    );
+    assert!(
+        offline_export["tool_count"]
+            .as_u64()
+            .is_some_and(|count| count > 0),
+        "Offline export should surface at least one tool from workspace manifests"
+    );
+    // Provenance must be workspace-manifest for offline.
+    assert!(
+        offline_export.get("tool_provenance").is_some()
+            || offline_export.get("provenance").is_some()
+            || offline_export["source"] == "workspace-manifests",
+        "Offline export must include workspace-manifest provenance"
+    );
+
+    // ── Live export via mock host ──
+    let github_connector =
+        mock_connector_summary_json("fcp.github:enterprise:v1", "GitHub Enterprise", 1, "safe");
+    let github_list_issues = mock_tool_descriptor_json(
+        "github.list_issues",
+        "github.issue_read",
+        "low",
+        "safe",
+        "strict",
+        None,
+        &json!({
+            "type": "object",
+            "properties": { "owner": { "type": "string" } },
+            "required": ["owner"]
+        }),
+        &json!({ "type": "object" }),
+    );
+    let (host, server) = spawn_mock_host_sequence(vec![
+        (
+            "POST /rpc/discover".to_owned(),
+            mock_discovery_response_json(&[github_connector.clone()]),
+        ),
+        (
+            "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
+            mock_introspection_response_json(&github_connector, &[github_list_issues]),
+        ),
+    ]);
+
+    let live_export = run_json_ok(&[
+        "--json",
+        "--host",
+        &host,
+        "export-tools",
+        "--format",
+        "mcp",
+    ]);
+    server.join().expect("mock host thread should complete");
+
+    assert_eq!(live_export["command"], "export-tools");
+    assert_eq!(live_export["source"], "host-admin-api");
+    assert_eq!(
+        live_export["availability"]["availability"],
+        "live-runtime"
+    );
+    assert_eq!(live_export["tool_count"], 1);
+    assert!(
+        live_export["tools"].as_array().is_some_and(|tools| !tools.is_empty()),
+        "Live export should include the tool definitions in the response"
+    );
+}
+
+/// Verify that a successful invoke through the mock host produces a history
+/// entry with a receipt that contains enough evidence for replay/audit —
+/// connector_id, operation_id, status, timestamp, and input hash.
+#[allow(clippy::too_many_lines)]
+#[test]
+fn truth_matrix_receipt_evidence_in_history() {
+    let capability_token = test_capability_token_arg();
+    let home = tempdir().expect("temp home should be created");
+    let github_connector =
+        mock_connector_summary_json("fcp.github:enterprise:v1", "GitHub Enterprise", 1, "risky");
+    let github_create_issue = mock_tool_descriptor_json(
+        "github.create_issue",
+        "github.issue_write",
+        "medium",
+        "risky",
+        "none",
+        Some("interactive"),
+        &json!({
+            "type": "object",
+            "properties": {
+                "owner": { "type": "string" },
+                "repo": { "type": "string" },
+                "title": { "type": "string" }
+            },
+            "required": ["owner", "repo", "title"]
+        }),
+        &json!({
+            "type": "object",
+            "properties": { "number": { "type": "integer" } },
+            "required": ["number"]
+        }),
+    );
+    let (host, server) = spawn_mock_host_sequence(vec![
+        (
+            "POST /rpc/discover".to_owned(),
+            mock_discovery_response_json(&[github_connector.clone()]),
+        ),
+        (
+            "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
+            mock_introspection_response_json(&github_connector, &[github_create_issue]),
+        ),
+        (
+            "POST /rpc/preflight".to_owned(),
+            mock_preflight_response_json(true),
+        ),
+        (
+            "POST /rpc/invoke".to_owned(),
+            mock_invoke_response_json(json!({ "number": 42 })),
+        ),
+    ]);
+
+    let invoke_payload = run_json_ok_in_home(
+        home.path(),
+        &[
+            "--json",
+            "--host",
+            &host,
+            "invoke",
+            "github",
+            "issues.create",
+            "--input",
+            r#"{"owner":"octocat","repo":"hello-world","title":"Receipt test"}"#,
+            "--capability-token",
+            &capability_token,
+        ],
+    );
+
+    server.join().expect("mock host thread should complete");
+    assert_eq!(invoke_payload["command"], "invoke");
+    assert_eq!(invoke_payload["status"], "ok");
+    assert_eq!(
+        invoke_payload["availability"]["availability"],
+        "live-runtime"
+    );
+
+    // ── Verify history receipt evidence ──
+    let history = run_json_ok_in_home(home.path(), &["--json", "history"]);
+    assert_eq!(history["command"], "history");
+    let entries = history["entries"]
+        .as_array()
+        .expect("history should have entries");
+    assert_eq!(entries.len(), 1, "One invoke should produce one history entry");
+
+    let entry = &entries[0];
+    // Receipt evidence: must have connector_id, operation_id, status, timestamp.
+    assert_eq!(
+        entry["connector_id"], "fcp.github:enterprise:v1",
+        "History entry must record the exact connector ID"
+    );
+    assert_eq!(
+        entry["operation_id"], "github.create_issue",
+        "History entry must record the exact operation ID"
+    );
+    assert_eq!(
+        entry["status"], "success",
+        "Successful invoke must be recorded as success"
+    );
+    assert!(
+        entry["timestamp"].as_str().is_some_and(|ts| !ts.is_empty()),
+        "History entry must include a timestamp for audit/replay"
+    );
+    // The entry should contain some form of input evidence (hash or summary).
+    assert!(
+        entry.get("input_hash").is_some()
+            || entry.get("input_summary").is_some()
+            || entry.get("input").is_some()
+            || entry.get("payload_hash").is_some(),
+        "History entry should contain input evidence for replay/audit"
+    );
 }

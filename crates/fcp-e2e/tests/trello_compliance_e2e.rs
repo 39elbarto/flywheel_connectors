@@ -183,7 +183,13 @@ impl FcpConnector for TrelloConnectorAdapter {
                 "input": req.input,
             }))
             .await?;
-        Ok(InvokeResponse::ok(request_id, value))
+        let mut response = InvokeResponse::ok(request_id, value);
+        if req.operation.as_str() == "trello.cards.delete" {
+            response = response
+                .with_receipt_id(stable_object_id("trello.cards.delete.receipt"))
+                .with_audit_event_id(stable_object_id("trello.cards.delete.audit"));
+        }
+        Ok(response)
     }
 
     async fn simulate(&self, req: SimulateRequest) -> fcp_core::FcpResult<SimulateResponse> {
@@ -529,6 +535,80 @@ async fn trello_allow_valid_token_connector_suite_passes() {
     assert_eq!(
         invoke_entry.context.get("invoke_status"),
         Some(&json!(format!("{:?}", InvokeStatus::Ok)))
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn trello_dangerous_delete_emits_receipt_audit_and_stable_evidence() {
+    let mock = MockApiServer::start().await;
+
+    Mock::given(method("DELETE"))
+        .and(path_regex(r"^/cards/.*"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(mock.inner())
+        .await;
+
+    let mut connector = TrelloConnectorAdapter::new();
+    let signing_key = Ed25519SigningKey::generate();
+    let handshake = handshake_request(
+        signing_key.verifying_key().to_bytes(),
+        &["trello.cards.write"],
+    );
+    let token = build_token(&signing_key, "trello.cards.write", &["trello.cards.delete"]);
+    let invoke = invoke_request(
+        "trello.cards.delete",
+        json!({ "card_id": "card_abc123" }),
+        token,
+    );
+
+    let suite = ConnectorSuite {
+        test_name: "trello_cards_delete_receipts".to_string(),
+        config: trello_config(&mock.base_url()),
+        handshake,
+        invoke: Some(invoke),
+        invoke_expectations: InvokeExpectations {
+            expect_error: false,
+            expect_decision_receipt: false,
+            expect_audit_event: true,
+            expect_receipt: true,
+            expected_reason_code: None,
+            rate_limit_pool: None,
+        },
+    };
+
+    let mut runner = E2eRunner::new("fcp-e2e-trello-dangerous");
+    let report = runner
+        .run_connector_suite(&mut connector, suite)
+        .await
+        .expect("connector suite run");
+
+    assert!(
+        report.passed,
+        "dangerous delete compliance should pass: {report:#?}"
+    );
+    assert_report_logs_validate(&report);
+
+    let invoke_entry = report
+        .logs
+        .iter()
+        .find(|entry| entry.context.get("operation") == Some(&json!("invoke")))
+        .expect("invoke entry");
+    assert_eq!(invoke_entry.result, "pass");
+    assert_eq!(
+        invoke_entry.context.get("invoke_status"),
+        Some(&json!(format!("{:?}", InvokeStatus::Ok)))
+    );
+    assert_eq!(
+        invoke_entry.context.get("audit_event_id"),
+        Some(&json!(
+            stable_object_id("trello.cards.delete.audit").to_string()
+        ))
+    );
+    assert_eq!(
+        invoke_entry.context.get("receipt_id"),
+        Some(&json!(
+            stable_object_id("trello.cards.delete.receipt").to_string()
+        ))
     );
 }
 

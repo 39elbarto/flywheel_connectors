@@ -12,7 +12,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::export_tools;
 use crate::history::{HistoryFilter, HistoryStore};
 use crate::mcp_resources::{
     self, McpPrompt as RegistryPrompt, McpResource as RegistryResource, McpResourceRegistry,
@@ -23,6 +22,7 @@ use crate::zone_scope::{
     CapabilityToken, ViolationReason, ZoneId, ZoneRegistry, ZoneScopedTool, ZoneViolation,
     validate_tool_call,
 };
+use crate::{catalog, export_tools};
 
 // ── JSON-RPC 2.0 Error Codes ────────────────────────────────────────────
 
@@ -331,6 +331,12 @@ pub struct McpToolDefinition {
     pub connector_id: String,
     /// Operation within the connector.
     pub operation_id: String,
+    /// Optional MCP annotations preserved from the export surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<export_tools::McpToolAnnotations>,
+    /// Truthfulness metadata describing the inventory source for this tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<catalog::ExportedToolProvenance>,
     /// Zones where this tool may be exposed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub supported_zones: Vec<String>,
@@ -351,6 +357,8 @@ impl McpToolDefinition {
             input_schema,
             connector_id: connector_id.into(),
             operation_id: operation_id.into(),
+            annotations: None,
+            provenance: None,
             supported_zones: Vec::new(),
         }
     }
@@ -375,6 +383,21 @@ impl McpToolDefinition {
         supported_zones.sort();
         supported_zones.dedup();
         self.supported_zones = supported_zones;
+        self
+    }
+
+    /// Builder: attach MCP annotations to this tool.
+    pub fn with_annotations(
+        mut self,
+        annotations: Option<export_tools::McpToolAnnotations>,
+    ) -> Self {
+        self.annotations = annotations;
+        self
+    }
+
+    /// Builder: attach provenance metadata to this tool.
+    pub fn with_provenance(mut self, provenance: catalog::ExportedToolProvenance) -> Self {
+        self.provenance = Some(provenance);
         self
     }
 
@@ -651,12 +674,19 @@ pub fn state_from_connectors(
         connector.operations.iter().map(|operation| {
             let tool = export_tools::to_mcp_tool(operation, &options);
             McpToolDefinition::new(
-                tool.name,
+                tool.name.clone(),
                 tool.description,
                 tool.input_schema,
                 connector.slug.clone(),
                 operation.preferred_selector.clone(),
             )
+            .with_annotations(tool.annotations)
+            .with_provenance(catalog::tool_provenance(
+                &tool.name,
+                &connector.slug,
+                catalog::ToolInventorySource::WorkspaceManifest,
+                catalog::ToolAvailability::Unknown,
+            ))
             .with_supported_zones(connector.supported_zones.clone())
         })
     });
@@ -1061,11 +1091,29 @@ fn handle_tools_list(state: &McpServerState, id: Value) -> JsonRpcResponse {
         .iter()
         .filter(|tool| tool_matches_server_filters(tool, &state.config))
         .map(|t| {
-            json!({
+            let mut payload = json!({
                 "name": t.name,
                 "description": t.description,
                 "inputSchema": t.input_schema,
-            })
+            });
+            if let Some(object) = payload.as_object_mut() {
+                if let Some(annotations) = &t.annotations {
+                    object.insert(
+                        "annotations".to_owned(),
+                        serde_json::to_value(annotations).unwrap_or(Value::Null),
+                    );
+                }
+                if let Some(provenance) = &t.provenance {
+                    object.insert(
+                        "provenance".to_owned(),
+                        serde_json::to_value(provenance).unwrap_or(Value::Null),
+                    );
+                }
+                if !t.supported_zones.is_empty() {
+                    object.insert("supportedZones".to_owned(), json!(t.supported_zones));
+                }
+            }
+            payload
         })
         .collect();
 
@@ -1361,7 +1409,11 @@ fn resolve_resource_content(
                     &connector_id,
                     &connector_tools,
                 )),
-                "rate-limits" => Some(connector_rate_limits_content(uri, &connector_id)),
+                "rate-limits" => Some(connector_rate_limits_content(
+                    uri,
+                    &connector_id,
+                    &connector_tools,
+                )),
                 "operations" => Some(connector_operations_content(
                     uri,
                     &connector_id,
@@ -1441,20 +1493,7 @@ fn connector_health_content(
     connector_id: &str,
     tools: &[&McpToolDefinition],
 ) -> mcp_resources::ResourceContent {
-    mcp_resources::ResourceContent::new(
-        uri.to_owned(),
-        json!({
-            "connector_id": connector_id,
-            "status": "available",
-            "authoritative": false,
-            "source": "serve-mcp-tool-inventory",
-            "operation_count": tools.len(),
-            "message": "This health snapshot is derived from the MCP tool inventory. Live host health telemetry is not yet attached to serve_mcp state.",
-        }),
-    )
-}
-
-fn connector_rate_limits_content(uri: &str, connector_id: &str) -> mcp_resources::ResourceContent {
+    let inventory = inventory_truth_summary(tools);
     mcp_resources::ResourceContent::new(
         uri.to_owned(),
         json!({
@@ -1462,6 +1501,29 @@ fn connector_rate_limits_content(uri: &str, connector_id: &str) -> mcp_resources
             "status": "unknown",
             "authoritative": false,
             "source": "serve-mcp-tool-inventory",
+            "operation_count": tools.len(),
+            "surface_state": inventory["surface_state"].clone(),
+            "inventory": inventory,
+            "message": "Live connector health telemetry is not yet attached to serve_mcp state. This resource only exposes tool inventory provenance.",
+        }),
+    )
+}
+
+fn connector_rate_limits_content(
+    uri: &str,
+    connector_id: &str,
+    tools: &[&McpToolDefinition],
+) -> mcp_resources::ResourceContent {
+    let inventory = inventory_truth_summary(tools);
+    mcp_resources::ResourceContent::new(
+        uri.to_owned(),
+        json!({
+            "connector_id": connector_id,
+            "status": "unknown",
+            "authoritative": false,
+            "source": "serve-mcp-tool-inventory",
+            "surface_state": inventory["surface_state"].clone(),
+            "inventory": inventory,
             "pools": [],
             "message": "Live rate-limit telemetry is not yet attached to serve_mcp state.",
         }),
@@ -1482,6 +1544,9 @@ fn connector_operations_content(
                 "operation_id": tool.operation_id,
                 "description": tool.description,
                 "input_schema": tool.input_schema,
+                "annotations": tool.annotations.clone(),
+                "provenance": tool.provenance.clone(),
+                "supported_zones": tool.supported_zones.clone(),
             })
         })
         .collect::<Vec<_>>();
@@ -1490,6 +1555,7 @@ fn connector_operations_content(
         uri.to_owned(),
         json!({
             "connector_id": connector_id,
+            "surface_state": inventory_truth_summary(tools)["surface_state"].clone(),
             "operation_count": operations.len(),
             "operations": operations,
         }),
@@ -1530,12 +1596,16 @@ fn global_status_content(state: &McpServerState) -> mcp_resources::ResourceConte
         })
         .into_iter()
         .map(|(connector_id, operation_count)| {
+            let connector_tools = state.tools_for_connector(&connector_id);
+            let inventory = inventory_truth_summary(&connector_tools);
             json!({
                 "connector_id": connector_id,
-                "status": "available",
-                "authoritative": false,
+                "status": inventory["status"].clone(),
+                "authoritative": inventory["authoritative"].clone(),
                 "source": "serve-mcp-tool-inventory",
                 "operation_count": operation_count,
+                "surface_state": inventory["surface_state"].clone(),
+                "inventory": inventory,
             })
         })
         .collect::<Vec<_>>();
@@ -1544,9 +1614,78 @@ fn global_status_content(state: &McpServerState) -> mcp_resources::ResourceConte
         "resource://connectors/status",
         json!({
             "connector_count": connectors.len(),
+            "source": "serve-mcp-tool-inventory",
             "connectors": connectors,
         }),
     )
+}
+
+fn inventory_truth_summary(tools: &[&McpToolDefinition]) -> Value {
+    let provenances = tools
+        .iter()
+        .filter_map(|tool| tool.provenance.as_ref())
+        .collect::<Vec<_>>();
+
+    let source = if provenances.is_empty() {
+        catalog::ToolInventorySource::Unknown
+    } else if provenances
+        .iter()
+        .all(|provenance| provenance.source == catalog::ToolInventorySource::LiveHostInventory)
+    {
+        catalog::ToolInventorySource::LiveHostInventory
+    } else if provenances
+        .iter()
+        .all(|provenance| provenance.source == catalog::ToolInventorySource::WorkspaceManifest)
+    {
+        catalog::ToolInventorySource::WorkspaceManifest
+    } else {
+        catalog::ToolInventorySource::Unknown
+    };
+
+    let availability = if provenances.is_empty() {
+        catalog::ToolAvailability::Unknown
+    } else if provenances
+        .iter()
+        .all(|provenance| provenance.availability == catalog::ToolAvailability::Live)
+    {
+        catalog::ToolAvailability::Live
+    } else if provenances
+        .iter()
+        .any(|provenance| provenance.availability == catalog::ToolAvailability::Withheld)
+    {
+        catalog::ToolAvailability::Withheld
+    } else if provenances
+        .iter()
+        .any(|provenance| provenance.availability == catalog::ToolAvailability::Unavailable)
+    {
+        catalog::ToolAvailability::Unavailable
+    } else if provenances
+        .iter()
+        .any(|provenance| provenance.availability == catalog::ToolAvailability::Unsupported)
+    {
+        catalog::ToolAvailability::Unsupported
+    } else {
+        catalog::ToolAvailability::Unknown
+    };
+
+    let surface_state = match source {
+        catalog::ToolInventorySource::LiveHostInventory => catalog::McpSurfaceState::LiveServing,
+        catalog::ToolInventorySource::WorkspaceManifest
+        | catalog::ToolInventorySource::StaticCatalog => catalog::McpSurfaceState::OfflineServing,
+        catalog::ToolInventorySource::Unknown => catalog::McpSurfaceState::Degraded {
+            reason: "Tool inventory provenance is mixed or unknown.".to_owned(),
+        },
+    };
+
+    json!({
+        "source": source.tag(),
+        "availability": availability.tag(),
+        "authoritative": source.is_authoritative() && availability.is_usable(),
+        "caveat": source.freshness_caveat(),
+        "status": if availability.is_usable() { "live_inventory" } else { "unknown" },
+        "surface_state": surface_state.tag(),
+        "tool_count": tools.len(),
+    })
 }
 
 fn load_connector_history(
@@ -1691,6 +1830,24 @@ mod tests {
             "get_secret",
         )
         .with_supported_zones(vec!["z:private".to_owned()])
+    }
+
+    fn sample_live_tool() -> McpToolDefinition {
+        sample_tool()
+            .with_annotations(Some(export_tools::McpToolAnnotations {
+                risk_level: Some("low".to_owned()),
+                safety_tier: Some("safe".to_owned()),
+                idempotency: Some("strict".to_owned()),
+                capability: Some("github.read".to_owned()),
+                read_only: Some(true),
+                destructive: Some(false),
+            }))
+            .with_provenance(catalog::tool_provenance(
+                "github.list_issues",
+                "github",
+                catalog::ToolInventorySource::LiveHostInventory,
+                catalog::ToolAvailability::Live,
+            ))
     }
 
     fn sample_token(zone: &str) -> Value {
@@ -2496,6 +2653,21 @@ mod tests {
     }
 
     #[test]
+    fn handle_tools_list_includes_annotations_provenance_and_supported_zones() {
+        let state = McpServerState::builder()
+            .with_tool(sample_live_tool())
+            .build();
+        let req = make_request("tools/list", None);
+        let resp = handle_request(&state, &req);
+        let tool = &resp.result().unwrap()["tools"][0];
+
+        assert_eq!(tool["annotations"]["capability"], "github.read");
+        assert_eq!(tool["provenance"]["source"], "live_host_inventory");
+        assert_eq!(tool["provenance"]["availability"], "live");
+        assert_eq!(tool["supportedZones"][0], "z:work");
+    }
+
+    #[test]
     fn handle_tools_list_respects_zone_filter() {
         let state = McpServerState::builder()
             .with_config(McpServerConfig::new().with_zone_filter("z:work"))
@@ -2651,6 +2823,49 @@ mod tests {
         let contents = result["contents"].as_array().unwrap();
         assert_eq!(contents.len(), 1);
         assert_eq!(contents[0]["mimeType"], "application/json");
+    }
+
+    #[test]
+    fn handle_resources_read_health_reports_unknown_without_live_telemetry() {
+        let state = state_from_tools([sample_live_tool()], McpServerConfig::default());
+        let req = make_request(
+            "resources/read",
+            Some(json!({"uri": "resource://connector/github/health"})),
+        );
+        let resp = handle_request(&state, &req);
+        let text = resp.result().unwrap()["contents"][0]["text"]
+            .as_str()
+            .expect("resource text should exist");
+        let payload: Value = serde_json::from_str(text).expect("health payload should be valid");
+
+        assert_eq!(payload["status"], "unknown");
+        assert_eq!(payload["inventory"]["source"], "live_host_inventory");
+        assert_eq!(payload["inventory"]["surface_state"], "live_serving");
+    }
+
+    #[test]
+    fn handle_resources_read_operations_include_tool_provenance() {
+        let state = state_from_tools([sample_live_tool()], McpServerConfig::default());
+        let req = make_request(
+            "resources/read",
+            Some(json!({"uri": "resource://connector/github/operations"})),
+        );
+        let resp = handle_request(&state, &req);
+        let text = resp.result().unwrap()["contents"][0]["text"]
+            .as_str()
+            .expect("resource text should exist");
+        let payload: Value =
+            serde_json::from_str(text).expect("operations payload should be valid");
+
+        assert_eq!(
+            payload["operations"][0]["provenance"]["source"],
+            "live_host_inventory"
+        );
+        assert_eq!(
+            payload["operations"][0]["annotations"]["capability"],
+            "github.read"
+        );
+        assert_eq!(payload["operations"][0]["supported_zones"][0], "z:work");
     }
 
     #[test]

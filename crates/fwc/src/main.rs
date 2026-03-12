@@ -3417,12 +3417,19 @@ fn host_mcp_tool_definitions(
             let exported =
                 export_tools::to_mcp_tool_info(&host_tool_operation_info(tool), &options);
             serve_mcp::McpToolDefinition::new(
-                exported.name,
+                exported.name.clone(),
                 exported.description,
                 exported.input_schema,
                 connector.slug.clone(),
                 tool.name.clone(),
             )
+            .with_annotations(exported.annotations)
+            .with_provenance(catalog::tool_provenance(
+                &exported.name,
+                &connector.slug,
+                catalog::ToolInventorySource::LiveHostInventory,
+                catalog::ToolAvailability::Live,
+            ))
         })
         .collect()
 }
@@ -3697,6 +3704,110 @@ fn attach_template_provenance(
             "provenance".to_owned(),
             serde_json::to_value(catalog::template_provenance(command, source))
                 .unwrap_or(Value::Null),
+        );
+    }
+}
+
+fn tool_inventory_mode_label(source: &catalog::ToolInventorySource) -> &'static str {
+    match source {
+        catalog::ToolInventorySource::LiveHostInventory => "live-introspection",
+        catalog::ToolInventorySource::WorkspaceManifest
+        | catalog::ToolInventorySource::StaticCatalog => "offline-artifact",
+        catalog::ToolInventorySource::Unknown => "unknown",
+    }
+}
+
+fn tool_inventory_surface_state(source: &catalog::ToolInventorySource) -> catalog::McpSurfaceState {
+    match source {
+        catalog::ToolInventorySource::LiveHostInventory => {
+            catalog::evaluate_export_readiness(catalog::RuntimeMode::Live, true)
+        }
+        catalog::ToolInventorySource::WorkspaceManifest
+        | catalog::ToolInventorySource::StaticCatalog => {
+            catalog::evaluate_export_readiness(catalog::RuntimeMode::ExplicitOffline, false)
+        }
+        catalog::ToolInventorySource::Unknown => catalog::McpSurfaceState::Degraded {
+            reason: "Tool inventory provenance is unknown.".to_owned(),
+        },
+    }
+}
+
+fn exported_tool_name(
+    operation: &fcp_core::OperationInfo,
+    format: export_tools::ToolSchemaFormat,
+    options: &export_tools::ExportOptions,
+) -> String {
+    match format {
+        export_tools::ToolSchemaFormat::Mcp => {
+            export_tools::to_mcp_tool_info(operation, options).name
+        }
+        export_tools::ToolSchemaFormat::Claude => {
+            export_tools::to_claude_tool_info(operation, options).name
+        }
+        export_tools::ToolSchemaFormat::OpenAi => {
+            export_tools::to_openai_tool_info(operation, options)
+                .function
+                .name
+        }
+    }
+}
+
+fn tool_inventory_provenance(
+    operations: &[fcp_core::OperationInfo],
+    format: export_tools::ToolSchemaFormat,
+    options: &export_tools::ExportOptions,
+    source: catalog::ToolInventorySource,
+    availability: catalog::ToolAvailability,
+) -> Vec<catalog::ExportedToolProvenance> {
+    operations
+        .iter()
+        .map(|operation| {
+            let canonical_id = operation.id.to_string();
+            let connector_id = canonical_id
+                .split('.')
+                .next()
+                .unwrap_or(canonical_id.as_str())
+                .to_owned();
+            catalog::tool_provenance(
+                &exported_tool_name(operation, format, options),
+                &connector_id,
+                source.clone(),
+                availability.clone(),
+            )
+        })
+        .collect()
+}
+
+fn attach_tool_inventory_provenance(
+    payload: &mut Value,
+    command: &str,
+    source: catalog::ToolInventorySource,
+    availability: catalog::ToolAvailability,
+    tools: Vec<catalog::ExportedToolProvenance>,
+) {
+    let surface_state = tool_inventory_surface_state(&source);
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert(
+            "mode".to_owned(),
+            Value::String(tool_inventory_mode_label(&source).to_owned()),
+        );
+        obj.insert(
+            "surface_state".to_owned(),
+            Value::String(surface_state.tag().to_owned()),
+        );
+        obj.insert(
+            "provenance".to_owned(),
+            json!({
+                "command": command,
+                "source": source.tag(),
+                "availability": availability.tag(),
+                "authoritative": source.is_authoritative() && availability.is_usable(),
+                "caveat": source.freshness_caveat(),
+            }),
+        );
+        obj.insert(
+            "tool_provenance".to_owned(),
+            serde_json::to_value(tools).unwrap_or(Value::Null),
         );
     }
 }
@@ -7833,6 +7944,17 @@ fn export_tools_dispatch(args: &ExportToolsArgs, host: Option<&str>) -> Result<D
     let tools_json = export_tools::export_tools(&operations, args.tool_format, &options);
     let tool_count = operations.len();
     let connector_count = connectors.len();
+    let operation_infos = operations
+        .iter()
+        .map(|operation| operation.operation_info())
+        .collect::<Vec<_>>();
+    let tool_provenance = tool_inventory_provenance(
+        &operation_infos,
+        args.tool_format,
+        &options,
+        catalog::ToolInventorySource::WorkspaceManifest,
+        catalog::ToolAvailability::Unknown,
+    );
 
     // Write to file if requested.
     if let Some(path) = &args.output {
@@ -7843,7 +7965,6 @@ fn export_tools_dispatch(args: &ExportToolsArgs, host: Option<&str>) -> Result<D
             "status": "ok",
             "command": "export-tools",
             "source": "workspace-manifests",
-            "mode": "offline-artifact",
             "format": args.tool_format.to_string(),
             "message": format!(
                 "Exported {tool_count} tool schemas ({connector_count} connectors) to {} from workspace manifests.",
@@ -7853,6 +7974,13 @@ fn export_tools_dispatch(args: &ExportToolsArgs, host: Option<&str>) -> Result<D
             "connector_count": connector_count,
             "output_file": path.display().to_string(),
         });
+        attach_tool_inventory_provenance(
+            &mut payload,
+            "export-tools",
+            catalog::ToolInventorySource::WorkspaceManifest,
+            catalog::ToolAvailability::Unknown,
+            tool_provenance.clone(),
+        );
         envelope.inject_into(&mut payload);
         return Ok(DispatchOutcome {
             payload,
@@ -7865,7 +7993,6 @@ fn export_tools_dispatch(args: &ExportToolsArgs, host: Option<&str>) -> Result<D
         "status": "ok",
         "command": "export-tools",
         "source": "workspace-manifests",
-        "mode": "offline-artifact",
         "format": args.tool_format.to_string(),
         "message": format!(
             "Exported {tool_count} tool schemas from {connector_count} workspace connectors. This is an offline artifact view, not live host inventory.",
@@ -7880,6 +8007,13 @@ fn export_tools_dispatch(args: &ExportToolsArgs, host: Option<&str>) -> Result<D
             "One connector: fwc export-tools --offline --format claude github",
         ],
     });
+    attach_tool_inventory_provenance(
+        &mut payload,
+        "export-tools",
+        catalog::ToolInventorySource::WorkspaceManifest,
+        catalog::ToolAvailability::Unknown,
+        tool_provenance,
+    );
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -7941,6 +8075,13 @@ fn export_tools_dispatch_host(args: &ExportToolsArgs, host: &str) -> Result<Disp
     let tools_json = export_tools::export_operation_infos(&operations, args.tool_format, &options);
     let tool_count = operations.len();
     let connector_count = connectors.len();
+    let tool_provenance = tool_inventory_provenance(
+        &operations,
+        args.tool_format,
+        &options,
+        catalog::ToolInventorySource::LiveHostInventory,
+        catalog::ToolAvailability::Live,
+    );
 
     if let Some(path) = &args.output {
         let content = serde_json::to_string_pretty(&tools_json)?;
@@ -7950,7 +8091,6 @@ fn export_tools_dispatch_host(args: &ExportToolsArgs, host: &str) -> Result<Disp
             "status": "ok",
             "command": "export-tools",
             "source": "host-admin-api",
-            "mode": "live-introspection",
             "format": args.tool_format.to_string(),
             "host": host,
             "message": format!(
@@ -7962,6 +8102,13 @@ fn export_tools_dispatch_host(args: &ExportToolsArgs, host: &str) -> Result<Disp
             "metadata_gaps": metadata_gaps,
             "output_file": path.display().to_string(),
         });
+        attach_tool_inventory_provenance(
+            &mut payload,
+            "export-tools",
+            catalog::ToolInventorySource::LiveHostInventory,
+            catalog::ToolAvailability::Live,
+            tool_provenance.clone(),
+        );
         envelope.inject_into(&mut payload);
         return Ok(DispatchOutcome {
             payload,
@@ -7974,7 +8121,6 @@ fn export_tools_dispatch_host(args: &ExportToolsArgs, host: &str) -> Result<Disp
         "status": "ok",
         "command": "export-tools",
         "source": "host-admin-api",
-        "mode": "live-introspection",
         "format": args.tool_format.to_string(),
         "host": host,
         "message": format!(
@@ -7989,6 +8135,13 @@ fn export_tools_dispatch_host(args: &ExportToolsArgs, host: &str) -> Result<Disp
             format!("Use `fwc ops <connector> --host {host}` to inspect one connector before exporting again."),
         ],
     });
+    attach_tool_inventory_provenance(
+        &mut payload,
+        "export-tools",
+        catalog::ToolInventorySource::LiveHostInventory,
+        catalog::ToolAvailability::Live,
+        tool_provenance,
+    );
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -16114,6 +16267,32 @@ mod tests {
         );
     }
 
+    fn assert_tool_inventory_provenance(
+        payload: &Value,
+        source: &str,
+        availability: &str,
+        authoritative: bool,
+        mode: &str,
+        surface_state: &str,
+    ) {
+        assert_eq!(payload["mode"], mode);
+        assert_eq!(payload["surface_state"], surface_state);
+        assert_eq!(payload["provenance"]["source"], source);
+        assert_eq!(payload["provenance"]["availability"], availability);
+        assert_eq!(payload["provenance"]["authoritative"], authoritative);
+        assert_eq!(payload["provenance"]["command"], payload["command"]);
+        assert!(
+            payload["provenance"]["caveat"]
+                .as_str()
+                .is_some_and(|caveat| !caveat.is_empty())
+        );
+        assert!(
+            payload["tool_provenance"]
+                .as_array()
+                .is_some_and(|entries| !entries.is_empty())
+        );
+    }
+
     fn spawn_mock_host(
         routes: StdBTreeMap<String, Value>,
         expected_requests: usize,
@@ -17288,7 +17467,15 @@ deny_ptrace = true
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["source"], "workspace-manifests");
-        assert_eq!(payload["mode"], "offline-artifact");
+        assert_tool_inventory_provenance(
+            &payload,
+            "workspace_manifest",
+            "unknown",
+            false,
+            "offline-artifact",
+            "offline_serving",
+        );
+        assert_eq!(payload["tool_provenance"][0]["availability"], "unknown");
     }
 
     #[test]
@@ -17309,10 +17496,18 @@ deny_ptrace = true
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["source"], "host-admin-api");
-        assert_eq!(payload["mode"], "live-introspection");
         assert_eq!(payload["connector_count"], 1);
         assert_eq!(payload["tool_count"], 2);
         assert_eq!(payload["tools"][0]["name"], "github.create_issue");
+        assert_tool_inventory_provenance(
+            &payload,
+            "live_host_inventory",
+            "live",
+            true,
+            "live-introspection",
+            "live_serving",
+        );
+        assert_eq!(payload["tool_provenance"][0]["availability"], "live");
     }
 
     #[test]
@@ -21070,6 +21265,27 @@ depends_on = ["missing"]
         assert_eq!(tools[0].name, "github.create_issue");
         assert_eq!(tools[0].connector_id, "github");
         assert_eq!(tools[0].operation_id, "github.create_issue");
+        assert_eq!(
+            tools[0]
+                .annotations
+                .as_ref()
+                .and_then(|ann| ann.capability.as_deref()),
+            Some("github.issue_write")
+        );
+        assert_eq!(
+            tools[0]
+                .provenance
+                .as_ref()
+                .map(|provenance| provenance.source.tag()),
+            Some("live_host_inventory")
+        );
+        assert_eq!(
+            tools[0]
+                .provenance
+                .as_ref()
+                .map(|provenance| provenance.availability.tag()),
+            Some("live")
+        );
     }
 
     #[test]

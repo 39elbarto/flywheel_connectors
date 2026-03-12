@@ -4,7 +4,7 @@
 //! tool schemas consumable by external AI agent runtimes.
 
 use fcp_core::{OperationInfo, tool_schema::ExportOptions as SharedExportOptions};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::readiness::DiscoveredOperation;
@@ -76,7 +76,7 @@ pub struct McpTool {
 }
 
 /// MCP tool annotations for risk and behavior metadata.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct McpToolAnnotations {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub risk_level: Option<String>,

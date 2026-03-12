@@ -54,7 +54,7 @@ pub fn command_alias(token: &str) -> Option<&'static str> {
 
         // Execution aliases
         "call" | "exec" | "send" | "request" | "fire" => Some("invoke"),
-        "preview" | "dry-run" | "dryrun" | "dry_run" | "preflight" | "test-run" => Some("simulate"),
+        "preview" | "dry-run" | "dryrun" | "dry_run" | "test-run" => Some("simulate"),
         "pipelines" | "flow" | "flows" => Some("pipeline"),
 
         _ => None,
@@ -304,6 +304,7 @@ pub fn is_readonly_command(command: &str) -> bool {
             | "examples"
             | "status"
             | "simulate"
+            | "preflight"
             | "plan"
             | "explain"
     )
@@ -975,6 +976,7 @@ mod tests {
             "config",
             "invoke",
             "simulate",
+            "preflight",
         ];
         for cmd in all_commands {
             assert!(
@@ -1212,6 +1214,7 @@ mod tests {
             "config",
             "invoke",
             "simulate",
+            "preflight",
         ];
         let test_aliases = [
             "info",
@@ -1252,7 +1255,6 @@ mod tests {
             "fire",
             "dryrun",
             "dry_run",
-            "preflight",
             "test-run",
             "taxonomy",
             "capsules",
@@ -1316,6 +1318,7 @@ mod tests {
             "config",
             "invoke",
             "simulate",
+            "preflight",
             "pin",
             "unpin",
         ];

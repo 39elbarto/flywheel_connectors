@@ -10,60 +10,20 @@
   ],
   "dependency_exceptions": [
     {
-      "crate": "fcp-core",
-      "dependency": "tokio",
-      "kind": "any",
-      "owner_bead": "flywheel_connectors-1ud0u.5.1",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Runtime substrate migration not complete"
-    },
-    {
-      "crate": "fcp-core",
-      "dependency": "tokio-stream",
-      "kind": "any",
-      "owner_bead": "flywheel_connectors-1ud0u.5.1",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Runtime substrate migration not complete"
-    },
-    {
-      "crate": "fcp-discord",
-      "dependency": "tokio-stream",
-      "kind": "any",
-      "owner_bead": "flywheel_connectors-1ud0u.9.1",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Connector migration wave not complete"
-    },
-    {
       "crate": "fcp-discord",
       "dependency": "tokio-tungstenite",
-      "kind": "any",
+      "kind": "dev",
       "owner_bead": "flywheel_connectors-1ud0u.9.1",
       "expires_on": "2026-03-21T00:00:00Z",
       "reason": "WebSocket transport migration not complete"
     },
     {
       "crate": "fcp-graphql",
-      "dependency": "tokio-stream",
-      "kind": "any",
-      "owner_bead": "flywheel_connectors-1ud0u.6.2",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "GraphQL transport migration not complete"
-    },
-    {
-      "crate": "fcp-graphql",
       "dependency": "tokio-tungstenite",
-      "kind": "any",
+      "kind": "dev",
       "owner_bead": "flywheel_connectors-1ud0u.6.2",
       "expires_on": "2026-03-21T00:00:00Z",
       "reason": "GraphQL subscription transport migration not complete"
-    },
-    {
-      "crate": "fcp-host",
-      "dependency": "tokio",
-      "kind": "any",
-      "owner_bead": "flywheel_connectors-1ud0u.6.4",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Host runtime migration not complete"
     },
     {
       "crate": "fwc",
@@ -74,97 +34,9 @@
       "reason": "CLI stdio/runtime seam still depends on Tokio pending main.rs and transport cutover"
     },
     {
-      "crate": "fcp-oauth",
-      "dependency": "tokio",
-      "kind": "any",
-      "owner_bead": "flywheel_connectors-1ud0u.5.7",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "OAuth async surface migration not complete"
-    },
-    {
-      "crate": "fcp-openai",
-      "dependency": "tokio-stream",
-      "kind": "any",
-      "owner_bead": "flywheel_connectors-1ud0u.8.12",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Connector migration wave not complete"
-    },
-    {
-      "crate": "fcp-sandbox",
-      "dependency": "tokio",
-      "kind": "any",
-      "owner_bead": "flywheel_connectors-1ud0u.6.7",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Tokio-coupled transport replacement pending"
-    },
-    {
-      "crate": "fcp-sdk",
-      "dependency": "tokio",
-      "kind": "any",
-      "owner_bead": "flywheel_connectors-1ud0u.5.2",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "SDK runtime kit migration not complete"
-    },
-    {
-      "crate": "fcp-store",
-      "dependency": "tokio",
-      "kind": "any",
-      "owner_bead": "flywheel_connectors-1ud0u.5.4",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Async primitive migration not complete"
-    },
-    {
-      "crate": "fcp-streaming",
-      "dependency": "tokio-stream",
-      "kind": "any",
-      "owner_bead": "flywheel_connectors-1ud0u.6.1",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Streaming runtime migration not complete"
-    },
-    {
-      "crate": "fcp-streaming",
-      "dependency": "tokio-tungstenite",
-      "kind": "any",
-      "owner_bead": "flywheel_connectors-1ud0u.6.1",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "WebSocket transport migration not complete"
-    },
-    {
-      "crate": "fcp-testkit",
-      "dependency": "tokio",
-      "kind": "any",
-      "owner_bead": "flywheel_connectors-1ud0u.7.1",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Test harness migration not complete"
-    },
-    {
-      "crate": "fcp-testkit",
-      "dependency": "tokio-stream",
-      "kind": "any",
-      "owner_bead": "flywheel_connectors-1ud0u.7.1",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Test harness migration not complete"
-    },
-    {
-      "crate": "fcp-webhook",
-      "dependency": "tokio",
-      "kind": "any",
-      "owner_bead": "flywheel_connectors-1ud0u.5.8",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Webhook async surface migration not complete"
-    },
-    {
       "crate": "fcp-async-core",
       "dependency": "tokio",
-      "kind": "any",
-      "owner_bead": "flywheel_connectors-1ud0u.2",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Substrate facade — last crate to eliminate Tokio"
-    },
-    {
-      "crate": "fcp-async-core",
-      "dependency": "tokio-stream",
-      "kind": "any",
+      "kind": "normal",
       "owner_bead": "flywheel_connectors-1ud0u.2",
       "expires_on": "2026-03-21T00:00:00Z",
       "reason": "Substrate facade — last crate to eliminate Tokio"
@@ -172,7 +44,7 @@
     {
       "crate": "fcp-slack",
       "dependency": "tokio-tungstenite",
-      "kind": "any",
+      "kind": "dev",
       "owner_bead": "flywheel_connectors-1ud0u.9.2",
       "expires_on": "2026-03-21T00:00:00Z",
       "reason": "WebSocket transport migration not complete"

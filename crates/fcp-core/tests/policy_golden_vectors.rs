@@ -1796,7 +1796,13 @@ fn decision_vector_denies_principal_not_allowed() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn create_valid_attestation(node_id: &str) -> PostureAttestation {
-    use chrono::{Duration, Utc};
+    // Use fixed timestamps consistent with now_ms: 1_700_000_000_000 (Nov 14, 2023 22:13:20 UTC)
+    // issued_at: 1 hour before now_ms, expires_at: 23 hours after now_ms
+    let issued_at =
+        chrono::DateTime::from_timestamp_millis(1_699_996_400_000).expect("valid timestamp");
+    let expires_at =
+        chrono::DateTime::from_timestamp_millis(1_700_082_800_000).expect("valid timestamp");
+
     let mut attributes = HashMap::new();
     attributes.insert(
         PostureAttributeKey::OsType,
@@ -1820,8 +1826,8 @@ fn create_valid_attestation(node_id: &str) -> PostureAttestation {
         attestation_id: "att-12345".to_string(),
         node_id: NodeId::new(node_id),
         attributes,
-        issued_at: Utc::now(),
-        expires_at: Utc::now() + Duration::hours(24),
+        issued_at,
+        expires_at,
         verifier_id: "trusted-verifier".to_string(),
         signature: "signature".to_string(),
         verifier_kid: "kid-1".to_string(),
@@ -1872,7 +1878,6 @@ fn decision_vector_denies_posture_attestation_missing() {
 
 #[test]
 fn decision_vector_denies_posture_attestation_expired() {
-    use chrono::{Duration, Utc};
     let zone = ZoneId::work();
     let mut policy = base_policy(zone.clone());
     policy.requires_posture = Some(
@@ -1884,9 +1889,10 @@ fn decision_vector_denies_posture_attestation_expired() {
         zone_policy: policy,
     };
 
-    // Create an expired attestation
+    // Create an expired attestation (expires_at before now_ms: 1_700_000_000_000)
     let mut attestation = create_valid_attestation("node-1");
-    attestation.expires_at = Utc::now() - Duration::hours(1);
+    attestation.expires_at =
+        chrono::DateTime::from_timestamp_millis(1_699_990_000_000).expect("valid timestamp");
 
     let input = PolicyDecisionInput {
         request_object_id: ObjectId::from_unscoped_bytes(b"req-posture-expired"),

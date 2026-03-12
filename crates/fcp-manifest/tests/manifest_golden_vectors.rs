@@ -1342,32 +1342,36 @@ fn jira_full_manifest_parses_with_all_operations() {
 
     assert_eq!(parsed.connector.id.as_str(), "fcp.jira");
 
-    // Verify all 23 operations present
+    // Verify all 27 operations present
     let ops = &parsed.provides.operations;
     let expected_ops = [
-        "jira.create_issue",
-        "jira.get_issue",
-        "jira.update_issue",
-        "jira.delete_issue",
-        "jira.search_jql",
-        "jira.list_transitions",
-        "jira.transition_issue",
-        "jira.list_sprints",
-        "jira.move_to_sprint",
-        "jira.add_comment",
-        "jira.list_comments",
-        "jira.worklog.list",
-        "jira.worklog.add",
-        "jira.worklog.update",
-        "jira.worklog.delete",
         "jira.add_attachment",
-        "jira.automation.rule.list",
-        "jira.automation.rule.get",
+        "jira.add_comment",
         "jira.automation.rule.create",
-        "jira.automation.rule.update",
-        "jira.automation.rule.enable",
-        "jira.automation.rule.disable",
         "jira.automation.rule.delete",
+        "jira.automation.rule.disable",
+        "jira.automation.rule.enable",
+        "jira.automation.rule.get",
+        "jira.automation.rule.list",
+        "jira.automation.rule.update",
+        "jira.create_issue",
+        "jira.delete_issue",
+        "jira.get_issue",
+        "jira.list_comments",
+        "jira.list_sprints",
+        "jira.list_transitions",
+        "jira.move_to_sprint",
+        "jira.search_jql",
+        "jira.server.info",
+        "jira.sync.pull_issue",
+        "jira.sync.push_bead",
+        "jira.sync.reconcile",
+        "jira.transition_issue",
+        "jira.update_issue",
+        "jira.worklog.add",
+        "jira.worklog.delete",
+        "jira.worklog.list",
+        "jira.worklog.update",
     ];
     for op_name in &expected_ops {
         assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
@@ -4145,8 +4149,10 @@ fn airtable_full_manifest_parses_with_all_operations() {
     let expected_ops = [
         "create_record",
         "create_records",
+        "create_webhook",
         "delete_record",
         "delete_records",
+        "delete_webhook",
         "download_attachment",
         "get_base_schema",
         "get_record",
@@ -4158,7 +4164,11 @@ fn airtable_full_manifest_parses_with_all_operations() {
         "list_tables",
         "list_view_records",
         "list_views",
+        "list_webhook_payloads",
+        "list_webhooks",
+        "refresh_webhook",
         "replace_record",
+        "set_webhook_notifications",
         "update_record",
         "update_records",
         "upsert_records",
@@ -4169,7 +4179,7 @@ fn airtable_full_manifest_parses_with_all_operations() {
     assert_eq!(ops.len(), expected_ops.len());
 
     let pools = parsed.rate_limits.as_ref().expect("rate_limits");
-    assert_eq!(pools.pools.len(), 3);
+    assert_eq!(pools.pools.len(), 4);
 }
 
 // =============================================================================
@@ -6269,6 +6279,7 @@ fn webhook_receiver_full_manifest_parses_with_all_operations() {
         "webhook.endpoints.create",
         "webhook.endpoints.delete",
         "webhook.endpoints.list",
+        "webhook.endpoints.rotate_secret",
         "webhook.events.recent",
     ];
     for op_name in &expected_ops {

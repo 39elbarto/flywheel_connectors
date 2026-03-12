@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:6e9b3cd17f8f1ffa80b79a916a6bf32990e25674f57c7e7e2697ae114d7dc0f2"
+interface_hash = "blake3-256:fcp.interface.v2:378f3948490f69af3a806204d3a43aa65ad98019a845cfaf3eccdf4a8ea6105b"
 
 [connector]
 id = "fcp.airtable"

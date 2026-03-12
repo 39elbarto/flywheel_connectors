@@ -14,7 +14,7 @@
 //! - **macOS (Tier 1)**: seatbelt profiles (sandbox-exec)
 //! - **Windows (Tier 2)**: `AppContainer` + job objects
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use fcp_manifest::{SandboxProfile, SandboxSection};
@@ -215,7 +215,22 @@ fn expand_path(path: &str, state_dir: Option<&PathBuf>) -> Option<PathBuf> {
                 Some(PathBuf::from(path))
             }
         },
-        |suffix| state_dir.map(|sd| sd.join(suffix)),
+        |suffix| {
+            state_dir.map(|sd| {
+                // Ensure the suffix cannot escape the state_dir via absolute paths or traversal
+                let mut safe_suffix = PathBuf::new();
+                for component in Path::new(suffix).components() {
+                    match component {
+                        std::path::Component::Normal(c) => safe_suffix.push(c),
+                        std::path::Component::ParentDir => {
+                            safe_suffix.pop();
+                        }
+                        _ => {} // Ignore RootDir, Prefix, CurDir to prevent escapes
+                    }
+                }
+                sd.join(safe_suffix)
+            })
+        },
     )
 }
 

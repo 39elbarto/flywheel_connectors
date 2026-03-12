@@ -632,14 +632,14 @@ impl ResilienceLayer {
     fn connector_state(&self, connector_id: &ConnectorId) -> Arc<ConnectorState> {
         // Fast path: try to get the existing state with a read lock
         {
-            let states = self.connectors.read().unwrap_or_else(|e| e.into_inner());
+            let states = self.connectors.read().unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(state) = states.get(connector_id) {
                 return Arc::clone(state);
             }
         }
 
         // Slow path: upgrade to write lock and insert if missing
-        let mut states = self.connectors.write().unwrap_or_else(|e| e.into_inner());
+        let mut states = self.connectors.write().unwrap_or_else(std::sync::PoisonError::into_inner);
         Arc::clone(
             states
                 .entry(connector_id.clone())
@@ -981,11 +981,6 @@ impl HealthRouter {
             config,
             entries: Mutex::new(HashMap::new()),
         }
-    }
-
-    fn ensure_connector(&self, connector_id: &ConnectorId) {
-        let mut entries = lock_unpoisoned(&self.entries);
-        entries.entry(connector_id.clone()).or_insert_with(|| HealthEntry::new(&self.config));
     }
 
     fn can_route(&self, connector_id: &ConnectorId) -> RoutingDecision {

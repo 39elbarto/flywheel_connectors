@@ -246,14 +246,14 @@ pub fn encrypt_symbol_with_subkey(
     let ciphertext_with_tag = match algorithm {
         ZoneKeyAlgorithm::ChaCha20Poly1305 => {
             let nonce = derive_nonce12(ctx.frame_seq, ctx.esi);
-            let cipher = ChaCha20Poly1305Cipher::new(&sender_key);
+            let cipher = ChaCha20Poly1305Cipher::new(sender_key);
             cipher
                 .encrypt(&nonce, plaintext, &aad)
                 .map_err(|_| SymbolEnvelopeError::EncryptFailed)?
         }
         ZoneKeyAlgorithm::XChaCha20Poly1305 => {
             let nonce = derive_nonce24(ctx.sender_instance_id, ctx.frame_seq, ctx.esi);
-            let cipher = XChaCha20Poly1305Cipher::new(&sender_key);
+            let cipher = XChaCha20Poly1305Cipher::new(sender_key);
             cipher
                 .encrypt(&nonce, plaintext, &aad)
                 .map_err(|_| SymbolEnvelopeError::EncryptFailed)?
@@ -335,14 +335,14 @@ pub fn decrypt_symbol_with_subkey(
     match algorithm {
         ZoneKeyAlgorithm::ChaCha20Poly1305 => {
             let nonce = derive_nonce12(ctx.frame_seq, ctx.esi);
-            let cipher = ChaCha20Poly1305Cipher::new(&sender_key);
+            let cipher = ChaCha20Poly1305Cipher::new(sender_key);
             cipher
                 .decrypt(&nonce, &ciphertext_with_tag, &aad)
                 .map_err(|_| SymbolEnvelopeError::DecryptFailed)
         }
         ZoneKeyAlgorithm::XChaCha20Poly1305 => {
             let nonce = derive_nonce24(ctx.sender_instance_id, ctx.frame_seq, ctx.esi);
-            let cipher = XChaCha20Poly1305Cipher::new(&sender_key);
+            let cipher = XChaCha20Poly1305Cipher::new(sender_key);
             cipher
                 .decrypt(&nonce, &ciphertext_with_tag, &aad)
                 .map_err(|_| SymbolEnvelopeError::DecryptFailed)

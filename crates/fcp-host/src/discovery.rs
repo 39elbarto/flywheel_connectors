@@ -1158,7 +1158,7 @@ impl DiscoveryCache {
         payload: &T,
         last_modified: DateTime<Utc>,
     ) -> CacheMetadata {
-        let ttl_seconds = self.ttl.as_secs().min(u64::from(u32::MAX)) as u32;
+        let ttl_seconds = u32::try_from(self.ttl.as_secs().min(u64::from(u32::MAX))).unwrap_or(u32::MAX);
         CacheMetadata::strong(payload, last_modified, ttl_seconds, Some(ttl_seconds))
     }
 

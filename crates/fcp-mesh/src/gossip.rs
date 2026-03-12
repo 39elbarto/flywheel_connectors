@@ -1125,10 +1125,7 @@ impl MeshGossip {
         let iblt_cells = u64::try_from(iblt_cells).unwrap_or(u64::MAX);
 
         // Update peer state
-        if !self.peer_states.contains_key(&peer_id) {
-            self.peer_states.insert(peer_id.clone(), PeerGossipState::new(peer_id.clone()));
-        }
-        let peer_state = self.peer_states.get_mut(&peer_id).unwrap();
+        let peer_state = self.peer_states.entry(peer_id.clone()).or_insert_with(|| PeerGossipState::new(peer_id.clone()));
         
         peer_state.update_from_summary(summary, now);
         debug!(

@@ -1002,7 +1002,7 @@ impl RegistryVerifier {
             }
         }
 
-        let decoded = decoded.ok_or_else(|| RegistryError::IncompleteSymbols {
+        let decoded = decoded.ok_or(RegistryError::IncompleteSymbols {
             received,
             needed: descriptor.source_symbols,
         })?;

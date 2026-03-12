@@ -350,8 +350,7 @@ fn check_result_from_self_check(check: &ConnectorSelfCheck) -> Option<CheckResul
         SelfCheckStatus::Failed => CheckStatus::Fail,
     };
     let severity = match check.report.status {
-        SelfCheckStatus::Ok => CheckSeverity::Info,
-        SelfCheckStatus::Unsupported => CheckSeverity::Info,
+        SelfCheckStatus::Ok | SelfCheckStatus::Unsupported => CheckSeverity::Info,
         SelfCheckStatus::Degraded => CheckSeverity::Warning,
         SelfCheckStatus::Failed => CheckSeverity::Critical,
     };
@@ -360,7 +359,7 @@ fn check_result_from_self_check(check: &ConnectorSelfCheck) -> Option<CheckResul
         .report
         .message
         .clone()
-        .unwrap_or_else(|| default_self_check_message(&check.report.status));
+        .unwrap_or_else(|| default_self_check_message(check.report.status));
 
     Some(CheckResult {
         name,
@@ -373,7 +372,7 @@ fn check_result_from_self_check(check: &ConnectorSelfCheck) -> Option<CheckResul
     })
 }
 
-fn default_self_check_message(status: &SelfCheckStatus) -> String {
+fn default_self_check_message(status: SelfCheckStatus) -> String {
     match status {
         SelfCheckStatus::Ok => "connector self-check succeeded".to_string(),
         SelfCheckStatus::Degraded => "connector self-check reported a degraded state".to_string(),

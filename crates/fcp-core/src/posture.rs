@@ -7,8 +7,8 @@
 //!
 //! # Overview
 //!
-//! Device Posture Attestation proves that a device meets certain security requirements
-//! before allowing it to participate in sensitive operations. This is distinct from
+//! Device Posture Attestation proves that a device has been verified to meet certain
+//! posture requirements at a point in time. This is distinct from
 //! [`NodeKeyAttestation`](fcp-tailscale) which binds node identity to keys.
 //!
 //! # Example
@@ -173,6 +173,13 @@ impl PostureAttestation {
     #[must_use]
     pub fn is_expired(&self) -> bool {
         self.expires_at <= Utc::now()
+    }
+
+    /// Check if this attestation has expired at a specific time.
+    #[must_use]
+    pub fn is_expired_at(&self, now_ms: u64) -> bool {
+        let now_i64 = i64::try_from(now_ms).unwrap_or(i64::MAX);
+        self.expires_at.timestamp_millis() <= now_i64
     }
 
     /// Check if this attestation is valid (not expired and has correct schema).
@@ -377,13 +384,21 @@ impl PostureRequirements {
     /// Check if an attestation satisfies all requirements.
     #[must_use]
     pub fn is_satisfied_by(&self, attestation: &PostureAttestation) -> PostureCheckResult {
+        self.is_satisfied_by_at(attestation, Utc::now().timestamp_millis().try_into().unwrap_or(0))
+    }
+
+    /// Check if an attestation satisfies all requirements at a specific time.
+    #[must_use]
+    pub fn is_satisfied_by_at(&self, attestation: &PostureAttestation, now_ms: u64) -> PostureCheckResult {
         // Check attestation is valid
-        if attestation.is_expired() {
+        if attestation.is_expired_at(now_ms) {
             return PostureCheckResult::AttestationExpired;
         }
 
         // Check attestation age
-        let age_secs = (Utc::now() - attestation.issued_at).num_seconds();
+        let now_i64 = i64::try_from(now_ms).unwrap_or(i64::MAX);
+        let now_dt = chrono::DateTime::from_timestamp_millis(now_i64).unwrap_or_else(Utc::now);
+        let age_secs = (now_dt - attestation.issued_at).num_seconds();
         let max_age = i64::try_from(self.max_attestation_age_secs).unwrap_or(i64::MAX);
         if age_secs < 0 || age_secs > max_age {
             return PostureCheckResult::AttestationTooOld;
@@ -1613,8 +1628,8 @@ mod tests {
     fn requirement_require_one_of_missing_attribute() {
         let att = create_test_attestation();
         let req = PostureRequirement::RequireOneOf {
-            attribute: PostureAttributeKey::AntivirusActive,
-            values: vec!["yes".into(), "no".into()],
+            attribute: PostureAttributeKey::OsType,
+            values: vec!["linux".to_string()],
         };
         assert!(!req.is_satisfied_by(&att));
     }

@@ -1199,7 +1199,12 @@ fn diff_json_objects(before: &Value, after: &Value) -> Result<ZoneDefinitionDiff
     let mut removed = BTreeMap::new();
     let mut changed = BTreeMap::new();
 
+    let ignore_keys = ["signature", "header", "prev"];
+
     for (key, value) in before_obj {
+        if ignore_keys.contains(&key.as_str()) {
+            continue;
+        }
         if !after_obj.contains_key(key) {
             removed.insert(key.clone(), value.clone());
         } else if let Some(after_value) = after_obj.get(key) {
@@ -1216,6 +1221,9 @@ fn diff_json_objects(before: &Value, after: &Value) -> Result<ZoneDefinitionDiff
     }
 
     for (key, value) in after_obj {
+        if ignore_keys.contains(&key.as_str()) {
+            continue;
+        }
         if !before_obj.contains_key(key) {
             added.insert(key.clone(), value.clone());
         }
@@ -2783,7 +2791,7 @@ fn check_posture(
     };
 
     // Check expiry first (before is_valid which also checks expiry)
-    if attestation.is_expired() {
+    if attestation.is_expired_at(input.now_ms) {
         return Some(DecisionReasonCode::PostureAttestationExpired);
     }
 
@@ -2792,7 +2800,7 @@ fn check_posture(
         return Some(DecisionReasonCode::PostureAttestationInvalid);
     }
 
-    match requirements.is_satisfied_by(attestation) {
+    match requirements.is_satisfied_by_at(attestation, input.now_ms) {
         PostureCheckResult::Satisfied => None,
         PostureCheckResult::AttestationExpired | PostureCheckResult::AttestationTooOld => {
             Some(DecisionReasonCode::PostureAttestationExpired)

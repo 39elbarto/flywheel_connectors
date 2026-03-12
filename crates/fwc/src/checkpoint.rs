@@ -1320,4 +1320,800 @@ mod tests {
         let resolved = resolve_replay_mode(&req, &store, &cap).unwrap();
         assert!(matches!(resolved, ResolvedReplay::StartFromTime { .. }));
     }
+
+    // ── Clone / Debug / PartialEq trait tests ────────────────────────────
+
+    #[test]
+    fn checkpoint_clone_is_equal() {
+        let cp = sample_checkpoint("fcp.clone");
+        let cloned = cp.clone();
+        assert_eq!(cp, cloned);
+    }
+
+    #[test]
+    fn checkpoint_debug_contains_connector_id() {
+        let cp = sample_checkpoint("fcp.dbg");
+        let dbg = format!("{cp:?}");
+        assert!(dbg.contains("fcp.dbg"));
+        assert!(dbg.contains("Checkpoint"));
+    }
+
+    #[test]
+    fn checkpoint_ne_different_sequence() {
+        let mut cp1 = sample_checkpoint("fcp.neq");
+        let mut cp2 = sample_checkpoint("fcp.neq");
+        cp1.last_sequence = 1;
+        cp2.last_sequence = 2;
+        assert_ne!(cp1, cp2);
+    }
+
+    #[test]
+    fn checkpoint_ne_different_id() {
+        let cp1 = sample_checkpoint("fcp.a");
+        let cp2 = sample_checkpoint("fcp.b");
+        assert_ne!(cp1, cp2);
+    }
+
+    #[test]
+    fn checkpoint_update_clone() {
+        let up = CheckpointUpdate {
+            sequence: 55,
+            timestamp: Utc::now(),
+            event_id: Some("e-clone".to_owned()),
+        };
+        let cloned = up.clone();
+        assert_eq!(up.sequence, cloned.sequence);
+        assert_eq!(up.event_id, cloned.event_id);
+    }
+
+    #[test]
+    fn checkpoint_update_debug() {
+        let up = sample_update(99);
+        let dbg = format!("{up:?}");
+        assert!(dbg.contains("CheckpointUpdate"));
+        assert!(dbg.contains("99"));
+    }
+
+    #[test]
+    fn replay_request_clone() {
+        let req = ReplayRequest {
+            connector_id: "fcp.clone".to_owned(),
+            mode: ReplayMode::FromLatest,
+        };
+        let cloned = req.clone();
+        assert_eq!(cloned.connector_id, "fcp.clone");
+        assert!(matches!(cloned.mode, ReplayMode::FromLatest));
+    }
+
+    #[test]
+    fn replay_request_debug() {
+        let req = ReplayRequest {
+            connector_id: "fcp.dbg".to_owned(),
+            mode: ReplayMode::FromSequence(7),
+        };
+        let dbg = format!("{req:?}");
+        assert!(dbg.contains("fcp.dbg"));
+        assert!(dbg.contains("FromSequence"));
+    }
+
+    #[test]
+    fn replay_mode_clone_from_checkpoint() {
+        let mode = ReplayMode::FromCheckpoint(PathBuf::from("/some/path"));
+        let cloned = mode.clone();
+        assert!(matches!(cloned, ReplayMode::FromCheckpoint(p) if p == PathBuf::from("/some/path")));
+    }
+
+    #[test]
+    fn replay_mode_clone_time_range() {
+        let from = Utc::now();
+        let mode = ReplayMode::TimeRange { from, to: None };
+        let cloned = mode.clone();
+        match cloned {
+            ReplayMode::TimeRange { from: f, to } => {
+                assert_eq!(f, from);
+                assert!(to.is_none());
+            }
+            other => panic!("expected TimeRange, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn replay_mode_debug_all_variants() {
+        let latest = format!("{:?}", ReplayMode::FromLatest);
+        assert!(latest.contains("FromLatest"));
+        let seq = format!("{:?}", ReplayMode::FromSequence(42));
+        assert!(seq.contains("42"));
+        let cp = format!("{:?}", ReplayMode::FromCheckpoint(PathBuf::from("/x")));
+        assert!(cp.contains("FromCheckpoint"));
+        let tr = format!("{:?}", ReplayMode::TimeRange { from: Utc::now(), to: None });
+        assert!(tr.contains("TimeRange"));
+    }
+
+    #[test]
+    fn replay_capability_clone() {
+        let cap = full_capability("fcp.cap");
+        let cloned = cap.clone();
+        assert_eq!(cloned.connector_id, "fcp.cap");
+        assert_eq!(cloned.supports_sequence_replay, cap.supports_sequence_replay);
+        assert_eq!(cloned.supports_time_replay, cap.supports_time_replay);
+    }
+
+    #[test]
+    fn replay_capability_debug() {
+        let cap = ReplayCapability {
+            connector_id: "fcp.dbg".to_owned(),
+            supports_sequence_replay: true,
+            supports_time_replay: false,
+            max_replay_window: Some(Duration::hours(6)),
+        };
+        let dbg = format!("{cap:?}");
+        assert!(dbg.contains("ReplayCapability"));
+        assert!(dbg.contains("fcp.dbg"));
+    }
+
+    #[test]
+    fn resolved_replay_clone() {
+        let r = ResolvedReplay::StartFrom { sequence: 77 };
+        let cloned = r.clone();
+        assert_eq!(r, cloned);
+    }
+
+    #[test]
+    fn resolved_replay_eq_start_from_time() {
+        let from = "2026-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let r1 = ResolvedReplay::StartFromTime { from, to: None };
+        let r2 = ResolvedReplay::StartFromTime { from, to: None };
+        assert_eq!(r1, r2);
+    }
+
+    #[test]
+    fn resolved_replay_ne_different_variant() {
+        let r1 = ResolvedReplay::StartFromLatest;
+        let r2 = ResolvedReplay::StartFrom { sequence: 1 };
+        assert_ne!(r1, r2);
+    }
+
+    // ── ReplayArgs default ───────────────────────────────────────────────
+
+    #[test]
+    fn replay_args_default_all_none() {
+        let args = ReplayArgs::default();
+        assert!(args.checkpoint.is_none());
+        assert!(args.from_seq.is_none());
+        assert!(args.from_time.is_none());
+        assert!(args.to_time.is_none());
+    }
+
+    #[test]
+    fn replay_args_clone() {
+        let args = ReplayArgs {
+            checkpoint: Some(PathBuf::from("/cp.json")),
+            from_seq: None,
+            from_time: None,
+            to_time: None,
+        };
+        let cloned = args.clone();
+        assert_eq!(cloned.checkpoint, Some(PathBuf::from("/cp.json")));
+    }
+
+    #[test]
+    fn replay_args_debug() {
+        let args = ReplayArgs {
+            checkpoint: None,
+            from_seq: Some(42),
+            from_time: None,
+            to_time: None,
+        };
+        let dbg = format!("{args:?}");
+        assert!(dbg.contains("ReplayArgs"));
+        assert!(dbg.contains("42"));
+    }
+
+    // ── parse_replay_mode additional cases ───────────────────────────────
+
+    #[test]
+    fn parse_conflicting_checkpoint_and_time() {
+        let args = ReplayArgs {
+            checkpoint: Some(PathBuf::from("/cp.json")),
+            from_time: Some("2026-01-01T00:00:00Z".to_owned()),
+            ..Default::default()
+        };
+        let err = parse_replay_mode(&args).unwrap_err();
+        assert!(err.to_string().contains("conflicting"));
+    }
+
+    #[test]
+    fn parse_from_seq_zero() {
+        let args = ReplayArgs {
+            from_seq: Some(0),
+            ..Default::default()
+        };
+        let mode = parse_replay_mode(&args).unwrap();
+        assert!(matches!(mode, ReplayMode::FromSequence(0)));
+    }
+
+    #[test]
+    fn parse_from_seq_max() {
+        let args = ReplayArgs {
+            from_seq: Some(u64::MAX),
+            ..Default::default()
+        };
+        let mode = parse_replay_mode(&args).unwrap();
+        assert!(matches!(mode, ReplayMode::FromSequence(v) if v == u64::MAX));
+    }
+
+    #[test]
+    fn parse_from_time_preserves_exact_timestamp() {
+        let args = ReplayArgs {
+            from_time: Some("2026-06-15T12:30:45Z".to_owned()),
+            ..Default::default()
+        };
+        let mode = parse_replay_mode(&args).unwrap();
+        match mode {
+            ReplayMode::TimeRange { from, to } => {
+                assert_eq!(from.to_rfc3339().as_str(), "2026-06-15T12:30:45+00:00");
+                assert!(to.is_none());
+            }
+            other => panic!("expected TimeRange, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_from_time_with_valid_to() {
+        let args = ReplayArgs {
+            from_time: Some("2026-01-01T00:00:00Z".to_owned()),
+            to_time: Some("2026-06-01T00:00:00Z".to_owned()),
+            ..Default::default()
+        };
+        let mode = parse_replay_mode(&args).unwrap();
+        match mode {
+            ReplayMode::TimeRange { from, to } => {
+                let expected_from = "2026-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+                let expected_to = "2026-06-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+                assert_eq!(from, expected_from);
+                assert_eq!(to.unwrap(), expected_to);
+            }
+            other => panic!("expected TimeRange, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_error_message_contains_conflicting() {
+        let args = ReplayArgs {
+            checkpoint: Some(PathBuf::from("/x")),
+            from_seq: Some(1),
+            from_time: Some("2026-01-01T00:00:00Z".to_owned()),
+            ..Default::default()
+        };
+        let err = parse_replay_mode(&args).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("conflicting"));
+        assert!(msg.contains("--checkpoint"));
+        assert!(msg.contains("--from-seq"));
+        assert!(msg.contains("--from"));
+    }
+
+    #[test]
+    fn parse_to_without_from_error_message() {
+        let args = ReplayArgs {
+            to_time: Some("2026-01-01T00:00:00Z".to_owned()),
+            ..Default::default()
+        };
+        let err = parse_replay_mode(&args).unwrap_err();
+        assert!(err.to_string().contains("--to requires --from"));
+    }
+
+    #[test]
+    fn parse_invalid_from_error_contains_timestamp() {
+        let args = ReplayArgs {
+            from_time: Some("banana".to_owned()),
+            ..Default::default()
+        };
+        let err = parse_replay_mode(&args).unwrap_err();
+        assert!(err.to_string().contains("banana"));
+    }
+
+    #[test]
+    fn parse_invalid_to_error_contains_timestamp() {
+        let args = ReplayArgs {
+            from_time: Some("2026-01-01T00:00:00Z".to_owned()),
+            to_time: Some("grape".to_owned()),
+            ..Default::default()
+        };
+        let err = parse_replay_mode(&args).unwrap_err();
+        assert!(err.to_string().contains("grape"));
+    }
+
+    // ── CheckpointStore path helpers ────────────────────────────────────
+
+    #[test]
+    fn path_for_returns_json_extension() {
+        let store = CheckpointStore::new(PathBuf::from("/base"));
+        let path = store.path_for("fcp.test");
+        assert_eq!(path, PathBuf::from("/base/fcp.test.json"));
+    }
+
+    #[test]
+    fn path_for_empty_connector_id() {
+        let store = CheckpointStore::new(PathBuf::from("/base"));
+        let path = store.path_for("");
+        assert_eq!(path, PathBuf::from("/base/.json"));
+    }
+
+    #[test]
+    fn tmp_path_for_format() {
+        let store = CheckpointStore::new(PathBuf::from("/base"));
+        let tmp = store.tmp_path_for("fcp.x");
+        let s = tmp.to_string_lossy();
+        assert!(s.starts_with("/base/fcp.x.json.tmp."));
+        assert!(s.contains(&std::process::id().to_string()));
+    }
+
+    // ── Serialization edge cases ─────────────────────────────────────────
+
+    #[test]
+    fn checkpoint_special_chars_in_id() {
+        let cp = Checkpoint {
+            connector_id: "fcp/test-v2.0+build".to_owned(),
+            last_sequence: 1,
+            last_timestamp: Utc::now(),
+            last_event_id: None,
+            updated_at: Utc::now(),
+            event_count: 1,
+        };
+        let json = serde_json::to_string(&cp).unwrap();
+        let rt: Checkpoint = serde_json::from_str(&json).unwrap();
+        assert_eq!(rt.connector_id, "fcp/test-v2.0+build");
+    }
+
+    #[test]
+    fn checkpoint_unicode_event_id() {
+        let cp = Checkpoint {
+            connector_id: "fcp.unicode".to_owned(),
+            last_sequence: 5,
+            last_timestamp: Utc::now(),
+            last_event_id: Some("evt-\u{1F600}-\u{1F4A9}".to_owned()),
+            updated_at: Utc::now(),
+            event_count: 5,
+        };
+        let json = serde_json::to_string(&cp).unwrap();
+        let rt: Checkpoint = serde_json::from_str(&json).unwrap();
+        assert_eq!(rt.last_event_id, cp.last_event_id);
+    }
+
+    #[test]
+    fn checkpoint_large_event_count() {
+        let cp = Checkpoint {
+            connector_id: "fcp.big".to_owned(),
+            last_sequence: u64::MAX - 1,
+            last_timestamp: Utc::now(),
+            last_event_id: None,
+            updated_at: Utc::now(),
+            event_count: u64::MAX,
+        };
+        let json = serde_json::to_string(&cp).unwrap();
+        let rt: Checkpoint = serde_json::from_str(&json).unwrap();
+        assert_eq!(rt.event_count, u64::MAX);
+    }
+
+    #[test]
+    fn checkpoint_json_contains_expected_keys() {
+        let cp = sample_checkpoint("fcp.keys");
+        let json = serde_json::to_string(&cp).unwrap();
+        assert!(json.contains("connector_id"));
+        assert!(json.contains("last_sequence"));
+        assert!(json.contains("last_timestamp"));
+        assert!(json.contains("last_event_id"));
+        assert!(json.contains("updated_at"));
+        assert!(json.contains("event_count"));
+    }
+
+    #[test]
+    fn checkpoint_from_json_value() {
+        let cp = sample_checkpoint("fcp.val");
+        let val = serde_json::to_value(&cp).unwrap();
+        assert_eq!(val["connector_id"], "fcp.val");
+        assert_eq!(val["last_sequence"], 42);
+        assert_eq!(val["event_count"], 10);
+        assert_eq!(val["last_event_id"], "evt-001");
+    }
+
+    #[test]
+    fn checkpoint_from_json_value_null_event_id() {
+        let cp = Checkpoint {
+            connector_id: "fcp.null-eid".to_owned(),
+            last_sequence: 0,
+            last_timestamp: Utc::now(),
+            last_event_id: None,
+            updated_at: Utc::now(),
+            event_count: 0,
+        };
+        let val = serde_json::to_value(&cp).unwrap();
+        assert!(val["last_event_id"].is_null());
+    }
+
+    // ── Store: update edge cases ─────────────────────────────────────────
+
+    #[test]
+    fn store_update_after_remove_creates_fresh() {
+        let dir = temp_dir("update_after_rm");
+        let store = CheckpointStore::new(dir);
+        store.update("fcp.rm", &sample_update(10)).unwrap();
+        store.update("fcp.rm", &sample_update(20)).unwrap();
+        store.remove("fcp.rm").unwrap();
+        let cp = store.update("fcp.rm", &sample_update(1)).unwrap();
+        // Should start fresh with event_count = 1, not 3.
+        assert_eq!(cp.event_count, 1);
+        assert_eq!(cp.last_sequence, 1);
+    }
+
+    #[test]
+    fn store_update_sets_updated_at_to_recent() {
+        let dir = temp_dir("update_ts_recent");
+        let store = CheckpointStore::new(dir);
+        let before = Utc::now();
+        let cp = store.update("fcp.ts", &sample_update(1)).unwrap();
+        let after = Utc::now();
+        assert!(cp.updated_at >= before);
+        assert!(cp.updated_at <= after);
+    }
+
+    #[test]
+    fn store_update_event_id_replaces_previous() {
+        let dir = temp_dir("update_eid_replace");
+        let store = CheckpointStore::new(dir);
+        let up1 = CheckpointUpdate {
+            sequence: 1,
+            timestamp: Utc::now(),
+            event_id: Some("first".to_owned()),
+        };
+        store.update("fcp.rep", &up1).unwrap();
+        let up2 = CheckpointUpdate {
+            sequence: 2,
+            timestamp: Utc::now(),
+            event_id: Some("second".to_owned()),
+        };
+        let cp = store.update("fcp.rep", &up2).unwrap();
+        assert_eq!(cp.last_event_id.as_deref(), Some("second"));
+    }
+
+    // ── resolve_replay_mode: additional combinations ─────────────────────
+
+    #[test]
+    fn resolve_time_range_exactly_at_max_window() {
+        let dir = temp_dir("resolve_exact_window");
+        let store = CheckpointStore::new(dir);
+        let from = "2026-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let to = "2026-01-02T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let req = ReplayRequest {
+            connector_id: "fcp.exact".to_owned(),
+            mode: ReplayMode::TimeRange { from, to: Some(to) },
+        };
+        // Exactly 24 hours window with 24 hour max.
+        let cap = ReplayCapability {
+            connector_id: "fcp.exact".to_owned(),
+            supports_sequence_replay: false,
+            supports_time_replay: true,
+            max_replay_window: Some(Duration::hours(24)),
+        };
+        let resolved = resolve_replay_mode(&req, &store, &cap).unwrap();
+        // 24h == 24h, should succeed (not strictly greater).
+        assert!(matches!(resolved, ResolvedReplay::StartFromTime { .. }));
+    }
+
+    #[test]
+    fn resolve_time_range_exceeds_by_one_second() {
+        let dir = temp_dir("resolve_exceed_1s");
+        let store = CheckpointStore::new(dir);
+        let from = "2026-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let to = "2026-01-02T00:00:01Z".parse::<DateTime<Utc>>().unwrap();
+        let req = ReplayRequest {
+            connector_id: "fcp.1s".to_owned(),
+            mode: ReplayMode::TimeRange { from, to: Some(to) },
+        };
+        let cap = ReplayCapability {
+            connector_id: "fcp.1s".to_owned(),
+            supports_sequence_replay: false,
+            supports_time_replay: true,
+            max_replay_window: Some(Duration::hours(24)),
+        };
+        let resolved = resolve_replay_mode(&req, &store, &cap).unwrap();
+        assert!(matches!(resolved, ResolvedReplay::Unsupported { .. }));
+    }
+
+    #[test]
+    fn resolve_unsupported_reason_contains_connector_name() {
+        let dir = temp_dir("resolve_reason_name");
+        let store = CheckpointStore::new(dir);
+        let req = ReplayRequest {
+            connector_id: "fcp.myconn".to_owned(),
+            mode: ReplayMode::FromSequence(1),
+        };
+        let cap = ReplayCapability {
+            connector_id: "fcp.myconn".to_owned(),
+            supports_sequence_replay: false,
+            supports_time_replay: false,
+            max_replay_window: None,
+        };
+        let resolved = resolve_replay_mode(&req, &store, &cap).unwrap();
+        match resolved {
+            ResolvedReplay::Unsupported { reason, .. } => {
+                assert!(reason.contains("fcp.myconn"));
+            }
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_unsupported_time_reason_contains_connector() {
+        let dir = temp_dir("resolve_time_reason");
+        let store = CheckpointStore::new(dir);
+        let from = Utc::now();
+        let req = ReplayRequest {
+            connector_id: "fcp.ntime".to_owned(),
+            mode: ReplayMode::TimeRange { from, to: None },
+        };
+        let cap = ReplayCapability {
+            connector_id: "fcp.ntime".to_owned(),
+            supports_sequence_replay: true,
+            supports_time_replay: false,
+            max_replay_window: None,
+        };
+        let resolved = resolve_replay_mode(&req, &store, &cap).unwrap();
+        match resolved {
+            ResolvedReplay::Unsupported { reason, fallback } => {
+                assert!(reason.contains("fcp.ntime"));
+                assert_eq!(*fallback, ResolvedReplay::StartFromLatest);
+            }
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_exceeded_window_fallback_has_clamped_from() {
+        let dir = temp_dir("resolve_clamped");
+        let store = CheckpointStore::new(dir);
+        let from = "2026-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let to = "2026-02-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let max_hours = 48;
+        let req = ReplayRequest {
+            connector_id: "fcp.clamp".to_owned(),
+            mode: ReplayMode::TimeRange { from, to: Some(to) },
+        };
+        let cap = ReplayCapability {
+            connector_id: "fcp.clamp".to_owned(),
+            supports_sequence_replay: false,
+            supports_time_replay: true,
+            max_replay_window: Some(Duration::hours(max_hours)),
+        };
+        let resolved = resolve_replay_mode(&req, &store, &cap).unwrap();
+        match resolved {
+            ResolvedReplay::Unsupported { fallback, .. } => {
+                match *fallback {
+                    ResolvedReplay::StartFromTime { from: clamped, to: fb_to } => {
+                        let expected_clamped = to - Duration::hours(max_hours);
+                        assert_eq!(clamped, expected_clamped);
+                        assert_eq!(fb_to, Some(to));
+                    }
+                    other => panic!("expected StartFromTime fallback, got {other:?}"),
+                }
+            }
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_from_checkpoint_store_time_only_cap() {
+        let dir = temp_dir("resolve_cp_store_time");
+        let store = CheckpointStore::new(dir);
+        let cp = sample_checkpoint("fcp.timeonly");
+        store.save(&cp).unwrap();
+        let req = ReplayRequest {
+            connector_id: "fcp.timeonly".to_owned(),
+            mode: ReplayMode::FromCheckpoint(PathBuf::from("/nonexistent/path.json")),
+        };
+        let cap = ReplayCapability {
+            connector_id: "fcp.timeonly".to_owned(),
+            supports_sequence_replay: false,
+            supports_time_replay: true,
+            max_replay_window: None,
+        };
+        let resolved = resolve_replay_mode(&req, &store, &cap).unwrap();
+        match resolved {
+            ResolvedReplay::StartFromTime { from, to } => {
+                assert_eq!(from, cp.last_timestamp);
+                assert!(to.is_none());
+            }
+            other => panic!("expected StartFromTime, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_from_checkpoint_store_no_cap() {
+        let dir = temp_dir("resolve_cp_store_nocap");
+        let store = CheckpointStore::new(dir);
+        let cp = sample_checkpoint("fcp.nocap");
+        store.save(&cp).unwrap();
+        let req = ReplayRequest {
+            connector_id: "fcp.nocap".to_owned(),
+            mode: ReplayMode::FromCheckpoint(PathBuf::from("/nonexistent/path.json")),
+        };
+        let cap = ReplayCapability {
+            connector_id: "fcp.nocap".to_owned(),
+            supports_sequence_replay: false,
+            supports_time_replay: false,
+            max_replay_window: None,
+        };
+        let resolved = resolve_replay_mode(&req, &store, &cap).unwrap();
+        match resolved {
+            ResolvedReplay::Unsupported { reason, fallback } => {
+                assert!(reason.contains("neither sequence nor time"));
+                assert_eq!(*fallback, ResolvedReplay::StartFromLatest);
+            }
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+    }
+
+    // ── ResolvedReplay Display additional ────────────────────────────────
+
+    #[test]
+    fn resolved_replay_display_nested_unsupported() {
+        let inner = ResolvedReplay::StartFrom { sequence: 99 };
+        let outer = ResolvedReplay::Unsupported {
+            reason: "time not available".to_owned(),
+            fallback: Box::new(inner),
+        };
+        let s = outer.to_string();
+        assert!(s.contains("time not available"));
+        assert!(s.contains("start from sequence 99"));
+    }
+
+    #[test]
+    fn resolved_replay_display_start_from_sequence_zero() {
+        let r = ResolvedReplay::StartFrom { sequence: 0 };
+        assert_eq!(r.to_string(), "start from sequence 0");
+    }
+
+    #[test]
+    fn resolved_replay_display_start_from_max() {
+        let r = ResolvedReplay::StartFrom { sequence: u64::MAX };
+        let s = r.to_string();
+        assert!(s.contains(&u64::MAX.to_string()));
+    }
+
+    // ── Store: save/load with various connector IDs ─────────────────────
+
+    #[test]
+    fn store_roundtrip_connector_with_dots() {
+        let dir = temp_dir("dots_id");
+        let store = CheckpointStore::new(dir);
+        let cp = sample_checkpoint("fcp.sub.module.v3");
+        store.save(&cp).unwrap();
+        let loaded = store.load("fcp.sub.module.v3").unwrap().unwrap();
+        assert_eq!(loaded.connector_id, "fcp.sub.module.v3");
+    }
+
+    #[test]
+    fn store_roundtrip_connector_with_hyphens() {
+        let dir = temp_dir("hyphen_id");
+        let store = CheckpointStore::new(dir);
+        let cp = sample_checkpoint("fcp-github-enterprise");
+        store.save(&cp).unwrap();
+        let loaded = store.load("fcp-github-enterprise").unwrap().unwrap();
+        assert_eq!(loaded.connector_id, "fcp-github-enterprise");
+    }
+
+    // ── Store: list sorted order ─────────────────────────────────────────
+
+    #[test]
+    fn store_list_sorted_reverse_insert_order() {
+        let dir = temp_dir("list_sorted_rev");
+        let store = CheckpointStore::new(dir);
+        store.save(&sample_checkpoint("fcp.zebra")).unwrap();
+        store.save(&sample_checkpoint("fcp.alpha")).unwrap();
+        store.save(&sample_checkpoint("fcp.middle")).unwrap();
+        let list = store.list().unwrap();
+        assert_eq!(list.len(), 3);
+        assert_eq!(list[0].connector_id, "fcp.alpha");
+        assert_eq!(list[1].connector_id, "fcp.middle");
+        assert_eq!(list[2].connector_id, "fcp.zebra");
+    }
+
+    // ── Store: const constructor ─────────────────────────────────────────
+
+    #[test]
+    fn checkpoint_store_new_is_const() {
+        // Verify the constructor can be used in a const context.
+        const _: fn() -> CheckpointStore = || CheckpointStore::new(PathBuf::new());
+        // Just verifying it compiles; the function itself is not called at compile time.
+    }
+
+    // ── Checkpoint store: multiple saves same connector ──────────────────
+
+    #[test]
+    fn store_multiple_saves_keeps_latest() {
+        let dir = temp_dir("multi_save");
+        let store = CheckpointStore::new(dir);
+        let mut cp = sample_checkpoint("fcp.multi");
+        for seq in 1..=5 {
+            cp.last_sequence = seq;
+            cp.event_count = seq;
+            store.save(&cp).unwrap();
+        }
+        let loaded = store.load("fcp.multi").unwrap().unwrap();
+        assert_eq!(loaded.last_sequence, 5);
+        assert_eq!(loaded.event_count, 5);
+        // Only one file in listing.
+        let list = store.list().unwrap();
+        assert_eq!(list.len(), 1);
+    }
+
+    // ── Store: remove then load returns none ─────────────────────────────
+
+    #[test]
+    fn store_remove_twice_second_returns_false() {
+        let dir = temp_dir("remove_twice");
+        let store = CheckpointStore::new(dir);
+        store.save(&sample_checkpoint("fcp.rmtwice")).unwrap();
+        assert!(store.remove("fcp.rmtwice").unwrap());
+        assert!(!store.remove("fcp.rmtwice").unwrap());
+    }
+
+    // ── CheckpointUpdate with timestamp ──────────────────────────────────
+
+    #[test]
+    fn update_with_specific_timestamp() {
+        let dir = temp_dir("update_spec_ts");
+        let store = CheckpointStore::new(dir);
+        let ts = "2025-06-15T10:30:00Z".parse::<DateTime<Utc>>().unwrap();
+        let up = CheckpointUpdate {
+            sequence: 100,
+            timestamp: ts,
+            event_id: Some("evt-specific".to_owned()),
+        };
+        let cp = store.update("fcp.spec", &up).unwrap();
+        assert_eq!(cp.last_timestamp, ts);
+        assert_eq!(cp.last_event_id.as_deref(), Some("evt-specific"));
+    }
+
+    // ── Resolved replay: unsupported fallback is boxed ───────────────────
+
+    #[test]
+    fn resolved_replay_unsupported_nested_clone() {
+        let r = ResolvedReplay::Unsupported {
+            reason: "test".to_owned(),
+            fallback: Box::new(ResolvedReplay::Unsupported {
+                reason: "inner".to_owned(),
+                fallback: Box::new(ResolvedReplay::StartFromLatest),
+            }),
+        };
+        let cloned = r.clone();
+        assert_eq!(r, cloned);
+    }
+
+    // ── Full checkpoint lifecycle ────────────────────────────────────────
+
+    #[test]
+    fn full_lifecycle_create_update_list_remove() {
+        let dir = temp_dir("full_lifecycle");
+        let store = CheckpointStore::new(dir);
+
+        // Create via update.
+        let cp1 = store.update("fcp.lc", &sample_update(1)).unwrap();
+        assert_eq!(cp1.event_count, 1);
+
+        // Update again.
+        let cp2 = store.update("fcp.lc", &sample_update(2)).unwrap();
+        assert_eq!(cp2.event_count, 2);
+
+        // List should show one entry.
+        let list = store.list().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].last_sequence, 2);
+
+        // Remove.
+        assert!(store.remove("fcp.lc").unwrap());
+        assert!(store.list().unwrap().is_empty());
+        assert!(store.load("fcp.lc").unwrap().is_none());
+    }
 }

@@ -1180,4 +1180,854 @@ mod tests {
         assert!(!result.is_valid());
         assert_eq!(result.errors[0].path, "<root>");
     }
+
+    // ── Additional type_fix_suggestion coverage ─────────────────────
+
+    #[test]
+    fn fix_suggestion_number_for_array() {
+        let suggestion = type_fix_suggestion("array", &json!(42));
+        assert!(suggestion.contains("[value]"));
+    }
+
+    #[test]
+    fn fix_suggestion_bool_for_array() {
+        let suggestion = type_fix_suggestion("array", &json!(true));
+        assert!(suggestion.contains("[value]"));
+    }
+
+    #[test]
+    fn fix_suggestion_null_for_array() {
+        let suggestion = type_fix_suggestion("array", &Value::Null);
+        assert!(suggestion.contains("[value]"));
+    }
+
+    #[test]
+    fn fix_suggestion_object_for_array() {
+        let suggestion = type_fix_suggestion("array", &json!({"a": 1}));
+        assert!(suggestion.contains("[value]"));
+    }
+
+    #[test]
+    fn fix_suggestion_string_for_integer() {
+        let suggestion = type_fix_suggestion("integer", &json!("99"));
+        assert!(suggestion.contains("99"));
+        assert!(suggestion.contains("number"));
+    }
+
+    #[test]
+    fn fix_suggestion_default_fallback() {
+        let suggestion = type_fix_suggestion("object", &json!("hello"));
+        assert!(suggestion.contains("object"));
+        assert!(suggestion.contains("provide"));
+    }
+
+    #[test]
+    fn fix_suggestion_null_for_string() {
+        let suggestion = type_fix_suggestion("string", &Value::Null);
+        assert!(suggestion.contains("string"));
+    }
+
+    #[test]
+    fn fix_suggestion_boolean_for_object() {
+        let suggestion = type_fix_suggestion("object", &json!(true));
+        assert!(suggestion.contains("object"));
+    }
+
+    // ── type_matches exhaustive coverage ────────────────────────────
+
+    #[test]
+    fn type_matches_string_positive() {
+        assert!(type_matches(&json!("hello"), "string"));
+    }
+
+    #[test]
+    fn type_matches_string_negative() {
+        assert!(!type_matches(&json!(42), "string"));
+        assert!(!type_matches(&json!(true), "string"));
+        assert!(!type_matches(&json!([1]), "string"));
+        assert!(!type_matches(&json!({"a":1}), "string"));
+        assert!(!type_matches(&Value::Null, "string"));
+    }
+
+    #[test]
+    fn type_matches_boolean_positive() {
+        assert!(type_matches(&json!(true), "boolean"));
+        assert!(type_matches(&json!(false), "boolean"));
+    }
+
+    #[test]
+    fn type_matches_boolean_negative() {
+        assert!(!type_matches(&json!(0), "boolean"));
+        assert!(!type_matches(&json!("true"), "boolean"));
+        assert!(!type_matches(&Value::Null, "boolean"));
+    }
+
+    #[test]
+    fn type_matches_object_positive() {
+        assert!(type_matches(&json!({}), "object"));
+        assert!(type_matches(&json!({"key": "val"}), "object"));
+    }
+
+    #[test]
+    fn type_matches_object_negative() {
+        assert!(!type_matches(&json!([]), "object"));
+        assert!(!type_matches(&json!("str"), "object"));
+        assert!(!type_matches(&json!(42), "object"));
+    }
+
+    #[test]
+    fn type_matches_array_positive() {
+        assert!(type_matches(&json!([]), "array"));
+        assert!(type_matches(&json!([1, 2]), "array"));
+    }
+
+    #[test]
+    fn type_matches_array_negative() {
+        assert!(!type_matches(&json!({}), "array"));
+        assert!(!type_matches(&json!("arr"), "array"));
+    }
+
+    #[test]
+    fn type_matches_null_negative() {
+        assert!(!type_matches(&json!(0), "null"));
+        assert!(!type_matches(&json!(false), "null"));
+        assert!(!type_matches(&json!(""), "null"));
+    }
+
+    #[test]
+    fn type_matches_integer_u64() {
+        // large unsigned integers are u64
+        assert!(type_matches(&json!(u64::MAX), "integer"));
+    }
+
+    // ── json_type_name edge cases ──────────────────────────────────
+
+    #[test]
+    fn json_type_name_u64_is_integer() {
+        assert_eq!(json_type_name(&json!(u64::MAX)), "integer");
+    }
+
+    #[test]
+    fn json_type_name_negative_integer() {
+        assert_eq!(json_type_name(&json!(-42)), "integer");
+    }
+
+    #[test]
+    fn json_type_name_zero() {
+        assert_eq!(json_type_name(&json!(0)), "integer");
+    }
+
+    #[test]
+    fn json_type_name_empty_string() {
+        assert_eq!(json_type_name(&json!("")), "string");
+    }
+
+    #[test]
+    fn json_type_name_empty_array() {
+        assert_eq!(json_type_name(&json!([])), "array");
+    }
+
+    #[test]
+    fn json_type_name_empty_object() {
+        assert_eq!(json_type_name(&json!({})), "object");
+    }
+
+    #[test]
+    fn json_type_name_false() {
+        assert_eq!(json_type_name(&json!(false)), "boolean");
+    }
+
+    // ── Root-level primitive validation ─────────────────────────────
+
+    #[test]
+    fn root_string_valid() {
+        let schema = json!({"type": "string", "minLength": 2});
+        let input = json!("hello");
+        assert!(validate(&input, &schema).is_valid());
+    }
+
+    #[test]
+    fn root_string_too_short() {
+        let schema = json!({"type": "string", "minLength": 5});
+        let input = json!("hi");
+        let result = validate(&input, &schema);
+        assert!(!result.is_valid());
+        assert_eq!(result.errors[0].path, "<root>");
+        assert!(result.errors[0].message.contains("too short"));
+    }
+
+    #[test]
+    fn root_number_below_minimum() {
+        let schema = json!({"type": "number", "minimum": 10.0});
+        let input = json!(5.0);
+        let result = validate(&input, &schema);
+        assert!(!result.is_valid());
+        assert_eq!(result.errors[0].path, "<root>");
+    }
+
+    #[test]
+    fn root_number_valid() {
+        let schema = json!({"type": "number", "minimum": 0.0, "maximum": 100.0});
+        let input = json!(50.0);
+        assert!(validate(&input, &schema).is_valid());
+    }
+
+    #[test]
+    fn root_boolean_valid() {
+        let schema = json!({"type": "boolean"});
+        let input = json!(true);
+        assert!(validate(&input, &schema).is_valid());
+    }
+
+    #[test]
+    fn root_null_valid() {
+        let schema = json!({"type": "null"});
+        let input = json!(null);
+        assert!(validate(&input, &schema).is_valid());
+    }
+
+    #[test]
+    fn root_integer_for_string_schema() {
+        let schema = json!({"type": "string"});
+        let input = json!(42);
+        let result = validate(&input, &schema);
+        assert!(!result.is_valid());
+        assert_eq!(result.errors[0].path, "<root>");
+    }
+
+    // ── Root-level enum validation ──────────────────────────────────
+
+    #[test]
+    fn root_enum_valid() {
+        let schema = json!({"type": "string", "enum": ["a", "b", "c"]});
+        let input = json!("b");
+        assert!(validate(&input, &schema).is_valid());
+    }
+
+    #[test]
+    fn root_enum_invalid() {
+        let schema = json!({"type": "string", "enum": ["a", "b", "c"]});
+        let input = json!("d");
+        let result = validate(&input, &schema);
+        assert!(!result.is_valid());
+        assert!(result.errors[0].message.contains("not in allowed set"));
+    }
+
+    // ── Root-level array constraints ────────────────────────────────
+
+    #[test]
+    fn root_array_min_items_fail() {
+        let schema = json!({"type": "array", "minItems": 3, "items": {"type": "integer"}});
+        let input = json!([1]);
+        let result = validate(&input, &schema);
+        assert!(!result.is_valid());
+        assert_eq!(result.errors[0].path, "<root>");
+        assert!(result.errors[0].message.contains("too short"));
+    }
+
+    #[test]
+    fn root_array_max_items_fail() {
+        let schema = json!({"type": "array", "maxItems": 2, "items": {"type": "integer"}});
+        let input = json!([1, 2, 3, 4]);
+        let result = validate(&input, &schema);
+        assert!(!result.is_valid());
+        assert_eq!(result.errors[0].path, "<root>");
+        assert!(result.errors[0].message.contains("too long"));
+    }
+
+    // ── Combined constraints within single field ────────────────────
+
+    #[test]
+    fn string_min_and_max_both_violated_only_min() {
+        // When both min and max constraints exist, both can fire
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "code": { "type": "string", "minLength": 5, "maxLength": 10 }
+            }
+        });
+        let input = json!({"code": "ab"});
+        let result = validate(&input, &schema);
+        assert!(!result.is_valid());
+        assert!(result.errors[0].message.contains("too short"));
+    }
+
+    #[test]
+    fn string_min_and_max_both_violated_only_max() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "code": { "type": "string", "minLength": 2, "maxLength": 5 }
+            }
+        });
+        let input = json!({"code": "waytoolong"});
+        let result = validate(&input, &schema);
+        assert!(!result.is_valid());
+        assert!(result.errors[0].message.contains("too long"));
+    }
+
+    #[test]
+    fn number_both_min_max_violated_below() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "val": { "type": "number", "minimum": 10.0, "maximum": 20.0 }
+            }
+        });
+        let input = json!({"val": 5.0});
+        let result = validate(&input, &schema);
+        assert!(!result.is_valid());
+        assert!(result.errors[0].message.contains("below minimum"));
+    }
+
+    #[test]
+    fn number_both_min_max_violated_above() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "val": { "type": "number", "minimum": 10.0, "maximum": 20.0 }
+            }
+        });
+        let input = json!({"val": 25.0});
+        let result = validate(&input, &schema);
+        assert!(!result.is_valid());
+        assert!(result.errors[0].message.contains("exceeds maximum"));
+    }
+
+    // ── Multiple errors in single input ─────────────────────────────
+
+    #[test]
+    fn multiple_field_errors_required_and_type() {
+        let schema = json!({
+            "type": "object",
+            "required": ["a", "b"],
+            "properties": {
+                "a": { "type": "string" },
+                "b": { "type": "integer" },
+                "c": { "type": "boolean" }
+            }
+        });
+        // missing a, missing b, wrong type for c
+        let input = json!({"c": "not_bool"});
+        let result = validate(&input, &schema);
+        assert!(!result.is_valid());
+        assert!(result.errors.len() >= 3);
+    }
+
+    #[test]
+    fn required_field_type_hint_from_schema() {
+        let schema = json!({
+            "type": "object",
+            "required": ["age"],
+            "properties": {
+                "age": { "type": "integer" }
+            }
+        });
+        let input = json!({});
+        let result = validate(&input, &schema);
+        assert!(!result.is_valid());
+        // Suggestion should reference the type hint from the schema
+        assert!(result.errors[0].suggestion.contains("integer"));
+    }
+
+    #[test]
+    fn required_field_no_properties_uses_value_fallback() {
+        let schema = json!({
+            "type": "object",
+            "required": ["x"]
+        });
+        let input = json!({});
+        let result = validate(&input, &schema);
+        assert!(!result.is_valid());
+        // Without properties, the type_hint defaults to "value"
+        assert!(result.errors[0].suggestion.contains("value"));
+    }
+
+    // ── Array with nested object validation ─────────────────────────
+
+    #[test]
+    fn array_of_objects_missing_required() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["id"],
+                        "properties": {
+                            "id": { "type": "integer" }
+                        }
+                    }
+                }
+            }
+        });
+        let input = json!({"items": [{"id": 1}, {}, {"id": 3}]});
+        let result = validate(&input, &schema);
+        assert!(!result.is_valid());
+        assert_eq!(result.errors.len(), 1);
+        assert!(result.errors[0].path.contains("[1]"));
+        assert!(result.errors[0].path.contains("id"));
+    }
+
+    #[test]
+    fn array_of_objects_multiple_missing_required() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "records": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["name", "value"],
+                        "properties": {
+                            "name": { "type": "string" },
+                            "value": { "type": "number" }
+                        }
+                    }
+                }
+            }
+        });
+        let input = json!({"records": [{}]});
+        let result = validate(&input, &schema);
+        assert!(!result.is_valid());
+        // Missing both name and value in records[0]
+        assert_eq!(result.errors.len(), 2);
+    }
+
+    // ── Deeply nested array in object in array ──────────────────────
+
+    #[test]
+    fn deeply_nested_array_in_object_in_array() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "groups": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "members": {
+                                "type": "array",
+                                "items": { "type": "string" }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        let input = json!({"groups": [{"members": ["alice", 42]}]});
+        let result = validate(&input, &schema);
+        assert!(!result.is_valid());
+        assert!(result.errors[0].path.contains("groups"));
+        assert!(result.errors[0].path.contains("[0]"));
+        assert!(result.errors[0].path.contains("members"));
+        assert!(result.errors[0].path.contains("[1]"));
+    }
+
+    // ── Schema with no type constraint ──────────────────────────────
+
+    #[test]
+    fn schema_without_type_accepts_any_value() {
+        let schema = json!({"enum": ["yes", "no"]});
+        let input = json!("yes");
+        assert!(validate(&input, &schema).is_valid());
+    }
+
+    #[test]
+    fn schema_without_type_still_checks_enum() {
+        let schema = json!({"enum": ["yes", "no"]});
+        let input = json!("maybe");
+        let result = validate(&input, &schema);
+        assert!(!result.is_valid());
+    }
+
+    // ── ValidationError field access ────────────────────────────────
+
+    #[test]
+    fn validation_error_fields_match_construction() {
+        let err = ValidationError {
+            path: "a.b.c".to_string(),
+            message: "type mismatch".to_string(),
+            suggestion: "use string".to_string(),
+        };
+        assert_eq!(err.path, "a.b.c");
+        assert_eq!(err.message, "type mismatch");
+        assert_eq!(err.suggestion, "use string");
+    }
+
+    #[test]
+    fn validation_error_serializes_all_fields() {
+        let err = ValidationError {
+            path: "deep.nested.path".to_string(),
+            message: "wrong type".to_string(),
+            suggestion: "convert to int".to_string(),
+        };
+        let s = serde_json::to_string(&err).unwrap();
+        assert!(s.contains("deep.nested.path"));
+        assert!(s.contains("wrong type"));
+        assert!(s.contains("convert to int"));
+    }
+
+    #[test]
+    fn validation_result_debug_format() {
+        let result = ValidationResult {
+            errors: vec![ValidationError {
+                path: "x".to_string(),
+                message: "bad".to_string(),
+                suggestion: "fix".to_string(),
+            }],
+        };
+        let debug = format!("{result:?}");
+        assert!(debug.contains("ValidationResult"));
+        assert!(debug.contains("bad"));
+    }
+
+    #[test]
+    fn validation_error_clone_independence() {
+        let err = ValidationError {
+            path: "original".to_string(),
+            message: "msg".to_string(),
+            suggestion: "sug".to_string(),
+        };
+        let mut cloned = err.clone();
+        cloned.path = "modified".to_string();
+        // Original unchanged
+        assert_eq!(err.path, "original");
+        assert_eq!(cloned.path, "modified");
+    }
+
+    // ── Multiple errors serialization ───────────────────────────────
+
+    #[test]
+    fn multiple_errors_serialize_as_array() {
+        let errors = vec![
+            ValidationError {
+                path: "a".to_string(),
+                message: "m1".to_string(),
+                suggestion: "s1".to_string(),
+            },
+            ValidationError {
+                path: "b".to_string(),
+                message: "m2".to_string(),
+                suggestion: "s2".to_string(),
+            },
+        ];
+        let json = serde_json::to_value(&errors).unwrap();
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["path"], "a");
+        assert_eq!(arr[1]["path"], "b");
+    }
+
+    // ── Edge case: properties not in schema are not validated ────────
+
+    #[test]
+    fn unknown_property_not_validated() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string" }
+            }
+        });
+        // "age" is not in properties, so no validation happens for it
+        let input = json!({"name": "test", "age": "not_a_number"});
+        assert!(validate(&input, &schema).is_valid());
+    }
+
+    // ── Array items schema absent means no item validation ──────────
+
+    #[test]
+    fn array_without_items_schema_accepts_mixed() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "data": { "type": "array" }
+            }
+        });
+        let input = json!({"data": [1, "two", true, null, [3], {"k": 4}]});
+        assert!(validate(&input, &schema).is_valid());
+    }
+
+    // ── Enum with null value ────────────────────────────────────────
+
+    #[test]
+    fn enum_with_null_valid() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "status": { "enum": [null, "active", "inactive"] }
+            }
+        });
+        let input = json!({"status": null});
+        assert!(validate(&input, &schema).is_valid());
+    }
+
+    #[test]
+    fn enum_with_boolean_values() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "flag": { "enum": [true, false] }
+            }
+        });
+        let input = json!({"flag": true});
+        assert!(validate(&input, &schema).is_valid());
+    }
+
+    // ── String constraints at exact boundaries ──────────────────────
+
+    #[test]
+    fn string_exact_max_length_valid() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "code": { "type": "string", "maxLength": 5 }
+            }
+        });
+        let input = json!({"code": "abcde"});
+        assert!(validate(&input, &schema).is_valid());
+    }
+
+    #[test]
+    fn string_one_over_max_length() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "code": { "type": "string", "maxLength": 5 }
+            }
+        });
+        let input = json!({"code": "abcdef"});
+        let result = validate(&input, &schema);
+        assert!(!result.is_valid());
+    }
+
+    #[test]
+    fn string_one_under_min_length() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "code": { "type": "string", "minLength": 5 }
+            }
+        });
+        let input = json!({"code": "abcd"});
+        let result = validate(&input, &schema);
+        assert!(!result.is_valid());
+    }
+
+    // ── Number constraint boundaries ────────────────────────────────
+
+    #[test]
+    fn number_just_below_minimum() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "val": { "type": "number", "minimum": 10.0 }
+            }
+        });
+        let input = json!({"val": 9.999});
+        let result = validate(&input, &schema);
+        assert!(!result.is_valid());
+    }
+
+    #[test]
+    fn number_just_above_maximum() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "val": { "type": "number", "maximum": 10.0 }
+            }
+        });
+        let input = json!({"val": 10.001});
+        let result = validate(&input, &schema);
+        assert!(!result.is_valid());
+    }
+
+    #[test]
+    fn negative_number_within_range() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "temp": { "type": "number", "minimum": -50.0, "maximum": 50.0 }
+            }
+        });
+        let input = json!({"temp": -25.0});
+        assert!(validate(&input, &schema).is_valid());
+    }
+
+    // ── min_items suggestion accuracy ───────────────────────────────
+
+    #[test]
+    fn array_min_items_suggestion_count() {
+        let schema = json!({
+            "type": "array",
+            "minItems": 5,
+            "items": { "type": "integer" }
+        });
+        let input = json!([1, 2]);
+        let result = validate(&input, &schema);
+        assert!(!result.is_valid());
+        // Should suggest adding 3 more items
+        assert!(result.errors[0].suggestion.contains('3'));
+    }
+
+    #[test]
+    fn array_max_items_suggestion_count() {
+        let schema = json!({
+            "type": "array",
+            "maxItems": 2,
+            "items": { "type": "integer" }
+        });
+        let input = json!([1, 2, 3, 4, 5]);
+        let result = validate(&input, &schema);
+        assert!(!result.is_valid());
+        // Should suggest removing 3 items
+        assert!(result.errors[0].suggestion.contains('3'));
+    }
+
+    // ── Empty array passes with no constraints ──────────────────────
+
+    #[test]
+    fn empty_array_valid_no_constraints() {
+        let schema = json!({
+            "type": "array",
+            "items": { "type": "string" }
+        });
+        let input = json!([]);
+        assert!(validate(&input, &schema).is_valid());
+    }
+
+    // ── Object with all optional fields empty ───────────────────────
+
+    #[test]
+    fn object_all_optional_empty_valid() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "a": { "type": "string" },
+                "b": { "type": "integer" },
+                "c": { "type": "boolean" }
+            }
+        });
+        let input = json!({});
+        assert!(validate(&input, &schema).is_valid());
+    }
+
+    // ── Enum with mixed types ───────────────────────────────────────
+
+    #[test]
+    fn enum_mixed_types_string_match() {
+        let schema = json!({
+            "properties": {
+                "val": { "enum": [1, "two", true, null] }
+            }
+        });
+        let input = json!({"val": "two"});
+        assert!(validate(&input, &schema).is_valid());
+    }
+
+    #[test]
+    fn enum_mixed_types_no_match() {
+        let schema = json!({
+            "properties": {
+                "val": { "enum": [1, "two", true] }
+            }
+        });
+        let input = json!({"val": "three"});
+        let result = validate(&input, &schema);
+        assert!(!result.is_valid());
+    }
+
+    // ── Type mismatch early return prevents further checks ──────────
+
+    #[test]
+    fn type_mismatch_stops_checking_constraints() {
+        // If type doesn't match, minLength/maxLength shouldn't fire
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "minLength": 100 }
+            }
+        });
+        let input = json!({"name": 42});
+        let result = validate(&input, &schema);
+        // Only 1 error (type mismatch), not 2 (type + minLength)
+        assert_eq!(result.errors.len(), 1);
+        assert!(result.errors[0].message.contains("string"));
+    }
+
+    // ── Four-level deep nesting ─────────────────────────────────────
+
+    #[test]
+    fn four_level_nesting_type_error() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "l1": {
+                    "type": "object",
+                    "properties": {
+                        "l2": {
+                            "type": "object",
+                            "properties": {
+                                "l3": {
+                                    "type": "object",
+                                    "properties": {
+                                        "l4": { "type": "integer" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        let input = json!({"l1": {"l2": {"l3": {"l4": "not_int"}}}});
+        let result = validate(&input, &schema);
+        assert!(!result.is_valid());
+        assert_eq!(result.errors[0].path, "l1.l2.l3.l4");
+    }
+
+    // ── Schema with only required, no properties ────────────────────
+
+    #[test]
+    fn required_without_properties_definition() {
+        let schema = json!({
+            "type": "object",
+            "required": ["id"]
+        });
+        let input = json!({});
+        let result = validate(&input, &schema);
+        assert!(!result.is_valid());
+        assert_eq!(result.errors[0].path, "id");
+        // type_hint defaults to "value" since no properties defined
+        assert!(result.errors[0].suggestion.contains("value"));
+    }
+
+    // ── Validate with all issue_schema fields correct types ─────────
+
+    #[test]
+    fn issue_schema_labels_wrong_item_type() {
+        let input = json!({
+            "owner": "octocat",
+            "repo": "hello-world",
+            "title": "Bug",
+            "labels": [42, true]
+        });
+        let result = validate(&input, &issue_schema());
+        assert!(!result.is_valid());
+        assert_eq!(result.errors.len(), 2);
+    }
+
+    #[test]
+    fn issue_schema_all_fields_wrong_type() {
+        let input = json!({
+            "owner": 1,
+            "repo": 2,
+            "title": 3,
+            "milestone": "one"
+        });
+        let result = validate(&input, &issue_schema());
+        // owner, repo, title, milestone all wrong type
+        assert_eq!(result.errors.len(), 4);
+    }
 }

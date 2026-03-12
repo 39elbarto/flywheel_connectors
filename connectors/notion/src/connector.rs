@@ -1357,13 +1357,17 @@ mod tests {
     use fcp_manifest::ConnectorManifest;
     use std::path::PathBuf;
 
-    fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> CapabilityToken {
+    fn generate_valid_token(
+        signing_key: &Ed25519SigningKey,
+        cap: &str,
+        operations: &[&str],
+    ) -> CapabilityToken {
         let now = Utc::now();
         let cose = CapabilityTokenBuilder::new()
             .capability_id(cap)
             .zone_id("z:work")
             .principal("user:test")
-            .operations(&[cap])
+            .operations(operations)
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
             .sign(signing_key)
@@ -1413,7 +1417,7 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "notion.get_page");
+        let token = generate_valid_token(&signing_key, "notion.read", &["notion.get_page"]);
 
         let result = connector
             .handle_invoke(json!({
@@ -1452,7 +1456,7 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "notion.get_page");
+        let token = generate_valid_token(&signing_key, "notion.read", &["notion.get_page"]);
 
         let result = connector
             .handle_invoke(json!({
@@ -1525,7 +1529,7 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "notion.get_database");
+        let token = generate_valid_token(&signing_key, "notion.read", &["notion.get_database"]);
 
         let result = connector
             .handle_invoke(json!({
@@ -1569,7 +1573,7 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "notion.create_database");
+        let token = generate_valid_token(&signing_key, "notion.write", &["notion.create_database"]);
 
         // Missing parent
         let result = connector
@@ -1588,7 +1592,7 @@ mod tests {
         }
 
         // Missing title
-        let token2 = generate_valid_token(&signing_key, "notion.create_database");
+        let token2 = generate_valid_token(&signing_key, "notion.write", &["notion.create_database"]);
         let result2 = connector
             .handle_invoke(json!({
                 "operation": "notion.create_database",
@@ -1605,7 +1609,7 @@ mod tests {
         }
 
         // Missing properties
-        let token3 = generate_valid_token(&signing_key, "notion.create_database");
+        let token3 = generate_valid_token(&signing_key, "notion.write", &["notion.create_database"]);
         let result3 = connector
             .handle_invoke(json!({
                 "operation": "notion.create_database",
@@ -1647,7 +1651,7 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "notion.get_block");
+        let token = generate_valid_token(&signing_key, "notion.read", &["notion.get_block"]);
 
         let result = connector
             .handle_invoke(json!({
@@ -1691,7 +1695,7 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "notion.delete_block");
+        let token = generate_valid_token(&signing_key, "notion.delete", &["notion.delete_block"]);
 
         let result = connector
             .handle_invoke(json!({

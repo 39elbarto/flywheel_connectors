@@ -114,12 +114,21 @@ pub struct DegradedModeStatus {
 pub struct CheckResult {
     /// Check name.
     pub name: String,
+    /// Connector this check applies to, when the result is connector-specific.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connector_id: Option<String>,
+    /// Stable reason code for machine-readable triage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
     /// Check status.
     pub status: CheckStatus,
     /// Check severity.
     pub severity: CheckSeverity,
     /// Human-readable message.
     pub message: String,
+    /// Ordered remediation hints for the smallest useful next steps.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repair_hints: Vec<String>,
 }
 
 /// Check status.
@@ -176,6 +185,10 @@ pub struct DoctorReport {
     /// Individual check results.
     pub checks: Vec<CheckResult>,
 
+    /// Deduplicated next steps pulled from the failing or degraded checks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recommended_actions: Vec<String>,
+
     /// Connector self-check results (when requested).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub connector_self_checks: Vec<ConnectorSelfCheck>,
@@ -205,11 +218,18 @@ impl DoctorReport {
             },
             degraded_mode: DegradedModeStatus::default(),
             checks: Vec::new(),
+            recommended_actions: Vec::new(),
             connector_self_checks: Vec::new(),
         }
     }
 
     fn with_self_checks(mut self, checks: Vec<ConnectorSelfCheck>) -> Self {
+        let derived_checks: Vec<CheckResult> = checks
+            .iter()
+            .filter_map(check_result_from_self_check)
+            .collect();
+        self.recommended_actions = recommended_actions_from_checks(&derived_checks);
+        self.checks.extend(derived_checks);
         self.overall_status = overall_status_from_self_checks(&checks);
         self.connector_self_checks = checks;
         self
@@ -321,6 +341,185 @@ fn overall_status_from_self_checks(checks: &[ConnectorSelfCheck]) -> OverallStat
     }
 
     OverallStatus::Ok
+}
+
+fn check_result_from_self_check(check: &ConnectorSelfCheck) -> Option<CheckResult> {
+    let status = match check.report.status {
+        SelfCheckStatus::Ok => return None,
+        SelfCheckStatus::Degraded | SelfCheckStatus::Unsupported => CheckStatus::Warn,
+        SelfCheckStatus::Failed => CheckStatus::Fail,
+    };
+    let severity = match check.report.status {
+        SelfCheckStatus::Ok => CheckSeverity::Info,
+        SelfCheckStatus::Unsupported => CheckSeverity::Info,
+        SelfCheckStatus::Degraded => CheckSeverity::Warning,
+        SelfCheckStatus::Failed => CheckSeverity::Critical,
+    };
+    let name = classify_self_check(&check.report).to_owned();
+    let message = check
+        .report
+        .message
+        .clone()
+        .unwrap_or_else(|| default_self_check_message(&check.report.status));
+
+    Some(CheckResult {
+        name,
+        connector_id: Some(check.connector_id.clone()),
+        code: check.report.reason_code.clone(),
+        status,
+        severity,
+        message,
+        repair_hints: repair_hints_for_self_check(check),
+    })
+}
+
+fn default_self_check_message(status: &SelfCheckStatus) -> String {
+    match status {
+        SelfCheckStatus::Ok => "connector self-check succeeded".to_string(),
+        SelfCheckStatus::Degraded => "connector self-check reported a degraded state".to_string(),
+        SelfCheckStatus::Failed => "connector self-check failed".to_string(),
+        SelfCheckStatus::Unsupported => {
+            "connector does not expose a self-check implementation".to_string()
+        }
+    }
+}
+
+fn classify_self_check(report: &SelfCheckReport) -> &'static str {
+    if report.status == SelfCheckStatus::Unsupported {
+        return "unsupported";
+    }
+
+    let mut haystack = String::new();
+    if let Some(code) = &report.reason_code {
+        haystack.push_str(code);
+        haystack.push(' ');
+    }
+    if let Some(message) = &report.message {
+        haystack.push_str(message);
+    }
+    let haystack = haystack.to_ascii_lowercase();
+
+    if contains_any(
+        &haystack,
+        &["schema", "config", "validation", "invalid", "parse"],
+    ) {
+        "schema"
+    } else if contains_any(
+        &haystack,
+        &["secret", "credential", "token", "oauth", "auth"],
+    ) {
+        "secrets"
+    } else if contains_any(
+        &haystack,
+        &["policy", "approval", "scope", "denied", "forbidden"],
+    ) {
+        "policy"
+    } else if contains_any(
+        &haystack,
+        &[
+            "timeout",
+            "not_found",
+            "not found",
+            "missing",
+            "offline",
+            "unavailable",
+            "network",
+            "connection",
+        ],
+    ) {
+        "availability"
+    } else {
+        "runtime"
+    }
+}
+
+fn contains_any(haystack: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| haystack.contains(needle))
+}
+
+fn repair_hints_for_self_check(check: &ConnectorSelfCheck) -> Vec<String> {
+    let classification = classify_self_check(&check.report);
+    let mut hints = match classification {
+        "schema" => vec![
+            "Validate the connector config against the host schema before retrying.".to_string(),
+            "Inspect the active revision diff to see which field changed.".to_string(),
+        ],
+        "secrets" => vec![
+            "Verify secret references, credential availability, and token freshness for this connector."
+                .to_string(),
+            "Refresh or re-bind the missing credential material, then rerun doctor.".to_string(),
+        ],
+        "policy" => vec![
+            "Inspect capability, approval, or policy constraints before retrying.".to_string(),
+            "Request the missing approval or broader scope if the denial is expected.".to_string(),
+        ],
+        "availability" => {
+            let mut availability_hints = vec![
+                "Check connector reachability and upstream dependency availability before retrying."
+                    .to_string(),
+                "Inspect live logs/events to see whether startup or health checks are failing."
+                    .to_string(),
+            ];
+            let reason = check
+                .report
+                .reason_code
+                .as_deref()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if reason.contains("timeout") {
+                availability_hints = vec![
+                    "Inspect connector logs and rerun doctor with a longer self-check timeout."
+                        .to_string(),
+                    "Check whether the connector or one of its upstream dependencies is hung or overloaded."
+                        .to_string(),
+                ];
+            } else if reason.contains("not_found") || reason.contains("missing") {
+                availability_hints = vec![
+                    "Confirm the connector is installed and that the connector ID is correct."
+                        .to_string(),
+                    "Refresh host discovery/status to verify the connector is registered before retrying."
+                        .to_string(),
+                ];
+            }
+            availability_hints
+        }
+        "unsupported" => vec![
+            "Use connector status/health surfaces instead of self-check for this connector."
+                .to_string(),
+            "Treat unsupported self-check as missing runtime evidence, not as confirmed health."
+                .to_string(),
+        ],
+        _ => vec![
+            "Inspect connector logs/details and retry after repairing the reported runtime failure."
+                .to_string(),
+            "If the failure followed a config change, diff or roll back the latest revision before retrying."
+                .to_string(),
+        ],
+    };
+
+    if check.report.status == SelfCheckStatus::Degraded
+        && !hints.iter().any(|hint| hint.contains("degraded"))
+    {
+        hints.insert(
+            0,
+            "Inspect the degraded reason and confirm whether the connector stabilizes without a restart."
+                .to_string(),
+        );
+    }
+
+    hints
+}
+
+fn recommended_actions_from_checks(checks: &[CheckResult]) -> Vec<String> {
+    let mut actions = Vec::new();
+    for check in checks {
+        for hint in &check.repair_hints {
+            if !actions.iter().any(|existing| existing == hint) {
+                actions.push(hint.clone());
+            }
+        }
+    }
+    actions
 }
 
 #[cfg(test)]
@@ -677,14 +876,41 @@ mod tests {
     fn check_result_serialization() {
         let result = CheckResult {
             name: "test_check".to_string(),
+            connector_id: None,
+            code: None,
             status: CheckStatus::Warn,
             severity: CheckSeverity::Warning,
             message: "something is off".to_string(),
+            repair_hints: Vec::new(),
         };
         let json = serde_json::to_value(&result).unwrap();
         assert_eq!(json["name"], "test_check");
         assert_eq!(json["status"], "WARN");
         assert_eq!(json["severity"], "warning");
+    }
+
+    #[test]
+    fn check_result_serialization_includes_optional_triage_fields() {
+        let result = CheckResult {
+            name: "auth".to_string(),
+            connector_id: Some("test.auth:utility:1.0.0".to_string()),
+            code: Some("token_expired".to_string()),
+            status: CheckStatus::Fail,
+            severity: CheckSeverity::Critical,
+            message: "token expired".to_string(),
+            repair_hints: vec![
+                "Refresh the connector token and rerun doctor.".to_string(),
+                "Verify the secret reference resolves in the target zone.".to_string(),
+            ],
+        };
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["connector_id"], "test.auth:utility:1.0.0");
+        assert_eq!(json["code"], "token_expired");
+        assert_eq!(
+            json["repair_hints"][0],
+            "Refresh the connector token and rerun doctor."
+        );
+        assert_eq!(json["repair_hints"].as_array().unwrap().len(), 2);
     }
 
     // ── OverallStatus serde tests ──
@@ -906,9 +1132,12 @@ mod tests {
     fn check_result_fields_accessible() {
         let result = CheckResult {
             name: "connectivity".to_string(),
+            connector_id: None,
+            code: None,
             status: CheckStatus::Ok,
             severity: CheckSeverity::Info,
             message: "all good".to_string(),
+            repair_hints: Vec::new(),
         };
         assert_eq!(result.name, "connectivity");
         assert_eq!(result.status, CheckStatus::Ok);
@@ -920,9 +1149,12 @@ mod tests {
     fn check_result_fail_critical_serialization() {
         let result = CheckResult {
             name: "disk_space".to_string(),
+            connector_id: None,
+            code: None,
             status: CheckStatus::Fail,
             severity: CheckSeverity::Critical,
             message: "disk full".to_string(),
+            repair_hints: Vec::new(),
         };
         let json = serde_json::to_value(&result).unwrap();
         assert_eq!(json["status"], "FAIL");
@@ -1161,9 +1393,12 @@ mod tests {
             for severity in &severities {
                 let result = CheckResult {
                     name: format!("{status:?}_{severity:?}"),
+                    connector_id: None,
+                    code: None,
                     status: *status,
                     severity: *severity,
                     message: "test".to_string(),
+                    repair_hints: Vec::new(),
                 };
                 let json = serde_json::to_value(&result).unwrap();
                 assert!(!json["status"].as_str().unwrap().is_empty());
@@ -1409,9 +1644,12 @@ mod tests {
     fn check_result_clone() {
         let result = CheckResult {
             name: "clone_test".to_string(),
+            connector_id: None,
+            code: None,
             status: CheckStatus::Warn,
             severity: CheckSeverity::Warning,
             message: "cloned".to_string(),
+            repair_hints: Vec::new(),
         };
         let cloned = result.clone();
         assert_eq!(result.name, cloned.name);
@@ -1424,9 +1662,12 @@ mod tests {
     fn check_result_debug() {
         let result = CheckResult {
             name: "debug_test".to_string(),
+            connector_id: None,
+            code: None,
             status: CheckStatus::Fail,
             severity: CheckSeverity::Critical,
             message: "debug msg".to_string(),
+            repair_hints: Vec::new(),
         };
         let dbg = format!("{result:?}");
         assert!(dbg.contains("CheckResult"));
@@ -1440,15 +1681,21 @@ mod tests {
         let mut report = DoctorReport::baseline("z:checks");
         report.checks.push(CheckResult {
             name: "disk".to_string(),
+            connector_id: None,
+            code: None,
             status: CheckStatus::Warn,
             severity: CheckSeverity::Warning,
             message: "low space".to_string(),
+            repair_hints: Vec::new(),
         });
         report.checks.push(CheckResult {
             name: "cpu".to_string(),
+            connector_id: None,
+            code: None,
             status: CheckStatus::Ok,
             severity: CheckSeverity::Info,
             message: "normal".to_string(),
+            repair_hints: Vec::new(),
         });
         let json = serde_json::to_string(&report).unwrap();
         assert!(json.contains("disk"));
@@ -1827,9 +2074,12 @@ mod tests {
         for i in 0u64..5 {
             report.checks.push(CheckResult {
                 name: format!("check_{i}"),
+                connector_id: None,
+                code: None,
                 status: CheckStatus::Ok,
                 severity: CheckSeverity::Info,
                 message: format!("msg_{i}"),
+                repair_hints: Vec::new(),
             });
         }
         let json = serde_json::to_value(&report).unwrap();
@@ -1986,9 +2236,12 @@ mod tests {
         let mut report = DoctorReport::baseline("z:full-clone");
         report.checks.push(CheckResult {
             name: "mem".to_string(),
+            connector_id: None,
+            code: None,
             status: CheckStatus::Warn,
             severity: CheckSeverity::Warning,
             message: "low mem".to_string(),
+            repair_hints: Vec::new(),
         });
         let checks = vec![ConnectorSelfCheck {
             connector_id: "sc".to_string(),
@@ -2029,6 +2282,61 @@ mod tests {
         }];
         // Unsupported is neither Failed nor Degraded, so overall should be Ok
         assert_eq!(overall_status_from_self_checks(&checks), OverallStatus::Ok);
+    }
+
+    #[test]
+    fn with_self_checks_derives_actionable_checks_and_recommended_actions() {
+        let checks = vec![
+            ConnectorSelfCheck {
+                connector_id: "cfg".to_string(),
+                report: SelfCheckReport::failed("schema_invalid", "config field is invalid"),
+            },
+            ConnectorSelfCheck {
+                connector_id: "slow".to_string(),
+                report: SelfCheckReport::degraded("self_check_timeout", "timed out"),
+            },
+        ];
+
+        let report = DoctorReport::baseline("z:doctor").with_self_checks(checks);
+
+        assert_eq!(report.overall_status, OverallStatus::Fail);
+        assert_eq!(report.checks.len(), 2);
+        assert!(report.checks.iter().any(|check| check.name == "schema"
+            && check.code.as_deref() == Some("schema_invalid")
+            && check.connector_id.as_deref() == Some("cfg")
+            && !check.repair_hints.is_empty()));
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|check| check.name == "availability"
+                    && check.code.as_deref() == Some("self_check_timeout"))
+        );
+        assert!(!report.recommended_actions.is_empty());
+    }
+
+    #[test]
+    fn with_self_checks_deduplicates_recommended_actions() {
+        let checks = vec![
+            ConnectorSelfCheck {
+                connector_id: "missing-a".to_string(),
+                report: SelfCheckReport::failed("not_found", "missing"),
+            },
+            ConnectorSelfCheck {
+                connector_id: "missing-b".to_string(),
+                report: SelfCheckReport::failed("not_found", "missing"),
+            },
+        ];
+
+        let report = DoctorReport::baseline("z:doctor").with_self_checks(checks);
+
+        assert_eq!(report.recommended_actions.len(), 2);
+        assert!(
+            report
+                .recommended_actions
+                .iter()
+                .any(|hint| hint.contains("connector is installed"))
+        );
     }
 
     // ── NEW: SelfCheckReport reason_code and message fields ──
@@ -2099,6 +2407,19 @@ mod tests {
         assert!(obj.contains_key("connector_self_checks"));
     }
 
+    #[test]
+    fn doctor_report_json_has_recommended_actions_when_present() {
+        let checks = vec![ConnectorSelfCheck {
+            connector_id: "cfg".to_string(),
+            report: SelfCheckReport::failed("schema_invalid", "config field is invalid"),
+        }];
+        let report = DoctorReport::baseline("z:with-actions").with_self_checks(checks);
+        let json = serde_json::to_value(&report).unwrap();
+        let obj = json.as_object().unwrap();
+        assert!(obj.contains_key("recommended_actions"));
+        assert!(!json["recommended_actions"].as_array().unwrap().is_empty());
+    }
+
     // ── NEW: TransportPolicyStatus all combinations ──
 
     #[test]
@@ -2144,9 +2465,12 @@ mod tests {
     fn check_result_empty_name_and_message() {
         let result = CheckResult {
             name: String::new(),
+            connector_id: None,
+            code: None,
             status: CheckStatus::Ok,
             severity: CheckSeverity::Info,
             message: String::new(),
+            repair_hints: Vec::new(),
         };
         let json = serde_json::to_value(&result).unwrap();
         assert_eq!(json["name"], "");
@@ -2158,9 +2482,12 @@ mod tests {
         let long_msg = "x".repeat(10_000);
         let result = CheckResult {
             name: "long_check".to_string(),
+            connector_id: None,
+            code: None,
             status: CheckStatus::Warn,
             severity: CheckSeverity::Warning,
             message: long_msg,
+            repair_hints: Vec::new(),
         };
         let json = serde_json::to_value(&result).unwrap();
         assert_eq!(json["message"].as_str().unwrap().len(), 10_000);

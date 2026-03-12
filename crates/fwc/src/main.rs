@@ -27832,4 +27832,931 @@ depends_on = ["missing"]
         // CommandEnvelope injects an "availability" field.
         assert!(outcome.payload.get("availability").is_some());
     }
+
+    // ── Auth gap tests (bead 1g7z0.27) ──────────────────────────────────
+
+    #[test]
+    fn auth_add_invalid_connector_id_returns_validation_error() {
+        let (_tempdir, store) = temp_auth_store();
+        let args = super::AuthArgs {
+            command: super::AuthCommand::Add(super::AuthAddArgs {
+                connector: "BAD ID!!".to_owned(),
+                label: None,
+                fields: Vec::new(),
+                extra_fields: Vec::new(),
+                token: Some("some-token".to_owned()),
+                api_token: None,
+                api_key: None,
+                username: None,
+                password: None,
+                client_id: None,
+                client_secret: None,
+                access_token: None,
+                refresh_token: None,
+                session_token: None,
+                credential_id: None,
+                expires_at: None,
+            }),
+        };
+        let result =
+            super::auth_dispatch_with_store(&args, &store).expect("should return structured error");
+        assert_eq!(result.exit_code, CliExitCode::Validation);
+        assert_eq!(result.payload["error"]["type"], "invalid-connector-id");
+        assert!(result.payload["error"]["recoverable"].as_bool().unwrap_or(false));
+    }
+
+    #[test]
+    fn auth_add_no_credential_fields_returns_validation_error() {
+        let (_tempdir, store) = temp_auth_store();
+        let args = super::AuthArgs {
+            command: super::AuthCommand::Add(super::AuthAddArgs {
+                connector: "github".to_owned(),
+                label: None,
+                fields: Vec::new(),
+                extra_fields: Vec::new(),
+                token: None,
+                api_token: None,
+                api_key: None,
+                username: None,
+                password: None,
+                client_id: None,
+                client_secret: None,
+                access_token: None,
+                refresh_token: None,
+                session_token: None,
+                credential_id: None,
+                expires_at: None,
+            }),
+        };
+        let result =
+            super::auth_dispatch_with_store(&args, &store).expect("should return structured error");
+        assert_eq!(result.exit_code, CliExitCode::Validation);
+        assert_eq!(
+            result.payload["error"]["type"],
+            "invalid-credential-fields"
+        );
+        assert!(result.payload["error"]["recoverable"].as_bool().unwrap_or(false));
+    }
+
+    #[test]
+    fn auth_add_with_credential_id_stores_reference_credential() {
+        let (_tempdir, store) = temp_auth_store();
+        let args = super::AuthArgs {
+            command: super::AuthCommand::Add(super::AuthAddArgs {
+                connector: "github".to_owned(),
+                label: Some("vault-ref".to_owned()),
+                fields: Vec::new(),
+                extra_fields: Vec::new(),
+                token: None,
+                api_token: None,
+                api_key: None,
+                username: None,
+                password: None,
+                client_id: None,
+                client_secret: None,
+                access_token: None,
+                refresh_token: None,
+                session_token: None,
+                credential_id: Some("vault://secrets/github-token".to_owned()),
+                expires_at: None,
+            }),
+        };
+        let result =
+            super::auth_dispatch_with_store(&args, &store).expect("auth add should work");
+        assert_eq!(result.exit_code, CliExitCode::Success);
+        assert_eq!(result.payload["subcommand"], "add");
+        assert!(
+            result.payload["credential"]["fields"]["credential_id"]
+                .as_str()
+                .is_some_and(|v| v.contains("***"))
+        );
+    }
+
+    #[test]
+    fn auth_show_nonexistent_connector_returns_missing_credential() {
+        let (_tempdir, store) = temp_auth_store();
+        let result = super::auth_dispatch_with_store(
+            &super::AuthArgs {
+                command: super::AuthCommand::Show(super::TargetArgs {
+                    connector: "nonexistent".to_owned(),
+                }),
+            },
+            &store,
+        )
+        .expect("auth show should produce structured error");
+        assert_eq!(result.exit_code, CliExitCode::Validation);
+        assert_eq!(result.payload["error"]["type"], "credential-not-found");
+        assert_eq!(result.payload["connector"], "nonexistent");
+    }
+
+    #[test]
+    fn auth_test_nonexistent_connector_returns_no_credential() {
+        let (_tempdir, store) = temp_auth_store();
+        let result = super::auth_dispatch_with_store(
+            &super::AuthArgs {
+                command: super::AuthCommand::Test(super::TargetArgs {
+                    connector: "does-not-exist".to_owned(),
+                }),
+            },
+            &store,
+        )
+        .expect("auth test should produce structured error");
+        assert_eq!(result.exit_code, CliExitCode::Validation);
+        assert_eq!(result.payload["error"]["type"], "credential-not-found");
+        assert_eq!(result.payload["result"]["status"], "no_credential");
+    }
+
+    #[test]
+    fn auth_list_empty_store_returns_zero_credentials() {
+        let (_tempdir, store) = temp_auth_store();
+        let result = super::auth_dispatch_with_store(
+            &super::AuthArgs {
+                command: super::AuthCommand::List,
+            },
+            &store,
+        )
+        .expect("auth list should work");
+        assert_eq!(result.exit_code, CliExitCode::Success);
+        assert_eq!(result.payload["summary"]["credential_count"], 0);
+        assert!(
+            result.payload["credentials"]
+                .as_array()
+                .is_some_and(|arr| arr.is_empty())
+        );
+    }
+
+    #[test]
+    fn auth_status_empty_store_returns_zero_summary() {
+        let (_tempdir, store) = temp_auth_store();
+        let result = super::auth_dispatch_with_store(
+            &super::AuthArgs {
+                command: super::AuthCommand::Status(super::AuthStatusArgs { connector: None }),
+            },
+            &store,
+        )
+        .expect("auth status should work");
+        assert_eq!(result.exit_code, CliExitCode::Success);
+        assert_eq!(result.payload["summary"]["credential_count"], 0);
+        assert_eq!(result.payload["summary"]["warning_count"], 0);
+        assert_eq!(result.payload["summary"]["attention_count"], 0);
+        assert!(
+            result.payload["credentials"]
+                .as_array()
+                .is_some_and(|arr| arr.is_empty())
+        );
+    }
+
+    #[test]
+    fn auth_status_multiple_connectors_mix_valid_and_expired() {
+        let (_tempdir, store) = temp_auth_store();
+
+        let valid = super::AuthArgs {
+            command: super::AuthCommand::Add(super::AuthAddArgs {
+                connector: "github".to_owned(),
+                label: None,
+                fields: Vec::new(),
+                extra_fields: Vec::new(),
+                token: Some("ghp-valid-token".to_owned()),
+                api_token: None,
+                api_key: None,
+                username: None,
+                password: None,
+                client_id: None,
+                client_secret: None,
+                access_token: None,
+                refresh_token: None,
+                session_token: None,
+                credential_id: None,
+                expires_at: Some("2030-06-01T00:00:00Z".to_owned()),
+            }),
+        };
+        super::auth_dispatch_with_store(&valid, &store).expect("valid add should work");
+
+        let expired = super::AuthArgs {
+            command: super::AuthCommand::Add(super::AuthAddArgs {
+                connector: "slack".to_owned(),
+                label: None,
+                fields: Vec::new(),
+                extra_fields: Vec::new(),
+                token: Some("xoxb-expired".to_owned()),
+                api_token: None,
+                api_key: None,
+                username: None,
+                password: None,
+                client_id: None,
+                client_secret: None,
+                access_token: None,
+                refresh_token: None,
+                session_token: None,
+                credential_id: None,
+                expires_at: Some("2000-01-01T00:00:00Z".to_owned()),
+            }),
+        };
+        super::auth_dispatch_with_store(&expired, &store).expect("expired add should work");
+
+        let status = super::auth_dispatch_with_store(
+            &super::AuthArgs {
+                command: super::AuthCommand::Status(super::AuthStatusArgs { connector: None }),
+            },
+            &store,
+        )
+        .expect("auth status should work");
+
+        assert_eq!(status.exit_code, CliExitCode::Success);
+        assert_eq!(status.payload["summary"]["credential_count"], 2);
+        assert!(status.payload["summary"]["warning_count"].as_u64().unwrap_or(0) >= 1);
+        assert!(status.payload["summary"]["attention_count"].as_u64().unwrap_or(0) >= 1);
+
+        let creds = status.payload["credentials"].as_array().expect("should be array");
+        assert_eq!(creds.len(), 2);
+
+        let github_entry = creds
+            .iter()
+            .find(|c| c["connector_id"] == "github")
+            .expect("github entry should exist");
+        assert_eq!(github_entry["structural_status"], "valid");
+
+        let slack_entry = creds
+            .iter()
+            .find(|c| c["connector_id"] == "slack")
+            .expect("slack entry should exist");
+        assert_eq!(slack_entry["structural_status"], "expired");
+        assert_eq!(
+            slack_entry["status_entry"]["expiry_status"],
+            "expired"
+        );
+    }
+
+    // ── History tests (bead 1g7z0.28) ───────────────────────────────────
+
+    #[test]
+    fn history_list_default_returns_ok_with_empty_entries() {
+        let root = std::env::temp_dir().join(format!(
+            "fwc-hist-list-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let history_path = root.join("history.jsonl");
+        let _guard = super::install_test_history_path(history_path);
+
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "history"]);
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["command"], "history");
+        assert_eq!(payload["scope"], "list");
+        assert_eq!(payload["total_entries"], 0);
+        assert_eq!(payload["returned"], 0);
+        assert!(payload["entries"].as_array().is_some_and(|arr| arr.is_empty()));
+    }
+
+    #[test]
+    fn history_connector_filter_narrows_results() {
+        let root = std::env::temp_dir().join(format!(
+            "fwc-hist-conn-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let history_path = root.join("history.jsonl");
+        let _guard = super::install_test_history_path(history_path);
+
+        super::append_history_entry(
+            super::history::OpStatus::Success,
+            "fcp.github",
+            "github.list_repos",
+            Some("z:work"),
+            &json!({"per_page": 10}),
+            Some(&json!({"repos": []})),
+            None,
+            None,
+            15,
+        )
+        .expect("append should succeed");
+        super::append_history_entry(
+            super::history::OpStatus::Success,
+            "fcp.slack",
+            "slack.post_message",
+            Some("z:work"),
+            &json!({"channel": "C1", "text": "hi"}),
+            Some(&json!({"ok": true})),
+            None,
+            None,
+            20,
+        )
+        .expect("append should succeed");
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "history",
+            "--connector",
+            "fcp.github",
+        ]);
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["returned"], 1);
+        assert_eq!(payload["filter"]["connector"], "fcp.github");
+        let entries = payload["entries"].as_array().expect("entries should be array");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["connector_id"], "fcp.github");
+    }
+
+    #[test]
+    fn history_status_filter_selects_matching_entries() {
+        let root = std::env::temp_dir().join(format!(
+            "fwc-hist-status-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let history_path = root.join("history.jsonl");
+        let _guard = super::install_test_history_path(history_path);
+
+        super::append_history_entry(
+            super::history::OpStatus::Success,
+            "fcp.github",
+            "github.list_repos",
+            Some("z:work"),
+            &json!({}),
+            Some(&json!({})),
+            None,
+            None,
+            10,
+        )
+        .expect("append should succeed");
+        super::append_history_entry(
+            super::history::OpStatus::Error,
+            "fcp.github",
+            "github.create_issue",
+            Some("z:work"),
+            &json!({"title": "test"}),
+            None,
+            Some("timeout".to_owned()),
+            None,
+            5000,
+        )
+        .expect("append should succeed");
+
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "history", "--status", "error"]);
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["returned"], 1);
+        assert_eq!(payload["filter"]["status"], "error");
+        let entries = payload["entries"].as_array().expect("entries should be array");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["status"], "error");
+    }
+
+    #[test]
+    fn history_since_filter_restricts_to_recent_entries() {
+        let root = std::env::temp_dir().join(format!(
+            "fwc-hist-since-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let history_path = root.join("history.jsonl");
+        let _guard = super::install_test_history_path(history_path);
+
+        super::append_history_entry(
+            super::history::OpStatus::Success,
+            "fcp.github",
+            "github.list_repos",
+            None,
+            &json!({}),
+            Some(&json!({})),
+            None,
+            None,
+            5,
+        )
+        .expect("append should succeed");
+
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "history", "--since", "1h"]);
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["returned"], 1);
+        assert_eq!(payload["filter"]["since"], "1h");
+    }
+
+    #[test]
+    fn history_limit_filter_caps_returned_entries() {
+        let root = std::env::temp_dir().join(format!(
+            "fwc-hist-limit-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let history_path = root.join("history.jsonl");
+        let _guard = super::install_test_history_path(history_path);
+
+        for i in 0..5 {
+            super::append_history_entry(
+                super::history::OpStatus::Success,
+                "fcp.github",
+                &format!("github.op_{i}"),
+                None,
+                &json!({"i": i}),
+                Some(&json!({})),
+                None,
+                None,
+                1,
+            )
+            .expect("append should succeed");
+        }
+
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "history", "--limit", "2"]);
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["returned"], 2);
+        assert_eq!(payload["total_entries"], 5);
+        assert_eq!(payload["filter"]["limit"], 2);
+        let entries = payload["entries"].as_array().expect("entries should be array");
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[test]
+    fn history_nonexistent_entry_id_returns_not_found() {
+        let root = std::env::temp_dir().join(format!(
+            "fwc-hist-notfound-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let history_path = root.join("history.jsonl");
+        let _guard = super::install_test_history_path(history_path);
+
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "history", "nonexistent-id-12345"]);
+        assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
+        assert_eq!(payload["status"], "error");
+        assert_eq!(payload["command"], "history");
+        assert_eq!(payload["error"]["type"], "not-found");
+    }
+
+    #[test]
+    fn history_structured_response_includes_filter_and_entry_count() {
+        let root = std::env::temp_dir().join(format!(
+            "fwc-hist-struct-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let history_path = root.join("history.jsonl");
+        let _guard = super::install_test_history_path(history_path);
+
+        super::append_history_entry(
+            super::history::OpStatus::Success,
+            "fcp.github",
+            "github.list_repos",
+            Some("z:work"),
+            &json!({"per_page": 30}),
+            Some(&json!({"repos": []})),
+            None,
+            None,
+            12,
+        )
+        .expect("append should succeed");
+        super::append_history_entry(
+            super::history::OpStatus::Denied,
+            "fcp.slack",
+            "slack.delete_message",
+            Some("z:work"),
+            &json!({"channel": "C1"}),
+            None,
+            Some("policy".to_owned()),
+            None,
+            0,
+        )
+        .expect("append should succeed");
+
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "history"]);
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["command"], "history");
+        assert_eq!(payload["scope"], "list");
+        assert_eq!(payload["total_entries"], 2);
+        assert_eq!(payload["returned"], 2);
+
+        assert!(payload["filter"]["connector"].is_null());
+        assert!(payload["filter"]["status"].is_null());
+        assert!(payload["filter"]["since"].is_null());
+        assert_eq!(payload["filter"]["limit"], 20);
+
+        let entries = payload["entries"].as_array().expect("entries should be array");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["connector_id"], "fcp.slack");
+        assert_eq!(entries[1]["connector_id"], "fcp.github");
+
+        assert!(payload["next_actions"].as_array().is_some_and(|arr| !arr.is_empty()));
+    }
+
+    // ── 1g7z0.8.1  Lifecycle UX ─────────────────────────────────────────
+
+    #[test]
+    fn unpin_offline_reports_missing_host() {
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "unpin", "github"]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "unpin");
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
+        assert!(payload["details"]["connector"]
+            .as_str()
+            .is_some_and(|connector| connector == "github"));
+    }
+
+    #[test]
+    fn rollout_status_offline_reports_missing_host() {
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "rollout", "status", "github"]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
+        assert!(payload["next_actions"]
+            .as_array()
+            .is_some_and(|actions| !actions.is_empty()));
+    }
+
+    #[test]
+    fn status_connector_next_actions_includes_show_ops_pin() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "GET /rpc/health".to_owned(),
+                    json!({
+                        "status": "healthy",
+                        "connectors": {},
+                        "uptime_seconds": 120,
+                        "active_connections": 1,
+                        "timestamp": chrono::Utc::now(),
+                    }),
+                ),
+                (
+                    "GET /rpc/connectors/fcp.github:enterprise:v1/status".to_owned(),
+                    json!({
+                        "connector_id": "fcp.github:enterprise:v1",
+                        "desired_state": "enabled",
+                        "observed_state": "running",
+                        "config_revision_count": 1,
+                        "last_journal_sequence": 5,
+                        "evaluated_at": chrono::Utc::now(),
+                    }),
+                ),
+                (
+                    "GET /rpc/rollout/pin/fcp.github:enterprise:v1".to_owned(),
+                    json!({
+                        "connector_id": "fcp.github:enterprise:v1",
+                        "pinned": false,
+                    }),
+                ),
+                (
+                    "GET /rpc/rollout/fcp.github:enterprise:v1".to_owned(),
+                    json!({
+                        "version": "1.0.0",
+                        "state": "active",
+                        "pinned": false,
+                        "canary_percent": 0,
+                    }),
+                ),
+            ]),
+            5,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "--host", &host, "status", "github",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "status");
+        assert_eq!(payload["scope"], "connector");
+        let next_actions = payload["next_actions"]
+            .as_array()
+            .expect("next_actions should be an array");
+        assert!(
+            next_actions.iter().any(|action| action
+                .as_str()
+                .is_some_and(|text| text.contains("show")))
+        );
+        assert!(
+            next_actions.iter().any(|action| action
+                .as_str()
+                .is_some_and(|text| text.contains("ops")))
+        );
+        assert!(
+            next_actions.iter().any(|action| action
+                .as_str()
+                .is_some_and(|text| text.contains("pin")))
+        );
+    }
+
+    // ── 1g7z0.9.1  Config UX ────────────────────────────────────────────
+
+    #[test]
+    fn config_schema_field_level_for_known_connector() {
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "config", "schema", "github"]);
+
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["command"], "config");
+        assert_eq!(payload["subcommand"], "schema");
+        assert_eq!(payload["status"], "unavailable");
+        assert!(payload["connector"]["slug"]
+            .as_str()
+            .is_some_and(|slug| slug == "github"));
+    }
+
+    #[test]
+    fn config_doctor_offline_known_shows_missing_host() {
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "config", "doctor", "github"]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "config");
+        assert_eq!(payload["subcommand"], "doctor");
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
+    }
+
+    #[test]
+    fn config_get_next_actions_include_doctor_and_export() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "GET /rpc/connectors/fcp.github:enterprise:v1/config".to_owned(),
+                    mock_config_snapshot_json(json!({
+                        "profile": "work",
+                        "api_token_ref": "cred://github/work"
+                    })),
+                ),
+            ]),
+            2,
+        );
+
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "--host", &host, "config", "get", "github"]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "config");
+        assert_eq!(payload["subcommand"], "get");
+        let next_actions = payload["next_actions"]
+            .as_array()
+            .expect("next_actions should be an array");
+        assert!(
+            next_actions.iter().any(|action| action
+                .as_str()
+                .is_some_and(|text| text.contains("doctor")))
+        );
+        assert!(
+            next_actions.iter().any(|action| action
+                .as_str()
+                .is_some_and(|text| text.contains("export")))
+        );
+    }
+
+    // ── 1g7z0.10.2  Invoke UX: explain, simulate, preflight ─────────────
+
+    #[test]
+    fn explain_offline_surfaces_connector_reasoning() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "explain",
+            "create a GitHub issue titled \"Test\"",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "explain");
+        assert!(payload["analysis"]["chosen_connector"].is_object());
+        assert!(payload["analysis"]["explanation"]["template_reasoning"]
+            .as_array()
+            .is_some_and(|entries| !entries.is_empty()));
+    }
+
+    #[test]
+    fn explain_intent_with_connector_identifies_connector() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "explain",
+            "list repositories",
+            "--connector",
+            "github",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "explain");
+        assert_eq!(payload["analysis"]["chosen_connector"]["id"], "github");
+    }
+
+    #[test]
+    fn simulate_offline_valid_payload_shows_missing_host() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "simulate",
+            "github",
+            "issues.create",
+            "--input",
+            "{\"owner\":\"octocat\",\"repo\":\"hello-world\",\"title\":\"Test\"}",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "simulate");
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
+    }
+
+    #[test]
+    fn preflight_offline_shows_risk_and_approval_metadata() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "simulate",
+            "github",
+            "issues.create",
+            "--input",
+            "{\"owner\":\"octocat\",\"repo\":\"hello-world\",\"title\":\"Preflight\"}",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "simulate");
+        assert!(payload["operation"]["risk_level"].is_string());
+        assert!(payload["operation"]["approval_mode"].is_string()
+            || payload["operation"]["approval_mode"].is_null());
+    }
+
+    // ── 1g7z0.10.3  Invoke UX: invoke, batch, idempotency ───────────────
+
+    #[test]
+    fn invoke_set_overwrites_existing_input_field() {
+        let capability_token = test_capability_token_arg();
+        let (host, server) = spawn_mock_host(
+            mock_github_host_routes(StdBTreeMap::from([
+                (
+                    "POST /rpc/preflight".to_owned(),
+                    mock_preflight_response_json(true),
+                ),
+                (
+                    "POST /rpc/invoke".to_owned(),
+                    mock_invoke_response_json(json!({
+                        "number": 99,
+                        "url": "https://example.test/issues/99",
+                    })),
+                ),
+            ])),
+            4,
+        );
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "invoke",
+            "github",
+            "issues.create",
+            "--input",
+            "{\"owner\":\"octocat\",\"repo\":\"hello-world\",\"title\":\"original\"}",
+            "--set",
+            "title=overwritten",
+            "--capability-token",
+            &capability_token,
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["phase"], "execution");
+        assert_eq!(
+            payload["input_authoring"]["payload"]["title"],
+            "overwritten"
+        );
+        assert_eq!(payload["input_authoring"]["binding_count"], 1);
+    }
+
+    #[test]
+    fn batch_single_entry_succeeds() {
+        let capability_token = test_capability_token_arg();
+        let file = batch_test_file(
+            "single_entry.jsonl",
+            r#"{"id":"only","connector":"github","operation":"get_issue","input":{"owner":"octocat","repo":"hello-world","number":1}}"#,
+        );
+        let (host, server) = spawn_mock_host(
+            mock_github_host_routes(StdBTreeMap::from([(
+                "POST /rpc/batch".to_owned(),
+                mock_batch_response_json(&["only"]),
+            )])),
+            3,
+        );
+        let file_path = file.display().to_string();
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "batch-file",
+            &file_path,
+            "--capability-token",
+            &capability_token,
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["command"], "batch-file");
+        assert_eq!(payload["plan"]["total_operations"], 1);
+        assert_eq!(payload["response"]["completed"], 1);
+    }
+
+    #[test]
+    fn invoke_request_id_in_host_success_response() {
+        let capability_token = test_capability_token_arg();
+        let (host, server) = spawn_mock_host(
+            mock_github_host_routes(StdBTreeMap::from([
+                (
+                    "POST /rpc/preflight".to_owned(),
+                    mock_preflight_response_json(true),
+                ),
+                (
+                    "POST /rpc/invoke".to_owned(),
+                    mock_invoke_response_json(json!({
+                        "number": 7,
+                        "url": "https://example.test/issues/7",
+                    })),
+                ),
+            ])),
+            4,
+        );
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "invoke",
+            "github",
+            "issues.create",
+            "--input",
+            "{\"owner\":\"octocat\",\"repo\":\"hello-world\",\"title\":\"Durable\"}",
+            "--capability-token",
+            &capability_token,
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["phase"], "execution");
+        assert!(payload["request"]["request_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty()));
+        assert!(payload["response"]["id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty()));
+    }
+
+    // ── 1g7z0.10.4  Invoke UX: streaming, log-tail, watch, resume ───────
+
+    #[test]
+    fn invoke_deadline_ms_included_in_request_metadata() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "invoke",
+            "github",
+            "issues.create",
+            "--input",
+            "{\"owner\":\"octocat\",\"repo\":\"hello-world\",\"title\":\"Deadline\"}",
+            "--deadline-ms",
+            "5000",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "invoke");
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
+        assert!(payload["captures"]["deadline_ms"].as_u64() == Some(5000));
+    }
+
+    #[test]
+    fn cancel_offline_reports_missing_host() {
+        let args = super::CancelArgs {
+            operation_id: "op-12345".to_owned(),
+            reason: "user-requested".to_owned(),
+            detail: None,
+            remaining_ms: None,
+            resource: None,
+            current: None,
+            resource_limit: None,
+            superseded_by: None,
+            cleanup: "best-effort".to_owned(),
+            cleanup_timeout_ms: None,
+            return_partial: false,
+        };
+        let outcome = super::cancel_dispatch(&args, None).expect("dispatch should not fail");
+        let payload: Value =
+            serde_json::from_str(&serde_json::to_string(&outcome.payload).unwrap())
+                .expect("payload should round-trip");
+
+        assert_eq!(outcome.exit_code, CliExitCode::Transport);
+        assert_eq!(payload["command"], "cancel");
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
+        assert_eq!(payload["details"]["operation_id"], "op-12345");
+    }
 }

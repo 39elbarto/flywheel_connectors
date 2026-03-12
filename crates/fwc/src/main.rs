@@ -27,12 +27,12 @@ mod checkpoint;
 mod credential;
 #[allow(dead_code)]
 mod credential_store;
+#[allow(dead_code)] // Error taxonomy wired when host-backed dispatch lands.
+mod error_taxonomy;
 #[allow(dead_code)] // Stream types wired when host integration lands.
 mod event_stream;
 #[allow(dead_code)] // Comprehensive event filtering engine.
 mod events;
-#[allow(dead_code)] // Error taxonomy wired when host-backed dispatch lands.
-mod error_taxonomy;
 mod export_tools;
 mod format_table;
 #[allow(dead_code)] // Cross-connector health aggregation dashboard.
@@ -77,6 +77,8 @@ mod recovery;
 mod render;
 #[allow(dead_code)] // Operation replay from history with input override.
 mod replay;
+#[allow(dead_code)] // Retry controller with exponential backoff and jitter.
+mod retry_controller;
 #[allow(dead_code)] // Smart connector auto-routing for ambiguous intents.
 mod routing;
 mod schema_nav;
@@ -2411,7 +2413,10 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
             let mut payload = catalog::guide_payload(args.command.as_deref());
             let (exit_code, availability) = if payload["status"] == "unknown-command" {
                 enrich_unknown_guide_command(&mut payload, args.command.as_deref());
-                (CliExitCode::UnknownCommand, CommandAvailability::Unsupported)
+                (
+                    CliExitCode::UnknownCommand,
+                    CommandAvailability::Unsupported,
+                )
             } else {
                 (CliExitCode::Success, CommandAvailability::OfflineArtifact)
             };
@@ -3667,6 +3672,33 @@ fn attach_discovery_provenance(
     }
 }
 
+fn template_mode_label(source: &catalog::TemplateDataSource) -> &'static str {
+    match source {
+        catalog::TemplateDataSource::LiveHostIntrospection => "live-introspection",
+        catalog::TemplateDataSource::WorkspaceManifest
+        | catalog::TemplateDataSource::StaticSchema => "offline-artifact",
+        catalog::TemplateDataSource::Unknown => "unknown",
+    }
+}
+
+fn attach_template_provenance(
+    payload: &mut Value,
+    command: &str,
+    source: catalog::TemplateDataSource,
+) {
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert(
+            "mode".to_owned(),
+            Value::String(template_mode_label(&source).to_owned()),
+        );
+        obj.insert(
+            "provenance".to_owned(),
+            serde_json::to_value(catalog::template_provenance(command, source))
+                .unwrap_or(Value::Null),
+        );
+    }
+}
+
 fn list_dispatch_host(args: &ListArgs, host: &str) -> Result<DispatchOutcome> {
     let client = HostAdminClient::new(host)?;
     let filter = HostDiscoveryFilter {
@@ -4072,10 +4104,10 @@ fn examples_dispatch_host(args: &ExampleArgs, host: &str) -> Result<DispatchOutc
                 format!("fwc simulate {} {} --file payload.json", connector.slug, operation.name),
             ],
         });
-        attach_discovery_provenance(
+        attach_template_provenance(
             &mut payload,
             "examples",
-            catalog::DiscoveryDataSource::LiveHostIntrospection,
+            catalog::TemplateDataSource::LiveHostIntrospection,
         );
         envelope.inject_into(&mut payload);
         return Ok(DispatchOutcome {
@@ -4128,10 +4160,10 @@ fn examples_dispatch_host(args: &ExampleArgs, host: &str) -> Result<DispatchOutc
             format!("fwc schema {} <operation> --host {host}", connector.slug),
         ],
     });
-    attach_discovery_provenance(
+    attach_template_provenance(
         &mut payload,
         "examples",
-        catalog::DiscoveryDataSource::LiveHostIntrospection,
+        catalog::TemplateDataSource::LiveHostIntrospection,
     );
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
@@ -5382,6 +5414,11 @@ fn search_dispatch_host(args: &SearchArgs, host: &str) -> Result<DispatchOutcome
             "Add --capability, --risk, --safety, or --idempotent flags to narrow results.",
         ],
     });
+    attach_discovery_provenance(
+        &mut payload,
+        "search",
+        catalog::DiscoveryDataSource::LiveHostIntrospection,
+    );
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -5477,6 +5514,11 @@ fn search_dispatch(args: &SearchArgs, host: Option<&str>) -> Result<DispatchOutc
             "Add --capability, --risk, --safety, --idempotent flags to narrow results.",
         ],
     });
+    attach_discovery_provenance(
+        &mut payload,
+        "search",
+        catalog::DiscoveryDataSource::WorkspaceManifest,
+    );
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -5958,10 +6000,10 @@ fn examples_dispatch(args: &ExampleArgs, host: Option<&str>) -> Result<DispatchO
                 format!("fwc simulate {} {} --file payload.json", connector.slug, operation.preferred_selector),
             ],
         });
-        attach_discovery_provenance(
+        attach_template_provenance(
             &mut payload,
             "examples",
-            catalog::DiscoveryDataSource::WorkspaceManifest,
+            catalog::TemplateDataSource::WorkspaceManifest,
         );
         envelope.inject_into(&mut payload);
         return Ok(DispatchOutcome {
@@ -6011,10 +6053,10 @@ fn examples_dispatch(args: &ExampleArgs, host: Option<&str>) -> Result<DispatchO
             format!("fwc schema {} <operation> --offline", connector.slug),
         ],
     });
-    attach_discovery_provenance(
+    attach_template_provenance(
         &mut payload,
         "examples",
-        catalog::DiscoveryDataSource::WorkspaceManifest,
+        catalog::TemplateDataSource::WorkspaceManifest,
     );
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
@@ -8044,6 +8086,11 @@ fn suggest_dispatch_host(args: &SuggestArgs, host: &str) -> Result<DispatchOutco
                 "Use `fwc suggest --goal '<next intent>' --host <endpoint>` for goal-directed search.".to_owned(),
             ],
         });
+        attach_discovery_provenance(
+            &mut payload,
+            "suggest",
+            catalog::DiscoveryDataSource::LiveHostIntrospection,
+        );
         envelope.inject_into(&mut payload);
         return Ok(DispatchOutcome {
             payload,
@@ -8088,6 +8135,11 @@ fn suggest_dispatch_host(args: &SuggestArgs, host: &str) -> Result<DispatchOutco
                 "Use `fwc simulate <connector> <operation> --host <endpoint> --file payload.json` to test safely.",
             ],
         });
+        attach_discovery_provenance(
+            &mut payload,
+            "suggest",
+            catalog::DiscoveryDataSource::LiveHostIntrospection,
+        );
         envelope.inject_into(&mut payload);
         return Ok(DispatchOutcome {
             payload,
@@ -8146,6 +8198,11 @@ fn suggest_dispatch_host(args: &SuggestArgs, host: &str) -> Result<DispatchOutco
                 "Use `fwc search '<query>' --host <endpoint>` for keyword-based live search.",
             ],
         });
+        attach_discovery_provenance(
+            &mut payload,
+            "suggest",
+            catalog::DiscoveryDataSource::LiveHostIntrospection,
+        );
         envelope.inject_into(&mut payload);
         return Ok(DispatchOutcome {
             payload,
@@ -8181,6 +8238,11 @@ fn suggest_dispatch_host(args: &SuggestArgs, host: &str) -> Result<DispatchOutco
             "Use `fwc suggest --connector <name> --host <endpoint>` to narrow to one connector.",
         ],
     });
+    attach_discovery_provenance(
+        &mut payload,
+        "suggest",
+        catalog::DiscoveryDataSource::LiveHostIntrospection,
+    );
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -8245,6 +8307,11 @@ fn suggest_dispatch(args: &SuggestArgs, host: Option<&str>) -> Result<DispatchOu
                 "Use `fwc simulate <connector> <operation> --file payload.json` to test safely.",
             ],
         });
+        attach_discovery_provenance(
+            &mut payload,
+            "suggest",
+            catalog::DiscoveryDataSource::WorkspaceManifest,
+        );
         envelope.inject_into(&mut payload);
         return Ok(DispatchOutcome {
             payload,
@@ -8315,6 +8382,11 @@ fn suggest_dispatch(args: &SuggestArgs, host: Option<&str>) -> Result<DispatchOu
                 "Use `fwc search '<query>' --offline` for keyword-based search.",
             ],
         });
+        attach_discovery_provenance(
+            &mut payload,
+            "suggest",
+            catalog::DiscoveryDataSource::WorkspaceManifest,
+        );
         envelope.inject_into(&mut payload);
         return Ok(DispatchOutcome {
             payload,
@@ -8348,6 +8420,11 @@ fn suggest_dispatch(args: &SuggestArgs, host: Option<&str>) -> Result<DispatchOu
             "Use `fwc suggest --connector <name> --offline` to narrow to one connector.",
         ],
     });
+    attach_discovery_provenance(
+        &mut payload,
+        "suggest",
+        catalog::DiscoveryDataSource::WorkspaceManifest,
+    );
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -8447,6 +8524,11 @@ fn suggest_after_dispatch(
             "Use `fwc suggest --goal '<next intent>' --offline` for goal-directed search.",
         ],
     });
+    attach_discovery_provenance(
+        &mut payload,
+        "suggest",
+        catalog::DiscoveryDataSource::WorkspaceManifest,
+    );
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -8535,6 +8617,11 @@ fn template_dispatch_host(args: &TemplateArgs, host: &str) -> Result<DispatchOut
             format!("fwc simulate {} {} --host {host} --file payload.json", connector.slug, operation.name),
         ],
     });
+    attach_template_provenance(
+        &mut payload,
+        "template",
+        catalog::TemplateDataSource::LiveHostIntrospection,
+    );
     envelope.inject_into(&mut payload);
 
     Ok(DispatchOutcome {
@@ -8634,6 +8721,11 @@ fn template_dispatch(args: &TemplateArgs, host: Option<&str>) -> Result<Dispatch
             format!("fwc simulate {} {} --file payload.json", connector.slug, operation.preferred_selector),
         ],
     });
+    attach_template_provenance(
+        &mut payload,
+        "template",
+        catalog::TemplateDataSource::WorkspaceManifest,
+    );
     envelope.inject_into(&mut payload);
 
     Ok(DispatchOutcome {
@@ -8674,21 +8766,27 @@ fn validate_dispatch_host(args: &ValidateArgs, host: &str) -> Result<DispatchOut
         let content = std::fs::read_to_string(path)?;
         serde_json::from_str(&content)?
     } else {
+        let mut payload = json!({
+            "status": "error",
+            "command": "validate",
+            "source": "host-admin-api",
+            "mode": "live-introspection",
+            "error": {
+                "type": "missing-input",
+                "message": "No input provided. Use --input or --input-file.",
+            },
+            "next_actions": [
+                format!("fwc validate {} {} --host {host} --input '{{...}}'", connector.slug, operation.name),
+                format!("fwc template {} {} --host {host}", connector.slug, operation.name),
+            ],
+        });
+        attach_template_provenance(
+            &mut payload,
+            "validate",
+            catalog::TemplateDataSource::LiveHostIntrospection,
+        );
         return Ok(DispatchOutcome {
-            payload: json!({
-                "status": "error",
-                "command": "validate",
-                "source": "host-admin-api",
-                "mode": "live-introspection",
-                "error": {
-                    "type": "missing-input",
-                    "message": "No input provided. Use --input or --input-file.",
-                },
-                "next_actions": [
-                    format!("fwc validate {} {} --host {host} --input '{{...}}'", connector.slug, operation.name),
-                    format!("fwc template {} {} --host {host}", connector.slug, operation.name),
-                ],
-            }),
+            payload,
             exit_code: CliExitCode::UnknownCommand,
         });
     };
@@ -8711,6 +8809,11 @@ fn validate_dispatch_host(args: &ValidateArgs, host: &str) -> Result<DispatchOut
                 format!("fwc invoke {} {} --host {host} --input '...'", connector.slug, operation.name),
             ],
         });
+        attach_template_provenance(
+            &mut payload,
+            "validate",
+            catalog::TemplateDataSource::LiveHostIntrospection,
+        );
         envelope.inject_into(&mut payload);
 
         Ok(DispatchOutcome {
@@ -8730,27 +8833,33 @@ fn validate_dispatch_host(args: &ValidateArgs, host: &str) -> Result<DispatchOut
             })
             .collect();
 
+        let mut payload = json!({
+            "status": "error",
+            "command": "validate",
+            "source": "host-admin-api",
+            "mode": "live-introspection",
+            "message": format!(
+                "Validation failed for live `{}.{}`: {} error(s).",
+                connector.slug, operation.name, result.errors.len()
+            ),
+            "connector": &connector.slug,
+            "operation": &operation.name,
+            "valid": false,
+            "error_count": result.errors.len(),
+            "errors": error_details,
+            "metadata_gaps": host_metadata_gaps(&introspection),
+            "next_actions": [
+                format!("fwc template {} {} --host {host}", connector.slug, operation.name),
+                format!("fwc schema {} {} --host {host}", connector.slug, operation.name),
+            ],
+        });
+        attach_template_provenance(
+            &mut payload,
+            "validate",
+            catalog::TemplateDataSource::LiveHostIntrospection,
+        );
         Ok(DispatchOutcome {
-            payload: json!({
-                "status": "error",
-                "command": "validate",
-                "source": "host-admin-api",
-                "mode": "live-introspection",
-                "message": format!(
-                    "Validation failed for live `{}.{}`: {} error(s).",
-                    connector.slug, operation.name, result.errors.len()
-                ),
-                "connector": &connector.slug,
-                "operation": &operation.name,
-                "valid": false,
-                "error_count": result.errors.len(),
-                "errors": error_details,
-                "metadata_gaps": host_metadata_gaps(&introspection),
-                "next_actions": [
-                    format!("fwc template {} {} --host {host}", connector.slug, operation.name),
-                    format!("fwc schema {} {} --host {host}", connector.slug, operation.name),
-                ],
-            }),
+            payload,
             exit_code: CliExitCode::UnknownCommand,
         })
     }
@@ -8816,21 +8925,27 @@ fn validate_dispatch(args: &ValidateArgs, host: Option<&str>) -> Result<Dispatch
         let content = std::fs::read_to_string(path)?;
         serde_json::from_str(&content)?
     } else {
+        let mut payload = json!({
+            "status": "error",
+            "command": "validate",
+            "source": "workspace-manifests",
+            "mode": "offline-artifact",
+            "error": {
+                "type": "missing-input",
+                "message": "No input provided. Use --input or --input-file.",
+            },
+            "next_actions": [
+                format!("fwc validate {} {} --offline --input '{{...}}'", connector.slug, operation.preferred_selector),
+                format!("fwc template {} {} --offline", connector.slug, operation.preferred_selector),
+            ],
+        });
+        attach_template_provenance(
+            &mut payload,
+            "validate",
+            catalog::TemplateDataSource::WorkspaceManifest,
+        );
         return Ok(DispatchOutcome {
-            payload: json!({
-                "status": "error",
-                "command": "validate",
-                "source": "workspace-manifests",
-                "mode": "offline-artifact",
-                "error": {
-                    "type": "missing-input",
-                    "message": "No input provided. Use --input or --input-file.",
-                },
-                "next_actions": [
-                    format!("fwc validate {} {} --offline --input '{{...}}'", connector.slug, operation.preferred_selector),
-                    format!("fwc template {} {} --offline", connector.slug, operation.preferred_selector),
-                ],
-            }),
+            payload,
             exit_code: CliExitCode::UnknownCommand,
         });
     };
@@ -8856,6 +8971,11 @@ fn validate_dispatch(args: &ValidateArgs, host: Option<&str>) -> Result<Dispatch
                 format!("fwc invoke {} {} --input '...'", connector.slug, operation.preferred_selector),
             ],
         });
+        attach_template_provenance(
+            &mut payload,
+            "validate",
+            catalog::TemplateDataSource::WorkspaceManifest,
+        );
         envelope.inject_into(&mut payload);
 
         Ok(DispatchOutcome {
@@ -8875,26 +8995,32 @@ fn validate_dispatch(args: &ValidateArgs, host: Option<&str>) -> Result<Dispatch
             })
             .collect();
 
+        let mut payload = json!({
+            "status": "error",
+            "command": "validate",
+            "source": "workspace-manifests",
+            "mode": "offline-artifact",
+            "message": format!(
+                "Validation failed for `{}.{}`: {} error(s).",
+                connector.slug, operation.preferred_selector, result.errors.len()
+            ),
+            "connector": &connector.slug,
+            "operation": &operation.preferred_selector,
+            "valid": false,
+            "error_count": result.errors.len(),
+            "errors": error_details,
+            "next_actions": [
+                format!("fwc template {} {} --offline", connector.slug, operation.preferred_selector),
+                format!("fwc schema {} {} --offline", connector.slug, operation.preferred_selector),
+            ],
+        });
+        attach_template_provenance(
+            &mut payload,
+            "validate",
+            catalog::TemplateDataSource::WorkspaceManifest,
+        );
         Ok(DispatchOutcome {
-            payload: json!({
-                "status": "error",
-                "command": "validate",
-                "source": "workspace-manifests",
-                "mode": "offline-artifact",
-                "message": format!(
-                    "Validation failed for `{}.{}`: {} error(s).",
-                    connector.slug, operation.preferred_selector, result.errors.len()
-                ),
-                "connector": &connector.slug,
-                "operation": &operation.preferred_selector,
-                "valid": false,
-                "error_count": result.errors.len(),
-                "errors": error_details,
-                "next_actions": [
-                    format!("fwc template {} {} --offline", connector.slug, operation.preferred_selector),
-                    format!("fwc schema {} {} --offline", connector.slug, operation.preferred_selector),
-                ],
-            }),
+            payload,
             exit_code: CliExitCode::UnknownCommand,
         })
     }
@@ -15962,6 +16088,30 @@ mod tests {
         (outcome.exit_code, outcome.text)
     }
 
+    fn assert_discovery_provenance(payload: &Value, source: &str, authoritative: bool, mode: &str) {
+        assert_eq!(payload["mode"], mode);
+        assert_eq!(payload["provenance"]["source"], source);
+        assert_eq!(payload["provenance"]["authoritative"], authoritative);
+        assert_eq!(payload["provenance"]["command"], payload["command"]);
+        assert!(
+            payload["provenance"]["caveat"]
+                .as_str()
+                .is_some_and(|caveat| !caveat.is_empty())
+        );
+    }
+
+    fn assert_template_provenance(payload: &Value, source: &str, authoritative: bool, mode: &str) {
+        assert_eq!(payload["mode"], mode);
+        assert_eq!(payload["provenance"]["source"], source);
+        assert_eq!(payload["provenance"]["authoritative"], authoritative);
+        assert_eq!(payload["provenance"]["command"], payload["command"]);
+        assert!(
+            payload["provenance"]["caveat"]
+                .as_str()
+                .is_some_and(|caveat| !caveat.is_empty())
+        );
+    }
+
     fn spawn_mock_host(
         routes: StdBTreeMap<String, Value>,
         expected_requests: usize,
@@ -16749,6 +16899,7 @@ deny_ptrace = true
         let args = vec![
             "fwc".to_owned(),
             "--json".to_owned(),
+            "--offline".to_owned(),
             "exmaples".to_owned(),
             "slack".to_owned(),
         ];
@@ -17101,6 +17252,7 @@ deny_ptrace = true
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["source"], "host-admin-api");
+        assert_discovery_provenance(&payload, "live_host_inventory", true, "live-inventory");
         assert_eq!(payload["filters"]["category"], "code");
         assert_eq!(payload["filters"]["zone"], "z:work");
         assert_eq!(payload["connectors"][0]["slug"], "github");
@@ -17187,6 +17339,12 @@ deny_ptrace = true
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["source"], "host-admin-api");
+        assert_discovery_provenance(
+            &payload,
+            "live_host_introspection",
+            true,
+            "live-introspection",
+        );
         assert_eq!(payload["connector"]["slug"], "github");
         assert_eq!(payload["connector"]["archetype"], "request_response");
         assert_eq!(payload["connector"]["operation_count"], 2);
@@ -17227,6 +17385,12 @@ deny_ptrace = true
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["source"], "host-admin-api");
+        assert_discovery_provenance(
+            &payload,
+            "live_host_introspection",
+            true,
+            "live-introspection",
+        );
         assert_eq!(payload["operations"].as_array().unwrap().len(), 1);
         assert_eq!(payload["operations"][0]["selector"], "github.get_issue");
     }
@@ -17274,6 +17438,12 @@ deny_ptrace = true
         server.join().expect("mock host thread should complete");
         assert_eq!(schema_exit, CliExitCode::Success.into());
         assert_eq!(schema_payload["source"], "host-admin-api");
+        assert_discovery_provenance(
+            &schema_payload,
+            "live_host_introspection",
+            true,
+            "live-introspection",
+        );
         assert_eq!(
             schema_payload["operation"]["selector"],
             "github.create_issue"
@@ -17293,6 +17463,12 @@ deny_ptrace = true
 
         assert_eq!(examples_exit, CliExitCode::Success.into());
         assert_eq!(examples_payload["source"], "host-admin-api");
+        assert_discovery_provenance(
+            &examples_payload,
+            "live_host_introspection",
+            true,
+            "live-introspection",
+        );
         assert_eq!(
             examples_payload["operation"]["selector"],
             "github.create_issue"
@@ -18295,26 +18471,29 @@ deny_ptrace = true
     // ── Intent recovery: typo auto-corrections (readonly) ───────────────
 
     #[test]
-    fn execute_shwo_typo_resolves_to_show() {
-        let args = vec![
-            "fwc".to_owned(),
-            "--json".to_owned(),
-            "shwo".to_owned(),
-            "github".to_owned(),
-        ];
+    fn execute_gudie_typo_resolves_to_guide() {
+        let args = vec!["fwc".to_owned(), "--json".to_owned(), "gudie".to_owned()];
         let outcome = execute(&args).expect("execution should not fail internally");
         let payload: Value =
             serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
 
         assert_eq!(outcome.exit_code, CliExitCode::Success.into());
-        assert_eq!(payload["command"], "show");
-        assert_eq!(payload["input_normalization"]["applied"][0]["from"], "shwo");
-        assert_eq!(payload["input_normalization"]["applied"][0]["to"], "show");
+        assert_eq!(payload["command"], "guide");
+        assert_eq!(
+            payload["input_normalization"]["applied"][0]["from"],
+            "gudie"
+        );
+        assert_eq!(payload["input_normalization"]["applied"][0]["to"], "guide");
     }
 
     #[test]
     fn execute_lsit_typo_resolves_to_list() {
-        let args = vec!["fwc".to_owned(), "--json".to_owned(), "lsit".to_owned()];
+        let args = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "--offline".to_owned(),
+            "lsit".to_owned(),
+        ];
         let outcome = execute(&args).expect("execution should not fail internally");
         let payload: Value =
             serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
@@ -18328,6 +18507,7 @@ deny_ptrace = true
         let args = vec![
             "fwc".to_owned(),
             "--json".to_owned(),
+            "--offline".to_owned(),
             "schmea".to_owned(),
             "github".to_owned(),
         ];
@@ -18344,6 +18524,7 @@ deny_ptrace = true
         let args = vec![
             "fwc".to_owned(),
             "--json".to_owned(),
+            "--offline".to_owned(),
             "serach".to_owned(),
             "github".to_owned(),
         ];
@@ -18539,7 +18720,7 @@ deny_ptrace = true
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "list");
         assert_eq!(payload["source"], "workspace-manifests");
-        assert_eq!(payload["mode"], "offline-artifact");
+        assert_discovery_provenance(&payload, "workspace_manifest", false, "offline-artifact");
         assert!(
             payload["connectors"]
                 .as_array()
@@ -18563,7 +18744,41 @@ deny_ptrace = true
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "search");
-        assert_eq!(payload["mode"], "offline-artifact");
+        assert_discovery_provenance(&payload, "workspace_manifest", false, "offline-artifact");
+        assert!(payload["results"].as_array().unwrap().iter().any(|result| {
+            result["connector"] == "github" && result["operation"] == "github.create_issue"
+        }));
+    }
+
+    #[test]
+    fn execute_search_with_host_uses_live_introspection() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
+                    mock_introspection_response_json(),
+                ),
+            ]),
+            2,
+        );
+
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "--host", &host, "search", "github issue"]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "search");
+        assert_eq!(payload["source"], "host-admin-api");
+        assert_discovery_provenance(
+            &payload,
+            "live_host_introspection",
+            true,
+            "live-introspection",
+        );
         assert!(payload["results"].as_array().unwrap().iter().any(|result| {
             result["connector"] == "github" && result["operation"] == "github.create_issue"
         }));
@@ -18576,7 +18791,7 @@ deny_ptrace = true
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "show");
         assert_eq!(payload["source"], "workspace-manifests");
-        assert_eq!(payload["mode"], "offline-artifact");
+        assert_discovery_provenance(&payload, "workspace_manifest", false, "offline-artifact");
         assert_eq!(payload["connector"]["slug"], "github");
         assert_eq!(payload["connector"]["canonical_id"], "fcp.github");
         assert_eq!(payload["connector"]["format"], "wasi");
@@ -18612,7 +18827,7 @@ deny_ptrace = true
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "ops");
-        assert_eq!(payload["mode"], "offline-artifact");
+        assert_discovery_provenance(&payload, "workspace_manifest", false, "offline-artifact");
         assert_eq!(payload["connector"]["slug"], "github");
         assert!(
             payload["operations"]
@@ -18643,7 +18858,7 @@ deny_ptrace = true
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "schema");
-        assert_eq!(payload["mode"], "offline-artifact");
+        assert_discovery_provenance(&payload, "workspace_manifest", false, "offline-artifact");
         assert_eq!(payload["scope"], "operation");
         assert_eq!(payload["operation"]["requested_selector"], "issues.create");
         assert_eq!(payload["operation"]["selector"], "issues.create");
@@ -18671,7 +18886,7 @@ deny_ptrace = true
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "examples");
-        assert_eq!(payload["mode"], "offline-artifact");
+        assert_discovery_provenance(&payload, "workspace_manifest", false, "offline-artifact");
         assert_eq!(payload["scope"], "operation");
         assert_eq!(payload["operation"]["selector"], "issues.create");
         assert_eq!(payload["operation"]["canonical_id"], "github.create_issue");
@@ -18707,7 +18922,7 @@ deny_ptrace = true
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "suggest");
         assert_eq!(payload["source"], "workspace-manifests");
-        assert_eq!(payload["mode"], "offline-artifact");
+        assert_discovery_provenance(&payload, "workspace_manifest", false, "offline-artifact");
         assert!(
             payload["suggestions"]
                 .as_array()
@@ -18749,7 +18964,12 @@ deny_ptrace = true
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "suggest");
         assert_eq!(payload["source"], "host-admin-api");
-        assert_eq!(payload["mode"], "live-introspection");
+        assert_discovery_provenance(
+            &payload,
+            "live_host_introspection",
+            true,
+            "live-introspection",
+        );
         assert!(
             payload["suggestions"]
                 .as_array()
@@ -18785,7 +19005,7 @@ deny_ptrace = true
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "template");
         assert_eq!(payload["source"], "workspace-manifests");
-        assert_eq!(payload["mode"], "offline-artifact");
+        assert_template_provenance(&payload, "workspace_manifest", false, "offline-artifact");
         assert_eq!(payload["operation"]["canonical_id"], "github.create_issue");
         assert_eq!(payload["template"]["title"], "example-string");
     }
@@ -18820,9 +19040,14 @@ deny_ptrace = true
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "template");
         assert_eq!(payload["source"], "host-admin-api");
-        assert_eq!(payload["mode"], "live-introspection");
+        assert_template_provenance(
+            &payload,
+            "live_host_introspection",
+            true,
+            "live-introspection",
+        );
         assert_eq!(payload["operation"]["selector"], "github.create_issue");
-        assert_eq!(payload["template"]["title"], "example-string");
+        assert_eq!(payload["template"]["title"], "<string:required>");
     }
 
     #[test]
@@ -18843,6 +19068,24 @@ deny_ptrace = true
     }
 
     #[test]
+    fn execute_validate_offline_requires_input_with_template_provenance() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "validate",
+            "github",
+            "issues.create",
+            "--offline",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
+        assert_eq!(payload["command"], "validate");
+        assert_eq!(payload["source"], "workspace-manifests");
+        assert_eq!(payload["error"]["type"], "missing-input");
+        assert_template_provenance(&payload, "workspace_manifest", false, "offline-artifact");
+    }
+
+    #[test]
     fn execute_validate_offline_returns_offline_artifact_result() {
         let (exit_code, payload) = execute_json(&[
             "fwc",
@@ -18858,8 +19101,47 @@ deny_ptrace = true
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "validate");
         assert_eq!(payload["source"], "workspace-manifests");
-        assert_eq!(payload["mode"], "offline-artifact");
+        assert_template_provenance(&payload, "workspace_manifest", false, "offline-artifact");
         assert_eq!(payload["valid"], true);
+    }
+
+    #[test]
+    fn execute_validate_with_host_requires_input_with_template_provenance() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
+                    mock_introspection_response_json(),
+                ),
+            ]),
+            2,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "validate",
+            "github",
+            "issues.create",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
+        assert_eq!(payload["command"], "validate");
+        assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["error"]["type"], "missing-input");
+        assert_template_provenance(
+            &payload,
+            "live_host_introspection",
+            true,
+            "live-introspection",
+        );
     }
 
     #[test]
@@ -18894,7 +19176,12 @@ deny_ptrace = true
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "validate");
         assert_eq!(payload["source"], "host-admin-api");
-        assert_eq!(payload["mode"], "live-introspection");
+        assert_template_provenance(
+            &payload,
+            "live_host_introspection",
+            true,
+            "live-introspection",
+        );
         assert_eq!(payload["valid"], true);
     }
 

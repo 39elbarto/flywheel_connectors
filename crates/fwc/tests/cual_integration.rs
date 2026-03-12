@@ -1460,3 +1460,601 @@ fn truth_matrix_receipt_evidence_in_history() {
         "History entry should contain input evidence for replay/audit"
     );
 }
+
+// ── Bead 29.8.2: E2E scenarios and regression gates ──────────────────
+
+/// E2E scenario: Full authenticated invoke lifecycle.
+/// Exercises: discovery → introspection → schema → preflight → invoke → history.
+/// Regression gate: every step must carry consistent availability + source markers
+/// and the history trail must be complete and honest.
+#[allow(clippy::too_many_lines)]
+#[test]
+fn e2e_authenticated_invoke_lifecycle_with_evidence_trail() {
+    let capability_token = test_capability_token_arg();
+    let home = tempdir().expect("temp home should be created");
+
+    let github_connector =
+        mock_connector_summary_json("fcp.github:enterprise:v1", "GitHub Enterprise", 1, "risky");
+    let github_create_issue = mock_tool_descriptor_json(
+        "github.create_issue",
+        "github.issue_write",
+        "medium",
+        "risky",
+        "none",
+        Some("interactive"),
+        &json!({
+            "type": "object",
+            "properties": {
+                "owner": { "type": "string" },
+                "repo": { "type": "string" },
+                "title": { "type": "string" },
+                "body": { "type": "string" }
+            },
+            "required": ["owner", "repo", "title"]
+        }),
+        &json!({
+            "type": "object",
+            "properties": { "number": { "type": "integer" } },
+            "required": ["number"]
+        }),
+    );
+
+    // Phase 1: Discovery — list connectors from host.
+    let (host1, server1) = spawn_mock_host_sequence(vec![(
+        "POST /rpc/discover".to_owned(),
+        mock_discovery_response_json(&[github_connector.clone()]),
+    )]);
+    let list_payload = run_json_ok(&["--json", "--host", &host1, "list"]);
+    server1.join().expect("mock host thread should complete");
+
+    assert_eq!(list_payload["source"], "host-admin-api");
+    assert_eq!(list_payload["availability"]["availability"], "live-runtime");
+    assert_eq!(list_payload["availability"]["authoritative"], true);
+    let connectors = list_payload["connectors"].as_array().expect("connectors");
+    assert!(
+        connectors.iter().any(|c| {
+            c["canonical_id"]
+                .as_str()
+                .is_some_and(|id| id.contains("github"))
+        }),
+        "Discovery must surface the github connector"
+    );
+
+    // Phase 2: Introspection — ops for the discovered connector.
+    let (host2, server2) = spawn_mock_host_sequence(vec![
+        (
+            "POST /rpc/discover".to_owned(),
+            mock_discovery_response_json(&[github_connector.clone()]),
+        ),
+        (
+            "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
+            mock_introspection_response_json(&github_connector, &[github_create_issue.clone()]),
+        ),
+    ]);
+    let ops_payload = run_json_ok(&["--json", "--host", &host2, "ops", "github"]);
+    server2.join().expect("mock host thread should complete");
+
+    assert_eq!(ops_payload["source"], "host-admin-api");
+    assert_eq!(ops_payload["availability"]["availability"], "live-runtime");
+    let ops = ops_payload["operations"].as_array().expect("operations");
+    assert_eq!(ops.len(), 1);
+    assert_eq!(ops[0]["canonical_id"], "github.create_issue");
+
+    // Phase 3: Invoke — execute with auth and verify receipt.
+    let (host4, server4) = spawn_mock_host_sequence(vec![
+        (
+            "POST /rpc/discover".to_owned(),
+            mock_discovery_response_json(&[github_connector.clone()]),
+        ),
+        (
+            "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
+            mock_introspection_response_json(&github_connector, &[github_create_issue]),
+        ),
+        (
+            "POST /rpc/preflight".to_owned(),
+            mock_preflight_response_json(true),
+        ),
+        (
+            "POST /rpc/invoke".to_owned(),
+            mock_invoke_response_json(json!({ "number": 99 })),
+        ),
+    ]);
+    let invoke_payload = run_json_ok_in_home(
+        home.path(),
+        &[
+            "--json",
+            "--host",
+            &host4,
+            "invoke",
+            "github",
+            "issues.create",
+            "--input",
+            r#"{"owner":"octocat","repo":"hello-world","title":"E2E lifecycle test"}"#,
+            "--capability-token",
+            &capability_token,
+        ],
+    );
+    server4.join().expect("mock host thread should complete");
+
+    assert_eq!(invoke_payload["status"], "ok");
+    assert_eq!(
+        invoke_payload["availability"]["availability"],
+        "live-runtime"
+    );
+    assert_eq!(invoke_payload["availability"]["authoritative"], true);
+
+    // Phase 5: History — verify the complete evidence trail.
+    let history = run_json_ok_in_home(home.path(), &["--json", "history"]);
+    let entries = history["entries"].as_array().expect("history entries");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["status"], "success");
+    assert_eq!(entries[0]["connector_id"], "fcp.github:enterprise:v1");
+    assert_eq!(entries[0]["operation_id"], "github.create_issue");
+
+    // Regression gate: history command itself must be offline-artifact (local data).
+    assert_eq!(history["availability"]["availability"], "offline-artifact");
+    assert_eq!(history["availability"]["authoritative"], false);
+}
+
+/// E2E scenario: Denied invoke with recovery evidence.
+/// Exercises: discovery → introspection → preflight denial → history + next_actions.
+/// Regression gate: denied invokes must never fabricate success, must record denial
+/// in history, and must offer actionable recovery paths.
+#[allow(clippy::too_many_lines)]
+#[test]
+fn e2e_denied_invoke_with_recovery_evidence_and_history() {
+    let capability_token = test_capability_token_arg();
+    let home = tempdir().expect("temp home should be created");
+
+    let github_connector =
+        mock_connector_summary_json("fcp.github:enterprise:v1", "GitHub Enterprise", 1, "risky");
+    let github_create_issue = mock_tool_descriptor_json(
+        "github.create_issue",
+        "github.issue_write",
+        "medium",
+        "risky",
+        "none",
+        Some("interactive"),
+        &json!({
+            "type": "object",
+            "properties": {
+                "owner": { "type": "string" },
+                "repo": { "type": "string" },
+                "title": { "type": "string" }
+            },
+            "required": ["owner", "repo", "title"]
+        }),
+        &json!({ "type": "object" }),
+    );
+
+    // Step 1: Invoke that gets denied at preflight.
+    let (host, server) = spawn_mock_host_sequence(vec![
+        (
+            "POST /rpc/discover".to_owned(),
+            mock_discovery_response_json(&[github_connector.clone()]),
+        ),
+        (
+            "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
+            mock_introspection_response_json(&github_connector, &[github_create_issue.clone()]),
+        ),
+        (
+            "POST /rpc/preflight".to_owned(),
+            mock_preflight_response_json(false),
+        ),
+    ]);
+
+    let (exit_code, denied_payload, _stderr) = run_json_in_home(
+        home.path(),
+        &[
+            "--json",
+            "--host",
+            &host,
+            "invoke",
+            "github",
+            "issues.create",
+            "--input",
+            r#"{"owner":"octocat","repo":"hello-world","title":"Should be denied"}"#,
+            "--capability-token",
+            &capability_token,
+        ],
+    );
+    server.join().expect("mock host thread should complete");
+
+    // Regression gate 1: denied invoke MUST NOT report success.
+    assert_ne!(exit_code, 0, "Denied invoke must not exit 0");
+    assert_eq!(denied_payload["status"], "denied");
+    assert_eq!(denied_payload["phase"], "preflight");
+
+    // Regression gate 2: error envelope must have type + reason.
+    assert_eq!(denied_payload["error"]["type"], "policy-denied");
+    assert_eq!(denied_payload["preflight"]["allowed"], false);
+    assert!(
+        denied_payload["preflight"]["reason"]
+            .as_str()
+            .is_some_and(|r| !r.is_empty()),
+        "Denial reason must not be empty"
+    );
+
+    // Regression gate 3: next_actions must offer recovery paths.
+    let next_actions = denied_payload["next_actions"]
+        .as_array()
+        .expect("denied invoke should include next_actions");
+    assert!(
+        next_actions.len() >= 2,
+        "Should have at least 2 recovery suggestions"
+    );
+
+    // Step 2: Then attempt the same operation with approval succeeding.
+    let (host2, server2) = spawn_mock_host_sequence(vec![
+        (
+            "POST /rpc/discover".to_owned(),
+            mock_discovery_response_json(&[github_connector.clone()]),
+        ),
+        (
+            "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
+            mock_introspection_response_json(&github_connector, &[github_create_issue]),
+        ),
+        (
+            "POST /rpc/preflight".to_owned(),
+            mock_preflight_response_json(true),
+        ),
+        (
+            "POST /rpc/invoke".to_owned(),
+            mock_invoke_response_json(json!({ "number": 101 })),
+        ),
+    ]);
+
+    let success_payload = run_json_ok_in_home(
+        home.path(),
+        &[
+            "--json",
+            "--host",
+            &host2,
+            "invoke",
+            "github",
+            "issues.create",
+            "--input",
+            r#"{"owner":"octocat","repo":"hello-world","title":"Retry after denial"}"#,
+            "--capability-token",
+            &capability_token,
+        ],
+    );
+    server2.join().expect("mock host thread should complete");
+    assert_eq!(success_payload["status"], "ok");
+
+    // Step 3: History must contain BOTH entries — the denial AND the success.
+    let history = run_json_ok_in_home(home.path(), &["--json", "history"]);
+    let entries = history["entries"].as_array().expect("history entries");
+    assert_eq!(
+        entries.len(),
+        2,
+        "History must record both the denied and successful invokes"
+    );
+
+    // Regression gate 4: history entries must have distinct statuses.
+    let statuses: Vec<&str> = entries
+        .iter()
+        .filter_map(|e| e["status"].as_str())
+        .collect();
+    assert!(statuses.contains(&"denied"), "History must contain denial");
+    assert!(statuses.contains(&"success"), "History must contain success");
+}
+
+/// E2E scenario: Offline-only workflow must never leak live-runtime markers.
+/// Exercises: search → schema → scaffold → validate (all --offline).
+/// Regression gate: every command in the chain must report "offline-artifact"
+/// availability and "workspace-manifests" source.  Any "live-runtime" or
+/// "host-admin-api" appearance is a truthfulness violation.
+#[test]
+fn e2e_offline_workflow_never_leaks_live_markers() {
+    let valid_input = fixture_path("operation_inputs/valid_create_issue.json");
+
+    // Step 1: Offline search.
+    let search = run_json_ok(&["--json", "search", "github issue", "--offline"]);
+    assert_eq!(search["mode"], "offline-artifact");
+    assert_eq!(
+        search["availability"]["availability"], "offline-artifact",
+        "Regression: offline search leaked live-runtime"
+    );
+    assert_ne!(
+        search["source"], "host-admin-api",
+        "Regression: offline search reported host-admin-api source"
+    );
+
+    // Step 2: Offline schema.
+    let schema = run_json_ok(&["--json", "schema", "github", "issues.create", "--offline"]);
+    assert_eq!(
+        schema["availability"]["availability"], "offline-artifact",
+        "Regression: offline schema leaked live-runtime"
+    );
+    assert_eq!(schema["availability"]["authoritative"], false);
+
+    // Step 3: Offline scaffold.
+    let scaffold = run_json_ok(&[
+        "--json",
+        "scaffold",
+        "github",
+        "issues.create",
+        "--offline",
+        "--required-only",
+    ]);
+    assert_eq!(
+        scaffold["availability"]["availability"], "offline-artifact",
+        "Regression: offline scaffold leaked live-runtime"
+    );
+
+    // Step 4: Offline validate.
+    let validate = run_json_ok(&[
+        "--json",
+        "validate",
+        "github",
+        "issues.create",
+        "--offline",
+        "--input-file",
+        valid_input.to_str().expect("valid fixture path"),
+    ]);
+    assert_eq!(validate["mode"], "offline-artifact");
+    assert_eq!(
+        validate["availability"]["availability"], "offline-artifact",
+        "Regression: offline validate leaked live-runtime"
+    );
+
+    // Regression gate: none of the payloads should mention "host-admin-api".
+    for (name, payload) in [
+        ("search", &search),
+        ("schema", &schema),
+        ("scaffold", &scaffold),
+        ("validate", &validate),
+    ] {
+        let json_str = serde_json::to_string(payload).expect("payload should serialize");
+        assert!(
+            !json_str.contains("host-admin-api"),
+            "Regression: {name} payload contains 'host-admin-api' in offline mode"
+        );
+        assert!(
+            !json_str.contains("\"live-runtime\""),
+            "Regression: {name} payload contains 'live-runtime' in offline mode"
+        );
+    }
+}
+
+/// E2E scenario: Live export-tools must reflect the actual host inventory,
+/// not a stale offline manifest.  Regression gate: tool count and tool names
+/// from live export must match what the mock host exposes, not what workspace
+/// manifests contain.
+#[allow(clippy::too_many_lines)]
+#[test]
+fn e2e_live_export_reflects_host_inventory_not_stale_manifests() {
+    let github_connector =
+        mock_connector_summary_json("fcp.github:enterprise:v1", "GitHub Enterprise", 2, "risky");
+    let tool_a = mock_tool_descriptor_json(
+        "github.create_issue",
+        "github.issue_write",
+        "medium",
+        "risky",
+        "none",
+        Some("interactive"),
+        &json!({
+            "type": "object",
+            "properties": { "title": { "type": "string" } },
+            "required": ["title"]
+        }),
+        &json!({ "type": "object" }),
+    );
+    let tool_b = mock_tool_descriptor_json(
+        "github.close_issue",
+        "github.issue_write",
+        "medium",
+        "risky",
+        "none",
+        Some("interactive"),
+        &json!({
+            "type": "object",
+            "properties": { "number": { "type": "integer" } },
+            "required": ["number"]
+        }),
+        &json!({ "type": "object" }),
+    );
+
+    let (host, server) = spawn_mock_host_sequence(vec![
+        (
+            "POST /rpc/discover".to_owned(),
+            mock_discovery_response_json(&[github_connector.clone()]),
+        ),
+        (
+            "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
+            mock_introspection_response_json(&github_connector, &[tool_a, tool_b]),
+        ),
+    ]);
+
+    let live_export = run_json_ok(&[
+        "--json",
+        "--host",
+        &host,
+        "export-tools",
+        "--format",
+        "mcp",
+    ]);
+    server.join().expect("mock host thread should complete");
+
+    // Regression gate: live export must match the mock host's exact inventory.
+    assert_eq!(live_export["source"], "host-admin-api");
+    assert_eq!(
+        live_export["availability"]["availability"],
+        "live-runtime"
+    );
+    assert_eq!(
+        live_export["tool_count"], 2,
+        "Live export tool count must match mock host (2 tools)"
+    );
+    assert_eq!(live_export["connector_count"], 1);
+
+    let tools = live_export["tools"]
+        .as_array()
+        .expect("live export should have tools array");
+    assert_eq!(tools.len(), 2);
+
+    let tool_names: Vec<&str> = tools
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .collect();
+    assert!(
+        tool_names.contains(&"github.create_issue"),
+        "Live export must include create_issue from host"
+    );
+    assert!(
+        tool_names.contains(&"github.close_issue"),
+        "Live export must include close_issue from host"
+    );
+
+    // Compare with offline export — the offline tool count will likely differ
+    // because it uses workspace manifests, not the mock host.
+    let offline_export =
+        run_json_ok(&["--json", "export-tools", "--offline", "--format", "mcp"]);
+    assert_eq!(offline_export["source"], "workspace-manifests");
+    assert_eq!(
+        offline_export["availability"]["availability"],
+        "offline-artifact"
+    );
+    // The key regression gate: these two sources should NOT be confused.
+    assert_ne!(
+        live_export["source"], offline_export["source"],
+        "Regression: live and offline export have same source label"
+    );
+}
+
+/// Regression gate: conflicting --offline + --host must produce a clear error,
+/// not silently prefer one mode.  This prevents silent fallback where a user
+/// thinks they're getting live data but receives offline artifacts (or vice versa).
+#[test]
+fn regression_gate_conflicting_offline_and_host_flags_rejected() {
+    // Pick a command that supports both --offline and --host: `list`.
+    let (exit_code, payload, _stderr) = run_json(&[
+        "--json",
+        "--host",
+        "http://127.0.0.1:19999",
+        "list",
+        "--offline",
+    ]);
+
+    // The CLI must reject the conflicting flags rather than silently picking one.
+    assert_ne!(
+        exit_code, 0,
+        "Conflicting --offline + --host must not succeed"
+    );
+    assert!(
+        payload["status"] == "error" || payload["error"].is_object(),
+        "Conflicting flags should produce an error status"
+    );
+    // The error message should explain the conflict.
+    let payload_str = serde_json::to_string(&payload).expect("payload should serialize");
+    assert!(
+        payload_str.contains("combine")
+            || payload_str.contains("conflict")
+            || payload_str.contains("both")
+            || payload_str.contains("incompatible")
+            || payload_str.contains("ambiguous"),
+        "Error should explain the --offline + --host conflict, got: {payload_str}"
+    );
+}
+
+/// Regression gate: missing host for live-only commands must produce a clear
+/// error with actionable next steps, not fabricated "live" data from offline.
+#[test]
+fn regression_gate_missing_host_for_live_commands_not_fabricated() {
+    // `invoke` without --host or --offline should report a host-needed error.
+    let (exit_code, payload, _stderr) = run_json(&[
+        "--json",
+        "invoke",
+        "github",
+        "issues.create",
+        "--input",
+        r#"{"owner":"o","repo":"r","title":"t"}"#,
+    ]);
+
+    // The payload should indicate that a host is needed, not fabricate success.
+    assert_ne!(payload["status"], "ok", "No-host invoke must not succeed");
+
+    // If it fails with an auth error (no capability token), that's also
+    // acceptable — it means the CLI correctly tried the offline path
+    // but couldn't fabricate a live result.
+    if exit_code == 0 {
+        // If it somehow succeeds, it must be clearly marked as offline-artifact.
+        assert_eq!(
+            payload["availability"]["availability"], "offline-artifact",
+            "Regression: no-host invoke claimed live-runtime"
+        );
+        assert_eq!(
+            payload["availability"]["authoritative"], false,
+            "Regression: no-host invoke claimed authoritative"
+        );
+    }
+
+    // Next actions should guide toward providing a host.
+    if let Some(next_actions) = payload["next_actions"].as_array() {
+        let has_host_suggestion = next_actions.iter().any(|action| {
+            action
+                .as_str()
+                .is_some_and(|s| s.contains("--host") || s.contains("host"))
+        });
+        assert!(
+            has_host_suggestion,
+            "Missing-host error should suggest providing --host"
+        );
+    }
+}
+
+/// Regression gate: plan/explain/do commands must include workflow_truth
+/// with availability semantics, not just raw command output.  This ensures
+/// the intent compiler's truthfulness is surfaced to agents/operators.
+#[test]
+fn regression_gate_plan_commands_include_workflow_truth() {
+    let plan = run_json_ok(&[
+        "--json",
+        "plan",
+        "create a GitHub issue titled \"test plan\"",
+    ]);
+
+    assert_eq!(plan["command"], "plan");
+    assert_eq!(plan["status"], "ready");
+
+    // The workflow_truth is nested under the `workflow` object.
+    let workflow = &plan["workflow"];
+    assert!(
+        workflow.is_object(),
+        "Plan output must include a workflow object"
+    );
+    let truth = &workflow["workflow_truth"];
+    assert!(
+        truth.is_object(),
+        "Workflow must include workflow_truth object"
+    );
+    assert!(
+        truth["availability"].is_string(),
+        "workflow_truth must have availability field"
+    );
+    assert!(
+        truth["source_of_truth"].is_string(),
+        "workflow_truth must have source_of_truth field"
+    );
+    assert!(
+        truth["explanation"].as_str().is_some_and(|e| !e.is_empty()),
+        "workflow_truth must have non-empty explanation"
+    );
+    // The authoritative field must reflect truth, not be fabricated as true.
+    assert!(
+        truth["authoritative"].is_boolean(),
+        "workflow_truth must have boolean authoritative field"
+    );
+
+    // The top-level availability envelope must also be present.
+    let avail = &plan["availability"];
+    assert!(
+        avail.is_object(),
+        "Plan output must include top-level availability envelope"
+    );
+    assert!(
+        avail["availability"].is_string(),
+        "Top-level availability must have availability field"
+    );
+}

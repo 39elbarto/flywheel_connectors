@@ -2696,18 +2696,8 @@ impl HostAdminStateStore {
         let guard = self.state.read().await;
         let state = guard.connectors.get(connector_id)?;
         let active_revision = state.active_config_revision();
-        let (current, source) = match active_revision {
-            Some(revision) => (
-                SanitizedConnectorConfig {
-                    payload: revision.payload.clone(),
-                    payload_digest: revision.payload_digest.clone(),
-                    redacted_fields: revision.redacted_fields.clone(),
-                    credential_references: revision.credential_references.clone(),
-                    contains_inline_secrets: revision.contains_inline_secrets,
-                },
-                ConnectorConfigSnapshotSource::ActiveRevision,
-            ),
-            None => (
+        let (current, source) = active_revision.map_or_else(
+            || (
                 SanitizedConnectorConfig {
                     payload: Value::Null,
                     payload_digest: String::new(),
@@ -2717,7 +2707,17 @@ impl HostAdminStateStore {
                 },
                 ConnectorConfigSnapshotSource::ManagedInventory,
             ),
-        };
+            |revision| (
+                SanitizedConnectorConfig {
+                    payload: revision.payload.clone(),
+                    payload_digest: revision.payload_digest.clone(),
+                    redacted_fields: revision.redacted_fields.clone(),
+                    credential_references: revision.credential_references.clone(),
+                    contains_inline_secrets: revision.contains_inline_secrets,
+                },
+                ConnectorConfigSnapshotSource::ActiveRevision,
+            )
+        );
         Some(ConnectorConfigSnapshot {
             connector_id: connector_id.clone(),
             current,
@@ -2752,6 +2752,9 @@ impl HostAdminStateStore {
     /// Returns a diff and validation preview without mutating state.
     /// If `expected_active_revision_id` is provided and does not match,
     /// the response indicates a stale-revision conflict.
+    ///
+    /// # Errors
+    /// Returns `LifecycleError` if the config is invalid or the connector cannot be validated.
     pub async fn validate_config(
         &self,
         connector_id: &ConnectorId,
@@ -2768,22 +2771,22 @@ impl HostAdminStateStore {
         let current_sanitized = current_sanitized_config(state);
 
         // Optimistic concurrency check.
-        if let Some(expected) = request.expected_active_revision_id {
-            if state.active_config_revision_id != Some(expected) {
-                return Ok(ConnectorConfigValidateResponse {
-                    connector_id: connector_id.clone(),
-                    valid: false,
-                    current_active_revision_id: state.active_config_revision_id,
-                    current: current_sanitized,
-                    candidate: SanitizedConnectorConfig::from_payload(request.payload.clone())?,
-                    diff: Vec::new(),
-                    preview: None,
-                    error: Some(format!(
-                        "stale revision: expected {expected}, found {:?}",
-                        state.active_config_revision_id
-                    )),
-                });
-            }
+        if let Some(expected) = request.expected_active_revision_id
+            && state.active_config_revision_id != Some(expected)
+        {
+            return Ok(ConnectorConfigValidateResponse {
+                connector_id: connector_id.clone(),
+                valid: false,
+                current_active_revision_id: state.active_config_revision_id,
+                current: current_sanitized,
+                candidate: SanitizedConnectorConfig::from_payload(request.payload.clone())?,
+                diff: Vec::new(),
+                preview: None,
+                error: Some(format!(
+                    "stale revision: expected {expected}, found {:?}",
+                    state.active_config_revision_id
+                )),
+            });
         }
 
         let current_payload = state
@@ -2826,15 +2829,15 @@ impl HostAdminStateStore {
                 })?;
 
             // Optimistic concurrency guard.
-            if let Some(expected) = request.expected_active_revision_id {
-                if state.active_config_revision_id != Some(expected) {
-                    return Err(LifecycleError::Persistence {
-                        reason: format!(
-                            "stale revision: expected {expected}, found {:?}",
-                            state.active_config_revision_id,
-                        ),
-                    });
-                }
+            if let Some(expected) = request.expected_active_revision_id
+                && state.active_config_revision_id != Some(expected)
+            {
+                return Err(LifecycleError::Persistence {
+                    reason: format!(
+                        "stale revision: expected {expected}, found {:?}",
+                        state.active_config_revision_id,
+                    ),
+                });
             }
 
             let previous_active_revision_id = state.active_config_revision_id;
@@ -2908,15 +2911,15 @@ impl HostAdminStateStore {
                 })?;
 
             // Optimistic concurrency guard.
-            if let Some(expected) = request.expected_active_revision_id {
-                if state.active_config_revision_id != Some(expected) {
-                    return Err(LifecycleError::Persistence {
-                        reason: format!(
-                            "stale revision: expected {expected}, found {:?}",
-                            state.active_config_revision_id,
-                        ),
-                    });
-                }
+            if let Some(expected) = request.expected_active_revision_id
+                && state.active_config_revision_id != Some(expected)
+            {
+                return Err(LifecycleError::Persistence {
+                    reason: format!(
+                        "stale revision: expected {expected}, found {:?}",
+                        state.active_config_revision_id,
+                    ),
+                });
             }
 
             // Find the target revision to roll back to.
@@ -4351,22 +4354,22 @@ struct SanitizedConfigPayload {
 
 /// Extract the current sanitized config from a connector's admin state.
 fn current_sanitized_config(state: &ConnectorAdminState) -> SanitizedConnectorConfig {
-    match state.active_config_revision() {
-        Some(revision) => SanitizedConnectorConfig {
-            payload: revision.payload.clone(),
-            payload_digest: revision.payload_digest.clone(),
-            redacted_fields: revision.redacted_fields.clone(),
-            credential_references: revision.credential_references.clone(),
-            contains_inline_secrets: revision.contains_inline_secrets,
-        },
-        None => SanitizedConnectorConfig {
+    state.active_config_revision().map_or_else(
+        || SanitizedConnectorConfig {
             payload: Value::Null,
             payload_digest: String::new(),
             redacted_fields: Vec::new(),
             credential_references: Vec::new(),
             contains_inline_secrets: false,
         },
-    }
+        |revision| SanitizedConnectorConfig {
+            payload: revision.payload.clone(),
+            payload_digest: revision.payload_digest.clone(),
+            redacted_fields: revision.redacted_fields.clone(),
+            credential_references: revision.credential_references.clone(),
+            contains_inline_secrets: revision.contains_inline_secrets,
+        },
+    )
 }
 
 fn sanitize_config_payload(payload: Value) -> SanitizedConfigPayload {

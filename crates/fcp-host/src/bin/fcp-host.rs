@@ -32,15 +32,17 @@ use fcp_async_core::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use fcp_async_core::sync::{Mutex, RwLock};
 use fcp_async_core::task::{self, JoinHandle};
 use fcp_core::{
-    ApprovalMode, ApprovalToken, CapabilityVerifier, ConnectorHealth, ConnectorId, Decision,
-    DecisionReceiptPolicy, HealthSnapshot, InstanceId, Introspection, InvokeRequest,
-    InvokeResponse, LifecycleError, LifecycleManager, LifecycleState, LifecycleStatus,
-    ObjectHeader, PolicySimulationInput, Provenance, RequestId, RolloutPolicy, SafetyTier,
-    SelfCheckReport, SoftwareBillOfMaterials, SupplyChainAttestation, TransportMode, ZoneId,
+    ApprovalMode, ApprovalToken, CapabilityVerifier, ConnectorHealth, ConnectorId,
+    CostEstimateConfidence, Decision, DecisionReceiptPolicy, HealthSnapshot, InstanceId,
+    Introspection, InvokeRequest, InvokeResponse, LifecycleError, LifecycleManager, LifecycleState,
+    LifecycleStatus, ObjectHeader, PolicySimulationInput, Provenance, RequestId,
+    ResourceAvailability, RolloutPolicy, SafetyTier, SelfCheckReport, SimulateRequest,
+    SimulateResponse, SoftwareBillOfMaterials, SupplyChainAttestation, TransportMode, ZoneId,
     ZonePolicyObject, ZoneTransportPolicy, simulate_policy_decision,
 };
 use fcp_crypto::{
     canonicalize::to_deterministic_cbor,
+    cose::fcp2_claims,
     ed25519::{Ed25519Signature, Ed25519VerifyingKey, PUBLIC_KEY_SIZE},
 };
 use fcp_host::{
@@ -59,13 +61,16 @@ use fcp_host::{
     DiscoveryFilter, DiscoveryResponse, DoctorReport, DoctorRequest, DoctorService,
     EventAcknowledgeRequest, EventAcknowledgeResponse, EventQueryRequest, EventQueryResponse,
     GateOutcome, HostAdminStateStore, HostHealthResponse, HostHealthStatus, HostPreflightRequest,
-    IntrospectionResponse, JournalQueryRequest, JournalQueryResponse, LifecycleTransitionRequest,
-    LifecycleTransitionResponse, LogQueryRequest, LogQueryResponse, ManagedConnectorConfig,
-    OperationResult, OperationResultStatus, PreflightRequest, PreflightResponse,
-    ReceiptQueryRequest, ReceiptQueryResponse, ReceiptSummary, RequestPriority, ResilienceError,
-    ResilienceLayer, RolloutController, RolloutDecision, RolloutObservation, RolloutOutcome,
-    SafetyTierExt, SanitizedConnectorConfig, StartupReconciliationReport, SupplyChainGate,
-    SupplyChainGateConfig, diff_sanitized_config_values, merge_connector_health,
+    HostSimulateRequest, HostSimulateResponse, IntrospectionResponse, JournalQueryRequest,
+    JournalQueryResponse, LifecycleTransitionRequest, LifecycleTransitionResponse, LogQueryRequest,
+    LogQueryResponse, ManagedConnectorConfig, OperationResult, OperationResultStatus,
+    PreflightRequest, PreflightResponse, ReceiptQueryRequest, ReceiptQueryResponse, ReceiptSummary,
+    RequestPriority, ResilienceError, ResilienceLayer, RolloutController, RolloutDecision,
+    RolloutObservation, RolloutOutcome, SafetyTierExt, SanitizedConnectorConfig,
+    SimulateCostConfidence, SimulateCostEstimate, SimulatePhase, SimulateReceipt,
+    SimulateReceiptQueryRequest, SimulateReceiptQueryResponse, SimulateResourceAvailability,
+    StartupReconciliationReport, SupplyChainGate, SupplyChainGateConfig,
+    diff_sanitized_config_values, merge_connector_health,
 };
 use fcp_host::{HostError, HostResult};
 use futures_util::future::join_all;
@@ -193,6 +198,14 @@ impl SubprocessConnector {
         let result = self.rpc("invoke", params).await?;
         serde_json::from_value(result)
             .map_err(|err| HostError::RegistryError(format!("invoke parse error: {err}")))
+    }
+
+    async fn simulate(&self, request: SimulateRequest) -> HostResult<SimulateResponse> {
+        let params = serde_json::to_value(request)
+            .map_err(|err| HostError::RegistryError(format!("simulate encode error: {err}")))?;
+        let result = self.rpc("simulate", params).await?;
+        serde_json::from_value(result)
+            .map_err(|err| HostError::RegistryError(format!("simulate parse error: {err}")))
     }
 
     async fn summary_snapshot(&self) -> ConnectorSummary {
@@ -437,6 +450,19 @@ impl SubprocessRegistry {
         }
         .ok_or_else(|| HostError::ConnectorNotFound(connector_id.to_string()))?;
         connector.invoke(request).await
+    }
+
+    async fn simulate(&self, request: SimulateRequest) -> HostResult<SimulateResponse> {
+        let connector_id = request.connector_id.clone();
+        let connector = {
+            let state = self.state.read().await;
+            state
+                .connectors
+                .get(&connector_id)
+                .map(|entry| Arc::clone(&entry.connector))
+        }
+        .ok_or_else(|| HostError::ConnectorNotFound(connector_id.to_string()))?;
+        connector.simulate(request).await
     }
 }
 
@@ -828,6 +854,138 @@ fn invoke_request_from_preflight(request: &HostPreflightRequest) -> HostResult<I
     })
 }
 
+fn simulate_request_from_host(request: &HostSimulateRequest) -> HostResult<SimulateRequest> {
+    let capability_token = request.capability_token.clone().ok_or_else(|| {
+        HostError::PreflightFailed("capability token is required for live simulate".to_string())
+    })?;
+    let connector_id = request.connector_id.parse().map_err(|error| {
+        HostError::InvalidFilter(format!(
+            "invalid simulate connector id '{}': {error}",
+            request.connector_id
+        ))
+    })?;
+    let zone_raw = request.zone_id.as_deref().ok_or_else(|| {
+        HostError::PreflightFailed("zone_id is required for live simulate".to_string())
+    })?;
+    let zone_id = zone_raw.parse().map_err(|error| {
+        HostError::InvalidFilter(format!("invalid simulate zone_id '{zone_raw}': {error}"))
+    })?;
+    let operation = request.operation.parse().map_err(|error| {
+        HostError::InvalidFilter(format!(
+            "invalid simulate operation '{}': {error}",
+            request.operation
+        ))
+    })?;
+
+    Ok(SimulateRequest {
+        r#type: "simulate".to_owned(),
+        id: RequestId::new(request.request_id.clone()),
+        connector_id,
+        operation,
+        zone_id,
+        input: request.input.clone().unwrap_or(serde_json::Value::Null),
+        capability_token,
+        estimate_cost: request.estimate_cost,
+        check_availability: request.check_availability,
+        context: None,
+        correlation_id: None,
+    })
+}
+
+fn invoke_request_from_simulate(request: &HostSimulateRequest) -> HostResult<InvokeRequest> {
+    let simulate_request = simulate_request_from_host(request)?;
+    Ok(InvokeRequest {
+        r#type: "invoke".to_owned(),
+        id: simulate_request.id.clone(),
+        connector_id: simulate_request.connector_id.clone(),
+        operation: simulate_request.operation.clone(),
+        zone_id: simulate_request.zone_id.clone(),
+        input: simulate_request.input.clone(),
+        capability_token: simulate_request.capability_token.clone(),
+        holder_proof: None,
+        context: simulate_request.context.clone(),
+        idempotency_key: None,
+        lease_seq: None,
+        deadline_ms: Some(request.deadline_ms),
+        correlation_id: simulate_request.correlation_id.clone(),
+        provenance: None,
+        approval_tokens: request.approval_tokens.clone(),
+    })
+}
+
+fn map_simulate_cost_confidence(confidence: CostEstimateConfidence) -> SimulateCostConfidence {
+    match confidence {
+        CostEstimateConfidence::Low => SimulateCostConfidence::Low,
+        CostEstimateConfidence::Medium => SimulateCostConfidence::Medium,
+        CostEstimateConfidence::High => SimulateCostConfidence::High,
+    }
+}
+
+fn map_simulate_cost_estimate(estimate: fcp_core::CostEstimate) -> SimulateCostEstimate {
+    SimulateCostEstimate {
+        api_credits: estimate.api_credits,
+        estimated_duration_ms: estimate.estimated_duration_ms,
+        estimated_bytes: estimate.estimated_bytes,
+        confidence: estimate.confidence.map(map_simulate_cost_confidence),
+    }
+}
+
+fn map_simulate_resource_availability(
+    availability: ResourceAvailability,
+) -> SimulateResourceAvailability {
+    SimulateResourceAvailability {
+        available: availability.available,
+        rate_limit_remaining: availability.rate_limit_remaining,
+        rate_limit_reset_at: availability.rate_limit_reset_at,
+        details: availability.details,
+    }
+}
+
+fn simulate_receipt_for_request(
+    request: &HostSimulateRequest,
+    input: &serde_json::Value,
+    phase: SimulatePhase,
+    would_succeed: bool,
+    duration_ms: u64,
+) -> HostResult<SimulateReceipt> {
+    Ok(SimulateReceipt {
+        receipt_id: format!("sim_{}", RequestId::random()),
+        connector_id: request.connector_id.clone(),
+        operation: request.operation.clone(),
+        phase,
+        would_succeed,
+        input_digest: Some(hex::encode(request_input_hash(input)?)),
+        duration_ms,
+        simulated_at: Utc::now(),
+    })
+}
+
+async fn record_simulate_receipt_summary(
+    lifecycle: &HostAdminStateStore,
+    receipt: &SimulateReceipt,
+) {
+    if let Err(err) = lifecycle.record_simulate_receipt(receipt.clone()).await {
+        tracing::warn!(
+            event = "simulate_receipt_persist_error",
+            connector_id = %receipt.connector_id,
+            operation = %receipt.operation,
+            receipt_id = %receipt.receipt_id,
+            error = %err,
+            "failed to persist simulate receipt"
+        );
+    }
+}
+
+fn is_simulate_unsupported(error: &HostError) -> bool {
+    matches!(
+        error,
+        HostError::RegistryError(message)
+            if message.contains("Unknown method: simulate")
+                || message.contains("does not support simulation")
+                || message.contains("unsupported")
+    )
+}
+
 fn request_input_hash(input: &serde_json::Value) -> HostResult<[u8; 32]> {
     let bytes = to_deterministic_cbor(input).map_err(|error| {
         HostError::Internal(format!("failed to canonicalize input payload: {error}"))
@@ -882,6 +1040,15 @@ fn verify_approval_tokens(
     Ok(())
 }
 
+fn claims_principal(claims: &fcp_crypto::cose::CwtClaims) -> Option<&str> {
+    claims
+        .get_subject()
+        .or_else(|| match claims.get(fcp2_claims::PRINCIPAL_ID) {
+            Some(ciborium::Value::Text(principal)) => Some(principal.as_str()),
+            _ => None,
+        })
+}
+
 async fn verify_live_request(
     state: &AppState,
     request: &InvokeRequest,
@@ -921,16 +1088,16 @@ async fn verify_live_request(
             HostError::PreflightFailed(format!("capability token rejected: {error}"))
         })?;
 
-    let principal = claims.get_subject().ok_or_else(|| {
+    let principal = claims_principal(&claims).ok_or_else(|| {
         HostError::PreflightFailed(
-            "capability token is missing the subject claim required for live execution".to_string(),
+            "capability token is missing the subject or principal_id claim required for live execution".to_string(),
         )
     })?;
     if let Some(expected) = principal_override
         && expected != principal
     {
         return Err(HostError::PreflightFailed(format!(
-            "request principal `{expected}` does not match capability token subject `{principal}`"
+            "request principal `{expected}` does not match capability token subject/principal_id `{principal}`"
         )));
     }
 
@@ -1775,6 +1942,7 @@ async fn async_main() -> HostResult<()> {
         .route("/rpc/batch", post(batch_invoke_handler))
         .route("/rpc/batch-invoke", post(batch_invoke_handler))
         .route("/rpc/preflight", post(preflight_handler))
+        .route("/rpc/simulate", post(simulate_handler))
         .route("/rpc/budget/report", post(budget_report_handler))
         .route(
             "/rpc/supply-chain/verify",
@@ -1807,6 +1975,10 @@ async fn async_main() -> HostResult<()> {
         // ── Logs, events, and receipt RPCs ──
         .route("/rpc/admin/logs", post(log_query_handler))
         .route("/rpc/admin/receipts", post(receipt_query_handler))
+        .route(
+            "/rpc/admin/simulate-receipts",
+            post(simulate_receipt_query_handler),
+        )
         .route("/rpc/admin/events", post(event_query_handler))
         .route(
             "/rpc/admin/events/acknowledge",
@@ -2885,6 +3057,220 @@ async fn preflight_handler(
     Json(response)
 }
 
+async fn simulate_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<HostSimulateRequest>,
+) -> Result<Json<HostSimulateResponse>, (StatusCode, String)> {
+    let connector_id = request.connector_id.clone();
+    let operation = request.operation.clone();
+    let request_id = request.request_id.clone();
+    let started_at = Instant::now();
+
+    tracing::debug!(
+        event = "simulate_request",
+        connector_id = %connector_id,
+        operation = %operation,
+        request_id = %request_id,
+        estimate_cost = request.estimate_cost,
+        check_availability = request.check_availability,
+        deadline_ms = request.deadline_ms,
+        "processing simulate request"
+    );
+
+    let preflight_request = match invoke_request_from_simulate(&request) {
+        Ok(preflight_request) => preflight_request,
+        Err(error) => {
+            let input = request.input.clone().unwrap_or(serde_json::Value::Null);
+            let duration_ms = elapsed_millis(started_at);
+            let response = HostSimulateResponse {
+                request_id: request_id.clone(),
+                would_succeed: false,
+                phase: SimulatePhase::PreflightOnly,
+                preflight_allowed: false,
+                failure_reason: Some(error.to_string()),
+                denial_code: None,
+                missing_capabilities: Vec::new(),
+                cost_estimate: None,
+                availability: None,
+                duration_ms,
+                receipt: simulate_receipt_for_request(
+                    &request,
+                    &input,
+                    SimulatePhase::PreflightOnly,
+                    false,
+                    duration_ms,
+                )
+                .map_err(map_host_error)?,
+            };
+            record_simulate_receipt_summary(state.lifecycle.as_ref(), &response.receipt).await;
+            tracing::info!(
+                event = "simulate_response",
+                connector_id = %connector_id,
+                operation = %operation,
+                request_id = %request_id,
+                phase = ?response.phase,
+                preflight_allowed = response.preflight_allowed,
+                would_succeed = response.would_succeed,
+                receipt_id = %response.receipt.receipt_id,
+                duration_ms = response.duration_ms,
+                "simulate request complete"
+            );
+            return Ok(Json(response));
+        }
+    };
+
+    let preflight =
+        evaluate_live_preflight(&state, &preflight_request, request.principal.as_deref()).await;
+    if !preflight.allowed {
+        let input = request.input.clone().unwrap_or(serde_json::Value::Null);
+        let duration_ms = elapsed_millis(started_at);
+        let response = HostSimulateResponse {
+            request_id: request_id.clone(),
+            would_succeed: false,
+            phase: SimulatePhase::PreflightOnly,
+            preflight_allowed: false,
+            failure_reason: Some(
+                preflight
+                    .reason
+                    .unwrap_or_else(|| "preflight denied live simulate request".to_string()),
+            ),
+            denial_code: None,
+            missing_capabilities: Vec::new(),
+            cost_estimate: None,
+            availability: None,
+            duration_ms,
+            receipt: simulate_receipt_for_request(
+                &request,
+                &input,
+                SimulatePhase::PreflightOnly,
+                false,
+                duration_ms,
+            )
+            .map_err(map_host_error)?,
+        };
+        record_simulate_receipt_summary(state.lifecycle.as_ref(), &response.receipt).await;
+        tracing::info!(
+            event = "simulate_response",
+            connector_id = %connector_id,
+            operation = %operation,
+            request_id = %request_id,
+            phase = ?response.phase,
+            preflight_allowed = response.preflight_allowed,
+            would_succeed = response.would_succeed,
+            receipt_id = %response.receipt.receipt_id,
+            duration_ms = response.duration_ms,
+            "simulate request complete"
+        );
+        return Ok(Json(response));
+    }
+
+    let simulate_request = simulate_request_from_host(&request).map_err(map_host_error)?;
+    let simulate_input = simulate_request.input.clone();
+    let simulate_result = fcp_async_core::time::timeout(
+        Duration::from_millis(request.deadline_ms),
+        state.registry.simulate(simulate_request),
+    )
+    .await;
+    let duration_ms = elapsed_millis(started_at);
+
+    let response = match simulate_result {
+        Ok(Ok(simulate_response)) => HostSimulateResponse {
+            request_id: request_id.clone(),
+            would_succeed: simulate_response.would_succeed,
+            phase: SimulatePhase::ConnectorReached,
+            preflight_allowed: true,
+            failure_reason: simulate_response.failure_reason,
+            denial_code: simulate_response.denial_code,
+            missing_capabilities: simulate_response.missing_capabilities,
+            cost_estimate: simulate_response
+                .estimated_cost
+                .map(map_simulate_cost_estimate),
+            availability: simulate_response
+                .availability
+                .map(map_simulate_resource_availability),
+            duration_ms,
+            receipt: simulate_receipt_for_request(
+                &request,
+                &simulate_input,
+                SimulatePhase::ConnectorReached,
+                simulate_response.would_succeed,
+                duration_ms,
+            )
+            .map_err(map_host_error)?,
+        },
+        Ok(Err(error)) if is_simulate_unsupported(&error) => HostSimulateResponse {
+            request_id: request_id.clone(),
+            would_succeed: false,
+            phase: SimulatePhase::ConnectorUnsupported,
+            preflight_allowed: true,
+            failure_reason: Some(
+                "connector does not support simulation for this operation".to_string(),
+            ),
+            denial_code: None,
+            missing_capabilities: Vec::new(),
+            cost_estimate: None,
+            availability: None,
+            duration_ms,
+            receipt: simulate_receipt_for_request(
+                &request,
+                &simulate_input,
+                SimulatePhase::ConnectorUnsupported,
+                false,
+                duration_ms,
+            )
+            .map_err(map_host_error)?,
+        },
+        Ok(Err(error)) => {
+            tracing::warn!(
+                event = "simulate_error",
+                connector_id = %connector_id,
+                operation = %operation,
+                request_id = %request_id,
+                error = %error,
+                duration_ms,
+                "simulate request failed"
+            );
+            return Err(map_host_error(error));
+        }
+        Err(_) => HostSimulateResponse {
+            request_id: request_id.clone(),
+            would_succeed: false,
+            phase: SimulatePhase::TimedOut,
+            preflight_allowed: true,
+            failure_reason: Some("simulation deadline exceeded".to_string()),
+            denial_code: None,
+            missing_capabilities: Vec::new(),
+            cost_estimate: None,
+            availability: None,
+            duration_ms,
+            receipt: simulate_receipt_for_request(
+                &request,
+                &simulate_input,
+                SimulatePhase::TimedOut,
+                false,
+                duration_ms,
+            )
+            .map_err(map_host_error)?,
+        },
+    };
+
+    record_simulate_receipt_summary(state.lifecycle.as_ref(), &response.receipt).await;
+    tracing::info!(
+        event = "simulate_response",
+        connector_id = %connector_id,
+        operation = %operation,
+        request_id = %request_id,
+        phase = ?response.phase,
+        preflight_allowed = response.preflight_allowed,
+        would_succeed = response.would_succeed,
+        receipt_id = %response.receipt.receipt_id,
+        duration_ms = response.duration_ms,
+        "simulate request complete"
+    );
+
+    Ok(Json(response))
+}
+
 async fn cancel_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<CancellationRequest>,
@@ -3887,6 +4273,19 @@ async fn receipt_query_handler(
         "processing receipt query"
     );
     Json(state.lifecycle.query_receipts(&request).await)
+}
+
+async fn simulate_receipt_query_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<SimulateReceiptQueryRequest>,
+) -> Json<SimulateReceiptQueryResponse> {
+    tracing::debug!(
+        event = "simulate_receipt_query_request",
+        connector_id = %request.connector_id,
+        operation = ?request.operation,
+        "processing simulate receipt query"
+    );
+    Json(state.lifecycle.query_simulate_receipts(&request).await)
 }
 
 async fn event_query_handler(

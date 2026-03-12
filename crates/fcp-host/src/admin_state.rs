@@ -13,8 +13,8 @@ use blake3::hash;
 use chrono::{DateTime, Utc};
 use fcp_async_core::sync::{Mutex, RwLock};
 use fcp_core::{
-    ConnectorId, CredentialId, LifecycleError, LifecycleManager, LifecycleRecord, LifecycleState,
-    LifecycleStatus, ObjectPlacementPolicy, TransitionReason,
+    ApprovalToken, CapabilityToken, ConnectorId, CredentialId, LifecycleError, LifecycleManager,
+    LifecycleRecord, LifecycleState, LifecycleStatus, ObjectPlacementPolicy, TransitionReason,
 };
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -398,7 +398,7 @@ pub struct ReceiptQueryResponse {
 
 // ── Simulate RPC types ──────────────────────────────────────────────────────
 
-/// Host admin API request for a simulation (preflight + connector simulate).
+/// Host RPC request for a simulation (preflight + connector simulate).
 ///
 /// This goes beyond the existing `/rpc/preflight` by actually reaching the
 /// connector's `simulate()` implementation. Preflight only checks
@@ -422,6 +422,12 @@ pub struct HostSimulateRequest {
     /// Principal requesting the simulation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub principal: Option<String>,
+    /// Capability token authorizing the live simulation request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability_token: Option<CapabilityToken>,
+    /// Approval tokens required for elevated live simulation requests.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub approval_tokens: Vec<ApprovalToken>,
     /// Whether to ask the connector for cost estimates.
     #[serde(default)]
     pub estimate_cost: bool,
@@ -451,7 +457,7 @@ pub enum SimulatePhase {
     TimedOut,
 }
 
-/// Host admin API response for a simulation.
+/// Host RPC response for a simulation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostSimulateResponse {
     /// Correlation request identifier.
@@ -3847,7 +3853,16 @@ impl HostAdminStateStore {
         Ok(CapabilityTokenInspection {
             token_id,
             issuer: claims.get_issuer().unwrap_or("unknown").to_string(),
-            subject: claims.get_subject().unwrap_or("unknown").to_string(),
+            subject: claims
+                .get_subject()
+                .or_else(
+                    || match claims.get(fcp_crypto::cose::fcp2_claims::PRINCIPAL_ID) {
+                        Some(ciborium::Value::Text(principal)) => Some(principal.as_str()),
+                        _ => None,
+                    },
+                )
+                .unwrap_or("unknown")
+                .to_string(),
             audience: claims
                 .get(fcp_crypto::cose::cwt_claims::AUD)
                 .and_then(|v| match v {
@@ -7042,6 +7057,8 @@ mod tests {
             input: Some(serde_json::json!({"org": "test"})),
             zone_id: Some("z:work".to_string()),
             principal: Some("agent:test".to_string()),
+            capability_token: None,
+            approval_tokens: Vec::new(),
             estimate_cost: true,
             check_availability: false,
             deadline_ms: 3000,
@@ -7051,6 +7068,8 @@ mod tests {
         let parsed: HostSimulateRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.request_id, "req-1");
         assert_eq!(parsed.connector_id, "github:saas:1.0.0");
+        assert!(parsed.capability_token.is_none());
+        assert!(parsed.approval_tokens.is_empty());
         assert!(parsed.estimate_cost);
         assert!(!parsed.check_availability);
         assert_eq!(parsed.deadline_ms, 3000);
@@ -7064,6 +7083,8 @@ mod tests {
             "operation": "list_repos"
         }"#;
         let parsed: HostSimulateRequest = serde_json::from_str(json).unwrap();
+        assert!(parsed.capability_token.is_none());
+        assert!(parsed.approval_tokens.is_empty());
         assert!(!parsed.estimate_cost);
         assert!(!parsed.check_availability);
         assert_eq!(parsed.deadline_ms, 5000);

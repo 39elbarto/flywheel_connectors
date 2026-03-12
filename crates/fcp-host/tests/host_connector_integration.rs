@@ -35,9 +35,11 @@ use fcp_host::{
     ConnectorConfigSnapshotSource, ConnectorConfigValidateRequest, ConnectorConfigValidateResponse,
     ConnectorDriftKind, ConnectorInventoryResponse, ConnectorRegistry, ConnectorSummary,
     DesiredRuntimeState, DiscoveryEndpoint, DiscoveryResponse, GateOutcome, HostAdminStateStore,
-    HostHealthResponse, HostHealthStatus, HostPreflightRequest, IntrospectionResponse,
-    ObservedRuntimeState, OperationResultStatus, PolicyEngine, PreflightRequest, PreflightResponse,
-    ReceiptQueryRequest, ReceiptQueryResponse, RecoveryAction, RolloutDecision, RolloutOutcome,
+    HostHealthResponse, HostHealthStatus, HostPreflightRequest, HostSimulateRequest,
+    HostSimulateResponse, IntrospectionResponse, ObservedRuntimeState, OperationResultStatus,
+    PolicyEngine, PreflightRequest, PreflightResponse, ReceiptQueryRequest, ReceiptQueryResponse,
+    RecoveryAction, RolloutDecision, RolloutOutcome, SimulatePhase, SimulateReceiptQueryRequest,
+    SimulateReceiptQueryResponse,
 };
 use fcp_testkit::LogCapture;
 use reqwest::header::{CACHE_CONTROL, ETAG, HeaderMap, HeaderValue, IF_NONE_MATCH, LAST_MODIFIED};
@@ -1680,6 +1682,218 @@ async fn fcp_host_binary_preflight_route_denies_missing_capability_token()
             .as_deref()
             .is_some_and(|reason| reason.contains("capability token is required"))
     );
+
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn fcp_host_binary_simulate_route_denies_missing_capability_token()
+-> Result<(), Box<dyn std::error::Error>> {
+    let connector_id = ConnectorId::from_static("fcp.test.simulate-auth:utility:1.0.0");
+    let capability_signing_key = Ed25519SigningKey::generate();
+    let capability_public_key = capability_public_key_hex(&capability_signing_key);
+    let host = HttpHostProcess::spawn_with_env(
+        vec![test_connector_config(
+            &connector_id,
+            "Simulate Auth",
+            &["test", "simulate"],
+        )],
+        &[(
+            "FCP_HOST_CAPABILITY_PUBLIC_KEY",
+            capability_public_key.as_str(),
+        )],
+    )
+    .await?;
+    let url = |path: &str| format!("{}{path}", host.base_url);
+
+    let response: HostSimulateResponse = http_post_json(
+        host.client.clone(),
+        url("/rpc/simulate"),
+        HostSimulateRequest {
+            request_id: "simulate-denied-1".to_string(),
+            connector_id: connector_id.to_string(),
+            operation: TEST_OPERATION.to_string(),
+            input: Some(json!({ "message": "hello" })),
+            zone_id: Some(ZoneId::work().to_string()),
+            principal: Some(TEST_PRINCIPAL.to_string()),
+            capability_token: None,
+            approval_tokens: Vec::new(),
+            estimate_cost: false,
+            check_availability: false,
+            deadline_ms: 5_000,
+        },
+    )
+    .await?;
+
+    assert_eq!(response.request_id, "simulate-denied-1");
+    assert!(!response.would_succeed);
+    assert_eq!(response.phase, SimulatePhase::PreflightOnly);
+    assert!(!response.preflight_allowed);
+    assert!(
+        response
+            .failure_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("capability token is required"))
+    );
+    assert_eq!(response.receipt.connector_id, connector_id.as_str());
+    assert_eq!(response.receipt.operation, TEST_OPERATION);
+    assert_eq!(response.receipt.phase, SimulatePhase::PreflightOnly);
+    assert!(!response.receipt.would_succeed);
+    assert!(response.receipt.input_digest.is_some());
+
+    let receipts: SimulateReceiptQueryResponse = http_post_json(
+        host.client.clone(),
+        url("/rpc/admin/simulate-receipts"),
+        SimulateReceiptQueryRequest {
+            connector_id: connector_id.to_string(),
+            operation: Some(TEST_OPERATION.to_string()),
+            after: None,
+            limit: 10,
+        },
+    )
+    .await?;
+    assert_eq!(receipts.receipts.len(), 1);
+    assert_eq!(receipts.total_receipts, 1);
+    assert_eq!(receipts.receipts[0].receipt_id, response.receipt.receipt_id);
+    assert_eq!(receipts.receipts[0].phase, SimulatePhase::PreflightOnly);
+    assert!(!receipts.receipts[0].would_succeed);
+
+    let logs = wait_for_log_events(
+        &host.stderr_logs,
+        &[
+            "simulate_request",
+            "simulate_response",
+            "simulate_receipt_query_request",
+        ],
+    )
+    .await?;
+    assert!(logs.iter().any(|entry| {
+        entry.get("event").and_then(Value::as_str) == Some("simulate_request")
+            && entry.get("connector_id").and_then(Value::as_str) == Some(connector_id.as_str())
+            && entry.get("request_id").and_then(Value::as_str) == Some("simulate-denied-1")
+    }));
+    assert!(logs.iter().any(|entry| {
+        entry.get("event").and_then(Value::as_str) == Some("simulate_response")
+            && entry.get("connector_id").and_then(Value::as_str) == Some(connector_id.as_str())
+            && entry.get("request_id").and_then(Value::as_str) == Some("simulate-denied-1")
+            && entry.get("phase").and_then(Value::as_str) == Some("PreflightOnly")
+            && entry.get("preflight_allowed").and_then(Value::as_bool) == Some(false)
+            && entry.get("would_succeed").and_then(Value::as_bool) == Some(false)
+    }));
+
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn fcp_host_binary_simulate_route_reaches_connector_and_records_receipt()
+-> Result<(), Box<dyn std::error::Error>> {
+    let connector_id = ConnectorId::from_static("fcp.test.simulate-live:utility:1.0.0");
+    let capability_signing_key = Ed25519SigningKey::generate();
+    let capability_public_key = capability_public_key_hex(&capability_signing_key);
+    let host = HttpHostProcess::spawn_with_env(
+        vec![test_connector_config(
+            &connector_id,
+            "Simulate Live",
+            &["test", "simulate"],
+        )],
+        &[(
+            "FCP_HOST_CAPABILITY_PUBLIC_KEY",
+            capability_public_key.as_str(),
+        )],
+    )
+    .await?;
+    let url = |path: &str| format!("{}{path}", host.base_url);
+    let (invoke_request, _) = build_invoke_request(connector_id.clone(), &capability_signing_key);
+    let preflight: PreflightResponse = http_post_json(
+        host.client.clone(),
+        url("/rpc/preflight"),
+        HostPreflightRequest {
+            request_id: RequestId::new("simulate-live-preflight"),
+            connector_id: connector_id.clone(),
+            operation: invoke_request.operation.to_string(),
+            params: Some(json!({ "message": "hello" })),
+            principal: Some(TEST_PRINCIPAL.to_string()),
+            zone_id: Some(invoke_request.zone_id.clone()),
+            capability_token: Some(invoke_request.capability_token.clone()),
+            approval_tokens: Vec::new(),
+        },
+    )
+    .await?;
+    assert!(preflight.allowed, "{preflight:?}");
+
+    let response: HostSimulateResponse = http_post_json(
+        host.client.clone(),
+        url("/rpc/simulate"),
+        HostSimulateRequest {
+            request_id: "simulate-live-1".to_string(),
+            connector_id: connector_id.to_string(),
+            operation: invoke_request.operation.to_string(),
+            input: Some(json!({ "message": "hello" })),
+            zone_id: Some(invoke_request.zone_id.to_string()),
+            principal: Some(TEST_PRINCIPAL.to_string()),
+            capability_token: Some(invoke_request.capability_token),
+            approval_tokens: Vec::new(),
+            estimate_cost: false,
+            check_availability: false,
+            deadline_ms: 5_000,
+        },
+    )
+    .await?;
+
+    assert_eq!(response.request_id, "simulate-live-1");
+    assert!(response.would_succeed, "{response:?}");
+    assert_eq!(response.phase, SimulatePhase::ConnectorReached);
+    assert!(response.preflight_allowed);
+    assert!(response.failure_reason.is_none());
+    assert!(response.denial_code.is_none());
+    assert!(response.missing_capabilities.is_empty());
+    assert_eq!(response.receipt.connector_id, connector_id.as_str());
+    assert_eq!(response.receipt.operation, TEST_OPERATION);
+    assert_eq!(response.receipt.phase, SimulatePhase::ConnectorReached);
+    assert!(response.receipt.would_succeed);
+    assert!(response.receipt.input_digest.is_some());
+
+    let receipts: SimulateReceiptQueryResponse = http_post_json(
+        host.client.clone(),
+        url("/rpc/admin/simulate-receipts"),
+        SimulateReceiptQueryRequest {
+            connector_id: connector_id.to_string(),
+            operation: Some(TEST_OPERATION.to_string()),
+            after: None,
+            limit: 10,
+        },
+    )
+    .await?;
+    assert_eq!(receipts.receipts.len(), 1);
+    assert_eq!(receipts.total_receipts, 1);
+    assert_eq!(receipts.receipts[0].receipt_id, response.receipt.receipt_id);
+    assert_eq!(receipts.receipts[0].phase, SimulatePhase::ConnectorReached);
+    assert!(receipts.receipts[0].would_succeed);
+
+    let logs = wait_for_log_events(
+        &host.stderr_logs,
+        &[
+            "simulate_request",
+            "simulate_response",
+            "simulate_receipt_query_request",
+        ],
+    )
+    .await?;
+    assert!(logs.iter().any(|entry| {
+        entry.get("event").and_then(Value::as_str) == Some("simulate_request")
+            && entry.get("connector_id").and_then(Value::as_str) == Some(connector_id.as_str())
+            && entry.get("request_id").and_then(Value::as_str) == Some("simulate-live-1")
+    }));
+    assert!(logs.iter().any(|entry| {
+        entry.get("event").and_then(Value::as_str) == Some("simulate_response")
+            && entry.get("connector_id").and_then(Value::as_str) == Some(connector_id.as_str())
+            && entry.get("request_id").and_then(Value::as_str) == Some("simulate-live-1")
+            && entry.get("phase").and_then(Value::as_str) == Some("ConnectorReached")
+            && entry.get("preflight_allowed").and_then(Value::as_bool) == Some(true)
+            && entry.get("would_succeed").and_then(Value::as_bool) == Some(true)
+            && entry.get("receipt_id").and_then(Value::as_str)
+                == Some(response.receipt.receipt_id.as_str())
+    }));
 
     Ok(())
 }

@@ -1466,10 +1466,14 @@ mod tests {
 
     #[test]
     fn strategy_delay_multiplier_ordering() {
-        assert!(ThrottleStrategy::Aggressive.delay_multiplier()
-            < ThrottleStrategy::Balanced.delay_multiplier());
-        assert!(ThrottleStrategy::Balanced.delay_multiplier()
-            < ThrottleStrategy::Conservative.delay_multiplier());
+        assert!(
+            ThrottleStrategy::Aggressive.delay_multiplier()
+                < ThrottleStrategy::Balanced.delay_multiplier()
+        );
+        assert!(
+            ThrottleStrategy::Balanced.delay_multiplier()
+                < ThrottleStrategy::Conservative.delay_multiplier()
+        );
     }
 
     // ── ThrottleConfig (extended) ────────────────────────────────
@@ -1808,12 +1812,7 @@ mod tests {
             "gh",
             vec![
                 PoolSnapshot::new("core", 100, 5000, None),
-                PoolSnapshot::new(
-                    "search",
-                    25,
-                    30,
-                    Some(Utc::now() + Duration::minutes(1)),
-                ),
+                PoolSnapshot::new("search", 25, 30, Some(Utc::now() + Duration::minutes(1))),
             ],
         );
         let config = ThrottleConfig::balanced();
@@ -1826,18 +1825,8 @@ mod tests {
         let limits = ConnectorRateLimits::new(
             "gh",
             vec![
-                PoolSnapshot::new(
-                    "core",
-                    4200,
-                    5000,
-                    Some(Utc::now() + Duration::minutes(10)),
-                ),
-                PoolSnapshot::new(
-                    "search",
-                    29,
-                    30,
-                    Some(Utc::now() + Duration::seconds(20)),
-                ),
+                PoolSnapshot::new("core", 4200, 5000, Some(Utc::now() + Duration::minutes(10))),
+                PoolSnapshot::new("search", 29, 30, Some(Utc::now() + Duration::seconds(20))),
             ],
         );
         let config = ThrottleConfig::balanced();
@@ -2013,18 +2002,8 @@ mod tests {
         let limits = ConnectorRateLimits::new(
             "gh",
             vec![
-                PoolSnapshot::new(
-                    "core",
-                    4000,
-                    5000,
-                    Some(Utc::now() + Duration::minutes(10)),
-                ),
-                PoolSnapshot::new(
-                    "search",
-                    25,
-                    30,
-                    Some(Utc::now() + Duration::minutes(1)),
-                ),
+                PoolSnapshot::new("core", 4000, 5000, Some(Utc::now() + Duration::minutes(10))),
+                PoolSnapshot::new("search", 25, 30, Some(Utc::now() + Duration::minutes(1))),
             ],
         );
         let config = ThrottleConfig::balanced();
@@ -2037,10 +2016,8 @@ mod tests {
 
     #[test]
     fn schedule_all_quota_used_no_reset() {
-        let limits = ConnectorRateLimits::new(
-            "gh",
-            vec![PoolSnapshot::new("core", 5000, 5000, None)],
-        );
+        let limits =
+            ConnectorRateLimits::new("gh", vec![PoolSnapshot::new("core", 5000, 5000, None)]);
         let config = ThrottleConfig::balanced();
         let sched = schedule_operations(&limits, 10, &config);
         // min_remaining = 0, ops_before_wait = 0
@@ -2100,10 +2077,7 @@ mod tests {
 
     #[test]
     fn pipeline_cost_empty_ops() {
-        let limits = ConnectorRateLimits::new(
-            "gh",
-            vec![PoolSnapshot::new("core", 0, 5000, None)],
-        );
+        let limits = ConnectorRateLimits::new("gh", vec![PoolSnapshot::new("core", 0, 5000, None)]);
         let costs = estimate_pipeline_cost(&limits, &[]);
         assert!(costs.fits_in_quota);
         assert_eq!(costs.resets_needed, 0);
@@ -2115,18 +2089,8 @@ mod tests {
         let limits = ConnectorRateLimits::new(
             "gh",
             vec![
-                PoolSnapshot::new(
-                    "core",
-                    4990,
-                    5000,
-                    Some(Utc::now() + Duration::minutes(1)),
-                ),
-                PoolSnapshot::new(
-                    "search",
-                    29,
-                    30,
-                    Some(Utc::now() + Duration::minutes(1)),
-                ),
+                PoolSnapshot::new("core", 4990, 5000, Some(Utc::now() + Duration::minutes(1))),
+                PoolSnapshot::new("search", 29, 30, Some(Utc::now() + Duration::minutes(1))),
             ],
         );
         let costs = estimate_pipeline_cost(
@@ -2134,26 +2098,25 @@ mod tests {
             &[("core".to_string(), 100), ("search".to_string(), 50)],
         );
         assert!(!costs.fits_in_quota);
-        let bottlenecks: Vec<_> = costs.pool_costs.iter().filter(|p| p.is_bottleneck).collect();
+        let bottlenecks: Vec<_> = costs
+            .pool_costs
+            .iter()
+            .filter(|p| p.is_bottleneck)
+            .collect();
         assert_eq!(bottlenecks.len(), 2);
     }
 
     #[test]
     fn pipeline_cost_zero_ops_per_pool() {
-        let limits = ConnectorRateLimits::new(
-            "gh",
-            vec![PoolSnapshot::new("core", 0, 5000, None)],
-        );
+        let limits = ConnectorRateLimits::new("gh", vec![PoolSnapshot::new("core", 0, 5000, None)]);
         let costs = estimate_pipeline_cost(&limits, &[("core".to_string(), 0)]);
         assert!(costs.fits_in_quota);
     }
 
     #[test]
     fn pipeline_cost_pool_cost_fields() {
-        let limits = ConnectorRateLimits::new(
-            "gh",
-            vec![PoolSnapshot::new("core", 100, 5000, None)],
-        );
+        let limits =
+            ConnectorRateLimits::new("gh", vec![PoolSnapshot::new("core", 100, 5000, None)]);
         let costs = estimate_pipeline_cost(&limits, &[("core".to_string(), 50)]);
         assert_eq!(costs.pool_costs.len(), 1);
         let pc = &costs.pool_costs[0];
@@ -2165,10 +2128,7 @@ mod tests {
 
     #[test]
     fn pipeline_cost_summary_includes_duration_when_fits() {
-        let limits = ConnectorRateLimits::new(
-            "gh",
-            vec![PoolSnapshot::new("core", 0, 5000, None)],
-        );
+        let limits = ConnectorRateLimits::new("gh", vec![PoolSnapshot::new("core", 0, 5000, None)]);
         let costs = estimate_pipeline_cost(&limits, &[("core".to_string(), 10)]);
         let summary = costs.summary();
         assert!(summary.contains("fits"));

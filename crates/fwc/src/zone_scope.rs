@@ -1597,8 +1597,14 @@ mod tests {
     #[test]
     fn violation_reason_all_variants_display() {
         let variants = [
-            (ViolationReason::ConnectorNotInZone, "connector not authorized in zone"),
-            (ViolationReason::OperationDenied, "operation explicitly denied"),
+            (
+                ViolationReason::ConnectorNotInZone,
+                "connector not authorized in zone",
+            ),
+            (
+                ViolationReason::OperationDenied,
+                "operation explicitly denied",
+            ),
             (ViolationReason::TokenExpired, "capability token expired"),
             (ViolationReason::NoToken, "no capability token provided"),
             (ViolationReason::UnknownZone, "zone not recognized"),
@@ -1665,8 +1671,12 @@ mod tests {
 
     #[test]
     fn violation_serde_roundtrip_full() {
-        let v = ZoneViolation::new("vault.secret", zone_private(), ViolationReason::TokenExpired)
-            .with_available_in(vec![zone_work(), zone_public()]);
+        let v = ZoneViolation::new(
+            "vault.secret",
+            zone_private(),
+            ViolationReason::TokenExpired,
+        )
+        .with_available_in(vec![zone_work(), zone_public()]);
         let json = serde_json::to_string(&v).unwrap();
         let v2: ZoneViolation = serde_json::from_str(&json).unwrap();
         assert_eq!(v2.tool, "vault.secret");
@@ -1712,7 +1722,11 @@ mod tests {
         reg.register_tool(ZoneScopedTool::new("github", "list_repos").with_zone(zone_work()));
         reg.register_tool(ZoneScopedTool::new("github", "delete_repo").with_zone(zone_work()));
         assert_eq!(reg.tool_count(), 3);
-        assert_eq!(reg.tools_for_connector_in_zone("github", &zone_work()).len(), 3);
+        assert_eq!(
+            reg.tools_for_connector_in_zone("github", &zone_work())
+                .len(),
+            3
+        );
     }
 
     #[test]
@@ -1784,7 +1798,9 @@ mod tests {
     fn validate_all_tools_in_zone_with_valid_token() {
         let reg = sample_registry();
         let token = sample_token(zone_work());
-        assert!(validate_tool_call(&reg, "github.create_issue", &zone_work(), Some(&token)).is_ok());
+        assert!(
+            validate_tool_call(&reg, "github.create_issue", &zone_work(), Some(&token)).is_ok()
+        );
         assert!(validate_tool_call(&reg, "github.list_repos", &zone_work(), Some(&token)).is_ok());
         assert!(validate_tool_call(&reg, "slack.send_message", &zone_work(), Some(&token)).is_ok());
     }
@@ -1793,7 +1809,9 @@ mod tests {
     fn validate_private_tool_requires_private_token() {
         let reg = sample_registry();
         let token = sample_token(zone_private());
-        assert!(validate_tool_call(&reg, "vault.get_secret", &zone_private(), Some(&token)).is_ok());
+        assert!(
+            validate_tool_call(&reg, "vault.get_secret", &zone_private(), Some(&token)).is_ok()
+        );
     }
 
     #[test]
@@ -1803,14 +1821,18 @@ mod tests {
         let result = validate_tool_call(&reg, "vault.get_secret", &zone_work(), Some(&token));
         assert!(result.is_err());
         // vault.get_secret is only in z:private, not z:work
-        assert_eq!(result.unwrap_err().reason, ViolationReason::ConnectorNotInZone);
+        assert_eq!(
+            result.unwrap_err().reason,
+            ViolationReason::ConnectorNotInZone
+        );
     }
 
     #[test]
     fn validate_nonexistent_tool_fails() {
         let reg = sample_registry();
         let token = sample_token(zone_work());
-        let err = validate_tool_call(&reg, "does.not.exist", &zone_work(), Some(&token)).unwrap_err();
+        let err =
+            validate_tool_call(&reg, "does.not.exist", &zone_work(), Some(&token)).unwrap_err();
         assert_eq!(err.reason, ViolationReason::ConnectorNotInZone);
         assert_eq!(err.tool, "does.not.exist");
     }
@@ -1829,7 +1851,9 @@ mod tests {
         let token = sample_token(zone_work())
             .with_connector("github")
             .with_connector("slack");
-        assert!(validate_tool_call(&reg, "github.create_issue", &zone_work(), Some(&token)).is_ok());
+        assert!(
+            validate_tool_call(&reg, "github.create_issue", &zone_work(), Some(&token)).is_ok()
+        );
         assert!(validate_tool_call(&reg, "slack.send_message", &zone_work(), Some(&token)).is_ok());
     }
 
@@ -1840,7 +1864,9 @@ mod tests {
             .with_connector("github")
             .with_denied_operation("create_issue");
         // github allowed, but create_issue denied
-        assert!(validate_tool_call(&reg, "github.create_issue", &zone_work(), Some(&token)).is_err());
+        assert!(
+            validate_tool_call(&reg, "github.create_issue", &zone_work(), Some(&token)).is_err()
+        );
         // list_repos should still work
         assert!(validate_tool_call(&reg, "github.list_repos", &zone_work(), Some(&token)).is_ok());
     }
@@ -2018,7 +2044,8 @@ mod tests {
         let reg = sample_registry();
         let token = sample_token(zone_public());
         // Token for public, validating against work
-        let err = validate_tool_call(&reg, "github.create_issue", &zone_work(), Some(&token)).unwrap_err();
+        let err = validate_tool_call(&reg, "github.create_issue", &zone_work(), Some(&token))
+            .unwrap_err();
         assert_eq!(err.reason, ViolationReason::UnknownZone);
     }
 
@@ -2030,7 +2057,11 @@ mod tests {
         let filtered = filter_tools_for_zone(&reg.tools, &zone_work(), &token);
         for tool in &filtered {
             let result = validate_tool_call(&reg, &tool.name, &zone_work(), Some(&token));
-            assert!(result.is_ok(), "validate failed for filtered tool {}", tool.name);
+            assert!(
+                result.is_ok(),
+                "validate failed for filtered tool {}",
+                tool.name
+            );
         }
     }
 
@@ -2084,8 +2115,7 @@ mod tests {
         let mut reg = ZoneRegistry::new();
         for i in 0..100 {
             reg.register_tool(
-                ZoneScopedTool::new(format!("conn_{i}"), format!("op_{i}"))
-                    .with_zone(zone_work()),
+                ZoneScopedTool::new(format!("conn_{i}"), format!("op_{i}")).with_zone(zone_work()),
             );
         }
         assert_eq!(reg.tool_count(), 100);

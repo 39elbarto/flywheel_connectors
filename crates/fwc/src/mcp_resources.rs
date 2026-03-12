@@ -1382,8 +1382,8 @@ mod tests {
 
     #[test]
     fn resource_clone_independence() {
-        let r = McpResource::new("resource://a", "A", "application/json")
-            .with_description("original");
+        let r =
+            McpResource::new("resource://a", "A", "application/json").with_description("original");
         let mut r2 = r.clone();
         r2.description = "modified".to_string();
         assert_eq!(r.description, "original");
@@ -1450,7 +1450,10 @@ mod tests {
         ];
         for p in &patterns {
             let uri = p.uri(None);
-            assert!(uri.contains("{id}"), "Pattern {p:?} should contain template");
+            assert!(
+                uri.contains("{id}"),
+                "Pattern {p:?} should contain template"
+            );
         }
     }
 
@@ -1496,17 +1499,49 @@ mod tests {
 
     #[test]
     fn resource_pattern_descriptions_all() {
-        assert!(ResourcePattern::ConnectorHealth.description().contains("health"));
-        assert!(ResourcePattern::ConnectorRateLimits.description().contains("rate limit") ||
-                ResourcePattern::ConnectorRateLimits.description().contains("Rate limit"));
-        assert!(ResourcePattern::ConnectorOperations.description().contains("operation"));
-        assert!(ResourcePattern::ConnectorHistory.description().contains("audit") ||
-                ResourcePattern::ConnectorHistory.description().contains("log") ||
-                ResourcePattern::ConnectorHistory.description().contains("history") ||
-                ResourcePattern::ConnectorHistory.description().contains("Recent"));
-        assert!(ResourcePattern::ConnectorsStatus.description().contains("dashboard") ||
-                ResourcePattern::ConnectorsStatus.description().contains("overview") ||
-                ResourcePattern::ConnectorsStatus.description().contains("Cross"));
+        assert!(
+            ResourcePattern::ConnectorHealth
+                .description()
+                .contains("health")
+        );
+        assert!(
+            ResourcePattern::ConnectorRateLimits
+                .description()
+                .contains("rate limit")
+                || ResourcePattern::ConnectorRateLimits
+                    .description()
+                    .contains("Rate limit")
+        );
+        assert!(
+            ResourcePattern::ConnectorOperations
+                .description()
+                .contains("operation")
+        );
+        assert!(
+            ResourcePattern::ConnectorHistory
+                .description()
+                .contains("audit")
+                || ResourcePattern::ConnectorHistory
+                    .description()
+                    .contains("log")
+                || ResourcePattern::ConnectorHistory
+                    .description()
+                    .contains("history")
+                || ResourcePattern::ConnectorHistory
+                    .description()
+                    .contains("Recent")
+        );
+        assert!(
+            ResourcePattern::ConnectorsStatus
+                .description()
+                .contains("dashboard")
+                || ResourcePattern::ConnectorsStatus
+                    .description()
+                    .contains("overview")
+                || ResourcePattern::ConnectorsStatus
+                    .description()
+                    .contains("Cross")
+        );
     }
 
     #[test]
@@ -1693,8 +1728,11 @@ mod tests {
     fn prompt_pattern_to_prompt_sets_description() {
         let p = PromptPattern::HowToUse.to_prompt("github", None);
         assert!(!p.description.is_empty());
-        assert!(p.description.contains("Usage") || p.description.contains("usage") ||
-                p.description.contains("guide"));
+        assert!(
+            p.description.contains("Usage")
+                || p.description.contains("usage")
+                || p.description.contains("guide")
+        );
     }
 
     #[test]
@@ -1860,25 +1898,45 @@ mod tests {
     fn registry_connector_resources_have_correct_uris() {
         let mut reg = McpResourceRegistry::new();
         reg.register_connector("jira");
-        assert!(reg.find_resource("resource://connector/jira/health").is_some());
-        assert!(reg.find_resource("resource://connector/jira/rate-limits").is_some());
-        assert!(reg.find_resource("resource://connector/jira/operations").is_some());
-        assert!(reg.find_resource("resource://connector/jira/history").is_some());
+        assert!(
+            reg.find_resource("resource://connector/jira/health")
+                .is_some()
+        );
+        assert!(
+            reg.find_resource("resource://connector/jira/rate-limits")
+                .is_some()
+        );
+        assert!(
+            reg.find_resource("resource://connector/jira/operations")
+                .is_some()
+        );
+        assert!(
+            reg.find_resource("resource://connector/jira/history")
+                .is_some()
+        );
     }
 
     #[test]
     fn registry_connector_prompts_have_correct_uris() {
         let mut reg = McpResourceRegistry::new();
         reg.register_connector("jira");
-        assert!(reg.find_prompt("prompt://connector/jira/how-to-use").is_some());
-        assert!(reg.find_prompt("prompt://connector/jira/troubleshoot").is_some());
+        assert!(
+            reg.find_prompt("prompt://connector/jira/how-to-use")
+                .is_some()
+        );
+        assert!(
+            reg.find_prompt("prompt://connector/jira/troubleshoot")
+                .is_some()
+        );
     }
 
     #[test]
     fn registry_find_resource_returns_correct_data() {
         let mut reg = McpResourceRegistry::new();
         reg.register_connector("github");
-        let r = reg.find_resource("resource://connector/github/health").unwrap();
+        let r = reg
+            .find_resource("resource://connector/github/health")
+            .unwrap();
         assert_eq!(r.name, "Connector Health");
         assert_eq!(r.mime_type, "application/json");
         assert!(!r.description.is_empty());
@@ -1888,7 +1946,9 @@ mod tests {
     fn registry_find_prompt_returns_correct_data() {
         let mut reg = McpResourceRegistry::new();
         reg.register_connector("github");
-        let p = reg.find_prompt("prompt://connector/github/how-to-use").unwrap();
+        let p = reg
+            .find_prompt("prompt://connector/github/how-to-use")
+            .unwrap();
         assert_eq!(p.name, "How to Use");
         assert!(!p.description.is_empty());
     }
@@ -1897,7 +1957,9 @@ mod tests {
     fn registry_operation_prompt_has_arguments() {
         let mut reg = McpResourceRegistry::new();
         reg.register_operation_prompt("github", "create_issue");
-        let p = reg.find_prompt("prompt://connector/github/op/create_issue/example").unwrap();
+        let p = reg
+            .find_prompt("prompt://connector/github/op/create_issue/example")
+            .unwrap();
         assert!(!p.arguments.is_empty());
         assert_eq!(p.arguments[0].name, "format");
     }
@@ -2184,9 +2246,7 @@ mod tests {
 
     #[test]
     fn format_prompts_description_shown() {
-        let prompts = vec![
-            McpPrompt::new("prompt://x", "X").with_description("the description"),
-        ];
+        let prompts = vec![McpPrompt::new("prompt://x", "X").with_description("the description")];
         let s = format_prompt_list(&prompts);
         assert!(s.contains("the description"));
     }
@@ -2194,8 +2254,7 @@ mod tests {
     #[test]
     fn format_resources_line_structure() {
         let resources = vec![
-            McpResource::new("resource://a", "A", "application/json")
-                .with_description("Alpha"),
+            McpResource::new("resource://a", "A", "application/json").with_description("Alpha"),
         ];
         let s = format_resource_list(&resources);
         let lines: Vec<&str> = s.lines().collect();
@@ -2206,9 +2265,7 @@ mod tests {
 
     #[test]
     fn format_prompts_line_structure() {
-        let prompts = vec![
-            McpPrompt::new("prompt://a", "A").with_description("Alpha"),
-        ];
+        let prompts = vec![McpPrompt::new("prompt://a", "A").with_description("Alpha")];
         let s = format_prompt_list(&prompts);
         let lines: Vec<&str> = s.lines().collect();
         assert_eq!(lines.len(), 2);
@@ -2219,8 +2276,7 @@ mod tests {
     #[test]
     fn format_resources_dash_separator() {
         let resources = vec![
-            McpResource::new("resource://x", "X", "application/json")
-                .with_description("desc"),
+            McpResource::new("resource://x", "X", "application/json").with_description("desc"),
         ];
         let s = format_resource_list(&resources);
         // Each resource line has " — " separator
@@ -2229,9 +2285,7 @@ mod tests {
 
     #[test]
     fn format_prompts_dash_separator() {
-        let prompts = vec![
-            McpPrompt::new("prompt://x", "X").with_description("desc"),
-        ];
+        let prompts = vec![McpPrompt::new("prompt://x", "X").with_description("desc")];
         let s = format_prompt_list(&prompts);
         assert!(s.contains(" — "));
     }

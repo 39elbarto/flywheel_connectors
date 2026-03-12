@@ -1658,7 +1658,8 @@ mod tests {
             RecipeCategory::Monitoring,
         ] {
             let display = cat.to_string();
-            let serde_val: String = serde_json::from_value(serde_json::to_value(cat).unwrap()).unwrap();
+            let serde_val: String =
+                serde_json::from_value(serde_json::to_value(cat).unwrap()).unwrap();
             assert_eq!(display, serde_val, "display vs serde mismatch for {cat:?}");
         }
     }
@@ -2076,7 +2077,11 @@ mod tests {
     #[test]
     fn builtin_deploy_announce_has_optional_param() {
         let r = recipe_deploy_announce();
-        let env_param = r.parameters.iter().find(|p| p.name == "environment").unwrap();
+        let env_param = r
+            .parameters
+            .iter()
+            .find(|p| p.name == "environment")
+            .unwrap();
         assert!(!env_param.required);
         assert_eq!(env_param.default.as_deref(), Some("production"));
     }
@@ -2126,7 +2131,11 @@ mod tests {
     #[test]
     fn builtin_sync_contacts_continue_on_error() {
         let r = recipe_sync_contacts();
-        let sync_step = r.steps.iter().find(|s| s.connector == "google-contacts").unwrap();
+        let sync_step = r
+            .steps
+            .iter()
+            .find(|s| s.connector == "google-contacts")
+            .unwrap();
         assert!(sync_step.continue_on_error);
     }
 
@@ -2161,7 +2170,11 @@ mod tests {
     fn builtin_rotate_secrets_optional_params() {
         let r = recipe_rotate_secrets();
         assert!(r.parameters.iter().all(|p| !p.required));
-        let threshold = r.parameters.iter().find(|p| p.name == "days_threshold").unwrap();
+        let threshold = r
+            .parameters
+            .iter()
+            .find(|p| p.name == "days_threshold")
+            .unwrap();
         assert_eq!(threshold.default.as_deref(), Some("7"));
     }
 
@@ -2221,8 +2234,16 @@ mod tests {
             .with_step(RecipeStep::new("bad-op", "github", ""))
             .with_step(RecipeStep::new("bad-conn", "slack", "o"));
         let errors = validate_recipe(&r);
-        assert!(errors.iter().any(|e| e.contains("bad-op") && e.contains("no operation")));
-        assert!(errors.iter().any(|e| e.contains("bad-conn") && e.contains("not in required_connectors")));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("bad-op") && e.contains("no operation"))
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("bad-conn") && e.contains("not in required_connectors"))
+        );
     }
 
     #[test]
@@ -2277,7 +2298,10 @@ mod tests {
     fn format_summary_all_builtins() {
         for recipe in builtin_recipes() {
             let summary = format_recipe_summary(&recipe);
-            assert!(summary.contains(&recipe.id), "summary should contain recipe id");
+            assert!(
+                summary.contains(&recipe.id),
+                "summary should contain recipe id"
+            );
             assert!(summary.contains("steps"), "summary should contain 'steps'");
         }
     }
@@ -2295,8 +2319,7 @@ mod tests {
 
     #[test]
     fn format_detail_step_numbering() {
-        let mut r = Recipe::new("t", "T", RecipeCategory::Development)
-            .with_connector("c");
+        let mut r = Recipe::new("t", "T", RecipeCategory::Development).with_connector("c");
         for i in 0..5 {
             r = r.with_step(RecipeStep::new(format!("step{i}"), "c", "op"));
         }

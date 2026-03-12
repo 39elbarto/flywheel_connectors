@@ -1233,7 +1233,9 @@ mod tests {
     fn summary_ne_when_event_type_counts_differ() {
         let r1 = make_report(0, 0, vec![]);
         let mut r2 = make_report(0, 0, vec![]);
-        r2.summary.event_type_counts.insert("new_type".to_string(), 1);
+        r2.summary
+            .event_type_counts
+            .insert("new_type".to_string(), 1);
         assert_ne!(r1.summary, r2.summary);
     }
 
@@ -1241,7 +1243,9 @@ mod tests {
     fn summary_ne_when_expected_decision_counts_differ() {
         let r1 = make_report(0, 0, vec![]);
         let mut r2 = make_report(0, 0, vec![]);
-        r2.summary.expected_decision_counts.insert("allow".to_string(), 1);
+        r2.summary
+            .expected_decision_counts
+            .insert("allow".to_string(), 1);
         assert_ne!(r1.summary, r2.summary);
     }
 
@@ -1249,7 +1253,9 @@ mod tests {
     fn summary_ne_when_actual_decision_counts_differ() {
         let r1 = make_report(0, 0, vec![]);
         let mut r2 = make_report(0, 0, vec![]);
-        r2.summary.actual_decision_counts.insert("deny".to_string(), 1);
+        r2.summary
+            .actual_decision_counts
+            .insert("deny".to_string(), 1);
         assert_ne!(r1.summary, r2.summary);
     }
 

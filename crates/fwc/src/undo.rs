@@ -1827,7 +1827,10 @@ mod tests {
         let reg = UndoRegistry::new();
         let check = check_reversibility(&reg, "slack.send_message");
         assert!(check.reversible);
-        assert_eq!(check.inverse_operation.as_deref(), Some("slack.delete_message"));
+        assert_eq!(
+            check.inverse_operation.as_deref(),
+            Some("slack.delete_message")
+        );
     }
 
     #[test]
@@ -1835,7 +1838,10 @@ mod tests {
         let reg = UndoRegistry::new();
         let check = check_reversibility(&reg, "kubernetes.create_pod");
         assert!(check.reversible);
-        assert_eq!(check.inverse_operation.as_deref(), Some("kubernetes.delete_pod"));
+        assert_eq!(
+            check.inverse_operation.as_deref(),
+            Some("kubernetes.delete_pod")
+        );
     }
 
     #[test]
@@ -1859,7 +1865,10 @@ mod tests {
         let reg = UndoRegistry::new();
         let check = check_reversibility(&reg, "terraform.apply");
         assert!(check.reversible);
-        assert_eq!(check.inverse_operation.as_deref(), Some("terraform.destroy"));
+        assert_eq!(
+            check.inverse_operation.as_deref(),
+            Some("terraform.destroy")
+        );
     }
 
     #[test]

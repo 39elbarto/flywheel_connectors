@@ -2910,4 +2910,967 @@ mod tests {
         let dbg = format!("{err:?}");
         assert!(dbg.contains("ValidationError"));
     }
+
+    // ── validate_input: additional edge cases ───────────────────────────
+
+    #[test]
+    fn validate_input_boolean_type_mismatch() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "active": { "type": "boolean" }
+            }
+        });
+        let input = json!({ "active": "yes" });
+        let errors = validate_input(&schema, &input);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].path, "active");
+        assert!(errors[0].expected.contains("boolean"));
+        assert!(errors[0].actual.contains("string"));
+    }
+
+    #[test]
+    fn validate_input_array_type_mismatch() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "tags": { "type": "array" }
+            }
+        });
+        let input = json!({ "tags": "not-an-array" });
+        let errors = validate_input(&schema, &input);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].expected.contains("array"));
+        assert!(errors[0].actual.contains("string"));
+    }
+
+    #[test]
+    fn validate_input_object_type_mismatch() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "meta": { "type": "object" }
+            }
+        });
+        let input = json!({ "meta": 42 });
+        let errors = validate_input(&schema, &input);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].expected.contains("object"));
+        assert!(errors[0].actual.contains("number"));
+    }
+
+    #[test]
+    fn validate_input_null_type_accepted_for_null_schema() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "result": { "type": "null" }
+            }
+        });
+        let input = json!({ "result": null });
+        let errors = validate_input(&schema, &input);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn validate_input_null_type_rejects_non_null() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "result": { "type": "null" }
+            }
+        });
+        let input = json!({ "result": "something" });
+        let errors = validate_input(&schema, &input);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].expected.contains("null"));
+    }
+
+    #[test]
+    fn validate_input_integer_whole_float_accepted() {
+        // 3.0 has fract() == 0 so it is treated as integer
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "count": { "type": "integer" }
+            }
+        });
+        let input = json!({ "count": 3.0 });
+        let errors = validate_input(&schema, &input);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn validate_input_minimum_at_boundary_valid() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "score": { "type": "number", "minimum": 0.0 }
+            }
+        });
+        let input = json!({ "score": 0.0 });
+        let errors = validate_input(&schema, &input);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn validate_input_maximum_at_boundary_valid() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "score": { "type": "number", "maximum": 100.0 }
+            }
+        });
+        let input = json!({ "score": 100.0 });
+        let errors = validate_input(&schema, &input);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn validate_input_minimum_and_maximum_both_violated() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "score": { "type": "number", "minimum": 10.0, "maximum": 20.0 }
+            }
+        });
+        // 5 is below minimum
+        let input = json!({ "score": 5.0 });
+        let errors = validate_input(&schema, &input);
+        assert!(errors.iter().any(|e| e.expected.contains(">= 10")));
+    }
+
+    #[test]
+    fn validate_input_string_field_ok() {
+        let schema = json!({
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+                "name": { "type": "string" }
+            }
+        });
+        let input = json!({ "name": "hello" });
+        let errors = validate_input(&schema, &input);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn validate_input_number_type_accepted_for_float() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "ratio": { "type": "number" }
+            }
+        });
+        let input = json!({ "ratio": 3.14 });
+        let errors = validate_input(&schema, &input);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn validate_input_enum_integer_value_accepted() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "code": { "enum": [1, 2, 3] }
+            }
+        });
+        let input = json!({ "code": 2 });
+        let errors = validate_input(&schema, &input);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn validate_input_enum_integer_value_rejected() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "code": { "enum": [1, 2, 3] }
+            }
+        });
+        let input = json!({ "code": 5 });
+        let errors = validate_input(&schema, &input);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].fix.contains("code"));
+    }
+
+    #[test]
+    fn validate_input_deeply_nested_missing_required() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "outer": {
+                    "type": "object",
+                    "required": ["inner"],
+                    "properties": {
+                        "inner": { "type": "string" }
+                    }
+                }
+            }
+        });
+        let input = json!({ "outer": {} });
+        let errors = validate_input(&schema, &input);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].path, "outer.inner");
+    }
+
+    #[test]
+    fn validate_input_multiple_array_items_each_validated() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "nums": {
+                    "type": "array",
+                    "items": { "type": "integer" }
+                }
+            }
+        });
+        let input = json!({ "nums": [1, "two", 3] });
+        let errors = validate_input(&schema, &input);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].path, "nums[1]");
+        assert!(errors[0].expected.contains("integer"));
+    }
+
+    #[test]
+    fn validate_input_missing_multiple_required() {
+        let schema = json!({
+            "type": "object",
+            "required": ["a", "b", "c"],
+            "properties": {
+                "a": { "type": "string" },
+                "b": { "type": "string" },
+                "c": { "type": "string" }
+            }
+        });
+        let input = json!({});
+        let errors = validate_input(&schema, &input);
+        assert_eq!(errors.len(), 3);
+        let paths: Vec<&str> = errors.iter().map(|e| e.path.as_str()).collect();
+        assert!(paths.contains(&"a"));
+        assert!(paths.contains(&"b"));
+        assert!(paths.contains(&"c"));
+    }
+
+    #[test]
+    fn validate_input_extra_fields_not_flagged() {
+        let schema = json!({
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+                "name": { "type": "string" }
+            }
+        });
+        // extra_field not in schema — should not trigger an error
+        let input = json!({ "name": "Alice", "extra_field": 42 });
+        let errors = validate_input(&schema, &input);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn validate_input_no_schema_type_no_error() {
+        // Schema with no type constraint; any value is accepted
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "anything": {}
+            }
+        });
+        let input = json!({ "anything": [1, 2, 3] });
+        let errors = validate_input(&schema, &input);
+        assert!(errors.is_empty());
+    }
+
+    // ── validate_type direct tests ──────────────────────────────────────
+
+    #[test]
+    fn validate_type_string_ok() {
+        let mut errors = Vec::new();
+        validate_type(&json!({"type": "string"}), &json!("hello"), "f", &mut errors);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn validate_type_string_fail() {
+        let mut errors = Vec::new();
+        validate_type(&json!({"type": "string"}), &json!(42), "f", &mut errors);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].expected.contains("string"));
+        assert!(errors[0].actual.contains("number"));
+    }
+
+    #[test]
+    fn validate_type_boolean_ok() {
+        let mut errors = Vec::new();
+        validate_type(&json!({"type": "boolean"}), &json!(true), "f", &mut errors);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn validate_type_boolean_fail() {
+        let mut errors = Vec::new();
+        validate_type(&json!({"type": "boolean"}), &json!("true"), "f", &mut errors);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].expected.contains("boolean"));
+    }
+
+    #[test]
+    fn validate_type_number_ok() {
+        let mut errors = Vec::new();
+        validate_type(&json!({"type": "number"}), &json!(3.14), "f", &mut errors);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn validate_type_array_ok() {
+        let mut errors = Vec::new();
+        validate_type(&json!({"type": "array"}), &json!([1, 2]), "f", &mut errors);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn validate_type_array_fail() {
+        let mut errors = Vec::new();
+        validate_type(&json!({"type": "array"}), &json!({}), "f", &mut errors);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].expected.contains("array"));
+        assert!(errors[0].actual.contains("object"));
+    }
+
+    #[test]
+    fn validate_type_object_fail_with_array() {
+        let mut errors = Vec::new();
+        validate_type(&json!({"type": "object"}), &json!([1, 2]), "f", &mut errors);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].expected.contains("object"));
+        assert!(errors[0].actual.contains("array"));
+    }
+
+    #[test]
+    fn validate_type_null_fail_with_boolean() {
+        let mut errors = Vec::new();
+        validate_type(&json!({"type": "null"}), &json!(false), "f", &mut errors);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].expected.contains("null"));
+        assert!(errors[0].actual.contains("boolean"));
+    }
+
+    #[test]
+    fn validate_type_unknown_type_string_accepted() {
+        // Any unrecognized type keyword -> accepted (no error)
+        let mut errors = Vec::new();
+        validate_type(&json!({"type": "custom_type"}), &json!("value"), "f", &mut errors);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn validate_type_enum_takes_precedence_over_type() {
+        // When enum is present, type is not checked separately
+        let mut errors = Vec::new();
+        validate_type(&json!({"type": "string", "enum": ["a", "b"]}), &json!("c"), "f", &mut errors);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].expected.contains("a"));
+        assert!(errors[0].expected.contains("b"));
+    }
+
+    #[test]
+    fn validate_type_enum_ok() {
+        let mut errors = Vec::new();
+        validate_type(&json!({"type": "string", "enum": ["a", "b"]}), &json!("a"), "f", &mut errors);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn validate_type_minimum_only_violated() {
+        let mut errors = Vec::new();
+        validate_type(&json!({"type": "number", "minimum": 5.0}), &json!(4.9), "f", &mut errors);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].expected.contains(">= 5"));
+    }
+
+    #[test]
+    fn validate_type_maximum_only_violated() {
+        let mut errors = Vec::new();
+        validate_type(&json!({"type": "number", "maximum": 10.0}), &json!(10.1), "f", &mut errors);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].expected.contains("<= 10"));
+    }
+
+    #[test]
+    fn validate_type_fix_mentions_path() {
+        let mut errors = Vec::new();
+        validate_type(&json!({"type": "string"}), &json!(99), "my.field", &mut errors);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].fix.contains("my.field"));
+    }
+
+    // ── validate_object direct tests ────────────────────────────────────
+
+    #[test]
+    fn validate_object_ok_all_required_present() {
+        let schema = json!({
+            "type": "object",
+            "required": ["x", "y"],
+            "properties": {
+                "x": { "type": "integer" },
+                "y": { "type": "integer" }
+            }
+        });
+        let input = json!({ "x": 1, "y": 2 });
+        let mut errors = Vec::new();
+        validate_object(&schema, &input, "", &mut errors);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn validate_object_nested_prefix_in_error_path() {
+        let schema = json!({
+            "type": "object",
+            "required": ["z"],
+            "properties": {
+                "z": { "type": "string" }
+            }
+        });
+        let input = json!({});
+        let mut errors = Vec::new();
+        validate_object(&schema, &input, "parent", &mut errors);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].path, "parent.z");
+    }
+
+    #[test]
+    fn validate_object_no_required_no_errors() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "opt": { "type": "string" }
+            }
+        });
+        let input = json!({});
+        let mut errors = Vec::new();
+        validate_object(&schema, &input, "", &mut errors);
+        assert!(errors.is_empty());
+    }
+
+    // ── schema_path_matches edge cases ──────────────────────────────────
+
+    #[test]
+    fn schema_path_matches_exact() {
+        assert!(schema_path_matches("foo", "foo"));
+    }
+
+    #[test]
+    fn schema_path_matches_dot_prefix() {
+        assert!(schema_path_matches("foo.bar", "foo"));
+    }
+
+    #[test]
+    fn schema_path_matches_array_suffix() {
+        assert!(schema_path_matches("foo[].bar", "foo"));
+    }
+
+    #[test]
+    fn schema_path_no_match_partial_word() {
+        assert!(!schema_path_matches("foobar", "foo"));
+    }
+
+    #[test]
+    fn schema_path_no_match_different() {
+        assert!(!schema_path_matches("baz", "foo"));
+    }
+
+    #[test]
+    fn schema_path_matches_self() {
+        assert!(schema_path_matches("a.b.c", "a.b.c"));
+    }
+
+    // ── join_path tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn join_path_with_prefix() {
+        assert_eq!(join_path(Some("parent"), "child"), "parent.child");
+    }
+
+    #[test]
+    fn join_path_no_prefix() {
+        assert_eq!(join_path(None, "child"), "child");
+    }
+
+    #[test]
+    fn join_path_empty_prefix() {
+        assert_eq!(join_path(Some(""), "child"), "child");
+    }
+
+    // ── join_array_index_path tests ──────────────────────────────────────
+
+    #[test]
+    fn join_array_index_path_with_prefix() {
+        assert_eq!(join_array_index_path("items", 3), "items[3]");
+    }
+
+    #[test]
+    fn join_array_index_path_no_prefix() {
+        assert_eq!(join_array_index_path("", 0), "[0]");
+    }
+
+    // ── short_value tests ────────────────────────────────────────────────
+
+    #[test]
+    fn short_value_string() {
+        assert_eq!(short_value(&json!("hello")), "hello");
+    }
+
+    #[test]
+    fn short_value_number() {
+        assert_eq!(short_value(&json!(42)), "42");
+    }
+
+    #[test]
+    fn short_value_boolean() {
+        assert_eq!(short_value(&json!(true)), "true");
+    }
+
+    #[test]
+    fn short_value_null() {
+        assert_eq!(short_value(&json!(null)), "null");
+    }
+
+    // ── summarize_enum_values tests ──────────────────────────────────────
+
+    #[test]
+    fn summarize_enum_values_up_to_three() {
+        let values = vec![json!("a"), json!("b"), json!("c")];
+        let result = summarize_enum_values(&values);
+        assert_eq!(result, "a, b, c");
+    }
+
+    #[test]
+    fn summarize_enum_values_truncates_past_three() {
+        let values = vec![json!("a"), json!("b"), json!("c"), json!("d")];
+        let result = summarize_enum_values(&values);
+        assert!(result.contains("..."));
+    }
+
+    #[test]
+    fn summarize_enum_values_single() {
+        let values = vec![json!("only")];
+        let result = summarize_enum_values(&values);
+        assert_eq!(result, "only");
+    }
+
+    #[test]
+    fn summarize_enum_values_empty() {
+        let values: Vec<serde_json::Value> = vec![];
+        let result = summarize_enum_values(&values);
+        assert_eq!(result, "");
+    }
+
+    // ── infer_type: multi-type array ─────────────────────────────────────
+
+    #[test]
+    fn infer_type_multi_type_array() {
+        let schema = json!({"type": ["string", "null"]});
+        let result = infer_type(&schema);
+        assert_eq!(result, "string | null");
+    }
+
+    #[test]
+    fn infer_type_one_of_with_variants() {
+        let schema = json!({
+            "oneOf": [
+                { "type": "string" },
+                { "type": "integer" }
+            ]
+        });
+        let result = infer_type(&schema);
+        assert!(result.starts_with("oneOf<"));
+        assert!(result.contains("string"));
+        assert!(result.contains("integer"));
+    }
+
+    #[test]
+    fn infer_type_any_of_with_variants() {
+        let schema = json!({
+            "anyOf": [
+                { "type": "boolean" },
+                { "type": "null" }
+            ]
+        });
+        let result = infer_type(&schema);
+        assert!(result.starts_with("anyOf<"));
+    }
+
+    #[test]
+    fn infer_type_object_with_properties_no_type_field() {
+        // Schema has no "type" field but has "properties"
+        let schema = json!({
+            "properties": {
+                "name": { "type": "string" }
+            }
+        });
+        assert_eq!(infer_type(&schema), "object");
+    }
+
+    // ── scaffold_template: default and example values ────────────────────
+
+    #[test]
+    fn scaffold_template_uses_default_over_example() {
+        let schema = json!({
+            "type": "object",
+            "required": ["field"],
+            "properties": {
+                "field": { "type": "string", "default": "default-val", "example": "ex-val" }
+            }
+        });
+        let template = scaffold_template(&schema);
+        assert_eq!(template["field"], "default-val");
+    }
+
+    #[test]
+    fn scaffold_template_uses_example_when_no_default() {
+        let schema = json!({
+            "type": "object",
+            "required": ["field"],
+            "properties": {
+                "field": { "type": "string", "example": "ex-val" }
+            }
+        });
+        let template = scaffold_template(&schema);
+        assert_eq!(template["field"], "ex-val");
+    }
+
+    #[test]
+    fn scaffold_template_uses_const_value() {
+        let schema = json!({
+            "type": "object",
+            "required": ["kind"],
+            "properties": {
+                "kind": { "const": "http" }
+            }
+        });
+        let template = scaffold_template(&schema);
+        assert_eq!(template["kind"], "http");
+    }
+
+    #[test]
+    fn scaffold_template_for_non_object_string() {
+        // Schema with no properties but type string
+        let schema = json!({"type": "string"});
+        let result = scaffold_template(&schema);
+        assert_eq!(result, json!("<string>"));
+    }
+
+    #[test]
+    fn scaffold_template_for_non_object_integer() {
+        let schema = json!({"type": "integer"});
+        let result = scaffold_template(&schema);
+        assert_eq!(result, json!(0));
+    }
+
+    #[test]
+    fn scaffold_template_for_non_object_boolean() {
+        let schema = json!({"type": "boolean"});
+        let result = scaffold_template(&schema);
+        assert_eq!(result, json!(false));
+    }
+
+    // ── schema_summary: min/max/default/example/variants/constraints ─────
+
+    #[test]
+    fn schema_summary_includes_example() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "example": "Alice" }
+            }
+        });
+        let fields = walk_schema(&schema, &[]);
+        let summary = schema_summary(&fields);
+        let arr = summary.as_array().unwrap();
+        assert_eq!(arr[0]["example"], "Alice");
+    }
+
+    #[test]
+    fn schema_summary_includes_min_max() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "score": { "type": "number", "minimum": 0, "maximum": 100 }
+            }
+        });
+        let fields = walk_schema(&schema, &[]);
+        let summary = schema_summary(&fields);
+        let arr = summary.as_array().unwrap();
+        assert_eq!(arr[0]["minimum"], 0);
+        assert_eq!(arr[0]["maximum"], 100);
+    }
+
+    #[test]
+    fn schema_summary_includes_default() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "limit": { "type": "integer", "default": 20 }
+            }
+        });
+        let fields = walk_schema(&schema, &[]);
+        let summary = schema_summary(&fields);
+        let arr = summary.as_array().unwrap();
+        assert_eq!(arr[0]["default"], 20);
+    }
+
+    #[test]
+    fn schema_summary_includes_variants() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "val": {
+                    "oneOf": [
+                        { "type": "string" },
+                        { "type": "integer" }
+                    ]
+                }
+            }
+        });
+        let fields = walk_schema(&schema, &[]);
+        let summary = schema_summary(&fields);
+        let arr = summary.as_array().unwrap();
+        let entry = arr.iter().find(|e| e["path"] == "val").unwrap();
+        assert!(entry.get("variants").is_some());
+    }
+
+    #[test]
+    fn schema_summary_includes_constraints() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "mode": { "type": "string", "not": { "enum": ["legacy"] } }
+            }
+        });
+        let fields = walk_schema(&schema, &[]);
+        let summary = schema_summary(&fields);
+        let arr = summary.as_array().unwrap();
+        let entry = arr.iter().find(|e| e["path"] == "mode").unwrap();
+        assert!(entry.get("constraints").is_some());
+    }
+
+    // ── fill_template: additional coverage ──────────────────────────────
+
+    #[test]
+    fn fill_template_overwrites_entire_nested_object() {
+        let template = json!({
+            "spec": {
+                "replicas": 0,
+                "image": "<string>"
+            }
+        });
+        let mut bindings = Map::new();
+        bindings.insert("spec".into(), json!({ "replicas": 5, "image": "nginx" }));
+        let filled = fill_template(&template, &bindings);
+        // The whole "spec" key is replaced by binding
+        assert_eq!(filled["spec"]["replicas"], 5);
+    }
+
+    #[test]
+    fn fill_template_array_is_cloned_unchanged() {
+        let template = json!({ "tags": ["a", "b"] });
+        let filled = fill_template(&template, &Map::new());
+        assert_eq!(filled["tags"], json!(["a", "b"]));
+    }
+
+    #[test]
+    fn fill_template_number_value_replaced() {
+        let template = json!({ "count": 0 });
+        let mut bindings = Map::new();
+        bindings.insert("count".into(), json!(42));
+        let filled = fill_template(&template, &bindings);
+        assert_eq!(filled["count"], 42);
+    }
+
+    #[test]
+    fn fill_template_boolean_value_replaced() {
+        let template = json!({ "active": false });
+        let mut bindings = Map::new();
+        bindings.insert("active".into(), json!(true));
+        let filled = fill_template(&template, &bindings);
+        assert_eq!(filled["active"], true);
+    }
+
+    // ── normalize_schema: allOf merging ──────────────────────────────────
+
+    #[test]
+    fn normalize_schema_allof_merges_types() {
+        let schema = json!({
+            "allOf": [
+                { "type": "object", "properties": { "a": { "type": "string" } } },
+                { "type": "object", "properties": { "b": { "type": "integer" } } }
+            ]
+        });
+        let normalized = normalize_schema(&schema);
+        // After merging allOf, properties should contain both a and b
+        let props = normalized.get("properties").unwrap().as_object().unwrap();
+        assert!(props.contains_key("a"));
+        assert!(props.contains_key("b"));
+    }
+
+    #[test]
+    fn normalize_schema_allof_merges_required_deduped() {
+        let schema = json!({
+            "allOf": [
+                {
+                    "type": "object",
+                    "required": ["x"],
+                    "properties": { "x": { "type": "string" } }
+                },
+                {
+                    "type": "object",
+                    "required": ["x", "y"],
+                    "properties": {
+                        "x": { "type": "string" },
+                        "y": { "type": "string" }
+                    }
+                }
+            ]
+        });
+        let normalized = normalize_schema(&schema);
+        let required = normalized
+            .get("required")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        let req_strs: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+        assert!(req_strs.contains(&"x"));
+        assert!(req_strs.contains(&"y"));
+        // No duplicates
+        let x_count = req_strs.iter().filter(|&&s| s == "x").count();
+        assert_eq!(x_count, 1);
+    }
+
+    // ── merge_schema_values edge cases ───────────────────────────────────
+
+    #[test]
+    fn merge_schema_values_base_wins_for_existing_scalar_keys() {
+        let base = json!({"type": "string", "description": "base desc"});
+        let overlay = json!({"description": "overlay desc"});
+        let merged = merge_schema_values(&base, &overlay);
+        // overlay doesn't overwrite existing keys
+        assert_eq!(merged["description"], "base desc");
+    }
+
+    #[test]
+    fn merge_schema_values_overlay_adds_new_keys() {
+        let base = json!({"type": "string"});
+        let overlay = json!({"minimum": 0, "maximum": 100});
+        let merged = merge_schema_values(&base, &overlay);
+        assert_eq!(merged["minimum"], 0);
+        assert_eq!(merged["maximum"], 100);
+    }
+
+    #[test]
+    fn merge_schema_values_null_base_returns_overlay() {
+        let base = json!(null);
+        let overlay = json!({"type": "string"});
+        let merged = merge_schema_values(&base, &overlay);
+        assert_eq!(merged["type"], "string");
+    }
+
+    // ── select_preferred_variant ─────────────────────────────────────────
+
+    #[test]
+    fn select_preferred_variant_one_of_returns_first() {
+        let schema = json!({
+            "oneOf": [
+                { "type": "string" },
+                { "type": "integer" }
+            ]
+        });
+        let variant = select_preferred_variant(&schema);
+        assert!(variant.is_some());
+        assert_eq!(variant.unwrap()["type"], "string");
+    }
+
+    #[test]
+    fn select_preferred_variant_any_of_returns_first() {
+        let schema = json!({
+            "anyOf": [
+                { "type": "boolean" },
+                { "type": "null" }
+            ]
+        });
+        let variant = select_preferred_variant(&schema);
+        assert!(variant.is_some());
+        assert_eq!(variant.unwrap()["type"], "boolean");
+    }
+
+    #[test]
+    fn select_preferred_variant_no_variants_returns_none() {
+        let schema = json!({ "type": "string" });
+        assert!(select_preferred_variant(&schema).is_none());
+    }
+
+    #[test]
+    fn select_preferred_variant_empty_one_of_returns_none() {
+        let schema = json!({ "oneOf": [] });
+        assert!(select_preferred_variant(&schema).is_none());
+    }
+
+    // ── required_only_fields: mixed nested ───────────────────────────────
+
+    #[test]
+    fn required_only_preserves_depth() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "spec": {
+                    "type": "object",
+                    "required": ["replicas"],
+                    "properties": {
+                        "replicas": { "type": "integer" }
+                    }
+                }
+            }
+        });
+        let fields = walk_schema(&schema, &[]);
+        let required = required_only_fields(&fields);
+        let replicas = required.iter().find(|f| f.path == "spec.replicas").unwrap();
+        assert_eq!(replicas.depth, 1);
+    }
+
+    // ── describe_schema_inline corner cases ──────────────────────────────
+
+    #[test]
+    fn describe_schema_inline_const_value() {
+        let schema = json!({"const": "http"});
+        let result = describe_schema_inline(&schema);
+        assert_eq!(result, "const http");
+    }
+
+    #[test]
+    fn describe_schema_inline_enum_values() {
+        let schema = json!({"enum": ["a", "b"]});
+        let result = describe_schema_inline(&schema);
+        assert!(result.contains("enum"));
+        assert!(result.contains("a"));
+        assert!(result.contains("b"));
+    }
+
+    #[test]
+    fn describe_schema_inline_array_with_items() {
+        let schema = json!({"type": "array", "items": {"type": "string"}});
+        let result = describe_schema_inline(&schema);
+        assert_eq!(result, "[string]");
+    }
+
+    #[test]
+    fn describe_schema_inline_array_no_items() {
+        let schema = json!({"type": "array"});
+        let result = describe_schema_inline(&schema);
+        assert_eq!(result, "[any]");
+    }
+
+    #[test]
+    fn describe_schema_inline_any() {
+        let result = describe_schema_inline(&json!({}));
+        assert_eq!(result, "any");
+    }
 }

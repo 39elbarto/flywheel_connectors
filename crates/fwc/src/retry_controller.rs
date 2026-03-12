@@ -1217,7 +1217,9 @@ mod tests {
 
     #[test]
     fn policy_clone_preserves_all_fields() {
-        let mut p = RetryPolicy::default().with_max_retries(7).with_base_delay_ms(500);
+        let mut p = RetryPolicy::default()
+            .with_max_retries(7)
+            .with_base_delay_ms(500);
         p.extra_retryable = vec!["auth".to_string()];
         p.never_retry = vec!["parse".to_string()];
         let cloned = p.clone();

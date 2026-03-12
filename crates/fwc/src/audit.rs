@@ -2688,8 +2688,14 @@ related = []
     fn summary_multiple_cohorts_counted() {
         let mut map = BTreeMap::new();
         map.insert("slack".into(), audit_manifest("slack", &minimal_manifest()));
-        map.insert("discord".into(), audit_manifest("discord", &minimal_manifest()));
-        map.insert("github".into(), audit_manifest("github", &minimal_manifest()));
+        map.insert(
+            "discord".into(),
+            audit_manifest("discord", &minimal_manifest()),
+        );
+        map.insert(
+            "github".into(),
+            audit_manifest("github", &minimal_manifest()),
+        );
         map.insert("s3".into(), audit_manifest("s3", &minimal_manifest()));
         let summary = compute_summary(&map);
         assert_eq!(summary.by_cohort.get("messaging"), Some(&2));
@@ -3295,7 +3301,10 @@ migration_hint = ""
     #[test]
     fn summary_by_cohort_key_is_lowercase() {
         let mut map = BTreeMap::new();
-        map.insert("github".into(), audit_manifest("github", &minimal_manifest()));
+        map.insert(
+            "github".into(),
+            audit_manifest("github", &minimal_manifest()),
+        );
         let summary = compute_summary(&map);
         // Key should be lowercase debug repr of the enum
         assert!(summary.by_cohort.contains_key("devtools"));

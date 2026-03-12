@@ -1499,8 +1499,7 @@ version = 1.0
 
     #[test]
     fn resolve_target_dir_deeply_nested_crate() {
-        let resolved =
-            resolve_target_dir(Path::new("/a/b/c/d/e/f/g/h/i/j/k/crate"), "release");
+        let resolved = resolve_target_dir(Path::new("/a/b/c/d/e/f/g/h/i/j/k/crate"), "release");
         assert_eq!(
             resolved,
             Path::new("/a/b/c/d/e/f/g/h/i/j/k/crate/target/release")
@@ -1626,10 +1625,7 @@ version = 1.0
         env.insert("CARGO_INCREMENTAL".to_string(), "0".to_string());
         env.insert("CC".to_string(), "clang".to_string());
         env.insert("CXX".to_string(), "clang++".to_string());
-        env.insert(
-            "TARGET".to_string(),
-            "x86_64-unknown-linux-gnu".to_string(),
-        );
+        env.insert("TARGET".to_string(), "x86_64-unknown-linux-gnu".to_string());
         let meta = BuildMetadata {
             rust_version: "1.85.0-nightly".to_string(),
             cargo_version: "1.85.0-nightly".to_string(),

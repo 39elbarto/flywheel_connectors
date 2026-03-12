@@ -363,7 +363,9 @@ impl RotationUrgency {
 /// Produce an age-based rotation advisory for a credential.
 pub fn rotation_advisory(metadata: &AuthMetadata) -> RotationAdvisory {
     let age_days = metadata.age().num_days();
-    let last_rotated_days = metadata.last_rotated_at.map(|t| (Utc::now() - t).num_days());
+    let last_rotated_days = metadata
+        .last_rotated_at
+        .map(|t| (Utc::now() - t).num_days());
     let days_since_rotation = last_rotated_days.unwrap_or(age_days);
 
     let (recommendation, message) = if days_since_rotation > 365 {

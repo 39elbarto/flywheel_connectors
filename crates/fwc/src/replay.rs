@@ -2404,10 +2404,7 @@ mod tests {
     #[test]
     fn apply_override_same_key_twice_last_wins() {
         let input = json!({"x": 0});
-        let overrides = vec![
-            ("x".to_owned(), json!(1)),
-            ("x".to_owned(), json!(2)),
-        ];
+        let overrides = vec![("x".to_owned(), json!(1)), ("x".to_owned(), json!(2))];
         let result = apply_overrides(&input, &overrides).unwrap();
         assert_eq!(result["x"], json!(2));
     }
@@ -2507,9 +2504,15 @@ mod tests {
     #[test]
     fn replay_store_multiple_entries_with_different_connectors() {
         let store = temp_store();
-        store.store_input("e1", "github", "issues.create", &json!({"a": 1})).unwrap();
-        store.store_input("e2", "slack", "chat.post", &json!({"b": 2})).unwrap();
-        store.store_input("e3", "jira", "issue.get", &json!({"c": 3})).unwrap();
+        store
+            .store_input("e1", "github", "issues.create", &json!({"a": 1}))
+            .unwrap();
+        store
+            .store_input("e2", "slack", "chat.post", &json!({"b": 2}))
+            .unwrap();
+        store
+            .store_input("e3", "jira", "issue.get", &json!({"c": 3}))
+            .unwrap();
 
         let s1 = store.get_stored_input("e1").unwrap().unwrap();
         assert_eq!(s1.connector_id, "github");
@@ -2560,7 +2563,9 @@ mod tests {
         let input = json!({"title": "original"});
         let mut history = HistoryStore::new();
         history.append(sample_history_entry("e001"));
-        store.store_input("e001", "github", "issues.create", &input).unwrap();
+        store
+            .store_input("e001", "github", "issues.create", &input)
+            .unwrap();
 
         let request = ReplayRequest::simple("e001")
             .with_override("title", json!("modified"))
@@ -2577,7 +2582,9 @@ mod tests {
         let input = json!({"title": "original", "body": "text"});
         let mut history = HistoryStore::new();
         history.append(sample_history_entry("e001"));
-        store.store_input("e001", "github", "issues.create", &input).unwrap();
+        store
+            .store_input("e001", "github", "issues.create", &input)
+            .unwrap();
 
         let request = ReplayRequest::simple("e001").with_override("title", json!("new"));
         let plan = plan_replay(&request, &store, &history).unwrap();
@@ -2595,7 +2602,9 @@ mod tests {
         entry.connector_id = "slack".to_owned();
         entry.operation_id = "chat.post".to_owned();
         history.append(entry);
-        store.store_input("e001", "slack", "chat.post", &input).unwrap();
+        store
+            .store_input("e001", "slack", "chat.post", &input)
+            .unwrap();
 
         let request = ReplayRequest::simple("e001");
         let plan = plan_replay(&request, &store, &history).unwrap();

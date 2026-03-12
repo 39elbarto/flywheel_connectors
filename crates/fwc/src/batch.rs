@@ -990,8 +990,7 @@ mod tests {
 
     #[test]
     fn parse_json_array_deeply_nested() {
-        let inputs =
-            BatchInputs::from_json_array(r#"[{"a":{"b":{"c":{"d":{"e":42}}}}}]"#).unwrap();
+        let inputs = BatchInputs::from_json_array(r#"[{"a":{"b":{"c":{"d":{"e":42}}}}}]"#).unwrap();
         assert_eq!(inputs.items[0]["a"]["b"]["c"]["d"]["e"], 42);
     }
 
@@ -1157,8 +1156,7 @@ mod tests {
 
     #[test]
     fn template_negative_numbers() {
-        let inputs =
-            BatchInputs::from_template(r#"{"offset":{{item}}}"#, "-10,-20,-30").unwrap();
+        let inputs = BatchInputs::from_template(r#"{"offset":{{item}}}"#, "-10,-20,-30").unwrap();
         assert_eq!(inputs.len(), 3);
         assert_eq!(inputs.items[0]["offset"], -10);
         assert_eq!(inputs.items[2]["offset"], -30);
@@ -1166,8 +1164,7 @@ mod tests {
 
     #[test]
     fn template_float_numbers() {
-        let inputs =
-            BatchInputs::from_template(r#"{"value":{{item}}}"#, "1.5,2.7,3.14").unwrap();
+        let inputs = BatchInputs::from_template(r#"{"value":{{item}}}"#, "1.5,2.7,3.14").unwrap();
         assert_eq!(inputs.len(), 3);
         let v = inputs.items[2]["value"].as_f64().unwrap();
         assert!((v - 3.14).abs() < f64::EPSILON);
@@ -1183,11 +1180,8 @@ mod tests {
     #[test]
     fn template_json_object_items_no_inner_commas() {
         // Items without inner commas work fine with CSV splitting
-        let inputs = BatchInputs::from_template(
-            r#"{"payload":{{item}}}"#,
-            r#"{"x":1},{"x":2}"#,
-        )
-        .unwrap();
+        let inputs =
+            BatchInputs::from_template(r#"{"payload":{{item}}}"#, r#"{"x":1},{"x":2}"#).unwrap();
         assert_eq!(inputs.len(), 2);
         assert_eq!(inputs.items[0]["payload"]["x"], 1);
         assert_eq!(inputs.items[1]["payload"]["x"], 2);
@@ -1344,9 +1338,18 @@ mod tests {
 
     #[test]
     fn item_status_serializes_to_snake_case() {
-        assert_eq!(serde_json::to_string(&ItemStatus::Success).unwrap(), "\"success\"");
-        assert_eq!(serde_json::to_string(&ItemStatus::Error).unwrap(), "\"error\"");
-        assert_eq!(serde_json::to_string(&ItemStatus::Skipped).unwrap(), "\"skipped\"");
+        assert_eq!(
+            serde_json::to_string(&ItemStatus::Success).unwrap(),
+            "\"success\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ItemStatus::Error).unwrap(),
+            "\"error\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ItemStatus::Skipped).unwrap(),
+            "\"skipped\""
+        );
     }
 
     #[test]
@@ -1760,8 +1763,7 @@ mod tests {
 
     #[test]
     fn full_pipeline_template_to_ndjson() {
-        let inputs =
-            BatchInputs::from_template(r#"{"n":{{item}}}"#, "10,20,30,40,50").unwrap();
+        let inputs = BatchInputs::from_template(r#"{"n":{{item}}}"#, "10,20,30,40,50").unwrap();
         assert_eq!(inputs.len(), 5);
         let results: Vec<ItemResult> = inputs
             .items

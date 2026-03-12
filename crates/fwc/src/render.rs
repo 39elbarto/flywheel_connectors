@@ -1852,10 +1852,9 @@ mod tests {
 
     #[test]
     fn template_nested_each_with_object_fields() {
-        let template = TemplateRender::inline(
-            "{{#each issues}}#{{this.number}}: {{this.title}}\n{{/each}}",
-        )
-        .unwrap();
+        let template =
+            TemplateRender::inline("{{#each issues}}#{{this.number}}: {{this.title}}\n{{/each}}")
+                .unwrap();
         let text = render_with_options(
             json!({
                 "issues": [

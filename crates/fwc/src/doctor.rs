@@ -1567,23 +1567,46 @@ mod tests {
 
     #[test]
     fn severity_all_labels_non_empty() {
-        for sev in [Severity::Info, Severity::Warning, Severity::Error, Severity::Critical] {
+        for sev in [
+            Severity::Info,
+            Severity::Warning,
+            Severity::Error,
+            Severity::Critical,
+        ] {
             assert!(!sev.label().is_empty());
         }
     }
 
     #[test]
     fn severity_label_matches_display() {
-        for sev in [Severity::Info, Severity::Warning, Severity::Error, Severity::Critical] {
+        for sev in [
+            Severity::Info,
+            Severity::Warning,
+            Severity::Error,
+            Severity::Critical,
+        ] {
             assert_eq!(sev.label(), sev.to_string());
         }
     }
 
     #[test]
     fn severity_total_ordering() {
-        let mut sevs = vec![Severity::Critical, Severity::Info, Severity::Error, Severity::Warning];
+        let mut sevs = vec![
+            Severity::Critical,
+            Severity::Info,
+            Severity::Error,
+            Severity::Warning,
+        ];
         sevs.sort();
-        assert_eq!(sevs, vec![Severity::Info, Severity::Warning, Severity::Error, Severity::Critical]);
+        assert_eq!(
+            sevs,
+            vec![
+                Severity::Info,
+                Severity::Warning,
+                Severity::Error,
+                Severity::Critical
+            ]
+        );
     }
 
     #[test]
@@ -1601,7 +1624,12 @@ mod tests {
 
     #[test]
     fn severity_debug_all() {
-        for sev in [Severity::Info, Severity::Warning, Severity::Error, Severity::Critical] {
+        for sev in [
+            Severity::Info,
+            Severity::Warning,
+            Severity::Error,
+            Severity::Critical,
+        ] {
             let debug = format!("{sev:?}");
             assert!(!debug.is_empty());
         }
@@ -1737,7 +1765,10 @@ mod tests {
         let fix = FixAction::manual("test")
             .with_url("https://first.example.com")
             .with_url("https://second.example.com");
-        assert_eq!(fix.reference_url.as_deref(), Some("https://second.example.com"));
+        assert_eq!(
+            fix.reference_url.as_deref(),
+            Some("https://second.example.com")
+        );
     }
 
     #[test]
@@ -1849,9 +1880,7 @@ mod tests {
             category: DiagnosisCategory::Network,
             severity: Severity::Critical,
             message: "Network down".to_owned(),
-            fixes: vec![
-                FixAction::command("Restart", "fwc restart test").safe(),
-            ],
+            fixes: vec![FixAction::command("Restart", "fwc restart test").safe()],
         }];
         let report = DiagnosticReport::from_diagnoses("test", diags);
         let json = report.to_json();
@@ -2023,7 +2052,12 @@ mod tests {
         symptoms.error_message = Some("SSL certificate error".to_owned());
         let report = diagnose("test", &symptoms);
         assert_eq!(report.diagnoses[0].fixes.len(), 3);
-        assert!(report.diagnoses[0].fixes.iter().all(|f| f.command.is_none()));
+        assert!(
+            report.diagnoses[0]
+                .fixes
+                .iter()
+                .all(|f| f.command.is_none())
+        );
     }
 
     #[test]

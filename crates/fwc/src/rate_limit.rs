@@ -1273,8 +1273,7 @@ mod tests {
 
     #[test]
     fn snapshot_reset_display_exactly_60_seconds() {
-        let snap =
-            PoolSnapshot::new("test", 0, 100, Some(Utc::now() + Duration::seconds(62)));
+        let snap = PoolSnapshot::new("test", 0, 100, Some(Utc::now() + Duration::seconds(62)));
         let display = snap.reset_display();
         // 62 seconds → "1m"
         assert!(display.contains('m'));
@@ -1282,8 +1281,12 @@ mod tests {
 
     #[test]
     fn snapshot_reset_display_exactly_one_hour() {
-        let snap =
-            PoolSnapshot::new("test", 0, 100, Some(Utc::now() + Duration::hours(1) + Duration::seconds(5)));
+        let snap = PoolSnapshot::new(
+            "test",
+            0,
+            100,
+            Some(Utc::now() + Duration::hours(1) + Duration::seconds(5)),
+        );
         let display = snap.reset_display();
         assert!(display.contains('h'));
     }
@@ -1318,10 +1321,8 @@ mod tests {
 
     #[test]
     fn connector_limits_clone() {
-        let limits = ConnectorRateLimits::new(
-            "github",
-            vec![PoolSnapshot::new("core", 10, 100, None)],
-        );
+        let limits =
+            ConnectorRateLimits::new("github", vec![PoolSnapshot::new("core", 10, 100, None)]);
         let cloned = limits.clone();
         assert_eq!(limits.connector_id, cloned.connector_id);
         assert_eq!(limits.pools.len(), cloned.pools.len());
@@ -1329,10 +1330,8 @@ mod tests {
 
     #[test]
     fn connector_limits_debug() {
-        let limits = ConnectorRateLimits::new(
-            "slack",
-            vec![PoolSnapshot::new("api", 50, 100, None)],
-        );
+        let limits =
+            ConnectorRateLimits::new("slack", vec![PoolSnapshot::new("api", 50, 100, None)]);
         let dbg = format!("{:?}", limits);
         assert!(dbg.contains("slack"));
         assert!(dbg.contains("ConnectorRateLimits"));
@@ -1353,9 +1352,9 @@ mod tests {
         let limits = ConnectorRateLimits::new(
             "mix",
             vec![
-                PoolSnapshot::new("a", 10, 100, None),  // Ok
-                PoolSnapshot::new("b", 85, 100, None),  // Warning
-                PoolSnapshot::new("c", 96, 100, None),  // Critical
+                PoolSnapshot::new("a", 10, 100, None), // Ok
+                PoolSnapshot::new("b", 85, 100, None), // Warning
+                PoolSnapshot::new("c", 96, 100, None), // Critical
             ],
         );
         assert_eq!(limits.worst_status(), PoolStatus::Critical);

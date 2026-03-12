@@ -1189,8 +1189,14 @@ mod tests {
 
     #[test]
     fn recommendation_ne_variants() {
-        assert_ne!(ForecastRecommendation::Safe, ForecastRecommendation::Caution);
-        assert_ne!(ForecastRecommendation::SlowDown, ForecastRecommendation::Idle);
+        assert_ne!(
+            ForecastRecommendation::Safe,
+            ForecastRecommendation::Caution
+        );
+        assert_ne!(
+            ForecastRecommendation::SlowDown,
+            ForecastRecommendation::Idle
+        );
         assert_ne!(
             ForecastRecommendation::WaitForReset,
             ForecastRecommendation::Safe
@@ -1259,7 +1265,10 @@ mod tests {
         assert_eq!(f.pool, cloned.pool);
         assert_eq!(f.remaining, cloned.remaining);
         assert_eq!(f.recommendation, cloned.recommendation);
-        assert_eq!(f.will_exhaust_before_reset, cloned.will_exhaust_before_reset);
+        assert_eq!(
+            f.will_exhaust_before_reset,
+            cloned.will_exhaust_before_reset
+        );
     }
 
     #[test]
@@ -1339,8 +1348,7 @@ mod tests {
     #[test]
     fn forecast_caution_will_exhaust_more_than_5_min() {
         // Will exhaust before reset, but > 5 min away → Caution
-        let snap =
-            PoolSnapshot::new("core", 2500, 5000, Some(Utc::now() + Duration::hours(10)));
+        let snap = PoolSnapshot::new("core", 2500, 5000, Some(Utc::now() + Duration::hours(10)));
         // 2500 used in 3600s → 2500/hr, 2500 remaining → 1 hour to exhaust
         // Reset in 10 hours → will exhaust before reset, secs_to_exhaust = 3600 > 300
         let f = forecast_pool(&snap, 3600);

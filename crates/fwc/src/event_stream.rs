@@ -1521,7 +1521,10 @@ mod tests {
 
     #[test]
     fn parse_connectors_many() {
-        let input = (0..20).map(|i| format!("conn_{i}")).collect::<Vec<_>>().join(",");
+        let input = (0..20)
+            .map(|i| format!("conn_{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
         let connectors = TailConfig::parse_connectors(&input);
         assert_eq!(connectors.len(), 20);
         assert_eq!(connectors[0], "conn_0");

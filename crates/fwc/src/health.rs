@@ -1813,7 +1813,11 @@ mod tests {
     #[test]
     fn dashboard_summary_serialization_roundtrip() {
         let t = fixed_time();
-        let connectors = vec![make_healthy("a", t), make_degraded("b", t), make_error("c", t)];
+        let connectors = vec![
+            make_healthy("a", t),
+            make_degraded("b", t),
+            make_error("c", t),
+        ];
         let summary = DashboardSummary::from_connectors(&connectors);
         let json = serde_json::to_string(&summary).unwrap();
         let back: DashboardSummary = serde_json::from_str(&json).unwrap();
@@ -1845,8 +1849,7 @@ mod tests {
         let t = fixed_time();
         let connectors = vec![
             ConnectorHealth::new("a", HealthStatus::Healthy, t).with_auth(AuthCheckResult::Valid),
-            ConnectorHealth::new("b", HealthStatus::Healthy, t)
-                .with_auth(AuthCheckResult::Unknown),
+            ConnectorHealth::new("b", HealthStatus::Healthy, t).with_auth(AuthCheckResult::Unknown),
             ConnectorHealth::new("c", HealthStatus::Healthy, t)
                 .with_auth(AuthCheckResult::NotConfigured),
         ];
@@ -1916,10 +1919,8 @@ mod tests {
     #[test]
     fn dashboard_clone() {
         let t = fixed_time();
-        let dashboard = HealthDashboard::from_connectors_at(
-            vec![make_healthy("a", t), make_error("b", t)],
-            t,
-        );
+        let dashboard =
+            HealthDashboard::from_connectors_at(vec![make_healthy("a", t), make_error("b", t)], t);
         let cloned = dashboard.clone();
         assert_eq!(cloned.connectors.len(), 2);
         assert_eq!(cloned.checked_at, t);
@@ -1963,10 +1964,8 @@ mod tests {
     #[test]
     fn dashboard_filter_by_id_with_unhealthy_match() {
         let t = fixed_time();
-        let dashboard = HealthDashboard::from_connectors_at(
-            vec![make_healthy("a", t), make_error("b", t)],
-            t,
-        );
+        let dashboard =
+            HealthDashboard::from_connectors_at(vec![make_healthy("a", t), make_error("b", t)], t);
         let filter = HealthFilter {
             unhealthy_only: true,
             connector_id: Some("b".to_owned()),
@@ -1997,8 +1996,8 @@ mod tests {
     #[test]
     fn detect_issues_no_latency_no_issue() {
         let t = fixed_time();
-        let mut h =
-            ConnectorHealth::new("test", HealthStatus::Healthy, t).with_auth(AuthCheckResult::Valid);
+        let mut h = ConnectorHealth::new("test", HealthStatus::Healthy, t)
+            .with_auth(AuthCheckResult::Valid);
         detect_issues(&mut h);
         assert_eq!(h.status, HealthStatus::Healthy);
         assert!(h.issues.is_empty());
@@ -2219,19 +2218,17 @@ mod tests {
     fn merge_connectors_sorted_by_id() {
         let t = fixed_time();
         let a = HealthDashboard::from_connectors_at(
-            vec![
-                make_healthy("zebra", t),
-                make_healthy("alpha", t),
-            ],
+            vec![make_healthy("zebra", t), make_healthy("alpha", t)],
             t,
         );
-        let b = HealthDashboard::from_connectors_at(
-            vec![make_healthy("middle", t)],
-            t,
-        );
+        let b = HealthDashboard::from_connectors_at(vec![make_healthy("middle", t)], t);
         let merged = merge_dashboards(&a, &b);
         // BTreeMap produces sorted order.
-        let ids: Vec<&str> = merged.connectors.iter().map(|c| c.connector_id.as_str()).collect();
+        let ids: Vec<&str> = merged
+            .connectors
+            .iter()
+            .map(|c| c.connector_id.as_str())
+            .collect();
         assert_eq!(ids, vec!["alpha", "middle", "zebra"]);
     }
 
@@ -2350,10 +2347,8 @@ mod tests {
     #[test]
     fn json_format_summary_fields() {
         let t = fixed_time();
-        let dashboard = HealthDashboard::from_connectors_at(
-            vec![make_healthy("a", t), make_error("b", t)],
-            t,
-        );
+        let dashboard =
+            HealthDashboard::from_connectors_at(vec![make_healthy("a", t), make_error("b", t)], t);
         let json = format_dashboard_json(&dashboard).unwrap();
         let summary = &json["summary"];
         assert_eq!(summary["total"], 2);

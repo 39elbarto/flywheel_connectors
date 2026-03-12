@@ -2067,7 +2067,10 @@ mod tests {
     fn event_dedup_identity_empty_event_id_uses_hash() {
         let e = IncomingEvent::new("slack", "message.new").with_event_id("");
         let id = e.dedup_identity();
-        assert!(id.starts_with("hash:"), "empty event_id should use hash fallback");
+        assert!(
+            id.starts_with("hash:"),
+            "empty event_id should use hash fallback"
+        );
     }
 
     #[test]
@@ -2364,8 +2367,7 @@ mod tests {
     #[test]
     fn trigger_match_expr_whitespace_in_patterns() {
         let event = sample_event();
-        let trigger =
-            EventTrigger::new("slack", "message.new").with_match("data.text~ bug | Bug ");
+        let trigger = EventTrigger::new("slack", "message.new").with_match("data.text~ bug | Bug ");
         assert!(matches_trigger(&event, &trigger));
     }
 
@@ -2388,8 +2390,7 @@ mod tests {
 
     #[test]
     fn template_truncate_exact_length() {
-        let event =
-            IncomingEvent::new("slack", "message.new").with_data("text", "12345");
+        let event = IncomingEvent::new("slack", "message.new").with_data("text", "12345");
         let result = render_template("{{event.data.text | truncate(5)}}", &event);
         assert_eq!(result, "12345");
     }
@@ -2507,8 +2508,7 @@ mod tests {
 
     #[test]
     fn eval_rule_with_match_expr_executes() {
-        let trigger =
-            EventTrigger::new("slack", "message.new").with_match("data.text~bug|Bug");
+        let trigger = EventTrigger::new("slack", "message.new").with_match("data.text~bug|Bug");
         let action = RuleAction::new("github", "create_issue");
         let rule = Rule::new("expr-rule", trigger, action);
         let event = sample_event();
@@ -2520,8 +2520,7 @@ mod tests {
 
     #[test]
     fn eval_rule_with_match_expr_no_match() {
-        let trigger =
-            EventTrigger::new("slack", "message.new").with_match("data.text~CRITICAL");
+        let trigger = EventTrigger::new("slack", "message.new").with_match("data.text~CRITICAL");
         let action = RuleAction::new("github", "create_issue");
         let rule = Rule::new("expr-rule", trigger, action);
         let event = sample_event();
@@ -2539,8 +2538,7 @@ mod tests {
         let cb = CircuitBreaker::default();
         let mut dedup = RuleDedupCache::new();
 
-        let (first, _) =
-            evaluate_rule_with_dedup(&rule, &event, &state, &cb, &mut dedup, false);
+        let (first, _) = evaluate_rule_with_dedup(&rule, &event, &state, &cb, &mut dedup, false);
         assert_eq!(first, ExecutionOutcome::Executed);
 
         // Same event content => same hash => duplicate
@@ -2548,8 +2546,7 @@ mod tests {
             .with_data("text", "Found a bug in login")
             .with_data("user", "alice")
             .with_data("channel", "general");
-        let (second, _) =
-            evaluate_rule_with_dedup(&rule, &event2, &state, &cb, &mut dedup, false);
+        let (second, _) = evaluate_rule_with_dedup(&rule, &event2, &state, &cb, &mut dedup, false);
         assert_eq!(second, ExecutionOutcome::Duplicate);
     }
 
@@ -2597,11 +2594,14 @@ mod tests {
     fn ruleset_active_count_all_disabled() {
         let mut rs = RuleSet::new();
         rs.add(sample_rule().with_enabled(false));
-        rs.add(Rule::new(
-            "another",
-            EventTrigger::new("a", "b"),
-            RuleAction::new("c", "d"),
-        ).with_enabled(false));
+        rs.add(
+            Rule::new(
+                "another",
+                EventTrigger::new("a", "b"),
+                RuleAction::new("c", "d"),
+            )
+            .with_enabled(false),
+        );
         assert_eq!(rs.active_count(), 0);
     }
 

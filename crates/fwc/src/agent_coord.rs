@@ -2030,7 +2030,12 @@ mod tests {
         // Inbox is now empty.
         assert_eq!(hub.unread_count(&agent("B")), 0);
         // New message arrives.
-        hub.send(agent("C"), &agent("B"), MessageKind::Warning, json!("second"));
+        hub.send(
+            agent("C"),
+            &agent("B"),
+            MessageKind::Warning,
+            json!("second"),
+        );
         assert_eq!(hub.unread_count(&agent("B")), 1);
         let msgs2 = hub.read_inbox(&agent("B"));
         assert_eq!(msgs2.len(), 1);
@@ -2175,19 +2180,24 @@ mod tests {
 
     #[test]
     fn conflict_check_warning_empty_vec_display() {
-        let c = ConflictCheck::Warning {
-            warnings: vec![],
-        };
+        let c = ConflictCheck::Warning { warnings: vec![] };
         assert_eq!(c.to_string(), "warning: ");
     }
 
     #[test]
     fn conflict_check_equality_variants() {
         assert_eq!(ConflictCheck::Clear, ConflictCheck::Clear);
-        assert_ne!(ConflictCheck::Clear, ConflictCheck::Blocked { reason: "x".into() });
         assert_ne!(
-            ConflictCheck::Warning { warnings: vec!["a".into()] },
-            ConflictCheck::Warning { warnings: vec!["b".into()] }
+            ConflictCheck::Clear,
+            ConflictCheck::Blocked { reason: "x".into() }
+        );
+        assert_ne!(
+            ConflictCheck::Warning {
+                warnings: vec!["a".into()]
+            },
+            ConflictCheck::Warning {
+                warnings: vec!["b".into()]
+            }
         );
     }
 
@@ -2290,7 +2300,8 @@ mod tests {
         );
         // Add active entries.
         hub.announce(UsageAnnouncement::new(agent("C"), "jira", "active"));
-        hub.reserve(agent("D"), "jira", "issue:1", 3600, true).unwrap();
+        hub.reserve(agent("D"), "jira", "issue:1", 3600, true)
+            .unwrap();
         let removed = hub.cleanup_expired();
         assert_eq!(removed, 2);
         assert_eq!(hub.announcement_count(), 1);
@@ -2322,9 +2333,16 @@ mod tests {
                 .with_operation("send")
                 .with_duration(120),
         );
-        hub.reserve(agent("A"), "github", "repo:x", 3600, true).unwrap();
-        hub.reserve(agent("B"), "slack", "channel:gen", 600, false).unwrap();
-        hub.send(agent("A"), &agent("B"), MessageKind::Request, json!({"action": "review"}));
+        hub.reserve(agent("A"), "github", "repo:x", 3600, true)
+            .unwrap();
+        hub.reserve(agent("B"), "slack", "channel:gen", 600, false)
+            .unwrap();
+        hub.send(
+            agent("A"),
+            &agent("B"),
+            MessageKind::Request,
+            json!({"action": "review"}),
+        );
         hub.send(agent("B"), &agent("A"), MessageKind::Response, json!("ok"));
 
         let json = serde_json::to_string(&hub).unwrap();
@@ -2403,7 +2421,11 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("coord.json");
         // CoordinationHub has defaults, so an object with just the required shape should work.
-        std::fs::write(&path, r#"{"announcements":[],"reservations":{},"inboxes":{},"next_reservation_id":0}"#).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"announcements":[],"reservations":{},"inboxes":{},"next_reservation_id":0}"#,
+        )
+        .unwrap();
         let store = CoordinationStore::new(&path);
         let hub = store.load().unwrap();
         assert_eq!(hub.announcement_count(), 0);
@@ -2414,7 +2436,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let store = CoordinationStore::new(dir.path().join("coord.json"));
         let mut hub = CoordinationHub::new();
-        hub.send(agent("X"), &agent("Y"), MessageKind::Warning, json!({"level": 5}));
+        hub.send(
+            agent("X"),
+            &agent("Y"),
+            MessageKind::Warning,
+            json!({"level": 5}),
+        );
         hub.send(agent("Y"), &agent("X"), MessageKind::Release, json!(null));
         store.save(&hub).unwrap();
 

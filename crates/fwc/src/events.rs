@@ -1911,8 +1911,8 @@ mod tests {
 
     #[test]
     fn format_json_with_nested_data() {
-        let e = ConnectorEvent::new("test", "x", 1)
-            .with_data(json!({"a": {"b": [1, 2, {"c": true}]}}));
+        let e =
+            ConnectorEvent::new("test", "x", 1).with_data(json!({"a": {"b": [1, 2, {"c": true}]}}));
         let out = format_json(&e);
         let parsed: Value = serde_json::from_str(&out).expect("parse");
         assert_eq!(parsed["data"]["a"]["b"][2]["c"], true);
@@ -1920,8 +1920,7 @@ mod tests {
 
     #[test]
     fn format_ndjson_with_special_chars() {
-        let e = ConnectorEvent::new("test", "x", 1)
-            .with_data(json!({"text": "line1\nline2\ttab"}));
+        let e = ConnectorEvent::new("test", "x", 1).with_data(json!({"text": "line1\nline2\ttab"}));
         let out = format_ndjson(&e);
         // NDJSON is single-line, so newlines in data are escaped
         assert!(!out.contains('\n'));

@@ -4201,23 +4201,25 @@ pub fn lifecycle_mutation_payload(result: &LifecycleMutationResult) -> Value {
 /// Lifecycle commands that MUST go through host-admin RPC in live mode.
 #[allow(dead_code)]
 pub const LIFECYCLE_HOST_REQUIRED_OPS: &[&str] = &[
-    "install", "update", "enable", "disable", "start", "stop", "restart",
-    "reload", "reconcile",
+    "install",
+    "update",
+    "enable",
+    "disable",
+    "start",
+    "stop",
+    "restart",
+    "reload",
+    "reconcile",
 ];
 
 /// Lifecycle commands that can work with offline artifacts.
 #[allow(dead_code)]
-pub const LIFECYCLE_OFFLINE_OPS: &[&str] = &[
-    "package", "verify", "prepare",
-];
+pub const LIFECYCLE_OFFLINE_OPS: &[&str] = &["package", "verify", "prepare"];
 
 /// Determine the expected lifecycle mutation channel for a command + mode.
 #[allow(dead_code)]
 #[must_use]
-pub fn expected_lifecycle_channel(
-    command: &str,
-    mode: RuntimeMode,
-) -> LifecycleMutationChannel {
+pub fn expected_lifecycle_channel(command: &str, mode: RuntimeMode) -> LifecycleMutationChannel {
     if LIFECYCLE_OFFLINE_OPS.contains(&command) {
         return LifecycleMutationChannel::OfflineArtifact;
     }
@@ -4309,9 +4311,7 @@ impl RealtimeSurfaceMode {
             Self::CachedReplay => {
                 "Data is from a cached replay and does not reflect current state."
             }
-            Self::StaticSnapshot => {
-                "Data is a static snapshot; no further updates will arrive."
-            }
+            Self::StaticSnapshot => "Data is a static snapshot; no further updates will arrive.",
             Self::Unavailable => "Surface is unavailable; no data can be served.",
         }
     }
@@ -4494,9 +4494,8 @@ pub fn realtime_surface_payload(result: &RealtimeSurfaceResult) -> Value {
 
 /// Real-time surface commands that should carry truthfulness envelopes.
 #[allow(dead_code)]
-pub const REALTIME_SURFACE_COMMANDS: &[&str] = &[
-    "serve-mcp", "audit-tail", "logs", "events", "tail",
-];
+pub const REALTIME_SURFACE_COMMANDS: &[&str] =
+    &["serve-mcp", "audit-tail", "logs", "events", "tail"];
 
 /// Returns `true` if the command is a real-time surface command.
 #[allow(dead_code)]
@@ -4509,10 +4508,7 @@ pub fn is_realtime_surface_command(command: &str) -> bool {
 /// runtime mode and whether the host is available.
 #[allow(dead_code)]
 #[must_use]
-pub fn expected_realtime_mode(
-    mode: RuntimeMode,
-    host_available: bool,
-) -> RealtimeSurfaceMode {
+pub fn expected_realtime_mode(mode: RuntimeMode, host_available: bool) -> RealtimeSurfaceMode {
     match mode {
         RuntimeMode::Live => {
             if host_available {
@@ -4532,10 +4528,7 @@ pub fn expected_realtime_mode(
 /// availability.
 #[allow(dead_code)]
 #[must_use]
-pub fn expected_audit_tail_source(
-    mode: RuntimeMode,
-    host_available: bool,
-) -> AuditTailSource {
+pub fn expected_audit_tail_source(mode: RuntimeMode, host_available: bool) -> AuditTailSource {
     match mode {
         RuntimeMode::Live => {
             if host_available {
@@ -4555,10 +4548,7 @@ pub fn expected_audit_tail_source(
 /// host availability.
 #[allow(dead_code)]
 #[must_use]
-pub fn expected_tool_call_backing(
-    mode: RuntimeMode,
-    host_available: bool,
-) -> ToolCallBackingState {
+pub fn expected_tool_call_backing(mode: RuntimeMode, host_available: bool) -> ToolCallBackingState {
     match mode {
         RuntimeMode::Live => {
             if host_available {
@@ -4652,19 +4642,29 @@ pub fn pipeline_truth_summary(
     stages: &[PipelineStageOutcome],
 ) -> PipelineTruthSummary {
     let total_stages = stages.len();
-    let executed_count = stages.iter().filter(|s| **s == PipelineStageOutcome::Executed).count();
-    let simulated_count = stages.iter().filter(|s| **s == PipelineStageOutcome::Simulated).count();
-    let skipped_count = stages.iter().filter(|s| **s == PipelineStageOutcome::Skipped).count();
-    let failed_count = stages.iter().filter(|s| **s == PipelineStageOutcome::Failed).count();
+    let executed_count = stages
+        .iter()
+        .filter(|s| **s == PipelineStageOutcome::Executed)
+        .count();
+    let simulated_count = stages
+        .iter()
+        .filter(|s| **s == PipelineStageOutcome::Simulated)
+        .count();
+    let skipped_count = stages
+        .iter()
+        .filter(|s| **s == PipelineStageOutcome::Skipped)
+        .count();
+    let failed_count = stages
+        .iter()
+        .filter(|s| **s == PipelineStageOutcome::Failed)
+        .count();
 
     let fully_live = total_stages > 0 && executed_count == total_stages;
 
     let caveat = if total_stages == 0 {
         "Pipeline has no stages — nothing was executed.".to_string()
     } else if fully_live {
-        format!(
-            "All {total_stages} stages of pipeline `{pipeline_id}` executed against live host."
-        )
+        format!("All {total_stages} stages of pipeline `{pipeline_id}` executed against live host.")
     } else if failed_count > 0 {
         format!(
             "Pipeline `{pipeline_id}` had {failed_count} failed stage(s) out of {total_stages}. \
@@ -4777,9 +4777,7 @@ pub fn workflow_execution_truth(
     let caveat = if steps == 0 {
         "Workflow has no steps — nothing was executed.".to_string()
     } else if fully_live {
-        format!(
-            "All {steps} steps of workflow `{workflow_id}` are backed by live host execution."
-        )
+        format!("All {steps} steps of workflow `{workflow_id}` are backed by live host execution.")
     } else {
         format!(
             "Workflow `{workflow_id}` has {plan_only_steps} plan-only step(s) out of {steps}. \
@@ -4836,6 +4834,11 @@ mod tests {
         workflow_can_proceed, workflow_kind,
     };
     use super::{
+        AuditTailSource, REALTIME_SURFACE_COMMANDS, RealtimeSurfaceMode, ToolCallBackingState,
+        expected_audit_tail_source, expected_realtime_mode, expected_tool_call_backing,
+        is_realtime_surface_command, realtime_surface_payload, realtime_surface_result,
+    };
+    use super::{
         AuthDenialEnvelope, AuthDenialReason, AuthRemediationStep, CapabilityTokenRequirement,
         auth_denial_envelope, command_token_requirement, denial_to_remediation,
         token_satisfies_freshness,
@@ -4843,6 +4846,12 @@ mod tests {
     use super::{
         CONFIG_MUTATING_OPS, CONFIG_READABLE_OPS, ConfigDataSource, ConfigMutationOutcome,
         config_op_requires_host, config_provenance, expected_config_source,
+    };
+    use super::{
+        DesiredLifecycleState, LIFECYCLE_HOST_REQUIRED_OPS, LIFECYCLE_OFFLINE_OPS,
+        LifecycleMutationChannel, LifecycleMutationResult, ObservedLifecycleState,
+        expected_lifecycle_channel, lifecycle_mutation_payload, lifecycle_mutation_result,
+        validate_lifecycle_channel,
     };
     use super::{
         EXPORT_COMMANDS, McpSurfaceState, ToolAvailability, ToolInventorySource,
@@ -4857,20 +4866,9 @@ mod tests {
         filter_suggestable_actions, is_intent_action, plan_step_truth,
     };
     use super::{
-        DesiredLifecycleState, LIFECYCLE_HOST_REQUIRED_OPS, LIFECYCLE_OFFLINE_OPS,
-        LifecycleMutationChannel, LifecycleMutationResult, ObservedLifecycleState,
-        expected_lifecycle_channel, lifecycle_mutation_payload, lifecycle_mutation_result,
-        validate_lifecycle_channel,
-    };
-    use super::{
-        PipelineStageOutcome, PipelineTruthSummary, TaskProgressSource,
-        WorkflowExecutionTruth, pipeline_truth_payload, pipeline_truth_summary,
-        workflow_execution_truth, workflow_truth_payload,
-    };
-    use super::{
-        AuditTailSource, REALTIME_SURFACE_COMMANDS, RealtimeSurfaceMode, ToolCallBackingState,
-        expected_audit_tail_source, expected_realtime_mode, expected_tool_call_backing,
-        is_realtime_surface_command, realtime_surface_payload, realtime_surface_result,
+        PipelineStageOutcome, PipelineTruthSummary, TaskProgressSource, WorkflowExecutionTruth,
+        pipeline_truth_payload, pipeline_truth_summary, workflow_execution_truth,
+        workflow_truth_payload,
     };
     use serde_json::json;
 
@@ -9534,12 +9532,16 @@ mod tests {
 
     #[test]
     fn demo_marker_zero_hash_embedded_in_longer_hash() {
-        assert!(contains_demo_marker("blake3:00000000000000001234567890abcdef"));
+        assert!(contains_demo_marker(
+            "blake3:00000000000000001234567890abcdef"
+        ));
     }
 
     #[test]
     fn demo_marker_fake_registry_embedded_in_url() {
-        assert!(contains_demo_marker("https://fake-registry.example.com/pkg"));
+        assert!(contains_demo_marker(
+            "https://fake-registry.example.com/pkg"
+        ));
     }
 
     #[test]
@@ -13408,9 +13410,7 @@ mod tests {
     fn auth_token_requirement_requires_token() {
         assert!(CapabilityTokenRequirement::Fresh { max_age_secs: 60 }.requires_token());
         assert!(CapabilityTokenRequirement::Valid.requires_token());
-        assert!(
-            CapabilityTokenRequirement::WithHolderProof { max_age_secs: 60 }.requires_token()
-        );
+        assert!(CapabilityTokenRequirement::WithHolderProof { max_age_secs: 60 }.requires_token());
         assert!(
             CapabilityTokenRequirement::WithApproval {
                 required_approvals: 1
@@ -13619,7 +13619,12 @@ mod tests {
     #[test]
     fn auth_denial_reissuable_classification() {
         assert!(AuthDenialReason::TokenMissing.is_reissuable());
-        assert!(AuthDenialReason::TokenExpired { expired_ago_secs: 1 }.is_reissuable());
+        assert!(
+            AuthDenialReason::TokenExpired {
+                expired_ago_secs: 1
+            }
+            .is_reissuable()
+        );
         assert!(
             AuthDenialReason::TokenRevoked {
                 revoked_at: "t".into()
@@ -13639,12 +13644,7 @@ mod tests {
             }
             .is_reissuable()
         );
-        assert!(
-            !AuthDenialReason::HolderProofFailed {
-                detail: "d".into()
-            }
-            .is_reissuable()
-        );
+        assert!(!AuthDenialReason::HolderProofFailed { detail: "d".into() }.is_reissuable());
         assert!(!AuthDenialReason::MalformedToken.is_reissuable());
         assert!(
             !AuthDenialReason::ApprovalMissing {
@@ -13657,15 +13657,15 @@ mod tests {
 
     #[test]
     fn auth_denial_structural_classification() {
+        assert!(AuthDenialReason::HolderProofFailed { detail: "d".into() }.is_structural());
+        assert!(AuthDenialReason::MalformedToken.is_structural());
+        assert!(!AuthDenialReason::TokenMissing.is_structural());
         assert!(
-            AuthDenialReason::HolderProofFailed {
-                detail: "d".into()
+            !AuthDenialReason::TokenExpired {
+                expired_ago_secs: 1
             }
             .is_structural()
         );
-        assert!(AuthDenialReason::MalformedToken.is_structural());
-        assert!(!AuthDenialReason::TokenMissing.is_structural());
-        assert!(!AuthDenialReason::TokenExpired { expired_ago_secs: 1 }.is_structural());
     }
 
     #[test]
@@ -13710,10 +13710,7 @@ mod tests {
             "replace-synthetic-token"
         );
         assert_eq!(
-            AuthRemediationStep::ContactAdmin {
-                reason: "x".into()
-            }
-            .tag(),
+            AuthRemediationStep::ContactAdmin { reason: "x".into() }.tag(),
             "contact-admin"
         );
     }
@@ -13938,9 +13935,7 @@ mod tests {
         }
 
         let non_reissuable_reasons: Vec<AuthDenialReason> = vec![
-            AuthDenialReason::HolderProofFailed {
-                detail: "d".into(),
-            },
+            AuthDenialReason::HolderProofFailed { detail: "d".into() },
             AuthDenialReason::MalformedToken,
             AuthDenialReason::ApprovalMissing {
                 required: 2,
@@ -14220,9 +14215,18 @@ mod tests {
 
     #[test]
     fn lifecycle_channel_tags_are_stable() {
-        assert_eq!(LifecycleMutationChannel::HostAdminRpc.tag(), "host-admin-rpc");
-        assert_eq!(LifecycleMutationChannel::LocalFileEdit.tag(), "local-file-edit");
-        assert_eq!(LifecycleMutationChannel::OfflineArtifact.tag(), "offline-artifact");
+        assert_eq!(
+            LifecycleMutationChannel::HostAdminRpc.tag(),
+            "host-admin-rpc"
+        );
+        assert_eq!(
+            LifecycleMutationChannel::LocalFileEdit.tag(),
+            "local-file-edit"
+        );
+        assert_eq!(
+            LifecycleMutationChannel::OfflineArtifact.tag(),
+            "offline-artifact"
+        );
         assert_eq!(LifecycleMutationChannel::Denied.tag(), "denied");
     }
 
@@ -14294,7 +14298,8 @@ mod tests {
     #[test]
     fn lifecycle_mutation_converges_when_desired_matches_observed() {
         let r = lifecycle_mutation_result(
-            "install", "github:rr:1.0",
+            "install",
+            "github:rr:1.0",
             LifecycleMutationChannel::HostAdminRpc,
             DesiredLifecycleState::Installed,
             ObservedLifecycleState::Running,
@@ -14306,7 +14311,8 @@ mod tests {
     #[test]
     fn lifecycle_mutation_does_not_converge_when_mismatch() {
         let r = lifecycle_mutation_result(
-            "install", "github:rr:1.0",
+            "install",
+            "github:rr:1.0",
             LifecycleMutationChannel::HostAdminRpc,
             DesiredLifecycleState::Installed,
             ObservedLifecycleState::Error,
@@ -14325,7 +14331,8 @@ mod tests {
             DesiredLifecycleState::Updated,
         ] {
             let r = lifecycle_mutation_result(
-                "install", "c",
+                "install",
+                "c",
                 LifecycleMutationChannel::HostAdminRpc,
                 desired,
                 ObservedLifecycleState::Unknown,
@@ -14341,7 +14348,8 @@ mod tests {
     #[test]
     fn lifecycle_mutation_enable_converges_with_running() {
         let r = lifecycle_mutation_result(
-            "enable", "slack:rr:2.0",
+            "enable",
+            "slack:rr:2.0",
             LifecycleMutationChannel::HostAdminRpc,
             DesiredLifecycleState::Enabled,
             ObservedLifecycleState::Running,
@@ -14353,7 +14361,8 @@ mod tests {
     #[test]
     fn lifecycle_mutation_disable_converges_with_stopped() {
         let r = lifecycle_mutation_result(
-            "disable", "slack:rr:2.0",
+            "disable",
+            "slack:rr:2.0",
             LifecycleMutationChannel::HostAdminRpc,
             DesiredLifecycleState::Disabled,
             ObservedLifecycleState::Stopped,
@@ -14365,7 +14374,8 @@ mod tests {
     #[test]
     fn lifecycle_mutation_uninstall_converges_with_not_present() {
         let r = lifecycle_mutation_result(
-            "uninstall", "slack:rr:2.0",
+            "uninstall",
+            "slack:rr:2.0",
             LifecycleMutationChannel::HostAdminRpc,
             DesiredLifecycleState::Uninstalled,
             ObservedLifecycleState::NotPresent,
@@ -14377,7 +14387,8 @@ mod tests {
     #[test]
     fn lifecycle_mutation_caveat_warns_about_non_authoritative_channel() {
         let r = lifecycle_mutation_result(
-            "install", "github:rr:1.0",
+            "install",
+            "github:rr:1.0",
             LifecycleMutationChannel::LocalFileEdit,
             DesiredLifecycleState::Installed,
             ObservedLifecycleState::Running,
@@ -14390,7 +14401,8 @@ mod tests {
     #[test]
     fn lifecycle_mutation_caveat_warns_about_non_converged() {
         let r = lifecycle_mutation_result(
-            "install", "github:rr:1.0",
+            "install",
+            "github:rr:1.0",
             LifecycleMutationChannel::HostAdminRpc,
             DesiredLifecycleState::Installed,
             ObservedLifecycleState::Error,
@@ -14402,7 +14414,8 @@ mod tests {
     #[test]
     fn lifecycle_mutation_caveat_confirms_convergence() {
         let r = lifecycle_mutation_result(
-            "install", "github:rr:1.0",
+            "install",
+            "github:rr:1.0",
             LifecycleMutationChannel::HostAdminRpc,
             DesiredLifecycleState::Installed,
             ObservedLifecycleState::Running,
@@ -14414,7 +14427,8 @@ mod tests {
     #[test]
     fn lifecycle_mutation_payload_has_required_fields() {
         let r = lifecycle_mutation_result(
-            "install", "github:rr:1.0",
+            "install",
+            "github:rr:1.0",
             LifecycleMutationChannel::HostAdminRpc,
             DesiredLifecycleState::Installed,
             ObservedLifecycleState::Running,
@@ -14434,7 +14448,8 @@ mod tests {
     #[test]
     fn lifecycle_mutation_payload_local_file_shows_restart_required() {
         let r = lifecycle_mutation_result(
-            "install", "c",
+            "install",
+            "c",
             LifecycleMutationChannel::LocalFileEdit,
             DesiredLifecycleState::Installed,
             ObservedLifecycleState::Running,
@@ -14447,7 +14462,9 @@ mod tests {
 
     #[test]
     fn lifecycle_host_required_ops_include_core_lifecycle_commands() {
-        for cmd in ["install", "update", "enable", "disable", "start", "stop", "restart"] {
+        for cmd in [
+            "install", "update", "enable", "disable", "start", "stop", "restart",
+        ] {
             assert!(
                 LIFECYCLE_HOST_REQUIRED_OPS.contains(&cmd),
                 "'{cmd}' should be in LIFECYCLE_HOST_REQUIRED_OPS"
@@ -14497,10 +14514,16 @@ mod tests {
 
     #[test]
     fn expected_lifecycle_channel_refused_denies_everything() {
-        for cmd in LIFECYCLE_HOST_REQUIRED_OPS.iter().chain(LIFECYCLE_OFFLINE_OPS.iter()) {
+        for cmd in LIFECYCLE_HOST_REQUIRED_OPS
+            .iter()
+            .chain(LIFECYCLE_OFFLINE_OPS.iter())
+        {
             let ch = expected_lifecycle_channel(cmd, RuntimeMode::Refused);
             assert!(
-                matches!(ch, LifecycleMutationChannel::Denied | LifecycleMutationChannel::OfflineArtifact),
+                matches!(
+                    ch,
+                    LifecycleMutationChannel::Denied | LifecycleMutationChannel::OfflineArtifact
+                ),
                 "Refused mode should deny or route to offline for '{cmd}': {ch:?}"
             );
         }
@@ -14561,7 +14584,8 @@ mod tests {
     #[test]
     fn lifecycle_mutation_result_serde_roundtrip() {
         let r = lifecycle_mutation_result(
-            "install", "github:rr:1.0",
+            "install",
+            "github:rr:1.0",
             LifecycleMutationChannel::HostAdminRpc,
             DesiredLifecycleState::Installed,
             ObservedLifecycleState::Running,
@@ -14693,10 +14717,7 @@ mod tests {
 
     #[test]
     fn pipeline_truth_summary_with_failures() {
-        let stages = vec![
-            PipelineStageOutcome::Executed,
-            PipelineStageOutcome::Failed,
-        ];
+        let stages = vec![PipelineStageOutcome::Executed, PipelineStageOutcome::Failed];
         let s = pipeline_truth_summary("p3", &stages);
         assert!(!s.fully_live);
         assert_eq!(s.failed_count, 1);
@@ -14714,10 +14735,7 @@ mod tests {
 
     #[test]
     fn pipeline_truth_summary_all_skipped() {
-        let stages = vec![
-            PipelineStageOutcome::Skipped,
-            PipelineStageOutcome::Skipped,
-        ];
+        let stages = vec![PipelineStageOutcome::Skipped, PipelineStageOutcome::Skipped];
         let s = pipeline_truth_summary("skip-all", &stages);
         assert!(!s.fully_live);
         assert_eq!(s.skipped_count, 2);
@@ -14753,10 +14771,13 @@ mod tests {
 
     #[test]
     fn pipeline_truth_payload_has_all_fields() {
-        let s = pipeline_truth_summary("pay", &[
-            PipelineStageOutcome::Executed,
-            PipelineStageOutcome::Simulated,
-        ]);
+        let s = pipeline_truth_summary(
+            "pay",
+            &[
+                PipelineStageOutcome::Executed,
+                PipelineStageOutcome::Simulated,
+            ],
+        );
         let p = pipeline_truth_payload(&s);
         assert_eq!(p["pipeline_id"], "pay");
         assert_eq!(p["total_stages"], 2);
@@ -14770,10 +14791,13 @@ mod tests {
 
     #[test]
     fn pipeline_truth_payload_fully_live() {
-        let s = pipeline_truth_summary("live", &[
-            PipelineStageOutcome::Executed,
-            PipelineStageOutcome::Executed,
-        ]);
+        let s = pipeline_truth_summary(
+            "live",
+            &[
+                PipelineStageOutcome::Executed,
+                PipelineStageOutcome::Executed,
+            ],
+        );
         let p = pipeline_truth_payload(&s);
         assert_eq!(p["fully_live"], true);
     }
@@ -14782,8 +14806,14 @@ mod tests {
 
     #[test]
     fn task_progress_source_tags() {
-        assert_eq!(TaskProgressSource::LiveHostProgress.tag(), "live_host_progress");
-        assert_eq!(TaskProgressSource::EstimatedProgress.tag(), "estimated_progress");
+        assert_eq!(
+            TaskProgressSource::LiveHostProgress.tag(),
+            "live_host_progress"
+        );
+        assert_eq!(
+            TaskProgressSource::EstimatedProgress.tag(),
+            "estimated_progress"
+        );
         assert_eq!(TaskProgressSource::Unknown.tag(), "unknown");
     }
 
@@ -14811,7 +14841,10 @@ mod tests {
     #[test]
     fn task_progress_only_live_host_is_authoritative() {
         // Cross-cutting: estimated and unknown must never claim authority
-        let non_auth = [TaskProgressSource::EstimatedProgress, TaskProgressSource::Unknown];
+        let non_auth = [
+            TaskProgressSource::EstimatedProgress,
+            TaskProgressSource::Unknown,
+        ];
         for src in non_auth {
             assert!(
                 !src.is_authoritative(),
@@ -14950,7 +14983,10 @@ mod tests {
             vec![PipelineStageOutcome::Failed],
             vec![PipelineStageOutcome::Skipped],
             vec![PipelineStageOutcome::Pending],
-            vec![PipelineStageOutcome::Executed, PipelineStageOutcome::Simulated],
+            vec![
+                PipelineStageOutcome::Executed,
+                PipelineStageOutcome::Simulated,
+            ],
             vec![PipelineStageOutcome::Executed, PipelineStageOutcome::Failed],
         ];
         for (i, stages) in combos.iter().enumerate() {
@@ -14966,12 +15002,8 @@ mod tests {
     fn workflow_truth_caveat_always_nonempty() {
         let combos = [(0, 0), (1, 0), (0, 1), (3, 2), (5, 0)];
         for (live, plan) in combos {
-            let t = workflow_execution_truth(
-                "caveat",
-                WorkflowKind::OrchestratedExecution,
-                live,
-                plan,
-            );
+            let t =
+                workflow_execution_truth("caveat", WorkflowKind::OrchestratedExecution, live, plan);
             assert!(
                 !t.caveat.is_empty(),
                 "Caveat should never be empty for live={live}, plan={plan}"
@@ -15046,7 +15078,11 @@ mod tests {
         ];
         let tags: Vec<_> = modes.iter().map(|m| m.tag()).collect();
         let deduped: std::collections::HashSet<_> = tags.iter().collect();
-        assert_eq!(tags.len(), deduped.len(), "Duplicate RealtimeSurfaceMode tags found");
+        assert_eq!(
+            tags.len(),
+            deduped.len(),
+            "Duplicate RealtimeSurfaceMode tags found"
+        );
     }
 
     #[test]
@@ -15114,13 +15150,20 @@ mod tests {
         ];
         let tags: Vec<_> = sources.iter().map(|s| s.tag()).collect();
         let deduped: std::collections::HashSet<_> = tags.iter().collect();
-        assert_eq!(tags.len(), deduped.len(), "Duplicate AuditTailSource tags found");
+        assert_eq!(
+            tags.len(),
+            deduped.len(),
+            "Duplicate AuditTailSource tags found"
+        );
     }
 
     #[test]
     fn tool_call_backing_state_tags_stable() {
         assert_eq!(ToolCallBackingState::LiveConnector.tag(), "live-connector");
-        assert_eq!(ToolCallBackingState::StaticDefinition.tag(), "static-definition");
+        assert_eq!(
+            ToolCallBackingState::StaticDefinition.tag(),
+            "static-definition"
+        );
         assert_eq!(ToolCallBackingState::Stale.tag(), "stale");
         assert_eq!(ToolCallBackingState::Unavailable.tag(), "unavailable");
     }
@@ -15182,12 +15225,17 @@ mod tests {
         ];
         let tags: Vec<_> = states.iter().map(|s| s.tag()).collect();
         let deduped: std::collections::HashSet<_> = tags.iter().collect();
-        assert_eq!(tags.len(), deduped.len(), "Duplicate ToolCallBackingState tags found");
+        assert_eq!(
+            tags.len(),
+            deduped.len(),
+            "Duplicate ToolCallBackingState tags found"
+        );
     }
 
     #[test]
     fn realtime_surface_result_live_stream() {
-        let r = realtime_surface_result("serve-mcp", "mcp-surface", RealtimeSurfaceMode::LiveStream);
+        let r =
+            realtime_surface_result("serve-mcp", "mcp-surface", RealtimeSurfaceMode::LiveStream);
         assert_eq!(r.command, "serve-mcp");
         assert_eq!(r.surface_name, "mcp-surface");
         assert!(r.authoritative);
@@ -15410,17 +15458,26 @@ mod tests {
     #[test]
     fn cross_cutting_live_stream_always_has_nonempty_caveat() {
         let r = realtime_surface_result("serve-mcp", "mcp", RealtimeSurfaceMode::LiveStream);
-        assert!(!r.caveat.is_empty(), "Live stream result must have a caveat");
         assert!(
-            !RealtimeSurfaceMode::LiveStream.freshness_caveat().is_empty(),
+            !r.caveat.is_empty(),
+            "Live stream result must have a caveat"
+        );
+        assert!(
+            !RealtimeSurfaceMode::LiveStream
+                .freshness_caveat()
+                .is_empty(),
             "Live stream mode must have a freshness caveat"
         );
         assert!(
-            !AuditTailSource::LiveHostStream.freshness_caveat().is_empty(),
+            !AuditTailSource::LiveHostStream
+                .freshness_caveat()
+                .is_empty(),
             "Live host stream audit tail must have a freshness caveat"
         );
         assert!(
-            !ToolCallBackingState::LiveConnector.freshness_caveat().is_empty(),
+            !ToolCallBackingState::LiveConnector
+                .freshness_caveat()
+                .is_empty(),
             "Live connector backing must have a freshness caveat"
         );
     }

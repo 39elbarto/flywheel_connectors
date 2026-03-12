@@ -2264,10 +2264,8 @@ mod tests {
 
     #[test]
     fn pipeline_cond_parse_nested_not_and() {
-        let c = parse_condition(
-            "!{{steps.a.output.skip}} && {{steps.b.output.ready}} == true",
-        )
-        .unwrap();
+        let c = parse_condition("!{{steps.a.output.skip}} && {{steps.b.output.ready}} == true")
+            .unwrap();
         match &c.parsed {
             ConditionExpr::LogicalAnd(l, r) => {
                 assert!(matches!(l.as_ref(), ConditionExpr::Not(_)));
@@ -2763,9 +2761,6 @@ mod tests {
 
     #[test]
     fn pipeline_cond_value_display_empty_string() {
-        assert_eq!(
-            ConditionValue::String(String::new()).to_string(),
-            "''"
-        );
+        assert_eq!(ConditionValue::String(String::new()).to_string(), "''");
     }
 }

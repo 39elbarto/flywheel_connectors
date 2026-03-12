@@ -1001,7 +1001,10 @@ mod tests {
         assert_eq!(cloned.error_count, 7);
         assert_eq!(cloned.window_requests, 20);
         assert_eq!(cloned.window_errors, 15);
-        assert_eq!(cloned.trip_code.as_deref(), Some("FCP_ERR_TRANSPORT_FAILED"));
+        assert_eq!(
+            cloned.trip_code.as_deref(),
+            Some("FCP_ERR_TRANSPORT_FAILED")
+        );
     }
 
     #[test]
@@ -1499,10 +1502,7 @@ mod tests {
             "conn-a",
             "write",
             FallbackEligibility::SuggestOnly,
-            &[
-                ("conn-b".to_string(), 0.2),
-                ("conn-c".to_string(), 0.7),
-            ],
+            &[("conn-b".to_string(), 0.2), ("conn-c".to_string(), 0.7)],
         );
         match &decision {
             FallbackDecision::SuggestFallback {
@@ -1573,13 +1573,8 @@ mod tests {
             ("conn-d".to_string(), 0.7),
             ("conn-e".to_string(), 0.1),
         ];
-        let decision = evaluate_fallback(
-            &reg,
-            "conn-a",
-            "read",
-            FallbackEligibility::Eligible,
-            &alts,
-        );
+        let decision =
+            evaluate_fallback(&reg, "conn-a", "read", FallbackEligibility::Eligible, &alts);
         match &decision {
             FallbackDecision::AutoFallback {
                 alternatives_considered,
@@ -1889,13 +1884,8 @@ mod tests {
             ("conn-e".to_string(), 0.8),  // viable, highest viable
             ("conn-f".to_string(), 0.0),  // zero score
         ];
-        let decision = evaluate_fallback(
-            &reg,
-            "conn-a",
-            "read",
-            FallbackEligibility::Eligible,
-            &alts,
-        );
+        let decision =
+            evaluate_fallback(&reg, "conn-a", "read", FallbackEligibility::Eligible, &alts);
         match &decision {
             FallbackDecision::AutoFallback { fallback, .. } => {
                 assert_eq!(fallback.connector_id, "conn-e");

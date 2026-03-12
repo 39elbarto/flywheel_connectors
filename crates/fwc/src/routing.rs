@@ -1633,14 +1633,20 @@ mod tests {
     #[test]
     fn latency_score_always_positive() {
         for ms in [0, 1, 10, 100, 1000, 10000, u64::MAX] {
-            assert!(latency_score(ms) > 0.0, "latency_score({ms}) should be positive");
+            assert!(
+                latency_score(ms) > 0.0,
+                "latency_score({ms}) should be positive"
+            );
         }
     }
 
     #[test]
     fn latency_score_always_at_most_one() {
         for ms in [0, 1, 10, 100, 1000, 10000, u64::MAX] {
-            assert!(latency_score(ms) <= 1.0, "latency_score({ms}) should be <= 1.0");
+            assert!(
+                latency_score(ms) <= 1.0,
+                "latency_score({ms}) should be <= 1.0"
+            );
         }
     }
 
@@ -1975,9 +1981,7 @@ mod tests {
         store.save().expect("save should create parent dirs");
 
         assert!(path.exists());
-        let _ = fs::remove_dir_all(
-            std::env::temp_dir().join("fwc_routing_test_nested"),
-        );
+        let _ = fs::remove_dir_all(std::env::temp_dir().join("fwc_routing_test_nested"));
     }
 
     #[test]
@@ -2040,7 +2044,10 @@ mod tests {
     fn pref_store_unicode_keys() {
         let mut store = PreferenceStore::new("/tmp/test_unicode_keys.json");
         store.record_choice("enviar_mensaje", "conector_\u{00e9}l");
-        assert_eq!(store.get_preference("enviar_mensaje", "conector_\u{00e9}l"), 1);
+        assert_eq!(
+            store.get_preference("enviar_mensaje", "conector_\u{00e9}l"),
+            1
+        );
     }
 
     #[test]
@@ -2218,7 +2225,11 @@ mod tests {
     #[test]
     fn score_normalized_between_zero_and_one() {
         // Test many candidate configurations
-        for health in [HealthState::Healthy, HealthState::Degraded, HealthState::Unknown] {
+        for health in [
+            HealthState::Healthy,
+            HealthState::Degraded,
+            HealthState::Unknown,
+        ] {
             for rate in [0.0_f64, 0.5, 1.0] {
                 for success in [0.0_f64, 0.5, 1.0] {
                     let mut c = default_candidate();
@@ -2246,11 +2257,7 @@ mod tests {
     #[test]
     fn pref_store_load_valid_json_populated() {
         let path = std::env::temp_dir().join("fwc_routing_test_populated.json");
-        fs::write(
-            &path,
-            r#"{"send_message":{"slack":5,"discord":2}}"#,
-        )
-        .unwrap();
+        fs::write(&path, r#"{"send_message":{"slack":5,"discord":2}}"#).unwrap();
         let mut store = PreferenceStore::new(&path);
         store.load().unwrap();
         assert_eq!(store.get_preference("send_message", "slack"), 5);

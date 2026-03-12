@@ -1313,10 +1313,10 @@ mod tests {
     fn check_only_logic_table() {
         // Test all 4 combinations of (check, write)
         let combos = [
-            (false, false, true),  // neither set → check_only
-            (false, true, false),  // write only → not check_only
-            (true, false, true),   // check only → check_only
-            (true, true, true),    // both (invalid in clap) → check_only (check dominates)
+            (false, false, true), // neither set → check_only
+            (false, true, false), // write only → not check_only
+            (true, false, true),  // check only → check_only
+            (true, true, true),   // both (invalid in clap) → check_only (check dominates)
         ];
         for (check, write, expected) in combos {
             let result = check || !write;

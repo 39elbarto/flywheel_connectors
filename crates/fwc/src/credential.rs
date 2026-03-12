@@ -1516,7 +1516,10 @@ mod tests {
             AuthType::from_str_label("credential-ref"),
             Some(AuthType::CredentialRef)
         );
-        assert_eq!(AuthType::from_str_label("ref"), Some(AuthType::CredentialRef));
+        assert_eq!(
+            AuthType::from_str_label("ref"),
+            Some(AuthType::CredentialRef)
+        );
     }
 
     #[test]
@@ -1787,7 +1790,10 @@ mod tests {
     #[test]
     fn redacted_credential_serde_no_raw_secrets() {
         let mut fields = BTreeMap::new();
-        fields.insert("password".to_owned(), "super_secret_password_123".to_owned());
+        fields.insert(
+            "password".to_owned(),
+            "super_secret_password_123".to_owned(),
+        );
         fields.insert("username".to_owned(), "admin_user_name".to_owned());
         let entry = CredentialEntry::new("db", AuthType::BasicAuth, fields);
         let redacted = entry.redacted();
@@ -1871,9 +1877,7 @@ mod tests {
     #[test]
     fn store_add_different_auth_types() {
         let store = mem_store();
-        store
-            .add("a", AuthType::ApiToken, sample_fields())
-            .unwrap();
+        store.add("a", AuthType::ApiToken, sample_fields()).unwrap();
         store
             .add("b", AuthType::OAuth, {
                 let mut f = BTreeMap::new();
@@ -1881,9 +1885,7 @@ mod tests {
                 f
             })
             .unwrap();
-        store
-            .add("c", AuthType::NoAuth, BTreeMap::new())
-            .unwrap();
+        store.add("c", AuthType::NoAuth, BTreeMap::new()).unwrap();
         let list = store.list().unwrap();
         assert_eq!(list.len(), 3);
         assert_eq!(list[0].auth_type, AuthType::ApiToken);
@@ -1908,15 +1910,9 @@ mod tests {
     #[test]
     fn store_list_after_remove() {
         let store = mem_store();
-        store
-            .add("a", AuthType::NoAuth, BTreeMap::new())
-            .unwrap();
-        store
-            .add("b", AuthType::NoAuth, BTreeMap::new())
-            .unwrap();
-        store
-            .add("c", AuthType::NoAuth, BTreeMap::new())
-            .unwrap();
+        store.add("a", AuthType::NoAuth, BTreeMap::new()).unwrap();
+        store.add("b", AuthType::NoAuth, BTreeMap::new()).unwrap();
+        store.add("c", AuthType::NoAuth, BTreeMap::new()).unwrap();
         store.remove("b").unwrap();
         let list = store.list().unwrap();
         let ids: Vec<&str> = list.iter().map(|r| r.connector_id.as_str()).collect();
@@ -1997,16 +1993,12 @@ mod tests {
     #[test]
     fn file_backend_multiple_auth_types() {
         let (store, dir) = file_store();
-        store
-            .add("a", AuthType::ApiToken, sample_fields())
-            .unwrap();
+        store.add("a", AuthType::ApiToken, sample_fields()).unwrap();
         let mut basic = BTreeMap::new();
         basic.insert("username".to_owned(), "u".to_owned());
         basic.insert("password".to_owned(), "p".to_owned());
         store.add("b", AuthType::BasicAuth, basic).unwrap();
-        store
-            .add("c", AuthType::NoAuth, BTreeMap::new())
-            .unwrap();
+        store.add("c", AuthType::NoAuth, BTreeMap::new()).unwrap();
         let list = store.list().unwrap();
         assert_eq!(list.len(), 3);
         let _ = fs::remove_dir_all(&dir);
@@ -2043,7 +2035,10 @@ mod tests {
     fn file_backend_unicode_value() {
         let (store, dir) = file_store();
         let mut fields = BTreeMap::new();
-        fields.insert("token".to_owned(), "tok_\u{00E9}\u{00E8}\u{00EA}".to_owned());
+        fields.insert(
+            "token".to_owned(),
+            "tok_\u{00E9}\u{00E8}\u{00EA}".to_owned(),
+        );
         store.add("unicode", AuthType::ApiToken, fields).unwrap();
         let entry = store.get("unicode").unwrap().unwrap();
         assert_eq!(
@@ -2369,10 +2364,7 @@ mod tests {
 
     #[test]
     fn required_fields_session_token() {
-        assert_eq!(
-            required_fields(AuthType::SessionToken),
-            &["session_token"]
-        );
+        assert_eq!(required_fields(AuthType::SessionToken), &["session_token"]);
     }
 
     #[test]

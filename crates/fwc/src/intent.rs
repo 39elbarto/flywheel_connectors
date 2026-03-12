@@ -3919,9 +3919,7 @@ mod tests {
         // Each variant gets a unique explanation when we use unique messages
         let explanations: std::collections::HashSet<String> = variants
             .iter()
-            .map(|v| {
-                WorkflowTruth::from_compiler(*v, format!("test-{}", v.tag())).explanation
-            })
+            .map(|v| WorkflowTruth::from_compiler(*v, format!("test-{}", v.tag())).explanation)
             .collect();
         assert_eq!(
             explanations.len(),
@@ -3944,24 +3942,21 @@ mod tests {
 
     #[test]
     fn workflow_truth_json_availability_uses_kebab_case() {
-        let truth =
-            WorkflowTruth::from_compiler(CommandAvailability::LiveRuntime, "test");
+        let truth = WorkflowTruth::from_compiler(CommandAvailability::LiveRuntime, "test");
         let json = serde_json::to_value(&truth).unwrap();
         assert_eq!(json["availability"], "live-runtime");
     }
 
     #[test]
     fn workflow_truth_json_offline_artifact_kebab_case() {
-        let truth =
-            WorkflowTruth::from_compiler(CommandAvailability::OfflineArtifact, "test");
+        let truth = WorkflowTruth::from_compiler(CommandAvailability::OfflineArtifact, "test");
         let json = serde_json::to_value(&truth).unwrap();
         assert_eq!(json["availability"], "offline-artifact");
     }
 
     #[test]
     fn workflow_truth_json_has_exactly_six_keys() {
-        let truth =
-            WorkflowTruth::from_compiler(CommandAvailability::Planned, "test");
+        let truth = WorkflowTruth::from_compiler(CommandAvailability::Planned, "test");
         let json = serde_json::to_value(&truth).unwrap();
         let obj = json.as_object().unwrap();
         assert_eq!(

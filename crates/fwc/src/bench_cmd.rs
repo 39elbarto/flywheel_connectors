@@ -492,11 +492,7 @@ fn get_rustc_version() -> Option<String> {
 // ─── CBOR benchmarks ────────────────────────────────────────────────────────
 
 /// Run CBOR benchmarks based on the specified target.
-fn run_cbor_benchmarks(
-    target: CborTarget,
-    iterations: u32,
-    warmup: u32,
-) -> Vec<BenchmarkResult> {
+fn run_cbor_benchmarks(target: CborTarget, iterations: u32, warmup: u32) -> Vec<BenchmarkResult> {
     let mut results = Vec::new();
 
     if target == CborTarget::SchemaHash || target == CborTarget::All {
@@ -917,9 +913,7 @@ pub(crate) fn run(args: &BenchArgs) -> anyhow::Result<()> {
                 "fcp-crypto Shamir not yet implemented",
             )]
         }
-        BenchCommand::Cbor { target } => {
-            run_cbor_benchmarks(*target, args.iterations, args.warmup)
-        }
+        BenchCommand::Cbor { target } => run_cbor_benchmarks(*target, args.iterations, args.warmup),
         BenchCommand::Primitives { target } => {
             run_primitives(*target, args.iterations, args.warmup)
         }
@@ -2239,7 +2233,11 @@ mod tests {
     fn cbor_benchmark_results_have_percentiles() {
         let results = run_cbor_benchmarks(CborTarget::All, 5, 1);
         for r in &results {
-            assert!(r.percentiles.is_some(), "missing percentiles for {}", r.name);
+            assert!(
+                r.percentiles.is_some(),
+                "missing percentiles for {}",
+                r.name
+            );
         }
     }
 
@@ -2613,5 +2611,554 @@ mod tests {
         // base_esi(8) + ack_epoch(8) + frame_seq(8) = 114
         let computed = 4 + 2 + 2 + 4 + 4 + 32 + 2 + 8 + 32 + 8 + 8 + 8;
         assert_eq!(FCPS_HEADER_LEN, computed);
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // Additional BenchmarkResult / BenchmarkReport coverage
+    // ════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn benchmark_result_new_empty_name() {
+        let r = BenchmarkResult::new("", "desc", 1, 0, test_percentiles());
+        assert_eq!(r.name, "");
+        assert_eq!(r.sample_count, 1);
+    }
+
+    #[test]
+    fn benchmark_result_new_string_into() {
+        let name = "bench-foo".to_string();
+        let r = BenchmarkResult::new(name, "desc", 10, 5, test_percentiles());
+        assert_eq!(r.name, "bench-foo");
+    }
+
+    #[test]
+    fn benchmark_result_with_parameters_replaces_empty() {
+        let r = BenchmarkResult::new("x", "y", 1, 0, test_percentiles());
+        assert!(r.parameters.as_object().unwrap().is_empty());
+        let r2 = r.with_parameters(json!({"k": "v"}));
+        assert_eq!(r2.parameters["k"], "v");
+    }
+
+    #[test]
+    fn benchmark_result_with_parameters_chained() {
+        let r = BenchmarkResult::new("x", "y", 1, 0, test_percentiles())
+            .with_parameters(json!({"a": 1}))
+            .with_parameters(json!({"b": 2}));
+        // Second call overwrites first (no merge)
+        assert_eq!(r.parameters["b"], 2);
+        assert!(r.parameters.get("a").is_none());
+    }
+
+    #[test]
+    fn benchmark_result_targets_stored_correctly() {
+        let r = BenchmarkResult::new("x", "y", 1, 0, test_percentiles())
+            .with_targets(Targets { p50_target_ms: 3.5, p99_target_ms: 7.25 });
+        let targets = r.targets.unwrap();
+        assert!((targets.p50_target_ms - 3.5).abs() < f64::EPSILON);
+        assert!((targets.p99_target_ms - 7.25).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn benchmark_result_outliers_detected_default_zero() {
+        let r = BenchmarkResult::new("x", "y", 5, 1, test_percentiles());
+        assert_eq!(r.outliers_detected, 0);
+    }
+
+    #[test]
+    fn benchmark_result_outliers_can_be_set() {
+        let mut r = BenchmarkResult::new("x", "y", 5, 1, test_percentiles());
+        r.outliers_detected = 3;
+        assert_eq!(r.outliers_detected, 3);
+    }
+
+    #[test]
+    fn benchmark_result_note_from_placeholder() {
+        let r = BenchmarkResult::placeholder("p", "reason");
+        assert!(r.note.is_some());
+        assert_eq!(r.note.as_deref(), Some("reason"));
+    }
+
+    #[test]
+    fn benchmark_result_description_from_placeholder() {
+        let r = BenchmarkResult::placeholder("p", "n");
+        assert_eq!(r.description, "Not yet implemented");
+    }
+
+    #[test]
+    fn benchmark_result_warmup_count_preserved() {
+        let r = BenchmarkResult::new("x", "y", 50, 25, test_percentiles());
+        assert_eq!(r.warmup_count, 25);
+        assert_eq!(r.sample_count, 50);
+    }
+
+    #[test]
+    fn benchmark_report_contains_all_results() {
+        let env = EnvironmentInfo {
+            os: "linux".to_string(),
+            os_version: "6.0".to_string(),
+            arch: "x86_64".to_string(),
+            cpu_count: 4,
+            memory_bytes: None,
+            git_commit: None,
+            git_branch: None,
+            git_dirty: None,
+            fcp_version: "0.1.0".to_string(),
+            rustc_version: None,
+            timestamp: Utc::now(),
+        };
+        let r1 = BenchmarkResult::placeholder("a", "n1");
+        let r2 = BenchmarkResult::placeholder("b", "n2");
+        let report = BenchmarkReport::new(env, vec![r1, r2]);
+        assert_eq!(report.results.len(), 2);
+    }
+
+    #[test]
+    fn benchmark_report_clone() {
+        let env = EnvironmentInfo {
+            os: "test".to_string(),
+            os_version: "0".to_string(),
+            arch: "x86_64".to_string(),
+            cpu_count: 1,
+            memory_bytes: None,
+            git_commit: None,
+            git_branch: None,
+            git_dirty: None,
+            fcp_version: "0.0.1".to_string(),
+            rustc_version: None,
+            timestamp: Utc::now(),
+        };
+        let report = BenchmarkReport::new(env, vec![]);
+        let cloned = report.clone();
+        assert_eq!(cloned.schema_version, report.schema_version);
+        assert_eq!(cloned.environment.os, report.environment.os);
+    }
+
+    #[test]
+    fn benchmark_report_debug() {
+        let env = EnvironmentInfo {
+            os: "test".to_string(),
+            os_version: "0".to_string(),
+            arch: "arm".to_string(),
+            cpu_count: 2,
+            memory_bytes: None,
+            git_commit: None,
+            git_branch: None,
+            git_dirty: None,
+            fcp_version: "0.0.1".to_string(),
+            rustc_version: None,
+            timestamp: Utc::now(),
+        };
+        let report = BenchmarkReport::new(env, vec![]);
+        let dbg = format!("{report:?}");
+        assert!(dbg.contains("BenchmarkReport"));
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // Percentiles statistics edge cases
+    // ════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn percentiles_three_elements() {
+        let sorted = vec![1_000_000_u64, 5_000_000, 9_000_000]; // 1ms, 5ms, 9ms
+        let p = calculate_percentiles(&sorted);
+        assert!((p.min_ms - 1.0).abs() < 0.01);
+        assert!((p.max_ms - 9.0).abs() < 0.01);
+        // Mean = (1+5+9)/3 = 5
+        assert!((p.mean_ms - 5.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn percentiles_large_dataset() {
+        let sorted: Vec<u64> = (1..=1000).map(|x| x * 1_000_000).collect();
+        let p = calculate_percentiles(&sorted);
+        // p50 ~ 500ms, p99 ~ 990ms
+        assert!(p.p50_ms > 400.0 && p.p50_ms < 600.0);
+        assert!(p.p99_ms > 900.0 && p.p99_ms < 1001.0);
+    }
+
+    #[test]
+    fn percentiles_stddev_increases_with_spread() {
+        let tight: Vec<u64> = (10..=20).map(|x| x * 1_000_000_u64).collect();
+        let wide: Vec<u64> = (1..=100).map(|x| x * 1_000_000_u64).collect();
+        let p_tight = calculate_percentiles(&tight);
+        let p_wide = calculate_percentiles(&wide);
+        assert!(p_wide.stddev_ms > p_tight.stddev_ms);
+    }
+
+    #[test]
+    fn percentiles_min_is_first_element() {
+        let sorted = vec![500_000_u64, 1_000_000, 2_000_000];
+        let p = calculate_percentiles(&sorted);
+        assert!((p.min_ms - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn percentiles_max_is_last_element() {
+        let sorted = vec![500_000_u64, 1_000_000, 2_000_000];
+        let p = calculate_percentiles(&sorted);
+        assert!((p.max_ms - 2.0).abs() < 0.001);
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // count_outliers additional coverage
+    // ════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn count_outliers_exactly_three_returns_zero() {
+        let sorted = vec![1_u64, 2, 3];
+        assert_eq!(count_outliers(&sorted), 0);
+    }
+
+    #[test]
+    fn count_outliers_two_extreme_outliers() {
+        let mut sorted: Vec<u64> = (100..=200).collect();
+        sorted.push(100_000_u64);
+        sorted.push(200_000_u64);
+        sorted.sort_unstable();
+        let outliers = count_outliers(&sorted);
+        assert!(outliers >= 2);
+    }
+
+    #[test]
+    fn count_outliers_all_same_no_outliers() {
+        let sorted = vec![42_u64; 10];
+        assert_eq!(count_outliers(&sorted), 0);
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // run_benchmark_with_result additional coverage
+    // ════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn run_benchmark_with_multiple_warmup_iterations() {
+        let mut counter = 0_u32;
+        let (p, _) = run_benchmark_with_result(5, 10, || {
+            counter += 1;
+            counter
+        });
+        // 5 warmup + 10 measured = 15 total calls
+        assert_eq!(counter, 15);
+        assert!(p.min_ms >= 0.0);
+    }
+
+    #[test]
+    fn run_benchmark_percentile_ordering_holds() {
+        let (p, _) = run_benchmark_with_result(2, 20, || {
+            let mut v = 0_u64;
+            for i in 0..50 {
+                v = v.wrapping_add(i);
+            }
+            v
+        });
+        assert!(p.min_ms <= p.p50_ms);
+        assert!(p.p50_ms <= p.p90_ms);
+        assert!(p.p90_ms <= p.p95_ms);
+        assert!(p.p95_ms <= p.p99_ms);
+        assert!(p.p99_ms <= p.max_ms);
+    }
+
+    #[test]
+    fn run_benchmark_mean_within_range() {
+        let (p, _) = run_benchmark_with_result(1, 50, || 7_u32);
+        assert!(p.mean_ms >= p.min_ms);
+        assert!(p.mean_ms <= p.max_ms);
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // parse_size_bytes: more boundary and format coverage
+    // ════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn parse_size_bytes_256b() {
+        assert_eq!(parse_size_bytes("256b").unwrap(), 256);
+    }
+
+    #[test]
+    fn parse_size_bytes_4gb() {
+        assert_eq!(parse_size_bytes("4gb").unwrap(), 4 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn parse_size_bytes_1kb_case_insensitive() {
+        assert_eq!(parse_size_bytes("1KB").unwrap(), 1024);
+    }
+
+    #[test]
+    fn parse_size_bytes_mixed_underscores() {
+        // "1_0kb" -> "10kb"
+        assert_eq!(parse_size_bytes("1_0kb").unwrap(), 10 * 1024);
+    }
+
+    #[test]
+    fn parse_size_bytes_whitespace_only_suffix() {
+        // "   " normalizes to "" -> error
+        let err = parse_size_bytes("   ").unwrap_err();
+        assert!(err.to_string().contains("must not be empty"));
+    }
+
+    #[test]
+    fn parse_size_bytes_just_b_suffix() {
+        // "b" -> number portion is "" -> "size value missing"
+        let err = parse_size_bytes("b").unwrap_err();
+        assert!(err.to_string().contains("size value missing"));
+    }
+
+    #[test]
+    fn parse_size_bytes_zero_gb() {
+        let err = parse_size_bytes("0gb").unwrap_err();
+        assert!(err.to_string().contains("greater than zero"));
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // Enum equality and Debug traits
+    // ════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn output_format_debug() {
+        let dbg = format!("{:?}", OutputFormat::Json);
+        assert!(dbg.contains("Json"));
+        let dbg2 = format!("{:?}", OutputFormat::Human);
+        assert!(dbg2.contains("Human"));
+    }
+
+    #[test]
+    fn mesh_path_debug() {
+        let dbg = format!("{:?}", MeshPath::Direct);
+        assert!(dbg.contains("Direct"));
+        let dbg2 = format!("{:?}", MeshPath::Derp);
+        assert!(dbg2.contains("Derp"));
+    }
+
+    #[test]
+    fn cbor_target_debug() {
+        let dbg = format!("{:?}", CborTarget::All);
+        assert!(dbg.contains("All"));
+        let dbg2 = format!("{:?}", CborTarget::Serialize);
+        assert!(dbg2.contains("Serialize"));
+    }
+
+    #[test]
+    fn primitive_target_debug() {
+        let dbg = format!("{:?}", PrimitiveTarget::FcpsFrame);
+        assert!(dbg.contains("FcpsFrame"));
+    }
+
+    #[test]
+    fn cbor_target_all_variants_not_equal() {
+        assert_ne!(CborTarget::SchemaHash, CborTarget::Serialize);
+        assert_ne!(CborTarget::Serialize, CborTarget::Deserialize);
+        assert_ne!(CborTarget::Deserialize, CborTarget::All);
+    }
+
+    #[test]
+    fn primitive_target_all_variants_not_equal() {
+        assert_ne!(PrimitiveTarget::ObjectId, PrimitiveTarget::CapabilityVerify);
+        assert_ne!(PrimitiveTarget::CapabilityVerify, PrimitiveTarget::SessionMac);
+        assert_ne!(PrimitiveTarget::SessionMac, PrimitiveTarget::FcpsFrame);
+        assert_ne!(PrimitiveTarget::FcpsFrame, PrimitiveTarget::All);
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // run_primitives dispatch coverage
+    // ════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn run_primitives_object_id_returns_one() {
+        let results = run_primitives(PrimitiveTarget::ObjectId, 3, 1);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "object-id-derive");
+    }
+
+    #[test]
+    fn run_primitives_capability_verify_returns_one() {
+        let results = run_primitives(PrimitiveTarget::CapabilityVerify, 3, 1);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "capability-verify");
+    }
+
+    #[test]
+    fn run_primitives_session_mac_returns_one() {
+        let results = run_primitives(PrimitiveTarget::SessionMac, 3, 1);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "session-mac-verify");
+    }
+
+    #[test]
+    fn run_primitives_fcps_frame_returns_one() {
+        let results = run_primitives(PrimitiveTarget::FcpsFrame, 3, 1);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "fcps-frame-parse-mac");
+    }
+
+    #[test]
+    fn run_primitives_all_returns_four() {
+        let results = run_primitives(PrimitiveTarget::All, 3, 1);
+        assert_eq!(results.len(), 4);
+        let names: Vec<&str> = results.iter().map(|r| r.name.as_str()).collect();
+        assert!(names.contains(&"object-id-derive"));
+        assert!(names.contains(&"capability-verify"));
+        assert!(names.contains(&"session-mac-verify"));
+        assert!(names.contains(&"fcps-frame-parse-mac"));
+    }
+
+    #[test]
+    fn run_primitives_all_have_percentiles() {
+        let results = run_primitives(PrimitiveTarget::All, 3, 1);
+        for r in &results {
+            assert!(r.percentiles.is_some(), "missing percentiles for {}", r.name);
+        }
+    }
+
+    #[test]
+    fn run_primitives_all_have_targets() {
+        let results = run_primitives(PrimitiveTarget::All, 3, 1);
+        for r in &results {
+            assert!(r.targets.is_some(), "missing targets for {}", r.name);
+        }
+    }
+
+    #[test]
+    fn run_primitives_all_have_passed_set() {
+        let results = run_primitives(PrimitiveTarget::All, 3, 1);
+        for r in &results {
+            assert!(r.passed.is_some(), "passed not set for {}", r.name);
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // CBOR benchmark function-level coverage
+    // ════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn bench_schema_hash_result_name() {
+        let result = bench_schema_hash(3, 1);
+        assert_eq!(result.name, "cbor-schema-hash");
+    }
+
+    #[test]
+    fn bench_schema_hash_sample_count_matches() {
+        let result = bench_schema_hash(7, 1);
+        assert_eq!(result.sample_count, 7);
+        assert_eq!(result.warmup_count, 1);
+    }
+
+    #[test]
+    fn bench_serialize_small_result_name() {
+        let result = bench_serialize_small(3, 1);
+        assert_eq!(result.name, "cbor-serialize-small");
+    }
+
+    #[test]
+    fn bench_serialize_medium_result_name() {
+        let result = bench_serialize_medium(3, 1);
+        assert_eq!(result.name, "cbor-serialize-medium");
+    }
+
+    #[test]
+    fn bench_deserialize_small_result_name() {
+        let result = bench_deserialize_small(3, 1);
+        assert_eq!(result.name, "cbor-deserialize-small");
+    }
+
+    #[test]
+    fn bench_deserialize_medium_result_name() {
+        let result = bench_deserialize_medium(3, 1);
+        assert_eq!(result.name, "cbor-deserialize-medium");
+    }
+
+    #[test]
+    fn cbor_benchmarks_parameters_include_object_type() {
+        let r = bench_serialize_small(3, 1);
+        assert_eq!(r.parameters["object_type"], "SmallObject");
+        assert_eq!(r.parameters["fields"], 3);
+    }
+
+    #[test]
+    fn cbor_benchmarks_medium_parameters_include_fields() {
+        let r = bench_serialize_medium(3, 1);
+        assert_eq!(r.parameters["fields"], 9);
+    }
+
+    #[test]
+    fn bench_schema_hash_parameters_include_schema_string() {
+        let r = bench_schema_hash(3, 1);
+        let schema_param = r.parameters["schema"].as_str().unwrap();
+        assert!(schema_param.contains("fcp.bench"));
+        assert!(schema_param.contains("TestObject"));
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // Environment fields completeness
+    // ════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn environment_info_clone() {
+        let env = EnvironmentInfo {
+            os: "linux".to_string(),
+            os_version: "6.0".to_string(),
+            arch: "x86_64".to_string(),
+            cpu_count: 4,
+            memory_bytes: Some(8_000_000_000),
+            git_commit: Some("abc".to_string()),
+            git_branch: Some("main".to_string()),
+            git_dirty: Some(false),
+            fcp_version: "0.1.0".to_string(),
+            rustc_version: Some("1.85.0".to_string()),
+            timestamp: Utc::now(),
+        };
+        let cloned = env.clone();
+        assert_eq!(cloned.os, env.os);
+        assert_eq!(cloned.cpu_count, env.cpu_count);
+        assert_eq!(cloned.memory_bytes, env.memory_bytes);
+    }
+
+    #[test]
+    fn environment_info_debug() {
+        let env = EnvironmentInfo {
+            os: "test".to_string(),
+            os_version: "0".to_string(),
+            arch: "x86_64".to_string(),
+            cpu_count: 1,
+            memory_bytes: None,
+            git_commit: None,
+            git_branch: None,
+            git_dirty: None,
+            fcp_version: "0.0.1".to_string(),
+            rustc_version: None,
+            timestamp: Utc::now(),
+        };
+        let dbg = format!("{env:?}");
+        assert!(dbg.contains("EnvironmentInfo"));
+    }
+
+    #[test]
+    fn targets_clone() {
+        let t = Targets { p50_target_ms: 1.0, p99_target_ms: 5.0 };
+        let cloned = t.clone();
+        assert!((cloned.p50_target_ms - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn targets_debug() {
+        let t = Targets { p50_target_ms: 1.0, p99_target_ms: 5.0 };
+        let dbg = format!("{t:?}");
+        assert!(dbg.contains("Targets"));
+        assert!(dbg.contains("p50_target_ms"));
+    }
+
+    #[test]
+    fn benchmark_result_debug() {
+        let r = BenchmarkResult::placeholder("p", "n");
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("BenchmarkResult"));
+    }
+
+    #[test]
+    fn benchmark_result_clone() {
+        let r = BenchmarkResult::new("x", "y", 1, 0, test_percentiles())
+            .with_parameters(json!({"key": "val"}));
+        let cloned = r.clone();
+        assert_eq!(cloned.name, r.name);
+        assert_eq!(cloned.parameters["key"], "val");
     }
 }

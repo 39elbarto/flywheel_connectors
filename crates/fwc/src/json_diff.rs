@@ -1285,7 +1285,12 @@ mod tests {
         });
         let result = diff(&old, &new);
         assert!(result.changes.iter().any(|c| c.path == "config.debug"));
-        assert!(result.changes.iter().any(|c| c.path == "config.features[2]"));
+        assert!(
+            result
+                .changes
+                .iter()
+                .any(|c| c.path == "config.features[2]")
+        );
         assert!(result.changes.iter().any(|c| c.path == "config.db.host"));
         assert_eq!(result.changes.len(), 3);
     }
@@ -1341,9 +1346,24 @@ mod tests {
     fn summary_all_three_kinds() {
         let result = DiffResult {
             changes: vec![
-                Change { path: "a".to_string(), kind: ChangeKind::Added, old: None, new: Some(json!(1)) },
-                Change { path: "b".to_string(), kind: ChangeKind::Removed, old: Some(json!(2)), new: None },
-                Change { path: "c".to_string(), kind: ChangeKind::Modified, old: Some(json!(3)), new: Some(json!(4)) },
+                Change {
+                    path: "a".to_string(),
+                    kind: ChangeKind::Added,
+                    old: None,
+                    new: Some(json!(1)),
+                },
+                Change {
+                    path: "b".to_string(),
+                    kind: ChangeKind::Removed,
+                    old: Some(json!(2)),
+                    new: None,
+                },
+                Change {
+                    path: "c".to_string(),
+                    kind: ChangeKind::Modified,
+                    old: Some(json!(3)),
+                    new: Some(json!(4)),
+                },
             ],
         };
         let summary = result.summary();
@@ -1354,12 +1374,42 @@ mod tests {
     fn summary_multiple_of_each_kind() {
         let result = DiffResult {
             changes: vec![
-                Change { path: "a".to_string(), kind: ChangeKind::Added, old: None, new: Some(json!(1)) },
-                Change { path: "b".to_string(), kind: ChangeKind::Added, old: None, new: Some(json!(2)) },
-                Change { path: "c".to_string(), kind: ChangeKind::Removed, old: Some(json!(3)), new: None },
-                Change { path: "d".to_string(), kind: ChangeKind::Removed, old: Some(json!(4)), new: None },
-                Change { path: "e".to_string(), kind: ChangeKind::Removed, old: Some(json!(5)), new: None },
-                Change { path: "f".to_string(), kind: ChangeKind::Modified, old: Some(json!(6)), new: Some(json!(7)) },
+                Change {
+                    path: "a".to_string(),
+                    kind: ChangeKind::Added,
+                    old: None,
+                    new: Some(json!(1)),
+                },
+                Change {
+                    path: "b".to_string(),
+                    kind: ChangeKind::Added,
+                    old: None,
+                    new: Some(json!(2)),
+                },
+                Change {
+                    path: "c".to_string(),
+                    kind: ChangeKind::Removed,
+                    old: Some(json!(3)),
+                    new: None,
+                },
+                Change {
+                    path: "d".to_string(),
+                    kind: ChangeKind::Removed,
+                    old: Some(json!(4)),
+                    new: None,
+                },
+                Change {
+                    path: "e".to_string(),
+                    kind: ChangeKind::Removed,
+                    old: Some(json!(5)),
+                    new: None,
+                },
+                Change {
+                    path: "f".to_string(),
+                    kind: ChangeKind::Modified,
+                    old: Some(json!(6)),
+                    new: Some(json!(7)),
+                },
             ],
         };
         let summary = result.summary();
@@ -1368,7 +1418,9 @@ mod tests {
 
     #[test]
     fn summary_no_changes_returns_parens_string() {
-        let result = DiffResult { changes: Vec::new() };
+        let result = DiffResult {
+            changes: Vec::new(),
+        };
         assert_eq!(result.summary(), "(no changes)");
     }
 
@@ -1711,7 +1763,9 @@ mod tests {
         let s = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
         assert!(s.len() > 60);
         let formatted = format_value_compact(Some(&json!(s)));
-        assert!(formatted.starts_with("\"abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTU"));
+        assert!(
+            formatted.starts_with("\"abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTU")
+        );
         assert!(formatted.ends_with("...\""));
     }
 
@@ -1724,8 +1778,18 @@ mod tests {
         let result = diff(&old, &new);
         assert_eq!(result.count_by_kind(ChangeKind::Removed), 1);
         assert_eq!(result.count_by_kind(ChangeKind::Added), 1);
-        assert!(result.changes.iter().any(|c| c.path == "old_key" && c.kind == ChangeKind::Removed));
-        assert!(result.changes.iter().any(|c| c.path == "new_key" && c.kind == ChangeKind::Added));
+        assert!(
+            result
+                .changes
+                .iter()
+                .any(|c| c.path == "old_key" && c.kind == ChangeKind::Removed)
+        );
+        assert!(
+            result
+                .changes
+                .iter()
+                .any(|c| c.path == "new_key" && c.kind == ChangeKind::Added)
+        );
     }
 
     #[test]
@@ -1742,29 +1806,69 @@ mod tests {
 
     #[test]
     fn change_eq_same_values() {
-        let c1 = Change { path: "x".to_string(), kind: ChangeKind::Added, old: None, new: Some(json!(1)) };
-        let c2 = Change { path: "x".to_string(), kind: ChangeKind::Added, old: None, new: Some(json!(1)) };
+        let c1 = Change {
+            path: "x".to_string(),
+            kind: ChangeKind::Added,
+            old: None,
+            new: Some(json!(1)),
+        };
+        let c2 = Change {
+            path: "x".to_string(),
+            kind: ChangeKind::Added,
+            old: None,
+            new: Some(json!(1)),
+        };
         assert_eq!(c1, c2);
     }
 
     #[test]
     fn change_ne_different_path() {
-        let c1 = Change { path: "x".to_string(), kind: ChangeKind::Added, old: None, new: Some(json!(1)) };
-        let c2 = Change { path: "y".to_string(), kind: ChangeKind::Added, old: None, new: Some(json!(1)) };
+        let c1 = Change {
+            path: "x".to_string(),
+            kind: ChangeKind::Added,
+            old: None,
+            new: Some(json!(1)),
+        };
+        let c2 = Change {
+            path: "y".to_string(),
+            kind: ChangeKind::Added,
+            old: None,
+            new: Some(json!(1)),
+        };
         assert_ne!(c1, c2);
     }
 
     #[test]
     fn change_ne_different_kind() {
-        let c1 = Change { path: "x".to_string(), kind: ChangeKind::Added, old: None, new: Some(json!(1)) };
-        let c2 = Change { path: "x".to_string(), kind: ChangeKind::Removed, old: None, new: Some(json!(1)) };
+        let c1 = Change {
+            path: "x".to_string(),
+            kind: ChangeKind::Added,
+            old: None,
+            new: Some(json!(1)),
+        };
+        let c2 = Change {
+            path: "x".to_string(),
+            kind: ChangeKind::Removed,
+            old: None,
+            new: Some(json!(1)),
+        };
         assert_ne!(c1, c2);
     }
 
     #[test]
     fn change_ne_different_values() {
-        let c1 = Change { path: "x".to_string(), kind: ChangeKind::Modified, old: Some(json!(1)), new: Some(json!(2)) };
-        let c2 = Change { path: "x".to_string(), kind: ChangeKind::Modified, old: Some(json!(1)), new: Some(json!(3)) };
+        let c1 = Change {
+            path: "x".to_string(),
+            kind: ChangeKind::Modified,
+            old: Some(json!(1)),
+            new: Some(json!(2)),
+        };
+        let c2 = Change {
+            path: "x".to_string(),
+            kind: ChangeKind::Modified,
+            old: Some(json!(1)),
+            new: Some(json!(3)),
+        };
         assert_ne!(c1, c2);
     }
 

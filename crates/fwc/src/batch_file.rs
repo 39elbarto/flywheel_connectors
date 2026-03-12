@@ -1321,7 +1321,8 @@ mod tests {
 
     #[test]
     fn batch_op_deserialize_with_extra_fields_ignored() {
-        let json = r#"{"id":"s1","connector":"g","operation":"o","input":{},"extra_field":"ignored"}"#;
+        let json =
+            r#"{"id":"s1","connector":"g","operation":"o","input":{},"extra_field":"ignored"}"#;
         let op: BatchOp = serde_json::from_str(json).unwrap();
         assert_eq!(op.id, "s1");
     }
@@ -1378,16 +1379,12 @@ mod tests {
         let content =
             r#"{"id":"s1","connector":"g","operation":"o","input":{},"zone":"us-west-2"}"#;
         let batch = BatchFile::parse(content).unwrap();
-        assert_eq!(
-            batch.operations[0].zone,
-            Some("us-west-2".to_owned())
-        );
+        assert_eq!(batch.operations[0].zone, Some("us-west-2".to_owned()));
     }
 
     #[test]
     fn parse_with_null_zone() {
-        let content =
-            r#"{"id":"s1","connector":"g","operation":"o","input":{},"zone":null}"#;
+        let content = r#"{"id":"s1","connector":"g","operation":"o","input":{},"zone":null}"#;
         let batch = BatchFile::parse(content).unwrap();
         assert!(batch.operations[0].zone.is_none());
     }
@@ -1526,9 +1523,7 @@ mod tests {
 
     #[test]
     fn error_debug_duplicate_id() {
-        let err = BatchFileError::DuplicateId {
-            id: "x".to_owned(),
-        };
+        let err = BatchFileError::DuplicateId { id: "x".to_owned() };
         let debug = format!("{err:?}");
         assert!(debug.contains("DuplicateId"));
     }
@@ -1557,20 +1552,14 @@ mod tests {
     #[test]
     fn error_ne_different_variants() {
         let a = BatchFileError::Empty;
-        let b = BatchFileError::DuplicateId {
-            id: "x".to_owned(),
-        };
+        let b = BatchFileError::DuplicateId { id: "x".to_owned() };
         assert_ne!(a, b);
     }
 
     #[test]
     fn error_ne_same_variant_different_data() {
-        let a = BatchFileError::DuplicateId {
-            id: "x".to_owned(),
-        };
-        let b = BatchFileError::DuplicateId {
-            id: "y".to_owned(),
-        };
+        let a = BatchFileError::DuplicateId { id: "x".to_owned() };
+        let b = BatchFileError::DuplicateId { id: "y".to_owned() };
         assert_ne!(a, b);
     }
 
@@ -1612,32 +1601,28 @@ mod tests {
 
     #[test]
     fn parse_unicode_in_ids() {
-        let content =
-            r#"{"id":"步骤1","connector":"g","operation":"o","input":{}}"#;
+        let content = r#"{"id":"步骤1","connector":"g","operation":"o","input":{}}"#;
         let batch = BatchFile::parse(content).unwrap();
         assert_eq!(batch.operations[0].id, "步骤1");
     }
 
     #[test]
     fn parse_unicode_in_connector() {
-        let content =
-            r#"{"id":"s1","connector":"κόσμε","operation":"o","input":{}}"#;
+        let content = r#"{"id":"s1","connector":"κόσμε","operation":"o","input":{}}"#;
         let batch = BatchFile::parse(content).unwrap();
         assert_eq!(batch.operations[0].connector, "κόσμε");
     }
 
     #[test]
     fn parse_leading_whitespace_on_json_line() {
-        let content =
-            "  {\"id\":\"a\",\"connector\":\"g\",\"operation\":\"o\",\"input\":{}}";
+        let content = "  {\"id\":\"a\",\"connector\":\"g\",\"operation\":\"o\",\"input\":{}}";
         let batch = BatchFile::parse(content).unwrap();
         assert_eq!(batch.len(), 1);
     }
 
     #[test]
     fn parse_trailing_newline_only() {
-        let content =
-            "{\"id\":\"a\",\"connector\":\"g\",\"operation\":\"o\",\"input\":{}}\n";
+        let content = "{\"id\":\"a\",\"connector\":\"g\",\"operation\":\"o\",\"input\":{}}\n";
         let batch = BatchFile::parse(content).unwrap();
         assert_eq!(batch.len(), 1);
     }
@@ -1659,7 +1644,8 @@ mod tests {
 
     #[test]
     fn parse_deep_nested_input() {
-        let content = r#"{"id":"s1","connector":"g","operation":"o","input":{"a":{"b":{"c":{"d":42}}}}}"#;
+        let content =
+            r#"{"id":"s1","connector":"g","operation":"o","input":{"a":{"b":{"c":{"d":42}}}}}"#;
         let batch = BatchFile::parse(content).unwrap();
         assert_eq!(batch.operations[0].input["a"]["b"]["c"]["d"], 42);
     }
@@ -1669,10 +1655,7 @@ mod tests {
         let content = r#"{"id":"s1","connector":"g","operation":"o","input":{}}"#;
         let batch = BatchFile::parse(content).unwrap();
         assert!(batch.operations[0].input.is_object());
-        assert_eq!(
-            batch.operations[0].input.as_object().unwrap().len(),
-            0
-        );
+        assert_eq!(batch.operations[0].input.as_object().unwrap().len(), 0);
     }
 
     #[test]

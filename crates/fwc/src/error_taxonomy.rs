@@ -1613,12 +1613,18 @@ mod tests {
 
     #[test]
     fn display_parse_failed() {
-        assert_eq!(FcpErrorCode::FcpErrParseFailed.to_string(), "FCP_ERR_PARSE_FAILED");
+        assert_eq!(
+            FcpErrorCode::FcpErrParseFailed.to_string(),
+            "FCP_ERR_PARSE_FAILED"
+        );
     }
 
     #[test]
     fn display_unknown_command() {
-        assert_eq!(FcpErrorCode::FcpErrUnknownCommand.to_string(), "FCP_ERR_UNKNOWN_COMMAND");
+        assert_eq!(
+            FcpErrorCode::FcpErrUnknownCommand.to_string(),
+            "FCP_ERR_UNKNOWN_COMMAND"
+        );
     }
 
     #[test]
@@ -1639,22 +1645,34 @@ mod tests {
 
     #[test]
     fn display_invalid_input() {
-        assert_eq!(FcpErrorCode::FcpErrInvalidInput.to_string(), "FCP_ERR_INVALID_INPUT");
+        assert_eq!(
+            FcpErrorCode::FcpErrInvalidInput.to_string(),
+            "FCP_ERR_INVALID_INPUT"
+        );
     }
 
     #[test]
     fn display_missing_field() {
-        assert_eq!(FcpErrorCode::FcpErrMissingField.to_string(), "FCP_ERR_MISSING_FIELD");
+        assert_eq!(
+            FcpErrorCode::FcpErrMissingField.to_string(),
+            "FCP_ERR_MISSING_FIELD"
+        );
     }
 
     #[test]
     fn display_schema_violation() {
-        assert_eq!(FcpErrorCode::FcpErrSchemaViolation.to_string(), "FCP_ERR_SCHEMA_VIOLATION");
+        assert_eq!(
+            FcpErrorCode::FcpErrSchemaViolation.to_string(),
+            "FCP_ERR_SCHEMA_VIOLATION"
+        );
     }
 
     #[test]
     fn display_binding_failed() {
-        assert_eq!(FcpErrorCode::FcpErrBindingFailed.to_string(), "FCP_ERR_BINDING_FAILED");
+        assert_eq!(
+            FcpErrorCode::FcpErrBindingFailed.to_string(),
+            "FCP_ERR_BINDING_FAILED"
+        );
     }
 
     #[test]
@@ -1691,12 +1709,18 @@ mod tests {
 
     #[test]
     fn display_unauthorized() {
-        assert_eq!(FcpErrorCode::FcpErrUnauthorized.to_string(), "FCP_ERR_UNAUTHORIZED");
+        assert_eq!(
+            FcpErrorCode::FcpErrUnauthorized.to_string(),
+            "FCP_ERR_UNAUTHORIZED"
+        );
     }
 
     #[test]
     fn display_token_expired() {
-        assert_eq!(FcpErrorCode::FcpErrTokenExpired.to_string(), "FCP_ERR_TOKEN_EXPIRED");
+        assert_eq!(
+            FcpErrorCode::FcpErrTokenExpired.to_string(),
+            "FCP_ERR_TOKEN_EXPIRED"
+        );
     }
 
     #[test]
@@ -1717,7 +1741,10 @@ mod tests {
 
     #[test]
     fn display_budget_exceeded() {
-        assert_eq!(FcpErrorCode::FcpErrBudgetExceeded.to_string(), "FCP_ERR_BUDGET_EXCEEDED");
+        assert_eq!(
+            FcpErrorCode::FcpErrBudgetExceeded.to_string(),
+            "FCP_ERR_BUDGET_EXCEEDED"
+        );
     }
 
     #[test]
@@ -1730,7 +1757,10 @@ mod tests {
 
     #[test]
     fn display_circuit_open() {
-        assert_eq!(FcpErrorCode::FcpErrCircuitOpen.to_string(), "FCP_ERR_CIRCUIT_OPEN");
+        assert_eq!(
+            FcpErrorCode::FcpErrCircuitOpen.to_string(),
+            "FCP_ERR_CIRCUIT_OPEN"
+        );
     }
 
     #[test]
@@ -1815,7 +1845,11 @@ mod tests {
         for cat in &categories {
             let json = serde_json::to_string(cat).unwrap();
             let parsed: FwcErrorCategory = serde_json::from_str(&json).unwrap();
-            assert_eq!(parsed, *cat, "Category serde round-trip failed for {:?}", cat);
+            assert_eq!(
+                parsed, *cat,
+                "Category serde round-trip failed for {:?}",
+                cat
+            );
         }
     }
 
@@ -1945,7 +1979,11 @@ mod tests {
             FcpErrorCode::FcpErrAmbiguousOperation,
         ];
         for code in &codes {
-            assert!(code.user_recoverable(), "{:?} should be user-recoverable", code);
+            assert!(
+                code.user_recoverable(),
+                "{:?} should be user-recoverable",
+                code
+            );
         }
     }
 
@@ -2196,7 +2234,10 @@ mod tests {
             code: 1001,
             message: "bad request".to_owned(),
         };
-        assert_eq!(classify_fcp_error(&err), FcpErrorCode::FcpErrValidationFailed);
+        assert_eq!(
+            classify_fcp_error(&err),
+            FcpErrorCode::FcpErrValidationFailed
+        );
     }
 
     #[test]
@@ -2205,7 +2246,10 @@ mod tests {
             code: 1002,
             message: "corrupt frame".to_owned(),
         };
-        assert_eq!(classify_fcp_error(&err), FcpErrorCode::FcpErrValidationFailed);
+        assert_eq!(
+            classify_fcp_error(&err),
+            FcpErrorCode::FcpErrValidationFailed
+        );
     }
 
     #[test]
@@ -2219,7 +2263,10 @@ mod tests {
     #[test]
     fn classify_checksum_mismatch() {
         let err = fcp_core::FcpError::ChecksumMismatch;
-        assert_eq!(classify_fcp_error(&err), FcpErrorCode::FcpErrTransportFailed);
+        assert_eq!(
+            classify_fcp_error(&err),
+            FcpErrorCode::FcpErrTransportFailed
+        );
     }
 
     #[test]
@@ -2228,7 +2275,10 @@ mod tests {
             expected: "2.0".to_owned(),
             actual: "1.0".to_owned(),
         };
-        assert_eq!(classify_fcp_error(&err), FcpErrorCode::FcpErrTransportFailed);
+        assert_eq!(
+            classify_fcp_error(&err),
+            FcpErrorCode::FcpErrTransportFailed
+        );
     }
 
     #[test]
@@ -2240,7 +2290,10 @@ mod tests {
     #[test]
     fn classify_invalid_signature() {
         let err = fcp_core::FcpError::InvalidSignature;
-        assert_eq!(classify_fcp_error(&err), FcpErrorCode::FcpErrInvalidSignature);
+        assert_eq!(
+            classify_fcp_error(&err),
+            FcpErrorCode::FcpErrInvalidSignature
+        );
     }
 
     #[test]
@@ -2248,7 +2301,10 @@ mod tests {
         let err = fcp_core::FcpError::OperationNotGranted {
             operation: "issues.delete".to_owned(),
         };
-        assert_eq!(classify_fcp_error(&err), FcpErrorCode::FcpErrOperationNotGranted);
+        assert_eq!(
+            classify_fcp_error(&err),
+            FcpErrorCode::FcpErrOperationNotGranted
+        );
     }
 
     #[test]
@@ -2275,7 +2331,10 @@ mod tests {
             capability: "admin.delete".to_owned(),
             ttl_seconds: Some(300),
         };
-        assert_eq!(classify_fcp_error(&err), FcpErrorCode::FcpErrElevationRequired);
+        assert_eq!(
+            classify_fcp_error(&err),
+            FcpErrorCode::FcpErrElevationRequired
+        );
     }
 
     #[test]
@@ -2283,7 +2342,10 @@ mod tests {
         let err = fcp_core::FcpError::UpstreamTimeout {
             service: "slack-api".to_owned(),
         };
-        assert_eq!(classify_fcp_error(&err), FcpErrorCode::FcpErrUpstreamTimeout);
+        assert_eq!(
+            classify_fcp_error(&err),
+            FcpErrorCode::FcpErrUpstreamTimeout
+        );
     }
 
     #[test]
@@ -2291,7 +2353,10 @@ mod tests {
         let err = fcp_core::FcpError::DependencyUnavailable {
             service: "redis-cache".to_owned(),
         };
-        assert_eq!(classify_fcp_error(&err), FcpErrorCode::FcpErrDependencyUnavailable);
+        assert_eq!(
+            classify_fcp_error(&err),
+            FcpErrorCode::FcpErrDependencyUnavailable
+        );
     }
 
     // ── structured_from_fcp_error: detail extraction ──────────────────

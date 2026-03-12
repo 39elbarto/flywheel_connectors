@@ -2140,7 +2140,11 @@ mod tests {
             bom_version: "1.5".to_string(),
             component_count: 999_999,
             dependency_count: 500_000,
-            tool_chain: vec!["tool1".to_string(), "tool2".to_string(), "tool3".to_string()],
+            tool_chain: vec![
+                "tool1".to_string(),
+                "tool2".to_string(),
+                "tool3".to_string(),
+            ],
             content_digest: "blake3-256:large".to_string(),
             trust_root: TrustRootReport {
                 root_type: "tuf".to_string(),
@@ -2267,7 +2271,11 @@ mod tests {
         let result = read_attestation(Some(path.to_str().unwrap()));
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("invalid") || err_msg.contains("JSON") || err_msg.contains("attestation"));
+        assert!(
+            err_msg.contains("invalid")
+                || err_msg.contains("JSON")
+                || err_msg.contains("attestation")
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -2278,7 +2286,9 @@ mod tests {
         let result = read_sbom(Some(path.to_str().unwrap()));
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("invalid") || err_msg.contains("JSON") || err_msg.contains("SBOM"));
+        assert!(
+            err_msg.contains("invalid") || err_msg.contains("JSON") || err_msg.contains("SBOM")
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -2494,7 +2504,10 @@ mod tests {
         let evidence = pipeline.verify("blake3-256:test", None, None);
         if evidence.decision == VerificationDecision::Deny {
             let has_failing = evidence.steps.iter().any(|s| !s.passed);
-            assert!(has_failing, "deny decision should have at least one failing step");
+            assert!(
+                has_failing,
+                "deny decision should have at least one failing step"
+            );
         }
     }
 
@@ -2650,10 +2663,10 @@ mod tests {
     fn policy_truth_table_require_attestation() {
         // require_attestation = has_attestation || !allow_unsigned
         let cases = [
-            (false, false, true),   // !false || !false = true
-            (false, true, false),   // false || !true = false
-            (true, false, true),    // true || !false = true
-            (true, true, true),     // true || !true = true
+            (false, false, true), // !false || !false = true
+            (false, true, false), // false || !true = false
+            (true, false, true),  // true || !false = true
+            (true, true, true),   // true || !true = true
         ];
         for (has_att, allow_unsigned, expected) in cases {
             let p = build_verification_policy(has_att, false, 0, allow_unsigned, false);
@@ -2668,10 +2681,10 @@ mod tests {
     fn policy_truth_table_require_sbom() {
         // require_sbom = has_sbom || !allow_unsigned
         let cases = [
-            (false, false, true),   // false || !false = true
-            (false, true, false),   // false || !true = false
-            (true, false, true),    // true || !false = true
-            (true, true, true),     // true || !true = true
+            (false, false, true), // false || !false = true
+            (false, true, false), // false || !true = false
+            (true, false, true),  // true || !false = true
+            (true, true, true),   // true || !true = true
         ];
         for (has_sbom, allow_unsigned, expected) in cases {
             let p = build_verification_policy(false, has_sbom, 0, allow_unsigned, false);

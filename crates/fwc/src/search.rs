@@ -1809,14 +1809,7 @@ mod tests {
 
     #[test]
     fn operation_filter_capability_case_insensitive() {
-        let op = stub_operation(
-            "test.op",
-            "Test",
-            "github.WRITE",
-            "low",
-            "safe",
-            "test",
-        );
+        let op = stub_operation("test.op", "Test", "github.WRITE", "low", "safe", "test");
         let filters = SearchFilters {
             capability: Some("write".to_owned()),
             ..Default::default()
@@ -1826,14 +1819,7 @@ mod tests {
 
     #[test]
     fn operation_filter_no_filters_passes_all() {
-        let op = stub_operation(
-            "test.op",
-            "Test",
-            "test.read",
-            "high",
-            "critical",
-            "test",
-        );
+        let op = stub_operation("test.op", "Test", "test.read", "high", "critical", "test");
         assert!(operation_passes_filters(&op, &SearchFilters::default()));
     }
 
@@ -2112,7 +2098,11 @@ mod tests {
     #[test]
     fn results_to_json_connector_name_present() {
         let connectors = sample_connectors();
-        let results = search_operations(&connectors, "github.create_issue", &SearchFilters::default());
+        let results = search_operations(
+            &connectors,
+            "github.create_issue",
+            &SearchFilters::default(),
+        );
         let json = results_to_json(&results, 10);
         assert!(!json.is_empty());
         assert_eq!(json[0]["connector_name"], "Github Connector");
@@ -2121,7 +2111,11 @@ mod tests {
     #[test]
     fn results_to_json_selector_present() {
         let connectors = sample_connectors();
-        let results = search_operations(&connectors, "github.create_issue", &SearchFilters::default());
+        let results = search_operations(
+            &connectors,
+            "github.create_issue",
+            &SearchFilters::default(),
+        );
         let json = results_to_json(&results, 10);
         assert!(!json.is_empty());
         assert_eq!(json[0]["selector"], "create_issue");
@@ -2130,7 +2124,11 @@ mod tests {
     #[test]
     fn results_to_json_summary_present() {
         let connectors = sample_connectors();
-        let results = search_operations(&connectors, "github.create_issue", &SearchFilters::default());
+        let results = search_operations(
+            &connectors,
+            "github.create_issue",
+            &SearchFilters::default(),
+        );
         let json = results_to_json(&results, 10);
         assert!(!json.is_empty());
         assert_eq!(json[0]["summary"], "Create a GitHub issue");
@@ -2139,7 +2137,11 @@ mod tests {
     #[test]
     fn results_to_json_capability_present() {
         let connectors = sample_connectors();
-        let results = search_operations(&connectors, "github.create_issue", &SearchFilters::default());
+        let results = search_operations(
+            &connectors,
+            "github.create_issue",
+            &SearchFilters::default(),
+        );
         let json = results_to_json(&results, 10);
         assert!(!json.is_empty());
         assert_eq!(json[0]["capability"], "github.write");
@@ -2148,7 +2150,11 @@ mod tests {
     #[test]
     fn results_to_json_idempotency_present() {
         let connectors = sample_connectors();
-        let results = search_operations(&connectors, "github.create_issue", &SearchFilters::default());
+        let results = search_operations(
+            &connectors,
+            "github.create_issue",
+            &SearchFilters::default(),
+        );
         let json = results_to_json(&results, 10);
         assert!(!json.is_empty());
         assert_eq!(json[0]["idempotency"], "strict");
@@ -2157,7 +2163,11 @@ mod tests {
     #[test]
     fn results_to_json_match_reasons_is_array() {
         let connectors = sample_connectors();
-        let results = search_operations(&connectors, "github.create_issue", &SearchFilters::default());
+        let results = search_operations(
+            &connectors,
+            "github.create_issue",
+            &SearchFilters::default(),
+        );
         let json = results_to_json(&results, 10);
         assert!(!json.is_empty());
         assert!(json[0]["match_reasons"].is_array());
@@ -2193,7 +2203,11 @@ mod tests {
     #[test]
     fn search_result_serializes_to_json() {
         let connectors = sample_connectors();
-        let results = search_operations(&connectors, "github.create_issue", &SearchFilters::default());
+        let results = search_operations(
+            &connectors,
+            "github.create_issue",
+            &SearchFilters::default(),
+        );
         assert!(!results.is_empty());
         let json_str = serde_json::to_string(&results[0]).unwrap();
         assert!(json_str.contains("github.create_issue"));
@@ -2203,7 +2217,11 @@ mod tests {
     #[test]
     fn search_result_debug_format() {
         let connectors = sample_connectors();
-        let results = search_operations(&connectors, "github.create_issue", &SearchFilters::default());
+        let results = search_operations(
+            &connectors,
+            "github.create_issue",
+            &SearchFilters::default(),
+        );
         assert!(!results.is_empty());
         let dbg = format!("{:?}", results[0]);
         assert!(dbg.contains("github.create_issue"));
@@ -2214,8 +2232,7 @@ mod tests {
     #[test]
     fn multi_token_all_miss_returns_empty() {
         let connectors = sample_connectors();
-        let results =
-            search_operations(&connectors, "xyzzy foobar", &SearchFilters::default());
+        let results = search_operations(&connectors, "xyzzy foobar", &SearchFilters::default());
         assert!(results.is_empty());
     }
 
@@ -2223,8 +2240,7 @@ mod tests {
     fn multi_token_one_hit_returns_results() {
         let connectors = sample_connectors();
         // "create" hits, "xyzzy" misses
-        let results =
-            search_operations(&connectors, "create xyzzy", &SearchFilters::default());
+        let results = search_operations(&connectors, "create xyzzy", &SearchFilters::default());
         assert!(!results.is_empty());
     }
 
@@ -2232,8 +2248,7 @@ mod tests {
     fn multi_token_both_hit_boosts_score() {
         let connectors = sample_connectors();
         let single = search_operations(&connectors, "create", &SearchFilters::default());
-        let double =
-            search_operations(&connectors, "create issue", &SearchFilters::default());
+        let double = search_operations(&connectors, "create issue", &SearchFilters::default());
         // The top result for "create issue" should have higher score than "create" alone
         assert!(!single.is_empty());
         assert!(!double.is_empty());

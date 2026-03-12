@@ -1323,10 +1323,7 @@ mod tests {
             restored.acquired_at.timestamp(),
             lock.acquired_at.timestamp()
         );
-        assert_eq!(
-            restored.expires_at.timestamp(),
-            lock.expires_at.timestamp()
-        );
+        assert_eq!(restored.expires_at.timestamp(), lock.expires_at.timestamp());
     }
 
     #[test]
@@ -1942,7 +1939,8 @@ mod tests {
 
     #[test]
     fn release_persists_across_store_instances() {
-        let dir = std::env::temp_dir().join(format!("fwc-lock-relpersist-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("fwc-lock-relpersist-{}", uuid::Uuid::new_v4()));
         let store1 = LockStore::new(dir.clone());
         store1.acquire("res", "Agent", 30, None).unwrap();
         store1.release("res", "Agent").unwrap();

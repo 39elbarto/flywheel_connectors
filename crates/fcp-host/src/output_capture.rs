@@ -1201,4 +1201,860 @@ mod tests {
         let lines = cap.json_lines();
         assert_eq!(lines.len(), 1);
     }
+
+    // ────────── Extended RingBuffer tests ──────────
+
+    #[test]
+    fn ring_buffer_capacity_one_incremental_writes() {
+        let mut buf = RingBuffer::new(1);
+        buf.write(b"a");
+        assert_eq!(buf.contents(), b"a");
+        buf.write(b"b");
+        assert_eq!(buf.contents(), b"b");
+        buf.write(b"c");
+        assert_eq!(buf.contents(), b"c");
+        assert_eq!(buf.total_written(), 3);
+        assert!(buf.has_overflow());
+    }
+
+    #[test]
+    fn ring_buffer_zero_capacity_has_overflow() {
+        let mut buf = RingBuffer::new(0);
+        buf.write(b"x");
+        assert!(buf.has_overflow());
+        assert!(buf.is_empty());
+        assert_eq!(buf.capacity(), 0);
+    }
+
+    #[test]
+    fn ring_buffer_zero_capacity_last_n() {
+        let buf = RingBuffer::new(0);
+        assert!(buf.last_n(5).is_empty());
+        assert!(buf.last_n(0).is_empty());
+    }
+
+    #[test]
+    fn ring_buffer_large_capacity() {
+        let mut buf = RingBuffer::new(1_000_000);
+        let data = vec![0x42u8; 500_000];
+        buf.write(&data);
+        assert_eq!(buf.len(), 500_000);
+        assert!(!buf.has_overflow());
+        buf.write(&data);
+        assert_eq!(buf.len(), 1_000_000);
+        assert!(!buf.has_overflow());
+        buf.write(b"extra");
+        assert_eq!(buf.len(), 1_000_000);
+        assert!(buf.has_overflow());
+    }
+
+    #[test]
+    fn ring_buffer_wrap_around_preserves_order() {
+        let mut buf = RingBuffer::new(8);
+        buf.write(b"abcdef"); // 6 bytes, no overflow
+        buf.write(b"ghij"); // 4 bytes, need to evict 2 → "cdefghij"
+        assert_eq!(buf.contents(), b"cdefghij");
+        assert_eq!(buf.len(), 8);
+    }
+
+    #[test]
+    fn ring_buffer_many_small_writes_overflow() {
+        let mut buf = RingBuffer::new(4);
+        for b in b"abcdefghij" {
+            buf.write(std::slice::from_ref(b));
+        }
+        assert_eq!(buf.contents(), b"ghij");
+        assert_eq!(buf.total_written(), 10);
+        assert!(buf.has_overflow());
+    }
+
+    #[test]
+    fn ring_buffer_write_exact_capacity_no_overflow() {
+        let mut buf = RingBuffer::new(10);
+        buf.write(b"0123456789");
+        assert_eq!(buf.len(), 10);
+        assert!(!buf.has_overflow());
+        assert_eq!(buf.total_written(), 10);
+    }
+
+    #[test]
+    fn ring_buffer_write_capacity_plus_one_overflows() {
+        let mut buf = RingBuffer::new(10);
+        buf.write(b"0123456789X");
+        assert_eq!(buf.len(), 10);
+        assert!(buf.has_overflow());
+        assert_eq!(buf.contents(), b"123456789X");
+    }
+
+    #[test]
+    fn ring_buffer_last_n_after_overflow() {
+        let mut buf = RingBuffer::new(5);
+        buf.write(b"0123456789");
+        assert_eq!(buf.last_n(3), b"789");
+        assert_eq!(buf.last_n(5), b"56789");
+        assert_eq!(buf.last_n(10), b"56789"); // capped at len
+    }
+
+    #[test]
+    fn ring_buffer_clear_then_reuse() {
+        let mut buf = RingBuffer::new(5);
+        buf.write(b"abc");
+        buf.clear();
+        assert!(buf.is_empty());
+        buf.write(b"xyz");
+        assert_eq!(buf.contents(), b"xyz");
+        assert_eq!(buf.total_written(), 6); // accumulated
+    }
+
+    #[test]
+    fn ring_buffer_contents_empty_buffer() {
+        let buf = RingBuffer::new(10);
+        assert!(buf.contents().is_empty());
+    }
+
+    #[test]
+    fn ring_buffer_clone_independence() {
+        let mut buf = RingBuffer::new(5);
+        buf.write(b"abc");
+        let cloned = buf.clone();
+        buf.write(b"de");
+        assert_eq!(cloned.contents(), b"abc");
+        assert_eq!(buf.contents(), b"abcde");
+    }
+
+    #[test]
+    fn ring_buffer_total_written_accumulates() {
+        let mut buf = RingBuffer::new(5);
+        buf.write(b"aaa"); // 3
+        buf.write(b"bb");  // 2
+        buf.write(b"cccc"); // 4
+        assert_eq!(buf.total_written(), 9);
+    }
+
+    #[test]
+    fn ring_buffer_massive_single_write() {
+        let mut buf = RingBuffer::new(3);
+        buf.write(b"abcdefghijklmnop");
+        assert_eq!(buf.contents(), b"nop");
+        assert_eq!(buf.total_written(), 16);
+    }
+
+    #[test]
+    fn ring_buffer_debug_format() {
+        let buf = RingBuffer::new(5);
+        let debug = format!("{buf:?}");
+        assert!(debug.contains("RingBuffer"));
+    }
+
+    // ────────── Extended OutputCaptureConfig tests ──────────
+
+    #[test]
+    fn config_new_equals_default() {
+        let a = OutputCaptureConfig::new();
+        let b = OutputCaptureConfig::default();
+        assert_eq!(a.stdout_capacity, b.stdout_capacity);
+        assert_eq!(a.stderr_capacity, b.stderr_capacity);
+        assert_eq!(a.parse_json_lines, b.parse_json_lines);
+        assert_eq!(a.max_json_lines, b.max_json_lines);
+    }
+
+    #[test]
+    fn config_serde_roundtrip() {
+        let c = OutputCaptureConfig::new()
+            .with_stdout_capacity(999)
+            .with_stderr_capacity(888)
+            .with_json_parsing(false)
+            .with_max_json_lines(42);
+        let json = serde_json::to_string(&c).unwrap();
+        let restored: OutputCaptureConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.stdout_capacity, 999);
+        assert_eq!(restored.stderr_capacity, 888);
+        assert!(!restored.parse_json_lines);
+        assert_eq!(restored.max_json_lines, 42);
+    }
+
+    #[test]
+    fn config_zero_capacities() {
+        let c = OutputCaptureConfig::new()
+            .with_stdout_capacity(0)
+            .with_stderr_capacity(0);
+        assert_eq!(c.stdout_capacity, 0);
+        assert_eq!(c.stderr_capacity, 0);
+    }
+
+    #[test]
+    fn config_max_json_lines_zero() {
+        let c = OutputCaptureConfig::new().with_max_json_lines(0);
+        assert_eq!(c.max_json_lines, 0);
+    }
+
+    #[test]
+    fn config_clone_independence() {
+        let a = OutputCaptureConfig::new().with_stdout_capacity(100);
+        let b = a.clone();
+        assert_eq!(a.stdout_capacity, b.stdout_capacity);
+    }
+
+    #[test]
+    fn config_debug_format() {
+        let c = OutputCaptureConfig::default();
+        let debug = format!("{c:?}");
+        assert!(debug.contains("OutputCaptureConfig"));
+    }
+
+    // ────────── Extended OutputCapture tests ──────────
+
+    #[test]
+    fn capture_with_defaults_uses_default_config() {
+        let cap = OutputCapture::with_defaults();
+        let stats = cap.stdout_stats();
+        assert_eq!(stats.capacity, 64 * 1024);
+    }
+
+    #[test]
+    fn capture_json_parsing_disabled_still_writes_stdout() {
+        let config = OutputCaptureConfig::new().with_json_parsing(false);
+        let mut cap = OutputCapture::new(config);
+        cap.write_stdout(b"{\"a\":1}\nplain text\n");
+        assert_eq!(cap.json_line_count(), 0);
+        assert!(cap.stdout_string().contains("{\"a\":1}"));
+        assert!(cap.stdout_string().contains("plain text"));
+    }
+
+    #[test]
+    fn capture_stderr_does_not_parse_json() {
+        let mut cap = OutputCapture::with_defaults();
+        cap.write_stderr(b"{\"level\":\"error\"}\n");
+        assert_eq!(cap.json_line_count(), 0);
+        assert!(cap.stderr_string().contains("error"));
+    }
+
+    #[test]
+    fn capture_json_max_lines_one() {
+        let config = OutputCaptureConfig::new().with_max_json_lines(1);
+        let mut cap = OutputCapture::new(config);
+        cap.write_stdout(b"{\"a\":1}\n{\"b\":2}\n{\"c\":3}\n");
+        assert_eq!(cap.json_line_count(), 1);
+        assert_eq!(cap.latest_json().unwrap()["c"], 3);
+    }
+
+    #[test]
+    fn capture_json_max_lines_zero_retains_none() {
+        let config = OutputCaptureConfig::new().with_max_json_lines(0);
+        let mut cap = OutputCapture::new(config);
+        cap.write_stdout(b"{\"a\":1}\n{\"b\":2}\n");
+        assert_eq!(cap.json_line_count(), 0);
+    }
+
+    #[test]
+    fn capture_tail_zero_bytes() {
+        let mut cap = OutputCapture::with_defaults();
+        cap.write_stdout(b"hello");
+        cap.write_stderr(b"world");
+        let (stdout, stderr) = cap.tail(0);
+        assert!(stdout.is_empty());
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn capture_tail_exceeds_buffer() {
+        let config = OutputCaptureConfig::new()
+            .with_stdout_capacity(5)
+            .with_stderr_capacity(5);
+        let mut cap = OutputCapture::new(config);
+        cap.write_stdout(b"hi");
+        cap.write_stderr(b"lo");
+        let (stdout, stderr) = cap.tail(1000);
+        assert_eq!(stdout, "hi");
+        assert_eq!(stderr, "lo");
+    }
+
+    #[test]
+    fn capture_clear_preserves_config() {
+        let config = OutputCaptureConfig::new()
+            .with_stdout_capacity(128)
+            .with_max_json_lines(10);
+        let mut cap = OutputCapture::new(config);
+        cap.write_stdout(b"{\"a\":1}\n");
+        cap.clear();
+        assert_eq!(cap.stdout_stats().capacity, 128);
+        // JSON parsing still works after clear.
+        cap.write_stdout(b"{\"b\":2}\n");
+        assert_eq!(cap.json_line_count(), 1);
+    }
+
+    #[test]
+    fn capture_stdout_overflow_stats() {
+        let config = OutputCaptureConfig::new().with_stdout_capacity(5);
+        let mut cap = OutputCapture::new(config);
+        cap.write_stdout(b"hello world");
+        let stats = cap.stdout_stats();
+        assert_eq!(stats.len, 5);
+        assert_eq!(stats.capacity, 5);
+        assert_eq!(stats.total_written, 11);
+        assert!(stats.has_overflow);
+    }
+
+    #[test]
+    fn capture_stderr_overflow_stats() {
+        let config = OutputCaptureConfig::new().with_stderr_capacity(3);
+        let mut cap = OutputCapture::new(config);
+        cap.write_stderr(b"abcdef");
+        let stats = cap.stderr_stats();
+        assert_eq!(stats.len, 3);
+        assert!(stats.has_overflow);
+        assert_eq!(cap.stderr_string(), "def");
+    }
+
+    #[test]
+    fn capture_json_nested_objects() {
+        let mut cap = OutputCapture::with_defaults();
+        cap.write_stdout(b"{\"outer\":{\"inner\":[1,2,3]}}\n");
+        assert_eq!(cap.json_line_count(), 1);
+        let val = cap.latest_json().unwrap();
+        assert_eq!(val["outer"]["inner"][1], 2);
+    }
+
+    #[test]
+    fn capture_json_array_line() {
+        let mut cap = OutputCapture::with_defaults();
+        cap.write_stdout(b"[1, 2, 3]\n");
+        assert_eq!(cap.json_line_count(), 1);
+    }
+
+    #[test]
+    fn capture_json_string_line() {
+        let mut cap = OutputCapture::with_defaults();
+        cap.write_stdout(b"\"just a string\"\n");
+        assert_eq!(cap.json_line_count(), 1);
+    }
+
+    #[test]
+    fn capture_json_number_line() {
+        let mut cap = OutputCapture::with_defaults();
+        cap.write_stdout(b"42\n");
+        assert_eq!(cap.json_line_count(), 1);
+        assert_eq!(cap.latest_json().unwrap(), &serde_json::json!(42));
+    }
+
+    #[test]
+    fn capture_json_boolean_line() {
+        let mut cap = OutputCapture::with_defaults();
+        cap.write_stdout(b"true\nfalse\n");
+        assert_eq!(cap.json_line_count(), 2);
+    }
+
+    #[test]
+    fn capture_json_null_line() {
+        let mut cap = OutputCapture::with_defaults();
+        cap.write_stdout(b"null\n");
+        assert_eq!(cap.json_line_count(), 1);
+        assert!(cap.latest_json().unwrap().is_null());
+    }
+
+    #[test]
+    fn capture_json_partial_across_three_writes() {
+        let mut cap = OutputCapture::with_defaults();
+        cap.write_stdout(b"{\"ke");
+        cap.write_stdout(b"y\":\"va");
+        cap.write_stdout(b"lue\"}\n");
+        assert_eq!(cap.json_line_count(), 1);
+        assert_eq!(cap.latest_json().unwrap()["key"], "value");
+    }
+
+    #[test]
+    fn capture_json_multiple_lines_in_single_write() {
+        let mut cap = OutputCapture::with_defaults();
+        cap.write_stdout(b"{\"a\":1}\n{\"b\":2}\n");
+        assert_eq!(cap.json_line_count(), 2);
+        // Most recent first.
+        assert_eq!(cap.latest_json().unwrap()["b"], 2);
+    }
+
+    #[test]
+    fn capture_json_invalid_utf8_ignored() {
+        let mut cap = OutputCapture::with_defaults();
+        // Write invalid UTF-8 followed by newline — should not panic.
+        cap.write_stdout(&[0xFF, 0xFE, b'\n']);
+        assert_eq!(cap.json_line_count(), 0);
+    }
+
+    #[test]
+    fn capture_clone_independence() {
+        let mut cap = OutputCapture::with_defaults();
+        cap.write_stdout(b"{\"a\":1}\n");
+        let cloned = cap.clone();
+        cap.write_stdout(b"{\"b\":2}\n");
+        assert_eq!(cloned.json_line_count(), 1);
+        assert_eq!(cap.json_line_count(), 2);
+    }
+
+    #[test]
+    fn capture_zero_capacity_buffers() {
+        let config = OutputCaptureConfig::new()
+            .with_stdout_capacity(0)
+            .with_stderr_capacity(0);
+        let mut cap = OutputCapture::new(config);
+        cap.write_stdout(b"data\n");
+        cap.write_stderr(b"err\n");
+        assert!(cap.stdout_string().is_empty());
+        assert!(cap.stderr_string().is_empty());
+        // JSON parsing still works even with zero-capacity stdout buffer.
+        // The ring buffer drops bytes but parse_lines processes them before buffering.
+        assert_eq!(cap.json_line_count(), 0); // "data" isn't JSON
+    }
+
+    #[test]
+    fn capture_json_with_zero_capacity_still_parses() {
+        let config = OutputCaptureConfig::new().with_stdout_capacity(0);
+        let mut cap = OutputCapture::new(config);
+        cap.write_stdout(b"{\"ok\":true}\n");
+        // JSON parsing operates on the raw bytes before ring buffer.
+        assert_eq!(cap.json_line_count(), 1);
+    }
+
+    #[test]
+    fn capture_debug_format() {
+        let cap = OutputCapture::with_defaults();
+        let debug = format!("{cap:?}");
+        assert!(debug.contains("OutputCapture"));
+    }
+
+    // ────────── Extended BufferStats tests ──────────
+
+    #[test]
+    fn buffer_stats_no_overflow() {
+        let s = BufferStats {
+            len: 50,
+            capacity: 1024,
+            total_written: 50,
+            has_overflow: false,
+        };
+        assert_eq!(s.len, 50);
+        assert!(!s.has_overflow);
+    }
+
+    #[test]
+    fn buffer_stats_clone() {
+        let s = BufferStats {
+            len: 10,
+            capacity: 100,
+            total_written: 200,
+            has_overflow: true,
+        };
+        let cloned = s.clone();
+        assert_eq!(cloned.len, s.len);
+        assert_eq!(cloned.capacity, s.capacity);
+        assert_eq!(cloned.total_written, s.total_written);
+        assert_eq!(cloned.has_overflow, s.has_overflow);
+    }
+
+    #[test]
+    fn buffer_stats_debug_format() {
+        let s = BufferStats {
+            len: 0,
+            capacity: 0,
+            total_written: 0,
+            has_overflow: false,
+        };
+        let debug = format!("{s:?}");
+        assert!(debug.contains("BufferStats"));
+    }
+
+    #[test]
+    fn buffer_stats_zero_values() {
+        let s = BufferStats {
+            len: 0,
+            capacity: 0,
+            total_written: 0,
+            has_overflow: false,
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let restored: BufferStats = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.len, 0);
+        assert_eq!(restored.total_written, 0);
+    }
+
+    // ────────── Extended InstallStatus tests ──────────
+
+    #[test]
+    fn install_status_display_all_variants() {
+        assert_eq!(InstallStatus::NotInstalled.to_string(), "not installed");
+        assert_eq!(InstallStatus::Installing.to_string(), "installing");
+        assert_eq!(InstallStatus::Installed.to_string(), "installed");
+        assert_eq!(InstallStatus::Uninstalling.to_string(), "uninstalling");
+    }
+
+    #[test]
+    fn install_status_failed_display_includes_error() {
+        let s = InstallStatus::Failed {
+            error: "checksum mismatch".into(),
+        };
+        let display = s.to_string();
+        assert!(display.starts_with("failed:"));
+        assert!(display.contains("checksum mismatch"));
+    }
+
+    #[test]
+    fn install_status_updating_display_shows_versions() {
+        let s = InstallStatus::Updating {
+            from_version: "0.9.0".into(),
+            to_version: "1.0.0".into(),
+        };
+        let display = s.to_string();
+        assert!(display.contains("0.9.0"));
+        assert!(display.contains("1.0.0"));
+    }
+
+    #[test]
+    fn install_status_equality() {
+        assert_eq!(InstallStatus::NotInstalled, InstallStatus::NotInstalled);
+        assert_eq!(InstallStatus::Installing, InstallStatus::Installing);
+        assert_ne!(InstallStatus::Installing, InstallStatus::Installed);
+        assert_ne!(
+            InstallStatus::Failed { error: "a".into() },
+            InstallStatus::Failed { error: "b".into() }
+        );
+    }
+
+    #[test]
+    fn install_status_clone() {
+        let s = InstallStatus::Updating {
+            from_version: "1.0".into(),
+            to_version: "2.0".into(),
+        };
+        let cloned = s.clone();
+        assert_eq!(s, cloned);
+    }
+
+    #[test]
+    fn install_status_label_matches_serde_variant() {
+        // Verify label returns a consistent identifier for each variant.
+        let pairs = vec![
+            (InstallStatus::NotInstalled, "not_installed"),
+            (InstallStatus::Installing, "installing"),
+            (InstallStatus::Installed, "installed"),
+            (InstallStatus::Failed { error: String::new() }, "failed"),
+            (
+                InstallStatus::Updating {
+                    from_version: String::new(),
+                    to_version: String::new(),
+                },
+                "updating",
+            ),
+            (InstallStatus::Uninstalling, "uninstalling"),
+        ];
+        for (status, expected_label) in pairs {
+            assert_eq!(status.label(), expected_label);
+        }
+    }
+
+    #[test]
+    fn install_status_failed_empty_error() {
+        let s = InstallStatus::Failed {
+            error: String::new(),
+        };
+        assert!(!s.is_installed());
+        assert!(!s.is_in_progress());
+        let display = s.to_string();
+        assert!(display.starts_with("failed:"));
+    }
+
+    // ────────── Extended InstallOptions tests ──────────
+
+    #[test]
+    fn install_options_new_equals_default() {
+        let a = InstallOptions::new();
+        let b = InstallOptions::default();
+        assert_eq!(a.dry_run, b.dry_run);
+        assert_eq!(a.mirror_to_mesh, b.mirror_to_mesh);
+        assert_eq!(a.skip_signature, b.skip_signature);
+        assert_eq!(a.force, b.force);
+    }
+
+    #[test]
+    fn install_options_all_flags_enabled() {
+        let mut o = InstallOptions::new().dry_run().mirror_to_mesh().force();
+        o.skip_signature = true;
+        o.target_override = Some("aarch64-apple-darwin".into());
+        assert!(o.dry_run);
+        assert!(o.mirror_to_mesh);
+        assert!(o.skip_signature);
+        assert!(o.force);
+        assert_eq!(o.target_override.as_deref(), Some("aarch64-apple-darwin"));
+    }
+
+    #[test]
+    fn install_options_serde_with_target_override() {
+        let mut o = InstallOptions::new();
+        o.target_override = Some("x86_64-unknown-linux-gnu".into());
+        let json = serde_json::to_string(&o).unwrap();
+        let restored: InstallOptions = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            restored.target_override.as_deref(),
+            Some("x86_64-unknown-linux-gnu")
+        );
+    }
+
+    #[test]
+    fn install_options_clone() {
+        let o = InstallOptions::new().dry_run().force();
+        let cloned = o.clone();
+        assert_eq!(cloned.dry_run, o.dry_run);
+        assert_eq!(cloned.force, o.force);
+    }
+
+    #[test]
+    fn install_options_debug_format() {
+        let o = InstallOptions::new();
+        let debug = format!("{o:?}");
+        assert!(debug.contains("InstallOptions"));
+    }
+
+    // ────────── Extended VerificationStatus tests ──────────
+
+    #[test]
+    fn verification_status_equality() {
+        assert_eq!(VerificationStatus::Verified, VerificationStatus::Verified);
+        assert_ne!(VerificationStatus::Verified, VerificationStatus::Skipped);
+        assert_ne!(
+            VerificationStatus::Failed { reason: "a".into() },
+            VerificationStatus::Failed { reason: "b".into() }
+        );
+    }
+
+    #[test]
+    fn verification_status_clone() {
+        let s = VerificationStatus::Failed {
+            reason: "bad sig".into(),
+        };
+        let cloned = s.clone();
+        assert_eq!(s, cloned);
+    }
+
+    #[test]
+    fn verification_failed_empty_reason() {
+        let s = VerificationStatus::Failed {
+            reason: String::new(),
+        };
+        assert!(!s.is_ok());
+    }
+
+    #[test]
+    fn verification_status_debug_format() {
+        let s = VerificationStatus::Verified;
+        let debug = format!("{s:?}");
+        assert!(debug.contains("Verified"));
+    }
+
+    // ────────── Extended InstallResult tests ──────────
+
+    #[test]
+    fn install_result_success_fields() {
+        let c = InstalledConnector {
+            connector_id: "fcp.test".into(),
+            version: "0.1.0".into(),
+            install_path: "/tmp/test".into(),
+            binary_hash: "hash1".into(),
+            manifest_hash: "hash2".into(),
+            installed_at_ms: 12345,
+            installed_by: "ci".into(),
+            signature_verified: true,
+            supply_chain_status: VerificationStatus::Verified,
+        };
+        let result = InstallResult::success(c);
+        assert!(result.success);
+        assert!(!result.dry_run);
+        assert!(result.error.is_none());
+        assert!(result.steps.is_empty());
+        let conn = result.connector.as_ref().unwrap();
+        assert_eq!(conn.connector_id, "fcp.test");
+        assert_eq!(conn.version, "0.1.0");
+    }
+
+    #[test]
+    fn install_result_dry_run_empty_steps() {
+        let result = InstallResult::dry_run_ok(vec![]);
+        assert!(result.success);
+        assert!(result.dry_run);
+        assert!(result.steps.is_empty());
+        assert!(result.connector.is_none());
+    }
+
+    #[test]
+    fn install_result_failed_has_no_connector() {
+        let result = InstallResult::failed("timeout");
+        assert!(result.connector.is_none());
+        assert!(!result.success);
+        assert!(!result.dry_run);
+    }
+
+    #[test]
+    fn install_result_with_steps_replaces_existing() {
+        let result = InstallResult::failed("err")
+            .with_steps(vec![InstallStep::passed("s1", "ok", 1.0)]);
+        assert_eq!(result.steps.len(), 1);
+        let result2 = result.with_steps(vec![
+            InstallStep::passed("s2", "ok", 2.0),
+            InstallStep::failed("s3", "bad", 3.0),
+        ]);
+        assert_eq!(result2.steps.len(), 2);
+    }
+
+    #[test]
+    fn install_result_success_serde_roundtrip() {
+        let c = InstalledConnector {
+            connector_id: "fcp.serde".into(),
+            version: "3.0.0".into(),
+            install_path: "/opt/c".into(),
+            binary_hash: "bh".into(),
+            manifest_hash: "mh".into(),
+            installed_at_ms: 0,
+            installed_by: "test".into(),
+            signature_verified: false,
+            supply_chain_status: VerificationStatus::Skipped,
+        };
+        let result = InstallResult::success(c).with_steps(vec![
+            InstallStep::passed("download", "fetched", 100.0),
+        ]);
+        let json = serde_json::to_string(&result).unwrap();
+        let restored: InstallResult = serde_json::from_str(&json).unwrap();
+        assert!(restored.success);
+        assert_eq!(restored.steps.len(), 1);
+        assert_eq!(
+            restored.connector.as_ref().unwrap().connector_id,
+            "fcp.serde"
+        );
+    }
+
+    #[test]
+    fn install_result_clone() {
+        let result = InstallResult::failed("clone test");
+        let cloned = result.clone();
+        assert_eq!(cloned.success, result.success);
+        assert_eq!(cloned.error, result.error);
+    }
+
+    #[test]
+    fn install_result_debug_format() {
+        let result = InstallResult::failed("debug");
+        let debug = format!("{result:?}");
+        assert!(debug.contains("InstallResult"));
+    }
+
+    // ────────── Extended InstallStep tests ──────────
+
+    #[test]
+    fn install_step_passed_zero_elapsed() {
+        let s = InstallStep::passed("instant", "done", 0.0);
+        assert!(s.passed);
+        assert!((s.elapsed_ms).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn install_step_failed_large_elapsed() {
+        let s = InstallStep::failed("timeout", "took too long", 999_999.9);
+        assert!(!s.passed);
+        assert!(s.elapsed_ms > 999_999.0);
+    }
+
+    #[test]
+    fn install_step_empty_strings() {
+        let s = InstallStep::passed("", "", 0.0);
+        assert!(s.name.is_empty());
+        assert!(s.detail.is_empty());
+        assert!(s.passed);
+    }
+
+    #[test]
+    fn install_step_clone() {
+        let s = InstallStep::passed("step", "detail", 5.5);
+        let cloned = s.clone();
+        assert_eq!(s.name, cloned.name);
+        assert_eq!(s.detail, cloned.detail);
+        assert!((s.elapsed_ms - cloned.elapsed_ms).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn install_step_debug_format() {
+        let s = InstallStep::failed("verify", "bad", 1.0);
+        let debug = format!("{s:?}");
+        assert!(debug.contains("InstallStep"));
+    }
+
+    // ────────── Extended InstalledConnector tests ──────────
+
+    #[test]
+    fn installed_connector_all_fields() {
+        let c = InstalledConnector {
+            connector_id: "fcp.github".into(),
+            version: "5.0.0-rc.1".into(),
+            install_path: "/usr/local/bin/fcp-github".into(),
+            binary_hash: "sha256:abc123".into(),
+            manifest_hash: "sha256:def456".into(),
+            installed_at_ms: u64::MAX,
+            installed_by: "automation-pipeline".into(),
+            signature_verified: true,
+            supply_chain_status: VerificationStatus::Verified,
+        };
+        assert_eq!(c.connector_id, "fcp.github");
+        assert_eq!(c.version, "5.0.0-rc.1");
+        assert_eq!(c.installed_at_ms, u64::MAX);
+        assert!(c.signature_verified);
+        assert!(c.supply_chain_status.is_ok());
+    }
+
+    #[test]
+    fn installed_connector_with_failed_verification() {
+        let c = InstalledConnector {
+            connector_id: "fcp.untrusted".into(),
+            version: "0.0.1".into(),
+            install_path: "/tmp/untrusted".into(),
+            binary_hash: "none".into(),
+            manifest_hash: "none".into(),
+            installed_at_ms: 0,
+            installed_by: "unknown".into(),
+            signature_verified: false,
+            supply_chain_status: VerificationStatus::Failed {
+                reason: "no attestation".into(),
+            },
+        };
+        assert!(!c.signature_verified);
+        assert!(!c.supply_chain_status.is_ok());
+    }
+
+    #[test]
+    fn installed_connector_clone() {
+        let c = InstalledConnector {
+            connector_id: "fcp.clone".into(),
+            version: "1.0.0".into(),
+            install_path: "/opt/c".into(),
+            binary_hash: "h1".into(),
+            manifest_hash: "h2".into(),
+            installed_at_ms: 100,
+            installed_by: "test".into(),
+            signature_verified: true,
+            supply_chain_status: VerificationStatus::Verified,
+        };
+        let cloned = c.clone();
+        assert_eq!(c.connector_id, cloned.connector_id);
+        assert_eq!(c.version, cloned.version);
+    }
+
+    #[test]
+    fn installed_connector_debug_format() {
+        let c = InstalledConnector {
+            connector_id: "fcp.debug".into(),
+            version: "1.0.0".into(),
+            install_path: "/opt".into(),
+            binary_hash: "h".into(),
+            manifest_hash: "m".into(),
+            installed_at_ms: 0,
+            installed_by: "t".into(),
+            signature_verified: false,
+            supply_chain_status: VerificationStatus::Unverified,
+        };
+        let debug = format!("{c:?}");
+        assert!(debug.contains("InstalledConnector"));
+    }
 }

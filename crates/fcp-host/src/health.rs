@@ -1454,4 +1454,815 @@ mod tests {
                 < HealthState::Unhealthy { reasons: vec![] }.severity()
         );
     }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // EXPANDED COVERAGE — 55 new tests
+    // ══════════════════════════════════════════════════════════════════════
+
+    // ────────── HealthState merge exhaustive ──────────
+
+    #[test]
+    fn merge_unhealthy_healthy() {
+        let u = HealthState::Unhealthy {
+            reasons: vec!["crash".into()],
+        };
+        let result = u.merge(&HealthState::Healthy);
+        assert!(result.is_unhealthy());
+        if let HealthState::Unhealthy { reasons } = &result {
+            assert_eq!(reasons, &["crash"]);
+        }
+    }
+
+    #[test]
+    fn merge_unhealthy_degraded() {
+        let u = HealthState::Unhealthy {
+            reasons: vec!["crash".into()],
+        };
+        let d = HealthState::Degraded {
+            reasons: vec!["slow".into()],
+        };
+        let result = u.merge(&d);
+        assert!(result.is_unhealthy());
+        // Only keeps unhealthy reasons (not degraded).
+        if let HealthState::Unhealthy { reasons } = &result {
+            assert_eq!(reasons, &["crash"]);
+        }
+    }
+
+    #[test]
+    fn merge_degraded_with_empty_reasons() {
+        let a = HealthState::Degraded {
+            reasons: vec![],
+        };
+        let b = HealthState::Degraded {
+            reasons: vec!["x".into()],
+        };
+        if let HealthState::Degraded { reasons } = a.merge(&b) {
+            assert_eq!(reasons, &["x"]);
+        } else {
+            panic!("expected degraded");
+        }
+    }
+
+    #[test]
+    fn merge_unhealthy_with_empty_reasons() {
+        let a = HealthState::Unhealthy {
+            reasons: vec![],
+        };
+        let b = HealthState::Unhealthy {
+            reasons: vec!["fatal".into()],
+        };
+        if let HealthState::Unhealthy { reasons } = a.merge(&b) {
+            assert_eq!(reasons, &["fatal"]);
+        } else {
+            panic!("expected unhealthy");
+        }
+    }
+
+    #[test]
+    fn merge_many_reasons_accumulate() {
+        let a = HealthState::Degraded {
+            reasons: vec!["r1".into(), "r2".into()],
+        };
+        let b = HealthState::Degraded {
+            reasons: vec!["r3".into(), "r4".into()],
+        };
+        if let HealthState::Degraded { reasons } = a.merge(&b) {
+            assert_eq!(reasons.len(), 4);
+            assert_eq!(reasons[0], "r1");
+            assert_eq!(reasons[3], "r4");
+        } else {
+            panic!("expected degraded");
+        }
+    }
+
+    #[test]
+    fn merge_is_not_commutative_for_mixed_unhealthy_degraded() {
+        // When one is unhealthy and the other degraded, only the unhealthy
+        // side's reasons are kept. The result depends on which side is unhealthy.
+        let u = HealthState::Unhealthy {
+            reasons: vec!["u_reason".into()],
+        };
+        let d = HealthState::Degraded {
+            reasons: vec!["d_reason".into()],
+        };
+        let result_ud = u.merge(&d);
+        let result_du = d.merge(&u);
+        // Both unhealthy, but potentially different reasons.
+        assert!(result_ud.is_unhealthy());
+        assert!(result_du.is_unhealthy());
+    }
+
+    #[test]
+    fn merge_chain_three_states() {
+        let h = HealthState::Healthy;
+        let d = HealthState::Degraded {
+            reasons: vec!["slow".into()],
+        };
+        let u = HealthState::Unhealthy {
+            reasons: vec!["dead".into()],
+        };
+        let result = h.merge(&d).merge(&u);
+        assert!(result.is_unhealthy());
+    }
+
+    // ────────── HealthState clone and equality ──────────
+
+    #[test]
+    fn health_state_clone_healthy() {
+        let s = HealthState::Healthy;
+        let cloned = s.clone();
+        assert_eq!(s, cloned);
+    }
+
+    #[test]
+    fn health_state_clone_degraded() {
+        let s = HealthState::Degraded {
+            reasons: vec!["r1".into(), "r2".into()],
+        };
+        let cloned = s.clone();
+        assert_eq!(s, cloned);
+    }
+
+    #[test]
+    fn health_state_clone_unhealthy() {
+        let s = HealthState::Unhealthy {
+            reasons: vec!["x".into()],
+        };
+        let cloned = s.clone();
+        assert_eq!(s, cloned);
+    }
+
+    #[test]
+    fn health_state_not_equal_different_variants() {
+        let h = HealthState::Healthy;
+        let d = HealthState::Degraded {
+            reasons: vec!["r".into()],
+        };
+        assert_ne!(h, d);
+    }
+
+    #[test]
+    fn health_state_not_equal_different_reasons() {
+        let a = HealthState::Degraded {
+            reasons: vec!["a".into()],
+        };
+        let b = HealthState::Degraded {
+            reasons: vec!["b".into()],
+        };
+        assert_ne!(a, b);
+    }
+
+    // ────────── HealthState Display edge cases ──────────
+
+    #[test]
+    fn health_state_display_degraded_empty_reasons() {
+        let s = HealthState::Degraded { reasons: vec![] };
+        assert_eq!(s.to_string(), "degraded: ");
+    }
+
+    #[test]
+    fn health_state_display_unhealthy_multiple_reasons() {
+        let s = HealthState::Unhealthy {
+            reasons: vec!["a".into(), "b".into(), "c".into()],
+        };
+        assert_eq!(s.to_string(), "unhealthy: a; b; c");
+    }
+
+    // ────────── HealthState serde ──────────
+
+    #[test]
+    fn health_state_serde_healthy() {
+        let s = HealthState::Healthy;
+        let json = serde_json::to_string(&s).unwrap();
+        let restored: HealthState = serde_json::from_str(&json).unwrap();
+        assert_eq!(s, restored);
+    }
+
+    #[test]
+    fn health_state_serde_degraded() {
+        let s = HealthState::Degraded {
+            reasons: vec!["reason1".into(), "reason2".into()],
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let restored: HealthState = serde_json::from_str(&json).unwrap();
+        assert_eq!(s, restored);
+    }
+
+    #[test]
+    fn health_state_serde_unhealthy() {
+        let s = HealthState::Unhealthy {
+            reasons: vec!["fatal".into()],
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let restored: HealthState = serde_json::from_str(&json).unwrap();
+        assert_eq!(s, restored);
+    }
+
+    #[test]
+    fn health_state_serde_tagged_format() {
+        let json = serde_json::to_string(&HealthState::Healthy).unwrap();
+        assert!(json.contains(r#""state":"healthy"#));
+    }
+
+    // ────────── ComponentHealth edge cases ──────────
+
+    #[test]
+    fn component_healthy_no_message() {
+        let c = ComponentHealth::healthy("comp");
+        assert!(c.message.is_none());
+        assert!(c.last_check_elapsed_ms.is_none());
+    }
+
+    #[test]
+    fn component_builder_chain() {
+        let c = ComponentHealth::unhealthy("db", "timeout")
+            .with_elapsed_ms(120.5)
+            .with_failures(7)
+            .with_message("connection refused");
+        assert_eq!(c.name, "db");
+        assert!(c.state.is_unhealthy());
+        assert_eq!(c.last_check_elapsed_ms, Some(120.5));
+        assert_eq!(c.consecutive_failures, 7);
+        assert_eq!(c.message.as_deref(), Some("connection refused"));
+    }
+
+    #[test]
+    fn component_serde_skips_none_message() {
+        let c = ComponentHealth::healthy("test");
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(!json.contains("message"));
+    }
+
+    #[test]
+    fn component_serde_includes_some_message() {
+        let c = ComponentHealth::healthy("test").with_message("info");
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("message"));
+        assert!(json.contains("info"));
+    }
+
+    #[test]
+    fn component_debug_format() {
+        let c = ComponentHealth::healthy("debug_test");
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("debug_test"));
+        assert!(dbg.contains("ComponentHealth"));
+    }
+
+    // ────────── ConnectorHealth edge cases ──────────
+
+    #[test]
+    fn connector_failed_exactly_3_restarts_is_crash_loop() {
+        let c = ConnectorHealth::failed("test", 3);
+        assert!(c.crash_loop);
+        assert_eq!(c.restart_count, 3);
+    }
+
+    #[test]
+    fn connector_stopped_health_state_is_healthy() {
+        let c = ConnectorHealth::stopped("test");
+        // Stopped connector: last_check_passed is None → healthy.
+        assert!(c.to_health_state().is_healthy());
+    }
+
+    #[test]
+    fn connector_health_state_message_content() {
+        let c = ConnectorHealth::failed("fcp.redis", 5);
+        if let HealthState::Unhealthy { reasons } = c.to_health_state() {
+            assert!(reasons[0].contains("fcp.redis"));
+            assert!(reasons[0].contains("crash loop"));
+            assert!(reasons[0].contains('5'));
+        } else {
+            panic!("expected unhealthy");
+        }
+    }
+
+    #[test]
+    fn connector_failed_check_not_crash_loop_is_degraded() {
+        let c = ConnectorHealth::failed("test", 1);
+        assert!(!c.crash_loop);
+        assert_eq!(c.last_check_passed, Some(false));
+        let state = c.to_health_state();
+        assert!(state.is_degraded());
+    }
+
+    #[test]
+    fn connector_running_zero_uptime() {
+        let c = ConnectorHealth::running("test", 0);
+        assert_eq!(c.uptime_seconds, Some(0));
+        assert!(c.to_health_state().is_healthy());
+    }
+
+    #[test]
+    fn connector_with_restarts_preserves_other_fields() {
+        let c = ConnectorHealth::stopped("x").with_restarts(10);
+        assert_eq!(c.process_state, "stopped");
+        assert_eq!(c.restart_count, 10);
+        assert!(c.uptime_seconds.is_none());
+    }
+
+    #[test]
+    fn connector_clone_independence() {
+        let original = ConnectorHealth::running("orig", 999);
+        let cloned = original.clone();
+        assert_eq!(cloned.connector_id, "orig");
+        assert_eq!(cloned.uptime_seconds, Some(999));
+        assert_eq!(original.connector_id, "orig");
+    }
+
+    // ────────── MeshHealth edge cases ──────────
+
+    #[test]
+    fn mesh_connected_zero_peers() {
+        let m = MeshHealth::connected(0);
+        assert!(m.connected);
+        assert_eq!(m.peer_count, 0);
+        // Still healthy since connected=true and both fresh.
+        assert!(m.to_health_state().is_healthy());
+    }
+
+    #[test]
+    fn mesh_connected_sync_age() {
+        let m = MeshHealth::connected(5);
+        assert_eq!(m.last_sync_age_seconds, Some(0));
+    }
+
+    #[test]
+    fn mesh_disconnected_no_sync_age() {
+        let m = MeshHealth::disconnected();
+        assert!(m.last_sync_age_seconds.is_none());
+    }
+
+    #[test]
+    fn mesh_disconnected_health_reason() {
+        let m = MeshHealth::disconnected();
+        if let HealthState::Unhealthy { reasons } = m.to_health_state() {
+            assert_eq!(reasons, &["mesh disconnected"]);
+        } else {
+            panic!("expected unhealthy");
+        }
+    }
+
+    #[test]
+    fn mesh_stale_checkpoint_reason() {
+        let mut m = MeshHealth::connected(3);
+        m.checkpoint_fresh = false;
+        if let HealthState::Degraded { reasons } = m.to_health_state() {
+            assert_eq!(reasons, &["checkpoint stale"]);
+        } else {
+            panic!("expected degraded");
+        }
+    }
+
+    #[test]
+    fn mesh_stale_revocation_reason() {
+        let mut m = MeshHealth::connected(3);
+        m.revocation_fresh = false;
+        if let HealthState::Degraded { reasons } = m.to_health_state() {
+            assert_eq!(reasons, &["revocation list stale"]);
+        } else {
+            panic!("expected degraded");
+        }
+    }
+
+    #[test]
+    fn mesh_both_stale_reason_order() {
+        let mut m = MeshHealth::connected(3);
+        m.checkpoint_fresh = false;
+        m.revocation_fresh = false;
+        if let HealthState::Degraded { reasons } = m.to_health_state() {
+            assert_eq!(reasons[0], "checkpoint stale");
+            assert_eq!(reasons[1], "revocation list stale");
+        } else {
+            panic!("expected degraded");
+        }
+    }
+
+    #[test]
+    fn mesh_clone_preserves_fields() {
+        let m = MeshHealth::connected(42);
+        let cloned = m.clone();
+        assert_eq!(cloned.peer_count, 42);
+        assert!(cloned.checkpoint_fresh);
+        assert!(cloned.revocation_fresh);
+        assert_eq!(m.peer_count, 42);
+    }
+
+    // ────────── ResourceHealth threshold edge cases ──────────
+
+    #[test]
+    fn resource_memory_exactly_at_80_percent() {
+        let r = ResourceHealth::new(800, 0.0, 0, 1024).with_memory_limit_mb(1000);
+        let util = r.memory_utilisation().unwrap();
+        assert!((util - 0.8).abs() < f64::EPSILON);
+        // 0.80 is NOT > 0.80 → healthy.
+        assert!(r.to_health_state().is_healthy());
+    }
+
+    #[test]
+    fn resource_memory_just_above_80_percent() {
+        let r = ResourceHealth::new(810, 0.0, 0, 1024).with_memory_limit_mb(1000);
+        assert!(r.to_health_state().is_degraded());
+    }
+
+    #[test]
+    fn resource_memory_exactly_at_95_percent() {
+        let r = ResourceHealth::new(950, 0.0, 0, 1024).with_memory_limit_mb(1000);
+        let util = r.memory_utilisation().unwrap();
+        assert!((util - 0.95).abs() < f64::EPSILON);
+        // 0.95 is NOT > 0.95 → stays degraded (>0.80 but not >0.95).
+        assert!(r.to_health_state().is_degraded());
+    }
+
+    #[test]
+    fn resource_memory_just_above_95_percent() {
+        let r = ResourceHealth::new(960, 0.0, 0, 1024).with_memory_limit_mb(1000);
+        assert!(r.to_health_state().is_unhealthy());
+    }
+
+    #[test]
+    fn resource_memory_at_100_percent() {
+        let r = ResourceHealth::new(1000, 0.0, 0, 1024).with_memory_limit_mb(1000);
+        let util = r.memory_utilisation().unwrap();
+        assert!((util - 1.0).abs() < f64::EPSILON);
+        assert!(r.to_health_state().is_unhealthy());
+    }
+
+    #[test]
+    fn resource_memory_over_100_percent() {
+        let r = ResourceHealth::new(1500, 0.0, 0, 1024).with_memory_limit_mb(1000);
+        let util = r.memory_utilisation().unwrap();
+        assert!(util > 1.0);
+        assert!(r.to_health_state().is_unhealthy());
+    }
+
+    #[test]
+    fn resource_memory_at_0_percent() {
+        let r = ResourceHealth::new(0, 0.0, 0, 1024).with_memory_limit_mb(1000);
+        let util = r.memory_utilisation().unwrap();
+        assert!(util.abs() < f64::EPSILON);
+        assert!(r.to_health_state().is_healthy());
+    }
+
+    #[test]
+    fn resource_cpu_exactly_80() {
+        let r = ResourceHealth::new(0, 80.0, 0, 1024);
+        // 80.0 is NOT > 80.0 → healthy.
+        assert!(r.to_health_state().is_healthy());
+    }
+
+    #[test]
+    fn resource_cpu_just_above_80() {
+        let r = ResourceHealth::new(0, 80.1, 0, 1024);
+        assert!(r.to_health_state().is_degraded());
+    }
+
+    #[test]
+    fn resource_cpu_exactly_95() {
+        let r = ResourceHealth::new(0, 95.0, 0, 1024);
+        // 95.0 is NOT > 95.0 → degraded (>80 but not >95).
+        assert!(r.to_health_state().is_degraded());
+    }
+
+    #[test]
+    fn resource_cpu_just_above_95() {
+        let r = ResourceHealth::new(0, 95.1, 0, 1024);
+        assert!(r.to_health_state().is_unhealthy());
+    }
+
+    #[test]
+    fn resource_cpu_at_zero() {
+        let r = ResourceHealth::new(0, 0.0, 0, 1024);
+        assert!(r.to_health_state().is_healthy());
+    }
+
+    #[test]
+    fn resource_fd_exactly_at_80_percent() {
+        // 80% of 1000 = 800.
+        let r = ResourceHealth::new(0, 0.0, 800, 1000);
+        let util = r.fd_utilisation();
+        assert!((util - 0.8).abs() < f64::EPSILON);
+        // 0.80 is NOT > 0.80 → healthy.
+        assert!(r.to_health_state().is_healthy());
+    }
+
+    #[test]
+    fn resource_fd_just_above_80_percent() {
+        let r = ResourceHealth::new(0, 0.0, 810, 1000);
+        assert!(r.to_health_state().is_degraded());
+    }
+
+    #[test]
+    fn resource_fd_exactly_at_95_percent() {
+        let r = ResourceHealth::new(0, 0.0, 950, 1000);
+        let util = r.fd_utilisation();
+        assert!((util - 0.95).abs() < f64::EPSILON);
+        // 0.95 is NOT > 0.95 → degraded.
+        assert!(r.to_health_state().is_degraded());
+    }
+
+    #[test]
+    fn resource_fd_just_above_95_percent() {
+        let r = ResourceHealth::new(0, 0.0, 960, 1000);
+        assert!(r.to_health_state().is_unhealthy());
+    }
+
+    #[test]
+    fn resource_fd_at_100_percent() {
+        let r = ResourceHealth::new(0, 0.0, 1024, 1024);
+        assert!(r.to_health_state().is_unhealthy());
+    }
+
+    #[test]
+    fn resource_fd_at_zero() {
+        let r = ResourceHealth::new(0, 0.0, 0, 1024);
+        let util = r.fd_utilisation();
+        assert!(util.abs() < f64::EPSILON);
+        assert!(r.to_health_state().is_healthy());
+    }
+
+    #[test]
+    fn resource_all_critical_returns_first_unhealthy() {
+        // Memory > 95%, CPU > 95%, FDs > 95% — memory check fires first.
+        let r = ResourceHealth::new(990, 99.0, 990, 1000).with_memory_limit_mb(1000);
+        let state = r.to_health_state();
+        assert!(state.is_unhealthy());
+        if let HealthState::Unhealthy { reasons } = &state {
+            // Memory check returns first.
+            assert!(reasons[0].contains("memory"));
+        }
+    }
+
+    #[test]
+    fn resource_cpu_unhealthy_no_memory_limit() {
+        // No memory limit → skip memory, CPU > 95 → unhealthy.
+        let r = ResourceHealth::new(0, 99.0, 0, 1024);
+        let state = r.to_health_state();
+        assert!(state.is_unhealthy());
+        if let HealthState::Unhealthy { reasons } = &state {
+            assert!(reasons[0].contains("CPU"));
+        }
+    }
+
+    #[test]
+    fn resource_fd_unhealthy_memory_and_cpu_ok() {
+        let r = ResourceHealth::new(0, 0.0, 999, 1000);
+        let state = r.to_health_state();
+        assert!(state.is_unhealthy());
+        if let HealthState::Unhealthy { reasons } = &state {
+            assert!(reasons[0].contains("FD"));
+        }
+    }
+
+    // ────────── HealthConfig validation and builder ──────────
+
+    #[test]
+    fn config_new_equals_default() {
+        let a = HealthConfig::new();
+        let b = HealthConfig::default();
+        assert_eq!(a.check_interval_ms, b.check_interval_ms);
+        assert_eq!(a.check_timeout_ms, b.check_timeout_ms);
+        assert_eq!(a.unhealthy_threshold, b.unhealthy_threshold);
+        assert_eq!(a.degraded_threshold, b.degraded_threshold);
+    }
+
+    #[test]
+    fn config_default_thresholds() {
+        let c = HealthConfig::default();
+        assert!((c.memory_degraded_threshold - 0.80).abs() < f64::EPSILON);
+        assert!((c.memory_unhealthy_threshold - 0.95).abs() < f64::EPSILON);
+        assert!((f64::from(c.cpu_degraded_threshold) - 80.0).abs() < f64::EPSILON);
+        assert!((f64::from(c.cpu_unhealthy_threshold) - 95.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn config_check_interval_duration() {
+        let c = HealthConfig::new().with_check_interval_ms(60_000);
+        assert_eq!(c.check_interval(), Duration::from_mins(1));
+    }
+
+    #[test]
+    fn config_check_timeout_duration() {
+        let c = HealthConfig::new().with_check_timeout_ms(10_000);
+        assert_eq!(c.check_timeout(), Duration::from_secs(10));
+    }
+
+    #[test]
+    fn config_zero_interval() {
+        let c = HealthConfig::new().with_check_interval_ms(0);
+        assert_eq!(c.check_interval(), Duration::from_secs(0));
+    }
+
+    #[test]
+    fn config_clone_independence() {
+        let original = HealthConfig::new().with_check_interval_ms(5000);
+        let cloned = original.clone();
+        assert_eq!(cloned.check_interval_ms, 5000);
+        assert_eq!(original.check_interval_ms, 5000);
+    }
+
+    #[test]
+    fn config_debug_format() {
+        let c = HealthConfig::default();
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("HealthConfig"));
+        assert!(dbg.contains("30000"));
+    }
+
+    // ────────── HealthAggregator expanded ──────────
+
+    #[test]
+    fn aggregator_many_components_worst_wins() {
+        let mut agg = HealthAggregator::with_defaults("1.0.0");
+        for i in 0..10 {
+            agg.report_component(ComponentHealth::healthy(format!("comp_{i}")));
+        }
+        agg.report_component(ComponentHealth::unhealthy("bad", "fatal"));
+        let status = agg.evaluate();
+        assert!(status.status.is_unhealthy());
+        assert_eq!(agg.component_count(), 11);
+    }
+
+    #[test]
+    fn aggregator_component_failures_below_degraded_threshold() {
+        let config = HealthConfig::new().with_unhealthy_threshold(5);
+        let mut agg = HealthAggregator::new("1.0.0", config);
+        agg.report_component(ComponentHealth::healthy("x").with_failures(0));
+        let status = agg.evaluate();
+        assert!(status.is_healthy());
+    }
+
+    #[test]
+    fn aggregator_component_failures_between_thresholds() {
+        let config = HealthConfig {
+            degraded_threshold: 2,
+            unhealthy_threshold: 5,
+            ..HealthConfig::default()
+        };
+        let mut agg = HealthAggregator::new("1.0.0", config);
+        agg.report_component(ComponentHealth::healthy("x").with_failures(3));
+        let status = agg.evaluate();
+        // 3 >= degraded(2) but < unhealthy(5) → degraded.
+        assert!(status.status.is_degraded());
+    }
+
+    #[test]
+    fn aggregator_component_failures_at_unhealthy_threshold() {
+        let config = HealthConfig {
+            unhealthy_threshold: 5,
+            ..HealthConfig::default()
+        };
+        let mut agg = HealthAggregator::new("1.0.0", config);
+        agg.report_component(ComponentHealth::healthy("x").with_failures(5));
+        let status = agg.evaluate();
+        assert!(status.status.is_unhealthy());
+    }
+
+    #[test]
+    fn aggregator_mixed_healthy_and_crash_loop() {
+        let mut agg = HealthAggregator::with_defaults("1.0.0");
+        agg.report_connector(ConnectorHealth::running("a", 100));
+        agg.report_connector(ConnectorHealth::running("b", 200));
+        agg.report_connector(ConnectorHealth::failed("c", 10));
+        let status = agg.evaluate();
+        assert!(status.status.is_unhealthy());
+        assert_eq!(status.running_connector_count(), 2);
+        assert_eq!(status.crash_loop_count(), 1);
+    }
+
+    #[test]
+    fn aggregator_mesh_override_updates() {
+        let mut agg = HealthAggregator::with_defaults("1.0.0");
+        agg.report_mesh(MeshHealth::disconnected());
+        let s1 = agg.evaluate();
+        assert!(s1.status.is_unhealthy());
+
+        agg.report_mesh(MeshHealth::connected(5));
+        let s2 = agg.evaluate();
+        assert!(s2.is_healthy());
+    }
+
+    #[test]
+    fn aggregator_resource_override_updates() {
+        let mut agg = HealthAggregator::with_defaults("1.0.0");
+        agg.report_resources(ResourceHealth::new(0, 99.0, 0, 1024));
+        let s1 = agg.evaluate();
+        assert!(s1.status.is_unhealthy());
+
+        agg.report_resources(ResourceHealth::new(0, 10.0, 0, 1024));
+        let s2 = agg.evaluate();
+        assert!(s2.is_healthy());
+    }
+
+    #[test]
+    fn aggregator_evaluate_default_mesh_is_disconnected() {
+        let agg = HealthAggregator::with_defaults("1.0.0");
+        let status = agg.evaluate();
+        assert!(!status.mesh.connected);
+        assert_eq!(status.mesh.peer_count, 0);
+    }
+
+    #[test]
+    fn aggregator_evaluate_default_resources() {
+        let agg = HealthAggregator::with_defaults("1.0.0");
+        let status = agg.evaluate();
+        assert_eq!(status.resources.memory_used_mb, 0);
+        assert_eq!(status.resources.max_fds, 1024);
+    }
+
+    #[test]
+    fn aggregator_version_preserved() {
+        let agg = HealthAggregator::with_defaults("2.5.3-beta");
+        let status = agg.evaluate();
+        assert_eq!(status.version, "2.5.3-beta");
+    }
+
+    // ────────── HealthStatus composite evaluations ──────────
+
+    #[test]
+    fn health_status_running_count_empty() {
+        let status = HealthStatus {
+            status: HealthState::Healthy,
+            version: "1.0.0".into(),
+            uptime_seconds: 0,
+            connectors: vec![],
+            mesh: MeshHealth::connected(1),
+            resources: ResourceHealth::new(0, 0.0, 0, 1024),
+            components: vec![],
+        };
+        assert_eq!(status.running_connector_count(), 0);
+        assert_eq!(status.crash_loop_count(), 0);
+    }
+
+    #[test]
+    fn health_status_crash_loop_count_many() {
+        let status = HealthStatus {
+            status: HealthState::Healthy,
+            version: "1.0.0".into(),
+            uptime_seconds: 0,
+            connectors: vec![
+                ConnectorHealth::failed("a", 5),
+                ConnectorHealth::failed("b", 4),
+                ConnectorHealth::running("c", 100),
+            ],
+            mesh: MeshHealth::connected(1),
+            resources: ResourceHealth::new(0, 0.0, 0, 1024),
+            components: vec![],
+        };
+        assert_eq!(status.crash_loop_count(), 2);
+        assert_eq!(status.running_connector_count(), 1);
+    }
+
+    #[test]
+    fn health_status_serialization_unhealthy() {
+        let status = HealthStatus {
+            status: HealthState::Unhealthy {
+                reasons: vec!["bad".into()],
+            },
+            version: "1.0.0".into(),
+            uptime_seconds: 42,
+            connectors: vec![],
+            mesh: MeshHealth::disconnected(),
+            resources: ResourceHealth::new(0, 0.0, 0, 1024),
+            components: vec![ComponentHealth::unhealthy("db", "timeout")],
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        let restored: HealthStatus = serde_json::from_str(&json).unwrap();
+        assert!(restored.status.is_unhealthy());
+        assert_eq!(restored.uptime_seconds, 42);
+        assert_eq!(restored.components.len(), 1);
+        assert_eq!(restored.components[0].name, "db");
+    }
+
+    #[test]
+    fn health_status_ready_and_healthy() {
+        let status = HealthStatus {
+            status: HealthState::Healthy,
+            version: "1.0.0".into(),
+            uptime_seconds: 0,
+            connectors: vec![],
+            mesh: MeshHealth::connected(1),
+            resources: ResourceHealth::new(0, 0.0, 0, 1024),
+            components: vec![],
+        };
+        assert!(status.is_healthy());
+        assert!(status.is_ready());
+    }
+
+    #[test]
+    fn health_status_debug_format() {
+        let status = HealthStatus {
+            status: HealthState::Healthy,
+            version: "1.0.0".into(),
+            uptime_seconds: 0,
+            connectors: vec![],
+            mesh: MeshHealth::connected(1),
+            resources: ResourceHealth::new(0, 0.0, 0, 1024),
+            components: vec![],
+        };
+        let dbg = format!("{status:?}");
+        assert!(dbg.contains("HealthStatus"));
+        assert!(dbg.contains("1.0.0"));
+    }
 }

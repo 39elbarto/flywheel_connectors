@@ -294,7 +294,11 @@ impl ExponentialBackoff {
     /// Create from a supervisor config.
     #[must_use]
     pub fn from_config(config: &SupervisorConfig) -> Self {
-        Self::new(config.initial_backoff, config.max_backoff, config.backoff_multiplier)
+        Self::new(
+            config.initial_backoff,
+            config.max_backoff,
+            config.backoff_multiplier,
+        )
     }
 
     /// Get the next backoff duration, advancing the attempt counter.
@@ -316,7 +320,9 @@ impl ExponentialBackoff {
         if self.attempt == 0 {
             return self.initial;
         }
-        let factor = self.multiplier.powi(i32::try_from(self.attempt).unwrap_or(i32::MAX));
+        let factor = self
+            .multiplier
+            .powi(i32::try_from(self.attempt).unwrap_or(i32::MAX));
         let initial_ms = self.initial.as_millis() as f64;
         let max_ms = self.max.as_millis() as f64;
         let delay_ms = (initial_ms * factor).min(max_ms).max(0.0);
@@ -528,7 +534,7 @@ impl ShutdownCoordinator {
     pub fn should_force_kill(&self, now: Instant) -> bool {
         match self.phase {
             ShutdownPhase::GracefulWait { sent_at } => {
-                now.duration_since(sent_at) >= self.graceful_timeout
+                now.saturating_duration_since(sent_at) >= self.graceful_timeout
             }
             _ => false,
         }
@@ -537,9 +543,7 @@ impl ShutdownCoordinator {
     /// Record that force kill has been sent.
     pub const fn record_force_kill(&mut self, now: Instant) {
         if matches!(self.phase, ShutdownPhase::GracefulWait { .. }) {
-            self.phase = ShutdownPhase::ForceKill {
-                escalated_at: now,
-            };
+            self.phase = ShutdownPhase::ForceKill { escalated_at: now };
         }
     }
 
@@ -608,7 +612,7 @@ impl HealthCheckScheduler {
     #[must_use]
     pub fn is_due(&self, now: Instant) -> bool {
         self.last_check
-            .is_none_or(|last| now.duration_since(last) >= self.interval)
+            .is_none_or(|last| now.saturating_duration_since(last) >= self.interval)
     }
 
     /// Record a successful health check.
@@ -645,7 +649,8 @@ impl HealthCheckScheduler {
     #[must_use]
     pub fn time_until_next(&self, now: Instant) -> Duration {
         self.last_check.map_or(Duration::ZERO, |last| {
-            self.interval.saturating_sub(now.duration_since(last))
+            self.interval
+                .saturating_sub(now.saturating_duration_since(last))
         })
     }
 }
@@ -917,8 +922,7 @@ impl ResourceUtilization {
     /// Whether any resource is at or above the given threshold (e.g. 0.9 for 90%).
     #[must_use]
     pub fn any_above_threshold(&self, threshold: f64) -> bool {
-        self.max_utilization()
-            .is_some_and(|max| max >= threshold)
+        self.max_utilization().is_some_and(|max| max >= threshold)
     }
 }
 
@@ -1199,21 +1203,15 @@ mod tests {
 
     #[test]
     fn backoff_starts_at_initial() {
-        let mut backoff = ExponentialBackoff::new(
-            Duration::from_millis(100),
-            Duration::from_mins(1),
-            2.0,
-        );
+        let mut backoff =
+            ExponentialBackoff::new(Duration::from_millis(100), Duration::from_mins(1), 2.0);
         assert_eq!(backoff.next_backoff(), Duration::from_millis(100));
     }
 
     #[test]
     fn backoff_doubles_each_attempt() {
-        let mut backoff = ExponentialBackoff::new(
-            Duration::from_millis(100),
-            Duration::from_mins(1),
-            2.0,
-        );
+        let mut backoff =
+            ExponentialBackoff::new(Duration::from_millis(100), Duration::from_mins(1), 2.0);
         assert_eq!(backoff.next_backoff(), Duration::from_millis(100));
         assert_eq!(backoff.next_backoff(), Duration::from_millis(200));
         assert_eq!(backoff.next_backoff(), Duration::from_millis(400));
@@ -1222,11 +1220,8 @@ mod tests {
 
     #[test]
     fn backoff_caps_at_max() {
-        let mut backoff = ExponentialBackoff::new(
-            Duration::from_millis(500),
-            Duration::from_secs(2),
-            2.0,
-        );
+        let mut backoff =
+            ExponentialBackoff::new(Duration::from_millis(500), Duration::from_secs(2), 2.0);
         assert_eq!(backoff.next_backoff(), Duration::from_millis(500));
         assert_eq!(backoff.next_backoff(), Duration::from_secs(1));
         assert_eq!(backoff.next_backoff(), Duration::from_secs(2));
@@ -1235,11 +1230,8 @@ mod tests {
 
     #[test]
     fn backoff_reset_restarts_from_initial() {
-        let mut backoff = ExponentialBackoff::new(
-            Duration::from_millis(100),
-            Duration::from_mins(1),
-            2.0,
-        );
+        let mut backoff =
+            ExponentialBackoff::new(Duration::from_millis(100), Duration::from_mins(1), 2.0);
         let _ = backoff.next_backoff();
         let _ = backoff.next_backoff();
         backoff.reset();
@@ -1256,22 +1248,16 @@ mod tests {
 
     #[test]
     fn backoff_negative_multiplier_defaults_to_two() {
-        let mut backoff = ExponentialBackoff::new(
-            Duration::from_millis(100),
-            Duration::from_mins(1),
-            -1.0,
-        );
+        let mut backoff =
+            ExponentialBackoff::new(Duration::from_millis(100), Duration::from_mins(1), -1.0);
         assert_eq!(backoff.next_backoff(), Duration::from_millis(100));
         assert_eq!(backoff.next_backoff(), Duration::from_millis(200));
     }
 
     #[test]
     fn backoff_triple_multiplier() {
-        let mut backoff = ExponentialBackoff::new(
-            Duration::from_millis(100),
-            Duration::from_mins(1),
-            3.0,
-        );
+        let mut backoff =
+            ExponentialBackoff::new(Duration::from_millis(100), Duration::from_mins(1), 3.0);
         assert_eq!(backoff.next_backoff(), Duration::from_millis(100));
         assert_eq!(backoff.next_backoff(), Duration::from_millis(300));
         assert_eq!(backoff.next_backoff(), Duration::from_millis(900));
@@ -1446,9 +1432,11 @@ mod tests {
             ..Default::default()
         };
         let mut tracker = RestartTracker::new(config);
-        assert!(tracker
-            .evaluate_restart(&ProcessExit::clean(), Instant::now())
-            .is_ok());
+        assert!(
+            tracker
+                .evaluate_restart(&ProcessExit::clean(), Instant::now())
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1503,6 +1491,15 @@ mod tests {
     }
 
     #[test]
+    fn shutdown_stale_now_does_not_panic_or_force_kill() {
+        let mut coordinator = ShutdownCoordinator::new(Duration::from_secs(30));
+        let now = Instant::now();
+        coordinator.start_graceful(now);
+        let earlier = now.checked_sub(Duration::from_secs(1)).unwrap();
+        assert!(!coordinator.should_force_kill(earlier));
+    }
+
+    #[test]
     fn shutdown_record_force_kill() {
         let mut coordinator = ShutdownCoordinator::new(Duration::from_secs(1));
         let now = Instant::now();
@@ -1550,30 +1547,33 @@ mod tests {
 
     #[test]
     fn health_check_due_initially() {
-        let scheduler = HealthCheckScheduler::new(
-            Duration::from_secs(30),
-            Duration::from_secs(10),
-        );
+        let scheduler = HealthCheckScheduler::new(Duration::from_secs(30), Duration::from_secs(10));
         assert!(scheduler.is_due(Instant::now()));
     }
 
     #[test]
     fn health_check_not_due_after_recent_check() {
-        let mut scheduler = HealthCheckScheduler::new(
-            Duration::from_secs(30),
-            Duration::from_secs(10),
-        );
+        let mut scheduler =
+            HealthCheckScheduler::new(Duration::from_secs(30), Duration::from_secs(10));
         let now = Instant::now();
         scheduler.record_success(now);
         assert!(!scheduler.is_due(now));
     }
 
     #[test]
+    fn health_check_stale_now_is_not_due() {
+        let mut scheduler =
+            HealthCheckScheduler::new(Duration::from_secs(30), Duration::from_secs(10));
+        let now = Instant::now();
+        scheduler.record_success(now);
+        let earlier = now.checked_sub(Duration::from_secs(1)).unwrap();
+        assert!(!scheduler.is_due(earlier));
+    }
+
+    #[test]
     fn health_check_due_after_interval() {
-        let mut scheduler = HealthCheckScheduler::new(
-            Duration::from_secs(1),
-            Duration::from_secs(10),
-        );
+        let mut scheduler =
+            HealthCheckScheduler::new(Duration::from_secs(1), Duration::from_secs(10));
         let now = Instant::now();
         scheduler.record_success(now);
         let later = now + Duration::from_secs(2);
@@ -1582,10 +1582,8 @@ mod tests {
 
     #[test]
     fn health_check_consecutive_failures_tracked() {
-        let mut scheduler = HealthCheckScheduler::new(
-            Duration::from_secs(30),
-            Duration::from_secs(10),
-        );
+        let mut scheduler =
+            HealthCheckScheduler::new(Duration::from_secs(30), Duration::from_secs(10));
         let now = Instant::now();
         assert_eq!(scheduler.consecutive_failures(), 0);
         scheduler.record_failure(now);
@@ -1596,10 +1594,8 @@ mod tests {
 
     #[test]
     fn health_check_success_resets_failures() {
-        let mut scheduler = HealthCheckScheduler::new(
-            Duration::from_secs(30),
-            Duration::from_secs(10),
-        );
+        let mut scheduler =
+            HealthCheckScheduler::new(Duration::from_secs(30), Duration::from_secs(10));
         let now = Instant::now();
         scheduler.record_failure(now);
         scheduler.record_failure(now);
@@ -1609,11 +1605,9 @@ mod tests {
 
     #[test]
     fn health_check_unhealthy_after_threshold() {
-        let mut scheduler = HealthCheckScheduler::new(
-            Duration::from_secs(30),
-            Duration::from_secs(10),
-        )
-        .with_max_failures(2);
+        let mut scheduler =
+            HealthCheckScheduler::new(Duration::from_secs(30), Duration::from_secs(10))
+                .with_max_failures(2);
         let now = Instant::now();
         assert!(!scheduler.is_unhealthy());
         scheduler.record_failure(now);
@@ -1624,10 +1618,8 @@ mod tests {
 
     #[test]
     fn health_check_time_until_next() {
-        let mut scheduler = HealthCheckScheduler::new(
-            Duration::from_secs(30),
-            Duration::from_secs(10),
-        );
+        let mut scheduler =
+            HealthCheckScheduler::new(Duration::from_secs(30), Duration::from_secs(10));
         let now = Instant::now();
         assert_eq!(scheduler.time_until_next(now), Duration::ZERO);
         scheduler.record_success(now);
@@ -1636,11 +1628,18 @@ mod tests {
     }
 
     #[test]
+    fn health_check_time_until_next_saturates_for_stale_now() {
+        let mut scheduler =
+            HealthCheckScheduler::new(Duration::from_secs(30), Duration::from_secs(10));
+        let now = Instant::now();
+        scheduler.record_success(now);
+        let earlier = now.checked_sub(Duration::from_secs(5)).unwrap();
+        assert_eq!(scheduler.time_until_next(earlier), Duration::from_secs(30));
+    }
+
+    #[test]
     fn health_check_timeout_accessor() {
-        let scheduler = HealthCheckScheduler::new(
-            Duration::from_secs(30),
-            Duration::from_secs(5),
-        );
+        let scheduler = HealthCheckScheduler::new(Duration::from_secs(30), Duration::from_secs(5));
         assert_eq!(scheduler.timeout(), Duration::from_secs(5));
     }
 
@@ -1694,8 +1693,7 @@ mod tests {
 
     #[test]
     fn backoff_zero_initial_stays_zero() {
-        let mut backoff =
-            ExponentialBackoff::new(Duration::ZERO, Duration::from_mins(1), 2.0);
+        let mut backoff = ExponentialBackoff::new(Duration::ZERO, Duration::from_mins(1), 2.0);
         assert_eq!(backoff.next_backoff(), Duration::ZERO);
         assert_eq!(backoff.next_backoff(), Duration::ZERO);
     }
@@ -1718,18 +1716,17 @@ mod tests {
             ..Default::default()
         };
         let mut tracker = RestartTracker::new(config);
-        assert!(tracker
-            .evaluate_restart(&ProcessExit::with_signal(11), Instant::now())
-            .is_ok());
+        assert!(
+            tracker
+                .evaluate_restart(&ProcessExit::with_signal(11), Instant::now())
+                .is_ok()
+        );
     }
 
     #[test]
     fn backoff_saturates_attempt_counter() {
-        let mut backoff = ExponentialBackoff::new(
-            Duration::from_millis(1),
-            Duration::from_secs(1),
-            2.0,
-        );
+        let mut backoff =
+            ExponentialBackoff::new(Duration::from_millis(1), Duration::from_secs(1), 2.0);
         for _ in 0..1000 {
             let _ = backoff.next_backoff();
         }
@@ -1739,11 +1736,8 @@ mod tests {
 
     #[test]
     fn health_scheduler_custom_max_failures() {
-        let scheduler = HealthCheckScheduler::new(
-            Duration::from_secs(30),
-            Duration::from_secs(10),
-        )
-        .with_max_failures(5);
+        let scheduler = HealthCheckScheduler::new(Duration::from_secs(30), Duration::from_secs(10))
+            .with_max_failures(5);
         assert!(!scheduler.is_unhealthy());
     }
 
@@ -2026,7 +2020,10 @@ mod tests {
     fn resource_kind_display_all_variants() {
         assert_eq!(ResourceKind::Memory.to_string(), "memory");
         assert_eq!(ResourceKind::CpuTime.to_string(), "cpu_time");
-        assert_eq!(ResourceKind::FileDescriptors.to_string(), "file_descriptors");
+        assert_eq!(
+            ResourceKind::FileDescriptors.to_string(),
+            "file_descriptors"
+        );
         assert_eq!(ResourceKind::Processes.to_string(), "processes");
         assert_eq!(ResourceKind::FileSize.to_string(), "file_size");
     }

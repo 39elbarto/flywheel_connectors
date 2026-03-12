@@ -757,6 +757,117 @@ pub enum HostHealthStatus {
     Unhealthy,
 }
 
+/// Status of the mesh network connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MeshStatus {
+    /// Mesh is fully connected and reachable.
+    Connected,
+    /// Mesh is reachable but experiencing issues (e.g. peer partitions).
+    Degraded,
+    /// Mesh is not reachable.
+    Unreachable,
+    /// Mesh is not configured (standalone mode).
+    NotConfigured,
+}
+
+impl MeshStatus {
+    /// Whether the mesh is considered operational (connected or degraded).
+    #[must_use]
+    pub const fn is_operational(&self) -> bool {
+        matches!(self, Self::Connected | Self::Degraded)
+    }
+}
+
+/// Status of the policy engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyEngineStatus {
+    /// Policy engine is loaded and operational.
+    Active,
+    /// Policy engine is loaded but some rules failed to parse.
+    PartiallyLoaded,
+    /// Policy engine is not initialized.
+    NotInitialized,
+    /// Policy engine encountered a fatal error.
+    Error,
+}
+
+impl PolicyEngineStatus {
+    /// Whether the policy engine can make decisions.
+    #[must_use]
+    pub const fn can_decide(&self) -> bool {
+        matches!(self, Self::Active | Self::PartiallyLoaded)
+    }
+}
+
+/// Extended diagnostics beyond basic health — mesh, policy, resources.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostDiagnostics {
+    /// Basic health information.
+    pub health: HostHealthResponse,
+    /// Mesh connectivity status.
+    pub mesh_status: MeshStatus,
+    /// Policy engine status.
+    pub policy_engine: PolicyEngineStatus,
+    /// Number of connectors in each lifecycle state.
+    pub connector_counts: ConnectorStateCounts,
+    /// Whether configuration changes are pending reload.
+    pub pending_config_reload: bool,
+}
+
+/// Counts of connectors by state.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConnectorStateCounts {
+    /// Running connectors.
+    pub running: u32,
+    /// Starting connectors.
+    pub starting: u32,
+    /// Stopped connectors.
+    pub stopped: u32,
+    /// Failed connectors.
+    pub failed: u32,
+    /// Disabled connectors.
+    pub disabled: u32,
+}
+
+impl ConnectorStateCounts {
+    /// Total number of connectors.
+    #[must_use]
+    pub const fn total(&self) -> u32 {
+        self.running + self.starting + self.stopped + self.failed + self.disabled
+    }
+
+    /// Whether all connectors are healthy (running or disabled).
+    #[must_use]
+    pub const fn all_healthy(&self) -> bool {
+        self.failed == 0 && self.stopped == 0 && self.starting == 0
+    }
+}
+
+impl HostDiagnostics {
+    /// Compute an aggregate health status from all diagnostic signals.
+    #[must_use]
+    pub fn aggregate_status(&self) -> HostHealthStatus {
+        if self.health.status == HostHealthStatus::Unhealthy {
+            return HostHealthStatus::Unhealthy;
+        }
+        if !self.policy_engine.can_decide() {
+            return HostHealthStatus::Unhealthy;
+        }
+        if self.mesh_status == MeshStatus::Unreachable {
+            return HostHealthStatus::Degraded;
+        }
+        if self.connector_counts.failed > 0 {
+            return HostHealthStatus::Degraded;
+        }
+        if self.mesh_status == MeshStatus::Degraded {
+            return HostHealthStatus::Degraded;
+        }
+        self.health.status
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // SafetyTier Extensions
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4461,5 +4572,303 @@ mod tests {
         let parsed: CacheValidator = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.if_none_match.as_deref(), Some("\"etag-xyz\""));
         assert!(parsed.if_modified_since.is_some());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // MeshStatus
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn mesh_status_connected_is_operational() {
+        assert!(MeshStatus::Connected.is_operational());
+    }
+
+    #[test]
+    fn mesh_status_degraded_is_operational() {
+        assert!(MeshStatus::Degraded.is_operational());
+    }
+
+    #[test]
+    fn mesh_status_unreachable_not_operational() {
+        assert!(!MeshStatus::Unreachable.is_operational());
+    }
+
+    #[test]
+    fn mesh_status_not_configured_not_operational() {
+        assert!(!MeshStatus::NotConfigured.is_operational());
+    }
+
+    #[test]
+    fn mesh_status_json_roundtrip() {
+        for status in [
+            MeshStatus::Connected,
+            MeshStatus::Degraded,
+            MeshStatus::Unreachable,
+            MeshStatus::NotConfigured,
+        ] {
+            let json = serde_json::to_string(&status).unwrap();
+            let parsed: MeshStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, status);
+        }
+    }
+
+    #[test]
+    fn mesh_status_snake_case_serialization() {
+        assert_eq!(
+            serde_json::to_string(&MeshStatus::Connected).unwrap(),
+            "\"connected\""
+        );
+        assert_eq!(
+            serde_json::to_string(&MeshStatus::NotConfigured).unwrap(),
+            "\"not_configured\""
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // PolicyEngineStatus
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn policy_engine_active_can_decide() {
+        assert!(PolicyEngineStatus::Active.can_decide());
+    }
+
+    #[test]
+    fn policy_engine_partially_loaded_can_decide() {
+        assert!(PolicyEngineStatus::PartiallyLoaded.can_decide());
+    }
+
+    #[test]
+    fn policy_engine_not_initialized_cannot_decide() {
+        assert!(!PolicyEngineStatus::NotInitialized.can_decide());
+    }
+
+    #[test]
+    fn policy_engine_error_cannot_decide() {
+        assert!(!PolicyEngineStatus::Error.can_decide());
+    }
+
+    #[test]
+    fn policy_engine_json_roundtrip() {
+        for status in [
+            PolicyEngineStatus::Active,
+            PolicyEngineStatus::PartiallyLoaded,
+            PolicyEngineStatus::NotInitialized,
+            PolicyEngineStatus::Error,
+        ] {
+            let json = serde_json::to_string(&status).unwrap();
+            let parsed: PolicyEngineStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, status);
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ConnectorStateCounts
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn connector_state_counts_default_is_zero() {
+        let counts = ConnectorStateCounts::default();
+        assert_eq!(counts.total(), 0);
+        assert!(counts.all_healthy());
+    }
+
+    #[test]
+    fn connector_state_counts_total() {
+        let counts = ConnectorStateCounts {
+            running: 3,
+            starting: 1,
+            stopped: 2,
+            failed: 1,
+            disabled: 4,
+        };
+        assert_eq!(counts.total(), 11);
+    }
+
+    #[test]
+    fn connector_state_counts_all_running_is_healthy() {
+        let counts = ConnectorStateCounts {
+            running: 5,
+            disabled: 2,
+            ..Default::default()
+        };
+        assert!(counts.all_healthy());
+    }
+
+    #[test]
+    fn connector_state_counts_with_failed_not_healthy() {
+        let counts = ConnectorStateCounts {
+            running: 5,
+            failed: 1,
+            ..Default::default()
+        };
+        assert!(!counts.all_healthy());
+    }
+
+    #[test]
+    fn connector_state_counts_with_stopped_not_healthy() {
+        let counts = ConnectorStateCounts {
+            running: 5,
+            stopped: 1,
+            ..Default::default()
+        };
+        assert!(!counts.all_healthy());
+    }
+
+    #[test]
+    fn connector_state_counts_json_roundtrip() {
+        let counts = ConnectorStateCounts {
+            running: 3,
+            starting: 1,
+            stopped: 0,
+            failed: 2,
+            disabled: 1,
+        };
+        let json = serde_json::to_string(&counts).unwrap();
+        let parsed: ConnectorStateCounts = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, counts);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // HostDiagnostics aggregate_status
+    // ─────────────────────────────────────────────────────────────────────────
+
+    fn make_diagnostics(
+        health_status: HostHealthStatus,
+        mesh: MeshStatus,
+        policy: PolicyEngineStatus,
+        failed_connectors: u32,
+    ) -> HostDiagnostics {
+        HostDiagnostics {
+            health: HostHealthResponse {
+                status: health_status,
+                connectors: HashMap::new(),
+                uptime_seconds: 3600,
+                active_connections: 0,
+                timestamp: Utc::now(),
+            },
+            mesh_status: mesh,
+            policy_engine: policy,
+            connector_counts: ConnectorStateCounts {
+                running: 5,
+                failed: failed_connectors,
+                ..Default::default()
+            },
+            pending_config_reload: false,
+        }
+    }
+
+    #[test]
+    fn diagnostics_all_healthy() {
+        let diag = make_diagnostics(
+            HostHealthStatus::Healthy,
+            MeshStatus::Connected,
+            PolicyEngineStatus::Active,
+            0,
+        );
+        assert_eq!(diag.aggregate_status(), HostHealthStatus::Healthy);
+    }
+
+    #[test]
+    fn diagnostics_unhealthy_host_stays_unhealthy() {
+        let diag = make_diagnostics(
+            HostHealthStatus::Unhealthy,
+            MeshStatus::Connected,
+            PolicyEngineStatus::Active,
+            0,
+        );
+        assert_eq!(diag.aggregate_status(), HostHealthStatus::Unhealthy);
+    }
+
+    #[test]
+    fn diagnostics_policy_error_makes_unhealthy() {
+        let diag = make_diagnostics(
+            HostHealthStatus::Healthy,
+            MeshStatus::Connected,
+            PolicyEngineStatus::Error,
+            0,
+        );
+        assert_eq!(diag.aggregate_status(), HostHealthStatus::Unhealthy);
+    }
+
+    #[test]
+    fn diagnostics_policy_not_initialized_makes_unhealthy() {
+        let diag = make_diagnostics(
+            HostHealthStatus::Healthy,
+            MeshStatus::Connected,
+            PolicyEngineStatus::NotInitialized,
+            0,
+        );
+        assert_eq!(diag.aggregate_status(), HostHealthStatus::Unhealthy);
+    }
+
+    #[test]
+    fn diagnostics_mesh_unreachable_degrades() {
+        let diag = make_diagnostics(
+            HostHealthStatus::Healthy,
+            MeshStatus::Unreachable,
+            PolicyEngineStatus::Active,
+            0,
+        );
+        assert_eq!(diag.aggregate_status(), HostHealthStatus::Degraded);
+    }
+
+    #[test]
+    fn diagnostics_mesh_degraded_degrades() {
+        let diag = make_diagnostics(
+            HostHealthStatus::Healthy,
+            MeshStatus::Degraded,
+            PolicyEngineStatus::Active,
+            0,
+        );
+        assert_eq!(diag.aggregate_status(), HostHealthStatus::Degraded);
+    }
+
+    #[test]
+    fn diagnostics_failed_connectors_degrades() {
+        let diag = make_diagnostics(
+            HostHealthStatus::Healthy,
+            MeshStatus::Connected,
+            PolicyEngineStatus::Active,
+            2,
+        );
+        assert_eq!(diag.aggregate_status(), HostHealthStatus::Degraded);
+    }
+
+    #[test]
+    fn diagnostics_not_configured_mesh_healthy_if_all_else_ok() {
+        let diag = make_diagnostics(
+            HostHealthStatus::Healthy,
+            MeshStatus::NotConfigured,
+            PolicyEngineStatus::Active,
+            0,
+        );
+        assert_eq!(diag.aggregate_status(), HostHealthStatus::Healthy);
+    }
+
+    #[test]
+    fn diagnostics_partially_loaded_policy_healthy() {
+        let diag = make_diagnostics(
+            HostHealthStatus::Healthy,
+            MeshStatus::Connected,
+            PolicyEngineStatus::PartiallyLoaded,
+            0,
+        );
+        assert_eq!(diag.aggregate_status(), HostHealthStatus::Healthy);
+    }
+
+    #[test]
+    fn diagnostics_json_roundtrip() {
+        let diag = make_diagnostics(
+            HostHealthStatus::Degraded,
+            MeshStatus::Degraded,
+            PolicyEngineStatus::Active,
+            1,
+        );
+        let json = serde_json::to_string(&diag).unwrap();
+        let parsed: HostDiagnostics = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.mesh_status, MeshStatus::Degraded);
+        assert_eq!(parsed.policy_engine, PolicyEngineStatus::Active);
+        assert_eq!(parsed.connector_counts.failed, 1);
     }
 }

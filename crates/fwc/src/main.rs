@@ -58,6 +58,8 @@ mod manifest_cmd;
 #[allow(dead_code)]
 mod mcp_resources;
 mod net_cmd;
+#[allow(dead_code)] // Connector scaffolding command.
+mod new_cmd;
 #[allow(dead_code)]
 mod op_lock;
 mod package_cmd;
@@ -132,8 +134,11 @@ use fcp_host::{
     BudgetReportRequest as HostBudgetReportRequest,
     BudgetReportResponse as HostBudgetReportResponse, CancelReason,
     CancellationRequest as HostCancellationRequest,
-    CancellationResponse as HostCancellationResponse, CleanupBehavior,
-    ConnectorAdminStatus as HostConnectorAdminStatus,
+    CancellationResponse as HostCancellationResponse, CleanupBehavior, ConfigRevisionRecord,
+    ConnectorAdminStatus as HostConnectorAdminStatus, ConnectorConfigApplyRequest,
+    ConnectorConfigApplyResponse, ConnectorConfigDiffRequest, ConnectorConfigDiffResponse,
+    ConnectorConfigRevisionsResponse, ConnectorConfigRollbackRequest, ConnectorConfigSnapshot,
+    ConnectorConfigValidateRequest, ConnectorConfigValidateResponse,
     ConnectorInventoryMutationKind as HostConnectorInventoryMutationKind,
     ConnectorInventoryMutationRequest as HostConnectorInventoryMutationRequest,
     ConnectorInventoryMutationResponse as HostConnectorInventoryMutationResponse,
@@ -141,8 +146,8 @@ use fcp_host::{
     DiscoveryFilter as HostDiscoveryFilter, DiscoveryResponse as HostDiscoveryResponse,
     DoctorReport as HostDoctorReport, DoctorRequest as HostDoctorRequest, HostHealthResponse,
     HostPreflightRequest, IntrospectionResponse as HostIntrospectionResponse,
-    ManagedConnectorConfig, PreflightResponse as HostPreflightResponse,
-    ToolDescriptor as HostToolDescriptor,
+    LifecycleTransitionRequest, LifecycleTransitionResponse, ManagedConnectorConfig,
+    PreflightResponse as HostPreflightResponse, ToolDescriptor as HostToolDescriptor,
 };
 use fcp_manifest::ConnectorManifest;
 use fcp_telemetry::{
@@ -479,6 +484,13 @@ enum Commands {
     /// Measures RaptorQ encoding/decoding, CBOR serialization, schema hashing,
     /// cryptographic operations, and cold-start latency with statistical analysis.
     Bench(bench_cmd::BenchArgs),
+
+    /// Scaffold a new FCP2-compliant connector crate.
+    ///
+    /// Creates the directory structure, manifest, connector stub, and integration
+    /// tests. Use `--check` to validate an existing connector instead.
+    #[command(visible_alias = "scaffold")]
+    New(new_cmd::NewArgs),
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -2004,6 +2016,13 @@ fn execute_passthrough_command(prepared: &PreparedCli) -> Result<Option<Executio
                 exit_code: ExitCode::SUCCESS,
             }))
         }
+        Commands::New(args) => {
+            new_cmd::run(args)?;
+            Ok(Some(ExecutionOutcome {
+                text: String::new(),
+                exit_code: ExitCode::SUCCESS,
+            }))
+        }
         _ => Ok(None),
     }
 }
@@ -2607,7 +2626,7 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         Commands::Unpin(args) => unpin_dispatch(args, cli.host.as_deref())?,
         Commands::Rollout(args) => rollout_dispatch(args, cli.host.as_deref())?,
         Commands::Auth(args) => auth_dispatch(args)?,
-        Commands::Config(args) => config_dispatch(args)?,
+        Commands::Config(args) => config_dispatch(args, cli.host.as_deref())?,
         Commands::Invoke(args) => invoke_dispatch("invoke", args, cli.host.as_deref())?,
         Commands::Simulate(args) => invoke_dispatch("simulate", args, cli.host.as_deref())?,
         Commands::Cancel(args) => cancel_dispatch(args, cli.host.as_deref())?,
@@ -2623,6 +2642,7 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         Commands::Map(args) => map_dispatch(args, cli.host.as_deref())?,
         Commands::BatchFile(args) => batch_file_dispatch(args, cli.host.as_deref())?,
         Commands::Bench(_) => passthrough_only_dispatch("bench"),
+        Commands::New(_) => passthrough_only_dispatch("new"),
     };
 
     Ok(outcome)
@@ -2941,6 +2961,72 @@ impl HostAdminClient {
         self.get_json(&format!("/rpc/connectors/{connector_id}/status"))
     }
 
+    fn config_snapshot(&self, connector_id: &str) -> Result<ConnectorConfigSnapshot> {
+        self.get_json(&format!("/rpc/connectors/{connector_id}/config"))
+    }
+
+    #[allow(dead_code)]
+    fn config_revisions(&self, connector_id: &str) -> Result<ConnectorConfigRevisionsResponse> {
+        self.get_json(&format!("/rpc/connectors/{connector_id}/config/revisions"))
+    }
+
+    #[allow(dead_code)]
+    fn config_revision(
+        &self,
+        connector_id: &str,
+        revision_id: u64,
+    ) -> Result<ConfigRevisionRecord> {
+        self.get_json(&format!(
+            "/rpc/connectors/{connector_id}/config/revisions/{revision_id}"
+        ))
+    }
+
+    #[allow(dead_code)]
+    fn config_diff(
+        &self,
+        connector_id: &str,
+        request: &ConnectorConfigDiffRequest,
+    ) -> Result<ConnectorConfigDiffResponse> {
+        self.post_json(
+            &format!("/rpc/connectors/{connector_id}/config/diff"),
+            request,
+        )
+    }
+
+    fn config_validate(
+        &self,
+        connector_id: &str,
+        request: &ConnectorConfigValidateRequest,
+    ) -> Result<ConnectorConfigValidateResponse> {
+        self.post_json(
+            &format!("/rpc/connectors/{connector_id}/config/validate"),
+            request,
+        )
+    }
+
+    fn config_apply(
+        &self,
+        connector_id: &str,
+        request: &ConnectorConfigApplyRequest,
+    ) -> Result<ConnectorConfigApplyResponse> {
+        self.post_json(
+            &format!("/rpc/connectors/{connector_id}/config/apply"),
+            request,
+        )
+    }
+
+    #[allow(dead_code)]
+    fn config_rollback(
+        &self,
+        connector_id: &str,
+        request: &ConnectorConfigRollbackRequest,
+    ) -> Result<ConnectorConfigApplyResponse> {
+        self.post_json(
+            &format!("/rpc/connectors/{connector_id}/config/rollback"),
+            request,
+        )
+    }
+
     fn preflight(&self, request: &HostPreflightRequest) -> Result<HostPreflightResponse> {
         self.post_json("/rpc/preflight", request)
     }
@@ -2992,6 +3078,20 @@ impl HostAdminClient {
         request: &HostRolloutScheduleRequest,
     ) -> Result<fcp_host::RolloutOutcome> {
         self.post_json("/rpc/rollout/schedule", request)
+    }
+
+    #[allow(dead_code)]
+    fn lifecycle_transition(
+        &self,
+        connector_id: &str,
+        request: &LifecycleTransitionRequest,
+    ) -> Result<LifecycleTransitionResponse> {
+        self.post_json(&format!("/rpc/lifecycle/{connector_id}"), request)
+    }
+
+    #[allow(dead_code)]
+    fn lifecycle_record(&self, connector_id: &str) -> Result<HostConnectorAdminStatus> {
+        self.get_json(&format!("/rpc/lifecycle/{connector_id}"))
     }
 
     #[allow(dead_code)]
@@ -7719,12 +7819,10 @@ fn parse_auth_expiry(raw: &str) -> std::result::Result<DateTime<Utc>, String> {
         .map_err(|error| format!("invalid `expires_at` timestamp `{raw}`: {error}"))
 }
 
-fn config_dispatch(args: &ConfigArgs) -> Result<DispatchOutcome> {
-    let catalog = DiscoveryCatalog::load()?;
-    let connectors_file = resolve_connectors_file_path(args.connectors_file.as_ref())?;
-
+fn config_dispatch(args: &ConfigArgs, explicit_host: Option<&str>) -> Result<DispatchOutcome> {
     match &args.command {
         ConfigCommand::Schema(target) => {
+            let catalog = DiscoveryCatalog::load()?;
             let connector = match catalog.resolve_connector(&target.connector) {
                 Ok(connector) => connector,
                 Err(error) => {
@@ -7750,7 +7848,6 @@ fn config_dispatch(args: &ConfigArgs) -> Result<DispatchOutcome> {
                             "slug": &connector.slug,
                             "canonical_id": connector.detail.summary.id.as_str(),
                         },
-                        "connectors_file": connectors_file.display().to_string(),
                     }),
                     exit_code: CliExitCode::Validation,
                 });
@@ -7766,7 +7863,6 @@ fn config_dispatch(args: &ConfigArgs) -> Result<DispatchOutcome> {
                     "slug": &connector.slug,
                     "canonical_id": connector.detail.summary.id.as_str(),
                 },
-                "connectors_file": connectors_file.display().to_string(),
                 "schema": schema,
             });
             envelope.inject_into(&mut payload);
@@ -7776,18 +7872,52 @@ fn config_dispatch(args: &ConfigArgs) -> Result<DispatchOutcome> {
             })
         }
         ConfigCommand::Get(target) => {
-            let configs = read_managed_connector_configs(&connectors_file)?;
-            let (entry, resolved) =
-                resolve_managed_connector(&catalog, &configs, &target.connector)?;
-            let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "config");
+            let Some(host) = resolve_host_config(explicit_host)? else {
+                return Ok(config_missing_host_dispatch(
+                    "get",
+                    json!({
+                        "connector": &target.connector,
+                        "connectors_file": args.connectors_file.as_ref().map(|path| path.display().to_string()),
+                    }),
+                    vec![
+                        format!("fwc config get {} --host <endpoint>", target.connector),
+                        "Set `FWC_HOST` or `FCP_HOST_ENDPOINT`, or configure an active FCP context."
+                            .to_owned(),
+                    ],
+                ));
+            };
+            let client = HostAdminClient::new(&host.endpoint)?;
+            let (catalog, _) = client.catalog(None)?;
+            let connector = match catalog.resolve_connector(&target.connector) {
+                Ok(connector) => connector.clone(),
+                Err(error) => {
+                    return Ok(connector_resolution_dispatch(
+                        "config get",
+                        &target.connector,
+                        &error,
+                    ));
+                }
+            };
+            let snapshot = client.config_snapshot(connector.summary.id.as_str())?;
+            let config = snapshot.current.payload.clone();
+
+            let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "config");
             let mut payload = json!({
                 "status": "ok",
                 "command": "config",
                 "subcommand": "get",
-                "source": "connectors-file",
-                "connector": connector_descriptor_json(&entry, resolved),
-                "connectors_file": connectors_file.display().to_string(),
-                "config": entry.config.clone().unwrap_or_else(|| json!({})),
+                "source": "host-admin-api",
+                "message": format!(
+                    "Loaded the live connector config snapshot for `{}` from `fcp-host`.",
+                    connector.slug
+                ),
+                "connector": host_connector_descriptor_json(&connector),
+                "snapshot": snapshot,
+                "config": config,
+                "next_actions": [
+                    format!("fwc config doctor {} --host {}", connector.slug, host.endpoint),
+                    format!("fwc config export {} --host {} --file <path>", connector.slug, host.endpoint),
+                ],
             });
             envelope.inject_into(&mut payload);
             Ok(DispatchOutcome {
@@ -7796,47 +7926,107 @@ fn config_dispatch(args: &ConfigArgs) -> Result<DispatchOutcome> {
             })
         }
         ConfigCommand::Set(set_args) => {
-            let mut configs = read_managed_connector_configs(&connectors_file)?;
-            let resolved = catalog.resolve_connector(&set_args.connector).ok();
-            let index = find_managed_connector_index(&configs, &set_args.connector, resolved)?;
-            let path = parse_invoke_path(&set_args.key).map_err(|error| {
-                anyhow::anyhow!("invalid config path `{}`: {error:?}", set_args.key)
-            })?;
-            let schema = resolved.and_then(|connector| connector.detail.config_schema.as_known());
-            let schema_at_path = schema.and_then(|schema| invoke_schema_at_path(schema, &path));
-            let value = coerce_invoke_value(&set_args.value, schema_at_path)
-                .map_err(|error| anyhow::anyhow!("failed to parse config value: {error}"))?;
-
-            let mut config_value = configs[index].config.clone().unwrap_or_else(|| json!({}));
-            apply_invoke_binding(&mut config_value, &path, value).map_err(|error| {
-                anyhow::anyhow!("failed to set config path `{}`: {error}", set_args.key)
-            })?;
-            let validation_errors = validate_config_value(schema, &config_value);
-            if !validation_errors.is_empty() {
-                return Ok(config_validation_dispatch(
+            let Some(host) = resolve_host_config(explicit_host)? else {
+                return Ok(config_missing_host_dispatch(
                     "set",
-                    &connectors_file,
-                    &configs[index],
-                    resolved,
-                    config_value,
-                    validation_errors,
+                    json!({
+                        "connector": &set_args.connector,
+                        "updated_path": &set_args.key,
+                    }),
+                    vec![
+                        format!(
+                            "fwc config set {} {} <value> --host <endpoint>",
+                            set_args.connector, set_args.key
+                        ),
+                        "Set `FWC_HOST` or `FCP_HOST_ENDPOINT`, or configure an active FCP context."
+                            .to_owned(),
+                    ],
+                ));
+            };
+            let client = HostAdminClient::new(&host.endpoint)?;
+            let (catalog, _) = client.catalog(None)?;
+            let connector = match catalog.resolve_connector(&set_args.connector) {
+                Ok(connector) => connector.clone(),
+                Err(error) => {
+                    return Ok(connector_resolution_dispatch(
+                        "config set",
+                        &set_args.connector,
+                        &error,
+                    ));
+                }
+            };
+            let snapshot = client.config_snapshot(connector.summary.id.as_str())?;
+            if !snapshot.current.is_replayable() {
+                return Ok(config_non_replayable_live_config_dispatch(
+                    "set",
+                    &host,
+                    &connector,
+                    &snapshot,
+                    json!({ "updated_path": &set_args.key }),
                 ));
             }
 
-            configs[index].config = Some(config_value.clone());
-            write_managed_connector_configs(&connectors_file, &configs)?;
-            let entry = &configs[index];
+            let path = parse_invoke_path(&set_args.key).map_err(|error| {
+                anyhow::anyhow!("invalid config path `{}`: {error:?}", set_args.key)
+            })?;
+            let schema = workspace_config_schema(&set_args.connector, &connector);
+            let schema_at_path = schema
+                .as_ref()
+                .and_then(|schema| invoke_schema_at_path(schema, &path));
+            let value = coerce_invoke_value(&set_args.value, schema_at_path)
+                .map_err(|error| anyhow::anyhow!("failed to parse config value: {error}"))?;
 
-            let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "config");
+            let mut candidate = snapshot.current.payload.clone();
+            apply_invoke_binding(&mut candidate, &path, value).map_err(|error| {
+                anyhow::anyhow!("failed to set config path `{}`: {error}", set_args.key)
+            })?;
+
+            let validation = client.config_validate(
+                connector.summary.id.as_str(),
+                &ConnectorConfigValidateRequest {
+                    payload: candidate.clone(),
+                    expected_active_revision_id: snapshot.active_revision_id,
+                },
+            )?;
+            if !validation.valid {
+                return Ok(config_live_validation_dispatch(
+                    "set",
+                    &host,
+                    &connector,
+                    validation,
+                    json!({ "updated_path": &set_args.key }),
+                ));
+            }
+
+            let applied = client.config_apply(
+                connector.summary.id.as_str(),
+                &ConnectorConfigApplyRequest {
+                    payload: candidate,
+                    expected_active_revision_id: snapshot.active_revision_id,
+                    created_by: Some("fwc".to_owned()),
+                    change_reason: Some(format!("fwc config set {}", set_args.key)),
+                },
+            )?;
+            let config = applied.current.payload.clone();
+
+            let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "config");
             let mut payload = json!({
                 "status": "ok",
                 "command": "config",
                 "subcommand": "set",
-                "source": "connectors-file",
-                "connector": connector_descriptor_json(entry, resolved),
-                "connectors_file": connectors_file.display().to_string(),
-                "updated_path": set_args.key,
-                "config": config_value,
+                "source": "host-admin-api",
+                "message": format!(
+                    "Applied a live config mutation for `{}` through `fcp-host`.",
+                    connector.slug
+                ),
+                "connector": host_connector_descriptor_json(&connector),
+                "updated_path": &set_args.key,
+                "config": config,
+                "response": applied,
+                "next_actions": [
+                    format!("fwc config get {} --host {}", connector.slug, host.endpoint),
+                    format!("fwc config doctor {} --host {}", connector.slug, host.endpoint),
+                ],
             });
             envelope.inject_into(&mut payload);
             Ok(DispatchOutcome {
@@ -7845,43 +8035,100 @@ fn config_dispatch(args: &ConfigArgs) -> Result<DispatchOutcome> {
             })
         }
         ConfigCommand::Unset(unset_args) => {
-            let mut configs = read_managed_connector_configs(&connectors_file)?;
-            let resolved = catalog.resolve_connector(&unset_args.connector).ok();
-            let index = find_managed_connector_index(&configs, &unset_args.connector, resolved)?;
-            let path = parse_invoke_path(&unset_args.key).map_err(|error| {
-                anyhow::anyhow!("invalid config path `{}`: {error:?}", unset_args.key)
-            })?;
-            let mut config_value = configs[index].config.clone().unwrap_or_else(|| json!({}));
-            remove_invoke_binding(&mut config_value, &path).map_err(|error| {
-                anyhow::anyhow!("failed to unset config path `{}`: {error}", unset_args.key)
-            })?;
-            let schema = resolved.and_then(|connector| connector.detail.config_schema.as_known());
-            let validation_errors = validate_config_value(schema, &config_value);
-            if !validation_errors.is_empty() {
-                return Ok(config_validation_dispatch(
+            let Some(host) = resolve_host_config(explicit_host)? else {
+                return Ok(config_missing_host_dispatch(
                     "unset",
-                    &connectors_file,
-                    &configs[index],
-                    resolved,
-                    config_value,
-                    validation_errors,
+                    json!({
+                        "connector": &unset_args.connector,
+                        "updated_path": &unset_args.key,
+                    }),
+                    vec![
+                        format!(
+                            "fwc config unset {} {} --host <endpoint>",
+                            unset_args.connector, unset_args.key
+                        ),
+                        "Set `FWC_HOST` or `FCP_HOST_ENDPOINT`, or configure an active FCP context."
+                            .to_owned(),
+                    ],
+                ));
+            };
+            let client = HostAdminClient::new(&host.endpoint)?;
+            let (catalog, _) = client.catalog(None)?;
+            let connector = match catalog.resolve_connector(&unset_args.connector) {
+                Ok(connector) => connector.clone(),
+                Err(error) => {
+                    return Ok(connector_resolution_dispatch(
+                        "config unset",
+                        &unset_args.connector,
+                        &error,
+                    ));
+                }
+            };
+            let snapshot = client.config_snapshot(connector.summary.id.as_str())?;
+            if !snapshot.current.is_replayable() {
+                return Ok(config_non_replayable_live_config_dispatch(
+                    "unset",
+                    &host,
+                    &connector,
+                    &snapshot,
+                    json!({ "updated_path": &unset_args.key }),
                 ));
             }
 
-            configs[index].config = Some(config_value.clone());
-            write_managed_connector_configs(&connectors_file, &configs)?;
-            let entry = &configs[index];
+            let path = parse_invoke_path(&unset_args.key).map_err(|error| {
+                anyhow::anyhow!("invalid config path `{}`: {error:?}", unset_args.key)
+            })?;
+            let mut candidate = snapshot.current.payload.clone();
+            remove_invoke_binding(&mut candidate, &path).map_err(|error| {
+                anyhow::anyhow!("failed to unset config path `{}`: {error}", unset_args.key)
+            })?;
 
-            let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "config");
+            let validation = client.config_validate(
+                connector.summary.id.as_str(),
+                &ConnectorConfigValidateRequest {
+                    payload: candidate.clone(),
+                    expected_active_revision_id: snapshot.active_revision_id,
+                },
+            )?;
+            if !validation.valid {
+                return Ok(config_live_validation_dispatch(
+                    "unset",
+                    &host,
+                    &connector,
+                    validation,
+                    json!({ "updated_path": &unset_args.key }),
+                ));
+            }
+
+            let applied = client.config_apply(
+                connector.summary.id.as_str(),
+                &ConnectorConfigApplyRequest {
+                    payload: candidate,
+                    expected_active_revision_id: snapshot.active_revision_id,
+                    created_by: Some("fwc".to_owned()),
+                    change_reason: Some(format!("fwc config unset {}", unset_args.key)),
+                },
+            )?;
+            let config = applied.current.payload.clone();
+
+            let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "config");
             let mut payload = json!({
                 "status": "ok",
                 "command": "config",
                 "subcommand": "unset",
-                "source": "connectors-file",
-                "connector": connector_descriptor_json(entry, resolved),
-                "connectors_file": connectors_file.display().to_string(),
-                "updated_path": unset_args.key,
-                "config": config_value,
+                "source": "host-admin-api",
+                "message": format!(
+                    "Removed a live config path for `{}` through `fcp-host`.",
+                    connector.slug
+                ),
+                "connector": host_connector_descriptor_json(&connector),
+                "updated_path": &unset_args.key,
+                "config": config,
+                "response": applied,
+                "next_actions": [
+                    format!("fwc config get {} --host {}", connector.slug, host.endpoint),
+                    format!("fwc config doctor {} --host {}", connector.slug, host.endpoint),
+                ],
             });
             envelope.inject_into(&mut payload);
             Ok(DispatchOutcome {
@@ -7890,41 +8137,85 @@ fn config_dispatch(args: &ConfigArgs) -> Result<DispatchOutcome> {
             })
         }
         ConfigCommand::Import(file_args) => {
-            let mut configs = read_managed_connector_configs(&connectors_file)?;
-            let resolved = catalog.resolve_connector(&file_args.connector).ok();
-            let index = find_managed_connector_index(&configs, &file_args.connector, resolved)?;
+            let Some(host) = resolve_host_config(explicit_host)? else {
+                return Ok(config_missing_host_dispatch(
+                    "import",
+                    json!({
+                        "connector": &file_args.connector,
+                        "input_file": file_args.file.as_ref().map(|path| path.display().to_string()),
+                    }),
+                    vec![
+                        format!("fwc config import {} --file <path> --host <endpoint>", file_args.connector),
+                        "Set `FWC_HOST` or `FCP_HOST_ENDPOINT`, or configure an active FCP context."
+                            .to_owned(),
+                    ],
+                ));
+            };
             let import_path = file_args
                 .file
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("`fwc config import` requires --file <path>"))?;
+            let client = HostAdminClient::new(&host.endpoint)?;
+            let (catalog, _) = client.catalog(None)?;
+            let connector = match catalog.resolve_connector(&file_args.connector) {
+                Ok(connector) => connector.clone(),
+                Err(error) => {
+                    return Ok(connector_resolution_dispatch(
+                        "config import",
+                        &file_args.connector,
+                        &error,
+                    ));
+                }
+            };
+            let snapshot = client.config_snapshot(connector.summary.id.as_str())?;
             let imported = read_json_file(import_path)?;
-            let schema = resolved.and_then(|connector| connector.detail.config_schema.as_known());
-            let validation_errors = validate_config_value(schema, &imported);
-            if !validation_errors.is_empty() {
-                return Ok(config_validation_dispatch(
+
+            let validation = client.config_validate(
+                connector.summary.id.as_str(),
+                &ConnectorConfigValidateRequest {
+                    payload: imported.clone(),
+                    expected_active_revision_id: snapshot.active_revision_id,
+                },
+            )?;
+            if !validation.valid {
+                return Ok(config_live_validation_dispatch(
                     "import",
-                    &connectors_file,
-                    &configs[index],
-                    resolved,
-                    imported,
-                    validation_errors,
+                    &host,
+                    &connector,
+                    validation,
+                    json!({ "input_file": import_path.display().to_string() }),
                 ));
             }
 
-            configs[index].config = Some(imported.clone());
-            write_managed_connector_configs(&connectors_file, &configs)?;
-            let entry = &configs[index];
+            let applied = client.config_apply(
+                connector.summary.id.as_str(),
+                &ConnectorConfigApplyRequest {
+                    payload: imported,
+                    expected_active_revision_id: snapshot.active_revision_id,
+                    created_by: Some("fwc".to_owned()),
+                    change_reason: Some(format!("fwc config import {}", import_path.display())),
+                },
+            )?;
+            let config = applied.current.payload.clone();
 
-            let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "config");
+            let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "config");
             let mut payload = json!({
                 "status": "ok",
                 "command": "config",
                 "subcommand": "import",
-                "source": "connectors-file",
-                "connector": connector_descriptor_json(entry, resolved),
-                "connectors_file": connectors_file.display().to_string(),
+                "source": "host-admin-api",
+                "message": format!(
+                    "Imported a live config document for `{}` through `fcp-host`.",
+                    connector.slug
+                ),
+                "connector": host_connector_descriptor_json(&connector),
                 "input_file": import_path.display().to_string(),
-                "config": imported,
+                "config": config,
+                "response": applied,
+                "next_actions": [
+                    format!("fwc config get {} --host {}", connector.slug, host.endpoint),
+                    format!("fwc config doctor {} --host {}", connector.slug, host.endpoint),
+                ],
             });
             envelope.inject_into(&mut payload);
             Ok(DispatchOutcome {
@@ -7933,23 +8224,56 @@ fn config_dispatch(args: &ConfigArgs) -> Result<DispatchOutcome> {
             })
         }
         ConfigCommand::Export(file_args) => {
-            let configs = read_managed_connector_configs(&connectors_file)?;
-            let (entry, resolved) =
-                resolve_managed_connector(&catalog, &configs, &file_args.connector)?;
-            let config_value = entry.config.clone().unwrap_or_else(|| json!({}));
+            let Some(host) = resolve_host_config(explicit_host)? else {
+                return Ok(config_missing_host_dispatch(
+                    "export",
+                    json!({
+                        "connector": &file_args.connector,
+                        "output_file": file_args.file.as_ref().map(|path| path.display().to_string()),
+                    }),
+                    vec![
+                        format!("fwc config export {} --host <endpoint>", file_args.connector),
+                        "Set `FWC_HOST` or `FCP_HOST_ENDPOINT`, or configure an active FCP context."
+                            .to_owned(),
+                    ],
+                ));
+            };
+            let client = HostAdminClient::new(&host.endpoint)?;
+            let (catalog, _) = client.catalog(None)?;
+            let connector = match catalog.resolve_connector(&file_args.connector) {
+                Ok(connector) => connector.clone(),
+                Err(error) => {
+                    return Ok(connector_resolution_dispatch(
+                        "config export",
+                        &file_args.connector,
+                        &error,
+                    ));
+                }
+            };
+            let snapshot = client.config_snapshot(connector.summary.id.as_str())?;
+            let config = snapshot.current.payload.clone();
             if let Some(path) = &file_args.file {
-                write_json_file(path, &config_value)?;
+                write_json_file(path, &config)?;
             }
-            let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "config");
+
+            let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "config");
             let mut payload = json!({
                 "status": "ok",
                 "command": "config",
                 "subcommand": "export",
-                "source": "connectors-file",
-                "connector": connector_descriptor_json(&entry, resolved),
-                "connectors_file": connectors_file.display().to_string(),
+                "source": "host-admin-api",
+                "message": format!(
+                    "Exported the live connector config snapshot for `{}`.",
+                    connector.slug
+                ),
+                "connector": host_connector_descriptor_json(&connector),
                 "output_file": file_args.file.as_ref().map(|path| path.display().to_string()),
-                "config": config_value,
+                "snapshot": snapshot,
+                "config": config,
+                "next_actions": [
+                    format!("fwc config doctor {} --host {}", connector.slug, host.endpoint),
+                    format!("fwc config import {} --host {} --file <path>", connector.slug, host.endpoint),
+                ],
             });
             envelope.inject_into(&mut payload);
             Ok(DispatchOutcome {
@@ -7958,66 +8282,126 @@ fn config_dispatch(args: &ConfigArgs) -> Result<DispatchOutcome> {
             })
         }
         ConfigCommand::Doctor(target) => {
-            let configs = read_managed_connector_configs(&connectors_file)?;
-            let (entry, resolved) =
-                resolve_managed_connector(&catalog, &configs, &target.connector)?;
-            let config_value = entry.config.clone().unwrap_or_else(|| json!({}));
-            let schema = resolved.and_then(|connector| connector.detail.config_schema.as_known());
-            let validation_errors = validate_config_value(schema, &config_value);
-            let schema_available = schema.is_some();
-            let status = if validation_errors.is_empty() {
+            let Some(host) = resolve_host_config(explicit_host)? else {
+                return Ok(config_missing_host_dispatch(
+                    "doctor",
+                    json!({
+                        "connector": &target.connector,
+                    }),
+                    vec![
+                        format!("fwc config doctor {} --host <endpoint>", target.connector),
+                        "Set `FWC_HOST` or `FCP_HOST_ENDPOINT`, or configure an active FCP context."
+                            .to_owned(),
+                    ],
+                ));
+            };
+            let client = HostAdminClient::new(&host.endpoint)?;
+            let (catalog, _) = client.catalog(None)?;
+            let connector = match catalog.resolve_connector(&target.connector) {
+                Ok(connector) => connector.clone(),
+                Err(error) => {
+                    return Ok(connector_resolution_dispatch(
+                        "config doctor",
+                        &target.connector,
+                        &error,
+                    ));
+                }
+            };
+            let snapshot = client.config_snapshot(connector.summary.id.as_str())?;
+            let replayable = snapshot.current.is_replayable();
+            let validation = if replayable {
+                Some(client.config_validate(
+                    connector.summary.id.as_str(),
+                    &ConnectorConfigValidateRequest {
+                        payload: snapshot.current.payload.clone(),
+                        expected_active_revision_id: None,
+                    },
+                )?)
+            } else {
+                None
+            };
+            let valid = validation
+                .as_ref()
+                .is_none_or(|validation| validation.valid);
+            let status = if replayable && !valid {
+                "invalid"
+            } else if replayable {
                 "ok"
             } else {
-                "invalid"
+                "limited"
             };
-            let exit_code = if validation_errors.is_empty() {
-                CliExitCode::Success
-            } else {
+            let exit_code = if replayable && !valid {
                 CliExitCode::Validation
+            } else {
+                CliExitCode::Success
             };
 
-            let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "config");
+            let mut checks = vec![
+                json!({
+                    "name": "host",
+                    "status": "ok",
+                    "detail": format!("Reached live host endpoint `{}`.", host.endpoint),
+                }),
+                json!({
+                    "name": "connector",
+                    "status": "ok",
+                    "detail": format!("Resolved `{}` to `{}`.", target.connector, connector.summary.id),
+                }),
+                json!({
+                    "name": "snapshot",
+                    "status": "ok",
+                    "detail": format!(
+                        "Loaded live config snapshot from `{:?}` with {} recorded revision(s).",
+                        snapshot.source,
+                        snapshot.revision_count
+                    ),
+                }),
+            ];
+            checks.push(if let Some(validation) = validation.as_ref() {
+                json!({
+                    "name": "validation",
+                    "status": if validation.valid { "ok" } else { "fail" },
+                    "detail": validation.error.clone().unwrap_or_else(|| {
+                        "Live host preview accepted the current connector config.".to_owned()
+                    }),
+                })
+            } else {
+                json!({
+                    "name": "validation",
+                    "status": "unavailable",
+                    "detail": "The current live config contains redacted inline secrets, so `fwc` will not replay the sanitized snapshot back into `fcp-host` for validation.",
+                })
+            });
+
+            let message = if replayable {
+                format!(
+                    "Validated the current live connector config for `{}` through `fcp-host`.",
+                    connector.slug
+                )
+            } else {
+                format!(
+                    "Loaded the live connector config for `{}` but withheld replay-based validation because the snapshot contains redacted inline secrets.",
+                    connector.slug
+                )
+            };
+            let config = snapshot.current.payload.clone();
+
+            let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "config");
             let mut payload = json!({
                 "status": status,
                 "command": "config",
                 "subcommand": "doctor",
-                "source": "connectors-file",
-                "connector": connector_descriptor_json(&entry, resolved),
-                "connectors_file": connectors_file.display().to_string(),
-                "schema_available": schema_available,
-                "checks": [
-                    {
-                        "name": "connectors_file",
-                        "status": "ok",
-                        "detail": format!("Loaded {}", connectors_file.display()),
-                    },
-                    {
-                        "name": "connector_entry",
-                        "status": "ok",
-                        "detail": format!("Found connector entry `{}`", entry.id),
-                    },
-                    {
-                        "name": "schema",
-                        "status": if schema_available { "ok" } else { "unavailable" },
-                        "detail": if schema_available {
-                            "Config schema loaded from workspace discovery."
-                        } else {
-                            "No config schema is available from workspace discovery."
-                        },
-                    },
-                    {
-                        "name": "validation",
-                        "status": if validation_errors.is_empty() { "ok" } else { "fail" },
-                        "detail": if validation_errors.is_empty() {
-                            "Current config satisfies all available schema checks."
-                        } else {
-                            "Current config failed schema validation."
-                        },
-                    }
+                "source": "host-admin-api",
+                "message": message,
+                "connector": host_connector_descriptor_json(&connector),
+                "checks": checks,
+                "snapshot": snapshot,
+                "validation": validation,
+                "config": config,
+                "next_actions": [
+                    format!("fwc config get {} --host {}", connector.slug, host.endpoint),
+                    format!("fwc config export {} --host {} --file <path>", connector.slug, host.endpoint),
                 ],
-                "errors": validation_errors,
-                "config": config_value,
-                "schema": schema,
             });
             if exit_code.is_success() {
                 envelope.inject_into(&mut payload);
@@ -8027,72 +8411,14 @@ fn config_dispatch(args: &ConfigArgs) -> Result<DispatchOutcome> {
     }
 }
 
-fn resolve_connectors_file_path(explicit: Option<&PathBuf>) -> Result<PathBuf> {
-    if let Some(path) = explicit {
-        return Ok(path.clone());
-    }
-
-    match std::env::var("FCP_HOST_CONNECTORS_FILE") {
-        Ok(raw) if !raw.trim().is_empty() => Ok(PathBuf::from(raw)),
-        _ => bail!(
-            "No connectors file configured. Pass `--connectors-file <path>` or set `FCP_HOST_CONNECTORS_FILE`."
-        ),
-    }
-}
-
-fn read_managed_connector_configs(path: &PathBuf) -> Result<Vec<ManagedConnectorConfig>> {
-    let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("failed to read connectors file: {}", path.display()))?;
-    serde_json::from_str(&raw)
-        .with_context(|| format!("invalid connectors file JSON: {}", path.display()))
-}
-
-fn write_managed_connector_configs(
-    path: &PathBuf,
-    configs: &[ManagedConnectorConfig],
-) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| {
-            format!(
-                "failed to create parent directory for connectors file: {}",
-                parent.display()
-            )
-        })?;
-    }
-    let encoded = serde_json::to_string_pretty(configs)?;
-    std::fs::write(path, format!("{encoded}\n"))
-        .with_context(|| format!("failed to write connectors file: {}", path.display()))
-}
-
-fn resolve_managed_connector<'a>(
-    catalog: &'a DiscoveryCatalog,
-    configs: &'a [ManagedConnectorConfig],
-    selector: &str,
-) -> Result<(&'a ManagedConnectorConfig, Option<&'a DiscoveredConnector>)> {
-    let resolved = catalog.resolve_connector(selector).ok();
-    let index = find_managed_connector_index(configs, selector, resolved)?;
-    Ok((&configs[index], resolved))
-}
-
-fn find_managed_connector_index(
-    configs: &[ManagedConnectorConfig],
-    selector: &str,
-    resolved: Option<&DiscoveredConnector>,
-) -> Result<usize> {
-    let canonical_id = resolved.map(|connector| connector.detail.summary.id.as_str());
-    configs
-        .iter()
-        .position(|entry| {
-            canonical_id.is_some_and(|id| entry.id == id)
-                || entry.id == selector
-                || entry
-                    .name
-                    .as_deref()
-                    .is_some_and(|name| name.eq_ignore_ascii_case(selector))
-        })
-        .ok_or_else(|| {
-            anyhow::anyhow!("connector `{selector}` was not found in the managed connectors file")
-        })
+fn host_connector_descriptor_json(connector: &HostConnectorRecord) -> Value {
+    json!({
+        "slug": &connector.slug,
+        "canonical_id": connector.summary.id.as_str(),
+        "name": &connector.summary.name,
+        "version": connector.summary.version.to_string(),
+        "enabled": connector.summary.enabled,
+    })
 }
 
 fn connector_descriptor_json(
@@ -8108,35 +8434,108 @@ fn connector_descriptor_json(
     })
 }
 
-fn validate_config_value(schema: Option<&Value>, payload: &Value) -> Vec<Value> {
-    match schema {
-        Some(schema) => {
-            let (_valid, errors) = validate_payload_against_schema(payload, schema);
-            errors
-        }
-        None => Vec::new(),
+fn workspace_config_schema(selector: &str, connector: &HostConnectorRecord) -> Option<Value> {
+    let catalog = DiscoveryCatalog::load().ok()?;
+    let resolved = catalog
+        .resolve_connector(selector)
+        .or_else(|_| catalog.resolve_connector(&connector.slug))
+        .or_else(|_| catalog.resolve_connector(connector.summary.id.as_str()))
+        .ok()?;
+    resolved.detail.config_schema.as_known().cloned()
+}
+
+fn config_missing_host_dispatch(
+    subcommand: &str,
+    details: Value,
+    next_actions: Vec<String>,
+) -> DispatchOutcome {
+    let envelope = CommandEnvelope::new(CommandAvailability::Unavailable, "config");
+    let mut payload = json!({
+        "status": "error",
+        "command": "config",
+        "subcommand": subcommand,
+        "error": {
+            "type": "missing-host-endpoint",
+            "message": format!(
+                "`fwc config {subcommand}` requires a live `fcp-host` endpoint. `fwc` will not treat local connector-file edits as live runtime truth."
+            ),
+            "recoverable": true,
+        },
+        "details": details,
+        "next_actions": next_actions,
+    });
+    envelope.inject_into(&mut payload);
+    DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Transport,
     }
 }
 
-fn config_validation_dispatch(
+fn config_non_replayable_live_config_dispatch(
     subcommand: &str,
-    connectors_file: &PathBuf,
-    entry: &ManagedConnectorConfig,
-    resolved: Option<&DiscoveredConnector>,
-    attempted_config: Value,
-    validation_errors: Vec<Value>,
+    host: &ResolvedHostConfig,
+    connector: &HostConnectorRecord,
+    snapshot: &ConnectorConfigSnapshot,
+    details: Value,
 ) -> DispatchOutcome {
+    DispatchOutcome {
+        payload: json!({
+            "status": "error",
+            "command": "config",
+            "subcommand": subcommand,
+            "source": "host-admin-api",
+            "error": {
+                "type": "non-replayable-live-config",
+                "message": format!(
+                    "The live config snapshot for `{}` contains redacted inline secrets, so `fwc config {subcommand}` cannot safely construct a partial mutation from the sanitized payload.",
+                    connector.slug
+                ),
+                "recoverable": true,
+            },
+            "connector": host_connector_descriptor_json(connector),
+            "snapshot": snapshot,
+            "details": details,
+            "next_actions": [
+                format!("fwc config export {} --host {} --file <path>", connector.slug, host.endpoint),
+                format!("fwc config import {} --host {} --file <path>", connector.slug, host.endpoint),
+                "Move inline secrets into credential references so future incremental edits remain replayable."
+                    .to_owned(),
+            ],
+        }),
+        exit_code: CliExitCode::Validation,
+    }
+}
+
+fn config_live_validation_dispatch(
+    subcommand: &str,
+    host: &ResolvedHostConfig,
+    connector: &HostConnectorRecord,
+    validation: ConnectorConfigValidateResponse,
+    details: Value,
+) -> DispatchOutcome {
+    let message = validation.error.clone().unwrap_or_else(|| {
+        "The live host rejected the candidate config during preview, so nothing was written."
+            .to_owned()
+    });
     DispatchOutcome {
         payload: json!({
             "status": "invalid",
             "command": "config",
             "subcommand": subcommand,
-            "source": "connectors-file",
-            "message": "The requested config change would leave the connector config in an invalid state, so nothing was written.",
-            "connector": connector_descriptor_json(entry, resolved),
-            "connectors_file": connectors_file.display().to_string(),
-            "config": attempted_config,
-            "errors": validation_errors,
+            "source": "host-admin-api",
+            "error": {
+                "type": "config-validation-failed",
+                "message": message,
+                "recoverable": true,
+            },
+            "connector": host_connector_descriptor_json(connector),
+            "details": details,
+            "validation": validation,
+            "next_actions": [
+                format!("fwc config doctor {} --host {}", connector.slug, host.endpoint),
+                format!("fwc config export {} --host {} --file <path>", connector.slug, host.endpoint),
+                format!("fwc config import {} --host {} --file <path>", connector.slug, host.endpoint),
+            ],
         }),
         exit_code: CliExitCode::Validation,
     }
@@ -8487,9 +8886,38 @@ fn prepare_package_artifact(
     source: &str,
     requested_version: Option<&str>,
 ) -> Result<PreparedPackageArtifact> {
+    // Gate 1: Reject sources containing known demo/stub/placeholder markers
+    // before any expensive resolution work (bead 29.12).
+    if catalog::contains_demo_marker(source) {
+        bail!(
+            "Source `{source}` contains a demo/placeholder marker and cannot be used \
+             for runtime install/update. Use `fwc package <connector>` to build a real \
+             package artifact, or provide a real registry/directory source."
+        );
+    }
+
     let (package_output, source_description) = resolve_package_output(source)?;
+
+    // Gate 2: Reject resolved artifacts whose identity contains demo markers.
+    if catalog::contains_demo_marker(&source_description) {
+        bail!(
+            "Resolved source description `{source_description}` contains a demo/placeholder \
+             marker. Only real package artifacts are accepted on runtime paths."
+        );
+    }
+
     let (manifest, build_metadata, verification) =
         inspect_package_output(&package_output, requested_version)?;
+
+    // Gate 3: Reject manifests with placeholder hashes in the interface hash.
+    let iface_hash = manifest.manifest.interface_hash.to_string();
+    if catalog::contains_demo_marker(&iface_hash) {
+        bail!(
+            "Manifest interface hash `{iface_hash}` contains a demo/placeholder marker. \
+             Use `with_computed_hash()` in tests or build a real package for runtime paths."
+        );
+    }
+
     Ok(PreparedPackageArtifact {
         package_output,
         manifest,
@@ -18091,6 +18519,134 @@ deny_ptrace = true
         .expect("inventory mutation response should serialize")
     }
 
+    #[allow(clippy::needless_pass_by_value)]
+    fn mock_sanitized_config_json(payload: Value, contains_inline_secrets: bool) -> Value {
+        json!({
+            "payload": payload,
+            "payload_digest": if contains_inline_secrets {
+                "blake3-256:mock-config-redacted"
+            } else {
+                "blake3-256:mock-config"
+            },
+            "redacted_fields": if contains_inline_secrets {
+                vec!["/client_secret".to_owned()]
+            } else {
+                Vec::<String>::new()
+            },
+            "credential_references": [],
+            "contains_inline_secrets": contains_inline_secrets,
+        })
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn mock_config_snapshot_json(payload: Value) -> Value {
+        json!({
+            "connector_id": "fcp.github:enterprise:v1",
+            "current": mock_sanitized_config_json(payload, false),
+            "source": "active_revision",
+            "active_revision_id": 41,
+            "revision_count": 1,
+            "last_journal_sequence": 9,
+        })
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn mock_redacted_config_snapshot_json(payload: Value) -> Value {
+        json!({
+            "connector_id": "fcp.github:enterprise:v1",
+            "current": mock_sanitized_config_json(payload, true),
+            "source": "active_revision",
+            "active_revision_id": 41,
+            "revision_count": 1,
+            "last_journal_sequence": 9,
+        })
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn mock_config_validation_response_json(
+        valid: bool,
+        current: Value,
+        candidate: Value,
+        error: Option<&str>,
+    ) -> Value {
+        json!({
+            "connector_id": "fcp.github:enterprise:v1",
+            "valid": valid,
+            "current_active_revision_id": 41,
+            "current": mock_sanitized_config_json(current, false),
+            "candidate": mock_sanitized_config_json(candidate, false),
+            "diff": [
+                {
+                    "path": "/profile",
+                    "kind": "changed",
+                    "before": "work",
+                    "after": "prod",
+                }
+            ],
+            "preview": if valid {
+                json!({
+                    "added": [],
+                    "updated": ["fcp.github:enterprise:v1"],
+                    "removed": [],
+                    "unchanged": [],
+                    "registry_version": 11,
+                })
+            } else {
+                Value::Null
+            },
+            "error": error,
+        })
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn mock_config_apply_response_json(current: Value, previous: Value) -> Value {
+        json!({
+            "connector_id": "fcp.github:enterprise:v1",
+            "changed": true,
+            "previous_active_revision_id": 41,
+            "current_active_revision_id": 42,
+            "previous": mock_sanitized_config_json(previous, false),
+            "current": mock_sanitized_config_json(current, false),
+            "diff": [
+                {
+                    "path": "/profile",
+                    "kind": "changed",
+                    "before": "work",
+                    "after": "prod",
+                }
+            ],
+            "revision": {
+                "revision_id": 42,
+                "previous_revision_id": 41,
+                "created_at": "2026-03-12T12:00:00Z",
+                "created_by": "fwc",
+                "change_reason": "fwc config set profile",
+                "payload": {
+                    "profile": "prod"
+                },
+                "payload_digest": "blake3-256:mock-config-next",
+                "redacted_fields": [],
+                "credential_references": [],
+                "contains_inline_secrets": false
+            },
+            "apply": {
+                "added": [],
+                "updated": ["fcp.github:enterprise:v1"],
+                "removed": [],
+                "unchanged": [],
+                "registry_version": 11
+            },
+            "admin_state": {
+                "reconciled_at": "2026-03-12T12:00:01Z",
+                "tracked_connectors": 1,
+                "created_connectors": 0,
+                "observed_updates": 1,
+                "drifted_connectors": 0,
+                "entries": []
+            }
+        })
+    }
+
     fn mock_github_host_routes(extra: StdBTreeMap<String, Value>) -> StdBTreeMap<String, Value> {
         let mut routes = StdBTreeMap::from([
             (
@@ -20221,6 +20777,141 @@ deny_ptrace = true
         assert_eq!(payload["response"]["dry_run"], true);
         assert_eq!(payload["response"]["current"]["args"][0], "--existing");
         assert_eq!(payload["updated"]["version"], "1.2.4");
+    }
+
+    #[test]
+    fn execute_config_get_reads_live_host_snapshot() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "GET /rpc/connectors/fcp.github:enterprise:v1/config".to_owned(),
+                    mock_config_snapshot_json(json!({
+                        "profile": "work",
+                        "credential_ref": "cred://github/work"
+                    })),
+                ),
+            ]),
+            2,
+        );
+
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "--host", &host, "config", "get", "github"]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "config");
+        assert_eq!(payload["subcommand"], "get");
+        assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["config"]["profile"], "work");
+        assert_eq!(payload["snapshot"]["active_revision_id"], 41);
+    }
+
+    #[test]
+    fn execute_config_set_applies_live_host_mutation() {
+        let current = json!({ "profile": "work" });
+        let candidate = json!({ "profile": "prod" });
+        let (host, server) = spawn_mock_host_sequence(vec![
+            (
+                "POST /rpc/discover".to_owned(),
+                mock_discovery_response_json(),
+            ),
+            (
+                "GET /rpc/connectors/fcp.github:enterprise:v1/config".to_owned(),
+                mock_config_snapshot_json(current.clone()),
+            ),
+            (
+                "POST /rpc/connectors/fcp.github:enterprise:v1/config/validate".to_owned(),
+                mock_config_validation_response_json(
+                    true,
+                    current.clone(),
+                    candidate.clone(),
+                    None,
+                ),
+            ),
+            (
+                "POST /rpc/connectors/fcp.github:enterprise:v1/config/apply".to_owned(),
+                mock_config_apply_response_json(candidate, current),
+            ),
+        ]);
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "--host", &host, "config", "set", "github", "profile", "prod",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "config");
+        assert_eq!(payload["subcommand"], "set");
+        assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["updated_path"], "profile");
+        assert_eq!(payload["config"]["profile"], "prod");
+        assert_eq!(payload["response"]["current_active_revision_id"], 42);
+    }
+
+    #[test]
+    fn execute_config_set_refuses_partial_mutation_when_live_snapshot_is_redacted() {
+        let (host, server) = spawn_mock_host_sequence(vec![
+            (
+                "POST /rpc/discover".to_owned(),
+                mock_discovery_response_json(),
+            ),
+            (
+                "GET /rpc/connectors/fcp.github:enterprise:v1/config".to_owned(),
+                mock_redacted_config_snapshot_json(json!({
+                    "profile": "work",
+                    "client_secret": "<redacted>"
+                })),
+            ),
+        ]);
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "--host", &host, "config", "set", "github", "profile", "prod",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["command"], "config");
+        assert_eq!(payload["subcommand"], "set");
+        assert_eq!(payload["error"]["type"], "non-replayable-live-config");
+        assert_eq!(
+            payload["snapshot"]["current"]["contains_inline_secrets"],
+            true
+        );
+    }
+
+    #[test]
+    fn execute_config_doctor_reads_live_host_validation() {
+        let current = json!({ "profile": "work" });
+        let (host, server) = spawn_mock_host_sequence(vec![
+            (
+                "POST /rpc/discover".to_owned(),
+                mock_discovery_response_json(),
+            ),
+            (
+                "GET /rpc/connectors/fcp.github:enterprise:v1/config".to_owned(),
+                mock_config_snapshot_json(current.clone()),
+            ),
+            (
+                "POST /rpc/connectors/fcp.github:enterprise:v1/config/validate".to_owned(),
+                mock_config_validation_response_json(true, current.clone(), current, None),
+            ),
+        ]);
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "--host", &host, "config", "doctor", "github",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "config");
+        assert_eq!(payload["subcommand"], "doctor");
+        assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["validation"]["valid"], true);
     }
 
     #[test]

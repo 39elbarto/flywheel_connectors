@@ -551,6 +551,7 @@ mod tests {
     use super::{
         ExtractRender, OutputFormat, RenderOptions, TemplateRender, TemplateSource,
         humanize_timestamp, relative_time_label, render, render_with_options, token_stats,
+        validate_template,
     };
 
     // ── Basic format rendering ──────────────────────────────────────────
@@ -1779,5 +1780,303 @@ mod tests {
         let original = OutputFormat::Csv;
         let copied = original;
         assert_eq!(original, copied);
+    }
+
+    // ── CUAL-E.2: Template rendering acceptance tests ─────────────
+
+    #[test]
+    fn template_html_escaping_disabled() {
+        // Verify that Handlebars does NOT escape HTML (no_escape registered).
+        let template = TemplateRender::inline("{{content}}").unwrap();
+        let text = render_with_options(
+            json!({"content": "<script>alert('xss')</script>"}),
+            OutputFormat::Json,
+            &RenderOptions {
+                template: Some(template),
+                ..RenderOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            text.contains("<script>alert('xss')</script>"),
+            "HTML should pass through unescaped: {text}"
+        );
+    }
+
+    #[test]
+    fn template_literal_text_interspersed_with_variables() {
+        let template =
+            TemplateRender::inline("Issue #{{number}}: {{title}} (by {{author}})").unwrap();
+        let text = render_with_options(
+            json!({"number": 42, "title": "Fix bug", "author": "alice"}),
+            OutputFormat::Json,
+            &RenderOptions {
+                template: Some(template),
+                ..RenderOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(text.trim(), "Issue #42: Fix bug (by alice)");
+    }
+
+    #[test]
+    fn template_no_variables_returns_static_text() {
+        let template = TemplateRender::inline("Hello, World!").unwrap();
+        let text = render_with_options(
+            json!({}),
+            OutputFormat::Json,
+            &RenderOptions {
+                template: Some(template),
+                ..RenderOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(text.trim(), "Hello, World!");
+    }
+
+    #[test]
+    fn template_numeric_and_boolean_fields() {
+        let template =
+            TemplateRender::inline("total={{total}} active={{active}} ratio={{ratio}}").unwrap();
+        let text = render_with_options(
+            json!({"total": 7, "active": true, "ratio": 3.14}),
+            OutputFormat::Json,
+            &RenderOptions {
+                template: Some(template),
+                ..RenderOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(text.trim(), "total=7 active=true ratio=3.14");
+    }
+
+    #[test]
+    fn template_nested_each_with_object_fields() {
+        let template = TemplateRender::inline(
+            "{{#each issues}}#{{this.number}}: {{this.title}}\n{{/each}}",
+        )
+        .unwrap();
+        let text = render_with_options(
+            json!({
+                "issues": [
+                    {"number": 1, "title": "First"},
+                    {"number": 2, "title": "Second"},
+                    {"number": 3, "title": "Third"},
+                ]
+            }),
+            OutputFormat::Json,
+            &RenderOptions {
+                template: Some(template),
+                ..RenderOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(text.contains("#1: First"));
+        assert!(text.contains("#2: Second"));
+        assert!(text.contains("#3: Third"));
+    }
+
+    #[test]
+    fn template_deeply_nested_access() {
+        let template =
+            TemplateRender::inline("{{issue.user.login}} on {{issue.repo.name}}").unwrap();
+        let text = render_with_options(
+            json!({"issue": {"user": {"login": "alice"}, "repo": {"name": "fwc"}}}),
+            OutputFormat::Json,
+            &RenderOptions {
+                template: Some(template),
+                ..RenderOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(text.trim(), "alice on fwc");
+    }
+
+    #[test]
+    fn template_count_helper_empty_array() {
+        let template = TemplateRender::inline("total={{count items}}").unwrap();
+        let text = render_with_options(
+            json!({"items": []}),
+            OutputFormat::Json,
+            &RenderOptions {
+                template: Some(template),
+                ..RenderOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(text.trim(), "total=0");
+    }
+
+    #[test]
+    fn template_count_helper_object_keys() {
+        let template = TemplateRender::inline("keys={{count metadata}}").unwrap();
+        let text = render_with_options(
+            json!({"metadata": {"a": 1, "b": 2, "c": 3}}),
+            OutputFormat::Json,
+            &RenderOptions {
+                template: Some(template),
+                ..RenderOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(text.trim(), "keys=3");
+    }
+
+    #[test]
+    fn template_truncate_helper_short_text_unmodified() {
+        let template = TemplateRender::inline("{{truncate name 50}}").unwrap();
+        let text = render_with_options(
+            json!({"name": "short"}),
+            OutputFormat::Json,
+            &RenderOptions {
+                template: Some(template),
+                ..RenderOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(text.trim(), "short");
+    }
+
+    #[test]
+    fn template_if_eq_helper_mismatch() {
+        let template =
+            TemplateRender::inline("{{#if (if_eq status \"open\")}}OPEN{{else}}CLOSED{{/if}}")
+                .unwrap();
+        let text = render_with_options(
+            json!({"status": "closed"}),
+            OutputFormat::Json,
+            &RenderOptions {
+                template: Some(template),
+                ..RenderOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(text.trim(), "CLOSED");
+    }
+
+    #[test]
+    fn template_combined_helpers_in_each_loop() {
+        let template = TemplateRender::inline(
+            "{{#each items}}{{truncate this.name 5}}: {{count this.tags}} tags\n{{/each}}",
+        )
+        .unwrap();
+        let text = render_with_options(
+            json!({
+                "items": [
+                    {"name": "Hello World", "tags": ["a", "b"]},
+                    {"name": "Short", "tags": []},
+                ]
+            }),
+            OutputFormat::Json,
+            &RenderOptions {
+                template: Some(template),
+                ..RenderOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(text.contains("Hell…: 2 tags"));
+        assert!(text.contains("Short: 0 tags"));
+    }
+
+    #[test]
+    fn template_special_chars_in_output() {
+        let template = TemplateRender::inline("msg={{message}}").unwrap();
+        let text = render_with_options(
+            json!({"message": "line1\nline2\ttab & \"quotes\""}),
+            OutputFormat::Json,
+            &RenderOptions {
+                template: Some(template),
+                ..RenderOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(text.contains("line1\nline2\ttab & \"quotes\""));
+    }
+
+    #[test]
+    fn template_with_unless_block() {
+        let template =
+            TemplateRender::inline("{{#unless deleted}}ACTIVE{{else}}DELETED{{/unless}}").unwrap();
+        let active = render_with_options(
+            json!({"deleted": false}),
+            OutputFormat::Json,
+            &RenderOptions {
+                template: Some(template.clone()),
+                ..RenderOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(active.trim(), "ACTIVE");
+        let deleted = render_with_options(
+            json!({"deleted": true}),
+            OutputFormat::Json,
+            &RenderOptions {
+                template: Some(template),
+                ..RenderOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(deleted.trim(), "DELETED");
+    }
+
+    #[test]
+    fn template_invoke_output_shape() {
+        // Simulate an invoke response structure and format it with a template.
+        let template = TemplateRender::inline(
+            "Connector: {{connector}}\nOperation: {{operation}}\nStatus: {{status}}\n{{#each result.issues}}  - #{{this.number}}: {{this.title}}\n{{/each}}",
+        )
+        .unwrap();
+        let text = render_with_options(
+            json!({
+                "connector": "github",
+                "operation": "list_issues",
+                "status": "success",
+                "result": {
+                    "issues": [
+                        {"number": 1, "title": "Bug fix"},
+                        {"number": 2, "title": "Feature request"},
+                    ]
+                }
+            }),
+            OutputFormat::Json,
+            &RenderOptions {
+                template: Some(template),
+                ..RenderOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(text.contains("Connector: github"));
+        assert!(text.contains("Operation: list_issues"));
+        assert!(text.contains("Status: success"));
+        assert!(text.contains("#1: Bug fix"));
+        assert!(text.contains("#2: Feature request"));
+    }
+
+    #[test]
+    fn template_empty_string_template() {
+        let template = TemplateRender::inline("").unwrap();
+        let text = render_with_options(
+            json!({"data": "anything"}),
+            OutputFormat::Json,
+            &RenderOptions {
+                template: Some(template),
+                ..RenderOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(text.trim(), "");
+    }
+
+    #[test]
+    fn validate_template_accepts_valid() {
+        assert!(validate_template("{{name}}").is_ok());
+        assert!(validate_template("{{#each items}}{{this}}{{/each}}").is_ok());
+        assert!(validate_template("static text only").is_ok());
+    }
+
+    #[test]
+    fn validate_template_rejects_invalid() {
+        assert!(validate_template("{{#if unclosed}}").is_err());
+        assert!(validate_template("{{#each items}}").is_err());
     }
 }

@@ -1884,6 +1884,38 @@ mod tests {
             .build()
     }
 
+    fn derived_connector_state() -> McpServerState {
+        from_operations(&[
+            DiscoveredOperationEntry::new(
+                "github",
+                "list_issues",
+                "List issues",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "owner": { "type": "string" },
+                        "repo": { "type": "string" }
+                    },
+                    "required": ["owner", "repo"]
+                }),
+            ),
+            DiscoveredOperationEntry::new(
+                "github",
+                "create_issue",
+                "Create issue",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "owner": { "type": "string" },
+                        "repo": { "type": "string" },
+                        "title": { "type": "string" }
+                    },
+                    "required": ["owner", "repo", "title"]
+                }),
+            ),
+        ])
+    }
+
     fn make_request(method: &str, params: Option<Value>) -> JsonRpcRequest {
         JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -3294,6 +3326,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stdio_transport_initialize_advertises_resources_and_prompts() {
+        let output = drive_stdio_transport(
+            derived_connector_state(),
+            "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"initialize\"}\n",
+            |tool, id, _arguments| {
+                JsonRpcResponse::success(
+                    id,
+                    json!({
+                        "content": [{
+                            "type": "text",
+                            "text": format!("unexpected tool call: {}", tool.name()),
+                        }],
+                        "isError": true,
+                    }),
+                )
+            },
+        )
+        .await;
+
+        let response: JsonRpcResponse = serde_json::from_str(output.trim()).unwrap();
+        let capabilities = &response.result().unwrap()["capabilities"];
+        assert!(capabilities.get("tools").is_some());
+        assert!(capabilities.get("resources").is_some());
+        assert!(capabilities.get("prompts").is_some());
+    }
+
+    #[tokio::test]
     async fn stdio_transport_handles_tools_list() {
         let output = drive_stdio_transport(
             sample_state(),
@@ -3318,6 +3377,138 @@ mod tests {
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0]["name"], "github.list_issues");
         assert!(tools[0]["inputSchema"].is_object());
+    }
+
+    #[tokio::test]
+    async fn stdio_transport_handles_resources_list_from_derived_state() {
+        let output = drive_stdio_transport(
+            derived_connector_state(),
+            "{\"jsonrpc\":\"2.0\",\"id\":12,\"method\":\"resources/list\"}\n",
+            |tool, id, _arguments| {
+                JsonRpcResponse::success(
+                    id,
+                    json!({
+                        "content": [{
+                            "type": "text",
+                            "text": format!("unexpected tool call: {}", tool.name()),
+                        }],
+                        "isError": true,
+                    }),
+                )
+            },
+        )
+        .await;
+
+        let response: JsonRpcResponse = serde_json::from_str(output.trim()).unwrap();
+        let resources = response.result().unwrap()["resources"].as_array().unwrap();
+        let uris = resources
+            .iter()
+            .filter_map(|resource| resource["uri"].as_str())
+            .collect::<Vec<_>>();
+        assert!(uris.contains(&"resource://connector/github/health"));
+        assert!(uris.contains(&"resource://connector/github/operations"));
+        assert!(uris.contains(&"resource://connectors/status"));
+    }
+
+    #[tokio::test]
+    async fn stdio_transport_handles_resources_read_from_derived_state() {
+        let output = drive_stdio_transport(
+            derived_connector_state(),
+            "{\"jsonrpc\":\"2.0\",\"id\":13,\"method\":\"resources/read\",\"params\":{\"uri\":\"resource://connector/github/operations\"}}\n",
+            |tool, id, _arguments| {
+                JsonRpcResponse::success(
+                    id,
+                    json!({
+                        "content": [{
+                            "type": "text",
+                            "text": format!("unexpected tool call: {}", tool.name()),
+                        }],
+                        "isError": true,
+                    }),
+                )
+            },
+        )
+        .await;
+
+        let response: JsonRpcResponse = serde_json::from_str(output.trim()).unwrap();
+        let text = response.result().unwrap()["contents"][0]["text"]
+            .as_str()
+            .expect("resource contents should include rendered text");
+        let payload: Value = serde_json::from_str(text).expect("resource payload should be JSON");
+        let operations = payload["operations"]
+            .as_array()
+            .expect("operations resource should render an operations array");
+        assert_eq!(operations.len(), 2);
+        assert_eq!(operations[0]["connector_id"], "github");
+        assert!(
+            operations
+                .iter()
+                .any(|operation| operation["operation_id"] == "create_issue")
+        );
+    }
+
+    #[tokio::test]
+    async fn stdio_transport_handles_prompts_list_from_derived_state() {
+        let output = drive_stdio_transport(
+            derived_connector_state(),
+            "{\"jsonrpc\":\"2.0\",\"id\":14,\"method\":\"prompts/list\"}\n",
+            |tool, id, _arguments| {
+                JsonRpcResponse::success(
+                    id,
+                    json!({
+                        "content": [{
+                            "type": "text",
+                            "text": format!("unexpected tool call: {}", tool.name()),
+                        }],
+                        "isError": true,
+                    }),
+                )
+            },
+        )
+        .await;
+
+        let response: JsonRpcResponse = serde_json::from_str(output.trim()).unwrap();
+        let prompts = response.result().unwrap()["prompts"].as_array().unwrap();
+        let names = prompts
+            .iter()
+            .filter_map(|prompt| prompt["name"].as_str())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"prompt://connector/github/how-to-use"));
+        assert!(names.contains(&"prompt://connector/github/troubleshoot"));
+        assert!(names.contains(&"prompt://connector/github/op/list_issues/example"));
+        assert!(names.contains(&"prompt://connector/github/op/create_issue/example"));
+    }
+
+    #[tokio::test]
+    async fn stdio_transport_handles_prompts_get_from_derived_state() {
+        let output = drive_stdio_transport(
+            derived_connector_state(),
+            "{\"jsonrpc\":\"2.0\",\"id\":15,\"method\":\"prompts/get\",\"params\":{\"name\":\"prompt://connector/github/op/create_issue/example\",\"arguments\":{\"format\":\"cli\"}}}\n",
+            |tool, id, _arguments| {
+                JsonRpcResponse::success(
+                    id,
+                    json!({
+                        "content": [{
+                            "type": "text",
+                            "text": format!("unexpected tool call: {}", tool.name()),
+                        }],
+                        "isError": true,
+                    }),
+                )
+            },
+        )
+        .await;
+
+        let response: JsonRpcResponse = serde_json::from_str(output.trim()).unwrap();
+        let messages = response.result().unwrap()["messages"]
+            .as_array()
+            .expect("prompt response should include messages");
+        assert_eq!(messages[0]["role"], "user");
+        let assistant = messages[1]["content"]["text"]
+            .as_str()
+            .expect("assistant message should contain rendered text");
+        assert!(assistant.contains("fwc invoke github create_issue"));
+        assert!(assistant.contains("\"title\": \"<string>\""));
     }
 
     #[tokio::test]

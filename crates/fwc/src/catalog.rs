@@ -1734,7 +1734,6 @@ pub const DEMO_MARKERS: &[&str] = &[
 ];
 
 /// Check whether a string contains any known demo/placeholder markers.
-#[allow(dead_code)]
 #[must_use]
 pub fn contains_demo_marker(s: &str) -> bool {
     DEMO_MARKERS.iter().any(|marker| s.contains(marker))
@@ -1975,6 +1974,424 @@ pub fn classify_token_source(token: &str) -> CapabilityTokenSource {
     // return CliFlag as the conservative default for non-empty, non-synthetic
     // tokens provided directly.
     CapabilityTokenSource::CliFlag
+}
+
+// ── Auth UX contract: issuance, denial, and remediation (bead 29.13) ─────────
+// These types model the full auth lifecycle: what tokens are required, why
+// auth might be denied, and how to remediate. Every denial produces actionable
+// guidance; no auth state ever results in empty or misleading output.
+
+/// What capability token is required for a given auth-gated path.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityTokenRequirement {
+    /// A fresh capability token must be presented (e.g., invoke, simulate).
+    Fresh {
+        /// Maximum token age in seconds before it is considered stale.
+        max_age_secs: u64,
+    },
+    /// A valid capability token is required but freshness is not enforced.
+    Valid,
+    /// A holder proof must accompany the capability token (sender-constrained).
+    WithHolderProof {
+        /// Maximum token age in seconds.
+        max_age_secs: u64,
+    },
+    /// An approval token chain is required in addition to the capability token.
+    WithApproval {
+        /// Number of approval tokens required.
+        required_approvals: u32,
+    },
+    /// No capability token is needed for this path.
+    None,
+}
+
+#[allow(dead_code)]
+impl CapabilityTokenRequirement {
+    /// Machine-readable tag.
+    #[must_use]
+    pub const fn tag(&self) -> &'static str {
+        match self {
+            Self::Fresh { .. } => "fresh",
+            Self::Valid => "valid",
+            Self::WithHolderProof { .. } => "with-holder-proof",
+            Self::WithApproval { .. } => "with-approval",
+            Self::None => "none",
+        }
+    }
+
+    /// Whether this requirement demands a real token.
+    #[must_use]
+    pub const fn requires_token(&self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    /// Whether this requirement enforces token freshness.
+    #[must_use]
+    pub const fn enforces_freshness(&self) -> bool {
+        matches!(self, Self::Fresh { .. } | Self::WithHolderProof { .. })
+    }
+
+    /// Whether this requirement demands a holder proof.
+    #[must_use]
+    pub const fn needs_holder_proof(&self) -> bool {
+        matches!(self, Self::WithHolderProof { .. })
+    }
+
+    /// Whether this requirement demands approval tokens.
+    #[must_use]
+    pub const fn needs_approval(&self) -> bool {
+        matches!(self, Self::WithApproval { .. })
+    }
+
+    /// Human-readable description of the requirement.
+    #[must_use]
+    pub fn description(&self) -> String {
+        match self {
+            Self::Fresh { max_age_secs } => {
+                format!("Fresh capability token required (max age: {max_age_secs}s)")
+            }
+            Self::Valid => "Valid capability token required".to_owned(),
+            Self::WithHolderProof { max_age_secs } => {
+                format!("Capability token with holder proof required (max age: {max_age_secs}s)")
+            }
+            Self::WithApproval { required_approvals } => {
+                format!("Capability token with {required_approvals} approval(s) required")
+            }
+            Self::None => "No capability token required".to_owned(),
+        }
+    }
+}
+
+/// Why auth was denied on an auth-gated path.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthDenialReason {
+    /// No token was provided at all.
+    TokenMissing,
+    /// Token was provided but has expired.
+    TokenExpired {
+        /// How many seconds ago the token expired.
+        expired_ago_secs: u64,
+    },
+    /// Token was revoked by the issuing authority.
+    TokenRevoked {
+        /// When the token was revoked (ISO 8601 timestamp).
+        revoked_at: String,
+    },
+    /// Token does not cover the requested operation.
+    InsufficientScope {
+        /// The operation that was requested.
+        requested_operation: String,
+        /// The scopes the token actually has.
+        token_scopes: Vec<String>,
+    },
+    /// Holder proof verification failed.
+    HolderProofFailed {
+        /// Why the holder proof failed.
+        detail: String,
+    },
+    /// Required approval tokens are missing or invalid.
+    ApprovalMissing {
+        /// How many approvals were required.
+        required: u32,
+        /// How many valid approvals were provided.
+        provided: u32,
+    },
+    /// Token is syntactically malformed.
+    MalformedToken,
+    /// The token source is synthetic (test/placeholder).
+    SyntheticSource {
+        /// The tag of the synthetic source.
+        source_tag: String,
+    },
+}
+
+#[allow(dead_code)]
+impl AuthDenialReason {
+    /// Machine-readable tag for this denial reason.
+    #[must_use]
+    pub const fn tag(&self) -> &'static str {
+        match self {
+            Self::TokenMissing => "token-missing",
+            Self::TokenExpired { .. } => "token-expired",
+            Self::TokenRevoked { .. } => "token-revoked",
+            Self::InsufficientScope { .. } => "insufficient-scope",
+            Self::HolderProofFailed { .. } => "holder-proof-failed",
+            Self::ApprovalMissing { .. } => "approval-missing",
+            Self::MalformedToken => "malformed-token",
+            Self::SyntheticSource { .. } => "synthetic-source",
+        }
+    }
+
+    /// Human-readable explanation of the denial.
+    #[must_use]
+    pub fn description(&self) -> String {
+        match self {
+            Self::TokenMissing => {
+                "No capability token was provided. Issue or supply one before retrying.".to_owned()
+            }
+            Self::TokenExpired { expired_ago_secs } => {
+                format!("Capability token expired {expired_ago_secs}s ago. Issue a fresh token.")
+            }
+            Self::TokenRevoked { revoked_at } => {
+                format!(
+                    "Capability token was revoked at {revoked_at}. Issue a new token from the host."
+                )
+            }
+            Self::InsufficientScope {
+                requested_operation,
+                token_scopes,
+            } => {
+                format!(
+                    "Token does not cover operation '{requested_operation}'. \
+                     Token scopes: [{}]. Issue a token with the correct scope.",
+                    token_scopes.join(", ")
+                )
+            }
+            Self::HolderProofFailed { detail } => {
+                format!(
+                    "Holder proof verification failed: {detail}. \
+                     Ensure the token is bound to this node's key."
+                )
+            }
+            Self::ApprovalMissing { required, provided } => {
+                format!(
+                    "Required {required} approval(s) but only {provided} valid approval(s) provided. \
+                     Obtain additional approvals before retrying."
+                )
+            }
+            Self::MalformedToken => {
+                "Capability token is syntactically malformed. Check encoding and structure."
+                    .to_owned()
+            }
+            Self::SyntheticSource { source_tag } => {
+                format!(
+                    "Token source '{source_tag}' is synthetic. \
+                     Only real host-issued tokens are accepted on live paths."
+                )
+            }
+        }
+    }
+
+    /// Whether this denial can be remediated by simply re-issuing a token.
+    #[must_use]
+    pub const fn is_reissuable(&self) -> bool {
+        matches!(
+            self,
+            Self::TokenMissing
+                | Self::TokenExpired { .. }
+                | Self::TokenRevoked { .. }
+                | Self::InsufficientScope { .. }
+                | Self::SyntheticSource { .. }
+        )
+    }
+
+    /// Whether this denial indicates a structural problem (not just staleness).
+    #[must_use]
+    pub const fn is_structural(&self) -> bool {
+        matches!(self, Self::HolderProofFailed { .. } | Self::MalformedToken)
+    }
+}
+
+/// A concrete step to remediate an auth denial.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthRemediationStep {
+    /// Issue a new capability token via the host.
+    IssueNewToken {
+        /// Suggested CLI command.
+        cli_hint: String,
+    },
+    /// Re-issue with broader scope covering the target operation.
+    BroadenScope {
+        /// The operation that needs to be covered.
+        target_operation: String,
+    },
+    /// Attach a holder proof to the request.
+    AttachHolderProof {
+        /// The node key that must sign the proof.
+        expected_holder: String,
+    },
+    /// Obtain additional approval tokens.
+    ObtainApprovals {
+        /// How many more approvals are needed.
+        additional_needed: u32,
+    },
+    /// Re-encode or fix the malformed token.
+    FixTokenEncoding {
+        /// What was wrong with the token.
+        encoding_hint: String,
+    },
+    /// Replace the synthetic token with a real one.
+    ReplaceSyntheticToken,
+    /// Contact the administrator for manual intervention.
+    ContactAdmin {
+        /// Reason for escalation.
+        reason: String,
+    },
+}
+
+#[allow(dead_code)]
+impl AuthRemediationStep {
+    /// Machine-readable tag.
+    #[must_use]
+    pub const fn tag(&self) -> &'static str {
+        match self {
+            Self::IssueNewToken { .. } => "issue-new-token",
+            Self::BroadenScope { .. } => "broaden-scope",
+            Self::AttachHolderProof { .. } => "attach-holder-proof",
+            Self::ObtainApprovals { .. } => "obtain-approvals",
+            Self::FixTokenEncoding { .. } => "fix-token-encoding",
+            Self::ReplaceSyntheticToken => "replace-synthetic-token",
+            Self::ContactAdmin { .. } => "contact-admin",
+        }
+    }
+
+    /// Human-readable instruction for this step.
+    #[must_use]
+    pub fn instruction(&self) -> String {
+        match self {
+            Self::IssueNewToken { cli_hint } => {
+                format!("Issue a new capability token: {cli_hint}")
+            }
+            Self::BroadenScope { target_operation } => {
+                format!("Re-issue token with scope covering '{target_operation}'")
+            }
+            Self::AttachHolderProof { expected_holder } => {
+                format!("Attach a holder proof signed by node key '{expected_holder}'")
+            }
+            Self::ObtainApprovals { additional_needed } => {
+                format!("Obtain {additional_needed} more approval token(s)")
+            }
+            Self::FixTokenEncoding { encoding_hint } => {
+                format!("Fix token encoding: {encoding_hint}")
+            }
+            Self::ReplaceSyntheticToken => {
+                "Replace the test/placeholder token with a real host-issued token".to_owned()
+            }
+            Self::ContactAdmin { reason } => {
+                format!("Contact administrator: {reason}")
+            }
+        }
+    }
+}
+
+/// Full auth denial envelope with structured remediation guidance.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthDenialEnvelope {
+    /// The command that was denied.
+    pub command: String,
+    /// Why auth was denied.
+    pub reason: AuthDenialReason,
+    /// Steps to remediate the denial (in priority order).
+    pub remediation: Vec<AuthRemediationStep>,
+    /// Whether the denial can be remediated without admin intervention.
+    pub self_service: bool,
+}
+
+/// Map a denial reason to its recommended remediation steps.
+#[allow(dead_code)]
+#[must_use]
+pub fn denial_to_remediation(reason: &AuthDenialReason) -> Vec<AuthRemediationStep> {
+    match reason {
+        AuthDenialReason::TokenMissing | AuthDenialReason::TokenExpired { .. } => {
+            vec![AuthRemediationStep::IssueNewToken {
+                cli_hint: "fwc capabilities issue --connector <id> --operation <op>".to_owned(),
+            }]
+        }
+        AuthDenialReason::TokenRevoked { .. } => vec![
+            AuthRemediationStep::IssueNewToken {
+                cli_hint: "fwc capabilities issue --connector <id> --operation <op>".to_owned(),
+            },
+            AuthRemediationStep::ContactAdmin {
+                reason: "Token was explicitly revoked; confirm authorization before re-issuing"
+                    .to_owned(),
+            },
+        ],
+        AuthDenialReason::InsufficientScope {
+            requested_operation,
+            ..
+        } => vec![AuthRemediationStep::BroadenScope {
+            target_operation: requested_operation.clone(),
+        }],
+        AuthDenialReason::HolderProofFailed { .. } => {
+            vec![AuthRemediationStep::AttachHolderProof {
+                expected_holder: "<your-node-key>".to_owned(),
+            }]
+        }
+        AuthDenialReason::ApprovalMissing {
+            required, provided, ..
+        } => vec![AuthRemediationStep::ObtainApprovals {
+            additional_needed: required.saturating_sub(*provided),
+        }],
+        AuthDenialReason::MalformedToken => vec![
+            AuthRemediationStep::FixTokenEncoding {
+                encoding_hint: "Ensure token is valid base64-encoded CBOR/JWT".to_owned(),
+            },
+            AuthRemediationStep::IssueNewToken {
+                cli_hint: "fwc capabilities issue --connector <id> --operation <op>".to_owned(),
+            },
+        ],
+        AuthDenialReason::SyntheticSource { .. } => {
+            vec![AuthRemediationStep::ReplaceSyntheticToken]
+        }
+    }
+}
+
+/// Build a complete auth denial envelope for a command.
+#[allow(dead_code)]
+#[must_use]
+pub fn auth_denial_envelope(command: &str, reason: AuthDenialReason) -> AuthDenialEnvelope {
+    let remediation = denial_to_remediation(&reason);
+    let self_service = reason.is_reissuable();
+    AuthDenialEnvelope {
+        command: command.to_owned(),
+        reason,
+        remediation,
+        self_service,
+    }
+}
+
+/// Determine the capability token requirement for a command.
+#[allow(dead_code)]
+#[must_use]
+pub fn command_token_requirement(command: &str) -> CapabilityTokenRequirement {
+    let cls = classify_command(command);
+    match cls {
+        Some(c) if c.requires_capability_token && c.may_need_approval => {
+            CapabilityTokenRequirement::WithApproval {
+                required_approvals: 1,
+            }
+        }
+        Some(c) if c.requires_capability_token => {
+            CapabilityTokenRequirement::Fresh { max_age_secs: 3600 }
+        }
+        _ => CapabilityTokenRequirement::None,
+    }
+}
+
+/// Check whether a token's age satisfies a freshness requirement.
+///
+/// Returns `true` if the token is fresh enough, `false` if expired.
+#[allow(dead_code)]
+#[must_use]
+pub const fn token_satisfies_freshness(
+    requirement: &CapabilityTokenRequirement,
+    token_age_secs: u64,
+) -> bool {
+    match requirement {
+        CapabilityTokenRequirement::Fresh { max_age_secs }
+        | CapabilityTokenRequirement::WithHolderProof { max_age_secs } => {
+            token_age_secs <= *max_age_secs
+        }
+        // Non-freshness requirements are always satisfied w.r.t. freshness.
+        _ => true,
+    }
 }
 
 // ── Workflow execution truth contract ────────────────────────────────────────
@@ -3434,7 +3851,10 @@ impl ConfigDataSource {
 
     /// Whether this source is offline/local.
     pub const fn is_offline(self) -> bool {
-        matches!(self, Self::LocalFile | Self::CachedSnapshot | Self::EnvironmentOverride)
+        matches!(
+            self,
+            Self::LocalFile | Self::CachedSnapshot | Self::EnvironmentOverride
+        )
     }
 
     /// Staleness caveat for user display.
@@ -3443,7 +3863,9 @@ impl ConfigDataSource {
             Self::LiveHost => "Reflects the running system's current configuration.",
             Self::LocalFile => "Read from local file; may not match the running system.",
             Self::CachedSnapshot => "From cached snapshot; may be stale.",
-            Self::EnvironmentOverride => "Overridden by environment; may not match persisted config.",
+            Self::EnvironmentOverride => {
+                "Overridden by environment; may not match persisted config."
+            }
         }
     }
 }
@@ -3491,7 +3913,10 @@ impl ConfigMutationOutcome {
 
     /// Whether the outcome represents a successful operation (not an error).
     pub fn is_success(&self) -> bool {
-        matches!(self, Self::Applied { .. } | Self::Validated | Self::RolledBack { .. })
+        matches!(
+            self,
+            Self::Applied { .. } | Self::Validated | Self::RolledBack { .. }
+        )
     }
 }
 
@@ -3536,15 +3961,11 @@ pub fn config_provenance(
 
 /// Config operations that require host-authoritative backing.
 #[allow(dead_code)]
-pub const CONFIG_MUTATING_OPS: &[&str] = &[
-    "set", "unset", "apply", "import", "rollback",
-];
+pub const CONFIG_MUTATING_OPS: &[&str] = &["set", "unset", "apply", "import", "rollback"];
 
 /// Config operations that can work offline.
 #[allow(dead_code)]
-pub const CONFIG_READABLE_OPS: &[&str] = &[
-    "get", "schema", "export", "diff", "revisions",
-];
+pub const CONFIG_READABLE_OPS: &[&str] = &["get", "schema", "export", "diff", "revisions"];
 
 /// Check whether a config operation requires host authority.
 #[allow(dead_code)]
@@ -3556,10 +3977,7 @@ pub fn config_op_requires_host(operation: &str) -> bool {
 /// Determine the expected config data source for a given operation + mode.
 #[allow(dead_code)]
 #[must_use]
-pub fn expected_config_source(
-    operation: &str,
-    mode: RuntimeMode,
-) -> Option<ConfigDataSource> {
+pub fn expected_config_source(operation: &str, mode: RuntimeMode) -> Option<ConfigDataSource> {
     match mode {
         RuntimeMode::Live => Some(ConfigDataSource::LiveHost),
         RuntimeMode::ExplicitOffline | RuntimeMode::DegradedOffline => {
@@ -3573,6 +3991,269 @@ pub fn expected_config_source(
     }
 }
 
+// ── Lifecycle state transition truth contract (bead 29.11) ───────────────
+// Defines the truthful semantics for connector lifecycle mutations.
+// Runtime lifecycle/config/install/update mutations must be first-class
+// host-admin state transitions, not local file edits or restart side channels.
+
+/// How a lifecycle mutation was actually performed.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LifecycleMutationChannel {
+    /// Mutation via live host-admin RPC (authoritative, real-time).
+    HostAdminRpc,
+    /// Mutation via local connectors-file edit (non-authoritative, requires restart).
+    LocalFileEdit,
+    /// Mutation prepared as offline artifact for later application.
+    OfflineArtifact,
+    /// Mutation denied — channel not available or not permitted.
+    Denied,
+}
+
+#[allow(dead_code)]
+impl LifecycleMutationChannel {
+    /// Machine-readable tag.
+    #[must_use]
+    pub const fn tag(self) -> &'static str {
+        match self {
+            Self::HostAdminRpc => "host-admin-rpc",
+            Self::LocalFileEdit => "local-file-edit",
+            Self::OfflineArtifact => "offline-artifact",
+            Self::Denied => "denied",
+        }
+    }
+
+    /// Whether this channel produces an authoritative runtime mutation.
+    #[must_use]
+    pub const fn is_authoritative(self) -> bool {
+        matches!(self, Self::HostAdminRpc)
+    }
+
+    /// Whether this channel requires a restart to take effect.
+    #[must_use]
+    pub const fn requires_restart(self) -> bool {
+        matches!(self, Self::LocalFileEdit)
+    }
+
+    /// Whether this channel is acceptable for runtime mutations.
+    #[must_use]
+    pub const fn is_runtime_acceptable(self) -> bool {
+        matches!(self, Self::HostAdminRpc)
+    }
+}
+
+/// Desired connector lifecycle state.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesiredLifecycleState {
+    /// Connector should be installed and running.
+    Installed,
+    /// Connector should be enabled (accepting requests).
+    Enabled,
+    /// Connector should be disabled (not accepting requests, but still loaded).
+    Disabled,
+    /// Connector should be uninstalled.
+    Uninstalled,
+    /// Connector should be updated to a specific version.
+    Updated,
+}
+
+/// Observed connector lifecycle state (what the host actually reports).
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ObservedLifecycleState {
+    /// Connector is running and healthy.
+    Running,
+    /// Connector is loaded but not accepting requests.
+    Stopped,
+    /// Connector is not loaded.
+    NotPresent,
+    /// Connector is in an error state.
+    Error,
+    /// State is unknown (host not queried or unreachable).
+    Unknown,
+}
+
+#[allow(dead_code)]
+impl ObservedLifecycleState {
+    /// Machine-readable tag.
+    #[must_use]
+    pub const fn tag(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Stopped => "stopped",
+            Self::NotPresent => "not-present",
+            Self::Error => "error",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// Whether the state is definitively known.
+    #[must_use]
+    pub const fn is_determined(self) -> bool {
+        !matches!(self, Self::Unknown)
+    }
+
+    /// Whether the connector is healthy.
+    #[must_use]
+    pub const fn is_healthy(self) -> bool {
+        matches!(self, Self::Running)
+    }
+}
+
+/// Result of a lifecycle mutation with desired-vs-observed reporting.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LifecycleMutationResult {
+    /// What lifecycle command was requested.
+    pub command: String,
+    /// The connector targeted.
+    pub connector_id: String,
+    /// The channel through which the mutation was performed.
+    pub channel: LifecycleMutationChannel,
+    /// The desired state after the mutation.
+    pub desired: DesiredLifecycleState,
+    /// The observed state after the mutation (from host health check).
+    pub observed: ObservedLifecycleState,
+    /// Whether the desired and observed states are consistent.
+    pub converged: bool,
+    /// Health check feedback from the host, if available.
+    pub health_feedback: Option<String>,
+    /// Truthfulness caveat about the mutation.
+    pub caveat: String,
+}
+
+/// Build a lifecycle mutation result with desired-vs-observed reporting.
+#[allow(dead_code)]
+#[must_use]
+pub fn lifecycle_mutation_result(
+    command: &str,
+    connector_id: &str,
+    channel: LifecycleMutationChannel,
+    desired: DesiredLifecycleState,
+    observed: ObservedLifecycleState,
+    health_feedback: Option<String>,
+) -> LifecycleMutationResult {
+    let converged = match (desired, observed) {
+        (DesiredLifecycleState::Installed, ObservedLifecycleState::Running) => true,
+        (DesiredLifecycleState::Enabled, ObservedLifecycleState::Running) => true,
+        (DesiredLifecycleState::Disabled, ObservedLifecycleState::Stopped) => true,
+        (DesiredLifecycleState::Uninstalled, ObservedLifecycleState::NotPresent) => true,
+        (_, ObservedLifecycleState::Unknown) => false,
+        _ => false,
+    };
+
+    let caveat = if !channel.is_authoritative() {
+        format!(
+            "Lifecycle mutation for `{connector_id}` was performed via {} — \
+             this is NOT an authoritative runtime mutation. The change may require \
+             a restart or manual reconciliation.",
+            channel.tag()
+        )
+    } else if !converged {
+        format!(
+            "Lifecycle mutation for `{connector_id}` was applied via host-admin RPC, \
+             but the observed state ({}) does not match the desired state ({desired:?}). \
+             Check `fwc status {connector_id}` for health details.",
+            observed.tag()
+        )
+    } else {
+        format!(
+            "Lifecycle mutation for `{connector_id}` converged: desired={desired:?}, \
+             observed={}.",
+            observed.tag()
+        )
+    };
+
+    LifecycleMutationResult {
+        command: command.to_owned(),
+        connector_id: connector_id.to_owned(),
+        channel,
+        desired,
+        observed,
+        converged,
+        health_feedback,
+        caveat,
+    }
+}
+
+/// Convert a lifecycle mutation result to a JSON payload.
+#[allow(dead_code)]
+#[must_use]
+pub fn lifecycle_mutation_payload(result: &LifecycleMutationResult) -> Value {
+    json!({
+        "command": result.command,
+        "connector_id": result.connector_id,
+        "channel": result.channel.tag(),
+        "desired_state": result.desired,
+        "observed_state": result.observed.tag(),
+        "converged": result.converged,
+        "health_feedback": result.health_feedback,
+        "caveat": result.caveat,
+        "authoritative": result.channel.is_authoritative(),
+        "requires_restart": result.channel.requires_restart(),
+    })
+}
+
+/// Lifecycle commands that MUST go through host-admin RPC in live mode.
+#[allow(dead_code)]
+pub const LIFECYCLE_HOST_REQUIRED_OPS: &[&str] = &[
+    "install", "update", "enable", "disable", "start", "stop", "restart",
+    "reload", "reconcile",
+];
+
+/// Lifecycle commands that can work with offline artifacts.
+#[allow(dead_code)]
+pub const LIFECYCLE_OFFLINE_OPS: &[&str] = &[
+    "package", "verify", "prepare",
+];
+
+/// Determine the expected lifecycle mutation channel for a command + mode.
+#[allow(dead_code)]
+#[must_use]
+pub fn expected_lifecycle_channel(
+    command: &str,
+    mode: RuntimeMode,
+) -> LifecycleMutationChannel {
+    if LIFECYCLE_OFFLINE_OPS.contains(&command) {
+        return LifecycleMutationChannel::OfflineArtifact;
+    }
+    match mode {
+        RuntimeMode::Live => LifecycleMutationChannel::HostAdminRpc,
+        RuntimeMode::ExplicitOffline | RuntimeMode::DegradedOffline => {
+            if LIFECYCLE_HOST_REQUIRED_OPS.contains(&command) {
+                LifecycleMutationChannel::Denied
+            } else {
+                LifecycleMutationChannel::OfflineArtifact
+            }
+        }
+        RuntimeMode::Refused => LifecycleMutationChannel::Denied,
+    }
+}
+
+/// Validate that a lifecycle mutation was performed through the correct channel.
+///
+/// Returns `None` if the channel is acceptable, or `Some(reason)` if it is not.
+#[allow(dead_code)]
+#[must_use]
+pub fn validate_lifecycle_channel(
+    command: &str,
+    channel: LifecycleMutationChannel,
+) -> Option<String> {
+    if LIFECYCLE_HOST_REQUIRED_OPS.contains(&command) && !channel.is_authoritative() {
+        Some(format!(
+            "The '{command}' command requires a host-admin RPC channel, but was performed \
+             via {}. This is not an acceptable runtime mutation.",
+            channel.tag()
+        ))
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -3581,7 +4262,7 @@ mod tests {
         DISCOVERY_COMMANDS, DiscoveryDataSource, HYBRID_MODE_HELP, HostAbsentBehavior,
         HostAbsentReason, MeshNodeState, MeshNodeSummary, OFFLINE_FLAG_HELP, OfflineSource,
         PackageArtifactSource, PlacementStrategy, RegistryCatalogSource, RegistryEntrySummary,
-        RuntimeContext, RuntimeMode, SYNTHETIC_TOKEN_MARKERS, SimulateCapability,
+        RuntimeContext, RuntimeMode, SYNTHETIC_TOKEN_MARKERS, SimulateCapability, SimulateResult,
         TEMPLATE_COMMANDS, TemplateDataSource, ValidationOutcome, WorkflowKind,
         WorkflowStepReality, admin_introspection, auth_required_commands, auth_ux_guidance,
         check_auth_requirement, classify_command, classify_token_source, command_requires_host,
@@ -3594,6 +4275,11 @@ mod tests {
         simulate_result, simulate_result_payload, template_provenance,
         validate_capability_token_source, validate_mode_consistency, validate_package_source,
         workflow_can_proceed, workflow_kind,
+    };
+    use super::{
+        AuthDenialEnvelope, AuthDenialReason, AuthRemediationStep, CapabilityTokenRequirement,
+        auth_denial_envelope, command_token_requirement, denial_to_remediation,
+        token_satisfies_freshness,
     };
     use super::{
         CONFIG_MUTATING_OPS, CONFIG_READABLE_OPS, ConfigDataSource, ConfigMutationOutcome,
@@ -3610,6 +4296,12 @@ mod tests {
     use super::{
         INTENT_ACTIONS, IntentActionAvailability, IntentSuggestionKind, classify_intent_action,
         filter_suggestable_actions, is_intent_action, plan_step_truth,
+    };
+    use super::{
+        DesiredLifecycleState, LIFECYCLE_HOST_REQUIRED_OPS, LIFECYCLE_OFFLINE_OPS,
+        LifecycleMutationChannel, LifecycleMutationResult, ObservedLifecycleState,
+        expected_lifecycle_channel, lifecycle_mutation_payload, lifecycle_mutation_result,
+        validate_lifecycle_channel,
     };
     use serde_json::json;
 
@@ -7355,6 +8047,580 @@ mod tests {
         }
     }
 
+    // ── Extended simulate/preflight truth contract tests (bead 29.14) ────
+
+    // -- No assumed supports_simulate defaults --
+
+    #[test]
+    fn simulate_unknown_never_treated_as_supported() {
+        // Unknown must fail evaluate regardless of allow_downgrade
+        let cap = SimulateCapability::Unknown;
+        assert!(evaluate_simulate_request(cap, false).is_err());
+        assert!(evaluate_simulate_request(cap, true).is_err());
+        // Unknown must never yield is_connector_dry_run
+        assert!(!simulate_result(true, cap).is_connector_dry_run);
+        assert!(!simulate_result(false, cap).is_connector_dry_run);
+        // Unknown must not allow simulate label or preflight
+        assert!(!cap.allows_simulate_label());
+        assert!(!cap.allows_preflight());
+    }
+
+    #[test]
+    fn simulate_unknown_is_never_silently_upgraded() {
+        // Even with the most permissive settings, Unknown never passes
+        let err = evaluate_simulate_request(SimulateCapability::Unknown, true).unwrap_err();
+        assert!(
+            err.contains("audited"),
+            "Unknown rejection should mention audit status, got: {err}"
+        );
+    }
+
+    #[test]
+    fn simulate_unknown_result_caveat_warns_about_unknown() {
+        let r = simulate_result(true, SimulateCapability::Unknown);
+        assert!(
+            r.caveat.to_lowercase().contains("not been audited")
+                || r.caveat.to_lowercase().contains("unknown"),
+            "Unknown caveat should warn about unknown/unaudited status, got: {}",
+            r.caveat
+        );
+    }
+
+    // -- Preflight vs simulate distinction is always maintained --
+
+    #[test]
+    fn simulate_exhaustive_requested_x_capability_matrix_labels_honestly() {
+        // Every combination of (requested_dry_run, actual_capability) must
+        // produce honestly labeled output.
+        let all_caps = [
+            SimulateCapability::FullDryRun,
+            SimulateCapability::PreflightOnly,
+            SimulateCapability::Unknown,
+            SimulateCapability::Unsupported,
+        ];
+
+        for requested in [false, true] {
+            for cap in all_caps {
+                let r = simulate_result(requested, cap);
+
+                // is_connector_dry_run iff FullDryRun
+                if cap == SimulateCapability::FullDryRun {
+                    assert!(
+                        r.is_connector_dry_run,
+                        "FullDryRun should set is_connector_dry_run=true \
+                         (requested={requested})"
+                    );
+                } else {
+                    assert!(
+                        !r.is_connector_dry_run,
+                        "{cap:?} must never set is_connector_dry_run=true \
+                         (requested={requested})"
+                    );
+                }
+
+                // actual_capability always matches what was passed in
+                assert_eq!(
+                    r.actual_capability, cap,
+                    "actual_capability should match input for {cap:?} \
+                     (requested={requested})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn simulate_preflight_result_never_claims_simulated() {
+        // When capability is PreflightOnly, output must never use the word
+        // "simulated" or "dry-run" in the positive sense.
+        let r = simulate_result(false, SimulateCapability::PreflightOnly);
+        assert!(!r.is_connector_dry_run);
+        assert_eq!(r.actual_capability, SimulateCapability::PreflightOnly);
+    }
+
+    #[test]
+    fn simulate_full_dry_run_not_requested_still_honest() {
+        // Even when dry_run was not explicitly requested, if capability is
+        // FullDryRun, the result should still mark is_connector_dry_run=true
+        // because the capability *is* present.
+        let r = simulate_result(false, SimulateCapability::FullDryRun);
+        assert!(r.is_connector_dry_run);
+        assert!(!r.downgraded);
+    }
+
+    // -- Downgrade behavior is exhaustively tested --
+
+    #[test]
+    fn simulate_downgrade_only_when_requested_dry_run_but_got_preflight() {
+        // downgraded=true iff requested_dry_run=true AND actual=PreflightOnly
+        let all_caps = [
+            SimulateCapability::FullDryRun,
+            SimulateCapability::PreflightOnly,
+            SimulateCapability::Unknown,
+            SimulateCapability::Unsupported,
+        ];
+
+        for requested in [false, true] {
+            for cap in all_caps {
+                let r = simulate_result(requested, cap);
+                let expect_downgraded = requested && cap == SimulateCapability::PreflightOnly;
+                assert_eq!(
+                    r.downgraded, expect_downgraded,
+                    "Downgrade mismatch for requested={requested}, cap={cap:?}: \
+                     expected {expect_downgraded}, got {}",
+                    r.downgraded
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn simulate_downgrade_caveat_mentions_preflight() {
+        let r = simulate_result(true, SimulateCapability::PreflightOnly);
+        assert!(r.downgraded);
+        assert!(
+            r.caveat.to_lowercase().contains("preflight"),
+            "Downgrade caveat should mention preflight, got: {}",
+            r.caveat
+        );
+    }
+
+    #[test]
+    fn simulate_downgrade_caveat_mentions_not_side_effects() {
+        let r = simulate_result(true, SimulateCapability::PreflightOnly);
+        assert!(
+            r.caveat.contains("side effects"),
+            "Downgrade caveat should mention side effects limitation, got: {}",
+            r.caveat
+        );
+    }
+
+    #[test]
+    fn simulate_no_downgrade_for_unknown_even_when_requested() {
+        // Unknown is not a downgrade — it's a refusal. The result must not
+        // set downgraded=true.
+        let r = simulate_result(true, SimulateCapability::Unknown);
+        assert!(!r.downgraded);
+    }
+
+    #[test]
+    fn simulate_no_downgrade_for_unsupported_even_when_requested() {
+        let r = simulate_result(true, SimulateCapability::Unsupported);
+        assert!(!r.downgraded);
+    }
+
+    #[test]
+    fn simulate_evaluate_full_dry_run_ignores_allow_downgrade() {
+        // FullDryRun succeeds regardless of allow_downgrade flag
+        assert_eq!(
+            evaluate_simulate_request(SimulateCapability::FullDryRun, false),
+            Ok(SimulateCapability::FullDryRun)
+        );
+        assert_eq!(
+            evaluate_simulate_request(SimulateCapability::FullDryRun, true),
+            Ok(SimulateCapability::FullDryRun)
+        );
+    }
+
+    #[test]
+    fn simulate_evaluate_preflight_respects_downgrade_flag_exactly() {
+        assert!(evaluate_simulate_request(SimulateCapability::PreflightOnly, false).is_err());
+        assert_eq!(
+            evaluate_simulate_request(SimulateCapability::PreflightOnly, true),
+            Ok(SimulateCapability::PreflightOnly)
+        );
+    }
+
+    #[test]
+    fn simulate_evaluate_preflight_error_mentions_preflight_flag() {
+        let err = evaluate_simulate_request(SimulateCapability::PreflightOnly, false).unwrap_err();
+        assert!(
+            err.contains("preflight"),
+            "Preflight rejection should mention preflight, got: {err}"
+        );
+    }
+
+    // -- Caveat strings are meaningful --
+
+    #[test]
+    fn simulate_full_dry_run_caveat_mentions_modeled() {
+        let r = simulate_result(true, SimulateCapability::FullDryRun);
+        assert!(
+            r.caveat.to_lowercase().contains("model")
+                || r.caveat.to_lowercase().contains("predicted"),
+            "FullDryRun caveat should mention modeling/prediction, got: {}",
+            r.caveat
+        );
+    }
+
+    #[test]
+    fn simulate_full_dry_run_caveat_mentions_not_committed() {
+        let r = simulate_result(true, SimulateCapability::FullDryRun);
+        assert!(
+            r.caveat.contains("not committed"),
+            "FullDryRun caveat should mention not committed, got: {}",
+            r.caveat
+        );
+    }
+
+    #[test]
+    fn simulate_unsupported_caveat_mentions_not_support() {
+        let r = simulate_result(false, SimulateCapability::Unsupported);
+        assert!(
+            r.caveat.to_lowercase().contains("not support")
+                || r.caveat.to_lowercase().contains("does not"),
+            "Unsupported caveat should mention lack of support, got: {}",
+            r.caveat
+        );
+    }
+
+    #[test]
+    fn simulate_all_caveats_are_substantial() {
+        // Every caveat must be at least 20 chars — no stub messages
+        let all_caps = [
+            SimulateCapability::FullDryRun,
+            SimulateCapability::PreflightOnly,
+            SimulateCapability::Unknown,
+            SimulateCapability::Unsupported,
+        ];
+        for requested in [false, true] {
+            for cap in all_caps {
+                let r = simulate_result(requested, cap);
+                assert!(
+                    r.caveat.len() >= 20,
+                    "Caveat too short for {cap:?} (requested={requested}): '{}'",
+                    r.caveat
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn simulate_caveat_differs_between_downgraded_and_normal_preflight() {
+        let normal = simulate_result(false, SimulateCapability::PreflightOnly);
+        let downgraded = simulate_result(true, SimulateCapability::PreflightOnly);
+        assert_ne!(
+            normal.caveat, downgraded.caveat,
+            "Downgraded and normal preflight should have different caveats"
+        );
+    }
+
+    // -- Payload integration --
+
+    #[test]
+    fn simulate_payload_exhaustive_all_combinations() {
+        let all_caps = [
+            SimulateCapability::FullDryRun,
+            SimulateCapability::PreflightOnly,
+            SimulateCapability::Unknown,
+            SimulateCapability::Unsupported,
+        ];
+
+        for requested in [false, true] {
+            for cap in all_caps {
+                let r = simulate_result(requested, cap);
+                let p = simulate_result_payload(&r);
+
+                // All four required fields are present
+                assert!(
+                    p.get("simulate_capability").is_some(),
+                    "Missing simulate_capability for {cap:?} (requested={requested})"
+                );
+                assert!(
+                    p.get("is_connector_dry_run").is_some(),
+                    "Missing is_connector_dry_run for {cap:?} (requested={requested})"
+                );
+                assert!(
+                    p.get("caveat").is_some(),
+                    "Missing caveat for {cap:?} (requested={requested})"
+                );
+                assert!(
+                    p.get("downgraded").is_some(),
+                    "Missing downgraded for {cap:?} (requested={requested})"
+                );
+
+                // Tag matches
+                assert_eq!(
+                    p["simulate_capability"].as_str().unwrap(),
+                    cap.tag(),
+                    "Tag mismatch in payload for {cap:?}"
+                );
+
+                // Boolean fields match
+                assert_eq!(
+                    p["is_connector_dry_run"].as_bool().unwrap(),
+                    r.is_connector_dry_run,
+                    "is_connector_dry_run mismatch in payload for {cap:?}"
+                );
+                assert_eq!(
+                    p["downgraded"].as_bool().unwrap(),
+                    r.downgraded,
+                    "downgraded mismatch in payload for {cap:?}"
+                );
+
+                // Caveat roundtrips
+                assert_eq!(
+                    p["caveat"].as_str().unwrap(),
+                    r.caveat,
+                    "caveat mismatch in payload for {cap:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn simulate_payload_has_exactly_four_keys() {
+        let r = simulate_result(true, SimulateCapability::FullDryRun);
+        let p = simulate_result_payload(&r);
+        let obj = p.as_object().unwrap();
+        assert_eq!(
+            obj.len(),
+            4,
+            "Payload should have exactly 4 keys, got: {:?}",
+            obj.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn simulate_payload_downgraded_scenario_all_fields_correct() {
+        let r = simulate_result(true, SimulateCapability::PreflightOnly);
+        let p = simulate_result_payload(&r);
+        assert_eq!(p["simulate_capability"], "preflight-only");
+        assert_eq!(p["is_connector_dry_run"], false);
+        assert_eq!(p["downgraded"], true);
+        assert!(p["caveat"].as_str().unwrap().contains("preflight"));
+    }
+
+    #[test]
+    fn simulate_payload_unknown_scenario_fields_correct() {
+        let r = simulate_result(true, SimulateCapability::Unknown);
+        let p = simulate_result_payload(&r);
+        assert_eq!(p["simulate_capability"], "unknown");
+        assert_eq!(p["is_connector_dry_run"], false);
+        assert_eq!(p["downgraded"], false);
+    }
+
+    #[test]
+    fn simulate_payload_unsupported_scenario_fields_correct() {
+        let r = simulate_result(false, SimulateCapability::Unsupported);
+        let p = simulate_result_payload(&r);
+        assert_eq!(p["simulate_capability"], "unsupported");
+        assert_eq!(p["is_connector_dry_run"], false);
+        assert_eq!(p["downgraded"], false);
+    }
+
+    // -- SimulateCapability::tag() stability: no misleading words --
+
+    #[test]
+    fn simulate_capability_tags_contain_no_misleading_words() {
+        // Tags for non-capable variants must not contain positive-sounding
+        // words that could be misinterpreted as support.
+        let positive_words = ["active", "enabled", "yes", "true", "ready", "available"];
+        for cap in [SimulateCapability::Unknown, SimulateCapability::Unsupported] {
+            let tag = cap.tag();
+            for word in positive_words {
+                assert!(
+                    !tag.contains(word),
+                    "Tag '{}' for {cap:?} contains misleading word '{word}'",
+                    tag
+                );
+            }
+        }
+        // FullDryRun and PreflightOnly tags must not contain "unsupported" or "unknown"
+        for cap in [
+            SimulateCapability::FullDryRun,
+            SimulateCapability::PreflightOnly,
+        ] {
+            let tag = cap.tag();
+            assert!(
+                !tag.contains("unsupported"),
+                "Tag '{tag}' for {cap:?} says unsupported"
+            );
+            assert!(
+                !tag.contains("unknown"),
+                "Tag '{tag}' for {cap:?} says unknown"
+            );
+        }
+    }
+
+    #[test]
+    fn simulate_capability_tags_are_lowercase_kebab_case() {
+        let all_caps = [
+            SimulateCapability::FullDryRun,
+            SimulateCapability::PreflightOnly,
+            SimulateCapability::Unknown,
+            SimulateCapability::Unsupported,
+        ];
+        for cap in all_caps {
+            let tag = cap.tag();
+            assert!(
+                tag.chars().all(|c| c.is_ascii_lowercase() || c == '-'),
+                "Tag '{}' for {cap:?} is not lowercase-kebab-case",
+                tag
+            );
+        }
+    }
+
+    #[test]
+    fn simulate_capability_tags_are_all_distinct() {
+        let tags: Vec<&str> = [
+            SimulateCapability::FullDryRun,
+            SimulateCapability::PreflightOnly,
+            SimulateCapability::Unknown,
+            SimulateCapability::Unsupported,
+        ]
+        .iter()
+        .map(|c| c.tag())
+        .collect();
+        for (i, a) in tags.iter().enumerate() {
+            for (j, b) in tags.iter().enumerate() {
+                if i != j {
+                    assert_ne!(a, b, "Tags at index {i} and {j} are identical: {a}");
+                }
+            }
+        }
+    }
+
+    // -- Cross-cutting invariants --
+
+    #[test]
+    fn simulate_is_connector_dry_run_true_only_for_full_dry_run() {
+        // THE core invariant: no combination of inputs ever produces
+        // is_connector_dry_run=true unless actual_capability is FullDryRun.
+        let all_caps = [
+            SimulateCapability::FullDryRun,
+            SimulateCapability::PreflightOnly,
+            SimulateCapability::Unknown,
+            SimulateCapability::Unsupported,
+        ];
+        for requested in [false, true] {
+            for cap in all_caps {
+                let r = simulate_result(requested, cap);
+                if r.is_connector_dry_run {
+                    assert_eq!(
+                        cap,
+                        SimulateCapability::FullDryRun,
+                        "is_connector_dry_run=true but capability is {cap:?} \
+                         (requested={requested})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn simulate_payload_is_connector_dry_run_true_only_for_full_dry_run_payload() {
+        // Same invariant, but checked through the payload layer
+        let all_caps = [
+            SimulateCapability::FullDryRun,
+            SimulateCapability::PreflightOnly,
+            SimulateCapability::Unknown,
+            SimulateCapability::Unsupported,
+        ];
+        for requested in [false, true] {
+            for cap in all_caps {
+                let r = simulate_result(requested, cap);
+                let p = simulate_result_payload(&r);
+                let dry = p["is_connector_dry_run"].as_bool().unwrap();
+                if dry {
+                    assert_eq!(
+                        p["simulate_capability"].as_str().unwrap(),
+                        "full-dry-run",
+                        "Payload has is_connector_dry_run=true but tag is '{}' \
+                         (requested={requested})",
+                        p["simulate_capability"]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn simulate_evaluate_and_result_agree_on_capability() {
+        // When evaluate_simulate_request succeeds, the returned capability
+        // should produce the expected behavior in simulate_result.
+        let scenarios: Vec<(SimulateCapability, bool)> = vec![
+            (SimulateCapability::FullDryRun, false),
+            (SimulateCapability::FullDryRun, true),
+            (SimulateCapability::PreflightOnly, true),
+        ];
+        for (cap, allow_downgrade) in scenarios {
+            let evaluated = evaluate_simulate_request(cap, allow_downgrade).unwrap();
+            let r = simulate_result(true, evaluated);
+            assert_eq!(
+                r.actual_capability, evaluated,
+                "evaluate returned {evaluated:?} but result has {:?}",
+                r.actual_capability
+            );
+        }
+    }
+
+    #[test]
+    fn simulate_serde_roundtrip_preserves_all_fields() {
+        let r = simulate_result(true, SimulateCapability::PreflightOnly);
+        let json = serde_json::to_string(&r).unwrap();
+        let back: SimulateResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.actual_capability, r.actual_capability);
+        assert_eq!(back.is_connector_dry_run, r.is_connector_dry_run);
+        assert_eq!(back.caveat, r.caveat);
+        assert_eq!(back.downgraded, r.downgraded);
+    }
+
+    #[test]
+    fn simulate_result_serde_roundtrip_all_variants() {
+        let all_caps = [
+            SimulateCapability::FullDryRun,
+            SimulateCapability::PreflightOnly,
+            SimulateCapability::Unknown,
+            SimulateCapability::Unsupported,
+        ];
+        for requested in [false, true] {
+            for cap in all_caps {
+                let r = simulate_result(requested, cap);
+                let json = serde_json::to_string(&r).unwrap();
+                let back: SimulateResult = serde_json::from_str(&json).unwrap();
+                assert_eq!(back.actual_capability, r.actual_capability);
+                assert_eq!(back.is_connector_dry_run, r.is_connector_dry_run);
+                assert_eq!(back.caveat, r.caveat);
+                assert_eq!(back.downgraded, r.downgraded);
+            }
+        }
+    }
+
+    #[test]
+    fn simulate_evaluate_refusal_messages_are_distinct() {
+        // Each refusal variant should have a distinct error message
+        let unknown_err =
+            evaluate_simulate_request(SimulateCapability::Unknown, false).unwrap_err();
+        let unsupported_err =
+            evaluate_simulate_request(SimulateCapability::Unsupported, false).unwrap_err();
+        let preflight_err =
+            evaluate_simulate_request(SimulateCapability::PreflightOnly, false).unwrap_err();
+        assert_ne!(unknown_err, unsupported_err);
+        assert_ne!(unknown_err, preflight_err);
+        assert_ne!(unsupported_err, preflight_err);
+    }
+
+    #[test]
+    fn simulate_explanations_differ_across_all_variants() {
+        let all_caps = [
+            SimulateCapability::FullDryRun,
+            SimulateCapability::PreflightOnly,
+            SimulateCapability::Unknown,
+            SimulateCapability::Unsupported,
+        ];
+        for (i, a) in all_caps.iter().enumerate() {
+            for (j, b) in all_caps.iter().enumerate() {
+                if i != j {
+                    assert_ne!(
+                        a.explanation(),
+                        b.explanation(),
+                        "Explanations for {a:?} and {b:?} should differ"
+                    );
+                }
+            }
+        }
+    }
+
     // ── Package artifact source validation tests ─────────────────────────
 
     // -- PackageArtifactSource tag stability --
@@ -7598,6 +8864,389 @@ mod tests {
         assert_eq!(src.path(), "/my/path");
         let src = PackageArtifactSource::DemoFixture("demo-id".into());
         assert_eq!(src.path(), "demo-id");
+    }
+
+    // ── Exhaustive DEMO_MARKERS detection (bead 29.12) ───────────────────
+
+    #[test]
+    fn demo_marker_fixture_connector_detected_individually() {
+        assert!(contains_demo_marker("fixture-connector"));
+    }
+
+    #[test]
+    fn demo_marker_placeholder_lowercase_detected_individually() {
+        assert!(contains_demo_marker("placeholder"));
+    }
+
+    #[test]
+    fn demo_marker_placeholder_uppercase_detected_individually() {
+        assert!(contains_demo_marker("PLACEHOLDER"));
+    }
+
+    #[test]
+    fn demo_marker_demo_package_detected_individually() {
+        assert!(contains_demo_marker("demo-package"));
+    }
+
+    #[test]
+    fn demo_marker_stub_connector_detected_individually() {
+        assert!(contains_demo_marker("stub-connector"));
+    }
+
+    #[test]
+    fn demo_marker_deadbeef_detected_individually() {
+        assert!(contains_demo_marker("deadbeef"));
+    }
+
+    #[test]
+    fn demo_marker_zero_hash_detected_individually() {
+        assert!(contains_demo_marker("0000000000000000"));
+    }
+
+    #[test]
+    fn demo_marker_test_only_detected_individually() {
+        assert!(contains_demo_marker("test-only"));
+    }
+
+    #[test]
+    fn demo_marker_fake_registry_detected_individually() {
+        assert!(contains_demo_marker("fake-registry"));
+    }
+
+    #[test]
+    fn demo_markers_every_entry_is_individually_detected() {
+        for marker in DEMO_MARKERS {
+            assert!(
+                contains_demo_marker(marker),
+                "DEMO_MARKERS entry '{marker}' was not detected by contains_demo_marker"
+            );
+        }
+    }
+
+    // ── Case sensitivity for demo markers ────────────────────────────────
+
+    #[test]
+    fn demo_marker_placeholder_exact_case_only() {
+        assert!(contains_demo_marker("placeholder"));
+        assert!(contains_demo_marker("PLACEHOLDER"));
+        // Mixed case is NOT in DEMO_MARKERS (case-sensitive matching)
+        assert!(!contains_demo_marker("Placeholder"));
+    }
+
+    #[test]
+    fn demo_marker_deadbeef_case_sensitive() {
+        assert!(contains_demo_marker("deadbeef"));
+        assert!(!contains_demo_marker("DEADBEEF"));
+    }
+
+    #[test]
+    fn demo_marker_test_only_case_sensitive() {
+        assert!(contains_demo_marker("test-only"));
+        assert!(!contains_demo_marker("Test-Only"));
+        assert!(!contains_demo_marker("TEST-ONLY"));
+    }
+
+    // ── Substring matching (markers embedded in longer strings) ──────────
+
+    #[test]
+    fn demo_marker_fixture_connector_embedded_in_path() {
+        assert!(contains_demo_marker("/home/user/fixture-connector/v2/out"));
+    }
+
+    #[test]
+    fn demo_marker_placeholder_embedded_in_uri() {
+        assert!(contains_demo_marker("registry:fcp.placeholder.slack:1.0.0"));
+    }
+
+    #[test]
+    fn demo_marker_deadbeef_embedded_in_hex() {
+        assert!(contains_demo_marker("sha256:abcdef01deadbeef99887766"));
+    }
+
+    #[test]
+    fn demo_marker_zero_hash_embedded_in_longer_hash() {
+        assert!(contains_demo_marker("blake3:00000000000000001234567890abcdef"));
+    }
+
+    #[test]
+    fn demo_marker_fake_registry_embedded_in_url() {
+        assert!(contains_demo_marker("https://fake-registry.example.com/pkg"));
+    }
+
+    #[test]
+    fn demo_marker_demo_package_embedded_in_path() {
+        assert!(contains_demo_marker("/tmp/builds/demo-package-v3.tar.gz"));
+    }
+
+    #[test]
+    fn demo_marker_stub_connector_embedded_in_identifier() {
+        assert!(contains_demo_marker("install:stub-connector:latest"));
+    }
+
+    #[test]
+    fn demo_marker_test_only_embedded_in_tag() {
+        assert!(contains_demo_marker("fcp.connector.test-only-debug:1.0"));
+    }
+
+    // ── False positive protection ────────────────────────────────────────
+
+    #[test]
+    fn no_false_positive_real_production_paths() {
+        let real_paths = [
+            "/opt/fcp/connectors/fcp.slack-2.1.0/bin/connector",
+            "registry:fcp.github:3.0.1",
+            "mesh://node-production/pkg-5a2f1b9c",
+            "/var/lib/fcp/packages/fcp.jira.tar.xz",
+            "https://registry.fcp.dev/v2/fcp.salesforce/blobs/sha256:abc123",
+            "/home/deploy/connectors/fcp.postgresql-1.2.3",
+            "registry:fcp.elasticsearch:7.0.0",
+            "mesh://cluster-east/connector-bundle-9f3e",
+            "/opt/bundles/fcp.redis-offline.tar",
+            "registry:fcp.datadog:4.2.1",
+        ];
+        for path in &real_paths {
+            assert!(
+                !contains_demo_marker(path),
+                "Real path '{path}' should NOT trigger demo marker detection"
+            );
+        }
+    }
+
+    #[test]
+    fn no_false_positive_real_hex_hashes() {
+        let real_hashes = [
+            "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae",
+            "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
+        ];
+        for hash in &real_hashes {
+            assert!(
+                !contains_demo_marker(hash),
+                "Real hash '{hash}' should NOT trigger demo marker detection"
+            );
+        }
+    }
+
+    // ── Interaction: real source type + marker in path ────────────────────
+
+    #[test]
+    fn real_source_type_with_marker_in_path_still_validates() {
+        let src = PackageArtifactSource::LocalDirectory("/tmp/placeholder-build".into());
+        assert!(validate_package_source(&src, "install").is_ok());
+        assert!(contains_demo_marker(src.path()));
+    }
+
+    #[test]
+    fn real_registry_with_fixture_connector_in_path_still_validates() {
+        let src = PackageArtifactSource::Registry("registry:fixture-connector:1.0".into());
+        assert!(validate_package_source(&src, "update").is_ok());
+        assert!(contains_demo_marker(src.path()));
+    }
+
+    #[test]
+    fn real_mesh_bundle_with_deadbeef_still_validates() {
+        let src = PackageArtifactSource::MeshBundle("mesh://node/deadbeef-pkg".into());
+        assert!(validate_package_source(&src, "install").is_ok());
+        assert!(contains_demo_marker(src.path()));
+    }
+
+    #[test]
+    fn real_offline_prepared_with_demo_package_still_validates() {
+        let src = PackageArtifactSource::OfflinePrepared("/opt/demo-package-v3.tar".into());
+        assert!(validate_package_source(&src, "update").is_ok());
+        assert!(contains_demo_marker(src.path()));
+    }
+
+    // ── DemoSourceRejection payload completeness ─────────────────────────
+
+    #[test]
+    fn demo_rejection_payload_all_fields_populated() {
+        let src = PackageArtifactSource::DemoFixture("my-fixture".into());
+        let err = validate_package_source(&src, "install").unwrap_err();
+        let payload = demo_source_rejection_payload(&err);
+
+        assert!(payload["error"].is_string());
+        assert!(payload["source_tag"].is_string());
+        assert!(payload["source_path"].is_string());
+        assert!(payload["reason"].is_string());
+        assert!(payload["next_actions"].is_array());
+
+        assert!(!payload["error"].as_str().unwrap().is_empty());
+        assert!(!payload["source_tag"].as_str().unwrap().is_empty());
+        assert!(!payload["source_path"].as_str().unwrap().is_empty());
+        assert!(!payload["reason"].as_str().unwrap().is_empty());
+        assert!(!payload["next_actions"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn demo_rejection_payload_every_next_action_is_nonempty() {
+        let src = PackageArtifactSource::StubPlaceholder("stub://x".into());
+        let err = validate_package_source(&src, "update").unwrap_err();
+        let payload = demo_source_rejection_payload(&err);
+        let actions = payload["next_actions"].as_array().unwrap();
+        assert!(!actions.is_empty());
+        for action in actions {
+            let s = action.as_str().unwrap();
+            assert!(!s.is_empty(), "next_action entry must not be empty");
+            assert!(s.len() > 5, "next_action should be a meaningful sentence");
+        }
+    }
+
+    #[test]
+    fn demo_rejection_payload_preserves_source_tag_and_path() {
+        let src = PackageArtifactSource::StubPlaceholder("stub://my-stub-id".into());
+        let err = validate_package_source(&src, "install").unwrap_err();
+        let payload = demo_source_rejection_payload(&err);
+        assert_eq!(payload["source_tag"].as_str().unwrap(), "stub-placeholder");
+        assert_eq!(
+            payload["source_path"].as_str().unwrap(),
+            "stub://my-stub-id"
+        );
+    }
+
+    #[test]
+    fn demo_rejection_payload_error_field_is_demo_source_rejected() {
+        for src in [
+            PackageArtifactSource::DemoFixture("d".into()),
+            PackageArtifactSource::StubPlaceholder("s".into()),
+        ] {
+            let err = validate_package_source(&src, "install").unwrap_err();
+            let payload = demo_source_rejection_payload(&err);
+            assert_eq!(
+                payload["error"].as_str().unwrap(),
+                "demo_source_rejected",
+                "error field must always be 'demo_source_rejected'"
+            );
+        }
+    }
+
+    #[test]
+    fn demo_rejection_reason_mentions_command() {
+        for cmd in ["install", "update"] {
+            let src = PackageArtifactSource::DemoFixture("demo-pkg".into());
+            let err = validate_package_source(&src, cmd).unwrap_err();
+            assert!(
+                err.reason.contains(cmd),
+                "Reason should mention the command '{cmd}'"
+            );
+        }
+    }
+
+    // ── Cross-cutting: all real x {install, update} pass ─────────────────
+
+    #[test]
+    fn cross_cutting_all_real_source_types_pass_install() {
+        let real = [
+            PackageArtifactSource::LocalDirectory("/a".into()),
+            PackageArtifactSource::Registry("r://a".into()),
+            PackageArtifactSource::MeshBundle("m://a".into()),
+            PackageArtifactSource::OfflinePrepared("/a".into()),
+        ];
+        for src in &real {
+            assert!(
+                validate_package_source(src, "install").is_ok(),
+                "{:?} must pass for install",
+                src
+            );
+        }
+    }
+
+    #[test]
+    fn cross_cutting_all_real_source_types_pass_update() {
+        let real = [
+            PackageArtifactSource::LocalDirectory("/b".into()),
+            PackageArtifactSource::Registry("r://b".into()),
+            PackageArtifactSource::MeshBundle("m://b".into()),
+            PackageArtifactSource::OfflinePrepared("/b".into()),
+        ];
+        for src in &real {
+            assert!(
+                validate_package_source(src, "update").is_ok(),
+                "{:?} must pass for update",
+                src
+            );
+        }
+    }
+
+    #[test]
+    fn cross_cutting_all_demo_types_fail_install() {
+        let demo = [
+            PackageArtifactSource::DemoFixture("d1".into()),
+            PackageArtifactSource::DemoFixture("d2".into()),
+            PackageArtifactSource::StubPlaceholder("s1".into()),
+            PackageArtifactSource::StubPlaceholder("s2".into()),
+        ];
+        for src in &demo {
+            assert!(
+                validate_package_source(src, "install").is_err(),
+                "{:?} must fail for install",
+                src
+            );
+        }
+    }
+
+    #[test]
+    fn cross_cutting_all_demo_types_fail_update() {
+        let demo = [
+            PackageArtifactSource::DemoFixture("d1".into()),
+            PackageArtifactSource::DemoFixture("d2".into()),
+            PackageArtifactSource::StubPlaceholder("s1".into()),
+            PackageArtifactSource::StubPlaceholder("s2".into()),
+        ];
+        for src in &demo {
+            assert!(
+                validate_package_source(src, "update").is_err(),
+                "{:?} must fail for update",
+                src
+            );
+        }
+    }
+
+    #[test]
+    fn cross_cutting_exhaustive_4_real_types_times_2_commands() {
+        let real_constructors: Vec<fn(String) -> PackageArtifactSource> = vec![
+            PackageArtifactSource::LocalDirectory,
+            PackageArtifactSource::Registry,
+            PackageArtifactSource::MeshBundle,
+            PackageArtifactSource::OfflinePrepared,
+        ];
+        let commands = ["install", "update"];
+        let mut count = 0;
+        for ctor in &real_constructors {
+            for cmd in &commands {
+                let src = ctor("real-path".into());
+                assert!(
+                    validate_package_source(&src, cmd).is_ok(),
+                    "Real source {:?} should pass for '{cmd}'",
+                    src
+                );
+                count += 1;
+            }
+        }
+        assert_eq!(count, 8, "Should test exactly 4 real types x 2 commands");
+    }
+
+    #[test]
+    fn cross_cutting_exhaustive_2_demo_types_times_2_commands() {
+        let demo_constructors: Vec<fn(String) -> PackageArtifactSource> = vec![
+            PackageArtifactSource::DemoFixture,
+            PackageArtifactSource::StubPlaceholder,
+        ];
+        let commands = ["install", "update"];
+        let mut count = 0;
+        for ctor in &demo_constructors {
+            for cmd in &commands {
+                let src = ctor("demo-path".into());
+                assert!(
+                    validate_package_source(&src, cmd).is_err(),
+                    "Demo source {:?} should fail for '{cmd}'",
+                    src
+                );
+                count += 1;
+            }
+        }
+        assert_eq!(count, 4, "Should test exactly 2 demo types x 2 commands");
     }
 
     // ── Capability token source validation tests ─────────────────────────
@@ -10916,19 +12565,36 @@ mod tests {
     #[test]
     fn config_mutation_outcome_tags_are_unique() {
         let outcomes = [
-            ConfigMutationOutcome::Applied { revision_id: 1, previous_revision_id: None },
+            ConfigMutationOutcome::Applied {
+                revision_id: 1,
+                previous_revision_id: None,
+            },
             ConfigMutationOutcome::Validated,
-            ConfigMutationOutcome::Rejected { reason: "test".to_owned() },
-            ConfigMutationOutcome::Failed { reason: "test".to_owned() },
-            ConfigMutationOutcome::RolledBack { to_revision_id: 1, from_revision_id: 2 },
+            ConfigMutationOutcome::Rejected {
+                reason: "test".to_owned(),
+            },
+            ConfigMutationOutcome::Failed {
+                reason: "test".to_owned(),
+            },
+            ConfigMutationOutcome::RolledBack {
+                to_revision_id: 1,
+                from_revision_id: 2,
+            },
         ];
         let tags: std::collections::HashSet<&str> = outcomes.iter().map(|o| o.tag()).collect();
-        assert_eq!(tags.len(), outcomes.len(), "Duplicate ConfigMutationOutcome tags");
+        assert_eq!(
+            tags.len(),
+            outcomes.len(),
+            "Duplicate ConfigMutationOutcome tags"
+        );
     }
 
     #[test]
     fn config_mutation_applied_is_committed() {
-        let outcome = ConfigMutationOutcome::Applied { revision_id: 5, previous_revision_id: Some(4) };
+        let outcome = ConfigMutationOutcome::Applied {
+            revision_id: 5,
+            previous_revision_id: Some(4),
+        };
         assert!(outcome.is_committed());
         assert!(outcome.is_success());
     }
@@ -10941,21 +12607,28 @@ mod tests {
 
     #[test]
     fn config_mutation_rejected_is_not_success() {
-        let outcome = ConfigMutationOutcome::Rejected { reason: "schema violation".to_owned() };
+        let outcome = ConfigMutationOutcome::Rejected {
+            reason: "schema violation".to_owned(),
+        };
         assert!(!outcome.is_committed());
         assert!(!outcome.is_success());
     }
 
     #[test]
     fn config_mutation_failed_is_not_success() {
-        let outcome = ConfigMutationOutcome::Failed { reason: "host unreachable".to_owned() };
+        let outcome = ConfigMutationOutcome::Failed {
+            reason: "host unreachable".to_owned(),
+        };
         assert!(!outcome.is_committed());
         assert!(!outcome.is_success());
     }
 
     #[test]
     fn config_mutation_rollback_is_committed() {
-        let outcome = ConfigMutationOutcome::RolledBack { to_revision_id: 3, from_revision_id: 5 };
+        let outcome = ConfigMutationOutcome::RolledBack {
+            to_revision_id: 3,
+            from_revision_id: 5,
+        };
         assert!(outcome.is_committed());
         assert!(outcome.is_success());
     }
@@ -10963,16 +12636,30 @@ mod tests {
     #[test]
     fn config_mutation_serde_round_trip() {
         let outcomes = [
-            ConfigMutationOutcome::Applied { revision_id: 42, previous_revision_id: Some(41) },
+            ConfigMutationOutcome::Applied {
+                revision_id: 42,
+                previous_revision_id: Some(41),
+            },
             ConfigMutationOutcome::Validated,
-            ConfigMutationOutcome::Rejected { reason: "bad schema".to_owned() },
-            ConfigMutationOutcome::Failed { reason: "timeout".to_owned() },
-            ConfigMutationOutcome::RolledBack { to_revision_id: 10, from_revision_id: 12 },
+            ConfigMutationOutcome::Rejected {
+                reason: "bad schema".to_owned(),
+            },
+            ConfigMutationOutcome::Failed {
+                reason: "timeout".to_owned(),
+            },
+            ConfigMutationOutcome::RolledBack {
+                to_revision_id: 10,
+                from_revision_id: 12,
+            },
         ];
         for outcome in &outcomes {
             let json = serde_json::to_string(outcome).unwrap();
             let parsed: ConfigMutationOutcome = serde_json::from_str(&json).unwrap();
-            assert_eq!(*outcome, parsed, "Serde round-trip failed for {:?}", outcome);
+            assert_eq!(
+                *outcome, parsed,
+                "Serde round-trip failed for {:?}",
+                outcome
+            );
         }
     }
 
@@ -10995,8 +12682,16 @@ mod tests {
 
     #[test]
     fn config_provenance_carries_mutation_outcome() {
-        let outcome = ConfigMutationOutcome::Applied { revision_id: 7, previous_revision_id: Some(6) };
-        let prov = config_provenance("apply", ConfigDataSource::LiveHost, Some(outcome.clone()), Some(7));
+        let outcome = ConfigMutationOutcome::Applied {
+            revision_id: 7,
+            previous_revision_id: Some(6),
+        };
+        let prov = config_provenance(
+            "apply",
+            ConfigDataSource::LiveHost,
+            Some(outcome.clone()),
+            Some(7),
+        );
         assert!(prov.mutation_outcome.is_some());
         assert_eq!(prov.mutation_outcome.unwrap(), outcome);
         assert_eq!(prov.revision_id, Some(7));
@@ -11007,7 +12702,10 @@ mod tests {
         let prov = config_provenance(
             "apply",
             ConfigDataSource::LiveHost,
-            Some(ConfigMutationOutcome::Applied { revision_id: 1, previous_revision_id: None }),
+            Some(ConfigMutationOutcome::Applied {
+                revision_id: 1,
+                previous_revision_id: None,
+            }),
             Some(1),
         );
         let v = serde_json::to_value(&prov).unwrap();
@@ -11111,6 +12809,1240 @@ mod tests {
                 "ExplicitOffline and DegradedOffline should match for '{}'",
                 op,
             );
+        }
+    }
+
+    // ── Auth UX contract: issuance, denial, remediation (bead 29.13) ──
+
+    #[test]
+    fn auth_token_requirement_tags_are_stable() {
+        assert_eq!(
+            CapabilityTokenRequirement::Fresh { max_age_secs: 3600 }.tag(),
+            "fresh"
+        );
+        assert_eq!(CapabilityTokenRequirement::Valid.tag(), "valid");
+        assert_eq!(
+            CapabilityTokenRequirement::WithHolderProof { max_age_secs: 300 }.tag(),
+            "with-holder-proof"
+        );
+        assert_eq!(
+            CapabilityTokenRequirement::WithApproval {
+                required_approvals: 2
+            }
+            .tag(),
+            "with-approval"
+        );
+        assert_eq!(CapabilityTokenRequirement::None.tag(), "none");
+    }
+
+    #[test]
+    fn auth_token_requirement_requires_token() {
+        assert!(CapabilityTokenRequirement::Fresh { max_age_secs: 60 }.requires_token());
+        assert!(CapabilityTokenRequirement::Valid.requires_token());
+        assert!(
+            CapabilityTokenRequirement::WithHolderProof { max_age_secs: 60 }.requires_token()
+        );
+        assert!(
+            CapabilityTokenRequirement::WithApproval {
+                required_approvals: 1
+            }
+            .requires_token()
+        );
+        assert!(!CapabilityTokenRequirement::None.requires_token());
+    }
+
+    #[test]
+    fn auth_token_requirement_freshness_enforcement() {
+        assert!(CapabilityTokenRequirement::Fresh { max_age_secs: 60 }.enforces_freshness());
+        assert!(
+            CapabilityTokenRequirement::WithHolderProof { max_age_secs: 60 }.enforces_freshness()
+        );
+        assert!(!CapabilityTokenRequirement::Valid.enforces_freshness());
+        assert!(
+            !CapabilityTokenRequirement::WithApproval {
+                required_approvals: 1
+            }
+            .enforces_freshness()
+        );
+        assert!(!CapabilityTokenRequirement::None.enforces_freshness());
+    }
+
+    #[test]
+    fn auth_token_requirement_holder_proof_flag() {
+        assert!(
+            CapabilityTokenRequirement::WithHolderProof { max_age_secs: 60 }.needs_holder_proof()
+        );
+        assert!(!CapabilityTokenRequirement::Fresh { max_age_secs: 60 }.needs_holder_proof());
+        assert!(!CapabilityTokenRequirement::Valid.needs_holder_proof());
+        assert!(!CapabilityTokenRequirement::None.needs_holder_proof());
+    }
+
+    #[test]
+    fn auth_token_requirement_approval_flag() {
+        assert!(
+            CapabilityTokenRequirement::WithApproval {
+                required_approvals: 1
+            }
+            .needs_approval()
+        );
+        assert!(!CapabilityTokenRequirement::Fresh { max_age_secs: 60 }.needs_approval());
+        assert!(!CapabilityTokenRequirement::None.needs_approval());
+    }
+
+    #[test]
+    fn auth_token_requirement_descriptions_never_empty() {
+        let variants: Vec<CapabilityTokenRequirement> = vec![
+            CapabilityTokenRequirement::Fresh { max_age_secs: 3600 },
+            CapabilityTokenRequirement::Valid,
+            CapabilityTokenRequirement::WithHolderProof { max_age_secs: 300 },
+            CapabilityTokenRequirement::WithApproval {
+                required_approvals: 2,
+            },
+            CapabilityTokenRequirement::None,
+        ];
+        for v in &variants {
+            let desc = v.description();
+            assert!(
+                !desc.is_empty(),
+                "Description for {:?} should not be empty",
+                v
+            );
+        }
+    }
+
+    #[test]
+    fn auth_token_requirement_serde_roundtrip() {
+        let variants = vec![
+            CapabilityTokenRequirement::Fresh { max_age_secs: 3600 },
+            CapabilityTokenRequirement::Valid,
+            CapabilityTokenRequirement::WithHolderProof { max_age_secs: 300 },
+            CapabilityTokenRequirement::WithApproval {
+                required_approvals: 2,
+            },
+            CapabilityTokenRequirement::None,
+        ];
+        for v in &variants {
+            let json_str = serde_json::to_string(v).unwrap();
+            let back: CapabilityTokenRequirement = serde_json::from_str(&json_str).unwrap();
+            assert_eq!(*v, back, "Roundtrip failed for {:?}", v);
+        }
+    }
+
+    #[test]
+    fn auth_denial_reason_tags_are_stable() {
+        assert_eq!(AuthDenialReason::TokenMissing.tag(), "token-missing");
+        assert_eq!(
+            AuthDenialReason::TokenExpired {
+                expired_ago_secs: 10
+            }
+            .tag(),
+            "token-expired"
+        );
+        assert_eq!(
+            AuthDenialReason::TokenRevoked {
+                revoked_at: "2026-01-01T00:00:00Z".into()
+            }
+            .tag(),
+            "token-revoked"
+        );
+        assert_eq!(
+            AuthDenialReason::InsufficientScope {
+                requested_operation: "read".into(),
+                token_scopes: vec![]
+            }
+            .tag(),
+            "insufficient-scope"
+        );
+        assert_eq!(
+            AuthDenialReason::HolderProofFailed {
+                detail: "bad sig".into()
+            }
+            .tag(),
+            "holder-proof-failed"
+        );
+        assert_eq!(
+            AuthDenialReason::ApprovalMissing {
+                required: 2,
+                provided: 0
+            }
+            .tag(),
+            "approval-missing"
+        );
+        assert_eq!(AuthDenialReason::MalformedToken.tag(), "malformed-token");
+        assert_eq!(
+            AuthDenialReason::SyntheticSource {
+                source_tag: "test-generated".into()
+            }
+            .tag(),
+            "synthetic-source"
+        );
+    }
+
+    #[test]
+    fn auth_denial_reason_descriptions_never_empty() {
+        let reasons: Vec<AuthDenialReason> = vec![
+            AuthDenialReason::TokenMissing,
+            AuthDenialReason::TokenExpired {
+                expired_ago_secs: 60,
+            },
+            AuthDenialReason::TokenRevoked {
+                revoked_at: "2026-01-01T00:00:00Z".into(),
+            },
+            AuthDenialReason::InsufficientScope {
+                requested_operation: "invoke_op".into(),
+                token_scopes: vec!["read".into()],
+            },
+            AuthDenialReason::HolderProofFailed {
+                detail: "signature mismatch".into(),
+            },
+            AuthDenialReason::ApprovalMissing {
+                required: 3,
+                provided: 1,
+            },
+            AuthDenialReason::MalformedToken,
+            AuthDenialReason::SyntheticSource {
+                source_tag: "placeholder".into(),
+            },
+        ];
+        for r in &reasons {
+            let desc = r.description();
+            assert!(
+                !desc.is_empty(),
+                "Description for {:?} should not be empty",
+                r
+            );
+        }
+    }
+
+    #[test]
+    fn auth_denial_reason_serde_roundtrip() {
+        let reasons: Vec<AuthDenialReason> = vec![
+            AuthDenialReason::TokenMissing,
+            AuthDenialReason::TokenExpired {
+                expired_ago_secs: 120,
+            },
+            AuthDenialReason::TokenRevoked {
+                revoked_at: "2026-03-12T12:00:00Z".into(),
+            },
+            AuthDenialReason::InsufficientScope {
+                requested_operation: "write_data".into(),
+                token_scopes: vec!["read_data".into(), "list".into()],
+            },
+            AuthDenialReason::HolderProofFailed {
+                detail: "wrong key".into(),
+            },
+            AuthDenialReason::ApprovalMissing {
+                required: 2,
+                provided: 1,
+            },
+            AuthDenialReason::MalformedToken,
+            AuthDenialReason::SyntheticSource {
+                source_tag: "test-generated".into(),
+            },
+        ];
+        for r in &reasons {
+            let json_str = serde_json::to_string(r).unwrap();
+            let back: AuthDenialReason = serde_json::from_str(&json_str).unwrap();
+            assert_eq!(*r, back, "Roundtrip failed for {:?}", r);
+        }
+    }
+
+    #[test]
+    fn auth_denial_reissuable_classification() {
+        assert!(AuthDenialReason::TokenMissing.is_reissuable());
+        assert!(AuthDenialReason::TokenExpired { expired_ago_secs: 1 }.is_reissuable());
+        assert!(
+            AuthDenialReason::TokenRevoked {
+                revoked_at: "t".into()
+            }
+            .is_reissuable()
+        );
+        assert!(
+            AuthDenialReason::InsufficientScope {
+                requested_operation: "x".into(),
+                token_scopes: vec![]
+            }
+            .is_reissuable()
+        );
+        assert!(
+            AuthDenialReason::SyntheticSource {
+                source_tag: "s".into()
+            }
+            .is_reissuable()
+        );
+        assert!(
+            !AuthDenialReason::HolderProofFailed {
+                detail: "d".into()
+            }
+            .is_reissuable()
+        );
+        assert!(!AuthDenialReason::MalformedToken.is_reissuable());
+        assert!(
+            !AuthDenialReason::ApprovalMissing {
+                required: 2,
+                provided: 0
+            }
+            .is_reissuable()
+        );
+    }
+
+    #[test]
+    fn auth_denial_structural_classification() {
+        assert!(
+            AuthDenialReason::HolderProofFailed {
+                detail: "d".into()
+            }
+            .is_structural()
+        );
+        assert!(AuthDenialReason::MalformedToken.is_structural());
+        assert!(!AuthDenialReason::TokenMissing.is_structural());
+        assert!(!AuthDenialReason::TokenExpired { expired_ago_secs: 1 }.is_structural());
+    }
+
+    #[test]
+    fn auth_remediation_step_tags_are_stable() {
+        assert_eq!(
+            AuthRemediationStep::IssueNewToken {
+                cli_hint: "x".into()
+            }
+            .tag(),
+            "issue-new-token"
+        );
+        assert_eq!(
+            AuthRemediationStep::BroadenScope {
+                target_operation: "x".into()
+            }
+            .tag(),
+            "broaden-scope"
+        );
+        assert_eq!(
+            AuthRemediationStep::AttachHolderProof {
+                expected_holder: "x".into()
+            }
+            .tag(),
+            "attach-holder-proof"
+        );
+        assert_eq!(
+            AuthRemediationStep::ObtainApprovals {
+                additional_needed: 1
+            }
+            .tag(),
+            "obtain-approvals"
+        );
+        assert_eq!(
+            AuthRemediationStep::FixTokenEncoding {
+                encoding_hint: "x".into()
+            }
+            .tag(),
+            "fix-token-encoding"
+        );
+        assert_eq!(
+            AuthRemediationStep::ReplaceSyntheticToken.tag(),
+            "replace-synthetic-token"
+        );
+        assert_eq!(
+            AuthRemediationStep::ContactAdmin {
+                reason: "x".into()
+            }
+            .tag(),
+            "contact-admin"
+        );
+    }
+
+    #[test]
+    fn auth_remediation_step_instructions_never_empty() {
+        let steps: Vec<AuthRemediationStep> = vec![
+            AuthRemediationStep::IssueNewToken {
+                cli_hint: "fwc capabilities issue".into(),
+            },
+            AuthRemediationStep::BroadenScope {
+                target_operation: "write_data".into(),
+            },
+            AuthRemediationStep::AttachHolderProof {
+                expected_holder: "node-key-abc".into(),
+            },
+            AuthRemediationStep::ObtainApprovals {
+                additional_needed: 2,
+            },
+            AuthRemediationStep::FixTokenEncoding {
+                encoding_hint: "base64 padding".into(),
+            },
+            AuthRemediationStep::ReplaceSyntheticToken,
+            AuthRemediationStep::ContactAdmin {
+                reason: "policy violation".into(),
+            },
+        ];
+        for s in &steps {
+            let inst = s.instruction();
+            assert!(
+                !inst.is_empty(),
+                "Instruction for {:?} should not be empty",
+                s
+            );
+        }
+    }
+
+    #[test]
+    fn auth_remediation_step_serde_roundtrip() {
+        let steps: Vec<AuthRemediationStep> = vec![
+            AuthRemediationStep::IssueNewToken {
+                cli_hint: "fwc capabilities issue --connector c --operation o".into(),
+            },
+            AuthRemediationStep::BroadenScope {
+                target_operation: "read_messages".into(),
+            },
+            AuthRemediationStep::AttachHolderProof {
+                expected_holder: "ed25519-key".into(),
+            },
+            AuthRemediationStep::ObtainApprovals {
+                additional_needed: 3,
+            },
+            AuthRemediationStep::FixTokenEncoding {
+                encoding_hint: "missing padding".into(),
+            },
+            AuthRemediationStep::ReplaceSyntheticToken,
+            AuthRemediationStep::ContactAdmin {
+                reason: "revoked token escalation".into(),
+            },
+        ];
+        for s in &steps {
+            let json_str = serde_json::to_string(s).unwrap();
+            let back: AuthRemediationStep = serde_json::from_str(&json_str).unwrap();
+            assert_eq!(*s, back, "Roundtrip failed for {:?}", s);
+        }
+    }
+
+    #[test]
+    fn auth_denial_to_remediation_always_produces_steps() {
+        let reasons: Vec<AuthDenialReason> = vec![
+            AuthDenialReason::TokenMissing,
+            AuthDenialReason::TokenExpired {
+                expired_ago_secs: 60,
+            },
+            AuthDenialReason::TokenRevoked {
+                revoked_at: "2026-01-01T00:00:00Z".into(),
+            },
+            AuthDenialReason::InsufficientScope {
+                requested_operation: "op".into(),
+                token_scopes: vec!["other".into()],
+            },
+            AuthDenialReason::HolderProofFailed {
+                detail: "sig".into(),
+            },
+            AuthDenialReason::ApprovalMissing {
+                required: 3,
+                provided: 1,
+            },
+            AuthDenialReason::MalformedToken,
+            AuthDenialReason::SyntheticSource {
+                source_tag: "test-generated".into(),
+            },
+        ];
+        for r in &reasons {
+            let steps = denial_to_remediation(r);
+            assert!(
+                !steps.is_empty(),
+                "denial_to_remediation({:?}) should produce at least one step",
+                r
+            );
+        }
+    }
+
+    #[test]
+    fn auth_denial_token_missing_maps_to_issue() {
+        let steps = denial_to_remediation(&AuthDenialReason::TokenMissing);
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].tag(), "issue-new-token");
+    }
+
+    #[test]
+    fn auth_denial_token_expired_maps_to_issue() {
+        let steps = denial_to_remediation(&AuthDenialReason::TokenExpired {
+            expired_ago_secs: 300,
+        });
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].tag(), "issue-new-token");
+    }
+
+    #[test]
+    fn auth_denial_token_revoked_maps_to_issue_and_admin() {
+        let steps = denial_to_remediation(&AuthDenialReason::TokenRevoked {
+            revoked_at: "2026-01-01T00:00:00Z".into(),
+        });
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].tag(), "issue-new-token");
+        assert_eq!(steps[1].tag(), "contact-admin");
+    }
+
+    #[test]
+    fn auth_denial_insufficient_scope_maps_to_broaden() {
+        let reason = AuthDenialReason::InsufficientScope {
+            requested_operation: "write_messages".into(),
+            token_scopes: vec!["read_messages".into()],
+        };
+        let steps = denial_to_remediation(&reason);
+        assert_eq!(steps.len(), 1);
+        match &steps[0] {
+            AuthRemediationStep::BroadenScope { target_operation } => {
+                assert_eq!(target_operation, "write_messages");
+            }
+            other => panic!("Expected BroadenScope, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn auth_denial_holder_proof_failure_maps_to_attach() {
+        let steps = denial_to_remediation(&AuthDenialReason::HolderProofFailed {
+            detail: "wrong key".into(),
+        });
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].tag(), "attach-holder-proof");
+    }
+
+    #[test]
+    fn auth_denial_approval_missing_maps_to_obtain() {
+        let reason = AuthDenialReason::ApprovalMissing {
+            required: 5,
+            provided: 2,
+        };
+        let steps = denial_to_remediation(&reason);
+        assert_eq!(steps.len(), 1);
+        match &steps[0] {
+            AuthRemediationStep::ObtainApprovals { additional_needed } => {
+                assert_eq!(*additional_needed, 3);
+            }
+            other => panic!("Expected ObtainApprovals, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn auth_denial_malformed_token_maps_to_fix_and_issue() {
+        let steps = denial_to_remediation(&AuthDenialReason::MalformedToken);
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].tag(), "fix-token-encoding");
+        assert_eq!(steps[1].tag(), "issue-new-token");
+    }
+
+    #[test]
+    fn auth_denial_synthetic_source_maps_to_replace() {
+        let steps = denial_to_remediation(&AuthDenialReason::SyntheticSource {
+            source_tag: "test-generated".into(),
+        });
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].tag(), "replace-synthetic-token");
+    }
+
+    #[test]
+    fn auth_denial_envelope_builds_correctly() {
+        let envelope = auth_denial_envelope("invoke", AuthDenialReason::TokenMissing);
+        assert_eq!(envelope.command, "invoke");
+        assert_eq!(envelope.reason.tag(), "token-missing");
+        assert!(!envelope.remediation.is_empty());
+        assert!(envelope.self_service);
+    }
+
+    #[test]
+    fn auth_denial_envelope_self_service_mirrors_reissuable() {
+        let reissuable_reasons: Vec<AuthDenialReason> = vec![
+            AuthDenialReason::TokenMissing,
+            AuthDenialReason::TokenExpired {
+                expired_ago_secs: 1,
+            },
+            AuthDenialReason::TokenRevoked {
+                revoked_at: "t".into(),
+            },
+            AuthDenialReason::InsufficientScope {
+                requested_operation: "x".into(),
+                token_scopes: vec![],
+            },
+            AuthDenialReason::SyntheticSource {
+                source_tag: "s".into(),
+            },
+        ];
+        for r in reissuable_reasons {
+            let env = auth_denial_envelope("cmd", r);
+            assert!(
+                env.self_service,
+                "self_service should be true for reissuable reason {:?}",
+                env.reason
+            );
+        }
+
+        let non_reissuable_reasons: Vec<AuthDenialReason> = vec![
+            AuthDenialReason::HolderProofFailed {
+                detail: "d".into(),
+            },
+            AuthDenialReason::MalformedToken,
+            AuthDenialReason::ApprovalMissing {
+                required: 2,
+                provided: 0,
+            },
+        ];
+        for r in non_reissuable_reasons {
+            let env = auth_denial_envelope("cmd", r);
+            assert!(
+                !env.self_service,
+                "self_service should be false for non-reissuable reason {:?}",
+                env.reason
+            );
+        }
+    }
+
+    #[test]
+    fn auth_denial_envelope_serde_roundtrip() {
+        let envelope = auth_denial_envelope(
+            "simulate",
+            AuthDenialReason::TokenExpired {
+                expired_ago_secs: 120,
+            },
+        );
+        let json_str = serde_json::to_string(&envelope).unwrap();
+        let back: AuthDenialEnvelope = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(back.command, "simulate");
+        assert_eq!(back.reason.tag(), "token-expired");
+        assert_eq!(back.remediation.len(), envelope.remediation.len());
+    }
+
+    #[test]
+    fn auth_command_token_requirement_invoke() {
+        let req = command_token_requirement("invoke");
+        assert!(req.requires_token());
+        assert!(req.needs_approval());
+        assert_eq!(req.tag(), "with-approval");
+    }
+
+    #[test]
+    fn auth_command_token_requirement_simulate() {
+        let req = command_token_requirement("simulate");
+        assert!(req.requires_token());
+        assert!(!req.needs_approval());
+        assert_eq!(req.tag(), "fresh");
+    }
+
+    #[test]
+    fn auth_command_token_requirement_guide_none() {
+        let req = command_token_requirement("guide");
+        assert!(!req.requires_token());
+        assert_eq!(req.tag(), "none");
+    }
+
+    #[test]
+    fn auth_token_freshness_at_boundary() {
+        let req = CapabilityTokenRequirement::Fresh { max_age_secs: 3600 };
+        assert!(token_satisfies_freshness(&req, 3600));
+        assert!(!token_satisfies_freshness(&req, 3601));
+        assert!(token_satisfies_freshness(&req, 0));
+    }
+
+    #[test]
+    fn auth_token_freshness_with_holder_proof() {
+        let req = CapabilityTokenRequirement::WithHolderProof { max_age_secs: 300 };
+        assert!(token_satisfies_freshness(&req, 300));
+        assert!(!token_satisfies_freshness(&req, 301));
+    }
+
+    #[test]
+    fn auth_token_freshness_non_freshness_always_passes() {
+        assert!(token_satisfies_freshness(
+            &CapabilityTokenRequirement::Valid,
+            u64::MAX
+        ));
+        assert!(token_satisfies_freshness(
+            &CapabilityTokenRequirement::WithApproval {
+                required_approvals: 1
+            },
+            u64::MAX
+        ));
+        assert!(token_satisfies_freshness(
+            &CapabilityTokenRequirement::None,
+            u64::MAX
+        ));
+    }
+
+    #[test]
+    fn auth_all_token_commands_produce_non_none_requirement() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            let req = command_token_requirement(cls.command);
+            if cls.requires_capability_token {
+                assert!(
+                    req.requires_token(),
+                    "Command '{}' requires token but command_token_requirement says None",
+                    cls.command
+                );
+            } else {
+                assert!(
+                    !req.requires_token(),
+                    "Command '{}' does not require token but command_token_requirement says {:?}",
+                    cls.command,
+                    req
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn auth_approval_commands_get_with_approval_requirement() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            if cls.requires_capability_token && cls.may_need_approval {
+                let req = command_token_requirement(cls.command);
+                assert!(
+                    req.needs_approval(),
+                    "Command '{}' needs approval but requirement says {:?}",
+                    cls.command,
+                    req
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn auth_denial_descriptions_no_empty_fragments() {
+        let reasons: Vec<AuthDenialReason> = vec![
+            AuthDenialReason::TokenMissing,
+            AuthDenialReason::TokenExpired {
+                expired_ago_secs: 0,
+            },
+            AuthDenialReason::TokenRevoked {
+                revoked_at: "now".into(),
+            },
+            AuthDenialReason::InsufficientScope {
+                requested_operation: "op".into(),
+                token_scopes: vec![],
+            },
+            AuthDenialReason::HolderProofFailed {
+                detail: "sig".into(),
+            },
+            AuthDenialReason::ApprovalMissing {
+                required: 1,
+                provided: 0,
+            },
+            AuthDenialReason::MalformedToken,
+            AuthDenialReason::SyntheticSource {
+                source_tag: "test".into(),
+            },
+        ];
+        for r in &reasons {
+            let desc = r.description();
+            assert!(
+                !desc.contains("  "),
+                "Description for {:?} contains double space: '{}'",
+                r,
+                desc
+            );
+            assert_eq!(
+                desc.trim(),
+                desc,
+                "Description for {:?} has leading/trailing whitespace",
+                r
+            );
+        }
+    }
+
+    #[test]
+    fn auth_denial_expired_mentions_elapsed_time() {
+        let reason = AuthDenialReason::TokenExpired {
+            expired_ago_secs: 42,
+        };
+        assert!(
+            reason.description().contains("42"),
+            "Expired description should mention 42s: {}",
+            reason.description()
+        );
+    }
+
+    #[test]
+    fn auth_denial_insufficient_scope_mentions_operation() {
+        let reason = AuthDenialReason::InsufficientScope {
+            requested_operation: "deploy_widget".into(),
+            token_scopes: vec!["read_widget".into()],
+        };
+        let desc = reason.description();
+        assert!(
+            desc.contains("deploy_widget"),
+            "Should mention requested op: {desc}"
+        );
+        assert!(
+            desc.contains("read_widget"),
+            "Should mention existing scope: {desc}"
+        );
+    }
+
+    #[test]
+    fn auth_approval_missing_remediation_delta_edge_cases() {
+        let reason = AuthDenialReason::ApprovalMissing {
+            required: 2,
+            provided: 5,
+        };
+        let steps = denial_to_remediation(&reason);
+        match &steps[0] {
+            AuthRemediationStep::ObtainApprovals { additional_needed } => {
+                assert_eq!(*additional_needed, 0);
+            }
+            other => panic!("Expected ObtainApprovals, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn auth_remediation_instructions_are_actionable() {
+        let steps: Vec<AuthRemediationStep> = vec![
+            AuthRemediationStep::IssueNewToken {
+                cli_hint: "fwc capabilities issue".into(),
+            },
+            AuthRemediationStep::BroadenScope {
+                target_operation: "op".into(),
+            },
+            AuthRemediationStep::AttachHolderProof {
+                expected_holder: "key".into(),
+            },
+            AuthRemediationStep::ObtainApprovals {
+                additional_needed: 1,
+            },
+            AuthRemediationStep::FixTokenEncoding {
+                encoding_hint: "base64".into(),
+            },
+            AuthRemediationStep::ReplaceSyntheticToken,
+            AuthRemediationStep::ContactAdmin {
+                reason: "escalation".into(),
+            },
+        ];
+        let action_words = [
+            "Issue", "Re-issue", "Attach", "Obtain", "Fix", "Replace", "Contact",
+        ];
+        for s in &steps {
+            let inst = s.instruction();
+            assert!(
+                action_words.iter().any(|w| inst.contains(w)),
+                "Instruction should start with an action verb: '{}'",
+                inst
+            );
+        }
+    }
+
+    #[test]
+    fn auth_token_requirement_golden_json_shapes() {
+        let fresh = CapabilityTokenRequirement::Fresh { max_age_secs: 3600 };
+        let json: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&fresh).unwrap()).unwrap();
+        assert!(
+            json.get("fresh").is_some(),
+            "Should have 'fresh' key: {json}"
+        );
+
+        let none = CapabilityTokenRequirement::None;
+        let json_str = serde_json::to_string(&none).unwrap();
+        assert_eq!(json_str, "\"none\"");
+    }
+
+    #[test]
+    fn auth_denial_reason_golden_json_shapes() {
+        let missing = AuthDenialReason::TokenMissing;
+        let json_str = serde_json::to_string(&missing).unwrap();
+        assert_eq!(json_str, "\"token_missing\"");
+
+        let expired = AuthDenialReason::TokenExpired {
+            expired_ago_secs: 10,
+        };
+        let json: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&expired).unwrap()).unwrap();
+        assert!(json.get("token_expired").is_some());
+    }
+
+    // ── Lifecycle state transition truth contract tests (bead 29.11) ─────
+
+    #[test]
+    fn lifecycle_channel_tags_are_stable() {
+        assert_eq!(LifecycleMutationChannel::HostAdminRpc.tag(), "host-admin-rpc");
+        assert_eq!(LifecycleMutationChannel::LocalFileEdit.tag(), "local-file-edit");
+        assert_eq!(LifecycleMutationChannel::OfflineArtifact.tag(), "offline-artifact");
+        assert_eq!(LifecycleMutationChannel::Denied.tag(), "denied");
+    }
+
+    #[test]
+    fn lifecycle_channel_serde_roundtrip() {
+        for ch in [
+            LifecycleMutationChannel::HostAdminRpc,
+            LifecycleMutationChannel::LocalFileEdit,
+            LifecycleMutationChannel::OfflineArtifact,
+            LifecycleMutationChannel::Denied,
+        ] {
+            let json = serde_json::to_string(&ch).unwrap();
+            let back: LifecycleMutationChannel = serde_json::from_str(&json).unwrap();
+            assert_eq!(ch, back);
+        }
+    }
+
+    #[test]
+    fn lifecycle_only_host_admin_rpc_is_authoritative() {
+        assert!(LifecycleMutationChannel::HostAdminRpc.is_authoritative());
+        assert!(!LifecycleMutationChannel::LocalFileEdit.is_authoritative());
+        assert!(!LifecycleMutationChannel::OfflineArtifact.is_authoritative());
+        assert!(!LifecycleMutationChannel::Denied.is_authoritative());
+    }
+
+    #[test]
+    fn lifecycle_only_local_file_edit_requires_restart() {
+        assert!(!LifecycleMutationChannel::HostAdminRpc.requires_restart());
+        assert!(LifecycleMutationChannel::LocalFileEdit.requires_restart());
+        assert!(!LifecycleMutationChannel::OfflineArtifact.requires_restart());
+        assert!(!LifecycleMutationChannel::Denied.requires_restart());
+    }
+
+    #[test]
+    fn lifecycle_only_host_admin_rpc_is_runtime_acceptable() {
+        assert!(LifecycleMutationChannel::HostAdminRpc.is_runtime_acceptable());
+        assert!(!LifecycleMutationChannel::LocalFileEdit.is_runtime_acceptable());
+        assert!(!LifecycleMutationChannel::OfflineArtifact.is_runtime_acceptable());
+        assert!(!LifecycleMutationChannel::Denied.is_runtime_acceptable());
+    }
+
+    #[test]
+    fn observed_lifecycle_state_tags_are_stable() {
+        assert_eq!(ObservedLifecycleState::Running.tag(), "running");
+        assert_eq!(ObservedLifecycleState::Stopped.tag(), "stopped");
+        assert_eq!(ObservedLifecycleState::NotPresent.tag(), "not-present");
+        assert_eq!(ObservedLifecycleState::Error.tag(), "error");
+        assert_eq!(ObservedLifecycleState::Unknown.tag(), "unknown");
+    }
+
+    #[test]
+    fn observed_lifecycle_unknown_is_not_determined() {
+        assert!(!ObservedLifecycleState::Unknown.is_determined());
+        assert!(ObservedLifecycleState::Running.is_determined());
+        assert!(ObservedLifecycleState::Stopped.is_determined());
+        assert!(ObservedLifecycleState::NotPresent.is_determined());
+        assert!(ObservedLifecycleState::Error.is_determined());
+    }
+
+    #[test]
+    fn observed_lifecycle_only_running_is_healthy() {
+        assert!(ObservedLifecycleState::Running.is_healthy());
+        assert!(!ObservedLifecycleState::Stopped.is_healthy());
+        assert!(!ObservedLifecycleState::NotPresent.is_healthy());
+        assert!(!ObservedLifecycleState::Error.is_healthy());
+        assert!(!ObservedLifecycleState::Unknown.is_healthy());
+    }
+
+    #[test]
+    fn lifecycle_mutation_converges_when_desired_matches_observed() {
+        let r = lifecycle_mutation_result(
+            "install", "github:rr:1.0",
+            LifecycleMutationChannel::HostAdminRpc,
+            DesiredLifecycleState::Installed,
+            ObservedLifecycleState::Running,
+            None,
+        );
+        assert!(r.converged);
+    }
+
+    #[test]
+    fn lifecycle_mutation_does_not_converge_when_mismatch() {
+        let r = lifecycle_mutation_result(
+            "install", "github:rr:1.0",
+            LifecycleMutationChannel::HostAdminRpc,
+            DesiredLifecycleState::Installed,
+            ObservedLifecycleState::Error,
+            None,
+        );
+        assert!(!r.converged);
+    }
+
+    #[test]
+    fn lifecycle_mutation_never_converges_when_observed_unknown() {
+        for desired in [
+            DesiredLifecycleState::Installed,
+            DesiredLifecycleState::Enabled,
+            DesiredLifecycleState::Disabled,
+            DesiredLifecycleState::Uninstalled,
+            DesiredLifecycleState::Updated,
+        ] {
+            let r = lifecycle_mutation_result(
+                "install", "c",
+                LifecycleMutationChannel::HostAdminRpc,
+                desired,
+                ObservedLifecycleState::Unknown,
+                None,
+            );
+            assert!(
+                !r.converged,
+                "Should not converge when observed=Unknown for desired={desired:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn lifecycle_mutation_enable_converges_with_running() {
+        let r = lifecycle_mutation_result(
+            "enable", "slack:rr:2.0",
+            LifecycleMutationChannel::HostAdminRpc,
+            DesiredLifecycleState::Enabled,
+            ObservedLifecycleState::Running,
+            None,
+        );
+        assert!(r.converged);
+    }
+
+    #[test]
+    fn lifecycle_mutation_disable_converges_with_stopped() {
+        let r = lifecycle_mutation_result(
+            "disable", "slack:rr:2.0",
+            LifecycleMutationChannel::HostAdminRpc,
+            DesiredLifecycleState::Disabled,
+            ObservedLifecycleState::Stopped,
+            None,
+        );
+        assert!(r.converged);
+    }
+
+    #[test]
+    fn lifecycle_mutation_uninstall_converges_with_not_present() {
+        let r = lifecycle_mutation_result(
+            "uninstall", "slack:rr:2.0",
+            LifecycleMutationChannel::HostAdminRpc,
+            DesiredLifecycleState::Uninstalled,
+            ObservedLifecycleState::NotPresent,
+            None,
+        );
+        assert!(r.converged);
+    }
+
+    #[test]
+    fn lifecycle_mutation_caveat_warns_about_non_authoritative_channel() {
+        let r = lifecycle_mutation_result(
+            "install", "github:rr:1.0",
+            LifecycleMutationChannel::LocalFileEdit,
+            DesiredLifecycleState::Installed,
+            ObservedLifecycleState::Running,
+            None,
+        );
+        assert!(r.caveat.contains("NOT an authoritative"));
+        assert!(r.caveat.contains("local-file-edit"));
+    }
+
+    #[test]
+    fn lifecycle_mutation_caveat_warns_about_non_converged() {
+        let r = lifecycle_mutation_result(
+            "install", "github:rr:1.0",
+            LifecycleMutationChannel::HostAdminRpc,
+            DesiredLifecycleState::Installed,
+            ObservedLifecycleState::Error,
+            None,
+        );
+        assert!(r.caveat.contains("does not match"));
+    }
+
+    #[test]
+    fn lifecycle_mutation_caveat_confirms_convergence() {
+        let r = lifecycle_mutation_result(
+            "install", "github:rr:1.0",
+            LifecycleMutationChannel::HostAdminRpc,
+            DesiredLifecycleState::Installed,
+            ObservedLifecycleState::Running,
+            None,
+        );
+        assert!(r.caveat.contains("converged"));
+    }
+
+    #[test]
+    fn lifecycle_mutation_payload_has_required_fields() {
+        let r = lifecycle_mutation_result(
+            "install", "github:rr:1.0",
+            LifecycleMutationChannel::HostAdminRpc,
+            DesiredLifecycleState::Installed,
+            ObservedLifecycleState::Running,
+            Some("all healthy".to_owned()),
+        );
+        let p = lifecycle_mutation_payload(&r);
+        assert_eq!(p["command"], "install");
+        assert_eq!(p["connector_id"], "github:rr:1.0");
+        assert_eq!(p["channel"], "host-admin-rpc");
+        assert_eq!(p["converged"], true);
+        assert_eq!(p["authoritative"], true);
+        assert_eq!(p["requires_restart"], false);
+        assert!(p["caveat"].is_string());
+        assert!(p["health_feedback"].is_string());
+    }
+
+    #[test]
+    fn lifecycle_mutation_payload_local_file_shows_restart_required() {
+        let r = lifecycle_mutation_result(
+            "install", "c",
+            LifecycleMutationChannel::LocalFileEdit,
+            DesiredLifecycleState::Installed,
+            ObservedLifecycleState::Running,
+            None,
+        );
+        let p = lifecycle_mutation_payload(&r);
+        assert_eq!(p["authoritative"], false);
+        assert_eq!(p["requires_restart"], true);
+    }
+
+    #[test]
+    fn lifecycle_host_required_ops_include_core_lifecycle_commands() {
+        for cmd in ["install", "update", "enable", "disable", "start", "stop", "restart"] {
+            assert!(
+                LIFECYCLE_HOST_REQUIRED_OPS.contains(&cmd),
+                "'{cmd}' should be in LIFECYCLE_HOST_REQUIRED_OPS"
+            );
+        }
+    }
+
+    #[test]
+    fn lifecycle_offline_ops_include_package_and_verify() {
+        for cmd in ["package", "verify", "prepare"] {
+            assert!(
+                LIFECYCLE_OFFLINE_OPS.contains(&cmd),
+                "'{cmd}' should be in LIFECYCLE_OFFLINE_OPS"
+            );
+        }
+    }
+
+    #[test]
+    fn expected_lifecycle_channel_live_returns_host_admin_rpc() {
+        for cmd in LIFECYCLE_HOST_REQUIRED_OPS {
+            assert_eq!(
+                expected_lifecycle_channel(cmd, RuntimeMode::Live),
+                LifecycleMutationChannel::HostAdminRpc,
+            );
+        }
+    }
+
+    #[test]
+    fn expected_lifecycle_channel_offline_denies_host_required_ops() {
+        for cmd in LIFECYCLE_HOST_REQUIRED_OPS {
+            assert_eq!(
+                expected_lifecycle_channel(cmd, RuntimeMode::ExplicitOffline),
+                LifecycleMutationChannel::Denied,
+            );
+        }
+    }
+
+    #[test]
+    fn expected_lifecycle_channel_offline_allows_offline_ops() {
+        for cmd in LIFECYCLE_OFFLINE_OPS {
+            assert_eq!(
+                expected_lifecycle_channel(cmd, RuntimeMode::ExplicitOffline),
+                LifecycleMutationChannel::OfflineArtifact,
+            );
+        }
+    }
+
+    #[test]
+    fn expected_lifecycle_channel_refused_denies_everything() {
+        for cmd in LIFECYCLE_HOST_REQUIRED_OPS.iter().chain(LIFECYCLE_OFFLINE_OPS.iter()) {
+            let ch = expected_lifecycle_channel(cmd, RuntimeMode::Refused);
+            assert!(
+                matches!(ch, LifecycleMutationChannel::Denied | LifecycleMutationChannel::OfflineArtifact),
+                "Refused mode should deny or route to offline for '{cmd}': {ch:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_lifecycle_channel_rejects_non_authoritative_for_host_required() {
+        for cmd in LIFECYCLE_HOST_REQUIRED_OPS {
+            let result = validate_lifecycle_channel(cmd, LifecycleMutationChannel::LocalFileEdit);
+            assert!(
+                result.is_some(),
+                "'{cmd}' via local-file-edit should be rejected"
+            );
+            let reason = result.unwrap();
+            assert!(reason.contains(cmd));
+            assert!(reason.contains("host-admin RPC"));
+        }
+    }
+
+    #[test]
+    fn validate_lifecycle_channel_accepts_host_admin_rpc_for_host_required() {
+        for cmd in LIFECYCLE_HOST_REQUIRED_OPS {
+            let result = validate_lifecycle_channel(cmd, LifecycleMutationChannel::HostAdminRpc);
+            assert!(
+                result.is_none(),
+                "'{cmd}' via host-admin-rpc should be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_lifecycle_channel_accepts_any_for_offline_ops() {
+        for cmd in LIFECYCLE_OFFLINE_OPS {
+            for ch in [
+                LifecycleMutationChannel::HostAdminRpc,
+                LifecycleMutationChannel::LocalFileEdit,
+                LifecycleMutationChannel::OfflineArtifact,
+            ] {
+                let result = validate_lifecycle_channel(cmd, ch);
+                assert!(
+                    result.is_none(),
+                    "'{cmd}' via {ch:?} should be accepted (offline ops are flexible)"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn lifecycle_channel_and_config_source_consistency() {
+        // Host-admin-rpc maps to live-host config source
+        assert!(LifecycleMutationChannel::HostAdminRpc.is_authoritative());
+        assert!(ConfigDataSource::LiveHost.is_authoritative());
+        // Local-file-edit maps to local-file config source
+        assert!(!LifecycleMutationChannel::LocalFileEdit.is_authoritative());
+        assert!(!ConfigDataSource::LocalFile.is_authoritative());
+    }
+
+    #[test]
+    fn lifecycle_mutation_result_serde_roundtrip() {
+        let r = lifecycle_mutation_result(
+            "install", "github:rr:1.0",
+            LifecycleMutationChannel::HostAdminRpc,
+            DesiredLifecycleState::Installed,
+            ObservedLifecycleState::Running,
+            Some("healthy".to_owned()),
+        );
+        let json = serde_json::to_string(&r).unwrap();
+        let back: LifecycleMutationResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(r.command, back.command);
+        assert_eq!(r.connector_id, back.connector_id);
+        assert_eq!(r.channel, back.channel);
+        assert_eq!(r.desired, back.desired);
+        assert_eq!(r.observed, back.observed);
+        assert_eq!(r.converged, back.converged);
+    }
+
+    #[test]
+    fn lifecycle_cross_cutting_no_file_edit_is_runtime_acceptable() {
+        // Critical invariant: LocalFileEdit must never pass as runtime-acceptable
+        assert!(!LifecycleMutationChannel::LocalFileEdit.is_runtime_acceptable());
+        // And must always require restart
+        assert!(LifecycleMutationChannel::LocalFileEdit.requires_restart());
+    }
+
+    #[test]
+    fn lifecycle_cross_cutting_all_caveats_nonempty() {
+        let channels = [
+            LifecycleMutationChannel::HostAdminRpc,
+            LifecycleMutationChannel::LocalFileEdit,
+            LifecycleMutationChannel::OfflineArtifact,
+        ];
+        let desired = [
+            DesiredLifecycleState::Installed,
+            DesiredLifecycleState::Enabled,
+            DesiredLifecycleState::Disabled,
+        ];
+        let observed = [
+            ObservedLifecycleState::Running,
+            ObservedLifecycleState::Stopped,
+            ObservedLifecycleState::Unknown,
+        ];
+        for ch in channels {
+            for d in desired {
+                for o in observed {
+                    let r = lifecycle_mutation_result("test", "c", ch, d, o, None);
+                    assert!(
+                        !r.caveat.is_empty(),
+                        "Empty caveat for channel={ch:?}, desired={d:?}, observed={o:?}"
+                    );
+                }
+            }
         }
     }
 }

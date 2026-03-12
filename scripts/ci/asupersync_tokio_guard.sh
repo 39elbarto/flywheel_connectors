@@ -121,6 +121,7 @@ jq --argjson now "${NOW_EPOCH}" '
 jq --slurpfile exceptions "${ACTIVE_DEP_EXCEPTIONS_JSON}" '
     [
       .[] as $dep
+      | $dep
       | select(
           (
             [

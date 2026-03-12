@@ -66,6 +66,14 @@
       "reason": "Host runtime migration not complete"
     },
     {
+      "crate": "fwc",
+      "dependency": "tokio",
+      "kind": "normal",
+      "owner_bead": "flywheel_connectors-1ud0u.4",
+      "expires_on": "2026-03-21T00:00:00Z",
+      "reason": "CLI stdio/runtime seam still depends on Tokio pending main.rs and transport cutover"
+    },
+    {
       "crate": "fcp-oauth",
       "dependency": "tokio",
       "kind": "any",

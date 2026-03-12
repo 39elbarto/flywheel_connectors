@@ -666,29 +666,59 @@ where
     }));
 }
 
-async fn serve_tcp(listener: TcpListener, app: Router) -> HostResult<()> {
+async fn serve_tcp(
+    listener: TcpListener,
+    app: Router,
+    mut shutdown_rx: fcp_async_core::channel::watch::Receiver<bool>,
+) -> HostResult<()> {
     loop {
-        match listener.accept().await {
-            Ok((stream, addr)) => {
-                tracing::debug!(transport = "tcp", remote_addr = %addr, "accepted connection");
-                spawn_http_connection(TokioIo::new(stream), app.clone());
+        let accept = listener.accept();
+        let shutdown = shutdown_rx.changed();
+        let mut accept = pin!(accept);
+        let mut shutdown = pin!(shutdown);
+        match futures_util::future::select(accept.as_mut(), shutdown.as_mut()).await {
+            futures_util::future::Either::Left((result, _)) => match result {
+                Ok((stream, addr)) => {
+                    tracing::debug!(transport = "tcp", remote_addr = %addr, "accepted connection");
+                    spawn_http_connection(TokioIo::new(stream), app.clone());
+                }
+                Err(err) => handle_accept_error(err).await,
+            },
+            futures_util::future::Either::Right(_) => {
+                tracing::info!(event = "shutdown_signal", transport = "tcp", "stopping accept loop");
+                break;
             }
-            Err(err) => handle_accept_error(err).await,
         }
     }
+    Ok(())
 }
 
 #[cfg(unix)]
-async fn serve_unix(listener: UnixListener, app: Router) -> HostResult<()> {
+async fn serve_unix(
+    listener: UnixListener,
+    app: Router,
+    mut shutdown_rx: fcp_async_core::channel::watch::Receiver<bool>,
+) -> HostResult<()> {
     loop {
-        match listener.accept().await {
-            Ok((stream, addr)) => {
-                tracing::debug!(transport = "unix", remote_addr = ?addr, "accepted connection");
-                spawn_http_connection(TokioIo::new(stream), app.clone());
+        let accept = listener.accept();
+        let shutdown = shutdown_rx.changed();
+        let mut accept = pin!(accept);
+        let mut shutdown = pin!(shutdown);
+        match futures_util::future::select(accept.as_mut(), shutdown.as_mut()).await {
+            futures_util::future::Either::Left((result, _)) => match result {
+                Ok((stream, addr)) => {
+                    tracing::debug!(transport = "unix", remote_addr = ?addr, "accepted connection");
+                    spawn_http_connection(TokioIo::new(stream), app.clone());
+                }
+                Err(err) => handle_accept_error(err).await,
+            },
+            futures_util::future::Either::Right(_) => {
+                tracing::info!(event = "shutdown_signal", transport = "unix", "stopping accept loop");
+                break;
             }
-            Err(err) => handle_accept_error(err).await,
         }
     }
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -1984,7 +2014,15 @@ async fn async_main() -> HostResult<()> {
             "/rpc/admin/events/acknowledge",
             post(event_acknowledge_handler),
         )
-        .with_state(state);
+        .with_state(Arc::clone(&state));
+
+    let (shutdown_tx, shutdown_rx) = fcp_async_core::channel::watch::channel(false);
+
+    // Spawn signal handler task.
+    let signal_state = Arc::clone(&state);
+    task::spawn(async move {
+        signal_handler_loop(signal_state, shutdown_tx).await;
+    });
 
     match bind_target {
         BindTarget::Tcp(addr) => {
@@ -1992,7 +2030,7 @@ async fn async_main() -> HostResult<()> {
                 .await
                 .map_err(|err| HostError::Internal(format!("tcp bind error: {err}")))?;
             tracing::info!(transport = "tcp", %addr, "fcp-host listening");
-            serve_tcp(listener, app).await?;
+            serve_tcp(listener, app, shutdown_rx).await?;
         }
         #[cfg(unix)]
         BindTarget::Unix(path) => {
@@ -2005,11 +2043,114 @@ async fn async_main() -> HostResult<()> {
                 socket_path = %path.display(),
                 "fcp-host listening"
             );
-            serve_unix(listener, app).await?;
+            serve_unix(listener, app, shutdown_rx).await?;
         }
     }
 
+    tracing::info!(event = "host_shutdown_complete", "fcp-host exiting cleanly");
     Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Signal handling
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(unix)]
+async fn signal_handler_loop(
+    state: Arc<AppState>,
+    shutdown_tx: fcp_async_core::channel::watch::Sender<bool>,
+) {
+    use futures_util::StreamExt;
+    use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
+
+    let mut signals =
+        signal_hook_tokio::Signals::new([SIGHUP, SIGTERM, SIGINT]).expect("register signal handlers");
+
+    while let Some(sig) = signals.next().await {
+        match sig {
+            SIGHUP => {
+                tracing::info!(event = "sighup_received", "reloading connector configuration");
+                match reload_connectors(&state).await {
+                    Ok(count) => {
+                        tracing::info!(
+                            event = "config_reload_complete",
+                            connectors_reloaded = count,
+                            "configuration reloaded successfully"
+                        );
+                    }
+                    Err(err) => {
+                        tracing::error!(
+                            event = "config_reload_failed",
+                            error = %err,
+                            "configuration reload failed; continuing with previous config"
+                        );
+                    }
+                }
+            }
+            SIGTERM => {
+                tracing::info!(event = "sigterm_received", "initiating graceful shutdown");
+                let _ = shutdown_tx.send(true);
+                break;
+            }
+            SIGINT => {
+                tracing::info!(event = "sigint_received", "initiating graceful shutdown");
+                let _ = shutdown_tx.send(true);
+                break;
+            }
+            _ => {}
+        }
+    }
+}
+
+#[cfg(not(unix))]
+async fn signal_handler_loop(
+    _state: Arc<AppState>,
+    shutdown_tx: fcp_async_core::channel::watch::Sender<bool>,
+) {
+    // On non-Unix platforms, wait for Ctrl+C via signal-hook.
+    use futures_util::StreamExt;
+    use signal_hook::consts::SIGINT;
+
+    let mut signals =
+        signal_hook_tokio::Signals::new([SIGINT]).expect("register signal handlers");
+    if let Some(_sig) = signals.next().await {
+        tracing::info!(event = "ctrl_c_received", "initiating graceful shutdown");
+        let _ = shutdown_tx.send(true);
+    }
+}
+
+/// Reload connector configuration from disk without restarting the host.
+///
+/// Re-reads the connectors config file, applies changes to the subprocess
+/// registry (adding/updating/removing connectors), and reconciles the
+/// lifecycle state with the updated inventory.
+#[cfg(unix)]
+async fn reload_connectors(state: &AppState) -> Result<usize, HostError> {
+    let loaded = load_connector_configs()?;
+    let count = loaded.configs.len();
+
+    // Apply the new config set (handles add/update/remove diff).
+    let report = state.registry.apply_configs(loaded.configs).await?;
+    tracing::info!(
+        event = "config_reload_applied",
+        added = report.added.len(),
+        updated = report.updated.len(),
+        removed = report.removed.len(),
+        unchanged = report.unchanged.len(),
+        registry_version = report.registry_version,
+        "registry updated from reloaded config"
+    );
+
+    // Reconcile lifecycle state with the new inventory.
+    let inventory = state.registry.list().await;
+    let reconciliation = state
+        .lifecycle
+        .reconcile_registered_connectors(&inventory)
+        .await
+        .map_err(|e| HostError::Internal(format!("reconciliation failed: {e}")))?;
+    log_startup_reconciliation(&reconciliation);
+
+    Ok(count)
 }
 
 async fn doctor_handler(

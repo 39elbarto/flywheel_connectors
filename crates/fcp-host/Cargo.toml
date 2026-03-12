@@ -51,6 +51,10 @@ hyper-util = { version = "0.1.20", features = ["server", "service", "http1", "ht
 tower = { version = "0.5.3", features = ["util"] }
 fcp-sandbox = { version = "0.1.0", path = "../fcp-sandbox" }
 
+# Signal handling (used by fcp-host binary for SIGHUP/SIGTERM/SIGINT)
+signal-hook = "0.3"
+signal-hook-tokio = { version = "0.3", features = ["futures-v0_3"] }
+
 [dev-dependencies]
 asupersync = { path = "/dp/asupersync" }
 fcp-conformance = { path = "../fcp-conformance" }

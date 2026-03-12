@@ -16,8 +16,6 @@
 //! - CPU overhead: < 1% idle (event-driven)
 //! - Binary size: < 20MB compressed
 
-#![allow(dead_code)]
-
 use anyhow::{anyhow, bail};
 use chrono::{DateTime, Utc};
 use clap::{Args, Subcommand};

@@ -20,7 +20,7 @@ mod batch;
 mod batch_file;
 #[allow(dead_code)] // Progress tracking wired when host integration lands.
 mod batch_progress;
-#[allow(dead_code)] // Benchmark suite for FCP primitives.
+#[allow(dead_code, clippy::redundant_pub_crate, clippy::needless_borrows_for_generic_args)]
 mod bench_cmd;
 mod catalog;
 #[allow(dead_code)] // Event checkpoint and replay from sequence/time.
@@ -42,6 +42,8 @@ mod fallback_routing;
 mod format_table;
 #[allow(dead_code)] // Cross-connector health aggregation dashboard.
 mod health;
+#[allow(dead_code)] // History replay, clone, and input-override flows.
+mod history_replay;
 #[allow(
     dead_code,
     clippy::writeln_empty_string,
@@ -96,6 +98,14 @@ mod secretless;
 mod serve_mcp;
 #[allow(dead_code)]
 mod session;
+#[cfg(test)]
+mod snapshot_help;
+#[cfg(test)]
+mod snapshot_invariants;
+#[cfg(test)]
+mod snapshot_recovery;
+#[cfg(test)]
+mod snapshot_workflow;
 mod supply_chain_cmd;
 mod template;
 #[allow(dead_code)] // Test observability contract: logging, artifact, redaction, and replay.

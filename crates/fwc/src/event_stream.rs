@@ -53,7 +53,6 @@ impl ConnectorEvent {
     }
 
     /// Format as a single-line JSON string.
-    #[allow(dead_code)] // Used in tests and available for JSON output mode.
     pub fn format_json(&self) -> String {
         serde_json::to_string(self).unwrap_or_default()
     }
@@ -109,14 +108,12 @@ pub fn parse_since(s: &str) -> Result<u64, String> {
 ///
 /// When full, the oldest events are dropped to make room for new ones.
 #[derive(Debug)]
-#[allow(dead_code)] // Used in tests; wired for live streaming in later beads.
 pub struct EventBuffer {
     events: VecDeque<ConnectorEvent>,
     capacity: usize,
     dropped: u64,
 }
 
-#[allow(dead_code)] // Used in tests; wired for live streaming in later beads.
 impl EventBuffer {
     /// Create a new buffer with the given capacity.
     pub fn new(capacity: usize) -> Self {
@@ -258,6 +255,291 @@ pub struct TailSummary {
     pub streams: Vec<ConnectorStreamState>,
     pub total_events: u64,
     pub dropped_events: u64,
+}
+
+// ── Event filtering ─────────────────────────────────────────────────────
+
+/// Comparison operator for field-level matching.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum FieldOp {
+    /// Exact string equality.
+    Eq,
+    /// Substring match.
+    Contains,
+    /// Simple pattern match (prefix*, *suffix, *infix*).
+    Regex,
+    /// Numeric greater-than comparison.
+    Gt,
+    /// Numeric less-than comparison.
+    Lt,
+}
+
+/// A single event filter predicate.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub enum EventFilter {
+    /// Exact match on `event_type`.
+    TypeExact(String),
+    /// Glob pattern match on `event_type` (supports `*` and `?`).
+    TypeGlob(String),
+    /// Simple pattern match on `event_type` (prefix/suffix/contains).
+    TypeRegex(String),
+    /// Match on an arbitrary data field.
+    FieldMatch {
+        field: String,
+        op: FieldOp,
+        value: String,
+    },
+    /// Negate an inner filter.
+    Exclude(Box<Self>),
+}
+
+/// An ordered chain of filters applied with AND logic.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct FilterChain {
+    filters: Vec<EventFilter>,
+}
+
+/// Resolve a dot-separated field path against a JSON value.
+///
+/// For example, `resolve_field(data, "channel.name")` walks
+/// `data["channel"]["name"]`.
+#[allow(dead_code)]
+pub fn resolve_field<'a>(data: &'a Value, path: &str) -> Option<&'a Value> {
+    let mut current = data;
+    for segment in path.split('.') {
+        match current {
+            Value::Object(map) => {
+                current = map.get(segment)?;
+            }
+            Value::Array(arr) => {
+                let idx: usize = segment.parse().ok()?;
+                current = arr.get(idx)?;
+            }
+            _ => return None,
+        }
+    }
+    Some(current)
+}
+
+/// Simple glob matching supporting `*` (any chars) and `?` (single char).
+///
+/// This is a recursive implementation that handles patterns like
+/// `message.*`, `*.error`, `deploy?`, and `*`.
+fn glob_matches(pattern: &str, text: &str) -> bool {
+    glob_match_bytes(pattern.as_bytes(), text.as_bytes())
+}
+
+fn glob_match_bytes(pat: &[u8], txt: &[u8]) -> bool {
+    match (pat.first(), txt.first()) {
+        (None, None) => true,
+        (Some(b'*'), _) => {
+            // '*' matches zero chars (skip the star) or one char (consume one text char)
+            glob_match_bytes(&pat[1..], txt)
+                || (!txt.is_empty() && glob_match_bytes(pat, &txt[1..]))
+        }
+        (Some(b'?'), Some(_)) => glob_match_bytes(&pat[1..], &txt[1..]),
+        (Some(&p), Some(&t)) if p == t => glob_match_bytes(&pat[1..], &txt[1..]),
+        _ => false,
+    }
+}
+
+/// Extract a string representation from a JSON value for comparison purposes.
+fn value_as_string(v: &Value) -> Option<String> {
+    match v {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        Value::Bool(b) => Some(b.to_string()),
+        Value::Null => None,
+        _ => Some(v.to_string()),
+    }
+}
+
+/// Parse a filter expression string into an `EventFilter`.
+///
+/// Supported syntaxes:
+/// - `type=message.new` → `TypeExact("message.new")`
+/// - `type~deploy*` → `TypeGlob("deploy*")`
+/// - `type/^message` → `TypeRegex("^message")`
+/// - `data.channel=#general` → `FieldMatch { field: "channel", op: Eq, value: "#general" }`
+/// - `data.text~bug` → `FieldMatch { field: "text", op: Contains, value: "bug" }`
+/// - `data.count>5` → `FieldMatch { field: "count", op: Gt, value: "5" }`
+/// - `data.count<10` → `FieldMatch { field: "count", op: Lt, value: "10" }`
+/// - `!type=reaction.*` → `Exclude(TypeExact("reaction.*"))`
+#[allow(dead_code)]
+pub fn parse_filter_expr(s: &str) -> Result<EventFilter, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("empty filter expression".to_owned());
+    }
+
+    // Handle negation prefix
+    if let Some(inner) = s.strip_prefix('!') {
+        let inner_filter = parse_filter_expr(inner)?;
+        return Ok(EventFilter::Exclude(Box::new(inner_filter)));
+    }
+
+    // Check for type-based filters
+    if let Some(rest) = s.strip_prefix("type=") {
+        return Ok(EventFilter::TypeExact(rest.to_owned()));
+    }
+    if let Some(rest) = s.strip_prefix("type~") {
+        return Ok(EventFilter::TypeGlob(rest.to_owned()));
+    }
+    if let Some(rest) = s.strip_prefix("type/") {
+        return Ok(EventFilter::TypeRegex(rest.to_owned()));
+    }
+
+    // Check for data field filters: data.<path><op><value>
+    if let Some(rest) = s.strip_prefix("data.") {
+        // Find the operator character
+        if let Some(pos) = rest.find(['=', '~', '>', '<']) {
+            let field = &rest[..pos];
+            let op_char = rest.as_bytes()[pos];
+            let value = &rest[pos + 1..];
+
+            if field.is_empty() {
+                return Err(format!("empty field name in filter: '{s}'"));
+            }
+
+            let op = match op_char {
+                b'=' => FieldOp::Eq,
+                b'~' => FieldOp::Contains,
+                b'>' => FieldOp::Gt,
+                b'<' => FieldOp::Lt,
+                _ => return Err(format!("unknown operator in filter: '{s}'")),
+            };
+
+            return Ok(EventFilter::FieldMatch {
+                field: field.to_owned(),
+                op,
+                value: value.to_owned(),
+            });
+        }
+        return Err(format!("no operator found in field filter: '{s}'"));
+    }
+
+    Err(format!("unrecognized filter syntax: '{s}'"))
+}
+
+impl EventFilter {
+    /// Test whether a `ConnectorEvent` matches this filter.
+    #[allow(dead_code)]
+    pub fn matches(&self, event: &ConnectorEvent) -> bool {
+        match self {
+            Self::TypeExact(expected) => event.event_type == *expected,
+            Self::TypeGlob(pattern) => glob_matches(pattern, &event.event_type),
+            Self::TypeRegex(pattern) => simple_pattern_match(pattern, &event.event_type),
+            Self::FieldMatch { field, op, value } => {
+                let resolved = resolve_field(&event.data, field);
+                let resolved_str = resolved.and_then(value_as_string);
+                match op {
+                    FieldOp::Eq => resolved_str.as_deref() == Some(value.as_str()),
+                    FieldOp::Contains => resolved_str
+                        .as_deref()
+                        .is_some_and(|s| s.contains(value.as_str())),
+                    FieldOp::Regex => resolved_str
+                        .as_deref()
+                        .is_some_and(|s| simple_pattern_match(value, s)),
+                    FieldOp::Gt => {
+                        if let (Some(resolved_val), Ok(threshold)) =
+                            (resolved.and_then(Value::as_f64), value.parse::<f64>())
+                        {
+                            resolved_val > threshold
+                        } else {
+                            false
+                        }
+                    }
+                    FieldOp::Lt => {
+                        if let (Some(resolved_val), Ok(threshold)) =
+                            (resolved.and_then(Value::as_f64), value.parse::<f64>())
+                        {
+                            resolved_val < threshold
+                        } else {
+                            false
+                        }
+                    }
+                }
+            }
+            Self::Exclude(inner) => !inner.matches(event),
+        }
+    }
+}
+
+/// Simple pattern matching without a regex engine.
+///
+/// Supports:
+/// - `^prefix` — starts with
+/// - `suffix$` — ends with
+/// - `^exact$` — exact match
+/// - `substring` — contains
+fn simple_pattern_match(pattern: &str, text: &str) -> bool {
+    let starts = pattern.starts_with('^');
+    let ends = pattern.ends_with('$');
+
+    match (starts, ends) {
+        (true, true) => {
+            // ^exact$
+            let inner = &pattern[1..pattern.len() - 1];
+            text == inner
+        }
+        (true, false) => {
+            // ^prefix
+            let prefix = &pattern[1..];
+            text.starts_with(prefix)
+        }
+        (false, true) => {
+            // suffix$
+            let suffix = &pattern[..pattern.len() - 1];
+            text.ends_with(suffix)
+        }
+        (false, false) => {
+            // substring
+            text.contains(pattern)
+        }
+    }
+}
+
+impl FilterChain {
+    /// Create a new filter chain.
+    #[allow(dead_code)]
+    pub const fn new(filters: Vec<EventFilter>) -> Self {
+        Self { filters }
+    }
+
+    /// Create an empty filter chain (matches everything).
+    #[allow(dead_code)]
+    pub const fn empty() -> Self {
+        Self {
+            filters: Vec::new(),
+        }
+    }
+
+    /// Add a filter to the chain.
+    #[allow(dead_code)]
+    pub fn push(&mut self, filter: EventFilter) {
+        self.filters.push(filter);
+    }
+
+    /// Test whether an event matches ALL filters in the chain.
+    #[allow(dead_code)]
+    pub fn matches_all(&self, event: &ConnectorEvent) -> bool {
+        self.filters.iter().all(|f| f.matches(event))
+    }
+
+    /// Number of filters in the chain.
+    #[allow(dead_code)]
+    pub fn len(&self) -> usize {
+        self.filters.len()
+    }
+
+    /// Whether the chain is empty.
+    #[allow(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        self.filters.is_empty()
+    }
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────
@@ -1957,5 +2239,933 @@ mod tests {
         };
         assert_eq!(config.since_seconds, Some(600));
         assert_eq!(config.connectors.len(), 2);
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // Event filtering tests
+    // ══════════════════════════════════════════════════════════════════
+
+    fn filter_event(event_type: &str, data: Value) -> ConnectorEvent {
+        ConnectorEvent {
+            timestamp: "2026-06-01T12:00:00Z".to_owned(),
+            connector: "test".to_owned(),
+            event_type: event_type.to_owned(),
+            context: None,
+            summary: None,
+            data,
+        }
+    }
+
+    // ── TypeExact filter ─────────────────────────────────────────
+
+    #[test]
+    fn type_exact_matches_identical() {
+        let f = EventFilter::TypeExact("message.new".to_owned());
+        let e = filter_event("message.new", json!({}));
+        assert!(f.matches(&e));
+    }
+
+    #[test]
+    fn type_exact_rejects_different() {
+        let f = EventFilter::TypeExact("message.new".to_owned());
+        let e = filter_event("message.edit", json!({}));
+        assert!(!f.matches(&e));
+    }
+
+    #[test]
+    fn type_exact_case_sensitive() {
+        let f = EventFilter::TypeExact("Message.New".to_owned());
+        let e = filter_event("message.new", json!({}));
+        assert!(!f.matches(&e));
+    }
+
+    #[test]
+    fn type_exact_empty_string() {
+        let f = EventFilter::TypeExact("".to_owned());
+        let e = filter_event("", json!({}));
+        assert!(f.matches(&e));
+    }
+
+    #[test]
+    fn type_exact_no_partial_match() {
+        let f = EventFilter::TypeExact("message".to_owned());
+        let e = filter_event("message.new", json!({}));
+        assert!(!f.matches(&e));
+    }
+
+    // ── TypeGlob filter ──────────────────────────────────────────
+
+    #[test]
+    fn type_glob_star_suffix() {
+        let f = EventFilter::TypeGlob("message.*".to_owned());
+        let e = filter_event("message.new", json!({}));
+        assert!(f.matches(&e));
+    }
+
+    #[test]
+    fn type_glob_star_prefix() {
+        let f = EventFilter::TypeGlob("*.error".to_owned());
+        let e = filter_event("deploy.error", json!({}));
+        assert!(f.matches(&e));
+    }
+
+    #[test]
+    fn type_glob_star_both() {
+        let f = EventFilter::TypeGlob("*message*".to_owned());
+        let e = filter_event("slack.message.new", json!({}));
+        assert!(f.matches(&e));
+    }
+
+    #[test]
+    fn type_glob_just_star() {
+        let f = EventFilter::TypeGlob("*".to_owned());
+        let e = filter_event("anything.at.all", json!({}));
+        assert!(f.matches(&e));
+    }
+
+    #[test]
+    fn type_glob_question_mark() {
+        let f = EventFilter::TypeGlob("deploy?".to_owned());
+        assert!(f.matches(&filter_event("deployX", json!({}))));
+        assert!(!f.matches(&filter_event("deploy", json!({}))));
+        assert!(!f.matches(&filter_event("deployXY", json!({}))));
+    }
+
+    #[test]
+    fn type_glob_no_match() {
+        let f = EventFilter::TypeGlob("message.*".to_owned());
+        let e = filter_event("issue.created", json!({}));
+        assert!(!f.matches(&e));
+    }
+
+    #[test]
+    fn type_glob_exact_match_no_wildcards() {
+        let f = EventFilter::TypeGlob("message.new".to_owned());
+        let e = filter_event("message.new", json!({}));
+        assert!(f.matches(&e));
+    }
+
+    #[test]
+    fn type_glob_empty_pattern_matches_empty() {
+        let f = EventFilter::TypeGlob("".to_owned());
+        assert!(f.matches(&filter_event("", json!({}))));
+        assert!(!f.matches(&filter_event("x", json!({}))));
+    }
+
+    #[test]
+    fn type_glob_multiple_stars() {
+        let f = EventFilter::TypeGlob("*.*.*".to_owned());
+        assert!(f.matches(&filter_event("a.b.c", json!({}))));
+        assert!(f.matches(&filter_event("deploy.staging.error", json!({}))));
+        assert!(!f.matches(&filter_event("ab", json!({}))));
+    }
+
+    #[test]
+    fn type_glob_mixed_star_question() {
+        let f = EventFilter::TypeGlob("msg.?ew*".to_owned());
+        assert!(f.matches(&filter_event("msg.new", json!({}))));
+        assert!(f.matches(&filter_event("msg.new.extra", json!({}))));
+        assert!(!f.matches(&filter_event("msg.old", json!({}))));
+    }
+
+    // ── TypeRegex (simple pattern) filter ────────────────────────
+
+    #[test]
+    fn type_regex_starts_with() {
+        let f = EventFilter::TypeRegex("^message".to_owned());
+        assert!(f.matches(&filter_event("message.new", json!({}))));
+        assert!(!f.matches(&filter_event("issue.message", json!({}))));
+    }
+
+    #[test]
+    fn type_regex_ends_with() {
+        let f = EventFilter::TypeRegex("error$".to_owned());
+        assert!(f.matches(&filter_event("deploy.error", json!({}))));
+        assert!(!f.matches(&filter_event("error.detail", json!({}))));
+    }
+
+    #[test]
+    fn type_regex_exact() {
+        let f = EventFilter::TypeRegex("^message.new$".to_owned());
+        assert!(f.matches(&filter_event("message.new", json!({}))));
+        assert!(!f.matches(&filter_event("message.new.x", json!({}))));
+    }
+
+    #[test]
+    fn type_regex_contains_substring() {
+        let f = EventFilter::TypeRegex("sage".to_owned());
+        assert!(f.matches(&filter_event("message.new", json!({}))));
+        assert!(!f.matches(&filter_event("issue.created", json!({}))));
+    }
+
+    // ── FieldMatch Eq ────────────────────────────────────────────
+
+    #[test]
+    fn field_eq_string_match() {
+        let f = EventFilter::FieldMatch {
+            field: "channel".to_owned(),
+            op: FieldOp::Eq,
+            value: "#general".to_owned(),
+        };
+        let e = filter_event("msg", json!({"channel": "#general"}));
+        assert!(f.matches(&e));
+    }
+
+    #[test]
+    fn field_eq_string_no_match() {
+        let f = EventFilter::FieldMatch {
+            field: "channel".to_owned(),
+            op: FieldOp::Eq,
+            value: "#general".to_owned(),
+        };
+        let e = filter_event("msg", json!({"channel": "#random"}));
+        assert!(!f.matches(&e));
+    }
+
+    #[test]
+    fn field_eq_missing_field() {
+        let f = EventFilter::FieldMatch {
+            field: "channel".to_owned(),
+            op: FieldOp::Eq,
+            value: "#general".to_owned(),
+        };
+        let e = filter_event("msg", json!({"text": "hello"}));
+        assert!(!f.matches(&e));
+    }
+
+    #[test]
+    fn field_eq_nested_field() {
+        let f = EventFilter::FieldMatch {
+            field: "channel.name".to_owned(),
+            op: FieldOp::Eq,
+            value: "general".to_owned(),
+        };
+        let e = filter_event("msg", json!({"channel": {"name": "general", "id": "C123"}}));
+        assert!(f.matches(&e));
+    }
+
+    #[test]
+    fn field_eq_numeric_as_string() {
+        let f = EventFilter::FieldMatch {
+            field: "count".to_owned(),
+            op: FieldOp::Eq,
+            value: "42".to_owned(),
+        };
+        let e = filter_event("metric", json!({"count": 42}));
+        assert!(f.matches(&e));
+    }
+
+    #[test]
+    fn field_eq_boolean_as_string() {
+        let f = EventFilter::FieldMatch {
+            field: "active".to_owned(),
+            op: FieldOp::Eq,
+            value: "true".to_owned(),
+        };
+        let e = filter_event("status", json!({"active": true}));
+        assert!(f.matches(&e));
+    }
+
+    // ── FieldMatch Contains ──────────────────────────────────────
+
+    #[test]
+    fn field_contains_substring() {
+        let f = EventFilter::FieldMatch {
+            field: "text".to_owned(),
+            op: FieldOp::Contains,
+            value: "bug".to_owned(),
+        };
+        let e = filter_event("msg", json!({"text": "found a bug in production"}));
+        assert!(f.matches(&e));
+    }
+
+    #[test]
+    fn field_contains_no_match() {
+        let f = EventFilter::FieldMatch {
+            field: "text".to_owned(),
+            op: FieldOp::Contains,
+            value: "bug".to_owned(),
+        };
+        let e = filter_event("msg", json!({"text": "everything is fine"}));
+        assert!(!f.matches(&e));
+    }
+
+    #[test]
+    fn field_contains_empty_value_matches_all() {
+        let f = EventFilter::FieldMatch {
+            field: "text".to_owned(),
+            op: FieldOp::Contains,
+            value: "".to_owned(),
+        };
+        let e = filter_event("msg", json!({"text": "anything"}));
+        assert!(f.matches(&e));
+    }
+
+    #[test]
+    fn field_contains_missing_field() {
+        let f = EventFilter::FieldMatch {
+            field: "text".to_owned(),
+            op: FieldOp::Contains,
+            value: "bug".to_owned(),
+        };
+        let e = filter_event("msg", json!({"channel": "general"}));
+        assert!(!f.matches(&e));
+    }
+
+    // ── FieldMatch Regex (simple pattern) ────────────────────────
+
+    #[test]
+    fn field_regex_prefix() {
+        let f = EventFilter::FieldMatch {
+            field: "status".to_owned(),
+            op: FieldOp::Regex,
+            value: "^error".to_owned(),
+        };
+        let e = filter_event("alert", json!({"status": "error: timeout"}));
+        assert!(f.matches(&e));
+    }
+
+    #[test]
+    fn field_regex_suffix() {
+        let f = EventFilter::FieldMatch {
+            field: "status".to_owned(),
+            op: FieldOp::Regex,
+            value: "ok$".to_owned(),
+        };
+        assert!(f.matches(&filter_event("check", json!({"status": "all ok"}))));
+        assert!(!f.matches(&filter_event("check", json!({"status": "ok sure"}))));
+    }
+
+    // ── FieldMatch Gt / Lt ───────────────────────────────────────
+
+    #[test]
+    fn field_gt_numeric() {
+        let f = EventFilter::FieldMatch {
+            field: "count".to_owned(),
+            op: FieldOp::Gt,
+            value: "10".to_owned(),
+        };
+        assert!(f.matches(&filter_event("metric", json!({"count": 15}))));
+        assert!(!f.matches(&filter_event("metric", json!({"count": 10}))));
+        assert!(!f.matches(&filter_event("metric", json!({"count": 5}))));
+    }
+
+    #[test]
+    fn field_lt_numeric() {
+        let f = EventFilter::FieldMatch {
+            field: "latency".to_owned(),
+            op: FieldOp::Lt,
+            value: "100".to_owned(),
+        };
+        assert!(f.matches(&filter_event("perf", json!({"latency": 50}))));
+        assert!(!f.matches(&filter_event("perf", json!({"latency": 100}))));
+        assert!(!f.matches(&filter_event("perf", json!({"latency": 200}))));
+    }
+
+    #[test]
+    fn field_gt_float_value() {
+        let f = EventFilter::FieldMatch {
+            field: "score".to_owned(),
+            op: FieldOp::Gt,
+            value: "3.5".to_owned(),
+        };
+        assert!(f.matches(&filter_event("eval", json!({"score": 4.2}))));
+        assert!(!f.matches(&filter_event("eval", json!({"score": 3.5}))));
+        assert!(!f.matches(&filter_event("eval", json!({"score": 2.0}))));
+    }
+
+    #[test]
+    fn field_gt_non_numeric_returns_false() {
+        let f = EventFilter::FieldMatch {
+            field: "name".to_owned(),
+            op: FieldOp::Gt,
+            value: "5".to_owned(),
+        };
+        let e = filter_event("test", json!({"name": "alice"}));
+        assert!(!f.matches(&e));
+    }
+
+    #[test]
+    fn field_lt_missing_field() {
+        let f = EventFilter::FieldMatch {
+            field: "missing".to_owned(),
+            op: FieldOp::Lt,
+            value: "10".to_owned(),
+        };
+        let e = filter_event("test", json!({"other": 5}));
+        assert!(!f.matches(&e));
+    }
+
+    #[test]
+    fn field_gt_invalid_threshold() {
+        let f = EventFilter::FieldMatch {
+            field: "count".to_owned(),
+            op: FieldOp::Gt,
+            value: "not_a_number".to_owned(),
+        };
+        let e = filter_event("test", json!({"count": 42}));
+        assert!(!f.matches(&e));
+    }
+
+    // ── Exclude filter ───────────────────────────────────────────
+
+    #[test]
+    fn exclude_type_exact() {
+        let f = EventFilter::Exclude(Box::new(EventFilter::TypeExact("heartbeat".to_owned())));
+        assert!(f.matches(&filter_event("message.new", json!({}))));
+        assert!(!f.matches(&filter_event("heartbeat", json!({}))));
+    }
+
+    #[test]
+    fn exclude_type_glob() {
+        let f = EventFilter::Exclude(Box::new(EventFilter::TypeGlob("reaction.*".to_owned())));
+        assert!(f.matches(&filter_event("message.new", json!({}))));
+        assert!(!f.matches(&filter_event("reaction.added", json!({}))));
+        assert!(!f.matches(&filter_event("reaction.removed", json!({}))));
+    }
+
+    #[test]
+    fn exclude_field_match() {
+        let inner = EventFilter::FieldMatch {
+            field: "source".to_owned(),
+            op: FieldOp::Eq,
+            value: "bot".to_owned(),
+        };
+        let f = EventFilter::Exclude(Box::new(inner));
+        assert!(f.matches(&filter_event("msg", json!({"source": "user"}))));
+        assert!(!f.matches(&filter_event("msg", json!({"source": "bot"}))));
+    }
+
+    #[test]
+    fn double_exclude_is_identity() {
+        let inner = EventFilter::TypeExact("ping".to_owned());
+        let f = EventFilter::Exclude(Box::new(EventFilter::Exclude(Box::new(inner))));
+        assert!(f.matches(&filter_event("ping", json!({}))));
+        assert!(!f.matches(&filter_event("pong", json!({}))));
+    }
+
+    // ── resolve_field ────────────────────────────────────────────
+
+    #[test]
+    fn resolve_field_top_level() {
+        let data = json!({"channel": "#general"});
+        assert_eq!(resolve_field(&data, "channel").unwrap(), "#general");
+    }
+
+    #[test]
+    fn resolve_field_nested() {
+        let data = json!({"channel": {"name": "general", "id": "C123"}});
+        assert_eq!(resolve_field(&data, "channel.name").unwrap(), "general");
+    }
+
+    #[test]
+    fn resolve_field_deeply_nested() {
+        let data = json!({"a": {"b": {"c": {"d": "deep"}}}});
+        assert_eq!(resolve_field(&data, "a.b.c.d").unwrap(), "deep");
+    }
+
+    #[test]
+    fn resolve_field_missing_returns_none() {
+        let data = json!({"x": 1});
+        assert!(resolve_field(&data, "y").is_none());
+    }
+
+    #[test]
+    fn resolve_field_missing_nested_returns_none() {
+        let data = json!({"a": {"b": 1}});
+        assert!(resolve_field(&data, "a.c").is_none());
+    }
+
+    #[test]
+    fn resolve_field_on_non_object() {
+        let data = json!(42);
+        assert!(resolve_field(&data, "field").is_none());
+    }
+
+    #[test]
+    fn resolve_field_array_index() {
+        let data = json!({"items": [10, 20, 30]});
+        assert_eq!(resolve_field(&data, "items.1").unwrap(), 20);
+    }
+
+    #[test]
+    fn resolve_field_array_out_of_bounds() {
+        let data = json!({"items": [1, 2]});
+        assert!(resolve_field(&data, "items.5").is_none());
+    }
+
+    #[test]
+    fn resolve_field_null_data() {
+        let data = Value::Null;
+        assert!(resolve_field(&data, "anything").is_none());
+    }
+
+    #[test]
+    fn resolve_field_empty_path_segment() {
+        // Empty path = the root itself
+        let data = json!({"": "empty_key"});
+        assert_eq!(resolve_field(&data, "").unwrap(), "empty_key");
+    }
+
+    // ── glob_matches ─────────────────────────────────────────────
+
+    #[test]
+    fn glob_star_matches_everything() {
+        assert!(glob_matches("*", "anything"));
+        assert!(glob_matches("*", ""));
+    }
+
+    #[test]
+    fn glob_question_matches_single_char() {
+        assert!(glob_matches("?", "x"));
+        assert!(!glob_matches("?", ""));
+        assert!(!glob_matches("?", "xy"));
+    }
+
+    #[test]
+    fn glob_literal_match() {
+        assert!(glob_matches("hello", "hello"));
+        assert!(!glob_matches("hello", "world"));
+    }
+
+    #[test]
+    fn glob_prefix_star() {
+        assert!(glob_matches("*.rs", "main.rs"));
+        assert!(glob_matches("*.rs", ".rs"));
+        assert!(!glob_matches("*.rs", "main.py"));
+    }
+
+    #[test]
+    fn glob_suffix_star() {
+        assert!(glob_matches("msg*", "msg"));
+        assert!(glob_matches("msg*", "msg.new"));
+        assert!(glob_matches("mes*", "message"));
+        assert!(!glob_matches("msg*", "xmsg"));
+        assert!(!glob_matches("msg*", "message"));
+    }
+
+    #[test]
+    fn glob_middle_star() {
+        assert!(glob_matches("a*c", "abc"));
+        assert!(glob_matches("a*c", "aXYZc"));
+        assert!(glob_matches("a*c", "ac"));
+        assert!(!glob_matches("a*c", "acd"));
+    }
+
+    #[test]
+    fn glob_consecutive_stars() {
+        assert!(glob_matches("**", "anything"));
+        assert!(glob_matches("a**b", "ab"));
+        assert!(glob_matches("a**b", "aXb"));
+    }
+
+    // ── FilterChain ──────────────────────────────────────────────
+
+    #[test]
+    fn filter_chain_empty_matches_all() {
+        let chain = FilterChain::empty();
+        assert!(chain.matches_all(&filter_event("anything", json!({}))));
+    }
+
+    #[test]
+    fn filter_chain_single_filter() {
+        let chain = FilterChain::new(vec![EventFilter::TypeExact("ping".to_owned())]);
+        assert!(chain.matches_all(&filter_event("ping", json!({}))));
+        assert!(!chain.matches_all(&filter_event("pong", json!({}))));
+    }
+
+    #[test]
+    fn filter_chain_and_logic() {
+        let chain = FilterChain::new(vec![
+            EventFilter::TypeGlob("message.*".to_owned()),
+            EventFilter::FieldMatch {
+                field: "channel".to_owned(),
+                op: FieldOp::Eq,
+                value: "#general".to_owned(),
+            },
+        ]);
+        // Both match
+        assert!(chain.matches_all(&filter_event(
+            "message.new",
+            json!({"channel": "#general"})
+        )));
+        // Type matches but field doesn't
+        assert!(!chain.matches_all(&filter_event(
+            "message.new",
+            json!({"channel": "#random"})
+        )));
+        // Field matches but type doesn't
+        assert!(!chain.matches_all(&filter_event(
+            "issue.created",
+            json!({"channel": "#general"})
+        )));
+    }
+
+    #[test]
+    fn filter_chain_three_filters() {
+        let chain = FilterChain::new(vec![
+            EventFilter::TypeGlob("deploy.*".to_owned()),
+            EventFilter::FieldMatch {
+                field: "env".to_owned(),
+                op: FieldOp::Eq,
+                value: "prod".to_owned(),
+            },
+            EventFilter::Exclude(Box::new(EventFilter::FieldMatch {
+                field: "dry_run".to_owned(),
+                op: FieldOp::Eq,
+                value: "true".to_owned(),
+            })),
+        ]);
+        // All pass
+        assert!(chain.matches_all(&filter_event(
+            "deploy.start",
+            json!({"env": "prod", "dry_run": false})
+        )));
+        // Excluded by dry_run=true
+        assert!(!chain.matches_all(&filter_event(
+            "deploy.start",
+            json!({"env": "prod", "dry_run": true})
+        )));
+    }
+
+    #[test]
+    fn filter_chain_push() {
+        let mut chain = FilterChain::empty();
+        assert!(chain.is_empty());
+        chain.push(EventFilter::TypeExact("x".to_owned()));
+        assert_eq!(chain.len(), 1);
+        assert!(!chain.is_empty());
+    }
+
+    #[test]
+    fn filter_chain_len() {
+        let chain = FilterChain::new(vec![
+            EventFilter::TypeExact("a".to_owned()),
+            EventFilter::TypeExact("b".to_owned()),
+        ]);
+        assert_eq!(chain.len(), 2);
+    }
+
+    // ── parse_filter_expr ────────────────────────────────────────
+
+    #[test]
+    fn parse_type_exact() {
+        let f = parse_filter_expr("type=message.new").unwrap();
+        assert!(f.matches(&filter_event("message.new", json!({}))));
+        assert!(!f.matches(&filter_event("message.edit", json!({}))));
+    }
+
+    #[test]
+    fn parse_type_glob() {
+        let f = parse_filter_expr("type~deploy*").unwrap();
+        assert!(f.matches(&filter_event("deploy.start", json!({}))));
+        assert!(!f.matches(&filter_event("message.new", json!({}))));
+    }
+
+    #[test]
+    fn parse_type_regex() {
+        let f = parse_filter_expr("type/^message").unwrap();
+        assert!(f.matches(&filter_event("message.new", json!({}))));
+        assert!(!f.matches(&filter_event("issue.created", json!({}))));
+    }
+
+    #[test]
+    fn parse_data_field_eq() {
+        let f = parse_filter_expr("data.channel=#general").unwrap();
+        assert!(f.matches(&filter_event("msg", json!({"channel": "#general"}))));
+        assert!(!f.matches(&filter_event("msg", json!({"channel": "#random"}))));
+    }
+
+    #[test]
+    fn parse_data_field_contains() {
+        let f = parse_filter_expr("data.text~bug").unwrap();
+        assert!(f.matches(&filter_event("msg", json!({"text": "found a bug"}))));
+        assert!(!f.matches(&filter_event("msg", json!({"text": "all good"}))));
+    }
+
+    #[test]
+    fn parse_data_field_gt() {
+        let f = parse_filter_expr("data.count>5").unwrap();
+        assert!(f.matches(&filter_event("metric", json!({"count": 10}))));
+        assert!(!f.matches(&filter_event("metric", json!({"count": 3}))));
+    }
+
+    #[test]
+    fn parse_data_field_lt() {
+        let f = parse_filter_expr("data.latency<100").unwrap();
+        assert!(f.matches(&filter_event("perf", json!({"latency": 50}))));
+        assert!(!f.matches(&filter_event("perf", json!({"latency": 200}))));
+    }
+
+    #[test]
+    fn parse_exclude() {
+        let f = parse_filter_expr("!type=heartbeat").unwrap();
+        assert!(f.matches(&filter_event("message.new", json!({}))));
+        assert!(!f.matches(&filter_event("heartbeat", json!({}))));
+    }
+
+    #[test]
+    fn parse_exclude_glob() {
+        let f = parse_filter_expr("!type~reaction.*").unwrap();
+        assert!(f.matches(&filter_event("message.new", json!({}))));
+        assert!(!f.matches(&filter_event("reaction.added", json!({}))));
+    }
+
+    #[test]
+    fn parse_nested_data_field() {
+        let f = parse_filter_expr("data.user.name=alice").unwrap();
+        assert!(f.matches(&filter_event(
+            "msg",
+            json!({"user": {"name": "alice"}})
+        )));
+        assert!(!f.matches(&filter_event(
+            "msg",
+            json!({"user": {"name": "bob"}})
+        )));
+    }
+
+    #[test]
+    fn parse_filter_empty_is_error() {
+        assert!(parse_filter_expr("").is_err());
+    }
+
+    #[test]
+    fn parse_filter_whitespace_only_is_error() {
+        assert!(parse_filter_expr("   ").is_err());
+    }
+
+    #[test]
+    fn parse_filter_unrecognized_syntax() {
+        assert!(parse_filter_expr("garbage").is_err());
+    }
+
+    #[test]
+    fn parse_filter_data_no_operator() {
+        assert!(parse_filter_expr("data.field").is_err());
+    }
+
+    #[test]
+    fn parse_filter_data_empty_field_name() {
+        assert!(parse_filter_expr("data.=value").is_err());
+    }
+
+    #[test]
+    fn parse_filter_trimmed() {
+        let f = parse_filter_expr("  type=ping  ").unwrap();
+        assert!(f.matches(&filter_event("ping", json!({}))));
+    }
+
+    // ── simple_pattern_match ─────────────────────────────────────
+
+    #[test]
+    fn simple_pattern_prefix() {
+        assert!(simple_pattern_match("^hello", "hello world"));
+        assert!(!simple_pattern_match("^hello", "say hello"));
+    }
+
+    #[test]
+    fn simple_pattern_suffix() {
+        assert!(simple_pattern_match("world$", "hello world"));
+        assert!(!simple_pattern_match("world$", "world peace"));
+    }
+
+    #[test]
+    fn simple_pattern_exact() {
+        assert!(simple_pattern_match("^exact$", "exact"));
+        assert!(!simple_pattern_match("^exact$", "exactX"));
+        assert!(!simple_pattern_match("^exact$", "Xexact"));
+    }
+
+    #[test]
+    fn simple_pattern_contains() {
+        assert!(simple_pattern_match("mid", "the middle part"));
+        assert!(!simple_pattern_match("xyz", "the middle part"));
+    }
+
+    // ── Edge cases and integration ───────────────────────────────
+
+    #[test]
+    fn filter_with_null_data_field() {
+        let f = EventFilter::FieldMatch {
+            field: "value".to_owned(),
+            op: FieldOp::Eq,
+            value: "test".to_owned(),
+        };
+        let e = filter_event("test", json!({"value": null}));
+        assert!(!f.matches(&e));
+    }
+
+    #[test]
+    fn filter_with_empty_string_field() {
+        let f = EventFilter::FieldMatch {
+            field: "value".to_owned(),
+            op: FieldOp::Eq,
+            value: "".to_owned(),
+        };
+        let e = filter_event("test", json!({"value": ""}));
+        assert!(f.matches(&e));
+    }
+
+    #[test]
+    fn filter_on_array_data() {
+        let data = json!({"tags": ["urgent", "bug"]});
+        // Can't match array as string directly
+        let f = EventFilter::FieldMatch {
+            field: "tags".to_owned(),
+            op: FieldOp::Contains,
+            value: "urgent".to_owned(),
+        };
+        // The array serializes to a JSON string containing "urgent"
+        assert!(f.matches(&filter_event("issue", data)));
+    }
+
+    #[test]
+    fn filter_gt_negative_number() {
+        let f = EventFilter::FieldMatch {
+            field: "temp".to_owned(),
+            op: FieldOp::Gt,
+            value: "-5".to_owned(),
+        };
+        assert!(f.matches(&filter_event("sensor", json!({"temp": 0}))));
+        assert!(!f.matches(&filter_event("sensor", json!({"temp": -10}))));
+    }
+
+    #[test]
+    fn filter_lt_zero() {
+        let f = EventFilter::FieldMatch {
+            field: "balance".to_owned(),
+            op: FieldOp::Lt,
+            value: "0".to_owned(),
+        };
+        assert!(f.matches(&filter_event("account", json!({"balance": -1}))));
+        assert!(!f.matches(&filter_event("account", json!({"balance": 0}))));
+    }
+
+    #[test]
+    fn filter_chain_with_exclude_and_field() {
+        let chain = FilterChain::new(vec![
+            EventFilter::Exclude(Box::new(EventFilter::TypeExact("heartbeat".to_owned()))),
+            EventFilter::FieldMatch {
+                field: "priority".to_owned(),
+                op: FieldOp::Gt,
+                value: "3".to_owned(),
+            },
+        ]);
+        // Matches: not heartbeat AND priority > 3
+        assert!(chain.matches_all(&filter_event(
+            "alert",
+            json!({"priority": 5})
+        )));
+        // Rejected: is heartbeat
+        assert!(!chain.matches_all(&filter_event(
+            "heartbeat",
+            json!({"priority": 5})
+        )));
+        // Rejected: priority too low
+        assert!(!chain.matches_all(&filter_event(
+            "alert",
+            json!({"priority": 2})
+        )));
+    }
+
+    #[test]
+    fn filter_debug_format() {
+        let f = EventFilter::TypeExact("test".to_owned());
+        let debug = format!("{f:?}");
+        assert!(debug.contains("TypeExact"));
+        assert!(debug.contains("test"));
+    }
+
+    #[test]
+    fn filter_chain_debug_format() {
+        let chain = FilterChain::new(vec![EventFilter::TypeExact("x".to_owned())]);
+        let debug = format!("{chain:?}");
+        assert!(debug.contains("FilterChain"));
+    }
+
+    #[test]
+    fn field_op_debug_all_variants() {
+        let variants = [
+            (FieldOp::Eq, "Eq"),
+            (FieldOp::Contains, "Contains"),
+            (FieldOp::Regex, "Regex"),
+            (FieldOp::Gt, "Gt"),
+            (FieldOp::Lt, "Lt"),
+        ];
+        for (op, expected) in &variants {
+            let debug = format!("{op:?}");
+            assert!(debug.contains(expected));
+        }
+    }
+
+    #[test]
+    fn field_op_clone() {
+        let op = FieldOp::Contains;
+        let cloned = op.clone();
+        assert_eq!(op, cloned);
+    }
+
+    #[test]
+    fn field_op_equality() {
+        assert_eq!(FieldOp::Eq, FieldOp::Eq);
+        assert_ne!(FieldOp::Eq, FieldOp::Gt);
+    }
+
+    #[test]
+    fn event_filter_clone() {
+        let f = EventFilter::TypeGlob("*.error".to_owned());
+        let cloned = f.clone();
+        let e = filter_event("deploy.error", json!({}));
+        assert!(cloned.matches(&e));
+    }
+
+    #[test]
+    fn filter_chain_clone() {
+        let chain = FilterChain::new(vec![EventFilter::TypeExact("ping".to_owned())]);
+        let cloned = chain.clone();
+        assert_eq!(cloned.len(), 1);
+        assert!(cloned.matches_all(&filter_event("ping", json!({}))));
+    }
+
+    #[test]
+    fn value_as_string_coverage() {
+        assert_eq!(value_as_string(&json!("hello")), Some("hello".to_owned()));
+        assert_eq!(value_as_string(&json!(42)), Some("42".to_owned()));
+        assert_eq!(value_as_string(&json!(true)), Some("true".to_owned()));
+        assert_eq!(value_as_string(&json!(null)), None);
+        // Object/array serialize to JSON strings
+        assert!(value_as_string(&json!({"a": 1})).is_some());
+        assert!(value_as_string(&json!([1, 2])).is_some());
+    }
+
+    #[test]
+    fn filter_chain_many_filters() {
+        let mut chain = FilterChain::empty();
+        for i in 0..10 {
+            chain.push(EventFilter::FieldMatch {
+                field: format!("f{i}"),
+                op: FieldOp::Eq,
+                value: format!("v{i}"),
+            });
+        }
+        assert_eq!(chain.len(), 10);
+
+        // Build an event that satisfies all 10 fields
+        let mut map = serde_json::Map::new();
+        for i in 0..10 {
+            map.insert(format!("f{i}"), json!(format!("v{i}")));
+        }
+        let e = filter_event("test", Value::Object(map));
+        assert!(chain.matches_all(&e));
+    }
+
+    #[test]
+    fn filter_chain_fails_on_first_mismatch() {
+        let chain = FilterChain::new(vec![
+            EventFilter::TypeExact("x".to_owned()),
+            EventFilter::TypeExact("y".to_owned()), // impossible: can't be both x and y
+        ]);
+        assert!(!chain.matches_all(&filter_event("x", json!({}))));
+        assert!(!chain.matches_all(&filter_event("y", json!({}))));
     }
 }

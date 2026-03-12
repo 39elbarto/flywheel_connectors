@@ -14,6 +14,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 mod admin_state;
+mod agent_api;
 mod batch;
 mod budget;
 mod cancellation;
@@ -31,6 +32,7 @@ mod supervisor;
 mod supply_chain;
 
 pub use admin_state::*;
+pub use agent_api::*;
 pub use batch::*;
 pub use budget::*;
 pub use cancellation::*;

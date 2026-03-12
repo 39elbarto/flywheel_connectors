@@ -28,7 +28,11 @@ use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_e2e::{AssertionsSummary, ConnectorProcessRunner, E2eLogEntry, E2eLogger};
 use fcp_host::{
     BatchInvokeResponse, BatchStatus, CancelReason, CancellationOutcome, CancellationRequest,
-    CancellationResponse, CleanupBehavior, ConnectorAdminStatus, ConnectorArchetype,
+    CancellationResponse, CleanupBehavior, ConfigDiffKind, ConfigRevisionRecord,
+    ConnectorAdminStatus, ConnectorArchetype, ConnectorConfigApplyRequest,
+    ConnectorConfigApplyResponse, ConnectorConfigDiffRequest, ConnectorConfigDiffResponse,
+    ConnectorConfigRevisionsResponse, ConnectorConfigRollbackRequest, ConnectorConfigSnapshot,
+    ConnectorConfigSnapshotSource, ConnectorConfigValidateRequest, ConnectorConfigValidateResponse,
     ConnectorDriftKind, ConnectorInventoryResponse, ConnectorRegistry, ConnectorSummary,
     DesiredRuntimeState, DiscoveryEndpoint, DiscoveryResponse, GateOutcome, HostAdminStateStore,
     HostHealthResponse, HostHealthStatus, HostPreflightRequest, IntrospectionResponse,
@@ -785,6 +789,49 @@ impl HttpHostProcess {
             stderr_thread: Some(stderr_thread),
         })
     }
+
+    async fn spawn_with_connectors_file(
+        connector_configs: Vec<serde_json::Value>,
+        extra_env: &[(&str, &str)],
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let bind_listener = StdTcpListener::bind("127.0.0.1:0")?;
+        let bind_addr = bind_listener.local_addr()?;
+        drop(bind_listener);
+
+        let base_url = format!("http://{bind_addr}");
+        let lifecycle_state_dir = tempfile::tempdir()?;
+        let lifecycle_state_path = lifecycle_state_dir.path().join("lifecycle-state.json");
+        let connectors_file_path = lifecycle_state_dir.path().join("connectors.json");
+        std::fs::write(
+            &connectors_file_path,
+            serde_json::to_vec_pretty(&connector_configs)?,
+        )?;
+
+        let mut command = Command::new(env!("CARGO_BIN_EXE_fcp-host"));
+        command
+            .env("FCP_HOST_BIND", bind_addr.to_string())
+            .env("FCP_HOST_CONNECTORS_FILE", &connectors_file_path)
+            .env("FCP_HOST_LIFECYCLE_STATE_FILE", &lifecycle_state_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        for (name, value) in extra_env {
+            command.env(name, value);
+        }
+        let mut child = command.spawn()?;
+        let (stderr_logs, stderr_thread) = spawn_stderr_capture(&mut child)?;
+
+        let client = build_http_client(reqwest::Client::builder().timeout(Duration::from_secs(2)))?;
+        wait_for_host_readiness(&mut child, &client, &base_url, &stderr_logs).await?;
+
+        Ok(Self {
+            child,
+            client,
+            base_url,
+            lifecycle_state_dir,
+            stderr_logs,
+            stderr_thread: Some(stderr_thread),
+        })
+    }
 }
 
 impl Drop for HttpHostProcess {
@@ -1303,6 +1350,289 @@ async fn fcp_host_binary_exposes_discovery_routes() -> Result<(), Box<dyn std::e
         &capability_signing_key,
     )
     .await?;
+
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn fcp_host_binary_config_routes_are_live_revision_aware()
+-> Result<(), Box<dyn std::error::Error>> {
+    let connector_id = ConnectorId::from_static("fcp.test.config-http:utility:1.0.0");
+    let host = HttpHostProcess::spawn_with_connectors_file(
+        vec![test_connector_config(
+            &connector_id,
+            "Config HTTP",
+            &["test", "config"],
+        )],
+        &[],
+    )
+    .await?;
+    let url = |path: &str| format!("{}{path}", host.base_url);
+
+    let snapshot_url = url(&format!("/rpc/connectors/{}/config", connector_id.as_str()));
+    let revisions_url = url(&format!(
+        "/rpc/connectors/{}/config/revisions",
+        connector_id.as_str()
+    ));
+    let diff_url = url(&format!(
+        "/rpc/connectors/{}/config/diff",
+        connector_id.as_str()
+    ));
+    let validate_url = url(&format!(
+        "/rpc/connectors/{}/config/validate",
+        connector_id.as_str()
+    ));
+    let apply_url = url(&format!(
+        "/rpc/connectors/{}/config/apply",
+        connector_id.as_str()
+    ));
+    let rollback_url = url(&format!(
+        "/rpc/connectors/{}/config/rollback",
+        connector_id.as_str()
+    ));
+
+    let initial_snapshot: ConnectorConfigSnapshot =
+        http_get_json(host.client.clone(), snapshot_url.clone()).await?;
+    assert_eq!(initial_snapshot.connector_id, connector_id);
+    assert_eq!(
+        initial_snapshot.source,
+        ConnectorConfigSnapshotSource::ManagedInventory
+    );
+    assert_eq!(initial_snapshot.active_revision_id, None);
+    assert_eq!(initial_snapshot.revision_count, 0);
+    assert_eq!(initial_snapshot.current.payload, json!({}));
+
+    let config_v1 = json!({
+        "profile": "work",
+        "region": "us-east-1",
+    });
+    let validate_v1: ConnectorConfigValidateResponse = http_post_json(
+        host.client.clone(),
+        validate_url.clone(),
+        ConnectorConfigValidateRequest {
+            payload: config_v1.clone(),
+            expected_active_revision_id: None,
+        },
+    )
+    .await?;
+    assert!(validate_v1.valid);
+    assert_eq!(validate_v1.current_active_revision_id, None);
+    assert_eq!(validate_v1.current.payload, json!({}));
+    assert_eq!(validate_v1.candidate.payload, config_v1);
+    assert!(validate_v1.preview.is_some());
+    assert!(
+        validate_v1
+            .diff
+            .iter()
+            .any(|entry| entry.path == "/profile" && entry.kind == ConfigDiffKind::Added)
+    );
+    assert!(
+        validate_v1
+            .diff
+            .iter()
+            .any(|entry| entry.path == "/region" && entry.kind == ConfigDiffKind::Added)
+    );
+    assert!(
+        validate_v1
+            .preview
+            .as_ref()
+            .is_some_and(|report| report.updated.iter().any(|id| id == connector_id.as_str()))
+    );
+
+    let apply_v1: ConnectorConfigApplyResponse = http_post_json(
+        host.client.clone(),
+        apply_url.clone(),
+        ConnectorConfigApplyRequest {
+            payload: config_v1.clone(),
+            expected_active_revision_id: None,
+            created_by: Some("integration-test".to_string()),
+            change_reason: Some("seed config".to_string()),
+        },
+    )
+    .await?;
+    let revision_v1 = apply_v1
+        .current_active_revision_id
+        .expect("apply should create the first revision");
+    assert!(apply_v1.changed);
+    assert_eq!(apply_v1.previous_active_revision_id, None);
+    assert_eq!(apply_v1.current.payload, config_v1);
+    assert_eq!(
+        apply_v1
+            .revision
+            .as_ref()
+            .map(|revision| revision.revision_id),
+        Some(revision_v1)
+    );
+    assert_eq!(
+        apply_v1
+            .revision
+            .as_ref()
+            .and_then(|revision| revision.created_by.as_deref()),
+        Some("integration-test")
+    );
+    assert!(
+        apply_v1
+            .apply
+            .as_ref()
+            .is_some_and(|report| report.updated.iter().any(|id| id == connector_id.as_str()))
+    );
+    assert!(apply_v1.admin_state.is_some());
+
+    let snapshot_after_v1: ConnectorConfigSnapshot =
+        http_get_json(host.client.clone(), snapshot_url.clone()).await?;
+    assert_eq!(snapshot_after_v1.active_revision_id, Some(revision_v1));
+    assert_eq!(
+        snapshot_after_v1.source,
+        ConnectorConfigSnapshotSource::ActiveRevision
+    );
+    assert_eq!(snapshot_after_v1.revision_count, 1);
+    assert_eq!(snapshot_after_v1.current.payload, config_v1);
+
+    let revisions_after_v1: ConnectorConfigRevisionsResponse =
+        http_get_json(host.client.clone(), revisions_url.clone()).await?;
+    assert_eq!(revisions_after_v1.active_revision_id, Some(revision_v1));
+    assert_eq!(revisions_after_v1.revision_count, 1);
+    assert_eq!(revisions_after_v1.revisions.len(), 1);
+
+    let revision_v1_record: ConfigRevisionRecord = http_get_json(
+        host.client.clone(),
+        url(&format!(
+            "/rpc/connectors/{}/config/revisions/{}",
+            connector_id.as_str(),
+            revision_v1
+        )),
+    )
+    .await?;
+    assert_eq!(revision_v1_record.revision_id, revision_v1);
+    assert_eq!(revision_v1_record.payload, config_v1);
+    assert_eq!(
+        revision_v1_record.created_by.as_deref(),
+        Some("integration-test")
+    );
+
+    let config_v2 = json!({
+        "profile": "work",
+        "region": "eu-west-1",
+        "features": {
+            "alpha": true,
+        },
+    });
+    let diff_v2: ConnectorConfigDiffResponse = http_post_json(
+        host.client.clone(),
+        diff_url.clone(),
+        ConnectorConfigDiffRequest {
+            payload: config_v2.clone(),
+            revision_id: Some(revision_v1),
+        },
+    )
+    .await?;
+    assert_eq!(diff_v2.base_revision_id, Some(revision_v1));
+    assert!(diff_v2.changed);
+    assert_eq!(diff_v2.base.payload, config_v1);
+    assert_eq!(diff_v2.candidate.payload, config_v2);
+    assert!(
+        diff_v2
+            .entries
+            .iter()
+            .any(|entry| entry.path == "/region" && entry.kind == ConfigDiffKind::Changed)
+    );
+    assert!(
+        diff_v2
+            .entries
+            .iter()
+            .any(|entry| entry.path == "/features" && entry.kind == ConfigDiffKind::Added)
+    );
+
+    let validate_v2: ConnectorConfigValidateResponse = http_post_json(
+        host.client.clone(),
+        validate_url.clone(),
+        ConnectorConfigValidateRequest {
+            payload: config_v2.clone(),
+            expected_active_revision_id: Some(revision_v1),
+        },
+    )
+    .await?;
+    assert!(validate_v2.valid);
+    assert_eq!(validate_v2.current_active_revision_id, Some(revision_v1));
+    assert_eq!(validate_v2.current.payload, config_v1);
+    assert_eq!(validate_v2.candidate.payload, config_v2);
+
+    let apply_v2: ConnectorConfigApplyResponse = http_post_json(
+        host.client.clone(),
+        apply_url.clone(),
+        ConnectorConfigApplyRequest {
+            payload: config_v2.clone(),
+            expected_active_revision_id: Some(revision_v1),
+            created_by: Some("integration-test".to_string()),
+            change_reason: Some("switch region".to_string()),
+        },
+    )
+    .await?;
+    let revision_v2 = apply_v2
+        .current_active_revision_id
+        .expect("second apply should advance the active revision");
+    assert!(apply_v2.changed);
+    assert_eq!(apply_v2.previous_active_revision_id, Some(revision_v1));
+    assert_eq!(apply_v2.current.payload, config_v2);
+    assert!(revision_v2 > revision_v1);
+
+    let revisions_after_v2: ConnectorConfigRevisionsResponse =
+        http_get_json(host.client.clone(), revisions_url.clone()).await?;
+    assert_eq!(revisions_after_v2.active_revision_id, Some(revision_v2));
+    assert_eq!(revisions_after_v2.revision_count, 2);
+
+    let rollback: ConnectorConfigApplyResponse = http_post_json(
+        host.client.clone(),
+        rollback_url.clone(),
+        ConnectorConfigRollbackRequest {
+            revision_id: revision_v1,
+            expected_active_revision_id: Some(revision_v2),
+            created_by: Some("integration-test".to_string()),
+            change_reason: Some("rollback to baseline".to_string()),
+        },
+    )
+    .await?;
+    let revision_v3 = rollback
+        .current_active_revision_id
+        .expect("rollback should record a new active revision");
+    assert!(rollback.changed);
+    assert_eq!(rollback.previous_active_revision_id, Some(revision_v2));
+    assert_eq!(rollback.current.payload, config_v1);
+    assert_eq!(
+        rollback
+            .revision
+            .as_ref()
+            .and_then(|revision| revision.previous_revision_id),
+        Some(revision_v2)
+    );
+    assert!(revision_v3 > revision_v2);
+
+    let final_snapshot: ConnectorConfigSnapshot =
+        http_get_json(host.client.clone(), snapshot_url.clone()).await?;
+    assert_eq!(final_snapshot.active_revision_id, Some(revision_v3));
+    assert_eq!(
+        final_snapshot.source,
+        ConnectorConfigSnapshotSource::ActiveRevision
+    );
+    assert_eq!(final_snapshot.revision_count, 3);
+    assert_eq!(final_snapshot.current.payload, config_v1);
+
+    let stale_response = host
+        .client
+        .post(apply_url)
+        .json(&ConnectorConfigApplyRequest {
+            payload: config_v2,
+            expected_active_revision_id: Some(revision_v2),
+            created_by: Some("integration-test".to_string()),
+            change_reason: Some("stale write".to_string()),
+        })
+        .send()
+        .await?;
+    assert_eq!(stale_response.status(), reqwest::StatusCode::BAD_REQUEST);
+    let stale_body = stale_response.text().await?;
+    assert!(stale_body.contains(&format!(
+        "config revision {revision_v3}, expected {revision_v2}"
+    )));
 
     Ok(())
 }

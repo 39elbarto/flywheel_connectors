@@ -2267,4 +2267,1018 @@ mod tests {
         let diff = diff_zone_policy(&policy, &policy).unwrap();
         assert!(diff.risk_flags.is_empty());
     }
+
+    // ---- PolicyBundleState ----
+
+    #[test]
+    fn policy_bundle_state_new_sets_fields() {
+        let bundle = test_bundle("bundle-x", ZoneId::work(), 1, None);
+        let now = Utc::now();
+        let state = PolicyBundleState::new(bundle, now);
+        assert_eq!(state.format, POLICY_BUNDLE_STATE_FORMAT);
+        assert_eq!(state.schema_version, POLICY_BUNDLE_STATE_SCHEMA_VERSION);
+        assert_eq!(state.zone_id, ZoneId::work());
+        assert_eq!(state.current.bundle.bundle_id, "bundle-x");
+        assert_eq!(state.current.applied_at, now);
+        assert!(state.previous.is_none());
+        assert!(state.audit_events.is_empty());
+    }
+
+    #[test]
+    fn policy_bundle_state_validate_ok() {
+        let bundle = test_bundle("bundle-v", ZoneId::work(), 1, None);
+        let state = PolicyBundleState::new(bundle, Utc::now());
+        assert!(state.validate().is_ok());
+    }
+
+    #[test]
+    fn policy_bundle_state_validate_bad_format() {
+        let bundle = test_bundle("bundle-v", ZoneId::work(), 1, None);
+        let mut state = PolicyBundleState::new(bundle, Utc::now());
+        state.format = "wrong-format".to_string();
+        let err = state.validate().unwrap_err();
+        assert!(err.to_string().contains("state format must be"));
+    }
+
+    #[test]
+    fn policy_bundle_state_validate_bad_schema_version() {
+        let bundle = test_bundle("bundle-v", ZoneId::work(), 1, None);
+        let mut state = PolicyBundleState::new(bundle, Utc::now());
+        state.schema_version = "9.9.9".to_string();
+        let err = state.validate().unwrap_err();
+        assert!(err.to_string().contains("state schema_version must be"));
+    }
+
+    #[test]
+    fn policy_bundle_state_validate_audit_event_zone_mismatch() {
+        let bundle = test_bundle("bundle-v", ZoneId::work(), 1, None);
+        let now = Utc::now();
+        let mut state = PolicyBundleState::new(bundle, now);
+        let event = build_bundle_audit_event(
+            POLICY_BUNDLE_EVENT_APPLIED,
+            &ZoneId::work(),
+            "bundle-v",
+            None,
+            1,
+            now,
+        )
+        .unwrap();
+        // Mutate zone_id to mismatch
+        let mut bad_event = event;
+        bad_event.zone_id = "z:other".to_string();
+        state.audit_events.push(bad_event);
+        let err = state.validate().unwrap_err();
+        assert!(err.to_string().contains("audit event zone"));
+    }
+
+    #[test]
+    fn policy_bundle_state_next_audit_seq_empty() {
+        let bundle = test_bundle("bundle-n", ZoneId::work(), 1, None);
+        let state = PolicyBundleState::new(bundle, Utc::now());
+        assert_eq!(state.next_audit_seq(), 1);
+    }
+
+    #[test]
+    fn policy_bundle_state_next_audit_seq_after_events() {
+        let bundle = test_bundle("bundle-n", ZoneId::work(), 1, None);
+        let now = Utc::now();
+        let mut state = PolicyBundleState::new(bundle, now);
+        let event = build_bundle_audit_event(
+            POLICY_BUNDLE_EVENT_APPLIED,
+            &ZoneId::work(),
+            "bundle-n",
+            None,
+            5,
+            now,
+        )
+        .unwrap();
+        state.audit_events.push(event);
+        assert_eq!(state.next_audit_seq(), 6);
+    }
+
+    #[test]
+    fn policy_bundle_state_clone() {
+        let bundle = test_bundle("bundle-cl", ZoneId::work(), 1, None);
+        let state = PolicyBundleState::new(bundle, Utc::now());
+        let cloned = state.clone();
+        assert_eq!(state.format, cloned.format);
+        assert_eq!(state.schema_version, cloned.schema_version);
+        assert_eq!(state.zone_id, cloned.zone_id);
+        assert_eq!(
+            state.current.bundle.bundle_id,
+            cloned.current.bundle.bundle_id
+        );
+    }
+
+    #[test]
+    fn policy_bundle_state_serde_roundtrip() {
+        let bundle = test_bundle("bundle-sr", ZoneId::work(), 1, None);
+        let state = PolicyBundleState::new(bundle, Utc::now());
+        let json = serde_json::to_string(&state).unwrap();
+        let deserialized: PolicyBundleState = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.format, state.format);
+        assert_eq!(deserialized.current.bundle.bundle_id, "bundle-sr");
+    }
+
+    // ---- PolicyBundleStateSnapshot ----
+
+    #[test]
+    fn snapshot_validate_for_zone_ok() {
+        let bundle = test_bundle("bundle-snap", ZoneId::work(), 1, None);
+        let snapshot = PolicyBundleStateSnapshot {
+            bundle,
+            applied_at: Utc::now(),
+        };
+        assert!(snapshot.validate_for_zone(&ZoneId::work(), "test").is_ok());
+    }
+
+    #[test]
+    fn snapshot_validate_for_zone_mismatch() {
+        let bundle = test_bundle("bundle-snap", ZoneId::work(), 1, None);
+        let snapshot = PolicyBundleStateSnapshot {
+            bundle,
+            applied_at: Utc::now(),
+        };
+        let other_zone: ZoneId = "z:personal".parse().unwrap();
+        let err = snapshot
+            .validate_for_zone(&other_zone, "current")
+            .unwrap_err();
+        assert!(err.to_string().contains("does not match state zone"));
+    }
+
+    // ---- PolicyBundleAuditEvent ----
+
+    #[test]
+    fn audit_event_clone_and_debug() {
+        let event = build_bundle_audit_event(
+            POLICY_BUNDLE_EVENT_APPLIED,
+            &ZoneId::work(),
+            "bundle-dbg",
+            Some("prev-bundle"),
+            3,
+            Utc::now(),
+        )
+        .unwrap();
+        let cloned = event.clone();
+        assert_eq!(event.seq, cloned.seq);
+        assert_eq!(event.event_type, cloned.event_type);
+        assert_eq!(event.bundle_id, cloned.bundle_id);
+        assert_eq!(event.previous_bundle_id, cloned.previous_bundle_id);
+        let debug = format!("{:?}", event);
+        assert!(debug.contains("PolicyBundleAuditEvent"));
+    }
+
+    #[test]
+    fn audit_event_serde_roundtrip() {
+        let event = build_bundle_audit_event(
+            POLICY_BUNDLE_EVENT_ROLLED_BACK,
+            &ZoneId::work(),
+            "bundle-rt",
+            None,
+            1,
+            Utc::now(),
+        )
+        .unwrap();
+        let json = serde_json::to_string(&event).unwrap();
+        let deserialized: PolicyBundleAuditEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.event_type, POLICY_BUNDLE_EVENT_ROLLED_BACK);
+        assert_eq!(deserialized.bundle_id, "bundle-rt");
+        assert!(deserialized.previous_bundle_id.is_none());
+    }
+
+    #[test]
+    fn audit_event_with_previous_bundle_serializes() {
+        let event = build_bundle_audit_event(
+            POLICY_BUNDLE_EVENT_APPLIED,
+            &ZoneId::work(),
+            "bundle-2",
+            Some("bundle-1"),
+            2,
+            Utc::now(),
+        )
+        .unwrap();
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"previous_bundle_id\":\"bundle-1\""));
+        assert!(json.contains("\"actor\":\"fwc\""));
+    }
+
+    #[test]
+    fn audit_event_deterministic_id() {
+        let ts = DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let event1 = build_bundle_audit_event(
+            POLICY_BUNDLE_EVENT_APPLIED,
+            &ZoneId::work(),
+            "bundle-det",
+            None,
+            1,
+            ts,
+        )
+        .unwrap();
+        let event2 = build_bundle_audit_event(
+            POLICY_BUNDLE_EVENT_APPLIED,
+            &ZoneId::work(),
+            "bundle-det",
+            None,
+            1,
+            ts,
+        )
+        .unwrap();
+        assert_eq!(event1.audit_event_id, event2.audit_event_id);
+    }
+
+    #[test]
+    fn audit_event_different_seq_different_id() {
+        let ts = DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let event1 = build_bundle_audit_event(
+            POLICY_BUNDLE_EVENT_APPLIED,
+            &ZoneId::work(),
+            "bundle-det",
+            None,
+            1,
+            ts,
+        )
+        .unwrap();
+        let event2 = build_bundle_audit_event(
+            POLICY_BUNDLE_EVENT_APPLIED,
+            &ZoneId::work(),
+            "bundle-det",
+            None,
+            2,
+            ts,
+        )
+        .unwrap();
+        assert_ne!(event1.audit_event_id, event2.audit_event_id);
+    }
+
+    // ---- build_bundle_audit_event ----
+
+    #[test]
+    fn build_audit_event_sets_actor() {
+        let event = build_bundle_audit_event(
+            POLICY_BUNDLE_EVENT_APPLIED,
+            &ZoneId::work(),
+            "bundle-actor",
+            None,
+            1,
+            Utc::now(),
+        )
+        .unwrap();
+        assert_eq!(event.actor, POLICY_BUNDLE_AUDIT_ACTOR);
+    }
+
+    #[test]
+    fn build_audit_event_iso_format() {
+        let ts = DateTime::parse_from_rfc3339("2026-06-15T10:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let event = build_bundle_audit_event(
+            POLICY_BUNDLE_EVENT_APPLIED,
+            &ZoneId::work(),
+            "bundle-iso",
+            None,
+            1,
+            ts,
+        )
+        .unwrap();
+        assert_eq!(event.occurred_at_iso, "2026-06-15T10:30:00Z");
+    }
+
+    // ---- validate_apply_transition ----
+
+    #[test]
+    fn validate_apply_transition_no_state() {
+        let bundle = test_bundle("bundle-first", ZoneId::work(), 1, None);
+        assert!(validate_apply_transition(None, &bundle).is_ok());
+    }
+
+    #[test]
+    fn validate_apply_transition_matching_previous() {
+        let bundle_a = test_bundle("bundle-a", ZoneId::work(), 1, None);
+        let state = PolicyBundleState::new(bundle_a, Utc::now());
+        let bundle_b = test_bundle("bundle-b", ZoneId::work(), 2, Some("bundle-a"));
+        assert!(validate_apply_transition(Some(&state), &bundle_b).is_ok());
+    }
+
+    #[test]
+    fn validate_apply_transition_mismatch() {
+        let bundle_a = test_bundle("bundle-a", ZoneId::work(), 1, None);
+        let state = PolicyBundleState::new(bundle_a, Utc::now());
+        let bundle_c = test_bundle("bundle-c", ZoneId::work(), 2, Some("bundle-x"));
+        let err = validate_apply_transition(Some(&state), &bundle_c).unwrap_err();
+        assert!(err.to_string().contains("declares previous_bundle"));
+    }
+
+    #[test]
+    fn validate_apply_transition_no_previous_on_bundle_but_state_exists() {
+        let bundle_a = test_bundle("bundle-a", ZoneId::work(), 1, None);
+        let state = PolicyBundleState::new(bundle_a, Utc::now());
+        let bundle_b = test_bundle("bundle-b", ZoneId::work(), 2, None);
+        let err = validate_apply_transition(Some(&state), &bundle_b).unwrap_err();
+        assert!(err.to_string().contains("declares previous_bundle"));
+    }
+
+    // ---- validate_rollback_transition ----
+
+    #[test]
+    fn validate_rollback_transition_valid() {
+        let bundle_a = test_bundle("bundle-a", ZoneId::work(), 1, None);
+        let bundle_b = test_bundle("bundle-b", ZoneId::work(), 2, Some("bundle-a"));
+        let state = PolicyBundleState::new(bundle_b, Utc::now());
+        assert!(validate_rollback_transition(&state, &bundle_a).is_ok());
+    }
+
+    #[test]
+    fn validate_rollback_transition_invalid() {
+        let bundle_a = test_bundle("bundle-a", ZoneId::work(), 1, None);
+        let bundle_b = test_bundle("bundle-b", ZoneId::work(), 2, Some("bundle-a"));
+        let state = PolicyBundleState::new(bundle_b, Utc::now());
+        let bundle_c = test_bundle("bundle-c", ZoneId::work(), 3, None);
+        let err = validate_rollback_transition(&state, &bundle_c).unwrap_err();
+        assert!(err.to_string().contains("does not match current bundle"));
+    }
+
+    // ---- validate_bundle_state_zone ----
+
+    #[test]
+    fn validate_bundle_state_zone_ok() {
+        let bundle = test_bundle("bundle-z", ZoneId::work(), 1, None);
+        let state = PolicyBundleState::new(bundle, Utc::now());
+        assert!(
+            validate_bundle_state_zone(&state, &ZoneId::work(), Path::new("/tmp/s.json")).is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_bundle_state_zone_mismatch() {
+        let bundle = test_bundle("bundle-z", ZoneId::work(), 1, None);
+        let state = PolicyBundleState::new(bundle, Utc::now());
+        let other: ZoneId = "z:personal".parse().unwrap();
+        let err =
+            validate_bundle_state_zone(&state, &other, Path::new("/tmp/s.json")).unwrap_err();
+        assert!(err.to_string().contains("but bundle targets zone"));
+    }
+
+    // ---- BundleApplyResult serde ----
+
+    #[test]
+    fn bundle_apply_result_serializes() {
+        let result = BundleApplyResult {
+            result_type: "bundle_apply".to_string(),
+            zone_id: "z:work".to_string(),
+            bundle_id: "bundle-1".to_string(),
+            replaced_bundle_id: None,
+            declared_previous_bundle_id: None,
+            state_path: "/tmp/state.json".to_string(),
+            changed: true,
+            audit_event: None,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("\"changed\":true"));
+        assert!(!json.contains("replaced_bundle_id"));
+    }
+
+    #[test]
+    fn bundle_apply_result_with_replaced_serializes() {
+        let result = BundleApplyResult {
+            result_type: "bundle_apply".to_string(),
+            zone_id: "z:work".to_string(),
+            bundle_id: "bundle-2".to_string(),
+            replaced_bundle_id: Some("bundle-1".to_string()),
+            declared_previous_bundle_id: Some("bundle-1".to_string()),
+            state_path: "/tmp/state.json".to_string(),
+            changed: true,
+            audit_event: None,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("\"replaced_bundle_id\":\"bundle-1\""));
+    }
+
+    // ---- BundleRollbackResult serde ----
+
+    #[test]
+    fn bundle_rollback_result_serializes() {
+        let result = BundleRollbackResult {
+            result_type: "bundle_rollback".to_string(),
+            zone_id: "z:work".to_string(),
+            target_bundle_id: "bundle-prev".to_string(),
+            replaced_bundle_id: Some("bundle-cur".to_string()),
+            state_path: "/tmp/state.json".to_string(),
+            changed: true,
+            audit_event: None,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("\"result_type\":\"bundle_rollback\""));
+        assert!(json.contains("\"replaced_bundle_id\":\"bundle-cur\""));
+    }
+
+    #[test]
+    fn bundle_rollback_result_no_change_serializes() {
+        let result = BundleRollbackResult {
+            result_type: "bundle_rollback".to_string(),
+            zone_id: "z:work".to_string(),
+            target_bundle_id: "bundle-same".to_string(),
+            replaced_bundle_id: None,
+            state_path: "/tmp/state.json".to_string(),
+            changed: false,
+            audit_event: None,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("\"changed\":false"));
+        assert!(!json.contains("replaced_bundle_id"));
+    }
+
+    // ---- diff_zone_policy edge cases ----
+
+    #[test]
+    fn diff_zone_policy_added_principal_allow() {
+        let zone = fcp_core::ZoneId::work();
+        let before = base_policy(zone.clone());
+        let mut after = base_policy(zone);
+        after.principal_allow.push(PolicyPattern {
+            pattern: "user:admin".to_string(),
+        });
+        let diff = diff_zone_policy(&before, &after).unwrap();
+        assert!(diff.risk_flags.contains(&"principal_allow_expanded".to_string()));
+    }
+
+    #[test]
+    fn diff_zone_policy_added_capability_allow() {
+        let zone = fcp_core::ZoneId::work();
+        let before = base_policy(zone.clone());
+        let mut after = base_policy(zone);
+        after.capability_allow.push(PolicyPattern {
+            pattern: "cap:admin".to_string(),
+        });
+        let diff = diff_zone_policy(&before, &after).unwrap();
+        assert!(diff.risk_flags.contains(&"capability_allow_expanded".to_string()));
+    }
+
+    #[test]
+    fn diff_zone_policy_removed_entries_no_risk() {
+        let zone = fcp_core::ZoneId::work();
+        let mut before = base_policy(zone.clone());
+        before.connector_allow.push(PolicyPattern {
+            pattern: "fcp.test:*".to_string(),
+        });
+        let after = base_policy(zone);
+        let diff = diff_zone_policy(&before, &after).unwrap();
+        assert!(diff.risk_flags.is_empty());
+        let removed = diff.removed.as_object().unwrap();
+        let removed_connectors = removed
+            .get("connector_allow")
+            .and_then(Value::as_array)
+            .unwrap();
+        assert!(removed_connectors.iter().any(|v| v.as_str() == Some("fcp.test:*")));
+    }
+
+    #[test]
+    fn diff_zone_policy_transport_lan_risk() {
+        let zone = fcp_core::ZoneId::work();
+        let mut before = base_policy(zone.clone());
+        before.transport_policy.allow_lan = false;
+        let mut after = base_policy(zone);
+        after.transport_policy.allow_lan = true;
+        let diff = diff_zone_policy(&before, &after).unwrap();
+        assert!(diff.risk_flags.contains(&"transport_lan_enabled".to_string()));
+    }
+
+    #[test]
+    fn diff_zone_policy_transport_funnel_risk() {
+        let zone = fcp_core::ZoneId::work();
+        let mut before = base_policy(zone.clone());
+        before.transport_policy.allow_funnel = false;
+        let mut after = base_policy(zone);
+        after.transport_policy.allow_funnel = true;
+        let diff = diff_zone_policy(&before, &after).unwrap();
+        assert!(diff.risk_flags.contains(&"transport_funnel_enabled".to_string()));
+    }
+
+    // ---- diff_policy_lists ----
+
+    #[test]
+    fn diff_policy_lists_all_fields() {
+        let zone = fcp_core::ZoneId::work();
+        let before = base_policy(zone.clone());
+        let mut after = base_policy(zone);
+        after.principal_deny.push(PolicyPattern {
+            pattern: "user:bad".to_string(),
+        });
+        after.capability_deny.push(PolicyPattern {
+            pattern: "cap:danger".to_string(),
+        });
+        after.connector_deny.push(PolicyPattern {
+            pattern: "conn:bad".to_string(),
+        });
+        let (added, removed) = diff_policy_lists(&before, &after);
+        assert_eq!(added.principal_deny, vec!["user:bad"]);
+        assert_eq!(added.capability_deny, vec!["cap:danger"]);
+        assert_eq!(added.connector_deny, vec!["conn:bad"]);
+        assert!(removed.principal_deny.is_empty());
+        assert!(removed.capability_deny.is_empty());
+        assert!(removed.connector_deny.is_empty());
+    }
+
+    // ---- diff_patterns duplicates ----
+
+    #[test]
+    fn diff_patterns_duplicate_entries() {
+        let before = vec![
+            PolicyPattern { pattern: "a".to_string() },
+            PolicyPattern { pattern: "a".to_string() },
+        ];
+        let after = vec![PolicyPattern { pattern: "a".to_string() }];
+        let (added, removed) = diff_patterns(&before, &after);
+        assert!(added.is_empty());
+        assert!(removed.is_empty());
+    }
+
+    // ---- diff_capability_ids more cases ----
+
+    #[test]
+    fn diff_capability_ids_identical() {
+        let caps = vec!["cap.read".parse().unwrap(), "cap.write".parse().unwrap()];
+        let (added, removed) = diff_capability_ids(&caps, &caps);
+        assert!(added.is_empty());
+        assert!(removed.is_empty());
+    }
+
+    #[test]
+    fn diff_capability_ids_only_added() {
+        let before = vec![];
+        let after = vec!["cap.exec".parse().unwrap()];
+        let (added, removed) = diff_capability_ids(&before, &after);
+        assert_eq!(added, vec!["cap.exec"]);
+        assert!(removed.is_empty());
+    }
+
+    #[test]
+    fn diff_capability_ids_only_removed() {
+        let before = vec!["cap.admin".parse().unwrap()];
+        let after = vec![];
+        let (added, removed) = diff_capability_ids(&before, &after);
+        assert!(added.is_empty());
+        assert_eq!(removed, vec!["cap.admin"]);
+    }
+
+    // ---- diff_json_objects more cases ----
+
+    #[test]
+    fn diff_json_objects_empty_objects() {
+        let before = serde_json::json!({});
+        let after = serde_json::json!({});
+        let diff = diff_json_objects(&before, &after).unwrap();
+        assert!(diff.added.is_empty());
+        assert!(diff.removed.is_empty());
+        assert!(diff.changed.is_empty());
+    }
+
+    #[test]
+    fn diff_json_objects_multiple_changes() {
+        let before = serde_json::json!({"a": 1, "b": 2, "c": 3});
+        let after = serde_json::json!({"a": 10, "c": 3, "d": 4});
+        let diff = diff_json_objects(&before, &after).unwrap();
+        assert_eq!(diff.added.len(), 1);
+        assert!(diff.added.contains_key("d"));
+        assert_eq!(diff.removed.len(), 1);
+        assert!(diff.removed.contains_key("b"));
+        assert_eq!(diff.changed.len(), 1);
+        assert!(diff.changed.contains_key("a"));
+    }
+
+    #[test]
+    fn diff_json_objects_after_not_object_fails() {
+        let before = serde_json::json!({"a": 1});
+        let after = serde_json::json!("string_value");
+        assert!(diff_json_objects(&before, &after).is_err());
+    }
+
+    // ---- parse_policy_document more cases ----
+
+    #[test]
+    fn parse_policy_document_whitespace_only() {
+        assert!(parse_policy_document("   \t\n  ").is_err());
+    }
+
+    #[test]
+    fn parse_policy_document_valid_but_wrong_shape() {
+        // Valid JSON but does not match ZonePolicy or ZoneDefinition
+        assert!(parse_policy_document(r#"{"arbitrary": "data"}"#).is_err());
+    }
+
+    // ---- parse_bundle_object more schemas ----
+
+    #[test]
+    fn parse_bundle_object_zone_policy_prefix() {
+        // schema_id starts with correct prefix, but value may not parse
+        let value = serde_json::json!({"not": "valid"});
+        assert!(parse_bundle_object("fcp.core:ZonePolicy@1.0.0", &value).is_err());
+    }
+
+    #[test]
+    fn parse_bundle_object_zone_definition_prefix() {
+        let value = serde_json::json!({"not": "valid"});
+        assert!(parse_bundle_object("fcp.core:ZoneDefinition@1.0.0", &value).is_err());
+    }
+
+    #[test]
+    fn parse_bundle_object_role_object_prefix() {
+        let value = serde_json::json!({"not": "valid"});
+        assert!(parse_bundle_object("fcp.core:RoleObject@1.0.0", &value).is_err());
+    }
+
+    #[test]
+    fn parse_bundle_object_resource_object_prefix() {
+        let value = serde_json::json!({"not": "valid"});
+        assert!(parse_bundle_object("fcp.core:ResourceObject@1.0.0", &value).is_err());
+    }
+
+    #[test]
+    fn parse_bundle_object_capability_object_prefix() {
+        let value = serde_json::json!({"not": "valid"});
+        assert!(parse_bundle_object("fcp.core:CapabilityObject@1.0.0", &value).is_err());
+    }
+
+    // ---- parse_simulation_input with valid json but unrelated ----
+
+    #[test]
+    fn parse_simulation_input_random_object() {
+        assert!(parse_simulation_input(r#"{"random": true}"#).is_err());
+    }
+
+    // ---- parse_created_at edge cases ----
+
+    #[test]
+    fn parse_created_at_epoch() {
+        let dt = parse_created_at(Some("1970-01-01T00:00:00Z"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(dt.timestamp(), 0);
+    }
+
+    #[test]
+    fn parse_created_at_empty_string() {
+        assert!(parse_created_at(Some("")).is_err());
+    }
+
+    // ---- load_bundle_state_optional file scenarios ----
+
+    #[test]
+    fn load_bundle_state_optional_missing_file() {
+        let result = load_bundle_state_optional(Path::new("/tmp/nonexistent_policy_state_xyz.json"))
+            .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn load_bundle_state_optional_valid_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let bundle = test_bundle("bundle-load", ZoneId::work(), 1, None);
+        let state = PolicyBundleState::new(bundle, Utc::now());
+        let path = temp_dir.path().join("state.json");
+        let json = serde_json::to_string_pretty(&state).unwrap();
+        fs::write(&path, json).unwrap();
+        let loaded = load_bundle_state_optional(&path).unwrap().unwrap();
+        assert_eq!(loaded.current.bundle.bundle_id, "bundle-load");
+    }
+
+    #[test]
+    fn load_bundle_state_optional_invalid_json() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("bad_state.json");
+        fs::write(&path, "not json!").unwrap();
+        assert!(load_bundle_state_optional(&path).is_err());
+    }
+
+    // ---- write_bundle_state ----
+
+    #[test]
+    fn write_bundle_state_creates_parent_dirs() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("sub").join("dir").join("state.json");
+        let bundle = test_bundle("bundle-wd", ZoneId::work(), 1, None);
+        let state = PolicyBundleState::new(bundle, Utc::now());
+        write_bundle_state(&path, &state).unwrap();
+        assert!(path.exists());
+    }
+
+    // ---- bundle_apply plan only ----
+
+    #[test]
+    fn bundle_apply_plan_mode() {
+        let temp_dir = TempDir::new().unwrap();
+        let bundle = test_bundle("bundle-plan", ZoneId::work(), 1, None);
+        let bundle_path = write_bundle_file(&temp_dir, "bundle-plan.json", &bundle);
+        let state_path = temp_dir.path().join("state.json");
+
+        run_bundle_apply(&BundleApplyArgs {
+            bundle: bundle_path,
+            state: state_path.clone(),
+            plan: true,
+            json: true,
+        })
+        .unwrap();
+
+        // State file should not exist since we only planned
+        assert!(!state_path.exists());
+    }
+
+    // ---- bundle_apply idempotent ----
+
+    #[test]
+    fn bundle_apply_idempotent_no_change() {
+        let temp_dir = TempDir::new().unwrap();
+        let bundle = test_bundle("bundle-idem", ZoneId::work(), 1, None);
+        let bundle_path = write_bundle_file(&temp_dir, "bundle-idem.json", &bundle);
+        let state_path = temp_dir.path().join("state.json");
+
+        // Apply once
+        run_bundle_apply(&BundleApplyArgs {
+            bundle: bundle_path.clone(),
+            state: state_path.clone(),
+            plan: false,
+            json: true,
+        })
+        .unwrap();
+
+        // Apply same bundle again — should succeed with changed=false
+        run_bundle_apply(&BundleApplyArgs {
+            bundle: bundle_path,
+            state: state_path.clone(),
+            plan: false,
+            json: true,
+        })
+        .unwrap();
+
+        let state = load_bundle_state_optional(&state_path).unwrap().unwrap();
+        assert_eq!(state.audit_events.len(), 1);
+    }
+
+    // ---- bundle_rollback plan only ----
+
+    #[test]
+    fn bundle_rollback_plan_mode() {
+        let temp_dir = TempDir::new().unwrap();
+        let bundle_a = test_bundle("bundle-a", ZoneId::work(), 1, None);
+        let bundle_b = test_bundle("bundle-b", ZoneId::work(), 2, Some("bundle-a"));
+        let bundle_a_path = write_bundle_file(&temp_dir, "bundle-a.json", &bundle_a);
+        let bundle_b_path = write_bundle_file(&temp_dir, "bundle-b.json", &bundle_b);
+        let state_path = temp_dir.path().join("state.json");
+
+        run_bundle_apply(&BundleApplyArgs {
+            bundle: bundle_a_path.clone(),
+            state: state_path.clone(),
+            plan: false,
+            json: true,
+        })
+        .unwrap();
+        run_bundle_apply(&BundleApplyArgs {
+            bundle: bundle_b_path,
+            state: state_path.clone(),
+            plan: false,
+            json: true,
+        })
+        .unwrap();
+
+        // Plan rollback — should not change state
+        let state_before = load_bundle_state_optional(&state_path).unwrap().unwrap();
+        run_bundle_rollback(&BundleRollbackArgs {
+            to: bundle_a_path,
+            state: state_path.clone(),
+            plan: true,
+            json: true,
+        })
+        .unwrap();
+        let state_after = load_bundle_state_optional(&state_path).unwrap().unwrap();
+        assert_eq!(
+            state_before.current.bundle.bundle_id,
+            state_after.current.bundle.bundle_id
+        );
+    }
+
+    // ---- bundle_rollback requires existing state ----
+
+    #[test]
+    fn bundle_rollback_requires_state_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let bundle = test_bundle("bundle-rb", ZoneId::work(), 1, None);
+        let bundle_path = write_bundle_file(&temp_dir, "bundle-rb.json", &bundle);
+        let state_path = temp_dir.path().join("nonexistent_state.json");
+
+        let err = run_bundle_rollback(&BundleRollbackArgs {
+            to: bundle_path,
+            state: state_path,
+            plan: false,
+            json: true,
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("requires an existing state file"));
+    }
+
+    // ---- bundle_rollback zone mismatch ----
+
+    #[test]
+    fn bundle_rollback_zone_mismatch() {
+        let temp_dir = TempDir::new().unwrap();
+        let bundle_a = test_bundle("bundle-a", ZoneId::work(), 1, None);
+        let bundle_a_path = write_bundle_file(&temp_dir, "bundle-a.json", &bundle_a);
+        let state_path = temp_dir.path().join("state.json");
+
+        run_bundle_apply(&BundleApplyArgs {
+            bundle: bundle_a_path,
+            state: state_path.clone(),
+            plan: false,
+            json: true,
+        })
+        .unwrap();
+
+        let other_zone: ZoneId = "z:personal".parse().unwrap();
+        let bundle_other = test_bundle("bundle-other", other_zone, 1, None);
+        let bundle_other_path = write_bundle_file(&temp_dir, "bundle-other.json", &bundle_other);
+
+        let err = run_bundle_rollback(&BundleRollbackArgs {
+            to: bundle_other_path,
+            state: state_path,
+            plan: false,
+            json: true,
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("but bundle targets zone"));
+    }
+
+    // ---- bundle_apply zone mismatch ----
+
+    #[test]
+    fn bundle_apply_zone_mismatch() {
+        let temp_dir = TempDir::new().unwrap();
+        let bundle_a = test_bundle("bundle-a", ZoneId::work(), 1, None);
+        let bundle_a_path = write_bundle_file(&temp_dir, "bundle-a.json", &bundle_a);
+        let state_path = temp_dir.path().join("state.json");
+
+        run_bundle_apply(&BundleApplyArgs {
+            bundle: bundle_a_path,
+            state: state_path.clone(),
+            plan: false,
+            json: true,
+        })
+        .unwrap();
+
+        let other_zone: ZoneId = "z:personal".parse().unwrap();
+        let bundle_other = test_bundle("bundle-other", other_zone, 1, None);
+        let bundle_other_path = write_bundle_file(&temp_dir, "bundle-other.json", &bundle_other);
+
+        let err = run_bundle_apply(&BundleApplyArgs {
+            bundle: bundle_other_path,
+            state: state_path,
+            plan: false,
+            json: true,
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("but bundle targets zone"));
+    }
+
+    // ---- constants ----
+
+    #[test]
+    fn constants_values() {
+        assert_eq!(POLICY_BUNDLE_STATE_FORMAT, "fcp-policy-bundle-state");
+        assert_eq!(POLICY_BUNDLE_STATE_SCHEMA_VERSION, "1.0.0");
+        assert_eq!(POLICY_BUNDLE_EVENT_APPLIED, "policy.bundle.applied");
+        assert_eq!(POLICY_BUNDLE_EVENT_ROLLED_BACK, "policy.bundle.rolled_back");
+        assert_eq!(POLICY_BUNDLE_AUDIT_ACTOR, "fwc");
+    }
+
+    // ---- PolicyDocument zone_definition ----
+
+    #[test]
+    fn policy_document_zone_definition_type() {
+        let zone = fcp_core::ZoneId::work();
+        let schema = SchemaId::new("fcp.core", "ZoneDefinition", Version::new(1, 0, 0));
+        let header = fcp_core::ObjectHeader {
+            schema,
+            zone_id: zone.clone(),
+            created_at: 0,
+            provenance: Provenance::new(zone.clone()),
+            refs: Vec::new(),
+            foreign_refs: Vec::new(),
+            ttl_secs: None,
+            placement: None,
+        };
+        let def = ZoneDefinitionObject {
+            header,
+            zone_id: zone.clone(),
+            name: "test-zone".to_string(),
+            integrity_level: fcp_core::IntegrityLevel::Work,
+            confidentiality_level: fcp_core::ConfidentialityLevel::Work,
+            symbol_port: 9000,
+            control_port: 9001,
+            transport_policy: fcp_core::ZoneTransportPolicy::default(),
+            policy_object_id: ObjectId::from_unscoped_bytes(b"test-oid"),
+            prev: None,
+            signature: fcp_core::NodeSignature::new(
+                fcp_core::NodeId::new("test-node"),
+                [0u8; 64],
+                0,
+            ),
+        };
+        let doc = PolicyDocument::ZoneDefinition(def);
+        assert_eq!(doc.policy_type(), "zone_definition");
+        assert_eq!(*doc.zone_id(), zone);
+    }
+
+    // ---- risk_flags transport_lan_enabled ----
+
+    #[test]
+    fn risk_flags_transport_lan_enabled() {
+        let added = PolicyListDiff::default();
+        let changed = PolicyChangedFields {
+            transport_policy: Some(TransportPolicyChange {
+                before: fcp_core::ZoneTransportPolicy {
+                    allow_lan: false,
+                    ..Default::default()
+                },
+                after: fcp_core::ZoneTransportPolicy {
+                    allow_lan: true,
+                    ..Default::default()
+                },
+            }),
+            ..Default::default()
+        };
+        let flags = compute_risk_flags(&added, &changed);
+        assert!(flags.contains(&"transport_lan_enabled".to_string()));
+    }
+
+    // ---- risk_flags transport not triggered when disabling ----
+
+    #[test]
+    fn risk_flags_transport_derp_disabled_no_flag() {
+        let added = PolicyListDiff::default();
+        let changed = PolicyChangedFields {
+            transport_policy: Some(TransportPolicyChange {
+                before: fcp_core::ZoneTransportPolicy {
+                    allow_derp: true,
+                    ..Default::default()
+                },
+                after: fcp_core::ZoneTransportPolicy {
+                    allow_derp: false,
+                    ..Default::default()
+                },
+            }),
+            ..Default::default()
+        };
+        let flags = compute_risk_flags(&added, &changed);
+        assert!(!flags.contains(&"transport_derp_enabled".to_string()));
+    }
+
+    // ---- PolicyListDiff serialize ----
+
+    #[test]
+    fn policy_list_diff_serializes() {
+        let diff = PolicyListDiff {
+            principal_allow: vec!["user:*".to_string()],
+            principal_deny: vec![],
+            connector_allow: vec!["c:*".to_string()],
+            connector_deny: vec![],
+            capability_allow: vec![],
+            capability_deny: vec![],
+            capability_ceiling: vec!["cap.x".to_string()],
+        };
+        let json = serde_json::to_string(&diff).unwrap();
+        assert!(json.contains("\"principal_allow\""));
+        assert!(json.contains("\"connector_allow\""));
+        assert!(json.contains("\"capability_ceiling\""));
+    }
+
+    // ---- Change<T> serialize ----
+
+    #[test]
+    fn change_serializes() {
+        let c = Change {
+            before: 10,
+            after: 20,
+        };
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"before\":10"));
+        assert!(json.contains("\"after\":20"));
+    }
+
+    // ---- transport policy all three changed ----
+
+    #[test]
+    fn transport_policy_all_fields_changed() {
+        let before = fcp_core::ZoneTransportPolicy {
+            allow_lan: false,
+            allow_derp: false,
+            allow_funnel: false,
+        };
+        let after = fcp_core::ZoneTransportPolicy {
+            allow_lan: true,
+            allow_derp: true,
+            allow_funnel: true,
+        };
+        assert!(transport_policy_changed(&before, &after));
+    }
 }

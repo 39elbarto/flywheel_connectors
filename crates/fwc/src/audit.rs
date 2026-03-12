@@ -2183,4 +2183,1132 @@ related = []
         let cloned = matrix.clone();
         assert_eq!(matrix.total_connectors, cloned.total_connectors);
     }
+
+    // ── Additional cohort edge cases ─────────────────────────────────
+
+    #[test]
+    fn cohort_empty_string_is_other() {
+        assert_eq!(assign_cohort(""), ConnectorCohort::Other);
+    }
+
+    #[test]
+    fn cohort_case_sensitive() {
+        // Cohort assignment is case-sensitive
+        assert_eq!(assign_cohort("Slack"), ConnectorCohort::Other);
+        assert_eq!(assign_cohort("GITHUB"), ConnectorCohort::Other);
+        assert_eq!(assign_cohort("Redis"), ConnectorCohort::Other);
+    }
+
+    #[test]
+    fn cohort_with_dashes_and_numbers() {
+        assert_eq!(assign_cohort("1password"), ConnectorCohort::Security);
+        assert_eq!(assign_cohort("annas-archive"), ConnectorCohort::Browser);
+        assert_eq!(assign_cohort("google-calendar"), ConnectorCohort::Workspace);
+        assert_eq!(assign_cohort("google-ai"), ConnectorCohort::Ai);
+    }
+
+    #[test]
+    fn cohort_storage_complete() {
+        assert_eq!(assign_cohort("s3"), ConnectorCohort::Storage);
+        assert_eq!(assign_cohort("dropbox"), ConnectorCohort::Storage);
+        assert_eq!(assign_cohort("box"), ConnectorCohort::Storage);
+    }
+
+    #[test]
+    fn cohort_security_complete() {
+        assert_eq!(assign_cohort("1password"), ConnectorCohort::Security);
+        assert_eq!(assign_cohort("bitwarden"), ConnectorCohort::Security);
+    }
+
+    #[test]
+    fn cohort_other_various_unknown() {
+        for name in ["abc", "my-connector", "test-123", "zzz"] {
+            assert_eq!(
+                assign_cohort(name),
+                ConnectorCohort::Other,
+                "failed for {name}"
+            );
+        }
+    }
+
+    // ── Manifest parsing edge cases ──────────────────────────────────
+
+    #[test]
+    fn manifest_no_connector_id() {
+        let s = r#"
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+name = "NoId"
+version = "0.1.0"
+description = "No id"
+archetypes = ["operational"]
+format = "wasi"
+
+[provides.operations."noid.op"]
+description = "Op"
+capability = "noid.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+[provides.operations."noid.op".input_schema]
+type = "object"
+required = ["id"]
+[provides.operations."noid.op".input_schema.properties.id]
+type = "string"
+[provides.operations."noid.op".output_schema]
+type = "object"
+required = ["data"]
+[provides.operations."noid.op".network_constraints]
+host_allow = ["api.noid.com"]
+port_allow = [443]
+[provides.operations."noid.op".ai_hints]
+when_to_use = "Do it"
+common_mistakes = ["x"]
+examples = ['{}']
+related = ["noid.other"]
+"#;
+        let manifest: toml::Value = toml::from_str(s).unwrap();
+        let audit = audit_manifest("noid", &manifest);
+        assert!(audit.connector_id.is_none());
+    }
+
+    #[test]
+    fn manifest_empty_input_properties_not_counted() {
+        let s = r#"
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.emptyin"
+name = "EmptyIn"
+version = "0.1.0"
+description = "Empty input props"
+archetypes = ["operational"]
+format = "wasi"
+
+[provides.operations."emptyin.op"]
+description = "Op"
+capability = "emptyin.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+[provides.operations."emptyin.op".input_schema]
+type = "object"
+[provides.operations."emptyin.op".input_schema.properties]
+[provides.operations."emptyin.op".output_schema]
+type = "object"
+required = ["data"]
+[provides.operations."emptyin.op".ai_hints]
+when_to_use = "Do it"
+common_mistakes = ["x"]
+examples = ['{}']
+related = []
+"#;
+        let manifest: toml::Value = toml::from_str(s).unwrap();
+        let audit = audit_manifest("emptyin", &manifest);
+        // Empty properties table should NOT count
+        assert_eq!(audit.operations.with_input_properties, 0);
+    }
+
+    #[test]
+    fn manifest_output_with_only_required() {
+        let s = r#"
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.outreq"
+name = "OutReq"
+version = "0.1.0"
+description = "Output required only"
+archetypes = ["operational"]
+format = "wasi"
+
+[provides.operations."outreq.op"]
+description = "Op"
+capability = "outreq.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+[provides.operations."outreq.op".input_schema]
+type = "object"
+required = ["id"]
+[provides.operations."outreq.op".input_schema.properties.id]
+type = "string"
+[provides.operations."outreq.op".output_schema]
+type = "object"
+required = ["data"]
+[provides.operations."outreq.op".ai_hints]
+when_to_use = "Test"
+common_mistakes = ["x"]
+examples = ['{}']
+related = []
+"#;
+        let manifest: toml::Value = toml::from_str(s).unwrap();
+        let audit = audit_manifest("outreq", &manifest);
+        // output_schema has required but no properties — still counts
+        assert_eq!(audit.operations.with_output_schema, 1);
+    }
+
+    #[test]
+    fn manifest_hints_partial_fields() {
+        let s = r#"
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.phint"
+name = "PartialHint"
+version = "0.1.0"
+description = "Partial hints"
+archetypes = ["operational"]
+format = "wasi"
+
+[provides.operations."phint.op"]
+description = "Op"
+capability = "phint.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+[provides.operations."phint.op".input_schema]
+type = "object"
+required = ["id"]
+[provides.operations."phint.op".input_schema.properties.id]
+type = "string"
+[provides.operations."phint.op".output_schema]
+type = "object"
+required = ["data"]
+[provides.operations."phint.op".network_constraints]
+host_allow = ["api.phint.com"]
+port_allow = [443]
+[provides.operations."phint.op".ai_hints]
+when_to_use = "Use this for testing"
+common_mistakes = []
+examples = []
+related = []
+"#;
+        let manifest: toml::Value = toml::from_str(s).unwrap();
+        let audit = audit_manifest("phint", &manifest);
+        assert_eq!(audit.agent_hints.with_hints, 1);
+        assert_eq!(audit.agent_hints.with_when_to_use, 1);
+        // empty examples, common_mistakes, related arrays → not counted
+        assert_eq!(audit.agent_hints.with_examples, 0);
+        assert_eq!(audit.agent_hints.with_common_mistakes, 0);
+        assert_eq!(audit.agent_hints.with_related, 0);
+    }
+
+    #[test]
+    fn manifest_empty_when_to_use_not_counted() {
+        let s = r#"
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.ewtu"
+name = "EmptyWTU"
+version = "0.1.0"
+description = "Empty when_to_use"
+archetypes = ["operational"]
+format = "wasi"
+
+[provides.operations."ewtu.op"]
+description = "Op"
+capability = "ewtu.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+[provides.operations."ewtu.op".input_schema]
+type = "object"
+[provides.operations."ewtu.op".output_schema]
+type = "object"
+[provides.operations."ewtu.op".ai_hints]
+when_to_use = ""
+common_mistakes = ["x"]
+examples = ['{}']
+related = ["ewtu.other"]
+"#;
+        let manifest: toml::Value = toml::from_str(s).unwrap();
+        let audit = audit_manifest("ewtu", &manifest);
+        assert_eq!(audit.agent_hints.with_when_to_use, 0);
+        assert_eq!(audit.agent_hints.with_common_mistakes, 1);
+        assert_eq!(audit.agent_hints.with_examples, 1);
+        assert_eq!(audit.agent_hints.with_related, 1);
+    }
+
+    #[test]
+    fn manifest_network_host_allow_only() {
+        let s = r#"
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.hostonly"
+name = "HostOnly"
+version = "0.1.0"
+description = "Host allow only"
+archetypes = ["operational"]
+format = "wasi"
+
+[provides.operations."hostonly.op"]
+description = "Op"
+capability = "hostonly.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+[provides.operations."hostonly.op".input_schema]
+type = "object"
+[provides.operations."hostonly.op".output_schema]
+type = "object"
+[provides.operations."hostonly.op".network_constraints]
+host_allow = ["api.hostonly.com"]
+port_allow = []
+[provides.operations."hostonly.op".ai_hints]
+when_to_use = "Test"
+examples = ['{}']
+related = []
+"#;
+        let manifest: toml::Value = toml::from_str(s).unwrap();
+        let audit = audit_manifest("hostonly", &manifest);
+        assert_eq!(audit.network.with_constraints, 1);
+        assert_eq!(audit.network.with_host_allow, 1);
+        assert_eq!(audit.network.with_port_allow, 0);
+    }
+
+    #[test]
+    fn manifest_network_port_allow_only() {
+        let s = r#"
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.portonly"
+name = "PortOnly"
+version = "0.1.0"
+description = "Port allow only"
+archetypes = ["operational"]
+format = "wasi"
+
+[provides.operations."portonly.op"]
+description = "Op"
+capability = "portonly.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+[provides.operations."portonly.op".input_schema]
+type = "object"
+[provides.operations."portonly.op".output_schema]
+type = "object"
+[provides.operations."portonly.op".network_constraints]
+host_allow = []
+port_allow = [443, 8080]
+[provides.operations."portonly.op".ai_hints]
+when_to_use = "Test"
+examples = ['{}']
+related = []
+"#;
+        let manifest: toml::Value = toml::from_str(s).unwrap();
+        let audit = audit_manifest("portonly", &manifest);
+        assert_eq!(audit.network.with_constraints, 1);
+        assert_eq!(audit.network.with_host_allow, 0);
+        assert_eq!(audit.network.with_port_allow, 1);
+    }
+
+    // ── Archetype detection edge cases ───────────────────────────────
+
+    #[test]
+    fn archetype_webhook_is_streaming() {
+        let s = r#"
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.wh"
+name = "Webhook"
+version = "0.1.0"
+description = "Webhook connector"
+archetypes = ["operational", "webhook"]
+format = "wasi"
+"#;
+        let manifest: toml::Value = toml::from_str(s).unwrap();
+        let audit = audit_manifest("wh", &manifest);
+        assert!(audit.events.has_streaming_archetype);
+    }
+
+    #[test]
+    fn archetype_bidirectional_is_streaming() {
+        let s = r#"
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.bidir"
+name = "Bidirectional"
+version = "0.1.0"
+description = "Bidirectional connector"
+archetypes = ["bidirectional"]
+format = "wasi"
+"#;
+        let manifest: toml::Value = toml::from_str(s).unwrap();
+        let audit = audit_manifest("bidir", &manifest);
+        assert!(audit.events.has_streaming_archetype);
+    }
+
+    #[test]
+    fn archetype_polling_is_streaming() {
+        let s = r#"
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.poll"
+name = "Polling"
+version = "0.1.0"
+description = "Polling connector"
+archetypes = ["polling"]
+format = "wasi"
+"#;
+        let manifest: toml::Value = toml::from_str(s).unwrap();
+        let audit = audit_manifest("poll", &manifest);
+        assert!(audit.events.has_streaming_archetype);
+    }
+
+    #[test]
+    fn archetype_operational_only_not_streaming() {
+        let s = r#"
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.oponly"
+name = "OpOnly"
+version = "0.1.0"
+description = "Op only connector"
+archetypes = ["operational"]
+format = "wasi"
+"#;
+        let manifest: toml::Value = toml::from_str(s).unwrap();
+        let audit = audit_manifest("oponly", &manifest);
+        assert!(!audit.events.has_streaming_archetype);
+    }
+
+    #[test]
+    fn archetype_no_archetypes_section() {
+        let s = r#"
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.noarch"
+name = "NoArch"
+version = "0.1.0"
+description = "No archetypes"
+format = "wasi"
+"#;
+        let manifest: toml::Value = toml::from_str(s).unwrap();
+        let audit = audit_manifest("noarch", &manifest);
+        assert!(!audit.events.has_streaming_archetype);
+    }
+
+    // ── Readiness level determination ────────────────────────────────
+
+    #[test]
+    fn blocking_gap_makes_not_ready() {
+        let manifest = manifest_missing_description();
+        let audit = audit_manifest("bad", &manifest);
+        assert_eq!(audit.level, ReadinessLevel::NotReady);
+    }
+
+    #[test]
+    fn low_completeness_makes_partially_ready() {
+        // A manifest with all descriptions but low completeness (<0.9)
+        let s = r#"
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.lowcomp"
+name = "LowComp"
+version = "0.1.0"
+description = "Low completeness"
+archetypes = ["operational"]
+format = "wasi"
+
+[provides.operations."lowcomp.op"]
+description = "Op"
+capability = "lowcomp.read"
+[provides.operations."lowcomp.op".input_schema]
+type = "object"
+[provides.operations."lowcomp.op".output_schema]
+type = "object"
+[provides.operations."lowcomp.op".ai_hints]
+when_to_use = "Test"
+examples = ['{}']
+related = []
+"#;
+        let manifest: toml::Value = toml::from_str(s).unwrap();
+        let audit = audit_manifest("lowcomp", &manifest);
+        // Missing risk_level, safety_tier, idempotency, approval, input_properties
+        // completeness < 0.9 → PartiallyReady
+        assert_eq!(audit.level, ReadinessLevel::PartiallyReady);
+    }
+
+    #[test]
+    fn low_hint_coverage_makes_partially_ready() {
+        let manifest = manifest_no_hints();
+        let audit = audit_manifest("nohints", &manifest);
+        // 0% hint coverage < 0.8 threshold → PartiallyReady
+        assert_eq!(audit.level, ReadinessLevel::PartiallyReady);
+    }
+
+    // ── Summary computation additional ───────────────────────────────
+
+    #[test]
+    fn summary_multiple_cohorts_counted() {
+        let mut map = BTreeMap::new();
+        map.insert("slack".into(), audit_manifest("slack", &minimal_manifest()));
+        map.insert("discord".into(), audit_manifest("discord", &minimal_manifest()));
+        map.insert("github".into(), audit_manifest("github", &minimal_manifest()));
+        map.insert("s3".into(), audit_manifest("s3", &minimal_manifest()));
+        let summary = compute_summary(&map);
+        assert_eq!(summary.by_cohort.get("messaging"), Some(&2));
+        assert_eq!(summary.by_cohort.get("devtools"), Some(&1));
+        assert_eq!(summary.by_cohort.get("storage"), Some(&1));
+    }
+
+    #[test]
+    fn summary_total_gaps_across_connectors() {
+        let mut map = BTreeMap::new();
+        map.insert("a".into(), audit_missing_manifest("a")); // 1 gap
+        map.insert("b".into(), audit_missing_manifest("b")); // 1 gap
+        map.insert("c".into(), audit_manifest("c", &manifest_no_hints())); // 1 gap
+        let summary = compute_summary(&map);
+        assert_eq!(summary.total_gaps, 3);
+    }
+
+    #[test]
+    fn summary_all_ready() {
+        let mut map = BTreeMap::new();
+        map.insert("a".into(), audit_manifest("a", &minimal_manifest()));
+        map.insert("b".into(), audit_manifest("b", &minimal_manifest()));
+        map.insert("c".into(), audit_manifest("c", &minimal_manifest()));
+        let summary = compute_summary(&map);
+        assert_eq!(summary.ready, 3);
+        assert_eq!(summary.partially_ready, 0);
+        assert_eq!(summary.not_ready, 0);
+    }
+
+    #[test]
+    fn summary_mean_completeness_mixed() {
+        let mut map = BTreeMap::new();
+        map.insert("a".into(), audit_manifest("a", &minimal_manifest())); // 1.0
+        map.insert("b".into(), audit_missing_manifest("b")); // 0.0 (no ops)
+        let summary = compute_summary(&map);
+        assert!((summary.mean_operation_completeness - 0.5).abs() < f64::EPSILON);
+    }
+
+    // ── Serialization roundtrip tests ────────────────────────────────
+
+    #[test]
+    fn operations_audit_default_serializes() {
+        let ops = OperationsAudit::default();
+        let json = serde_json::to_string(&ops).unwrap();
+        assert!(json.contains("\"count\":0"));
+    }
+
+    #[test]
+    fn audit_summary_default_serializes() {
+        let summary = AuditSummary::default();
+        let json = serde_json::to_value(&summary).unwrap();
+        assert_eq!(json["ready"], 0);
+        assert_eq!(json["total_gaps"], 0);
+        assert_eq!(json["mean_operation_completeness"], 0.0);
+    }
+
+    #[test]
+    fn audit_matrix_full_serialization() {
+        let mut connectors = BTreeMap::new();
+        connectors.insert("test".into(), audit_manifest("test", &minimal_manifest()));
+        connectors.insert("missing".into(), audit_missing_manifest("missing"));
+
+        let summary = compute_summary(&connectors);
+        let matrix = AuditMatrix {
+            generated_at: "2026-03-12T00:00:00Z".into(),
+            total_connectors: 2,
+            with_manifest: 1,
+            missing_manifest: 1,
+            connectors,
+            summary,
+        };
+
+        let json = serde_json::to_string_pretty(&matrix).unwrap();
+        assert!(json.contains("\"total_connectors\": 2"));
+        assert!(json.contains("\"with_manifest\": 1"));
+        assert!(json.contains("\"missing_manifest\": 1"));
+        assert!(json.contains("\"ready\": 1"));
+        assert!(json.contains("\"not_ready\": 1"));
+    }
+
+    #[test]
+    fn connector_audit_json_has_all_sub_objects() {
+        let audit = audit_manifest("test", &minimal_manifest());
+        let json = serde_json::to_value(&audit).unwrap();
+        assert!(json.get("operations").is_some());
+        assert!(json.get("config").is_some());
+        assert!(json.get("agent_hints").is_some());
+        assert!(json.get("events").is_some());
+        assert!(json.get("rate_limits").is_some());
+        assert!(json.get("network").is_some());
+        assert!(json.get("gaps").is_some());
+        assert!(json.get("name").is_some());
+        assert!(json.get("crate_path").is_some());
+        assert!(json.get("connector_id").is_some());
+        assert!(json.get("cohort").is_some());
+        assert!(json.get("level").is_some());
+        assert!(json.get("has_manifest").is_some());
+    }
+
+    // ── Clone deep equality ──────────────────────────────────────────
+
+    #[test]
+    fn operations_audit_clone() {
+        let ops = OperationsAudit {
+            count: 5,
+            with_description: 3,
+            with_input_properties: 2,
+            with_output_schema: 4,
+            with_capability: 5,
+            with_risk_level: 3,
+            with_safety_tier: 2,
+            with_idempotency: 4,
+            with_approval: 1,
+            completeness: 0.72,
+        };
+        let cloned = ops.clone();
+        assert_eq!(ops.count, cloned.count);
+        assert_eq!(ops.with_description, cloned.with_description);
+        assert!((ops.completeness - cloned.completeness).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn config_audit_clone() {
+        let config = ConfigAudit {
+            has_state_config: true,
+            has_migration_hint: true,
+        };
+        let cloned = config.clone();
+        assert_eq!(config.has_state_config, cloned.has_state_config);
+        assert_eq!(config.has_migration_hint, cloned.has_migration_hint);
+    }
+
+    #[test]
+    fn event_audit_clone() {
+        let events = EventAudit {
+            event_count: 5,
+            has_event_caps: true,
+            has_streaming_archetype: true,
+        };
+        let cloned = events.clone();
+        assert_eq!(events.event_count, cloned.event_count);
+        assert_eq!(events.has_event_caps, cloned.has_event_caps);
+    }
+
+    #[test]
+    fn rate_limit_audit_clone() {
+        let rl = RateLimitAudit {
+            pool_count: 3,
+            has_operation_pools: true,
+        };
+        let cloned = rl.clone();
+        assert_eq!(rl.pool_count, cloned.pool_count);
+        assert_eq!(rl.has_operation_pools, cloned.has_operation_pools);
+    }
+
+    #[test]
+    fn network_audit_clone() {
+        let net = NetworkAudit {
+            with_constraints: 4,
+            with_host_allow: 3,
+            with_port_allow: 2,
+            coverage: 0.8,
+        };
+        let cloned = net.clone();
+        assert_eq!(net.with_constraints, cloned.with_constraints);
+        assert!((net.coverage - cloned.coverage).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn agent_hint_audit_clone() {
+        let hints = AgentHintAudit {
+            with_hints: 5,
+            with_when_to_use: 4,
+            with_examples: 3,
+            with_common_mistakes: 2,
+            with_related: 1,
+            coverage: 0.5,
+        };
+        let cloned = hints.clone();
+        assert_eq!(hints.with_hints, cloned.with_hints);
+        assert!((hints.coverage - cloned.coverage).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn audit_summary_clone() {
+        let summary = AuditSummary {
+            ready: 10,
+            partially_ready: 5,
+            not_ready: 2,
+            total_operations: 150,
+            total_gaps: 20,
+            blocking_gaps: 3,
+            degraded_gaps: 12,
+            cosmetic_gaps: 5,
+            mean_operation_completeness: 0.75,
+            mean_hint_coverage: 0.6,
+            ..AuditSummary::default()
+        };
+        let cloned = summary.clone();
+        assert_eq!(summary.ready, cloned.ready);
+        assert_eq!(summary.total_gaps, cloned.total_gaps);
+        assert!((summary.mean_hint_coverage - cloned.mean_hint_coverage).abs() < f64::EPSILON);
+    }
+
+    // ── Debug trait tests ────────────────────────────────────────────
+
+    #[test]
+    fn operations_audit_debug() {
+        let ops = OperationsAudit::default();
+        let debug = format!("{ops:?}");
+        assert!(debug.contains("OperationsAudit"));
+        assert!(debug.contains("count"));
+    }
+
+    #[test]
+    fn config_audit_debug() {
+        let config = ConfigAudit::default();
+        let debug = format!("{config:?}");
+        assert!(debug.contains("ConfigAudit"));
+    }
+
+    #[test]
+    fn event_audit_debug() {
+        let events = EventAudit::default();
+        let debug = format!("{events:?}");
+        assert!(debug.contains("EventAudit"));
+    }
+
+    #[test]
+    fn rate_limit_audit_debug() {
+        let rl = RateLimitAudit::default();
+        let debug = format!("{rl:?}");
+        assert!(debug.contains("RateLimitAudit"));
+    }
+
+    #[test]
+    fn network_audit_debug() {
+        let net = NetworkAudit::default();
+        let debug = format!("{net:?}");
+        assert!(debug.contains("NetworkAudit"));
+    }
+
+    #[test]
+    fn agent_hint_audit_debug() {
+        let hints = AgentHintAudit::default();
+        let debug = format!("{hints:?}");
+        assert!(debug.contains("AgentHintAudit"));
+    }
+
+    #[test]
+    fn connector_audit_debug() {
+        let audit = audit_missing_manifest("test");
+        let debug = format!("{audit:?}");
+        assert!(debug.contains("ConnectorAudit"));
+        assert!(debug.contains("test"));
+    }
+
+    #[test]
+    fn audit_matrix_debug() {
+        let matrix = AuditMatrix {
+            generated_at: "2026-03-12T00:00:00Z".into(),
+            total_connectors: 0,
+            with_manifest: 0,
+            missing_manifest: 0,
+            connectors: BTreeMap::new(),
+            summary: AuditSummary::default(),
+        };
+        let debug = format!("{matrix:?}");
+        assert!(debug.contains("AuditMatrix"));
+    }
+
+    #[test]
+    fn audit_summary_debug() {
+        let summary = AuditSummary::default();
+        let debug = format!("{summary:?}");
+        assert!(debug.contains("AuditSummary"));
+    }
+
+    // ── Crate path formatting ────────────────────────────────────────
+
+    #[test]
+    fn crate_path_format_for_manifest() {
+        let audit = audit_manifest("github", &minimal_manifest());
+        assert_eq!(audit.crate_path, "connectors/github");
+    }
+
+    #[test]
+    fn crate_path_format_for_missing() {
+        let audit = audit_missing_manifest("slack");
+        assert_eq!(audit.crate_path, "connectors/slack");
+    }
+
+    #[test]
+    fn crate_path_preserves_dashes() {
+        let audit = audit_missing_manifest("annas-archive");
+        assert_eq!(audit.crate_path, "connectors/annas-archive");
+    }
+
+    // ── Multi-op gap accumulation ────────────────────────────────────
+
+    #[test]
+    fn multiple_ops_missing_capability_accumulates_gaps() {
+        let s = r#"
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.multigap"
+name = "MultiGap"
+version = "0.1.0"
+description = "Multi gap connector"
+archetypes = ["operational"]
+format = "wasi"
+
+[provides.operations."multigap.a"]
+description = "Op A"
+[provides.operations."multigap.a".input_schema]
+type = "object"
+[provides.operations."multigap.a".output_schema]
+type = "object"
+
+[provides.operations."multigap.b"]
+description = "Op B"
+[provides.operations."multigap.b".input_schema]
+type = "object"
+[provides.operations."multigap.b".output_schema]
+type = "object"
+"#;
+        let manifest: toml::Value = toml::from_str(s).unwrap();
+        let audit = audit_manifest("multigap", &manifest);
+        // Each op missing capability → 1 blocking gap each
+        // Each op missing ai_hints → 1 degraded gap each
+        let cap_gaps = audit
+            .gaps
+            .iter()
+            .filter(|g| g.description.contains("capability"))
+            .count();
+        assert_eq!(cap_gaps, 2);
+        let hint_gaps = audit
+            .gaps
+            .iter()
+            .filter(|g| g.category == GapCategory::AgentHints)
+            .count();
+        assert_eq!(hint_gaps, 2);
+    }
+
+    #[test]
+    fn gap_remediation_messages_non_empty() {
+        let audit = audit_missing_manifest("test");
+        for gap in &audit.gaps {
+            assert!(!gap.remediation.is_empty());
+        }
+
+        let manifest = manifest_missing_description();
+        let audit2 = audit_manifest("bad", &manifest);
+        for gap in &audit2.gaps {
+            assert!(!gap.remediation.is_empty());
+        }
+    }
+
+    // ── Rate limit edge cases ────────────────────────────────────────
+
+    #[test]
+    fn rate_limits_no_pools_section() {
+        let s = r#"
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.norl"
+name = "NoRL"
+version = "0.1.0"
+description = "No rate limits"
+archetypes = ["operational"]
+format = "wasi"
+
+[rate_limits]
+strategy = "token_bucket"
+"#;
+        let manifest: toml::Value = toml::from_str(s).unwrap();
+        let audit = audit_manifest("norl", &manifest);
+        assert_eq!(audit.rate_limits.pool_count, 0);
+        assert!(!audit.rate_limits.has_operation_pools);
+    }
+
+    #[test]
+    fn rate_limits_multiple_pools() {
+        let s = r#"
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.multipool"
+name = "MultiPool"
+version = "0.1.0"
+description = "Multi pool"
+archetypes = ["operational"]
+format = "wasi"
+
+[[rate_limits.pools]]
+id = "pool_a"
+requests = 100
+window_ms = 60000
+
+[[rate_limits.pools]]
+id = "pool_b"
+requests = 50
+window_ms = 30000
+
+[[rate_limits.pools]]
+id = "pool_c"
+requests = 200
+window_ms = 120000
+"#;
+        let manifest: toml::Value = toml::from_str(s).unwrap();
+        let audit = audit_manifest("multipool", &manifest);
+        assert_eq!(audit.rate_limits.pool_count, 3);
+    }
+
+    // ── Event count edge cases ───────────────────────────────────────
+
+    #[test]
+    fn multiple_events_counted() {
+        let s = r#"
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.multievt"
+name = "MultiEvt"
+version = "0.1.0"
+description = "Multi events"
+archetypes = ["operational", "streaming"]
+format = "wasi"
+
+[event_caps]
+streaming = true
+
+[provides.events."evt.a"]
+description = "Event A"
+[provides.events."evt.b"]
+description = "Event B"
+[provides.events."evt.c"]
+description = "Event C"
+"#;
+        let manifest: toml::Value = toml::from_str(s).unwrap();
+        let audit = audit_manifest("multievt", &manifest);
+        assert_eq!(audit.events.event_count, 3);
+        assert!(audit.events.has_event_caps);
+        assert!(audit.events.has_streaming_archetype);
+    }
+
+    // ── Completeness ratio precision ─────────────────────────────────
+
+    #[test]
+    fn completeness_ratio_calculated_correctly() {
+        // 2 ops, each with 8 checks = 16 total checks
+        // multi_ops manifest: all 8 fields present for all 3 ops → 24/24 = 1.0
+        let manifest = manifest_multi_ops();
+        let audit = audit_manifest("multi", &manifest);
+        let expected = 24.0 / 24.0;
+        assert!((audit.operations.completeness - expected).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn hint_coverage_ratio_partial() {
+        // 3 ops, 2 with hints → coverage = 2/3
+        let s = r#"
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.phcov"
+name = "PartHintCov"
+version = "0.1.0"
+description = "Partial hint coverage"
+archetypes = ["operational"]
+format = "wasi"
+
+[provides.operations."phcov.a"]
+description = "A"
+capability = "phcov.read"
+[provides.operations."phcov.a".input_schema]
+type = "object"
+[provides.operations."phcov.a".output_schema]
+type = "object"
+[provides.operations."phcov.a".ai_hints]
+when_to_use = "A"
+examples = ['{}']
+related = []
+
+[provides.operations."phcov.b"]
+description = "B"
+capability = "phcov.read"
+[provides.operations."phcov.b".input_schema]
+type = "object"
+[provides.operations."phcov.b".output_schema]
+type = "object"
+[provides.operations."phcov.b".ai_hints]
+when_to_use = "B"
+examples = ['{}']
+related = []
+
+[provides.operations."phcov.c"]
+description = "C"
+capability = "phcov.read"
+[provides.operations."phcov.c".input_schema]
+type = "object"
+[provides.operations."phcov.c".output_schema]
+type = "object"
+"#;
+        let manifest: toml::Value = toml::from_str(s).unwrap();
+        let audit = audit_manifest("phcov", &manifest);
+        let expected = 2.0 / 3.0;
+        assert!((audit.agent_hints.coverage - expected).abs() < f64::EPSILON);
+    }
+
+    // ── Migration hint edge cases ────────────────────────────────────
+
+    #[test]
+    fn migration_hint_empty_string_not_meaningful() {
+        let s = r#"
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.emptymig"
+name = "EmptyMig"
+version = "0.1.0"
+description = "Empty migration hint"
+archetypes = ["operational"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = ""
+"#;
+        let manifest: toml::Value = toml::from_str(s).unwrap();
+        let audit = audit_manifest("emptymig", &manifest);
+        assert!(audit.config.has_state_config);
+        assert!(!audit.config.has_migration_hint);
+    }
+
+    #[test]
+    fn migration_hint_init_not_meaningful() {
+        // Already tested but let's be explicit
+        let manifest = minimal_manifest();
+        let audit = audit_manifest("test", &manifest);
+        assert!(!audit.config.has_migration_hint);
+    }
+
+    // ── Filesystem edge cases ────────────────────────────────────────
+
+    #[test]
+    fn run_audit_empty_directory() {
+        let dir = std::env::temp_dir().join("fwc_audit_test_empty");
+        let _ = std::fs::create_dir_all(&dir);
+        let matrix = run_audit(&dir).unwrap();
+        assert_eq!(matrix.total_connectors, 0);
+        assert_eq!(matrix.with_manifest, 0);
+        assert_eq!(matrix.missing_manifest, 0);
+        assert!(matrix.connectors.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_audit_dir_with_files_only() {
+        let dir = std::env::temp_dir().join("fwc_audit_test_files");
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("not_a_dir.txt"), "hello").unwrap();
+        let matrix = run_audit(&dir).unwrap();
+        // Files are filtered out, only dirs
+        assert_eq!(matrix.total_connectors, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_audit_dir_with_subdirs_no_manifest() {
+        let dir = std::env::temp_dir().join("fwc_audit_test_subdirs");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("connector_a")).unwrap();
+        std::fs::create_dir_all(dir.join("connector_b")).unwrap();
+        let matrix = run_audit(&dir).unwrap();
+        assert_eq!(matrix.total_connectors, 2);
+        assert_eq!(matrix.missing_manifest, 2);
+        assert_eq!(matrix.with_manifest, 0);
+        for audit in matrix.connectors.values() {
+            assert!(!audit.has_manifest);
+            assert_eq!(audit.level, ReadinessLevel::NotReady);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Summary by_cohort deduplication ──────────────────────────────
+
+    #[test]
+    fn summary_by_cohort_key_is_lowercase() {
+        let mut map = BTreeMap::new();
+        map.insert("github".into(), audit_manifest("github", &minimal_manifest()));
+        let summary = compute_summary(&map);
+        // Key should be lowercase debug repr of the enum
+        assert!(summary.by_cohort.contains_key("devtools"));
+        assert!(!summary.by_cohort.contains_key("DevTools"));
+    }
+
+    #[test]
+    fn summary_by_cohort_accumulates() {
+        let mut map = BTreeMap::new();
+        for name in ["slack", "discord", "telegram", "twilio"] {
+            map.insert(name.into(), audit_manifest(name, &minimal_manifest()));
+        }
+        let summary = compute_summary(&map);
+        assert_eq!(summary.by_cohort.get("messaging"), Some(&4));
+    }
 }

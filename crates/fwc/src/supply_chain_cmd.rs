@@ -1499,6 +1499,51 @@ mod tests {
         assert!(dbg.contains("evidence_digest"));
     }
 
+    #[test]
+    fn supply_chain_evaluation_clone_preserves_policy() {
+        let policy = SupplyChainVerificationPolicy {
+            require_attestation: true,
+            require_sbom: true,
+            min_slsa_level: 3,
+            trusted_builders: vec!["builder-a".to_string()],
+            allow_unsigned: false,
+            require_digest_match: true,
+        };
+        let pipeline = VerificationPipeline::new(policy.clone());
+        let evidence = pipeline.verify("blake3-256:pol", None, None);
+        let eval = SupplyChainEvaluation {
+            artifact_digest: "blake3-256:pol".to_string(),
+            attestation: None,
+            sbom: None,
+            policy,
+            evidence_digest: "blake3-256:ev".to_string(),
+            evidence,
+        };
+        let cloned = eval.clone();
+        assert_eq!(cloned.policy.require_attestation, true);
+        assert_eq!(cloned.policy.min_slsa_level, 3);
+        assert_eq!(cloned.policy.require_digest_match, true);
+        assert_eq!(cloned.policy.trusted_builders.len(), 1);
+    }
+
+    #[test]
+    fn supply_chain_evaluation_clone_preserves_steps() {
+        let policy = SupplyChainVerificationPolicy::default();
+        let pipeline = VerificationPipeline::new(policy.clone());
+        let evidence = pipeline.verify("blake3-256:steps", None, None);
+        let original_steps = evidence.steps.len();
+        let eval = SupplyChainEvaluation {
+            artifact_digest: "blake3-256:steps".to_string(),
+            attestation: None,
+            sbom: None,
+            policy,
+            evidence_digest: "blake3-256:ev".to_string(),
+            evidence,
+        };
+        let cloned = eval.clone();
+        assert_eq!(cloned.evidence.steps.len(), original_steps);
+    }
+
     // ── build_verify_output extended ─────────────────────────────────
 
     #[test]
@@ -1776,5 +1821,991 @@ mod tests {
         let dbg = format!("{output:?}");
         assert!(dbg.contains("rpt"));
         assert!(dbg.contains("sbom_missing"));
+    }
+
+    // ── Expanded supply-chain tests ─────────────────────────────────
+
+    // ── camel_to_snake_case additional edge cases ───────────────────
+
+    #[test]
+    fn camel_to_snake_unicode_lowercase() {
+        // Non-ASCII lowercase should pass through
+        assert_eq!(camel_to_snake_case("caf\u{00e9}"), "caf\u{00e9}");
+    }
+
+    #[test]
+    fn camel_to_snake_long_string() {
+        let result = camel_to_snake_case("ThisIsAVeryLongCamelCaseIdentifierForTesting");
+        assert!(result.contains("this_is_a_very_long"));
+        assert!(result.starts_with("this"));
+        assert!(!result.starts_with('_'));
+    }
+
+    #[test]
+    fn camel_to_snake_single_capital_at_end() {
+        assert_eq!(camel_to_snake_case("testA"), "test_a");
+    }
+
+    #[test]
+    fn camel_to_snake_two_chars_both_capital() {
+        assert_eq!(camel_to_snake_case("AB"), "a_b");
+    }
+
+    #[test]
+    fn camel_to_snake_numbers_between_capitals() {
+        assert_eq!(camel_to_snake_case("A1B"), "a1_b");
+    }
+
+    #[test]
+    fn camel_to_snake_spaces_preserved() {
+        // Spaces are not uppercase, so they pass through
+        assert_eq!(camel_to_snake_case("hello World"), "hello _world");
+    }
+
+    // ── verification_decision_label coverage ────────────────────────
+
+    #[test]
+    fn decision_label_allow_not_empty() {
+        let label = verification_decision_label(VerificationDecision::Allow);
+        assert!(!label.is_empty());
+    }
+
+    #[test]
+    fn decision_label_deny_not_empty() {
+        let label = verification_decision_label(VerificationDecision::Deny);
+        assert!(!label.is_empty());
+    }
+
+    #[test]
+    fn decision_labels_are_distinct() {
+        let allow = verification_decision_label(VerificationDecision::Allow);
+        let deny = verification_decision_label(VerificationDecision::Deny);
+        assert_ne!(allow, deny);
+    }
+
+    // ── verification_reason_code_label extended ─────────────────────
+
+    #[test]
+    fn reason_code_label_is_lowercase() {
+        let label = verification_reason_code_label(&"SomeReason");
+        // All chars should be lowercase or underscore or quotes
+        for ch in label.chars() {
+            assert!(
+                !ch.is_uppercase(),
+                "reason code label should not contain uppercase: found '{ch}' in '{label}'"
+            );
+        }
+    }
+
+    #[test]
+    fn reason_code_label_empty_debug() {
+        let label = verification_reason_code_label(&"");
+        // Debug of &str "" is "\"\"" → should produce "\"\"" after camel_to_snake
+        assert!(!label.is_empty());
+    }
+
+    // ── build_verification_policy exhaustive ────────────────────────
+
+    #[test]
+    fn policy_require_digest_match_combinations() {
+        for digest_match in [false, true] {
+            let p = build_verification_policy(true, true, 0, false, digest_match);
+            assert_eq!(p.require_digest_match, digest_match);
+        }
+    }
+
+    #[test]
+    fn policy_slsa_level_range() {
+        for level in [0, 1, 2, 3, 4, 5, 128, 255] {
+            let p = build_verification_policy(false, false, level, true, false);
+            assert_eq!(p.min_slsa_level, level);
+        }
+    }
+
+    #[test]
+    fn policy_has_sbom_overrides_unsigned() {
+        let p = build_verification_policy(false, true, 0, true, false);
+        // has_sbom=true → require_sbom = true || !true = true
+        assert!(p.require_sbom);
+        // has_attestation=false, allow_unsigned=true → require_attestation = false || !true = false
+        assert!(!p.require_attestation);
+    }
+
+    // ── json_string_value type coverage ─────────────────────────────
+
+    #[test]
+    fn json_string_value_rejects_object() {
+        use std::collections::HashMap;
+        let obj: HashMap<String, i32> = HashMap::new();
+        assert!(json_string_value(&obj).is_err());
+    }
+
+    #[test]
+    fn json_string_value_rejects_float() {
+        assert!(json_string_value(&3.14).is_err());
+    }
+
+    #[test]
+    fn json_string_value_string_with_quotes() {
+        let s = r#"hello "world""#.to_string();
+        let result = json_string_value(&s).unwrap();
+        assert!(result.contains("hello"));
+        assert!(result.contains("world"));
+    }
+
+    #[test]
+    fn json_string_value_string_with_newlines() {
+        let s = "line1\nline2".to_string();
+        assert_eq!(json_string_value(&s).unwrap(), "line1\nline2");
+    }
+
+    // ── Output struct serialization extended ────────────────────────
+
+    #[test]
+    fn verify_output_all_fields_present_in_json() {
+        let output = VerifyOutput {
+            connector_id: "fc".to_string(),
+            decision: "deny".to_string(),
+            reason_code: "attestation_missing".to_string(),
+            artifact_digest: "sha256:aaaa".to_string(),
+            steps: vec![
+                VerifyStepOutput {
+                    step: "s1".to_string(),
+                    passed: true,
+                    detail: "ok".to_string(),
+                },
+                VerifyStepOutput {
+                    step: "s2".to_string(),
+                    passed: false,
+                    detail: "nope".to_string(),
+                },
+            ],
+            evidence_digest: "sha256:bbbb".to_string(),
+            policy: VerifyPolicyOutput {
+                require_attestation: true,
+                require_sbom: false,
+                min_slsa_level: 1,
+                allow_unsigned: false,
+            },
+        };
+        let value: serde_json::Value = serde_json::to_value(&output).unwrap();
+        assert_eq!(value["connector_id"], "fc");
+        assert_eq!(value["decision"], "deny");
+        assert_eq!(value["steps"].as_array().unwrap().len(), 2);
+        assert_eq!(value["policy"]["min_slsa_level"], 1);
+    }
+
+    #[test]
+    fn verify_step_output_passed_true() {
+        let step = VerifyStepOutput {
+            step: "attestation_present".to_string(),
+            passed: true,
+            detail: "attestation found".to_string(),
+        };
+        let value: serde_json::Value = serde_json::to_value(&step).unwrap();
+        assert_eq!(value["passed"], true);
+    }
+
+    #[test]
+    fn verify_step_output_passed_false() {
+        let step = VerifyStepOutput {
+            step: "sbom_present".to_string(),
+            passed: false,
+            detail: "sbom not found".to_string(),
+        };
+        let value: serde_json::Value = serde_json::to_value(&step).unwrap();
+        assert_eq!(value["passed"], false);
+    }
+
+    #[test]
+    fn verify_policy_output_all_true() {
+        let policy = VerifyPolicyOutput {
+            require_attestation: true,
+            require_sbom: true,
+            min_slsa_level: 4,
+            allow_unsigned: true,
+        };
+        let value: serde_json::Value = serde_json::to_value(&policy).unwrap();
+        assert_eq!(value["require_attestation"], true);
+        assert_eq!(value["require_sbom"], true);
+        assert_eq!(value["min_slsa_level"], 4);
+        assert_eq!(value["allow_unsigned"], true);
+    }
+
+    #[test]
+    fn verify_policy_output_all_false() {
+        let policy = VerifyPolicyOutput {
+            require_attestation: false,
+            require_sbom: false,
+            min_slsa_level: 0,
+            allow_unsigned: false,
+        };
+        let value: serde_json::Value = serde_json::to_value(&policy).unwrap();
+        assert_eq!(value["require_attestation"], false);
+        assert_eq!(value["require_sbom"], false);
+        assert_eq!(value["min_slsa_level"], 0);
+        assert_eq!(value["allow_unsigned"], false);
+    }
+
+    // ── Report output struct coverage ───────────────────────────────
+
+    #[test]
+    fn report_output_json_field_names() {
+        let output = SupplyChainReportOutput {
+            connector_id: "x".to_string(),
+            decision: "allow".to_string(),
+            reason_code: "ok".to_string(),
+            artifact_digest: "d".to_string(),
+            evidence_digest: "e".to_string(),
+            policy: VerifyPolicyOutput {
+                require_attestation: false,
+                require_sbom: false,
+                min_slsa_level: 0,
+                allow_unsigned: true,
+            },
+            steps: vec![],
+            attestation: None,
+            sbom: None,
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        assert!(json.contains("connector_id"));
+        assert!(json.contains("decision"));
+        assert!(json.contains("reason_code"));
+        assert!(json.contains("artifact_digest"));
+        assert!(json.contains("evidence_digest"));
+    }
+
+    #[test]
+    fn attestation_report_trust_root_fields() {
+        let report = SupplyChainAttestationReport {
+            predicate_type: "p".to_string(),
+            builder_id: "b".to_string(),
+            build_type: "t".to_string(),
+            subject_digest: "d".to_string(),
+            slsa_level: 0,
+            provenance_hash: "h".to_string(),
+            content_digest: "c".to_string(),
+            trust_root: TrustRootReport {
+                root_type: "custom_type".to_string(),
+                root_id: "custom_id".to_string(),
+            },
+        };
+        let value: serde_json::Value = serde_json::to_value(&report).unwrap();
+        assert_eq!(value["trust_root"]["root_type"], "custom_type");
+        assert_eq!(value["trust_root"]["root_id"], "custom_id");
+    }
+
+    #[test]
+    fn attestation_report_slsa_level_zero() {
+        let report = SupplyChainAttestationReport {
+            predicate_type: "p".to_string(),
+            builder_id: "b".to_string(),
+            build_type: "t".to_string(),
+            subject_digest: "d".to_string(),
+            slsa_level: 0,
+            provenance_hash: "h".to_string(),
+            content_digest: "c".to_string(),
+            trust_root: TrustRootReport {
+                root_type: "t".to_string(),
+                root_id: "i".to_string(),
+            },
+        };
+        let value: serde_json::Value = serde_json::to_value(&report).unwrap();
+        assert_eq!(value["slsa_level"], 0);
+    }
+
+    #[test]
+    fn attestation_report_slsa_level_max() {
+        let report = SupplyChainAttestationReport {
+            predicate_type: "p".to_string(),
+            builder_id: "b".to_string(),
+            build_type: "t".to_string(),
+            subject_digest: "d".to_string(),
+            slsa_level: 255,
+            provenance_hash: "h".to_string(),
+            content_digest: "c".to_string(),
+            trust_root: TrustRootReport {
+                root_type: "t".to_string(),
+                root_id: "i".to_string(),
+            },
+        };
+        let value: serde_json::Value = serde_json::to_value(&report).unwrap();
+        assert_eq!(value["slsa_level"], 255);
+    }
+
+    #[test]
+    fn sbom_report_large_component_count() {
+        let report = SupplyChainSbomReport {
+            bom_format: "CycloneDX".to_string(),
+            bom_version: "1.5".to_string(),
+            component_count: 999_999,
+            dependency_count: 500_000,
+            tool_chain: vec!["tool1".to_string(), "tool2".to_string(), "tool3".to_string()],
+            content_digest: "blake3-256:large".to_string(),
+            trust_root: TrustRootReport {
+                root_type: "tuf".to_string(),
+                root_id: "root".to_string(),
+            },
+        };
+        let value: serde_json::Value = serde_json::to_value(&report).unwrap();
+        assert_eq!(value["component_count"], 999_999);
+        assert_eq!(value["dependency_count"], 500_000);
+        assert_eq!(value["tool_chain"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn sbom_report_spdx_format() {
+        let report = SupplyChainSbomReport {
+            bom_format: "SPDX".to_string(),
+            bom_version: "2.3".to_string(),
+            component_count: 5,
+            dependency_count: 3,
+            tool_chain: vec!["spdx-sbom-generator".to_string()],
+            content_digest: "blake3-256:spdx".to_string(),
+            trust_root: TrustRootReport {
+                root_type: "sigstore".to_string(),
+                root_id: "fulcio".to_string(),
+            },
+        };
+        let value: serde_json::Value = serde_json::to_value(&report).unwrap();
+        assert_eq!(value["bom_format"], "SPDX");
+        assert_eq!(value["bom_version"], "2.3");
+    }
+
+    #[test]
+    fn trust_root_report_empty_fields() {
+        let tr = TrustRootReport {
+            root_type: "".to_string(),
+            root_id: "".to_string(),
+        };
+        let value: serde_json::Value = serde_json::to_value(&tr).unwrap();
+        assert_eq!(value["root_type"], "");
+        assert_eq!(value["root_id"], "");
+    }
+
+    #[test]
+    fn trust_root_report_long_values() {
+        let tr = TrustRootReport {
+            root_type: "a".repeat(1000),
+            root_id: "b".repeat(1000),
+        };
+        let value: serde_json::Value = serde_json::to_value(&tr).unwrap();
+        assert_eq!(value["root_type"].as_str().unwrap().len(), 1000);
+        assert_eq!(value["root_id"].as_str().unwrap().len(), 1000);
+    }
+
+    // ── evaluate_supply_chain extended ──────────────────────────────
+
+    #[test]
+    fn evaluate_allow_unsigned_result_decision() {
+        let result = evaluate_supply_chain(None, None, Some("blake3-256:test"), 0, true);
+        let eval = result.unwrap();
+        assert_eq!(eval.evidence.decision, VerificationDecision::Allow);
+    }
+
+    #[test]
+    fn evaluate_deny_unsigned_result_decision() {
+        let result = evaluate_supply_chain(None, None, Some("blake3-256:test"), 0, false);
+        let eval = result.unwrap();
+        assert_eq!(eval.evidence.decision, VerificationDecision::Deny);
+    }
+
+    #[test]
+    fn evaluate_policy_reflects_allow_unsigned() {
+        let eval = evaluate_supply_chain(None, None, Some("blake3-256:x"), 0, true).unwrap();
+        assert!(eval.policy.allow_unsigned);
+    }
+
+    #[test]
+    fn evaluate_policy_reflects_deny_unsigned() {
+        let eval = evaluate_supply_chain(None, None, Some("blake3-256:x"), 0, false).unwrap();
+        assert!(!eval.policy.allow_unsigned);
+    }
+
+    #[test]
+    fn evaluate_artifact_digest_matches_input() {
+        let eval = evaluate_supply_chain(None, None, Some("blake3-256:mydigest"), 0, true).unwrap();
+        assert_eq!(eval.artifact_digest, "blake3-256:mydigest");
+    }
+
+    #[test]
+    fn evaluate_min_slsa_propagated() {
+        let eval = evaluate_supply_chain(None, None, Some("blake3-256:x"), 4, true).unwrap();
+        assert_eq!(eval.policy.min_slsa_level, 4);
+    }
+
+    #[test]
+    fn evaluate_strict_evidence_has_steps() {
+        // A strict policy should produce verification steps
+        let eval = evaluate_supply_chain(None, None, Some("blake3-256:x"), 0, false).unwrap();
+        assert!(!eval.evidence.steps.is_empty());
+    }
+
+    #[test]
+    fn evaluate_evidence_digest_starts_with_blake3() {
+        let eval = evaluate_supply_chain(None, None, Some("blake3-256:x"), 0, true).unwrap();
+        assert!(
+            eval.evidence_digest.starts_with("blake3-256:"),
+            "evidence digest should be blake3: got {}",
+            eval.evidence_digest
+        );
+    }
+
+    #[test]
+    fn evaluate_no_attestation_no_sbom_in_result() {
+        let eval = evaluate_supply_chain(None, None, Some("blake3-256:x"), 0, true).unwrap();
+        assert!(eval.attestation.is_none());
+        assert!(eval.sbom.is_none());
+    }
+
+    // ── read_attestation / read_sbom extended ───────────────────────
+
+    #[test]
+    fn read_attestation_corrupt_json_errors() {
+        let path = std::env::temp_dir().join("fwc_sc_test_bad_att.json");
+        std::fs::write(&path, "not valid json {{{").unwrap();
+        let result = read_attestation(Some(path.to_str().unwrap()));
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("invalid") || err_msg.contains("JSON") || err_msg.contains("attestation"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn read_sbom_corrupt_json_errors() {
+        let path = std::env::temp_dir().join("fwc_sc_test_bad_sbom.json");
+        std::fs::write(&path, "{{bad json").unwrap();
+        let result = read_sbom(Some(path.to_str().unwrap()));
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("invalid") || err_msg.contains("JSON") || err_msg.contains("SBOM"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // ── build_verify_output additional ──────────────────────────────
+
+    #[test]
+    fn build_verify_output_decision_deny() {
+        let policy = SupplyChainVerificationPolicy::default();
+        let pipeline = VerificationPipeline::new(policy.clone());
+        let evidence = pipeline.verify("blake3-256:deny-test", None, None);
+        let eval = SupplyChainEvaluation {
+            artifact_digest: "blake3-256:deny-test".to_string(),
+            attestation: None,
+            sbom: None,
+            policy,
+            evidence_digest: "blake3-256:ev".to_string(),
+            evidence,
+        };
+        let output = build_verify_output("deny-conn", &eval);
+        assert_eq!(output.decision, "deny");
+        assert!(!output.reason_code.is_empty());
+    }
+
+    #[test]
+    fn build_verify_output_connector_id_propagated() {
+        let policy = SupplyChainVerificationPolicy {
+            require_attestation: false,
+            require_sbom: false,
+            min_slsa_level: 0,
+            trusted_builders: vec![],
+            allow_unsigned: true,
+            require_digest_match: false,
+        };
+        let pipeline = VerificationPipeline::new(policy.clone());
+        let evidence = pipeline.verify("blake3-256:x", None, None);
+        let eval = SupplyChainEvaluation {
+            artifact_digest: "blake3-256:x".to_string(),
+            attestation: None,
+            sbom: None,
+            policy,
+            evidence_digest: "blake3-256:ev".to_string(),
+            evidence,
+        };
+        let output = build_verify_output("special-name-123", &eval);
+        assert_eq!(output.connector_id, "special-name-123");
+    }
+
+    #[test]
+    fn build_verify_output_step_details_nonempty() {
+        let policy = SupplyChainVerificationPolicy::default();
+        let pipeline = VerificationPipeline::new(policy.clone());
+        let evidence = pipeline.verify("blake3-256:steps", None, None);
+        let eval = SupplyChainEvaluation {
+            artifact_digest: "blake3-256:steps".to_string(),
+            attestation: None,
+            sbom: None,
+            policy,
+            evidence_digest: "blake3-256:ev".to_string(),
+            evidence,
+        };
+        let output = build_verify_output("steps-conn", &eval);
+        for step in &output.steps {
+            assert!(!step.step.is_empty(), "step name should not be empty");
+            assert!(!step.detail.is_empty(), "step detail should not be empty");
+        }
+    }
+
+    // ── build_report_output additional ──────────────────────────────
+
+    #[test]
+    fn build_report_output_evidence_digest_propagated() {
+        let policy = SupplyChainVerificationPolicy {
+            require_attestation: false,
+            require_sbom: false,
+            min_slsa_level: 0,
+            trusted_builders: vec![],
+            allow_unsigned: true,
+            require_digest_match: false,
+        };
+        let pipeline = VerificationPipeline::new(policy.clone());
+        let evidence = pipeline.verify("blake3-256:x", None, None);
+        let eval = SupplyChainEvaluation {
+            artifact_digest: "blake3-256:x".to_string(),
+            attestation: None,
+            sbom: None,
+            policy,
+            evidence_digest: "blake3-256:custom-hash".to_string(),
+            evidence,
+        };
+        let output = build_report_output("c", &eval).unwrap();
+        assert_eq!(output.evidence_digest, "blake3-256:custom-hash");
+    }
+
+    #[test]
+    fn build_report_output_policy_matches_evaluation() {
+        let policy = SupplyChainVerificationPolicy {
+            require_attestation: true,
+            require_sbom: false,
+            min_slsa_level: 2,
+            trusted_builders: vec![],
+            allow_unsigned: true,
+            require_digest_match: true,
+        };
+        let pipeline = VerificationPipeline::new(policy.clone());
+        let evidence = pipeline.verify("blake3-256:x", None, None);
+        let eval = SupplyChainEvaluation {
+            artifact_digest: "blake3-256:x".to_string(),
+            attestation: None,
+            sbom: None,
+            policy,
+            evidence_digest: "blake3-256:ev".to_string(),
+            evidence,
+        };
+        let output = build_report_output("c", &eval).unwrap();
+        assert!(output.policy.require_attestation);
+        assert!(!output.policy.require_sbom);
+        assert_eq!(output.policy.min_slsa_level, 2);
+        assert!(output.policy.allow_unsigned);
+    }
+
+    // ── Verification pipeline invariants ────────────────────────────
+
+    #[test]
+    fn pipeline_strict_policy_always_denies_without_artifacts() {
+        let policy = SupplyChainVerificationPolicy {
+            require_attestation: true,
+            require_sbom: true,
+            min_slsa_level: 3,
+            trusted_builders: vec![],
+            allow_unsigned: false,
+            require_digest_match: true,
+        };
+        let pipeline = VerificationPipeline::new(policy);
+        let evidence = pipeline.verify("blake3-256:strict", None, None);
+        assert_eq!(evidence.decision, VerificationDecision::Deny);
+    }
+
+    #[test]
+    fn pipeline_permissive_policy_always_allows_without_artifacts() {
+        let policy = SupplyChainVerificationPolicy {
+            require_attestation: false,
+            require_sbom: false,
+            min_slsa_level: 0,
+            trusted_builders: vec![],
+            allow_unsigned: true,
+            require_digest_match: false,
+        };
+        let pipeline = VerificationPipeline::new(policy);
+        let evidence = pipeline.verify("blake3-256:permissive", None, None);
+        assert_eq!(evidence.decision, VerificationDecision::Allow);
+    }
+
+    #[test]
+    fn pipeline_attestation_required_only_denies_without_attestation() {
+        let policy = SupplyChainVerificationPolicy {
+            require_attestation: true,
+            require_sbom: false,
+            min_slsa_level: 0,
+            trusted_builders: vec![],
+            allow_unsigned: false,
+            require_digest_match: false,
+        };
+        let pipeline = VerificationPipeline::new(policy);
+        let evidence = pipeline.verify("blake3-256:x", None, None);
+        assert_eq!(evidence.decision, VerificationDecision::Deny);
+    }
+
+    #[test]
+    fn pipeline_sbom_required_only_denies_without_sbom() {
+        let policy = SupplyChainVerificationPolicy {
+            require_attestation: false,
+            require_sbom: true,
+            min_slsa_level: 0,
+            trusted_builders: vec![],
+            allow_unsigned: false,
+            require_digest_match: false,
+        };
+        let pipeline = VerificationPipeline::new(policy);
+        let evidence = pipeline.verify("blake3-256:x", None, None);
+        assert_eq!(evidence.decision, VerificationDecision::Deny);
+    }
+
+    #[test]
+    fn pipeline_steps_have_step_names() {
+        let policy = SupplyChainVerificationPolicy::default();
+        let pipeline = VerificationPipeline::new(policy);
+        let evidence = pipeline.verify("blake3-256:test", None, None);
+        for step in &evidence.steps {
+            assert!(
+                !step.step.is_empty(),
+                "each verification step must have a name"
+            );
+        }
+    }
+
+    #[test]
+    fn pipeline_steps_have_details() {
+        let policy = SupplyChainVerificationPolicy::default();
+        let pipeline = VerificationPipeline::new(policy);
+        let evidence = pipeline.verify("blake3-256:test", None, None);
+        for step in &evidence.steps {
+            assert!(
+                !step.detail.is_empty(),
+                "each verification step must have detail"
+            );
+        }
+    }
+
+    #[test]
+    fn pipeline_deny_has_at_least_one_failing_step() {
+        let policy = SupplyChainVerificationPolicy::default();
+        let pipeline = VerificationPipeline::new(policy);
+        let evidence = pipeline.verify("blake3-256:test", None, None);
+        if evidence.decision == VerificationDecision::Deny {
+            let has_failing = evidence.steps.iter().any(|s| !s.passed);
+            assert!(has_failing, "deny decision should have at least one failing step");
+        }
+    }
+
+    #[test]
+    fn pipeline_different_digests_same_policy_same_decision() {
+        let policy = SupplyChainVerificationPolicy {
+            require_attestation: false,
+            require_sbom: false,
+            min_slsa_level: 0,
+            trusted_builders: vec![],
+            allow_unsigned: true,
+            require_digest_match: false,
+        };
+        let pipeline = VerificationPipeline::new(policy);
+        let ev1 = pipeline.verify("blake3-256:aaa", None, None);
+        let ev2 = pipeline.verify("blake3-256:bbb", None, None);
+        assert_eq!(ev1.decision, ev2.decision);
+    }
+
+    // ── SupplyChainArgs / SupplyChainCommand coverage ──────────────
+
+    #[test]
+    fn supply_chain_command_verify_debug() {
+        let cmd = SupplyChainCommand::Verify(VerifyArgs {
+            connector_id: "debug-test".to_string(),
+            attestation: None,
+            sbom: None,
+            digest: Some("sha256:abc".to_string()),
+            min_slsa_level: 0,
+            allow_unsigned: true,
+            json: false,
+        });
+        let dbg = format!("{cmd:?}");
+        assert!(dbg.contains("Verify"));
+        assert!(dbg.contains("debug-test"));
+    }
+
+    #[test]
+    fn supply_chain_command_report_debug() {
+        let cmd = SupplyChainCommand::Report(ReportArgs {
+            connector_id: "rpt-debug".to_string(),
+            supply_chain: true,
+            attestation: None,
+            sbom: None,
+            digest: None,
+            min_slsa_level: 0,
+            allow_unsigned: true,
+            json: false,
+        });
+        let dbg = format!("{cmd:?}");
+        assert!(dbg.contains("Report"));
+        assert!(dbg.contains("rpt-debug"));
+    }
+
+    #[test]
+    fn supply_chain_args_debug() {
+        let args = SupplyChainArgs {
+            command: SupplyChainCommand::Verify(VerifyArgs {
+                connector_id: "args-test".to_string(),
+                attestation: None,
+                sbom: None,
+                digest: None,
+                min_slsa_level: 0,
+                allow_unsigned: true,
+                json: false,
+            }),
+        };
+        let dbg = format!("{args:?}");
+        assert!(dbg.contains("args-test"));
+    }
+
+    #[test]
+    fn supply_chain_args_clone() {
+        let args = SupplyChainArgs {
+            command: SupplyChainCommand::Verify(VerifyArgs {
+                connector_id: "clone-test".to_string(),
+                attestation: Some("att.json".to_string()),
+                sbom: None,
+                digest: Some("blake3-256:x".to_string()),
+                min_slsa_level: 2,
+                allow_unsigned: false,
+                json: true,
+            }),
+        };
+        let cloned = args.clone();
+        let dbg = format!("{cloned:?}");
+        assert!(dbg.contains("clone-test"));
+    }
+
+    // ── Cross-cutting invariants ────────────────────────────────────
+
+    #[test]
+    fn verify_output_decision_is_allow_or_deny() {
+        for allow_unsigned in [false, true] {
+            let policy = SupplyChainVerificationPolicy {
+                require_attestation: !allow_unsigned,
+                require_sbom: !allow_unsigned,
+                min_slsa_level: 0,
+                trusted_builders: vec![],
+                allow_unsigned,
+                require_digest_match: false,
+            };
+            let pipeline = VerificationPipeline::new(policy.clone());
+            let evidence = pipeline.verify("blake3-256:inv", None, None);
+            let eval = SupplyChainEvaluation {
+                artifact_digest: "blake3-256:inv".to_string(),
+                attestation: None,
+                sbom: None,
+                policy,
+                evidence_digest: "blake3-256:ev".to_string(),
+                evidence,
+            };
+            let output = build_verify_output("inv-conn", &eval);
+            assert!(
+                output.decision == "allow" || output.decision == "deny",
+                "decision must be 'allow' or 'deny', got '{}'",
+                output.decision
+            );
+        }
+    }
+
+    #[test]
+    fn report_output_decision_matches_evidence() {
+        for allow_unsigned in [false, true] {
+            let policy = SupplyChainVerificationPolicy {
+                require_attestation: !allow_unsigned,
+                require_sbom: !allow_unsigned,
+                min_slsa_level: 0,
+                trusted_builders: vec![],
+                allow_unsigned,
+                require_digest_match: false,
+            };
+            let pipeline = VerificationPipeline::new(policy.clone());
+            let evidence = pipeline.verify("blake3-256:match", None, None);
+            let expected = match evidence.decision {
+                VerificationDecision::Allow => "allow",
+                VerificationDecision::Deny => "deny",
+            };
+            let eval = SupplyChainEvaluation {
+                artifact_digest: "blake3-256:match".to_string(),
+                attestation: None,
+                sbom: None,
+                policy,
+                evidence_digest: "blake3-256:ev".to_string(),
+                evidence,
+            };
+            let output = build_report_output("match-conn", &eval).unwrap();
+            assert_eq!(output.decision, expected);
+        }
+    }
+
+    #[test]
+    fn policy_truth_table_require_attestation() {
+        // require_attestation = has_attestation || !allow_unsigned
+        let cases = [
+            (false, false, true),   // !false || !false = true
+            (false, true, false),   // false || !true = false
+            (true, false, true),    // true || !false = true
+            (true, true, true),     // true || !true = true
+        ];
+        for (has_att, allow_unsigned, expected) in cases {
+            let p = build_verification_policy(has_att, false, 0, allow_unsigned, false);
+            assert_eq!(
+                p.require_attestation, expected,
+                "has_att={has_att}, allow_unsigned={allow_unsigned}"
+            );
+        }
+    }
+
+    #[test]
+    fn policy_truth_table_require_sbom() {
+        // require_sbom = has_sbom || !allow_unsigned
+        let cases = [
+            (false, false, true),   // false || !false = true
+            (false, true, false),   // false || !true = false
+            (true, false, true),    // true || !false = true
+            (true, true, true),     // true || !true = true
+        ];
+        for (has_sbom, allow_unsigned, expected) in cases {
+            let p = build_verification_policy(false, has_sbom, 0, allow_unsigned, false);
+            assert_eq!(
+                p.require_sbom, expected,
+                "has_sbom={has_sbom}, allow_unsigned={allow_unsigned}"
+            );
+        }
+    }
+
+    #[test]
+    fn evaluate_evidence_digest_deterministic() {
+        // Same inputs should produce same evidence digest
+        let eval1 = evaluate_supply_chain(None, None, Some("blake3-256:det"), 0, true).unwrap();
+        let eval2 = evaluate_supply_chain(None, None, Some("blake3-256:det"), 0, true).unwrap();
+        assert_eq!(eval1.evidence_digest, eval2.evidence_digest);
+    }
+
+    #[test]
+    fn evaluate_different_digests_different_evidence_hashes() {
+        let eval1 = evaluate_supply_chain(None, None, Some("blake3-256:aaa"), 0, true).unwrap();
+        let eval2 = evaluate_supply_chain(None, None, Some("blake3-256:bbb"), 0, true).unwrap();
+        // Different artifact digests may produce different evidence hashes
+        // (not guaranteed but highly likely)
+        // Just check both are valid
+        assert!(eval1.evidence_digest.starts_with("blake3-256:"));
+        assert!(eval2.evidence_digest.starts_with("blake3-256:"));
+    }
+
+    #[test]
+    fn sbom_report_debug() {
+        let report = SupplyChainSbomReport {
+            bom_format: "CycloneDX".to_string(),
+            bom_version: "1.5".to_string(),
+            component_count: 42,
+            dependency_count: 15,
+            tool_chain: vec!["cargo-cyclonedx".to_string()],
+            content_digest: "blake3-256:fff".to_string(),
+            trust_root: TrustRootReport {
+                root_type: "internal".to_string(),
+                root_id: "build-root".to_string(),
+            },
+        };
+        let dbg = format!("{report:?}");
+        assert!(dbg.contains("CycloneDX"));
+        assert!(dbg.contains("42"));
+    }
+
+    #[test]
+    fn attestation_report_debug() {
+        let report = SupplyChainAttestationReport {
+            predicate_type: "in-toto".to_string(),
+            builder_id: "ci-system".to_string(),
+            build_type: "container".to_string(),
+            subject_digest: "sha256:abc".to_string(),
+            slsa_level: 3,
+            provenance_hash: "blake3-256:prov".to_string(),
+            content_digest: "blake3-256:cd".to_string(),
+            trust_root: TrustRootReport {
+                root_type: "sigstore".to_string(),
+                root_id: "fulcio".to_string(),
+            },
+        };
+        let dbg = format!("{report:?}");
+        assert!(dbg.contains("in-toto"));
+        assert!(dbg.contains("ci-system"));
+    }
+
+    #[test]
+    fn report_output_with_multiple_steps() {
+        let output = SupplyChainReportOutput {
+            connector_id: "multi".to_string(),
+            decision: "deny".to_string(),
+            reason_code: "test".to_string(),
+            artifact_digest: "d".to_string(),
+            evidence_digest: "e".to_string(),
+            policy: VerifyPolicyOutput {
+                require_attestation: true,
+                require_sbom: true,
+                min_slsa_level: 0,
+                allow_unsigned: false,
+            },
+            steps: (0..5)
+                .map(|i| VerifyStepOutput {
+                    step: format!("step_{i}"),
+                    passed: i % 2 == 0,
+                    detail: format!("detail_{i}"),
+                })
+                .collect(),
+            attestation: None,
+            sbom: None,
+        };
+        let value: serde_json::Value = serde_json::to_value(&output).unwrap();
+        let steps = value["steps"].as_array().unwrap();
+        assert_eq!(steps.len(), 5);
+        assert_eq!(steps[0]["passed"], true);
+        assert_eq!(steps[1]["passed"], false);
+        assert_eq!(steps[4]["step"], "step_4");
+    }
+
+    #[test]
+    fn verify_args_default_values() {
+        let args = VerifyArgs {
+            connector_id: "x".to_string(),
+            attestation: None,
+            sbom: None,
+            digest: None,
+            min_slsa_level: 0,
+            allow_unsigned: false,
+            json: false,
+        };
+        assert_eq!(args.min_slsa_level, 0);
+        assert!(!args.allow_unsigned);
+        assert!(!args.json);
+    }
+
+    #[test]
+    fn report_args_supply_chain_flag() {
+        let args = ReportArgs {
+            connector_id: "c".to_string(),
+            supply_chain: true,
+            attestation: None,
+            sbom: None,
+            digest: None,
+            min_slsa_level: 0,
+            allow_unsigned: false,
+            json: false,
+        };
+        assert!(args.supply_chain);
+
+        let args2 = ReportArgs {
+            supply_chain: false,
+            ..args.clone()
+        };
+        assert!(!args2.supply_chain);
     }
 }

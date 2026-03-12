@@ -3912,4 +3912,1037 @@ members = [
         assert!(output.contains("test_missing_capability_denied"));
         assert!(output.contains("test_error_codes_correct"));
     }
+
+    // ════════════════════════════════════════════════════════════════
+    // Expanded coverage below
+    // ════════════════════════════════════════════════════════════════
+
+    // ---- ConnectorArchetype serde roundtrip ----
+
+    #[test]
+    fn archetype_serde_roundtrip_all() {
+        for arch in [
+            ConnectorArchetype::RequestResponse,
+            ConnectorArchetype::Streaming,
+            ConnectorArchetype::Bidirectional,
+            ConnectorArchetype::Polling,
+            ConnectorArchetype::Webhook,
+            ConnectorArchetype::Queue,
+            ConnectorArchetype::File,
+            ConnectorArchetype::Database,
+            ConnectorArchetype::Cli,
+            ConnectorArchetype::Browser,
+        ] {
+            let json = serde_json::to_string(&arch).unwrap();
+            let parsed: ConnectorArchetype = serde_json::from_str(&json).unwrap();
+            assert_eq!(arch, parsed, "serde roundtrip failed for {arch:?}");
+        }
+    }
+
+    #[test]
+    fn archetype_kebab_case_serialization() {
+        assert_eq!(
+            serde_json::to_string(&ConnectorArchetype::RequestResponse).unwrap(),
+            "\"request-response\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ConnectorArchetype::Streaming).unwrap(),
+            "\"streaming\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ConnectorArchetype::Bidirectional).unwrap(),
+            "\"bidirectional\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ConnectorArchetype::Polling).unwrap(),
+            "\"polling\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ConnectorArchetype::Webhook).unwrap(),
+            "\"webhook\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ConnectorArchetype::Queue).unwrap(),
+            "\"queue\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ConnectorArchetype::File).unwrap(),
+            "\"file\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ConnectorArchetype::Database).unwrap(),
+            "\"database\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ConnectorArchetype::Cli).unwrap(),
+            "\"cli\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ConnectorArchetype::Browser).unwrap(),
+            "\"browser\""
+        );
+    }
+
+    #[test]
+    fn archetype_from_str_case_insensitive() {
+        assert_eq!(
+            "STREAMING".parse::<ConnectorArchetype>().unwrap(),
+            ConnectorArchetype::Streaming
+        );
+        assert_eq!(
+            "Polling".parse::<ConnectorArchetype>().unwrap(),
+            ConnectorArchetype::Polling
+        );
+        assert_eq!(
+            "REQUEST-RESPONSE".parse::<ConnectorArchetype>().unwrap(),
+            ConnectorArchetype::RequestResponse
+        );
+        assert_eq!(
+            "REQUESTRESPONSE".parse::<ConnectorArchetype>().unwrap(),
+            ConnectorArchetype::RequestResponse
+        );
+    }
+
+    #[test]
+    fn archetype_from_str_unknown_gives_error() {
+        let err = "foobar".parse::<ConnectorArchetype>().unwrap_err();
+        assert!(err.contains("unknown archetype"));
+        assert!(err.contains("foobar"));
+    }
+
+    #[test]
+    fn archetype_display_all_variants() {
+        assert_eq!(ConnectorArchetype::RequestResponse.to_string(), "request-response");
+        assert_eq!(ConnectorArchetype::Streaming.to_string(), "streaming");
+        assert_eq!(ConnectorArchetype::Bidirectional.to_string(), "bidirectional");
+        assert_eq!(ConnectorArchetype::Polling.to_string(), "polling");
+        assert_eq!(ConnectorArchetype::Webhook.to_string(), "webhook");
+        assert_eq!(ConnectorArchetype::Queue.to_string(), "queue");
+        assert_eq!(ConnectorArchetype::File.to_string(), "file");
+        assert_eq!(ConnectorArchetype::Database.to_string(), "database");
+        assert_eq!(ConnectorArchetype::Cli.to_string(), "cli");
+        assert_eq!(ConnectorArchetype::Browser.to_string(), "browser");
+    }
+
+    #[test]
+    fn archetype_clone_copy() {
+        let a = ConnectorArchetype::Queue;
+        let b = a;
+        let c = a.clone();
+        assert_eq!(a, b);
+        assert_eq!(a, c);
+    }
+
+    #[test]
+    fn archetype_debug() {
+        let debug = format!("{:?}", ConnectorArchetype::Browser);
+        assert!(debug.contains("Browser"));
+    }
+
+    // ---- ScaffoldResult serde ----
+
+    #[test]
+    fn scaffold_result_serde_roundtrip() {
+        let result = ScaffoldResult {
+            connector_id: "fcp.example".to_string(),
+            crate_path: "connectors/example".to_string(),
+            files_created: vec![
+                CreatedFile {
+                    path: "Cargo.toml".to_string(),
+                    purpose: "Manifest".to_string(),
+                    size: 100,
+                },
+                CreatedFile {
+                    path: "src/main.rs".to_string(),
+                    purpose: "Entry".to_string(),
+                    size: 200,
+                },
+            ],
+            prechecks: PrecheckResults::passed(vec![]),
+            next_steps: vec!["step1".to_string(), "step2".to_string()],
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let parsed: ScaffoldResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.connector_id, "fcp.example");
+        assert_eq!(parsed.files_created.len(), 2);
+        assert_eq!(parsed.next_steps.len(), 2);
+    }
+
+    #[test]
+    fn scaffold_result_empty_files() {
+        let result = ScaffoldResult {
+            connector_id: "fcp.empty".to_string(),
+            crate_path: "connectors/empty".to_string(),
+            files_created: vec![],
+            prechecks: PrecheckResults::passed(vec![]),
+            next_steps: vec![],
+        };
+        let json = serde_json::to_value(&result).unwrap();
+        assert!(json["files_created"].as_array().unwrap().is_empty());
+        assert!(json["next_steps"].as_array().unwrap().is_empty());
+    }
+
+    // ---- CreatedFile serde ----
+
+    #[test]
+    fn created_file_serde_roundtrip() {
+        let file = CreatedFile {
+            path: "src/lib.rs".to_string(),
+            purpose: "Library".to_string(),
+            size: 42,
+        };
+        let json = serde_json::to_string(&file).unwrap();
+        let parsed: CreatedFile = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.path, "src/lib.rs");
+        assert_eq!(parsed.purpose, "Library");
+        assert_eq!(parsed.size, 42);
+    }
+
+    #[test]
+    fn created_file_zero_size() {
+        let file = CreatedFile {
+            path: "empty.txt".to_string(),
+            purpose: "Placeholder".to_string(),
+            size: 0,
+        };
+        let json = serde_json::to_value(&file).unwrap();
+        assert_eq!(json["size"], 0);
+    }
+
+    // ---- PrecheckResults ----
+
+    #[test]
+    fn precheck_results_all_passed() {
+        let checks = vec![
+            PrecheckItem {
+                id: "a".to_string(),
+                description: "A".to_string(),
+                passed: true,
+                message: None,
+                severity: CheckSeverity::Error,
+            },
+            PrecheckItem {
+                id: "b".to_string(),
+                description: "B".to_string(),
+                passed: true,
+                message: None,
+                severity: CheckSeverity::Warning,
+            },
+        ];
+        let result = PrecheckResults::passed(checks);
+        assert!(result.passed);
+        assert_eq!(result.summary.total, 2);
+        assert_eq!(result.summary.passed, 2);
+        assert_eq!(result.summary.failed, 0);
+        assert_eq!(result.summary.warnings, 0);
+    }
+
+    #[test]
+    fn precheck_results_some_failed() {
+        let checks = vec![
+            PrecheckItem {
+                id: "a".to_string(),
+                description: "A".to_string(),
+                passed: true,
+                message: None,
+                severity: CheckSeverity::Error,
+            },
+            PrecheckItem {
+                id: "b".to_string(),
+                description: "B".to_string(),
+                passed: false,
+                message: Some("fail".to_string()),
+                severity: CheckSeverity::Error,
+            },
+        ];
+        let result = PrecheckResults::passed(checks);
+        assert!(!result.passed);
+        assert_eq!(result.summary.failed, 1);
+    }
+
+    #[test]
+    fn precheck_results_empty_checks() {
+        let result = PrecheckResults::passed(vec![]);
+        assert!(result.passed);
+        assert_eq!(result.summary.total, 0);
+        assert_eq!(result.summary.passed, 0);
+        assert_eq!(result.summary.failed, 0);
+    }
+
+    #[test]
+    fn precheck_results_serde_roundtrip() {
+        let checks = vec![PrecheckItem {
+            id: "test".to_string(),
+            description: "Test check".to_string(),
+            passed: true,
+            message: Some("ok".to_string()),
+            severity: CheckSeverity::Info,
+        }];
+        let result = PrecheckResults::passed(checks);
+        let json = serde_json::to_string(&result).unwrap();
+        let parsed: PrecheckResults = serde_json::from_str(&json).unwrap();
+        assert!(parsed.passed);
+        assert_eq!(parsed.checks.len(), 1);
+        assert_eq!(parsed.checks[0].id, "test");
+    }
+
+    #[test]
+    fn precheck_results_warning_only_still_passes() {
+        let checks = vec![PrecheckItem {
+            id: "w".to_string(),
+            description: "Warn".to_string(),
+            passed: false,
+            message: None,
+            severity: CheckSeverity::Warning,
+        }];
+        let result = PrecheckResults::passed(checks);
+        // The `passed` field is computed from all checks passing, so this fails
+        assert!(!result.passed);
+        assert_eq!(result.summary.warnings, 1);
+        assert_eq!(result.summary.failed, 0);
+    }
+
+    // ---- PrecheckItem serde ----
+
+    #[test]
+    fn precheck_item_skips_none_message() {
+        let item = PrecheckItem {
+            id: "test".to_string(),
+            description: "Desc".to_string(),
+            passed: true,
+            message: None,
+            severity: CheckSeverity::Info,
+        };
+        let json = serde_json::to_string(&item).unwrap();
+        assert!(!json.contains("message"));
+    }
+
+    #[test]
+    fn precheck_item_includes_some_message() {
+        let item = PrecheckItem {
+            id: "test".to_string(),
+            description: "Desc".to_string(),
+            passed: false,
+            message: Some("bad stuff".to_string()),
+            severity: CheckSeverity::Error,
+        };
+        let json = serde_json::to_string(&item).unwrap();
+        assert!(json.contains("bad stuff"));
+    }
+
+    // ---- CheckSeverity serde ----
+
+    #[test]
+    fn check_severity_serde_roundtrip() {
+        for sev in [CheckSeverity::Error, CheckSeverity::Warning, CheckSeverity::Info] {
+            let json = serde_json::to_string(&sev).unwrap();
+            let parsed: CheckSeverity = serde_json::from_str(&json).unwrap();
+            assert_eq!(sev, parsed);
+        }
+    }
+
+    #[test]
+    fn check_severity_serializes_lowercase() {
+        assert_eq!(serde_json::to_string(&CheckSeverity::Error).unwrap(), "\"error\"");
+        assert_eq!(serde_json::to_string(&CheckSeverity::Warning).unwrap(), "\"warning\"");
+        assert_eq!(serde_json::to_string(&CheckSeverity::Info).unwrap(), "\"info\"");
+    }
+
+    // ---- PrecheckSummary ----
+
+    #[test]
+    fn precheck_summary_all_passed() {
+        let checks = vec![
+            PrecheckItem { id: "a".into(), description: "A".into(), passed: true, message: None, severity: CheckSeverity::Error },
+            PrecheckItem { id: "b".into(), description: "B".into(), passed: true, message: None, severity: CheckSeverity::Warning },
+        ];
+        let summary = PrecheckSummary::from_checks(&checks);
+        assert_eq!(summary.total, 2);
+        assert_eq!(summary.passed, 2);
+        assert_eq!(summary.failed, 0);
+        assert_eq!(summary.warnings, 0);
+    }
+
+    #[test]
+    fn precheck_summary_empty() {
+        let summary = PrecheckSummary::from_checks(&[]);
+        assert_eq!(summary.total, 0);
+        assert_eq!(summary.passed, 0);
+        assert_eq!(summary.failed, 0);
+        assert_eq!(summary.warnings, 0);
+    }
+
+    #[test]
+    fn precheck_summary_serde_roundtrip() {
+        let summary = PrecheckSummary { total: 5, passed: 3, failed: 1, warnings: 1 };
+        let json = serde_json::to_string(&summary).unwrap();
+        let parsed: PrecheckSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.total, 5);
+        assert_eq!(parsed.passed, 3);
+        assert_eq!(parsed.failed, 1);
+        assert_eq!(parsed.warnings, 1);
+    }
+
+    #[test]
+    fn precheck_summary_info_failures_not_counted() {
+        let checks = vec![
+            PrecheckItem { id: "i".into(), description: "I".into(), passed: false, message: None, severity: CheckSeverity::Info },
+        ];
+        let summary = PrecheckSummary::from_checks(&checks);
+        assert_eq!(summary.total, 1);
+        assert_eq!(summary.passed, 0);
+        assert_eq!(summary.failed, 0);
+        assert_eq!(summary.warnings, 0);
+    }
+
+    // ---- CheckResult serde ----
+
+    #[test]
+    fn check_result_serde_roundtrip() {
+        let result = CheckResult {
+            path: "/tmp/test".to_string(),
+            connector_id: Some("fcp.test".to_string()),
+            prechecks: PrecheckResults::passed(vec![]),
+            suggested_fixes: vec![SuggestedFix {
+                check_id: "manifest.valid".to_string(),
+                action: "Fix it".to_string(),
+                file: Some("manifest.toml".to_string()),
+            }],
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let parsed: CheckResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.path, "/tmp/test");
+        assert_eq!(parsed.connector_id, Some("fcp.test".to_string()));
+        assert_eq!(parsed.suggested_fixes.len(), 1);
+    }
+
+    #[test]
+    fn check_result_no_connector_id() {
+        let result = CheckResult {
+            path: "/tmp/test".to_string(),
+            connector_id: None,
+            prechecks: PrecheckResults::passed(vec![]),
+            suggested_fixes: vec![],
+        };
+        let json = serde_json::to_value(&result).unwrap();
+        assert!(json["connector_id"].is_null());
+    }
+
+    // ---- SuggestedFix serde ----
+
+    #[test]
+    fn suggested_fix_serde_roundtrip() {
+        let fix = SuggestedFix {
+            check_id: "test.check".to_string(),
+            action: "Do something".to_string(),
+            file: Some("src/main.rs".to_string()),
+        };
+        let json = serde_json::to_string(&fix).unwrap();
+        let parsed: SuggestedFix = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.check_id, "test.check");
+        assert_eq!(parsed.file, Some("src/main.rs".to_string()));
+    }
+
+    #[test]
+    fn suggested_fix_no_file_skips_field() {
+        let fix = SuggestedFix {
+            check_id: "x".to_string(),
+            action: "Do it".to_string(),
+            file: None,
+        };
+        let json = serde_json::to_string(&fix).unwrap();
+        assert!(!json.contains("file"));
+    }
+
+    // ---- validate_connector_id expanded ----
+
+    #[test]
+    fn validate_connector_id_just_fcp_dot() {
+        assert!(validate_connector_id("fcp.").is_err());
+    }
+
+    #[test]
+    fn validate_connector_id_consecutive_dots() {
+        assert!(validate_connector_id("fcp..test").is_err());
+    }
+
+    #[test]
+    fn validate_connector_id_triple_dots() {
+        assert!(validate_connector_id("fcp...test").is_err());
+    }
+
+    #[test]
+    fn validate_connector_id_no_prefix() {
+        let err = validate_connector_id("nofcp").unwrap_err();
+        assert!(err.to_string().contains("fcp."));
+    }
+
+    #[test]
+    fn validate_connector_id_uppercase_rejected() {
+        assert!(validate_connector_id("fcp.MyService").is_err());
+    }
+
+    #[test]
+    fn validate_connector_id_with_spaces() {
+        assert!(validate_connector_id("fcp.my service").is_err());
+    }
+
+    #[test]
+    fn validate_connector_id_single_char_suffix() {
+        assert!(validate_connector_id("fcp.a").is_ok());
+    }
+
+    #[test]
+    fn validate_connector_id_with_underscores() {
+        assert!(validate_connector_id("fcp.my_service").is_ok());
+    }
+
+    #[test]
+    fn validate_connector_id_with_hyphens() {
+        assert!(validate_connector_id("fcp.my-service").is_ok());
+    }
+
+    // ---- extract_short_name expanded ----
+
+    #[test]
+    fn extract_short_name_no_prefix() {
+        assert_eq!(extract_short_name("noprefixhere"), "noprefixhere");
+    }
+
+    #[test]
+    fn extract_short_name_empty() {
+        assert_eq!(extract_short_name(""), "");
+    }
+
+    #[test]
+    fn extract_short_name_just_prefix() {
+        assert_eq!(extract_short_name("fcp."), "");
+    }
+
+    // ---- normalize_crate_slug expanded ----
+
+    #[test]
+    fn normalize_crate_slug_all_special_chars() {
+        assert_eq!(normalize_crate_slug("..."), "");
+    }
+
+    #[test]
+    fn normalize_crate_slug_numbers() {
+        assert_eq!(normalize_crate_slug("service123"), "service123");
+    }
+
+    #[test]
+    fn normalize_crate_slug_unicode() {
+        // Non-ascii is replaced with dash
+        assert_eq!(normalize_crate_slug("abc\u{00e9}def"), "abc-def");
+    }
+
+    #[test]
+    fn normalize_crate_slug_mixed_special() {
+        assert_eq!(normalize_crate_slug("a.b_c-d"), "a-b-c-d");
+    }
+
+    // ---- to_pascal_case expanded ----
+
+    #[test]
+    fn to_pascal_case_consecutive_underscores() {
+        assert_eq!(to_pascal_case("a__b"), "AB");
+    }
+
+    #[test]
+    fn to_pascal_case_all_uppercase() {
+        assert_eq!(to_pascal_case("ABC"), "Abc");
+    }
+
+    #[test]
+    fn to_pascal_case_numeric_parts() {
+        assert_eq!(to_pascal_case("v2_beta"), "V2Beta");
+    }
+
+    // ---- insert_workspace_member expanded ----
+
+    #[test]
+    fn insert_workspace_member_multiple_sections() {
+        let content = r#"[package]
+name = "root"
+
+[workspace]
+members = [
+    "crates/alpha",
+]
+
+[dependencies]
+serde = "1"
+"#;
+        let result = insert_workspace_member(content, "connectors/new").unwrap();
+        assert!(result.contains("\"connectors/new\""));
+        assert!(result.contains("\"crates/alpha\""));
+    }
+
+    #[test]
+    fn insert_workspace_member_empty_list() {
+        let content = "[workspace]\nmembers = [\n]\n";
+        let result = insert_workspace_member(content, "connectors/first").unwrap();
+        assert!(result.contains("\"connectors/first\""));
+    }
+
+    // ---- generate_next_steps expanded ----
+
+    #[test]
+    fn generate_next_steps_bidirectional_has_event_hint() {
+        let steps = generate_next_steps(
+            "fcp.test",
+            "connectors/test",
+            ConnectorArchetype::Bidirectional,
+            false,
+        );
+        assert!(steps.iter().any(|s| s.contains("event streaming")));
+    }
+
+    #[test]
+    fn generate_next_steps_queue_no_specific_hint() {
+        let steps = generate_next_steps(
+            "fcp.test",
+            "connectors/test",
+            ConnectorArchetype::Queue,
+            false,
+        );
+        // Queue doesn't have a special archetype hint
+        assert!(!steps.iter().any(|s| s.contains("event streaming")));
+        assert!(!steps.iter().any(|s| s.contains("polling interval")));
+        assert!(!steps.iter().any(|s| s.contains("webhook signature")));
+    }
+
+    #[test]
+    fn generate_next_steps_always_has_cd_and_build() {
+        for archetype in [
+            ConnectorArchetype::File,
+            ConnectorArchetype::Database,
+            ConnectorArchetype::Cli,
+            ConnectorArchetype::Browser,
+        ] {
+            let steps = generate_next_steps("fcp.x", "connectors/x", archetype, false);
+            assert!(steps.iter().any(|s| s.contains("cd connectors/x")));
+            assert!(steps.iter().any(|s| s.contains("cargo build")));
+        }
+    }
+
+    // ---- manifest_archetype expanded ----
+
+    #[test]
+    fn manifest_archetype_all_variants_non_empty() {
+        for arch in [
+            ConnectorArchetype::RequestResponse,
+            ConnectorArchetype::Streaming,
+            ConnectorArchetype::Bidirectional,
+            ConnectorArchetype::Polling,
+            ConnectorArchetype::Webhook,
+            ConnectorArchetype::Queue,
+            ConnectorArchetype::File,
+            ConnectorArchetype::Database,
+            ConnectorArchetype::Cli,
+            ConnectorArchetype::Browser,
+        ] {
+            assert!(!manifest_archetype(arch).is_empty(), "archetype {arch:?} had empty manifest label");
+        }
+    }
+
+    // ---- generate_manifest_toml expanded ----
+
+    #[test]
+    fn generate_manifest_toml_streaming() {
+        let result = generate_manifest_toml(
+            "fcp.stream",
+            "stream",
+            ConnectorArchetype::Streaming,
+            "z:project:stream",
+        );
+        assert!(result.is_ok());
+        let content = result.unwrap();
+        assert!(content.contains("\"streaming\""));
+        assert!(content.contains("z:project:stream"));
+    }
+
+    #[test]
+    fn generate_manifest_toml_bidirectional() {
+        let result = generate_manifest_toml(
+            "fcp.bidir",
+            "bidir",
+            ConnectorArchetype::Bidirectional,
+            "z:project:bidir",
+        );
+        assert!(result.is_ok());
+        let content = result.unwrap();
+        assert!(content.contains("\"bidirectional\""));
+    }
+
+    #[test]
+    fn generate_manifest_toml_replaces_placeholder_hash() {
+        let content = generate_manifest_toml(
+            "fcp.test",
+            "test",
+            ConnectorArchetype::RequestResponse,
+            "z:project:test",
+        )
+        .unwrap();
+        // The INTERFACE_HASH_PLACEHOLDER should not appear in the final output
+        assert!(!content.contains("0000000000000000000000000000000000000000"));
+    }
+
+    #[test]
+    fn generate_manifest_toml_contains_default_deny() {
+        let content = generate_manifest_toml(
+            "fcp.test",
+            "test",
+            ConnectorArchetype::RequestResponse,
+            "z:project:test",
+        )
+        .unwrap();
+        assert!(content.contains("deny_localhost = true"));
+        assert!(content.contains("deny_private_ranges = true"));
+        assert!(content.contains("deny_ip_literals = true"));
+    }
+
+    // ---- scaffold_connector expanded ----
+
+    #[test]
+    fn scaffold_connector_next_steps_not_empty() {
+        let result = scaffold_connector(
+            "fcp.test",
+            ConnectorArchetype::RequestResponse,
+            "z:project:test",
+            false,
+            true,
+        )
+        .unwrap();
+        assert!(!result.next_steps.is_empty());
+    }
+
+    #[test]
+    fn scaffold_connector_crate_path_matches() {
+        let result = scaffold_connector(
+            "fcp.my-svc",
+            ConnectorArchetype::Database,
+            "z:project:db",
+            true,
+            true,
+        )
+        .unwrap();
+        assert_eq!(result.crate_path, "connectors/my-svc");
+    }
+
+    #[test]
+    fn scaffold_connector_nested_id() {
+        let result = scaffold_connector(
+            "fcp.a.b.c",
+            ConnectorArchetype::RequestResponse,
+            "z:project:test",
+            true,
+            true,
+        )
+        .unwrap();
+        assert_eq!(result.connector_id, "fcp.a.b.c");
+        assert_eq!(result.crate_path, "connectors/a-b-c");
+    }
+
+    // ---- generate_files expanded ----
+
+    #[test]
+    fn generate_files_webhook_no_api_no_stream_no_polling() {
+        let files = generate_files(
+            "fcp.test",
+            "test",
+            "fcp-test",
+            ConnectorArchetype::Webhook,
+            "z:project:test",
+            true,
+        )
+        .unwrap();
+        let paths: Vec<&str> = files.iter().map(|(p, _, _)| p.as_str()).collect();
+        assert!(!paths.contains(&"src/api.rs"));
+        assert!(!paths.contains(&"src/stream.rs"));
+        assert!(!paths.contains(&"src/polling.rs"));
+        assert!(!paths.contains(&"tests/e2e_tests.rs"));
+    }
+
+    #[test]
+    fn generate_files_database_no_api() {
+        let files = generate_files(
+            "fcp.test",
+            "test",
+            "fcp-test",
+            ConnectorArchetype::Database,
+            "z:project:test",
+            false,
+        )
+        .unwrap();
+        let paths: Vec<&str> = files.iter().map(|(p, _, _)| p.as_str()).collect();
+        assert!(!paths.contains(&"src/api.rs"));
+        assert!(paths.contains(&"tests/e2e_tests.rs"));
+    }
+
+    #[test]
+    fn generate_files_cli_archetype() {
+        let files = generate_files(
+            "fcp.test",
+            "test",
+            "fcp-test",
+            ConnectorArchetype::Cli,
+            "z:project:test",
+            true,
+        )
+        .unwrap();
+        let paths: Vec<&str> = files.iter().map(|(p, _, _)| p.as_str()).collect();
+        assert!(!paths.contains(&"src/api.rs"));
+        assert!(!paths.contains(&"src/stream.rs"));
+    }
+
+    #[test]
+    fn generate_files_all_have_nonzero_content() {
+        let files = generate_files(
+            "fcp.test",
+            "test",
+            "fcp-test",
+            ConnectorArchetype::RequestResponse,
+            "z:project:test",
+            false,
+        )
+        .unwrap();
+        for (path, content, _) in &files {
+            assert!(!content.is_empty(), "file {path} has empty content");
+        }
+    }
+
+    // ---- generate_connector_rs expanded ----
+
+    #[test]
+    fn generate_connector_rs_queue_has_enforce_limits() {
+        let output = generate_connector_rs("fcp.test", "test", ConnectorArchetype::Queue);
+        assert!(output.contains("MAX_MESSAGE_BYTES"));
+        assert!(output.contains("enforce_limits"));
+    }
+
+    #[test]
+    fn generate_connector_rs_file_has_filename_check() {
+        let output = generate_connector_rs("fcp.test", "test", ConnectorArchetype::File);
+        assert!(output.contains("MAX_FILENAME_CHARS"));
+    }
+
+    #[test]
+    fn generate_connector_rs_database_enforce_limits() {
+        let output = generate_connector_rs("fcp.test", "test", ConnectorArchetype::Database);
+        assert!(output.contains("MAX_PAYLOAD_BYTES"));
+    }
+
+    #[test]
+    fn generate_connector_rs_has_default_impl() {
+        let output = generate_connector_rs("fcp.test", "test", ConnectorArchetype::RequestResponse);
+        assert!(output.contains("impl Default for TestConnector"));
+    }
+
+    #[test]
+    fn generate_connector_rs_cli_no_stream_or_polling() {
+        let output = generate_connector_rs("fcp.test", "test", ConnectorArchetype::Cli);
+        assert!(!output.contains("StreamSupervisor"));
+        assert!(!output.contains("PollingSupervisor"));
+    }
+
+    // ---- generate_limits_rs expanded ----
+
+    #[test]
+    fn generate_limits_rs_cli_uses_generic_template() {
+        let output = generate_limits_rs("test", ConnectorArchetype::Cli);
+        assert!(output.contains("MAX_MESSAGE_CHARS"));
+        assert!(output.contains("MAX_ATTACHMENTS"));
+    }
+
+    #[test]
+    fn generate_limits_rs_browser_uses_generic_template() {
+        let output = generate_limits_rs("test", ConnectorArchetype::Browser);
+        assert!(output.contains("MAX_MESSAGE_CHARS"));
+    }
+
+    #[test]
+    fn generate_limits_rs_bidirectional_same_as_streaming() {
+        let streaming = generate_limits_rs("test", ConnectorArchetype::Streaming);
+        let bidir = generate_limits_rs("test", ConnectorArchetype::Bidirectional);
+        assert!(streaming.contains("MAX_BUFFER_ITEMS"));
+        assert!(bidir.contains("MAX_BUFFER_ITEMS"));
+    }
+
+    // ---- prechecks expanded ----
+
+    #[test]
+    fn prechecks_detect_secrets_in_files() {
+        let files: Vec<(String, String, String)> = vec![
+            ("manifest.toml".to_string(), "placeholder".to_string(), "Manifest".to_string()),
+            ("src/config.rs".to_string(), "let password = \"secret\";".to_string(), "Config".to_string()),
+        ];
+        let result = run_prechecks(&files, "fcp.test", "z:project:test");
+        let secrets_check = result
+            .checks
+            .iter()
+            .find(|c| c.id == "scaffold.no_secrets");
+        assert!(secrets_check.is_some());
+        assert!(!secrets_check.unwrap().passed);
+    }
+
+    #[test]
+    fn prechecks_detect_api_key_in_files() {
+        let files: Vec<(String, String, String)> = vec![
+            ("manifest.toml".to_string(), "placeholder".to_string(), "Manifest".to_string()),
+            ("src/main.rs".to_string(), "let api_key = \"abc\";".to_string(), "Main".to_string()),
+        ];
+        let result = run_prechecks(&files, "fcp.test", "z:project:test");
+        let secrets_check = result.checks.iter().find(|c| c.id == "scaffold.no_secrets").unwrap();
+        assert!(!secrets_check.passed);
+    }
+
+    // ---- generate_e2e_tests_rs expanded ----
+
+    #[test]
+    fn generate_e2e_tests_rs_references_connector_id() {
+        let output = generate_e2e_tests_rs("fcp.github", "github", "fcp-github");
+        assert!(output.contains("fcp.github"));
+        assert!(output.contains("cargo_bin(\"fcp-github\")"));
+        assert!(output.contains("github.placeholder"));
+    }
+
+    // ---- generate_config_rs expanded ----
+
+    #[test]
+    fn generate_config_rs_pascal_case_name() {
+        let output = generate_config_rs("my_complex_service");
+        assert!(output.contains("MyComplexServiceConfig"));
+    }
+
+    // ---- generate_error_rs expanded ----
+
+    #[test]
+    fn generate_error_rs_pascal_case_name() {
+        let output = generate_error_rs("my_complex_service");
+        assert!(output.contains("MyComplexServiceError"));
+    }
+
+    // ---- ArchetypeArg ----
+
+    #[test]
+    fn archetype_arg_debug_all() {
+        for arg in [
+            ArchetypeArg::RequestResponse,
+            ArchetypeArg::Streaming,
+            ArchetypeArg::Bidirectional,
+            ArchetypeArg::Polling,
+            ArchetypeArg::Webhook,
+            ArchetypeArg::Queue,
+            ArchetypeArg::File,
+            ArchetypeArg::Database,
+            ArchetypeArg::Cli,
+            ArchetypeArg::Browser,
+        ] {
+            let debug = format!("{arg:?}");
+            assert!(!debug.is_empty());
+        }
+    }
+
+    // ---- generate_lib_rs expanded ----
+
+    #[test]
+    fn generate_lib_rs_all_modules_off() {
+        let output = generate_lib_rs("test", false, false, false);
+        assert!(!output.contains("pub mod api;"));
+        assert!(!output.contains("pub mod stream;"));
+        assert!(!output.contains("pub mod polling;"));
+        assert!(output.contains("pub mod connector;"));
+        assert!(output.contains("pub mod config;"));
+        assert!(output.contains("pub mod error;"));
+    }
+
+    #[test]
+    fn generate_lib_rs_all_modules_on() {
+        let output = generate_lib_rs("test", true, true, true);
+        assert!(output.contains("pub mod api;"));
+        assert!(output.contains("pub mod stream;"));
+        assert!(output.contains("pub mod polling;"));
+    }
+
+    #[test]
+    fn generate_lib_rs_re_exports_connector() {
+        let output = generate_lib_rs("my_svc", false, false, false);
+        assert!(output.contains("pub use connector::MySvcConnector;"));
+    }
+
+    // ---- generate_main_rs expanded ----
+
+    #[test]
+    fn generate_main_rs_uses_correct_crate_ident() {
+        let output = generate_main_rs("my_svc", "fcp_my_svc");
+        assert!(output.contains("fcp_my_svc::MySvcConnector"));
+    }
+
+    #[test]
+    fn generate_main_rs_forbids_unsafe() {
+        let output = generate_main_rs("test", "fcp_test");
+        assert!(output.contains("#![forbid(unsafe_code)]"));
+    }
+
+    // ---- generate_cargo_toml expanded ----
+
+    #[test]
+    fn generate_cargo_toml_has_dev_deps() {
+        let output = generate_cargo_toml("fcp-test", "test");
+        assert!(output.contains("[dev-dependencies]"));
+        assert!(output.contains("wiremock"));
+        assert!(output.contains("tokio"));
+    }
+
+    #[test]
+    fn generate_cargo_toml_has_bin_section() {
+        let output = generate_cargo_toml("fcp-myservice", "myservice");
+        assert!(output.contains("[[bin]]"));
+        assert!(output.contains("name = \"fcp-myservice\""));
+    }
+
+    // ---- generate_types_rs expanded ----
+
+    #[test]
+    fn generate_types_rs_has_serde_derives() {
+        let output = generate_types_rs("test");
+        assert!(output.contains("Serialize, Deserialize"));
+    }
+
+    #[test]
+    fn generate_types_rs_has_test_module() {
+        let output = generate_types_rs("test");
+        assert!(output.contains("#[cfg(test)]"));
+        assert!(output.contains("mod tests"));
+    }
+
+    // ---- generate_stream_rs expanded ----
+
+    #[test]
+    fn generate_stream_rs_has_topics_tracking() {
+        let output = generate_stream_rs("test");
+        assert!(output.contains("topics"));
+        assert!(output.contains("on_subscribe_topic"));
+        assert!(output.contains("record_cursor"));
+    }
+
+    // ---- generate_polling_rs expanded ----
+
+    #[test]
+    fn generate_polling_rs_has_should_poll() {
+        let output = generate_polling_rs("test");
+        assert!(output.contains("should_poll"));
+        assert!(output.contains("CursorState"));
+        assert!(output.contains("advance"));
+    }
+
+    // ---- generate_api_rs expanded ----
+
+    #[test]
+    fn generate_api_rs_uses_correct_error_type() {
+        let output = generate_api_rs("my_svc");
+        assert!(output.contains("MySvcError"));
+    }
 }

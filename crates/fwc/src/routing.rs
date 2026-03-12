@@ -1514,4 +1514,768 @@ mod tests {
             SafetyRank::Dangerous
         );
     }
+
+    // ── Expanded routing tests ─────────────────────────────────────
+
+    #[test]
+    fn health_state_clone_and_copy() {
+        let h = HealthState::Degraded;
+        let h2 = h;
+        let h3 = h.clone();
+        assert_eq!(h, h2);
+        assert_eq!(h, h3);
+    }
+
+    #[test]
+    fn health_state_hash_distinct() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(HealthState::Healthy);
+        set.insert(HealthState::Degraded);
+        set.insert(HealthState::Error);
+        set.insert(HealthState::Unknown);
+        assert_eq!(set.len(), 4);
+    }
+
+    #[test]
+    fn health_state_hash_duplicate_ignored() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(HealthState::Healthy);
+        set.insert(HealthState::Healthy);
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn health_state_debug_contains_variant() {
+        assert_eq!(format!("{:?}", HealthState::Healthy), "Healthy");
+        assert_eq!(format!("{:?}", HealthState::Degraded), "Degraded");
+        assert_eq!(format!("{:?}", HealthState::Error), "Error");
+        assert_eq!(format!("{:?}", HealthState::Unknown), "Unknown");
+    }
+
+    #[test]
+    fn health_state_parse_whitespace_fails() {
+        assert!(" healthy".parse::<HealthState>().is_err());
+        assert!("healthy ".parse::<HealthState>().is_err());
+    }
+
+    #[test]
+    fn health_state_parse_empty_fails() {
+        assert!("".parse::<HealthState>().is_err());
+    }
+
+    #[test]
+    fn safety_rank_clone_and_copy() {
+        let r = SafetyRank::Critical;
+        let r2 = r;
+        let r3 = r.clone();
+        assert_eq!(r, r2);
+        assert_eq!(r, r3);
+    }
+
+    #[test]
+    fn safety_rank_hash_distinct() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(SafetyRank::Unknown);
+        set.insert(SafetyRank::Safe);
+        set.insert(SafetyRank::Risky);
+        set.insert(SafetyRank::Dangerous);
+        set.insert(SafetyRank::Critical);
+        assert_eq!(set.len(), 5);
+    }
+
+    #[test]
+    fn safety_rank_debug_contains_variant() {
+        assert_eq!(format!("{:?}", SafetyRank::Unknown), "Unknown");
+        assert_eq!(format!("{:?}", SafetyRank::Safe), "Safe");
+        assert_eq!(format!("{:?}", SafetyRank::Critical), "Critical");
+    }
+
+    #[test]
+    fn safety_rank_parse_whitespace_fails() {
+        assert!(" safe".parse::<SafetyRank>().is_err());
+    }
+
+    #[test]
+    fn safety_rank_parse_empty_fails() {
+        assert!("".parse::<SafetyRank>().is_err());
+    }
+
+    #[test]
+    fn safety_rank_ordering_full_chain() {
+        let mut ranks = vec![
+            SafetyRank::Critical,
+            SafetyRank::Safe,
+            SafetyRank::Unknown,
+            SafetyRank::Dangerous,
+            SafetyRank::Risky,
+        ];
+        ranks.sort();
+        assert_eq!(
+            ranks,
+            vec![
+                SafetyRank::Unknown,
+                SafetyRank::Safe,
+                SafetyRank::Risky,
+                SafetyRank::Dangerous,
+                SafetyRank::Critical,
+            ]
+        );
+    }
+
+    #[test]
+    fn safety_rank_unknown_and_risky_same_score() {
+        assert!((SafetyRank::Unknown.score() - SafetyRank::Risky.score()).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn latency_score_always_positive() {
+        for ms in [0, 1, 10, 100, 1000, 10000, u64::MAX] {
+            assert!(latency_score(ms) > 0.0, "latency_score({ms}) should be positive");
+        }
+    }
+
+    #[test]
+    fn latency_score_always_at_most_one() {
+        for ms in [0, 1, 10, 100, 1000, 10000, u64::MAX] {
+            assert!(latency_score(ms) <= 1.0, "latency_score({ms}) should be <= 1.0");
+        }
+    }
+
+    #[test]
+    fn latency_score_specific_values() {
+        // 1000/(1000+100) = 1000/1100 ≈ 0.909
+        let s100 = latency_score(100);
+        assert!((s100 - 1000.0 / 1100.0).abs() < 0.001);
+        // 1000/(1000+5000) = 1000/6000 ≈ 0.167
+        let s5000 = latency_score(5000);
+        assert!((s5000 - 1000.0 / 6000.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn preference_score_diminishing_returns() {
+        let d1 = preference_score(10) - preference_score(0);
+        let d2 = preference_score(20) - preference_score(10);
+        // First 10 should have more impact than next 10
+        assert!(d1 > d2, "preference score should have diminishing returns");
+    }
+
+    #[test]
+    fn preference_score_large_values_stay_bounded() {
+        for count in [500, 1000, 5000, 10_000, u32::MAX] {
+            let s = preference_score(count);
+            assert!(s >= 0.0);
+            assert!(s <= 1.0);
+        }
+    }
+
+    #[test]
+    fn weights_total_with_single_nonzero() {
+        let w = SignalWeights {
+            zone: 42.0,
+            health: 0.0,
+            rate_limit: 0.0,
+            success: 0.0,
+            preference: 0.0,
+            safety: 0.0,
+            latency: 0.0,
+        };
+        assert!((w.total() - 42.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn signal_weights_clone() {
+        let w = SignalWeights::default();
+        let cloned = w.clone();
+        assert_eq!(w, cloned);
+    }
+
+    #[test]
+    fn signal_weights_debug() {
+        let w = SignalWeights::default();
+        let dbg = format!("{w:?}");
+        assert!(dbg.contains("zone"));
+        assert!(dbg.contains("health"));
+        assert!(dbg.contains("latency"));
+    }
+
+    #[test]
+    fn routing_config_clone() {
+        let cfg = RoutingConfig::default();
+        let cloned = cfg.clone();
+        assert_eq!(cfg.weights, cloned.weights);
+    }
+
+    #[test]
+    fn routing_config_debug() {
+        let cfg = RoutingConfig::default();
+        let dbg = format!("{cfg:?}");
+        assert!(dbg.contains("weights"));
+    }
+
+    #[test]
+    fn score_breakdown_clone() {
+        let bd = ScoreBreakdown {
+            zone: 100.0,
+            health: 50.0,
+            rate_limit: 20.0,
+            success: 15.0,
+            preference: 10.0,
+            safety: 8.0,
+            latency: 5.0,
+        };
+        let cloned = bd.clone();
+        assert_eq!(bd, cloned);
+    }
+
+    #[test]
+    fn score_breakdown_debug() {
+        let bd = ScoreBreakdown {
+            zone: 1.0,
+            health: 2.0,
+            rate_limit: 3.0,
+            success: 4.0,
+            preference: 5.0,
+            safety: 6.0,
+            latency: 7.0,
+        };
+        let dbg = format!("{bd:?}");
+        assert!(dbg.contains("zone"));
+        assert!(dbg.contains("safety"));
+    }
+
+    #[test]
+    fn routing_score_clone() {
+        let c = default_candidate();
+        let result = rank_candidates(&[c], &default_config());
+        let cloned = result[0].clone();
+        assert_eq!(result[0].connector_id, cloned.connector_id);
+        assert_eq!(result[0].score, cloned.score);
+        assert_eq!(result[0].recommended, cloned.recommended);
+    }
+
+    #[test]
+    fn routing_score_debug() {
+        let c = default_candidate();
+        let result = rank_candidates(&[c], &default_config());
+        let dbg = format!("{:?}", result[0]);
+        assert!(dbg.contains("slack"));
+        assert!(dbg.contains("score"));
+    }
+
+    #[test]
+    fn connector_candidate_debug() {
+        let c = default_candidate();
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("slack"));
+        assert!(dbg.contains("send_message"));
+    }
+
+    #[test]
+    fn score_only_zone_weight_nonzero() {
+        let w = SignalWeights {
+            zone: 100.0,
+            health: 0.0,
+            rate_limit: 0.0,
+            success: 0.0,
+            preference: 0.0,
+            safety: 0.0,
+            latency: 0.0,
+        };
+        let c = default_candidate();
+        let (score, bd) = compute_score(&c, &w);
+        // zone_authorized=true → zone_val=1.0, health_val=1.0 (Healthy)
+        // health_val != 0 but health weight is 0
+        // total_weight=100, raw=100 → 100/100=1.0
+        assert!((score - 1.0).abs() < f64::EPSILON);
+        assert!((bd.zone - 100.0).abs() < f64::EPSILON);
+        assert!((bd.health - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn score_only_health_weight_nonzero() {
+        let w = SignalWeights {
+            zone: 0.0,
+            health: 100.0,
+            rate_limit: 0.0,
+            success: 0.0,
+            preference: 0.0,
+            safety: 0.0,
+            latency: 0.0,
+        };
+        let c = default_candidate();
+        let (score, bd) = compute_score(&c, &w);
+        // zone_val=1.0 (authorized), zone weight=0 → zone contribution=0
+        // health_val=1.0 (Healthy) * 100 = 100 / 100 = 1.0
+        assert!((score - 1.0).abs() < f64::EPSILON);
+        assert!((bd.health - 100.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn score_only_latency_weight_nonzero() {
+        let w = SignalWeights {
+            zone: 0.0,
+            health: 0.0,
+            rate_limit: 0.0,
+            success: 0.0,
+            preference: 0.0,
+            safety: 0.0,
+            latency: 50.0,
+        };
+        let mut c = default_candidate();
+        c.avg_latency_ms = 0;
+        let (score, bd) = compute_score(&c, &w);
+        // zone_val=1.0, health_val=1.0 (not zero), latency=1.0 * 50 = 50 / 50 = 1.0
+        assert!((score - 1.0).abs() < f64::EPSILON);
+        assert!((bd.latency - 50.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn score_equal_weights_all_signals_contribute() {
+        let w = SignalWeights {
+            zone: 10.0,
+            health: 10.0,
+            rate_limit: 10.0,
+            success: 10.0,
+            preference: 10.0,
+            safety: 10.0,
+            latency: 10.0,
+        };
+        let c = default_candidate();
+        let (_, bd) = compute_score(&c, &w);
+        // All breakdown values should be > 0 for a healthy authorized candidate
+        assert!(bd.zone > 0.0);
+        assert!(bd.health > 0.0);
+        assert!(bd.rate_limit > 0.0);
+        assert!(bd.success > 0.0);
+        assert!(bd.preference > 0.0);
+        assert!(bd.safety > 0.0);
+        assert!(bd.latency > 0.0);
+    }
+
+    #[test]
+    fn score_unauthorized_zeroes_all_soft_signals() {
+        let mut c = default_candidate();
+        c.zone_authorized = false;
+        let (_, bd) = compute_score(&c, &default_weights());
+        assert!((bd.rate_limit - 0.0).abs() < f64::EPSILON);
+        assert!((bd.success - 0.0).abs() < f64::EPSILON);
+        assert!((bd.preference - 0.0).abs() < f64::EPSILON);
+        assert!((bd.safety - 0.0).abs() < f64::EPSILON);
+        assert!((bd.latency - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn score_error_health_zeroes_all_soft_signals() {
+        let mut c = default_candidate();
+        c.health = HealthState::Error;
+        let (_, bd) = compute_score(&c, &default_weights());
+        assert!((bd.rate_limit - 0.0).abs() < f64::EPSILON);
+        assert!((bd.success - 0.0).abs() < f64::EPSILON);
+        assert!((bd.preference - 0.0).abs() < f64::EPSILON);
+        assert!((bd.safety - 0.0).abs() < f64::EPSILON);
+        assert!((bd.latency - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn rank_candidates_with_same_score_stable_lexicographic() {
+        let ids = ["z", "a", "m", "b", "y"];
+        let candidates: Vec<ConnectorCandidate> = ids
+            .iter()
+            .map(|id| {
+                let mut c = default_candidate();
+                c.connector_id = (*id).to_owned();
+                c
+            })
+            .collect();
+        let result = rank_candidates(&candidates, &default_config());
+        let result_ids: Vec<&str> = result.iter().map(|r| r.connector_id.as_str()).collect();
+        assert_eq!(result_ids, vec!["a", "b", "m", "y", "z"]);
+    }
+
+    #[test]
+    fn rank_single_error_candidate_score_zero_not_recommended() {
+        let mut c = default_candidate();
+        c.health = HealthState::Error;
+        let result = rank_candidates(&[c], &default_config());
+        assert_eq!(result.len(), 1);
+        assert!(!result[0].recommended);
+        assert!((result[0].score - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn rank_mixed_authorized_unauthorized_only_authorized_recommended() {
+        let mut auth1 = default_candidate();
+        auth1.connector_id = "auth1".to_owned();
+        auth1.zone_authorized = true;
+
+        let mut auth2 = default_candidate();
+        auth2.connector_id = "auth2".to_owned();
+        auth2.zone_authorized = true;
+        auth2.success_rate = 0.5;
+
+        let mut unauth = default_candidate();
+        unauth.connector_id = "unauth".to_owned();
+        unauth.zone_authorized = false;
+        unauth.success_rate = 1.0;
+
+        let result = rank_candidates(&[unauth, auth2, auth1], &default_config());
+        // auth1 and auth2 should be above unauth
+        assert!(result[0].score > 0.0);
+        assert!(result[1].score > 0.0);
+        assert!((result[2].score - 0.0).abs() < f64::EPSILON);
+        assert!(result[0].recommended);
+    }
+
+    #[test]
+    fn rank_degraded_beats_unknown_health() {
+        let mut degraded = default_candidate();
+        degraded.connector_id = "degraded".to_owned();
+        degraded.health = HealthState::Degraded;
+
+        let mut unknown = default_candidate();
+        unknown.connector_id = "unknown".to_owned();
+        unknown.health = HealthState::Unknown;
+
+        let result = rank_candidates(&[unknown, degraded], &default_config());
+        assert_eq!(result[0].connector_id, "degraded");
+        assert!(result[0].score > result[1].score);
+    }
+
+    #[test]
+    fn rank_ten_candidates_first_is_recommended_rest_not() {
+        let candidates: Vec<ConnectorCandidate> = (0..10)
+            .map(|i| {
+                let mut c = default_candidate();
+                c.connector_id = format!("c{i:02}");
+                c.success_rate = 1.0 - (f64::from(i) * 0.05);
+                c
+            })
+            .collect();
+        let result = rank_candidates(&candidates, &default_config());
+        assert_eq!(result.len(), 10);
+        assert!(result[0].recommended);
+        for r in &result[1..] {
+            assert!(!r.recommended);
+        }
+    }
+
+    #[test]
+    fn pref_store_save_creates_parent_directory() {
+        let path = std::env::temp_dir()
+            .join("fwc_routing_test_nested")
+            .join("deep")
+            .join("prefs.json");
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+
+        let mut store = PreferenceStore::new(&path);
+        store.record_choice("test", "conn");
+        store.save().expect("save should create parent dirs");
+
+        assert!(path.exists());
+        let _ = fs::remove_dir_all(
+            std::env::temp_dir().join("fwc_routing_test_nested"),
+        );
+    }
+
+    #[test]
+    fn pref_store_overwrite_on_save() {
+        let path = std::env::temp_dir().join("fwc_routing_test_overwrite.json");
+        let _ = fs::remove_file(&path);
+
+        let mut store1 = PreferenceStore::new(&path);
+        store1.record_choice("a", "x");
+        store1.save().unwrap();
+
+        let mut store2 = PreferenceStore::new(&path);
+        store2.record_choice("b", "y");
+        store2.save().unwrap();
+
+        let mut loaded = PreferenceStore::new(&path);
+        loaded.load().unwrap();
+        // store2 only had "b"/"y", not "a"/"x"
+        assert_eq!(loaded.get_preference("a", "x"), 0);
+        assert_eq!(loaded.get_preference("b", "y"), 1);
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn pref_store_load_then_record_then_save() {
+        let path = std::env::temp_dir().join("fwc_routing_test_load_record_save.json");
+        let _ = fs::remove_file(&path);
+
+        // Create initial data
+        let mut store = PreferenceStore::new(&path);
+        store.record_choice("intent_a", "conn_1");
+        store.save().unwrap();
+
+        // Load, add more data, save
+        let mut store2 = PreferenceStore::new(&path);
+        store2.load().unwrap();
+        store2.record_choice("intent_a", "conn_1");
+        store2.record_choice("intent_b", "conn_2");
+        store2.save().unwrap();
+
+        // Verify final state
+        let mut final_store = PreferenceStore::new(&path);
+        final_store.load().unwrap();
+        assert_eq!(final_store.get_preference("intent_a", "conn_1"), 2);
+        assert_eq!(final_store.get_preference("intent_b", "conn_2"), 1);
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn pref_store_empty_strings_as_keys() {
+        let mut store = PreferenceStore::new("/tmp/test_empty_keys.json");
+        store.record_choice("", "");
+        assert_eq!(store.get_preference("", ""), 1);
+        assert_eq!(store.data().len(), 1);
+    }
+
+    #[test]
+    fn pref_store_unicode_keys() {
+        let mut store = PreferenceStore::new("/tmp/test_unicode_keys.json");
+        store.record_choice("enviar_mensaje", "conector_\u{00e9}l");
+        assert_eq!(store.get_preference("enviar_mensaje", "conector_\u{00e9}l"), 1);
+    }
+
+    #[test]
+    fn compute_score_deterministic() {
+        let c = default_candidate();
+        let w = default_weights();
+        let (s1, bd1) = compute_score(&c, &w);
+        let (s2, bd2) = compute_score(&c, &w);
+        assert!((s1 - s2).abs() < f64::EPSILON);
+        assert_eq!(bd1, bd2);
+    }
+
+    #[test]
+    fn score_safety_rank_ordering_matches_score_ordering() {
+        let ranks = [
+            SafetyRank::Safe,
+            SafetyRank::Risky,
+            SafetyRank::Dangerous,
+            SafetyRank::Critical,
+        ];
+        let w = default_weights();
+        let mut prev_score = f64::MAX;
+        for rank in &ranks {
+            let mut c = default_candidate();
+            c.safety_tier = *rank;
+            let (score, _) = compute_score(&c, &w);
+            assert!(
+                score <= prev_score,
+                "score for {rank:?} should be <= previous"
+            );
+            prev_score = score;
+        }
+    }
+
+    #[test]
+    fn score_health_ordering_matches_health_score() {
+        let states = [
+            HealthState::Healthy,
+            HealthState::Degraded,
+            HealthState::Unknown,
+        ];
+        let w = default_weights();
+        let mut prev_score = f64::MAX;
+        for state in &states {
+            let mut c = default_candidate();
+            c.health = *state;
+            let (score, _) = compute_score(&c, &w);
+            assert!(
+                score <= prev_score,
+                "score for {state:?} should be <= previous"
+            );
+            prev_score = score;
+        }
+    }
+
+    #[test]
+    fn rank_candidates_returns_same_count_as_input() {
+        for n in [1, 2, 5, 10, 20] {
+            let candidates: Vec<ConnectorCandidate> = (0..n)
+                .map(|i| {
+                    let mut c = default_candidate();
+                    c.connector_id = format!("c{i}");
+                    c
+                })
+                .collect();
+            let result = rank_candidates(&candidates, &default_config());
+            assert_eq!(result.len(), n);
+        }
+    }
+
+    #[test]
+    fn rank_candidates_scores_sorted_descending() {
+        let candidates: Vec<ConnectorCandidate> = (0..5)
+            .map(|i| {
+                let mut c = default_candidate();
+                c.connector_id = format!("c{i}");
+                c.success_rate = f64::from(i) * 0.2;
+                c.rate_headroom = f64::from(i) * 0.2;
+                c
+            })
+            .collect();
+        let result = rank_candidates(&candidates, &default_config());
+        for window in result.windows(2) {
+            assert!(
+                window[0].score >= window[1].score,
+                "scores should be descending"
+            );
+        }
+    }
+
+    #[test]
+    fn rank_candidates_exactly_one_recommended() {
+        let candidates: Vec<ConnectorCandidate> = (0..5)
+            .map(|i| {
+                let mut c = default_candidate();
+                c.connector_id = format!("c{i}");
+                c.success_rate = f64::from(i) * 0.2;
+                c
+            })
+            .collect();
+        let result = rank_candidates(&candidates, &default_config());
+        let recommended_count = result.iter().filter(|r| r.recommended).count();
+        assert_eq!(recommended_count, 1);
+    }
+
+    #[test]
+    fn score_rate_headroom_boundary_zero() {
+        let mut c = default_candidate();
+        c.rate_headroom = 0.0;
+        let w = default_weights();
+        let (_, bd) = compute_score(&c, &w);
+        assert!((bd.rate_limit - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn score_rate_headroom_boundary_one() {
+        let mut c = default_candidate();
+        c.rate_headroom = 1.0;
+        let w = default_weights();
+        let (_, bd) = compute_score(&c, &w);
+        assert!((bd.rate_limit - 20.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn score_success_rate_boundary_zero() {
+        let mut c = default_candidate();
+        c.success_rate = 0.0;
+        let w = default_weights();
+        let (_, bd) = compute_score(&c, &w);
+        assert!((bd.success - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn score_success_rate_boundary_one() {
+        let mut c = default_candidate();
+        c.success_rate = 1.0;
+        let w = default_weights();
+        let (_, bd) = compute_score(&c, &w);
+        assert!((bd.success - 15.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn score_preference_count_zero_contribution() {
+        let mut c = default_candidate();
+        c.preference_count = 0;
+        let w = default_weights();
+        let (_, bd) = compute_score(&c, &w);
+        // preference_score(0) is approximately 0 → preference weight contribution ≈ 0
+        assert!(bd.preference < 0.1);
+    }
+
+    #[test]
+    fn score_preference_count_max_contribution() {
+        let mut c = default_candidate();
+        c.preference_count = u32::MAX;
+        let w = default_weights();
+        let (_, bd) = compute_score(&c, &w);
+        // Capped at 1.0 * 10.0 = 10.0
+        assert!((bd.preference - 10.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn score_unknown_safety_same_as_risky() {
+        let mut unknown = default_candidate();
+        unknown.safety_tier = SafetyRank::Unknown;
+        let mut risky = default_candidate();
+        risky.safety_tier = SafetyRank::Risky;
+
+        let w = default_weights();
+        let (_, bd_unknown) = compute_score(&unknown, &w);
+        let (_, bd_risky) = compute_score(&risky, &w);
+        assert!((bd_unknown.safety - bd_risky.safety).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn score_normalized_between_zero_and_one() {
+        // Test many candidate configurations
+        for health in [HealthState::Healthy, HealthState::Degraded, HealthState::Unknown] {
+            for rate in [0.0_f64, 0.5, 1.0] {
+                for success in [0.0_f64, 0.5, 1.0] {
+                    let mut c = default_candidate();
+                    c.health = health;
+                    c.rate_headroom = rate;
+                    c.success_rate = success;
+                    let (score, _) = compute_score(&c, &default_weights());
+                    assert!(score >= 0.0, "score should be >= 0");
+                    assert!(score <= 1.0, "score should be <= 1");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pref_store_load_valid_json_empty_object() {
+        let path = std::env::temp_dir().join("fwc_routing_test_empty_obj.json");
+        fs::write(&path, "{}").unwrap();
+        let mut store = PreferenceStore::new(&path);
+        store.load().unwrap();
+        assert!(store.data().is_empty());
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn pref_store_load_valid_json_populated() {
+        let path = std::env::temp_dir().join("fwc_routing_test_populated.json");
+        fs::write(
+            &path,
+            r#"{"send_message":{"slack":5,"discord":2}}"#,
+        )
+        .unwrap();
+        let mut store = PreferenceStore::new(&path);
+        store.load().unwrap();
+        assert_eq!(store.get_preference("send_message", "slack"), 5);
+        assert_eq!(store.get_preference("send_message", "discord"), 2);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn score_breakdown_partial_eq() {
+        let bd1 = ScoreBreakdown {
+            zone: 1.0,
+            health: 2.0,
+            rate_limit: 3.0,
+            success: 4.0,
+            preference: 5.0,
+            safety: 6.0,
+            latency: 7.0,
+        };
+        let bd2 = bd1.clone();
+        assert_eq!(bd1, bd2);
+
+        let bd3 = ScoreBreakdown {
+            zone: 999.0,
+            ..bd1.clone()
+        };
+        assert_ne!(bd1, bd3);
+    }
 }

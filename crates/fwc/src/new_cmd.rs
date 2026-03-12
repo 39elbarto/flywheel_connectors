@@ -1712,7 +1712,9 @@ impl Bidirectional for {struct_name}Connector {{
         Ok(())
     }}"#
         }
-        ConnectorArchetype::Webhook | ConnectorArchetype::Polling | ConnectorArchetype::Database => {
+        ConnectorArchetype::Webhook
+        | ConnectorArchetype::Polling
+        | ConnectorArchetype::Database => {
             r#"    fn enforce_limits(&self, input: &serde_json::Value) -> FcpResult<()> {{
         if limits::MAX_PAYLOAD_BYTES > 0 && input.to_string().len() > limits::MAX_PAYLOAD_BYTES {{
             return Err(FcpError::InvalidRequest {{
@@ -4012,9 +4014,15 @@ members = [
 
     #[test]
     fn archetype_display_all_variants() {
-        assert_eq!(ConnectorArchetype::RequestResponse.to_string(), "request-response");
+        assert_eq!(
+            ConnectorArchetype::RequestResponse.to_string(),
+            "request-response"
+        );
         assert_eq!(ConnectorArchetype::Streaming.to_string(), "streaming");
-        assert_eq!(ConnectorArchetype::Bidirectional.to_string(), "bidirectional");
+        assert_eq!(
+            ConnectorArchetype::Bidirectional.to_string(),
+            "bidirectional"
+        );
         assert_eq!(ConnectorArchetype::Polling.to_string(), "polling");
         assert_eq!(ConnectorArchetype::Webhook.to_string(), "webhook");
         assert_eq!(ConnectorArchetype::Queue.to_string(), "queue");
@@ -4024,11 +4032,12 @@ members = [
         assert_eq!(ConnectorArchetype::Browser.to_string(), "browser");
     }
 
+    #[allow(clippy::clone_on_copy)]
     #[test]
     fn archetype_clone_copy() {
         let a = ConnectorArchetype::Queue;
         let b = a;
-        let c = b;
+        let c = a.clone();
         assert_eq!(a, b);
         assert_eq!(a, c);
     }
@@ -4234,7 +4243,11 @@ members = [
 
     #[test]
     fn check_severity_serde_roundtrip() {
-        for sev in [CheckSeverity::Error, CheckSeverity::Warning, CheckSeverity::Info] {
+        for sev in [
+            CheckSeverity::Error,
+            CheckSeverity::Warning,
+            CheckSeverity::Info,
+        ] {
             let json = serde_json::to_string(&sev).unwrap();
             let parsed: CheckSeverity = serde_json::from_str(&json).unwrap();
             assert_eq!(sev, parsed);
@@ -4243,9 +4256,18 @@ members = [
 
     #[test]
     fn check_severity_serializes_lowercase() {
-        assert_eq!(serde_json::to_string(&CheckSeverity::Error).unwrap(), "\"error\"");
-        assert_eq!(serde_json::to_string(&CheckSeverity::Warning).unwrap(), "\"warning\"");
-        assert_eq!(serde_json::to_string(&CheckSeverity::Info).unwrap(), "\"info\"");
+        assert_eq!(
+            serde_json::to_string(&CheckSeverity::Error).unwrap(),
+            "\"error\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CheckSeverity::Warning).unwrap(),
+            "\"warning\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CheckSeverity::Info).unwrap(),
+            "\"info\""
+        );
     }
 
     // ---- PrecheckSummary ----
@@ -4253,8 +4275,20 @@ members = [
     #[test]
     fn precheck_summary_all_passed() {
         let checks = vec![
-            PrecheckItem { id: "a".into(), description: "A".into(), passed: true, message: None, severity: CheckSeverity::Error },
-            PrecheckItem { id: "b".into(), description: "B".into(), passed: true, message: None, severity: CheckSeverity::Warning },
+            PrecheckItem {
+                id: "a".into(),
+                description: "A".into(),
+                passed: true,
+                message: None,
+                severity: CheckSeverity::Error,
+            },
+            PrecheckItem {
+                id: "b".into(),
+                description: "B".into(),
+                passed: true,
+                message: None,
+                severity: CheckSeverity::Warning,
+            },
         ];
         let summary = PrecheckSummary::from_checks(&checks);
         assert_eq!(summary.total, 2);
@@ -4274,7 +4308,12 @@ members = [
 
     #[test]
     fn precheck_summary_serde_roundtrip() {
-        let summary = PrecheckSummary { total: 5, passed: 3, failed: 1, warnings: 1 };
+        let summary = PrecheckSummary {
+            total: 5,
+            passed: 3,
+            failed: 1,
+            warnings: 1,
+        };
         let json = serde_json::to_string(&summary).unwrap();
         let parsed: PrecheckSummary = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.total, 5);
@@ -4285,9 +4324,13 @@ members = [
 
     #[test]
     fn precheck_summary_info_failures_not_counted() {
-        let checks = vec![
-            PrecheckItem { id: "i".into(), description: "I".into(), passed: false, message: None, severity: CheckSeverity::Info },
-        ];
+        let checks = vec![PrecheckItem {
+            id: "i".into(),
+            description: "I".into(),
+            passed: false,
+            message: None,
+            severity: CheckSeverity::Info,
+        }];
         let summary = PrecheckSummary::from_checks(&checks);
         assert_eq!(summary.total, 1);
         assert_eq!(summary.passed, 0);
@@ -4543,7 +4586,10 @@ serde = "1"
             ConnectorArchetype::Cli,
             ConnectorArchetype::Browser,
         ] {
-            assert!(!manifest_archetype(arch).is_empty(), "archetype {arch:?} had empty manifest label");
+            assert!(
+                !manifest_archetype(arch).is_empty(),
+                "archetype {arch:?} had empty manifest label"
+            );
         }
     }
 
@@ -4775,14 +4821,19 @@ serde = "1"
     #[test]
     fn prechecks_detect_secrets_in_files() {
         let files: Vec<(String, String, String)> = vec![
-            ("manifest.toml".to_string(), "placeholder".to_string(), "Manifest".to_string()),
-            ("src/config.rs".to_string(), "let password = \"secret\";".to_string(), "Config".to_string()),
+            (
+                "manifest.toml".to_string(),
+                "placeholder".to_string(),
+                "Manifest".to_string(),
+            ),
+            (
+                "src/config.rs".to_string(),
+                "let password = \"secret\";".to_string(),
+                "Config".to_string(),
+            ),
         ];
         let result = run_prechecks(&files, "fcp.test", "z:project:test");
-        let secrets_check = result
-            .checks
-            .iter()
-            .find(|c| c.id == "scaffold.no_secrets");
+        let secrets_check = result.checks.iter().find(|c| c.id == "scaffold.no_secrets");
         assert!(secrets_check.is_some());
         assert!(!secrets_check.unwrap().passed);
     }
@@ -4790,11 +4841,23 @@ serde = "1"
     #[test]
     fn prechecks_detect_api_key_in_files() {
         let files: Vec<(String, String, String)> = vec![
-            ("manifest.toml".to_string(), "placeholder".to_string(), "Manifest".to_string()),
-            ("src/main.rs".to_string(), "let api_key = \"abc\";".to_string(), "Main".to_string()),
+            (
+                "manifest.toml".to_string(),
+                "placeholder".to_string(),
+                "Manifest".to_string(),
+            ),
+            (
+                "src/main.rs".to_string(),
+                "let api_key = \"abc\";".to_string(),
+                "Main".to_string(),
+            ),
         ];
         let result = run_prechecks(&files, "fcp.test", "z:project:test");
-        let secrets_check = result.checks.iter().find(|c| c.id == "scaffold.no_secrets").unwrap();
+        let secrets_check = result
+            .checks
+            .iter()
+            .find(|c| c.id == "scaffold.no_secrets")
+            .unwrap();
         assert!(!secrets_check.passed);
     }
 

@@ -3297,7 +3297,7 @@ mod tests {
         assert_eq!(data["arguments"]["owner"], "x");
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn stdio_transport_handles_initialize() {
         let output = drive_stdio_transport(
             sample_state(),
@@ -3325,7 +3325,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn stdio_transport_initialize_advertises_resources_and_prompts() {
         let output = drive_stdio_transport(
             derived_connector_state(),
@@ -3353,7 +3353,7 @@ mod tests {
         assert!(capabilities.get("prompts").is_some());
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn stdio_transport_handles_tools_list() {
         let output = drive_stdio_transport(
             sample_state(),
@@ -3380,7 +3380,7 @@ mod tests {
         assert!(tools[0]["inputSchema"].is_object());
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn stdio_transport_handles_resources_list_from_derived_state() {
         let output = drive_stdio_transport(
             derived_connector_state(),
@@ -3415,7 +3415,7 @@ mod tests {
         assert!(uris.contains(&"resource://connectors/status"));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn stdio_transport_handles_resources_read_from_derived_state() {
         let output = drive_stdio_transport(
             derived_connector_state(),
@@ -3464,7 +3464,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn stdio_transport_handles_prompts_list_from_derived_state() {
         let output = drive_stdio_transport(
             derived_connector_state(),
@@ -3498,7 +3498,7 @@ mod tests {
         assert!(names.contains(&"prompt://connector/github/op/create_issue/example"));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn stdio_transport_handles_prompts_get_from_derived_state() {
         let output = drive_stdio_transport(
             derived_connector_state(),
@@ -3532,7 +3532,7 @@ mod tests {
         assert!(assistant.contains("\"title\": \"<string>\""));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn stdio_transport_routes_tools_call_through_callback() {
         let output = drive_stdio_transport(
             sample_state(),
@@ -3562,7 +3562,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn stdio_transport_rejects_zone_scoped_call_without_capability_token() {
         let output = drive_stdio_transport(
             McpServerState::builder()
@@ -3594,7 +3594,7 @@ mod tests {
         assert_eq!(data["zone_id"], "z:work");
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn stdio_transport_allows_zone_scoped_call_with_valid_capability_token() {
         let output = drive_stdio_transport(
             McpServerState::builder()
@@ -3630,7 +3630,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn stdio_transport_returns_parse_errors() {
         let output = drive_stdio_transport(sample_state(), "not valid json\n", |tool, id, _| {
             JsonRpcResponse::success(
@@ -3652,7 +3652,7 @@ mod tests {
         assert!(error.message().contains("Failed to parse request"));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn stdio_transport_exits_cleanly_on_eof() {
         let output = drive_stdio_transport(sample_state(), "", |tool, id, _| {
             JsonRpcResponse::success(

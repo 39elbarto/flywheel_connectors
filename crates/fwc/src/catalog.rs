@@ -3370,6 +3370,184 @@ fn execution_contract(summary: &str, intended_shape: &str) -> Value {
     })
 }
 
+// ── Config truth contract (bead 29.2.1) ─────────────────────────────────
+// Types describing the truthful config surface: host-authoritative
+// config operations with revision tracking, diff semantics, and
+// audit-backed write evidence.
+
+/// Source of a config operation's data.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigDataSource {
+    /// Config retrieved from or applied via live host admin RPC.
+    LiveHost,
+    /// Config read from local file (not authoritative for running system).
+    LocalFile,
+    /// Config from cached snapshot (may be stale).
+    CachedSnapshot,
+    /// Config from environment variable or CLI override.
+    EnvironmentOverride,
+}
+
+#[allow(dead_code)]
+impl ConfigDataSource {
+    /// Machine-readable tag.
+    pub const fn tag(self) -> &'static str {
+        match self {
+            Self::LiveHost => "live-host",
+            Self::LocalFile => "local-file",
+            Self::CachedSnapshot => "cached-snapshot",
+            Self::EnvironmentOverride => "environment-override",
+        }
+    }
+
+    /// Whether this source reflects the running system's actual config.
+    pub const fn is_authoritative(self) -> bool {
+        matches!(self, Self::LiveHost)
+    }
+
+    /// Whether this source is offline/local.
+    pub const fn is_offline(self) -> bool {
+        matches!(self, Self::LocalFile | Self::CachedSnapshot | Self::EnvironmentOverride)
+    }
+
+    /// Staleness caveat for user display.
+    pub const fn staleness_caveat(self) -> &'static str {
+        match self {
+            Self::LiveHost => "Reflects the running system's current configuration.",
+            Self::LocalFile => "Read from local file; may not match the running system.",
+            Self::CachedSnapshot => "From cached snapshot; may be stale.",
+            Self::EnvironmentOverride => "Overridden by environment; may not match persisted config.",
+        }
+    }
+}
+
+/// Outcome of a config mutation attempt.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigMutationOutcome {
+    /// Config was applied and the host accepted the change.
+    Applied {
+        revision_id: u64,
+        previous_revision_id: Option<u64>,
+    },
+    /// Config was validated but not applied (dry-run/validate mode).
+    Validated,
+    /// Config was rejected by the host (schema violation, policy, etc.).
+    Rejected { reason: String },
+    /// Config mutation failed due to transport/availability.
+    Failed { reason: String },
+    /// Config rollback was performed.
+    RolledBack {
+        to_revision_id: u64,
+        from_revision_id: u64,
+    },
+}
+
+#[allow(dead_code)]
+impl ConfigMutationOutcome {
+    /// Machine-readable tag.
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Self::Applied { .. } => "applied",
+            Self::Validated => "validated",
+            Self::Rejected { .. } => "rejected",
+            Self::Failed { .. } => "failed",
+            Self::RolledBack { .. } => "rolled-back",
+        }
+    }
+
+    /// Whether the mutation was successfully committed.
+    pub fn is_committed(&self) -> bool {
+        matches!(self, Self::Applied { .. } | Self::RolledBack { .. })
+    }
+
+    /// Whether the outcome represents a successful operation (not an error).
+    pub fn is_success(&self) -> bool {
+        matches!(self, Self::Applied { .. } | Self::Validated | Self::RolledBack { .. })
+    }
+}
+
+/// Provenance envelope for a config operation result.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigOperationProvenance {
+    /// The config subcommand (get, set, apply, validate, rollback, etc.).
+    pub operation: String,
+    /// Where the config data came from.
+    pub source: ConfigDataSource,
+    /// Whether this result is authoritative for the running system.
+    pub authoritative: bool,
+    /// Staleness/freshness caveat.
+    pub caveat: String,
+    /// Mutation outcome, if the operation was a write.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mutation_outcome: Option<ConfigMutationOutcome>,
+    /// Current revision ID, if known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision_id: Option<u64>,
+}
+
+/// Build a [`ConfigOperationProvenance`] for a config operation.
+#[allow(dead_code)]
+#[must_use]
+pub fn config_provenance(
+    operation: &str,
+    source: ConfigDataSource,
+    mutation_outcome: Option<ConfigMutationOutcome>,
+    revision_id: Option<u64>,
+) -> ConfigOperationProvenance {
+    ConfigOperationProvenance {
+        operation: operation.to_owned(),
+        source,
+        authoritative: source.is_authoritative(),
+        caveat: source.staleness_caveat().to_owned(),
+        mutation_outcome,
+        revision_id,
+    }
+}
+
+/// Config operations that require host-authoritative backing.
+#[allow(dead_code)]
+pub const CONFIG_MUTATING_OPS: &[&str] = &[
+    "set", "unset", "apply", "import", "rollback",
+];
+
+/// Config operations that can work offline.
+#[allow(dead_code)]
+pub const CONFIG_READABLE_OPS: &[&str] = &[
+    "get", "schema", "export", "diff", "revisions",
+];
+
+/// Check whether a config operation requires host authority.
+#[allow(dead_code)]
+#[must_use]
+pub fn config_op_requires_host(operation: &str) -> bool {
+    CONFIG_MUTATING_OPS.contains(&operation)
+}
+
+/// Determine the expected config data source for a given operation + mode.
+#[allow(dead_code)]
+#[must_use]
+pub fn expected_config_source(
+    operation: &str,
+    mode: RuntimeMode,
+) -> Option<ConfigDataSource> {
+    match mode {
+        RuntimeMode::Live => Some(ConfigDataSource::LiveHost),
+        RuntimeMode::ExplicitOffline | RuntimeMode::DegradedOffline => {
+            if config_op_requires_host(operation) {
+                None // Mutating ops cannot work offline
+            } else {
+                Some(ConfigDataSource::LocalFile)
+            }
+        }
+        RuntimeMode::Refused => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -3391,6 +3569,10 @@ mod tests {
         simulate_result, simulate_result_payload, template_provenance,
         validate_capability_token_source, validate_mode_consistency, validate_package_source,
         workflow_can_proceed, workflow_kind,
+    };
+    use super::{
+        CONFIG_MUTATING_OPS, CONFIG_READABLE_OPS, ConfigDataSource, ConfigMutationOutcome,
+        config_op_requires_host, config_provenance, expected_config_source,
     };
     use super::{
         EXPORT_COMMANDS, McpSurfaceState, ToolAvailability, ToolInventorySource,
@@ -10631,5 +10813,279 @@ mod tests {
             avails.len(),
             "Duplicate ToolAvailability serde tags"
         );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Bead 29.2.1: Config truth contract tests
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn config_data_source_tags_are_unique() {
+        let sources = [
+            ConfigDataSource::LiveHost,
+            ConfigDataSource::LocalFile,
+            ConfigDataSource::CachedSnapshot,
+            ConfigDataSource::EnvironmentOverride,
+        ];
+        let tags: std::collections::HashSet<&str> = sources.iter().map(|s| s.tag()).collect();
+        assert_eq!(tags.len(), sources.len(), "Duplicate ConfigDataSource tags");
+    }
+
+    #[test]
+    fn config_data_source_only_live_host_is_authoritative() {
+        assert!(ConfigDataSource::LiveHost.is_authoritative());
+        assert!(!ConfigDataSource::LocalFile.is_authoritative());
+        assert!(!ConfigDataSource::CachedSnapshot.is_authoritative());
+        assert!(!ConfigDataSource::EnvironmentOverride.is_authoritative());
+    }
+
+    #[test]
+    fn config_data_source_authoritative_and_offline_mutually_exclusive() {
+        let sources = [
+            ConfigDataSource::LiveHost,
+            ConfigDataSource::LocalFile,
+            ConfigDataSource::CachedSnapshot,
+            ConfigDataSource::EnvironmentOverride,
+        ];
+        for src in &sources {
+            assert!(
+                !(src.is_authoritative() && src.is_offline()),
+                "{:?} is both authoritative and offline",
+                src,
+            );
+        }
+    }
+
+    #[test]
+    fn config_data_source_all_have_staleness_caveat() {
+        let sources = [
+            ConfigDataSource::LiveHost,
+            ConfigDataSource::LocalFile,
+            ConfigDataSource::CachedSnapshot,
+            ConfigDataSource::EnvironmentOverride,
+        ];
+        for src in &sources {
+            assert!(
+                !src.staleness_caveat().is_empty(),
+                "{:?} has empty staleness caveat",
+                src,
+            );
+        }
+    }
+
+    #[test]
+    fn config_data_source_serde_round_trip() {
+        let sources = [
+            ConfigDataSource::LiveHost,
+            ConfigDataSource::LocalFile,
+            ConfigDataSource::CachedSnapshot,
+            ConfigDataSource::EnvironmentOverride,
+        ];
+        for src in &sources {
+            let json = serde_json::to_string(src).unwrap();
+            let parsed: ConfigDataSource = serde_json::from_str(&json).unwrap();
+            assert_eq!(*src, parsed, "Serde round-trip failed for {:?}", src);
+        }
+    }
+
+    #[test]
+    fn config_mutation_outcome_tags_are_unique() {
+        let outcomes = [
+            ConfigMutationOutcome::Applied { revision_id: 1, previous_revision_id: None },
+            ConfigMutationOutcome::Validated,
+            ConfigMutationOutcome::Rejected { reason: "test".to_owned() },
+            ConfigMutationOutcome::Failed { reason: "test".to_owned() },
+            ConfigMutationOutcome::RolledBack { to_revision_id: 1, from_revision_id: 2 },
+        ];
+        let tags: std::collections::HashSet<&str> = outcomes.iter().map(|o| o.tag()).collect();
+        assert_eq!(tags.len(), outcomes.len(), "Duplicate ConfigMutationOutcome tags");
+    }
+
+    #[test]
+    fn config_mutation_applied_is_committed() {
+        let outcome = ConfigMutationOutcome::Applied { revision_id: 5, previous_revision_id: Some(4) };
+        assert!(outcome.is_committed());
+        assert!(outcome.is_success());
+    }
+
+    #[test]
+    fn config_mutation_validated_is_not_committed() {
+        assert!(!ConfigMutationOutcome::Validated.is_committed());
+        assert!(ConfigMutationOutcome::Validated.is_success());
+    }
+
+    #[test]
+    fn config_mutation_rejected_is_not_success() {
+        let outcome = ConfigMutationOutcome::Rejected { reason: "schema violation".to_owned() };
+        assert!(!outcome.is_committed());
+        assert!(!outcome.is_success());
+    }
+
+    #[test]
+    fn config_mutation_failed_is_not_success() {
+        let outcome = ConfigMutationOutcome::Failed { reason: "host unreachable".to_owned() };
+        assert!(!outcome.is_committed());
+        assert!(!outcome.is_success());
+    }
+
+    #[test]
+    fn config_mutation_rollback_is_committed() {
+        let outcome = ConfigMutationOutcome::RolledBack { to_revision_id: 3, from_revision_id: 5 };
+        assert!(outcome.is_committed());
+        assert!(outcome.is_success());
+    }
+
+    #[test]
+    fn config_mutation_serde_round_trip() {
+        let outcomes = [
+            ConfigMutationOutcome::Applied { revision_id: 42, previous_revision_id: Some(41) },
+            ConfigMutationOutcome::Validated,
+            ConfigMutationOutcome::Rejected { reason: "bad schema".to_owned() },
+            ConfigMutationOutcome::Failed { reason: "timeout".to_owned() },
+            ConfigMutationOutcome::RolledBack { to_revision_id: 10, from_revision_id: 12 },
+        ];
+        for outcome in &outcomes {
+            let json = serde_json::to_string(outcome).unwrap();
+            let parsed: ConfigMutationOutcome = serde_json::from_str(&json).unwrap();
+            assert_eq!(*outcome, parsed, "Serde round-trip failed for {:?}", outcome);
+        }
+    }
+
+    #[test]
+    fn config_provenance_authoritative_matches_source() {
+        let prov = config_provenance("get", ConfigDataSource::LiveHost, None, Some(5));
+        assert!(prov.authoritative);
+        assert_eq!(prov.source, ConfigDataSource::LiveHost);
+        assert_eq!(prov.operation, "get");
+
+        let prov = config_provenance("get", ConfigDataSource::LocalFile, None, None);
+        assert!(!prov.authoritative);
+    }
+
+    #[test]
+    fn config_provenance_caveat_matches_source() {
+        let prov = config_provenance("set", ConfigDataSource::LiveHost, None, None);
+        assert_eq!(prov.caveat, ConfigDataSource::LiveHost.staleness_caveat());
+    }
+
+    #[test]
+    fn config_provenance_carries_mutation_outcome() {
+        let outcome = ConfigMutationOutcome::Applied { revision_id: 7, previous_revision_id: Some(6) };
+        let prov = config_provenance("apply", ConfigDataSource::LiveHost, Some(outcome.clone()), Some(7));
+        assert!(prov.mutation_outcome.is_some());
+        assert_eq!(prov.mutation_outcome.unwrap(), outcome);
+        assert_eq!(prov.revision_id, Some(7));
+    }
+
+    #[test]
+    fn config_provenance_serializes_all_fields() {
+        let prov = config_provenance(
+            "apply",
+            ConfigDataSource::LiveHost,
+            Some(ConfigMutationOutcome::Applied { revision_id: 1, previous_revision_id: None }),
+            Some(1),
+        );
+        let v = serde_json::to_value(&prov).unwrap();
+        assert!(v.get("operation").is_some());
+        assert!(v.get("source").is_some());
+        assert!(v.get("authoritative").is_some());
+        assert!(v.get("caveat").is_some());
+        assert!(v.get("mutation_outcome").is_some());
+        assert!(v.get("revision_id").is_some());
+    }
+
+    #[test]
+    fn config_mutating_ops_require_host() {
+        for op in CONFIG_MUTATING_OPS {
+            assert!(
+                config_op_requires_host(op),
+                "Mutating op '{}' should require host",
+                op,
+            );
+        }
+    }
+
+    #[test]
+    fn config_readable_ops_do_not_require_host() {
+        for op in CONFIG_READABLE_OPS {
+            assert!(
+                !config_op_requires_host(op),
+                "Readable op '{}' should not require host",
+                op,
+            );
+        }
+    }
+
+    #[test]
+    fn config_op_sets_are_disjoint() {
+        for op in CONFIG_MUTATING_OPS {
+            assert!(
+                !CONFIG_READABLE_OPS.contains(op),
+                "Op '{}' is in both mutating and readable sets",
+                op,
+            );
+        }
+    }
+
+    #[test]
+    fn expected_config_source_live_always_returns_live_host() {
+        for op in CONFIG_MUTATING_OPS.iter().chain(CONFIG_READABLE_OPS.iter()) {
+            let src = expected_config_source(op, RuntimeMode::Live);
+            assert_eq!(
+                src,
+                Some(ConfigDataSource::LiveHost),
+                "Live mode should always use LiveHost for '{}'",
+                op,
+            );
+        }
+    }
+
+    #[test]
+    fn expected_config_source_offline_returns_none_for_mutating() {
+        for op in CONFIG_MUTATING_OPS {
+            let src = expected_config_source(op, RuntimeMode::ExplicitOffline);
+            assert!(
+                src.is_none(),
+                "Mutating op '{}' should not work offline",
+                op,
+            );
+        }
+    }
+
+    #[test]
+    fn expected_config_source_offline_returns_local_for_readable() {
+        for op in CONFIG_READABLE_OPS {
+            let src = expected_config_source(op, RuntimeMode::ExplicitOffline);
+            assert_eq!(
+                src,
+                Some(ConfigDataSource::LocalFile),
+                "Readable op '{}' should use LocalFile offline",
+                op,
+            );
+        }
+    }
+
+    #[test]
+    fn expected_config_source_refused_always_none() {
+        for op in CONFIG_MUTATING_OPS.iter().chain(CONFIG_READABLE_OPS.iter()) {
+            assert!(
+                expected_config_source(op, RuntimeMode::Refused).is_none(),
+                "Refused mode should return None for '{}'",
+                op,
+            );
+        }
+    }
+
+    #[test]
+    fn expected_config_source_degraded_same_as_explicit_offline() {
+        for op in CONFIG_MUTATING_OPS.iter().chain(CONFIG_READABLE_OPS.iter()) {
+            let explicit = expected_config_source(op, RuntimeMode::ExplicitOffline);
+            let degraded = expected_config_source(op, RuntimeMode::DegradedOffline);
+            assert_eq!(
+                explicit, degraded,
+                "ExplicitOffline and DegradedOffline should match for '{}'",
+                op,
+            );
+        }
     }
 }

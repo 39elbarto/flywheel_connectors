@@ -2721,4 +2721,700 @@ mod tests {
         let outcome = TaintApprovalCheck.check(&ctx, &config);
         assert!(outcome.is_allow());
     }
+
+    // ── Additional edge-case and boundary tests ──
+
+    // ── Config builder chaining ──
+
+    #[test]
+    fn config_builder_chained_all_setters() {
+        let config = EnforcementConfig::new()
+            .with_checkpoint_max_age_ms(111)
+            .with_revocation_max_age_ms(222)
+            .with_critical_taint_flags(vec!["secret".into()]);
+        assert_eq!(config.checkpoint_max_age_ms, 111);
+        assert_eq!(config.revocation_max_age_ms, 222);
+        assert_eq!(config.critical_taint_flags, vec!["secret"]);
+    }
+
+    #[test]
+    fn config_zero_thresholds() {
+        let config = EnforcementConfig::new()
+            .with_checkpoint_max_age_ms(0)
+            .with_revocation_max_age_ms(0);
+        assert_eq!(config.checkpoint_max_age_ms, 0);
+        assert_eq!(config.revocation_max_age_ms, 0);
+    }
+
+    #[test]
+    fn config_max_u64_thresholds() {
+        let config = EnforcementConfig::new()
+            .with_checkpoint_max_age_ms(u64::MAX)
+            .with_revocation_max_age_ms(u64::MAX);
+        assert_eq!(config.checkpoint_max_age_ms, u64::MAX);
+        assert_eq!(config.revocation_max_age_ms, u64::MAX);
+    }
+
+    #[test]
+    fn config_add_duplicate_zone_membership_is_idempotent() {
+        let mut config = EnforcementConfig::new();
+        config.add_zone_membership("alice", "zone-a");
+        config.add_zone_membership("alice", "zone-a");
+        let zones = config.zone_memberships.get("alice").unwrap();
+        assert_eq!(zones.len(), 1);
+    }
+
+    #[test]
+    fn config_add_duplicate_zone_connector_is_idempotent() {
+        let mut config = EnforcementConfig::new();
+        config.add_zone_connector("zone-a", "slack");
+        config.add_zone_connector("zone-a", "slack");
+        let connectors = config.zone_allowed_connectors.get("zone-a").unwrap();
+        assert_eq!(connectors.len(), 1);
+    }
+
+    #[test]
+    fn config_add_duplicate_zone_operation_is_idempotent() {
+        let mut config = EnforcementConfig::new();
+        config.add_zone_operation("zone-a", "read");
+        config.add_zone_operation("zone-a", "read");
+        let ops = config.zone_allowed_operations.get("zone-a").unwrap();
+        assert_eq!(ops.len(), 1);
+    }
+
+    #[test]
+    fn config_default_has_all_four_critical_flags() {
+        let config = EnforcementConfig::default();
+        assert!(config.critical_taint_flags.contains(&"pii".to_string()));
+        assert!(config.critical_taint_flags.contains(&"phi".to_string()));
+        assert!(config.critical_taint_flags.contains(&"classified".to_string()));
+        assert!(config.critical_taint_flags.contains(&"financial".to_string()));
+        assert_eq!(config.critical_taint_flags.len(), 4);
+    }
+
+    // ── Builder edge cases ──
+
+    #[test]
+    fn builder_empty_build_returns_none() {
+        let ctx = EnforcementContextBuilder::new().build();
+        assert!(ctx.is_none());
+    }
+
+    #[test]
+    fn builder_debug_format() {
+        let builder = EnforcementContextBuilder::new().request_id("r1");
+        let debug = format!("{builder:?}");
+        assert!(debug.contains("EnforcementContextBuilder"));
+        assert!(debug.contains("r1"));
+    }
+
+    #[test]
+    fn builder_empty_strings_still_build() {
+        // Builder accepts empty strings — canonical_decode catches them later
+        let ctx = EnforcementContextBuilder::new()
+            .request_id("")
+            .connector_id("")
+            .operation("")
+            .zone_id("")
+            .principal("")
+            .build();
+        assert!(ctx.is_some());
+        let ctx = ctx.unwrap();
+        assert!(ctx.request_id.is_empty());
+    }
+
+    #[test]
+    fn builder_all_optional_fields_set() {
+        let ctx = EnforcementContextBuilder::new()
+            .request_id("r1")
+            .connector_id("c1")
+            .operation("op1")
+            .zone_id("z1")
+            .principal("p1")
+            .capability_claims(vec!["cap".into()])
+            .taint_flags(vec!["pii".into()])
+            .approval_scopes(vec!["pii".into()])
+            .timestamp_ms(12345)
+            .holder_verified(true)
+            .checkpoint_age_ms(100)
+            .revocation_list_age_ms(200)
+            .budget_used(50)
+            .budget_limit(500)
+            .rate_count(3)
+            .rate_limit(10)
+            .manifest_allowed_operations(vec!["op1".into()])
+            .build()
+            .unwrap();
+        assert_eq!(ctx.timestamp_ms, 12345);
+        assert!(ctx.holder_verified);
+        assert_eq!(ctx.checkpoint_age_ms, Some(100));
+        assert_eq!(ctx.revocation_list_age_ms, Some(200));
+        assert_eq!(ctx.budget_used, Some(50));
+        assert_eq!(ctx.budget_limit, Some(500));
+        assert_eq!(ctx.rate_count, Some(3));
+        assert_eq!(ctx.rate_limit, Some(10));
+    }
+
+    // ── CanonicalDecodeCheck ordering ──
+
+    #[test]
+    fn canonical_decode_checks_operation_before_zone() {
+        let mut ctx = test_context();
+        ctx.operation = String::new();
+        ctx.zone_id = String::new();
+        let config = EnforcementConfig::default();
+        let outcome = CanonicalDecodeCheck.check(&ctx, &config);
+        if let CheckOutcome::Deny { reason_code, .. } = &outcome {
+            assert_eq!(reason_code, "MISSING_OPERATION");
+        }
+    }
+
+    #[test]
+    fn canonical_decode_checks_zone_before_principal() {
+        let mut ctx = test_context();
+        ctx.zone_id = String::new();
+        ctx.principal = String::new();
+        let config = EnforcementConfig::default();
+        let outcome = CanonicalDecodeCheck.check(&ctx, &config);
+        if let CheckOutcome::Deny { reason_code, .. } = &outcome {
+            assert_eq!(reason_code, "MISSING_ZONE_ID");
+        }
+    }
+
+    #[test]
+    fn canonical_decode_checks_principal_before_request_id() {
+        let mut ctx = test_context();
+        ctx.principal = String::new();
+        ctx.request_id = String::new();
+        let config = EnforcementConfig::default();
+        let outcome = CanonicalDecodeCheck.check(&ctx, &config);
+        if let CheckOutcome::Deny { reason_code, .. } = &outcome {
+            assert_eq!(reason_code, "MISSING_PRINCIPAL");
+        }
+    }
+
+    #[test]
+    fn canonical_decode_deny_whitespace_request_id() {
+        let mut ctx = test_context();
+        ctx.request_id = " \t ".into();
+        let config = EnforcementConfig::default();
+        let outcome = CanonicalDecodeCheck.check(&ctx, &config);
+        assert!(outcome.is_deny());
+        if let CheckOutcome::Deny { reason_code, .. } = &outcome {
+            assert_eq!(reason_code, "MISSING_REQUEST_ID");
+        }
+    }
+
+    // ── CapabilityVerifyCheck edge cases ──
+
+    #[test]
+    fn capability_verify_nested_prefix_dot() {
+        let mut ctx = test_context();
+        ctx.operation = "messages.channels.send".into();
+        ctx.capability_claims = vec!["messages.channels".into()];
+        let config = EnforcementConfig::default();
+        let outcome = CapabilityVerifyCheck.check(&ctx, &config);
+        assert!(outcome.is_allow());
+    }
+
+    #[test]
+    fn capability_verify_nested_prefix_slash() {
+        let mut ctx = test_context();
+        ctx.operation = "api/v2/list".into();
+        ctx.capability_claims = vec!["api/v2".into()];
+        let config = EnforcementConfig::default();
+        let outcome = CapabilityVerifyCheck.check(&ctx, &config);
+        assert!(outcome.is_allow());
+    }
+
+    #[test]
+    fn capability_verify_no_partial_match_without_separator() {
+        // "send" should NOT match "send_extended" (no dot/slash)
+        let mut ctx = test_context();
+        ctx.operation = "send_extended".into();
+        ctx.capability_claims = vec!["send".into()];
+        let config = EnforcementConfig::default();
+        let outcome = CapabilityVerifyCheck.check(&ctx, &config);
+        assert!(outcome.is_deny());
+    }
+
+    #[test]
+    fn capability_verify_exact_match_with_dots() {
+        let mut ctx = test_context();
+        ctx.operation = "a.b.c".into();
+        ctx.capability_claims = vec!["a.b.c".into()];
+        let config = EnforcementConfig::default();
+        let outcome = CapabilityVerifyCheck.check(&ctx, &config);
+        assert!(outcome.is_allow());
+    }
+
+    #[test]
+    fn capability_verify_wildcard_alone() {
+        let mut ctx = test_context();
+        ctx.capability_claims = vec!["*".into()];
+        ctx.operation = "any.random.operation".into();
+        let config = EnforcementConfig::default();
+        let outcome = CapabilityVerifyCheck.check(&ctx, &config);
+        assert!(outcome.is_allow());
+    }
+
+    // ── CheckpointFreshnessCheck boundary ──
+
+    #[test]
+    fn checkpoint_freshness_deny_at_max_u64() {
+        let mut ctx = test_context();
+        ctx.checkpoint_age_ms = Some(u64::MAX);
+        let config = EnforcementConfig::default();
+        let outcome = CheckpointFreshnessCheck.check(&ctx, &config);
+        assert!(outcome.is_deny());
+    }
+
+    #[test]
+    fn checkpoint_freshness_allow_zero_threshold() {
+        let mut ctx = test_context();
+        ctx.checkpoint_age_ms = Some(0);
+        let config = EnforcementConfig::new().with_checkpoint_max_age_ms(0);
+        let outcome = CheckpointFreshnessCheck.check(&ctx, &config);
+        assert!(outcome.is_allow());
+    }
+
+    #[test]
+    fn checkpoint_freshness_deny_one_over_zero_threshold() {
+        let mut ctx = test_context();
+        ctx.checkpoint_age_ms = Some(1);
+        let config = EnforcementConfig::new().with_checkpoint_max_age_ms(0);
+        let outcome = CheckpointFreshnessCheck.check(&ctx, &config);
+        assert!(outcome.is_deny());
+    }
+
+    // ── RevocationFreshnessCheck boundary ──
+
+    #[test]
+    fn revocation_freshness_deny_at_max_u64() {
+        let mut ctx = test_context();
+        ctx.revocation_list_age_ms = Some(u64::MAX);
+        let config = EnforcementConfig::default();
+        let outcome = RevocationFreshnessCheck.check(&ctx, &config);
+        assert!(outcome.is_deny());
+    }
+
+    #[test]
+    fn revocation_freshness_allow_zero_threshold() {
+        let mut ctx = test_context();
+        ctx.revocation_list_age_ms = Some(0);
+        let config = EnforcementConfig::new().with_revocation_max_age_ms(0);
+        let outcome = RevocationFreshnessCheck.check(&ctx, &config);
+        assert!(outcome.is_allow());
+    }
+
+    #[test]
+    fn revocation_freshness_zero_age() {
+        let mut ctx = test_context();
+        ctx.revocation_list_age_ms = Some(0);
+        let config = EnforcementConfig::default();
+        let outcome = RevocationFreshnessCheck.check(&ctx, &config);
+        assert!(outcome.is_allow());
+    }
+
+    // ── TaintApprovalCheck edge cases ──
+
+    #[test]
+    fn taint_approval_deny_classified_without_approval() {
+        let mut ctx = test_context();
+        ctx.taint_flags = vec!["classified".into()];
+        let config = EnforcementConfig::default();
+        let outcome = TaintApprovalCheck.check(&ctx, &config);
+        assert!(outcome.is_deny());
+        if let CheckOutcome::Deny { explanation, .. } = &outcome {
+            assert!(explanation.contains("classified"));
+        }
+    }
+
+    #[test]
+    fn taint_approval_deny_financial_without_approval() {
+        let mut ctx = test_context();
+        ctx.taint_flags = vec!["financial".into()];
+        let config = EnforcementConfig::default();
+        let outcome = TaintApprovalCheck.check(&ctx, &config);
+        assert!(outcome.is_deny());
+        if let CheckOutcome::Deny { explanation, .. } = &outcome {
+            assert!(explanation.contains("financial"));
+        }
+    }
+
+    #[test]
+    fn taint_approval_superset_approvals_ok() {
+        let mut ctx = test_context();
+        ctx.taint_flags = vec!["pii".into()];
+        ctx.approval_scopes = vec!["pii".into(), "phi".into(), "classified".into()];
+        let config = EnforcementConfig::default();
+        let outcome = TaintApprovalCheck.check(&ctx, &config);
+        assert!(outcome.is_allow());
+    }
+
+    #[test]
+    fn taint_approval_all_four_defaults_approved() {
+        let mut ctx = test_context();
+        ctx.taint_flags = vec![
+            "pii".into(), "phi".into(), "classified".into(), "financial".into(),
+        ];
+        ctx.approval_scopes = vec![
+            "pii".into(), "phi".into(), "classified".into(), "financial".into(),
+        ];
+        let config = EnforcementConfig::default();
+        let outcome = TaintApprovalCheck.check(&ctx, &config);
+        assert!(outcome.is_allow());
+    }
+
+    #[test]
+    fn taint_approval_all_four_defaults_one_missing() {
+        let mut ctx = test_context();
+        ctx.taint_flags = vec![
+            "pii".into(), "phi".into(), "classified".into(), "financial".into(),
+        ];
+        ctx.approval_scopes = vec!["pii".into(), "phi".into(), "financial".into()];
+        let config = EnforcementConfig::default();
+        let outcome = TaintApprovalCheck.check(&ctx, &config);
+        assert!(outcome.is_deny());
+        if let CheckOutcome::Deny { explanation, .. } = &outcome {
+            assert!(explanation.contains("classified"));
+        }
+    }
+
+    // ── PolicyCeilingCheck edge cases ──
+
+    #[test]
+    fn policy_ceiling_connector_allowed_operation_denied() {
+        let ctx = test_context();
+        let mut config = EnforcementConfig::default();
+        config.add_zone_connector("zone-prod", "slack:utility:1.0.0");
+        config.add_zone_operation("zone-prod", "list_channels");
+        let outcome = PolicyCeilingCheck.check(&ctx, &config);
+        assert!(outcome.is_deny());
+        if let CheckOutcome::Deny { reason_code, .. } = &outcome {
+            assert_eq!(reason_code, "OPERATION_NOT_IN_ZONE_POLICY");
+        }
+    }
+
+    #[test]
+    fn policy_ceiling_no_connector_rules_but_operation_rules_deny() {
+        let ctx = test_context();
+        let mut config = EnforcementConfig::default();
+        // No connector rules for zone-prod, but operation rules exist
+        config.add_zone_operation("zone-prod", "list_channels");
+        let outcome = PolicyCeilingCheck.check(&ctx, &config);
+        assert!(outcome.is_deny());
+        if let CheckOutcome::Deny { reason_code, .. } = &outcome {
+            assert_eq!(reason_code, "OPERATION_NOT_IN_ZONE_POLICY");
+        }
+    }
+
+    #[test]
+    fn policy_ceiling_rules_for_other_zone_only() {
+        let ctx = test_context();
+        let mut config = EnforcementConfig::default();
+        config.add_zone_connector("zone-dev", "slack:utility:1.0.0");
+        config.add_zone_operation("zone-dev", "send_message");
+        // zone-prod has no rules → allow
+        let outcome = PolicyCeilingCheck.check(&ctx, &config);
+        assert!(outcome.is_allow());
+    }
+
+    // ── RateLimitCheck edge cases ──
+
+    #[test]
+    fn rate_limit_both_none() {
+        let mut ctx = test_context();
+        ctx.rate_count = None;
+        ctx.rate_limit = None;
+        let config = EnforcementConfig::default();
+        let outcome = RateLimitCheck.check(&ctx, &config);
+        assert!(outcome.is_skip());
+    }
+
+    #[test]
+    fn rate_limit_max_u32_under_limit() {
+        let mut ctx = test_context();
+        ctx.rate_count = Some(u32::MAX - 1);
+        ctx.rate_limit = Some(u32::MAX);
+        let config = EnforcementConfig::default();
+        let outcome = RateLimitCheck.check(&ctx, &config);
+        assert!(outcome.is_allow());
+    }
+
+    #[test]
+    fn rate_limit_max_u32_at_limit() {
+        let mut ctx = test_context();
+        ctx.rate_count = Some(u32::MAX);
+        ctx.rate_limit = Some(u32::MAX);
+        let config = EnforcementConfig::default();
+        let outcome = RateLimitCheck.check(&ctx, &config);
+        assert!(outcome.is_deny());
+    }
+
+    #[test]
+    fn rate_limit_one_of_one() {
+        let mut ctx = test_context();
+        ctx.rate_count = Some(1);
+        ctx.rate_limit = Some(1);
+        let config = EnforcementConfig::default();
+        let outcome = RateLimitCheck.check(&ctx, &config);
+        assert!(outcome.is_deny());
+    }
+
+    // ── ConnectorManifestCheck edge cases ──
+
+    #[test]
+    fn connector_manifest_many_ops_last_matches() {
+        let mut ctx = test_context();
+        let mut ops: Vec<String> = (0..99).map(|i| format!("op_{i}")).collect();
+        ops.push("send_message".into());
+        ctx.manifest_allowed_operations = ops;
+        let config = EnforcementConfig::default();
+        let outcome = ConnectorManifestCheck.check(&ctx, &config);
+        assert!(outcome.is_allow());
+    }
+
+    #[test]
+    fn connector_manifest_many_ops_none_match() {
+        let mut ctx = test_context();
+        ctx.manifest_allowed_operations = (0..100).map(|i| format!("op_{i}")).collect();
+        let config = EnforcementConfig::default();
+        let outcome = ConnectorManifestCheck.check(&ctx, &config);
+        assert!(outcome.is_deny());
+    }
+
+    // ── Pipeline integration edge cases ──
+
+    #[test]
+    fn pipeline_single_allow_check() {
+        let pipeline = EnforcementPipeline::with_checks(vec![
+            Box::new(AlwaysAllowCheck),
+        ]);
+        let ctx = test_context();
+        let decision = pipeline.evaluate(&ctx);
+        assert!(decision.is_allowed());
+        assert_eq!(decision.checks_executed(), 1);
+        assert_eq!(decision.allow_count(), 1);
+        assert_eq!(decision.skip_count(), 0);
+    }
+
+    #[test]
+    fn pipeline_single_deny_check() {
+        let pipeline = EnforcementPipeline::with_checks(vec![
+            Box::new(AlwaysDenyCheck { code: "SOLO".into() }),
+        ]);
+        let ctx = test_context();
+        let decision = pipeline.evaluate(&ctx);
+        assert!(!decision.is_allowed());
+        assert_eq!(decision.checks_executed(), 1);
+        if let PipelineOutcome::Deny { reason_code, .. } = &decision.outcome {
+            assert_eq!(reason_code, "SOLO");
+        }
+    }
+
+    #[test]
+    fn pipeline_single_skip_check() {
+        let pipeline = EnforcementPipeline::with_checks(vec![
+            Box::new(AlwaysSkipCheck),
+        ]);
+        let ctx = test_context();
+        let decision = pipeline.evaluate(&ctx);
+        assert!(decision.is_allowed());
+        assert_eq!(decision.skip_count(), 1);
+        assert_eq!(decision.allow_count(), 0);
+    }
+
+    #[test]
+    fn pipeline_deny_after_many_skips() {
+        let pipeline = EnforcementPipeline::with_checks(vec![
+            Box::new(AlwaysSkipCheck),
+            Box::new(AlwaysSkipCheck),
+            Box::new(AlwaysSkipCheck),
+            Box::new(AlwaysDenyCheck { code: "LATE".into() }),
+            Box::new(AlwaysAllowCheck),
+        ]);
+        let ctx = test_context();
+        let decision = pipeline.evaluate(&ctx);
+        assert!(!decision.is_allowed());
+        assert_eq!(decision.checks_executed(), 4);
+        assert_eq!(decision.skip_count(), 3);
+    }
+
+    #[test]
+    fn pipeline_check_names_empty() {
+        let pipeline = EnforcementPipeline::with_checks(vec![]);
+        assert!(pipeline.check_names().is_empty());
+    }
+
+    // ── PipelineOutcome clone ──
+
+    #[test]
+    fn pipeline_outcome_clone_allow() {
+        let o = PipelineOutcome::Allow;
+        let cloned = o.clone();
+        assert!(o.is_allow());
+        assert!(cloned.is_allow());
+    }
+
+    #[test]
+    fn pipeline_outcome_clone_deny() {
+        let o = PipelineOutcome::Deny {
+            check_name: "check".into(),
+            reason_code: "code".into(),
+            explanation: "detail".into(),
+        };
+        let cloned = o.clone();
+        assert!(o.is_deny());
+        assert!(cloned.is_deny());
+        if let PipelineOutcome::Deny { check_name, reason_code, explanation } = &cloned {
+            assert_eq!(check_name, "check");
+            assert_eq!(reason_code, "code");
+            assert_eq!(explanation, "detail");
+        }
+    }
+
+    #[test]
+    fn pipeline_outcome_deny_debug_contains_fields() {
+        let o = PipelineOutcome::Deny {
+            check_name: "mycheck".into(),
+            reason_code: "MYCODE".into(),
+            explanation: "mydetail".into(),
+        };
+        let debug = format!("{o:?}");
+        assert!(debug.contains("mycheck"));
+        assert!(debug.contains("MYCODE"));
+        assert!(debug.contains("mydetail"));
+    }
+
+    // ── CheckOutcome skip debug ──
+
+    #[test]
+    fn check_outcome_skip_debug_contains_reason() {
+        let o = CheckOutcome::Skip {
+            reason: "not applicable".into(),
+        };
+        let debug = format!("{o:?}");
+        assert!(debug.contains("not applicable"));
+    }
+
+    // ── CheckRecord clone ──
+
+    #[test]
+    fn check_record_clone() {
+        let record = CheckRecord {
+            name: "test".into(),
+            outcome: CheckOutcome::Allow,
+            elapsed_ms: 1.5,
+        };
+        let cloned = record.clone();
+        assert_eq!(record.name, cloned.name);
+        assert!(cloned.outcome.is_allow());
+        assert!((cloned.elapsed_ms - 1.5).abs() < f64::EPSILON);
+    }
+
+    // ── Decision with deny outcome ──
+
+    #[test]
+    fn enforcement_decision_clone_deny() {
+        let decision = EnforcementDecision {
+            outcome: PipelineOutcome::Deny {
+                check_name: "x".into(),
+                reason_code: "y".into(),
+                explanation: "z".into(),
+            },
+            checks_run: vec![
+                CheckRecord {
+                    name: "x".into(),
+                    outcome: CheckOutcome::Deny {
+                        reason_code: "y".into(),
+                        explanation: "z".into(),
+                    },
+                    elapsed_ms: 0.5,
+                },
+            ],
+            elapsed_ms: 0.5,
+        };
+        let cloned = decision.clone();
+        assert!(!decision.is_allowed());
+        assert!(!cloned.is_allowed());
+        assert_eq!(cloned.checks_executed(), 1);
+    }
+
+    #[test]
+    fn enforcement_decision_debug_deny() {
+        let decision = EnforcementDecision {
+            outcome: PipelineOutcome::Deny {
+                check_name: "check_abc".into(),
+                reason_code: "CODE_XYZ".into(),
+                explanation: "details here".into(),
+            },
+            checks_run: vec![],
+            elapsed_ms: 2.0,
+        };
+        let debug = format!("{decision:?}");
+        assert!(debug.contains("check_abc"));
+        assert!(debug.contains("CODE_XYZ"));
+    }
+
+    // ── Context field verification ──
+
+    #[test]
+    fn context_clone_preserves_all_fields() {
+        let ctx = test_context();
+        let cloned = ctx.clone();
+        assert_eq!(ctx.request_id, cloned.request_id);
+        assert_eq!(ctx.connector_id, cloned.connector_id);
+        assert_eq!(ctx.operation, cloned.operation);
+        assert_eq!(ctx.zone_id, cloned.zone_id);
+        assert_eq!(ctx.principal, cloned.principal);
+        assert_eq!(ctx.capability_claims, cloned.capability_claims);
+        assert_eq!(ctx.taint_flags, cloned.taint_flags);
+        assert_eq!(ctx.approval_scopes, cloned.approval_scopes);
+        assert_eq!(ctx.timestamp_ms, cloned.timestamp_ms);
+        assert_eq!(ctx.holder_verified, cloned.holder_verified);
+        assert_eq!(ctx.checkpoint_age_ms, cloned.checkpoint_age_ms);
+        assert_eq!(ctx.revocation_list_age_ms, cloned.revocation_list_age_ms);
+        assert_eq!(ctx.budget_used, cloned.budget_used);
+        assert_eq!(ctx.budget_limit, cloned.budget_limit);
+        assert_eq!(ctx.rate_count, cloned.rate_count);
+        assert_eq!(ctx.rate_limit, cloned.rate_limit);
+        assert_eq!(ctx.manifest_allowed_operations, cloned.manifest_allowed_operations);
+    }
+
+    // ── Pipeline with fully configured config passes all checks ──
+
+    #[test]
+    fn pipeline_fully_configured_all_allow() {
+        let mut config = EnforcementConfig::new()
+            .with_checkpoint_max_age_ms(100_000)
+            .with_revocation_max_age_ms(200_000);
+        config.add_zone_membership("agent-alpha", "zone-prod");
+        config.add_zone_connector("zone-prod", "slack:utility:1.0.0");
+        config.add_zone_operation("zone-prod", "send_message");
+
+        let pipeline = EnforcementPipeline::with_config(config);
+        let ctx = test_context();
+        let decision = pipeline.evaluate(&ctx);
+        assert!(decision.is_allowed());
+        assert_eq!(decision.checks_executed(), 9);
+        // With zone membership configured, it should be allow not skip
+        let zone_check = &decision.checks_run[1];
+        assert_eq!(zone_check.name, "zone_membership");
+        assert!(zone_check.outcome.is_allow());
+    }
+
+    #[test]
+    fn pipeline_deny_zone_membership_before_capability() {
+        let mut config = EnforcementConfig::default();
+        config.add_zone_membership("agent-alpha", "zone-staging");
+        let pipeline = EnforcementPipeline::with_config(config);
+        let mut ctx = test_context();
+        ctx.capability_claims = Vec::new(); // would also fail
+        let decision = pipeline.evaluate(&ctx);
+        // zone_membership is checked before capability_verify
+        if let PipelineOutcome::Deny { check_name, .. } = &decision.outcome {
+            assert_eq!(check_name, "zone_membership");
+        }
+    }
 }

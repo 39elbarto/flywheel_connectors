@@ -4468,6 +4468,202 @@ mod gossip_integration {
         );
     }
 
+    /// Test: Oversized reconciliation sketches fall back to empty IBLT payloads and log why.
+    #[test]
+    fn test_gossip_summary_creation_logs_iblt_fallback_reason() {
+        const TEST_NAME: &str = "gossip_summary_creation_logs_iblt_fallback_reason";
+        const CATEGORY: &str = "gossip";
+        emit_test_start(TEST_NAME, CATEGORY);
+
+        let capture = LogCapture::new();
+        let _guard = capture.install_json_with_filter("info");
+
+        let zone_id = ZoneId::work();
+        let epoch = EpochId::new("epoch-fallback");
+        let config = GossipConfig {
+            reconciliation_batch_size: 64,
+            ..GossipConfig::default()
+        };
+        let mut gossip = MeshGossip::new(TailscaleNodeId::new("node-fallback"), config);
+        let object_id = test_object_id("fallback-object");
+        let now = 1_000u64;
+
+        for esi in 0..512 {
+            gossip.announce_symbol(
+                &zone_id,
+                &object_id,
+                esi,
+                ObjectAdmissionClass::Admitted,
+                now,
+            );
+        }
+
+        let summary = gossip
+            .create_summary(&zone_id, epoch)
+            .expect("summary should exist");
+        let summary_bytes = u64::try_from(
+            serde_json::to_vec(&summary)
+                .expect("summary should serialize")
+                .len(),
+        )
+        .unwrap_or(u64::MAX);
+
+        assert_eq!(summary.iblt, b"[]".to_vec());
+
+        let created_log = find_tracing_event(&capture, "summary_created");
+        assert_eq!(
+            created_log
+                .get("component")
+                .and_then(serde_json::Value::as_str),
+            Some("mesh.gossip")
+        );
+        assert_eq!(
+            created_log
+                .get("zone_id")
+                .and_then(serde_json::Value::as_str),
+            Some(zone_id.as_str())
+        );
+        assert_eq!(
+            created_log
+                .get("fallback_reason")
+                .and_then(serde_json::Value::as_str),
+            Some("iblt_bytes_exceeded")
+        );
+        assert_eq!(
+            created_log
+                .get("summary_bytes")
+                .and_then(serde_json::Value::as_u64),
+            Some(summary_bytes)
+        );
+        assert_eq!(
+            created_log
+                .get("iblt_bytes")
+                .and_then(serde_json::Value::as_u64),
+            Some(u64::try_from(summary.iblt.len()).unwrap_or(u64::MAX))
+        );
+        assert!(
+            created_log
+                .get("iblt_cells")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0)
+                > 0,
+            "summary_created log should keep the pre-fallback cell count"
+        );
+
+        emit_test_pass(
+            TEST_NAME,
+            CATEGORY,
+            serde_json::json!({
+                "zone": zone_id.as_str(),
+                "summary_bytes": created_log["summary_bytes"].clone(),
+                "iblt_bytes": created_log["iblt_bytes"].clone(),
+                "iblt_cells": created_log["iblt_cells"].clone(),
+                "fallback_reason": created_log["fallback_reason"].clone(),
+                "result": "pass",
+            }),
+        );
+    }
+
+    /// Test: Decode-budget rejections surface a stable change-limit reason code.
+    #[test]
+    fn test_gossip_summary_rejected_when_iblt_change_limit_exceeded() {
+        const TEST_NAME: &str = "gossip_summary_rejected_when_iblt_change_limit_exceeded";
+        const CATEGORY: &str = "gossip";
+        emit_test_start(TEST_NAME, CATEGORY);
+
+        let zone_id = ZoneId::work();
+        let epoch = EpochId::new("epoch-change-limit");
+        let now = 1_000u64;
+
+        let sender_config = GossipConfig {
+            reconciliation_batch_size: 8,
+            ..GossipConfig::default()
+        };
+        let mut sender = MeshGossip::new(TailscaleNodeId::new("node-change-sender"), sender_config);
+        let object_id = test_object_id("change-limit-object");
+        sender.announce_object(&zone_id, &object_id, ObjectAdmissionClass::Admitted, now);
+        for esi in 0..3 {
+            sender.announce_symbol(
+                &zone_id,
+                &object_id,
+                esi,
+                ObjectAdmissionClass::Admitted,
+                now,
+            );
+        }
+
+        let summary = sender
+            .create_summary(&zone_id, epoch)
+            .expect("summary should exist");
+        let summary_iblt_bytes = u64::try_from(summary.iblt.len()).unwrap_or(u64::MAX);
+
+        let receiver_config = GossipConfig {
+            reconciliation_batch_size: 2,
+            ..GossipConfig::default()
+        };
+        let capture = LogCapture::new();
+        let _guard = capture.install_json_with_filter("warn");
+        let mut receiver = MeshGossip::new(
+            TailscaleNodeId::new("node-change-receiver"),
+            receiver_config.clone(),
+        );
+        receiver.handle_summary(summary, now + 1);
+
+        assert_eq!(receiver.peer_count(), 0);
+
+        let rejected_log = find_tracing_event(&capture, "summary_rejected");
+        assert_eq!(
+            rejected_log
+                .get("reason")
+                .and_then(serde_json::Value::as_str),
+            Some("iblt_change_limit_exceeded")
+        );
+        assert_eq!(
+            rejected_log
+                .get("peer_node_id")
+                .and_then(serde_json::Value::as_str),
+            Some("node-change-sender")
+        );
+        assert_eq!(
+            rejected_log
+                .get("zone_id")
+                .and_then(serde_json::Value::as_str),
+            Some(zone_id.as_str())
+        );
+        assert_eq!(
+            rejected_log
+                .get("iblt_bytes")
+                .and_then(serde_json::Value::as_u64),
+            Some(summary_iblt_bytes)
+        );
+        assert_eq!(
+            rejected_log
+                .get("max_iblt_bytes")
+                .and_then(serde_json::Value::as_u64),
+            Some(u64::try_from(receiver_config.max_iblt_bytes()).unwrap_or(u64::MAX))
+        );
+        assert!(
+            rejected_log
+                .get("decode_ms")
+                .and_then(serde_json::Value::as_u64)
+                .is_some(),
+            "summary_rejected log should include decode_ms"
+        );
+
+        emit_test_pass(
+            TEST_NAME,
+            CATEGORY,
+            serde_json::json!({
+                "zone": zone_id.as_str(),
+                "peer_node_id": "node-change-sender",
+                "iblt_bytes": rejected_log["iblt_bytes"].clone(),
+                "decode_ms": rejected_log["decode_ms"].clone(),
+                "fallback_reason": rejected_log["reason"].clone(),
+                "result": "pass",
+            }),
+        );
+    }
+
     /// Test: Partition/leave behavior via stale-peer pruning and rejoin.
     #[test]
     fn test_gossip_partition_prune_and_rejoin() {

@@ -8449,7 +8449,10 @@ fn config_dispatch(args: &ConfigArgs, explicit_host: Option<&str>) -> Result<Dis
             };
             let next_actions = if replayable {
                 vec![
-                    format!("fwc config doctor {} --host {}", connector.slug, host.endpoint),
+                    format!(
+                        "fwc config doctor {} --host {}",
+                        connector.slug, host.endpoint
+                    ),
                     format!(
                         "fwc config import {} --host {} --file <path>",
                         connector.slug, host.endpoint
@@ -8797,9 +8800,7 @@ fn collect_config_redacted_placeholder_paths(
     paths: &mut Vec<String>,
 ) {
     match value {
-        Value::String(raw)
-            if raw == "[REDACTED]" && expected_redactions.contains(pointer_path) =>
-        {
+        Value::String(raw) if raw == "[REDACTED]" && expected_redactions.contains(pointer_path) => {
             paths.push(display_path.to_owned());
         }
         Value::Array(items) => {
@@ -10600,7 +10601,7 @@ fn validate_dispatch_host(args: &ValidateArgs, host: &str) -> Result<DispatchOut
         );
         return Ok(DispatchOutcome {
             payload,
-            exit_code: CliExitCode::UnknownCommand,
+            exit_code: CliExitCode::Validation,
         });
     };
 
@@ -10673,7 +10674,7 @@ fn validate_dispatch_host(args: &ValidateArgs, host: &str) -> Result<DispatchOut
         );
         Ok(DispatchOutcome {
             payload,
-            exit_code: CliExitCode::UnknownCommand,
+            exit_code: CliExitCode::Validation,
         })
     }
 }
@@ -10759,7 +10760,7 @@ fn validate_dispatch(args: &ValidateArgs, host: Option<&str>) -> Result<Dispatch
         );
         return Ok(DispatchOutcome {
             payload,
-            exit_code: CliExitCode::UnknownCommand,
+            exit_code: CliExitCode::Validation,
         });
     };
 
@@ -10834,7 +10835,7 @@ fn validate_dispatch(args: &ValidateArgs, host: Option<&str>) -> Result<Dispatch
         );
         Ok(DispatchOutcome {
             payload,
-            exit_code: CliExitCode::UnknownCommand,
+            exit_code: CliExitCode::Validation,
         })
     }
 }
@@ -19719,10 +19720,12 @@ deny_ptrace = true
         );
         assert!(result.payload["result"]["rotation_guidance"].is_object());
         assert!(result.payload["result"]["diagnosis"].is_object());
-        assert!(result.payload["credential"]["fields"]["token"]
-            .as_str()
-            .unwrap()
-            .contains("***"));
+        assert!(
+            result.payload["credential"]["fields"]["token"]
+                .as_str()
+                .unwrap()
+                .contains("***")
+        );
     }
 
     #[test]
@@ -21224,8 +21227,9 @@ deny_ptrace = true
             2,
         );
 
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "--host", &host, "config", "export", "github"]);
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "--host", &host, "config", "export", "github",
+        ]);
 
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Success.into());
@@ -21399,7 +21403,10 @@ deny_ptrace = true
         assert_eq!(payload["command"], "config");
         assert_eq!(payload["subcommand"], "import");
         assert_eq!(payload["error"]["type"], "redacted-placeholder-import");
-        assert_eq!(payload["details"]["placeholder_paths"][0], "$.client_secret");
+        assert_eq!(
+            payload["details"]["placeholder_paths"][0],
+            "$.client_secret"
+        );
     }
 
     #[test]
@@ -22185,11 +22192,31 @@ deny_ptrace = true
             "--offline",
         ]);
 
-        assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
+        assert_eq!(exit_code, CliExitCode::Validation.into());
         assert_eq!(payload["command"], "validate");
         assert_eq!(payload["source"], "workspace-manifests");
         assert_eq!(payload["error"]["type"], "missing-input");
         assert_template_provenance(&payload, "workspace_manifest", false, "offline-artifact");
+    }
+
+    #[test]
+    fn execute_validate_offline_invalid_input_returns_validation_exit() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "validate",
+            "github",
+            "issues.create",
+            "--offline",
+            "--input",
+            "{\"owner\":\"octocat\",\"repo\":\"hello-world\"}",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["command"], "validate");
+        assert_eq!(payload["source"], "workspace-manifests");
+        assert_eq!(payload["valid"], false);
+        assert!(payload["error_count"].as_u64().unwrap_or(0) >= 1);
     }
 
     #[test]
@@ -22239,7 +22266,7 @@ deny_ptrace = true
         ]);
 
         server.join().expect("mock host thread should complete");
-        assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
+        assert_eq!(exit_code, CliExitCode::Validation.into());
         assert_eq!(payload["command"], "validate");
         assert_eq!(payload["source"], "host-admin-api");
         assert_eq!(payload["error"]["type"], "missing-input");
@@ -22290,6 +22317,48 @@ deny_ptrace = true
             "live-introspection",
         );
         assert_eq!(payload["valid"], true);
+    }
+
+    #[test]
+    fn execute_validate_with_host_invalid_input_returns_validation_exit() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
+                    mock_introspection_response_json(),
+                ),
+            ]),
+            2,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "validate",
+            "github",
+            "issues.create",
+            "--input",
+            "{\"owner\":\"octocat\",\"repo\":\"hello-world\"}",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["command"], "validate");
+        assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["valid"], false);
+        assert!(payload["error_count"].as_u64().unwrap_or(0) >= 1);
+        assert_template_provenance(
+            &payload,
+            "live_host_introspection",
+            true,
+            "live-introspection",
+        );
     }
 
     // ── Intent recovery: config subcommand aliases ──────────────────────

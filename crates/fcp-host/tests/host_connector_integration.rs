@@ -33,7 +33,7 @@ use fcp_host::{
     DesiredRuntimeState, DiscoveryEndpoint, DiscoveryResponse, GateOutcome, HostAdminStateStore,
     HostHealthResponse, HostHealthStatus, HostPreflightRequest, IntrospectionResponse,
     ObservedRuntimeState, OperationResultStatus, PolicyEngine, PreflightRequest, PreflightResponse,
-    RecoveryAction, RolloutDecision, RolloutOutcome,
+    ReceiptQueryRequest, ReceiptQueryResponse, RecoveryAction, RolloutDecision, RolloutOutcome,
 };
 use fcp_testkit::LogCapture;
 use reqwest::header::{CACHE_CONTROL, ETAG, HeaderMap, HeaderValue, IF_NONE_MATCH, LAST_MODIFIED};
@@ -1171,8 +1171,9 @@ async fn assert_discovery_routes(
     assert!(preflight.allowed);
     assert!(preflight.reason.is_none());
 
-    let (invoke_request, correlation_id) =
+    let (mut invoke_request, correlation_id) =
         build_invoke_request(connector_a_id.clone(), capability_signing_key);
+    invoke_request.idempotency_key = Some("it-receipt-query".to_string());
     let invoke_response: InvokeResponse =
         http_post_json(client.clone(), url("/rpc/invoke"), invoke_request).await?;
     assert_eq!(invoke_response.status, InvokeStatus::Ok);
@@ -1189,6 +1190,33 @@ async fn assert_discovery_routes(
     assert!(
         correlation_id.to_string().len() > 10,
         "correlation id should be propagated from the request helper"
+    );
+    let receipts: ReceiptQueryResponse = http_post_json(
+        client.clone(),
+        url("/rpc/admin/receipts"),
+        ReceiptQueryRequest {
+            connector_id: connector_a_id.to_string(),
+            operation: Some(TEST_OPERATION.to_string()),
+            after: None,
+            limit: 10,
+        },
+    )
+    .await?;
+    assert_eq!(receipts.receipts.len(), 1);
+    assert_eq!(receipts.total_receipts, 1);
+    assert_eq!(
+        receipts.receipts[0].receipt_id,
+        invoke_response
+            .receipt_id
+            .as_ref()
+            .expect("invoke response should include a receipt id")
+            .to_string()
+    );
+    assert_eq!(receipts.receipts[0].operation, TEST_OPERATION);
+    assert!(receipts.receipts[0].success);
+    assert_eq!(
+        receipts.receipts[0].idempotency_key.as_deref(),
+        Some("it-receipt-query")
     );
 
     let doctor: serde_json::Value = http_post_json(

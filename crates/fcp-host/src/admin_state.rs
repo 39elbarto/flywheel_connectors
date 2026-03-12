@@ -2245,6 +2245,8 @@ pub struct HostAdminStateSnapshot {
     #[serde(default)]
     next_token_sequence: u64,
     #[serde(default)]
+    receipts: Vec<ReceiptSummary>,
+    #[serde(default)]
     simulate_receipts: Vec<SimulateReceipt>,
 }
 
@@ -2262,6 +2264,7 @@ impl Default for HostAdminStateSnapshot {
             next_log_sequence: 1,
             issued_tokens: Vec::new(),
             next_token_sequence: 1,
+            receipts: Vec::new(),
             simulate_receipts: Vec::new(),
         }
     }
@@ -2269,9 +2272,7 @@ impl Default for HostAdminStateSnapshot {
 
 impl HostAdminStateSnapshot {
     fn connector_state_mut(&mut self, connector_id: &ConnectorId) -> &mut ConnectorAdminState {
-        self.connectors
-            .entry(connector_id.clone())
-            .or_default()
+        self.connectors.entry(connector_id.clone()).or_default()
     }
 
     const fn next_config_revision_id(&mut self) -> u64 {
@@ -2757,11 +2758,12 @@ impl HostAdminStateStore {
         request: &ConnectorConfigValidateRequest,
     ) -> Result<ConnectorConfigValidateResponse, LifecycleError> {
         let guard = self.state.read().await;
-        let state = guard.connectors.get(connector_id).ok_or_else(|| {
-            LifecycleError::NotFound {
+        let state = guard
+            .connectors
+            .get(connector_id)
+            .ok_or_else(|| LifecycleError::NotFound {
                 connector_id: connector_id.clone(),
-            }
-        })?;
+            })?;
 
         let current_sanitized = current_sanitized_config(state);
 
@@ -3828,6 +3830,72 @@ impl HostAdminStateStore {
             tokens,
             total_tokens,
             active_count,
+        }
+    }
+
+    // ── Receipt tracking ───────────────────────────────────────────────────
+
+    /// Record an operation receipt summary in the admin state.
+    ///
+    /// Called by the host after a live invoke returns an auditable receipt.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if persistence fails.
+    pub async fn record_receipt(&self, receipt: ReceiptSummary) -> Result<u64, LifecycleError> {
+        let connector_id: ConnectorId =
+            receipt
+                .connector_id
+                .parse()
+                .map_err(|err| LifecycleError::Persistence {
+                    reason: format!(
+                        "could not parse receipt connector id '{}': {err}",
+                        receipt.connector_id
+                    ),
+                })?;
+
+        self.apply_mutation(|snapshot| {
+            let seq = snapshot.append_journal(
+                &connector_id,
+                AdminStateMutation::DesiredStateSet {
+                    desired_state: DesiredRuntimeState::Enabled,
+                },
+                Some(format!("invoke_receipt:{}", receipt.receipt_id)),
+            );
+            snapshot.receipts.push(receipt);
+            Ok(seq)
+        })
+        .await
+    }
+
+    /// Query operation receipts.
+    pub async fn query_receipts(&self, request: &ReceiptQueryRequest) -> ReceiptQueryResponse {
+        let snapshot = self.state.read().await;
+
+        let receipts: Vec<ReceiptSummary> = snapshot
+            .receipts
+            .iter()
+            .filter(|r| r.connector_id == request.connector_id)
+            .filter(|r| {
+                request
+                    .operation
+                    .as_ref()
+                    .is_none_or(|op| r.operation == *op)
+            })
+            .filter(|r| request.after.is_none_or(|after| r.executed_at > after))
+            .take(request.limit)
+            .cloned()
+            .collect();
+
+        let total_receipts = snapshot
+            .receipts
+            .iter()
+            .filter(|r| r.connector_id == request.connector_id)
+            .count();
+
+        ReceiptQueryResponse {
+            receipts,
+            total_receipts,
         }
     }
 
@@ -5698,6 +5766,18 @@ mod tests {
         assert_eq!(parsed.duration_ms, 42);
     }
 
+    fn test_receipt_summary(connector_id: &str, operation: &str, success: bool) -> ReceiptSummary {
+        ReceiptSummary {
+            receipt_id: format!("rcpt-{connector_id}-{operation}"),
+            connector_id: connector_id.to_string(),
+            operation: operation.to_string(),
+            success,
+            duration_ms: 42,
+            idempotency_key: Some(format!("idem-{operation}")),
+            executed_at: Utc::now(),
+        }
+    }
+
     // ── Log store integration ──
 
     #[fcp_async_core::runtime::test]
@@ -5926,6 +6006,101 @@ mod tests {
             .await;
         assert_eq!(response.acknowledged_count, 0);
         assert_eq!(response.not_found, vec!["evt-999"]);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn record_and_query_receipts() {
+        let store = HostAdminStateStore::new();
+
+        store
+            .record_receipt(test_receipt_summary(
+                "github:saas:1.0.0",
+                "list_repos",
+                true,
+            ))
+            .await
+            .unwrap();
+
+        let result = store
+            .query_receipts(&ReceiptQueryRequest {
+                connector_id: "github:saas:1.0.0".to_string(),
+                operation: None,
+                after: None,
+                limit: 100,
+            })
+            .await;
+        assert_eq!(result.receipts.len(), 1);
+        assert_eq!(result.total_receipts, 1);
+        assert!(result.receipts[0].success);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn query_receipts_filter_by_operation() {
+        let store = HostAdminStateStore::new();
+
+        store
+            .record_receipt(test_receipt_summary(
+                "github:saas:1.0.0",
+                "list_repos",
+                true,
+            ))
+            .await
+            .unwrap();
+        store
+            .record_receipt(test_receipt_summary(
+                "github:saas:1.0.0",
+                "create_issue",
+                false,
+            ))
+            .await
+            .unwrap();
+
+        let result = store
+            .query_receipts(&ReceiptQueryRequest {
+                connector_id: "github:saas:1.0.0".to_string(),
+                operation: Some("create_issue".to_string()),
+                after: None,
+                limit: 100,
+            })
+            .await;
+        assert_eq!(result.receipts.len(), 1);
+        assert_eq!(result.receipts[0].operation, "create_issue");
+        assert_eq!(result.total_receipts, 2);
+        assert!(!result.receipts[0].success);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn query_receipts_filter_by_connector() {
+        let store = HostAdminStateStore::new();
+
+        store
+            .record_receipt(test_receipt_summary(
+                "github:saas:1.0.0",
+                "list_repos",
+                true,
+            ))
+            .await
+            .unwrap();
+        store
+            .record_receipt(test_receipt_summary(
+                "slack:saas:1.0.0",
+                "send_message",
+                true,
+            ))
+            .await
+            .unwrap();
+
+        let result = store
+            .query_receipts(&ReceiptQueryRequest {
+                connector_id: "github:saas:1.0.0".to_string(),
+                operation: None,
+                after: None,
+                limit: 100,
+            })
+            .await;
+        assert_eq!(result.receipts.len(), 1);
+        assert_eq!(result.total_receipts, 1);
+        assert_eq!(result.receipts[0].connector_id, "github:saas:1.0.0");
     }
 
     // ── Capability issuance tests ──────────────────────────────────────────
@@ -7671,7 +7846,10 @@ mod tests {
         let record = LifecycleRecord::new(cid.clone(), Version::new(1, 0, 0));
         store.save(&record).await.expect("save");
         let snapshot = store.get_config_snapshot(&cid).await.expect("snapshot");
-        assert_eq!(snapshot.source, ConnectorConfigSnapshotSource::ManagedInventory);
+        assert_eq!(
+            snapshot.source,
+            ConnectorConfigSnapshotSource::ManagedInventory
+        );
         assert!(snapshot.active_revision_id.is_none());
         assert!(snapshot.active_revision.is_none());
         assert_eq!(snapshot.revision_count, 0);
@@ -7687,7 +7865,10 @@ mod tests {
             .await
             .expect("append");
         let snapshot = store.get_config_snapshot(&cid).await.expect("snapshot");
-        assert_eq!(snapshot.source, ConnectorConfigSnapshotSource::ActiveRevision);
+        assert_eq!(
+            snapshot.source,
+            ConnectorConfigSnapshotSource::ActiveRevision
+        );
         assert!(snapshot.active_revision_id.is_some());
         assert!(snapshot.active_revision.is_some());
         assert_eq!(snapshot.revision_count, 1);
@@ -7731,7 +7912,10 @@ mod tests {
             payload: config_payload("v2"),
             expected_active_revision_id: None,
         };
-        let response = store.validate_config(&cid, &request).await.expect("validate");
+        let response = store
+            .validate_config(&cid, &request)
+            .await
+            .expect("validate");
         assert!(response.valid);
         assert!(response.error.is_none());
         assert!(!response.diff.is_empty());
@@ -7749,7 +7933,10 @@ mod tests {
             payload: config_payload("v2"),
             expected_active_revision_id: Some(999), // wrong revision
         };
-        let response = store.validate_config(&cid, &request).await.expect("validate");
+        let response = store
+            .validate_config(&cid, &request)
+            .await
+            .expect("validate");
         assert!(!response.valid);
         assert!(response.error.is_some());
         assert!(response.error.unwrap().contains("stale"));
@@ -7829,7 +8016,10 @@ mod tests {
             created_by: Some("rollback-test".to_owned()),
             change_reason: Some("reverting".to_owned()),
         };
-        let response = store.rollback_config(&cid, &request).await.expect("rollback");
+        let response = store
+            .rollback_config(&cid, &request)
+            .await
+            .expect("rollback");
         assert!(response.changed);
         assert_eq!(response.current.payload["profile"], "v1");
         // Rollback creates a new revision (3rd total).
@@ -7889,7 +8079,10 @@ mod tests {
             payload,
             expected_active_revision_id: None,
         };
-        let response = store.validate_config(&cid, &request).await.expect("validate");
+        let response = store
+            .validate_config(&cid, &request)
+            .await
+            .expect("validate");
         assert!(response.valid);
         assert!(response.diff.is_empty());
     }

@@ -131,6 +131,8 @@ impl OperationIntent {
         bytes.extend_from_slice(self.capability_token_jti.as_bytes());
         if let Some(ref key) = self.idempotency_key {
             bytes.extend_from_slice(&[1]); // present marker
+            let key_len = u32::try_from(key.len()).unwrap_or(u32::MAX);
+            bytes.extend_from_slice(&key_len.to_le_bytes());
             bytes.extend_from_slice(key.as_bytes());
         } else {
             bytes.extend_from_slice(&[0]); // absent marker
@@ -145,6 +147,8 @@ impl OperationIntent {
         }
         if let Some(ref upstream) = self.upstream_idempotency {
             bytes.extend_from_slice(&[1]);
+            let up_len = u32::try_from(upstream.len()).unwrap_or(u32::MAX);
+            bytes.extend_from_slice(&up_len.to_le_bytes());
             bytes.extend_from_slice(upstream.as_bytes());
         } else {
             bytes.extend_from_slice(&[0]);
@@ -239,6 +243,8 @@ impl OperationReceipt {
         bytes.extend_from_slice(self.request_object_id.as_bytes());
         if let Some(ref key) = self.idempotency_key {
             bytes.extend_from_slice(&[1]);
+            let key_len = u32::try_from(key.len()).unwrap_or(u32::MAX);
+            bytes.extend_from_slice(&key_len.to_le_bytes());
             bytes.extend_from_slice(key.as_bytes());
         } else {
             bytes.extend_from_slice(&[0]);
@@ -1373,8 +1379,7 @@ mod tests {
         let mut reconciled = entry;
         reconciled.status = IntentStatus::Orphaned;
 
-        // Still not terminal (Orphaned is not success/failure)
-        // Note: Orphaned may need different handling in actual implementation
+        // Still not terminal (Orphaned may need different handling in actual implementation)
         assert!(!reconciled.is_terminal());
     }
 
@@ -1392,7 +1397,7 @@ mod tests {
             zone_id: test_zone(),
             intent_id: test_object_id("intent"),
             receipt_id: None,
-            status: IntentStatus::InProgress,
+            status: IntentStatus::Pending,
             created_at: 1000,
             expires_at: 5000,
         };

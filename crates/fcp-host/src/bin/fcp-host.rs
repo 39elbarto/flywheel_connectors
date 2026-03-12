@@ -60,9 +60,10 @@ use fcp_host::{
     HostHealthStatus, HostPreflightRequest, IntrospectionResponse, JournalQueryRequest,
     JournalQueryResponse, LifecycleTransitionRequest, LifecycleTransitionResponse, LogQueryRequest,
     LogQueryResponse, ManagedConnectorConfig, OperationResult, OperationResultStatus,
-    PreflightRequest, PreflightResponse, RequestPriority, ResilienceError, ResilienceLayer,
-    RolloutController, RolloutDecision, RolloutObservation, RolloutOutcome, SafetyTierExt,
-    SanitizedConnectorConfig, StartupReconciliationReport, SupplyChainGate, SupplyChainGateConfig,
+    PreflightRequest, PreflightResponse, ReceiptQueryRequest, ReceiptQueryResponse, ReceiptSummary,
+    RequestPriority, ResilienceError, ResilienceLayer, RolloutController, RolloutDecision,
+    RolloutObservation, RolloutOutcome, SafetyTierExt, SanitizedConnectorConfig,
+    StartupReconciliationReport, SupplyChainGate, SupplyChainGateConfig,
     diff_sanitized_config_values, merge_connector_health,
 };
 use fcp_host::{HostError, HostResult};
@@ -1810,6 +1811,7 @@ async fn async_main() -> HostResult<()> {
         )
         // ── Logs, events, and receipt RPCs ──
         .route("/rpc/admin/logs", post(log_query_handler))
+        .route("/rpc/admin/receipts", post(receipt_query_handler))
         .route("/rpc/admin/events", post(event_query_handler))
         .route(
             "/rpc/admin/events/acknowledge",
@@ -3650,6 +3652,7 @@ async fn async_main() -> HostResult<()> {
         )
         // ── Logs, events, and receipt RPCs ──
         .route("/rpc/admin/logs", post(log_query_handler))
+        .route("/rpc/admin/receipts", post(receipt_query_handler))
         .route("/rpc/admin/events", post(event_query_handler))
         .route(
             "/rpc/admin/events/acknowledge",
@@ -4109,11 +4112,13 @@ async fn invoke_handler(
 
     let connector_id = request.connector_id.clone();
     let operation = request.operation.clone();
+    let operation_name = operation.to_string();
     let correlation_id = request
         .correlation_id
         .as_ref()
         .map(std::string::ToString::to_string);
     let operation_id = request.id.to_string();
+    let idempotency_key = request.idempotency_key.clone();
     let started_at = Instant::now();
 
     tracing::debug!(
@@ -4149,6 +4154,16 @@ async fn invoke_handler(
 
     match invoke_result {
         Ok(response) => {
+            let duration_ms = elapsed_millis(started_at);
+            record_invoke_receipt_summary(
+                state.lifecycle.as_ref(),
+                connector_id.as_str(),
+                &operation_name,
+                idempotency_key,
+                &response,
+                duration_ms,
+            )
+            .await;
             tracing::info!(
                 event = "invoke_response",
                 connector_id = %connector_id,
@@ -4156,7 +4171,7 @@ async fn invoke_handler(
                 operation_id = %operation_id,
                 correlation_id,
                 status = ?response.status,
-                duration_ms = started_at.elapsed().as_millis() as u64,
+                duration_ms,
                 "invoke request complete"
             );
             Ok(Json(response))
@@ -4174,6 +4189,40 @@ async fn invoke_handler(
             );
             Err(map_host_error(err))
         }
+    }
+}
+
+async fn record_invoke_receipt_summary(
+    lifecycle: &HostAdminStateStore,
+    connector_id: &str,
+    operation: &str,
+    idempotency_key: Option<String>,
+    response: &InvokeResponse,
+    duration_ms: u64,
+) {
+    let Some(receipt_id) = response.receipt_id.as_ref() else {
+        return;
+    };
+
+    let summary = ReceiptSummary {
+        receipt_id: receipt_id.to_string(),
+        connector_id: connector_id.to_owned(),
+        operation: operation.to_owned(),
+        success: matches!(response.status, fcp_core::InvokeStatus::Ok),
+        duration_ms,
+        idempotency_key,
+        executed_at: Utc::now(),
+    };
+
+    if let Err(err) = lifecycle.record_receipt(summary).await {
+        tracing::warn!(
+            event = "invoke_receipt_persist_error",
+            connector_id,
+            operation,
+            receipt_id = %receipt_id,
+            error = %err,
+            "failed to persist invoke receipt summary"
+        );
     }
 }
 
@@ -4293,6 +4342,9 @@ async fn execute_batch_operation(
 ) -> OperationResult {
     let started_at = Instant::now();
     let request = operation.request;
+    let connector_id = request.connector_id.clone();
+    let operation_name = request.operation.to_string();
+    let idempotency_key = request.idempotency_key.clone();
 
     if let Err(err) = request.validate_idempotency_key() {
         return OperationResult {
@@ -4324,16 +4376,28 @@ async fn execute_batch_operation(
     }
 
     match state.registry.invoke(request).await {
-        Ok(response) => OperationResult {
-            id: operation.id,
-            status: OperationResultStatus::Success,
-            output: Some(
-                serde_json::to_value(&response)
-                    .unwrap_or_else(|_| json!({ "status": "serialization_error" })),
-            ),
-            error: None,
-            duration_ms: elapsed_millis(started_at),
-        },
+        Ok(response) => {
+            let duration_ms = elapsed_millis(started_at);
+            record_invoke_receipt_summary(
+                state.lifecycle.as_ref(),
+                connector_id.as_str(),
+                &operation_name,
+                idempotency_key,
+                &response,
+                duration_ms,
+            )
+            .await;
+            OperationResult {
+                id: operation.id,
+                status: OperationResultStatus::Success,
+                output: Some(
+                    serde_json::to_value(&response)
+                        .unwrap_or_else(|_| json!({ "status": "serialization_error" })),
+                ),
+                error: None,
+                duration_ms,
+            }
+        }
         Err(err) => OperationResult {
             id: operation.id,
             status: OperationResultStatus::Error,
@@ -4990,6 +5054,19 @@ async fn log_query_handler(
         "processing log query"
     );
     Json(state.lifecycle.query_logs(&request).await)
+}
+
+async fn receipt_query_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<ReceiptQueryRequest>,
+) -> Json<ReceiptQueryResponse> {
+    tracing::debug!(
+        event = "receipt_query_request",
+        connector_id = %request.connector_id,
+        operation = ?request.operation,
+        "processing receipt query"
+    );
+    Json(state.lifecycle.query_receipts(&request).await)
 }
 
 async fn event_query_handler(

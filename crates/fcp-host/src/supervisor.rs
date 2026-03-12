@@ -2237,4 +2237,776 @@ mod tests {
         let debug = format!("{guard:?}");
         assert!(debug.contains("ConnectionGuard"));
     }
+
+    // ── Additional ProcessExit tests ──
+
+    #[test]
+    fn exit_clean_has_code_zero_no_signal() {
+        let exit = ProcessExit::clean();
+        assert_eq!(exit.code, Some(0));
+        assert!(exit.signal.is_none());
+    }
+
+    #[test]
+    fn exit_with_code_stores_code() {
+        let exit = ProcessExit::with_code(127);
+        assert_eq!(exit.code, Some(127));
+        assert!(exit.signal.is_none());
+    }
+
+    #[test]
+    fn exit_with_signal_stores_signal() {
+        let exit = ProcessExit::with_signal(11);
+        assert!(exit.code.is_none());
+        assert_eq!(exit.signal, Some(11));
+    }
+
+    #[test]
+    fn exit_with_code_zero_is_clean() {
+        let exit = ProcessExit::with_code(0);
+        // code == 0 but signal == None, so is_clean() is true.
+        assert!(exit.is_clean());
+    }
+
+    #[test]
+    fn exit_with_code_and_signal_not_clean_but_signal_terminated() {
+        let exit = ProcessExit {
+            code: Some(1),
+            signal: Some(15),
+        };
+        assert!(!exit.is_clean()); // signal present → not clean
+        assert!(exit.is_signal_terminated());
+    }
+
+    #[test]
+    fn exit_none_none_not_clean_not_signal() {
+        let exit = ProcessExit {
+            code: None,
+            signal: None,
+        };
+        assert!(!exit.is_clean());
+        assert!(!exit.is_signal_terminated());
+    }
+
+    #[test]
+    fn exit_equality_clean_same() {
+        assert_eq!(ProcessExit::clean(), ProcessExit::clean());
+    }
+
+    #[test]
+    fn exit_equality_code_differs() {
+        assert_ne!(ProcessExit::with_code(0), ProcessExit::with_code(1));
+    }
+
+    #[test]
+    fn exit_clone_preserves_fields() {
+        let exit = ProcessExit {
+            code: Some(2),
+            signal: Some(9),
+        };
+        let cloned = exit.clone();
+        assert_eq!(exit, cloned);
+    }
+
+    // ── Additional RestartPolicy tests ──
+
+    #[test]
+    fn restart_policy_always_restarts_signal() {
+        assert!(RestartPolicy::Always.should_restart(&ProcessExit::with_signal(9)));
+    }
+
+    #[test]
+    fn restart_policy_on_failure_restarts_signal() {
+        // Signal exit is not clean, so OnFailure should restart.
+        assert!(RestartPolicy::OnFailure.should_restart(&ProcessExit::with_signal(15)));
+    }
+
+    #[test]
+    fn restart_policy_on_failure_does_not_restart_clean() {
+        assert!(!RestartPolicy::OnFailure.should_restart(&ProcessExit::clean()));
+    }
+
+    #[test]
+    fn restart_policy_on_crash_restarts_sigkill() {
+        assert!(RestartPolicy::OnCrash.should_restart(&ProcessExit::with_signal(9)));
+    }
+
+    #[test]
+    fn restart_policy_on_crash_does_not_restart_code_2() {
+        // non-zero exit code without signal is NOT a crash.
+        assert!(!RestartPolicy::OnCrash.should_restart(&ProcessExit::with_code(2)));
+    }
+
+    #[test]
+    fn restart_policy_never_does_not_restart_signal() {
+        assert!(!RestartPolicy::Never.should_restart(&ProcessExit::with_signal(11)));
+    }
+
+    #[test]
+    fn restart_policy_default_is_on_failure_serde() {
+        let policy = RestartPolicy::default();
+        let json = serde_json::to_string(&policy).unwrap();
+        assert!(json.contains("on_failure"));
+    }
+
+    #[test]
+    fn restart_policy_clone() {
+        let policy = RestartPolicy::OnCrash;
+        let cloned = policy.clone();
+        assert_eq!(cloned, RestartPolicy::OnCrash);
+    }
+
+    // ── Additional ProcessState tests ──
+
+    #[test]
+    fn process_state_starting_label() {
+        let state = ProcessState::Starting {
+            since: Instant::now(),
+        };
+        assert_eq!(state.label(), "starting");
+        assert!(!state.is_running());
+        assert!(!state.is_terminal());
+    }
+
+    #[test]
+    fn process_state_running_label() {
+        let state = ProcessState::Running {
+            pid: 9999,
+            started_at: Instant::now(),
+        };
+        assert_eq!(state.label(), "running");
+        assert!(state.is_running());
+        assert!(!state.is_terminal());
+    }
+
+    #[test]
+    fn process_state_stopping_all_stop_reasons() {
+        for reason in [
+            StopReason::Requested,
+            StopReason::HostShutdown,
+            StopReason::HealthCheckFailed,
+            StopReason::ResourceLimitExceeded,
+            StopReason::Upgrade,
+        ] {
+            let state = ProcessState::Stopping {
+                reason,
+                since: Instant::now(),
+            };
+            assert_eq!(state.label(), "stopping");
+            assert!(!state.is_running());
+            assert!(!state.is_terminal());
+        }
+    }
+
+    #[test]
+    fn process_state_stopped_with_signal_exit() {
+        let state = ProcessState::Stopped {
+            exit: ProcessExit::with_signal(9),
+            stopped_at: Instant::now(),
+        };
+        assert_eq!(state.label(), "stopped");
+        assert!(!state.is_running());
+        assert!(state.is_terminal());
+    }
+
+    #[test]
+    fn process_state_failed_with_empty_error() {
+        let state = ProcessState::Failed {
+            error: String::new(),
+            failed_at: Instant::now(),
+        };
+        assert_eq!(state.label(), "failed");
+        assert!(!state.is_running());
+        assert!(state.is_terminal());
+    }
+
+    // ── Additional StopReason tests ──
+
+    #[test]
+    fn stop_reason_serde_roundtrip() {
+        for reason in [
+            StopReason::Requested,
+            StopReason::HostShutdown,
+            StopReason::HealthCheckFailed,
+            StopReason::ResourceLimitExceeded,
+            StopReason::Upgrade,
+        ] {
+            let json = serde_json::to_string(&reason).unwrap();
+            let parsed: StopReason = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, reason);
+        }
+    }
+
+    #[test]
+    fn stop_reason_clone() {
+        let r = StopReason::Upgrade;
+        let cloned = r.clone();
+        assert_eq!(cloned, StopReason::Upgrade);
+    }
+
+    // ── Additional ExponentialBackoff tests ──
+
+    #[test]
+    fn backoff_current_delay_advances_with_next() {
+        let mut backoff =
+            ExponentialBackoff::new(Duration::from_millis(200), Duration::from_secs(10), 2.0);
+        let first = backoff.current_delay();
+        assert_eq!(first, Duration::from_millis(200));
+        backoff.next_backoff();
+        let second = backoff.current_delay();
+        assert_eq!(second, Duration::from_millis(400));
+    }
+
+    #[test]
+    fn backoff_attempts_increments() {
+        let mut backoff =
+            ExponentialBackoff::new(Duration::from_millis(100), Duration::from_secs(60), 2.0);
+        assert_eq!(backoff.attempts(), 0);
+        backoff.next_backoff();
+        assert_eq!(backoff.attempts(), 1);
+        backoff.next_backoff();
+        assert_eq!(backoff.attempts(), 2);
+    }
+
+    #[test]
+    fn backoff_reset_brings_attempts_to_zero() {
+        let mut backoff =
+            ExponentialBackoff::new(Duration::from_millis(100), Duration::from_secs(60), 2.0);
+        for _ in 0..5 {
+            backoff.next_backoff();
+        }
+        assert_eq!(backoff.attempts(), 5);
+        backoff.reset();
+        assert_eq!(backoff.attempts(), 0);
+        assert_eq!(backoff.current_delay(), Duration::from_millis(100));
+    }
+
+    #[test]
+    fn backoff_multiplier_below_one_clamps_to_two() {
+        let mut backoff =
+            ExponentialBackoff::new(Duration::from_millis(100), Duration::from_secs(60), 0.5);
+        // multiplier < 1 → reset to 2.0
+        assert_eq!(backoff.next_backoff(), Duration::from_millis(100));
+        assert_eq!(backoff.next_backoff(), Duration::from_millis(200));
+    }
+
+    #[test]
+    fn backoff_zero_max_clamps_subsequent_to_zero() {
+        let mut backoff =
+            ExponentialBackoff::new(Duration::from_millis(100), Duration::ZERO, 2.0);
+        // First call returns initial (attempt 0 short-circuits before clamping).
+        assert_eq!(backoff.next_backoff(), Duration::from_millis(100));
+        // Subsequent calls clamp to max (zero).
+        assert_eq!(backoff.next_backoff(), Duration::ZERO);
+        assert_eq!(backoff.next_backoff(), Duration::ZERO);
+    }
+
+    #[test]
+    fn backoff_initial_eq_max_stays_constant() {
+        let fixed = Duration::from_millis(500);
+        let mut backoff = ExponentialBackoff::new(fixed, fixed, 2.0);
+        for _ in 0..5 {
+            assert_eq!(backoff.next_backoff(), fixed);
+        }
+    }
+
+    // ── Additional SupervisorConfig tests ──
+
+    #[test]
+    fn supervisor_config_custom_values() {
+        let config = SupervisorConfig {
+            restart_policy: RestartPolicy::Always,
+            max_restarts: 10,
+            restart_window: Duration::from_secs(60),
+            health_check_interval: Duration::from_secs(5),
+            health_check_timeout: Duration::from_secs(2),
+            graceful_shutdown_timeout: Duration::from_secs(10),
+            initial_backoff: Duration::from_millis(100),
+            max_backoff: Duration::from_secs(30),
+            backoff_multiplier: 1.5,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: SupervisorConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.max_restarts, 10);
+        assert_eq!(parsed.backoff_multiplier, 1.5);
+        assert_eq!(parsed.restart_policy, RestartPolicy::Always);
+    }
+
+    #[test]
+    fn supervisor_config_clone() {
+        let config = SupervisorConfig::default();
+        let cloned = config.clone();
+        assert_eq!(cloned.max_restarts, config.max_restarts);
+        assert_eq!(cloned.restart_policy, config.restart_policy);
+    }
+
+    // ── Additional RestartTracker tests ──
+
+    #[test]
+    fn tracker_empty_history_restarts_in_window_zero() {
+        let config = SupervisorConfig::default();
+        let tracker = RestartTracker::new(config);
+        assert_eq!(tracker.restarts_in_window(Instant::now()), 0);
+        assert_eq!(tracker.total_restarts(), 0);
+    }
+
+    #[test]
+    fn tracker_history_attempt_numbers_sequential() {
+        let config = SupervisorConfig {
+            max_restarts: 10,
+            ..Default::default()
+        };
+        let mut tracker = RestartTracker::new(config);
+        let exit = ProcessExit::with_code(1);
+        let now = Instant::now();
+        tracker.evaluate_restart(&exit, now).unwrap();
+        tracker.evaluate_restart(&exit, now).unwrap();
+        tracker.evaluate_restart(&exit, now).unwrap();
+        let hist = tracker.history();
+        assert_eq!(hist[0].attempt, 1);
+        assert_eq!(hist[1].attempt, 2);
+        assert_eq!(hist[2].attempt, 3);
+    }
+
+    #[test]
+    fn tracker_history_records_previous_exit() {
+        let config = SupervisorConfig {
+            max_restarts: 5,
+            ..Default::default()
+        };
+        let mut tracker = RestartTracker::new(config);
+        let exit = ProcessExit::with_signal(11);
+        tracker.evaluate_restart(&exit, Instant::now()).unwrap();
+        assert_eq!(tracker.history()[0].previous_exit, exit);
+    }
+
+    #[test]
+    fn tracker_max_restarts_zero_always_denied() {
+        let config = SupervisorConfig {
+            max_restarts: 0,
+            ..Default::default()
+        };
+        let mut tracker = RestartTracker::new(config);
+        let result = tracker.evaluate_restart(&ProcessExit::with_code(1), Instant::now());
+        assert!(matches!(result, Err(RestartDenied::MaxRestartsExceeded { count: 0, .. })));
+    }
+
+    #[test]
+    fn tracker_window_boundary_exact_expired() {
+        let window = Duration::from_secs(5);
+        let config = SupervisorConfig {
+            max_restarts: 1,
+            restart_window: window,
+            ..Default::default()
+        };
+        let mut tracker = RestartTracker::new(config);
+        let exit = ProcessExit::with_code(1);
+        let start = Instant::now();
+
+        // Use up the one allowed restart.
+        tracker.evaluate_restart(&exit, start).unwrap();
+
+        // Exactly at boundary (start + window): event at start is at boundary.
+        // window_start = now - window = start + window - window = start
+        // event.timestamp == start >= window_start, so still in window → denied.
+        let at_boundary = start + window;
+        let result = tracker.evaluate_restart(&exit, at_boundary);
+        assert!(result.is_err());
+
+        // One tick past the boundary → event expires.
+        let past_boundary = start + window + Duration::from_nanos(1);
+        let result2 = tracker.evaluate_restart(&exit, past_boundary);
+        assert!(result2.is_ok());
+    }
+
+    #[test]
+    fn tracker_record_successful_start_resets_backoff_after_multiple() {
+        let config = SupervisorConfig {
+            max_restarts: 20,
+            initial_backoff: Duration::from_millis(50),
+            backoff_multiplier: 2.0,
+            ..Default::default()
+        };
+        let mut tracker = RestartTracker::new(config);
+        let exit = ProcessExit::with_code(1);
+        let now = Instant::now();
+
+        // Five restarts — backoff builds up.
+        for _ in 0..5 {
+            tracker.evaluate_restart(&exit, now).unwrap();
+        }
+        // Reset via successful start.
+        tracker.record_successful_start();
+        // Next restart should use initial backoff.
+        let delay = tracker.evaluate_restart(&exit, now).unwrap();
+        assert_eq!(delay, Duration::from_millis(50));
+    }
+
+    #[test]
+    fn restart_denied_display_policy() {
+        let denied = RestartDenied::PolicyDenied;
+        assert!(denied.to_string().contains("policy"));
+    }
+
+    #[test]
+    fn restart_denied_display_max_exceeded() {
+        let denied = RestartDenied::MaxRestartsExceeded {
+            count: 3,
+            window: Duration::from_secs(10),
+        };
+        let s = denied.to_string();
+        assert!(s.contains("3"));
+        assert!(s.contains("10"));
+    }
+
+    // ── Additional ShutdownCoordinator tests ──
+
+    #[test]
+    fn shutdown_coordinator_zero_timeout_immediately_force_kill() {
+        let mut coordinator = ShutdownCoordinator::new(Duration::ZERO);
+        let now = Instant::now();
+        coordinator.start_graceful(now);
+        // With zero timeout, should_force_kill at same instant.
+        assert!(coordinator.should_force_kill(now));
+    }
+
+    #[test]
+    fn shutdown_not_shutting_down_when_not_started() {
+        let coordinator = ShutdownCoordinator::new(Duration::from_secs(30));
+        assert!(!coordinator.is_shutting_down());
+        assert!(!coordinator.is_complete());
+    }
+
+    #[test]
+    fn shutdown_force_kill_phase_not_shutting_down_as_bool() {
+        let mut coordinator = ShutdownCoordinator::new(Duration::from_secs(1));
+        let now = Instant::now();
+        coordinator.start_graceful(now);
+        coordinator.record_force_kill(now + Duration::from_secs(2));
+        // ForceKill phase IS considered shutting down.
+        assert!(coordinator.is_shutting_down());
+        assert!(!coordinator.is_complete());
+    }
+
+    #[test]
+    fn shutdown_complete_not_shutting_down() {
+        let mut coordinator = ShutdownCoordinator::new(Duration::from_secs(30));
+        coordinator.start_graceful(Instant::now());
+        coordinator.record_exit(ProcessExit::with_code(0));
+        assert!(!coordinator.is_shutting_down());
+        assert!(coordinator.is_complete());
+    }
+
+    #[test]
+    fn shutdown_record_exit_from_not_started() {
+        // Can record exit directly without going through graceful.
+        let mut coordinator = ShutdownCoordinator::new(Duration::from_secs(30));
+        coordinator.record_exit(ProcessExit::with_signal(9));
+        assert!(coordinator.is_complete());
+        assert!(!coordinator.is_shutting_down());
+    }
+
+    #[test]
+    fn shutdown_force_kill_from_complete_is_noop() {
+        // record_force_kill only applies when in GracefulWait.
+        let mut coordinator = ShutdownCoordinator::new(Duration::from_secs(30));
+        coordinator.record_exit(ProcessExit::clean());
+        coordinator.record_force_kill(Instant::now());
+        // Still complete.
+        assert!(coordinator.is_complete());
+    }
+
+    #[test]
+    fn shutdown_start_graceful_after_force_kill_is_noop() {
+        let mut coordinator = ShutdownCoordinator::new(Duration::from_secs(1));
+        let now = Instant::now();
+        coordinator.start_graceful(now);
+        coordinator.record_force_kill(now + Duration::from_secs(2));
+        let later = now + Duration::from_secs(3);
+        coordinator.start_graceful(later); // Should be no-op.
+        // Still in ForceKill, not GracefulWait.
+        assert!(matches!(
+            coordinator.phase(),
+            ShutdownPhase::ForceKill { .. }
+        ));
+    }
+
+    // ── Additional HealthCheckScheduler tests ──
+
+    #[test]
+    fn health_scheduler_max_failures_zero_always_unhealthy_after_one() {
+        let mut scheduler = HealthCheckScheduler::new(Duration::from_secs(30), Duration::from_secs(5))
+            .with_max_failures(0);
+        // zero threshold — already at limit with no failures.
+        assert!(scheduler.is_unhealthy());
+        // After one failure, still unhealthy.
+        scheduler.record_failure(Instant::now());
+        assert!(scheduler.is_unhealthy());
+    }
+
+    #[test]
+    fn health_scheduler_one_success_clears_all_failures() {
+        let mut scheduler = HealthCheckScheduler::new(Duration::from_secs(30), Duration::from_secs(5))
+            .with_max_failures(2);
+        let now = Instant::now();
+        scheduler.record_failure(now);
+        scheduler.record_failure(now);
+        assert!(scheduler.is_unhealthy());
+        scheduler.record_success(now);
+        assert!(!scheduler.is_unhealthy());
+        assert_eq!(scheduler.consecutive_failures(), 0);
+    }
+
+    #[test]
+    fn health_scheduler_time_until_next_zero_when_no_check() {
+        let scheduler = HealthCheckScheduler::new(Duration::from_secs(30), Duration::from_secs(5));
+        assert_eq!(scheduler.time_until_next(Instant::now()), Duration::ZERO);
+    }
+
+    #[test]
+    fn health_scheduler_consecutive_failures_saturate_at_max() {
+        let mut scheduler = HealthCheckScheduler::new(Duration::from_secs(1), Duration::from_secs(1))
+            .with_max_failures(3);
+        let now = Instant::now();
+        // Record 10 failures — saturating_add should prevent overflow.
+        for _ in 0..10 {
+            scheduler.record_failure(now);
+        }
+        assert_eq!(scheduler.consecutive_failures(), 10);
+        assert!(scheduler.is_unhealthy());
+    }
+
+    #[test]
+    fn health_scheduler_is_due_after_interval_passed() {
+        let mut scheduler = HealthCheckScheduler::new(Duration::from_secs(10), Duration::from_secs(5));
+        let now = Instant::now();
+        scheduler.record_success(now);
+        // Not due immediately after.
+        assert!(!scheduler.is_due(now));
+        // Due after interval.
+        let later = now + Duration::from_secs(11);
+        assert!(scheduler.is_due(later));
+    }
+
+    #[test]
+    fn health_scheduler_timeout_unchanged_by_record_calls() {
+        let mut scheduler = HealthCheckScheduler::new(Duration::from_secs(30), Duration::from_secs(7));
+        let now = Instant::now();
+        scheduler.record_failure(now);
+        scheduler.record_success(now);
+        assert_eq!(scheduler.timeout(), Duration::from_secs(7));
+    }
+
+    // ── Additional ResourceLimits tests ──
+
+    #[test]
+    fn resource_limits_one_active_count() {
+        let limits = ResourceLimits {
+            memory_bytes: Some(100),
+            cpu_seconds: None,
+            max_fds: None,
+            max_processes: None,
+            max_file_size_bytes: None,
+        };
+        assert_eq!(limits.active_limit_count(), 1);
+    }
+
+    #[test]
+    fn resource_limits_merge_strict_file_size() {
+        let a = ResourceLimits {
+            max_file_size_bytes: Some(1024 * 1024),
+            ..ResourceLimits::unlimited()
+        };
+        let b = ResourceLimits {
+            max_file_size_bytes: Some(512 * 1024),
+            ..ResourceLimits::unlimited()
+        };
+        let merged = a.merge_strict(&b);
+        assert_eq!(merged.max_file_size_bytes, Some(512 * 1024));
+    }
+
+    #[test]
+    fn resource_limits_cpu_active_count() {
+        let limits = ResourceLimits {
+            cpu_seconds: Some(60),
+            ..ResourceLimits::unlimited()
+        };
+        assert_eq!(limits.active_limit_count(), 1);
+    }
+
+    #[test]
+    fn resource_limits_has_any_after_merge_unlimited_unlimited() {
+        let a = ResourceLimits::unlimited();
+        let b = ResourceLimits::unlimited();
+        let merged = a.merge_strict(&b);
+        assert!(!merged.has_any_limits());
+    }
+
+    // ── Additional ResourceUsage tests ──
+
+    #[test]
+    fn resource_usage_default_all_zero() {
+        let usage = ResourceUsage::default();
+        assert_eq!(usage.memory_bytes, 0);
+        assert_eq!(usage.cpu_millis, 0);
+        assert_eq!(usage.open_fds, 0);
+        assert_eq!(usage.process_count, 0);
+    }
+
+    #[test]
+    fn resource_usage_cpu_not_violated_below_threshold() {
+        // 59 seconds out of 60 limit — no violation.
+        let usage = ResourceUsage {
+            cpu_millis: 59_000,
+            ..Default::default()
+        };
+        let limits = ResourceLimits {
+            cpu_seconds: Some(60),
+            ..ResourceLimits::unlimited()
+        };
+        assert!(usage.within_limits(&limits));
+        assert!(usage.violations(&limits).is_empty());
+    }
+
+    #[test]
+    fn resource_usage_cpu_violation_display() {
+        let usage = ResourceUsage {
+            cpu_millis: 90_000,
+            ..Default::default()
+        };
+        let limits = ResourceLimits {
+            cpu_seconds: Some(60),
+            ..ResourceLimits::unlimited()
+        };
+        let violations = usage.violations(&limits);
+        assert_eq!(violations.len(), 1);
+        let msg = violations[0].to_string();
+        assert!(msg.contains("cpu_time"));
+    }
+
+    #[test]
+    fn resource_usage_process_count_at_limit_no_violation() {
+        let usage = ResourceUsage {
+            process_count: 64,
+            ..Default::default()
+        };
+        let limits = ResourceLimits {
+            max_processes: Some(64),
+            ..ResourceLimits::unlimited()
+        };
+        assert!(usage.within_limits(&limits));
+    }
+
+    #[test]
+    fn resource_usage_fds_at_limit_no_violation() {
+        let usage = ResourceUsage {
+            open_fds: 1024,
+            ..Default::default()
+        };
+        let limits = ResourceLimits {
+            max_fds: Some(1024),
+            ..ResourceLimits::unlimited()
+        };
+        assert!(usage.within_limits(&limits));
+    }
+
+    #[test]
+    fn resource_usage_utilization_cpu_computed() {
+        let usage = ResourceUsage {
+            cpu_millis: 30_000, // 30 seconds
+            ..Default::default()
+        };
+        let limits = ResourceLimits {
+            cpu_seconds: Some(60),
+            ..ResourceLimits::unlimited()
+        };
+        let util = usage.utilization(&limits);
+        let cpu = util.cpu.unwrap();
+        assert!((cpu - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn resource_usage_utilization_processes_computed() {
+        let usage = ResourceUsage {
+            process_count: 32,
+            ..Default::default()
+        };
+        let limits = ResourceLimits {
+            max_processes: Some(64),
+            ..ResourceLimits::unlimited()
+        };
+        let util = usage.utilization(&limits);
+        let processes = util.processes.unwrap();
+        assert!((processes - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn resource_usage_utilization_any_above_zero_threshold() {
+        let usage = ResourceUsage {
+            memory_bytes: 1, // tiny non-zero usage
+            ..Default::default()
+        };
+        let limits = ResourceLimits {
+            memory_bytes: Some(1024),
+            ..ResourceLimits::unlimited()
+        };
+        let util = usage.utilization(&limits);
+        // 1/1024 < 0.001, so not above 0.001 threshold.
+        assert!(!util.any_above_threshold(0.001));
+        // But above 0.0 threshold.
+        assert!(util.any_above_threshold(0.0));
+    }
+
+    #[test]
+    fn resource_violation_clone() {
+        let v = ResourceViolation {
+            resource: ResourceKind::Processes,
+            current: 100,
+            limit: 50,
+        };
+        let cloned = v.clone();
+        assert_eq!(cloned.resource, ResourceKind::Processes);
+        assert_eq!(cloned.current, 100);
+        assert_eq!(v.limit, cloned.limit);
+    }
+
+    // ── ConnectionTracker edge cases ──
+
+    #[test]
+    fn connection_tracker_acquire_returns_none_when_draining() {
+        let tracker = ConnectionTracker::new();
+        tracker.start_drain();
+        let guard = tracker.try_acquire();
+        assert!(guard.is_none());
+        assert_eq!(tracker.active_count(), 0);
+    }
+
+    #[test]
+    fn connection_tracker_not_drained_without_start_drain() {
+        let tracker = ConnectionTracker::new();
+        // active == 0 but draining == false → not drained.
+        assert!(!tracker.is_drained());
+    }
+
+    #[test]
+    fn connection_tracker_single_acquire_then_drain_then_drop() {
+        let tracker = ConnectionTracker::new();
+        let g = tracker.try_acquire().unwrap();
+        assert_eq!(tracker.active_count(), 1);
+        tracker.start_drain();
+        assert!(!tracker.is_drained());
+        drop(g);
+        assert_eq!(tracker.active_count(), 0);
+        assert!(tracker.is_drained());
+    }
+
+    #[test]
+    fn connection_tracker_acquire_fails_after_drain_even_with_zero_active() {
+        let tracker = ConnectionTracker::new();
+        tracker.start_drain();
+        assert_eq!(tracker.active_count(), 0);
+        assert!(tracker.try_acquire().is_none());
+        // Still counts as drained.
+        assert!(tracker.is_drained());
+    }
 }

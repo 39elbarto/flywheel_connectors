@@ -809,6 +809,8 @@ Delivers the core safety story ("zones + explicit authority + auditable operatio
 - User-facing result semantics are carried by `CommandAvailability` in `crates/fwc/src/readiness.rs`, with explicit states such as `live-runtime`, `offline-artifact`, `unsupported`, `planned`, `unavailable`, `denied`, and `unknown`.
 - Hybrid catalog commands such as `list`, `search`, `show`, `ops`, `schema`, `examples`, `suggest`, `template`, `validate`, and `export-tools` require an explicit `--offline` opt-in for artifact-backed behavior when live host truth is unavailable or not desired.
 - Offline results are useful, but they are not authoritative for current runtime state. They must carry provenance markers and stale-data caveats.
+- The no-fakes invariant is part of the CLI contract: placeholder runtime data, guessed simulate support, and local file-edit side channels are bugs, not convenience features. When live truth is unavailable, `fwc` must refuse or require explicit offline mode.
+- Evidence for this model is layered: local semantics in `crates/fwc/src/catalog.rs` and `crates/fwc/src/readiness.rs`, CLI integration coverage in `crates/fwc/tests/cual_integration.rs`, and replayable artifact bundles (`trace.jsonl`, `summary.json`, `environment.json`, `replay.sh`) defined by `crates/fwc/src/test_observability.rs`.
 
 For operator and agent workflows, migration guidance, and evidence-bundle expectations, see [docs/FWC_Host_First_Truthfulness_Playbook.md](docs/FWC_Host_First_Truthfulness_Playbook.md).
 

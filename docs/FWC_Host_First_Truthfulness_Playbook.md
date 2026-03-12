@@ -2,7 +2,7 @@
 
 > Status: active operator/agent guide for the `fwc` truthfulness migration  
 > Primary beads: `flywheel_connectors-1g7z0.29.8`, `flywheel_connectors-1g7z0.29.8.3`  
-> Implementation anchors: `crates/fwc/src/catalog.rs`, `crates/fwc/src/readiness.rs`, `crates/fwc/tests/cual_integration.rs`, `crates/fwc/src/test_observability.rs`, `docs/testing/e2e_log_schema.md`
+> Implementation anchors: `crates/fwc/src/catalog.rs`, `crates/fwc/src/readiness.rs`, `crates/fwc/src/main.rs`, `crates/fwc/tests/cual_integration.rs`, `crates/fwc/src/test_observability.rs`, `docs/testing/e2e_log_schema.md`, `docs/testing/coverage-inventory.md`
 
 ## Purpose
 
@@ -12,6 +12,7 @@ The short version:
 
 - live runtime truth must come from a reachable `fcp-host`
 - offline artifact work must be explicit
+- the no-fakes invariant is mandatory: placeholder runtime data, guessed capability bits, and hidden file-edit side channels are bugs
 - unknown, unsupported, denied, planned, and unavailable states must stay distinct
 - tests and transcripts must make truth failures obvious without re-deriving the original planning thread
 
@@ -36,6 +37,24 @@ The resolved runtime mode is also centralized in `crates/fwc/src/catalog.rs`.
 | `refused` | Command requires live host truth and no honest live path exists | no execution |
 
 The contract is strict: dispatch resolves mode once, before doing work, and no handler is allowed to silently switch from live runtime to offline artifacts mid-flight.
+
+## The No-Fakes Invariant
+
+The truthfulness migration is not just about better labels. It is a ban on fake runtime confidence.
+
+`fwc` must never:
+
+- present manifest or cache data as though it came from the running host
+- advertise connector dry-run semantics when only host preflight exists
+- replace `planned`, `unsupported`, `unavailable`, `denied`, or `unknown` with a generic success-looking payload
+- mutate runtime state through local file edits and then report the result as if the host accepted it
+
+If a surface cannot produce honest live-runtime truth, it must do one of four things:
+
+1. return a real `live-runtime` result from the host
+2. require explicit `--offline` and label the result `offline-artifact`
+3. degrade with a visible warning only when the command contract explicitly allows it
+4. refuse the operation instead of fabricating success
 
 ## Availability Vocabulary
 
@@ -69,6 +88,71 @@ The current discovery provenance contract in `crates/fwc/src/catalog.rs` disting
 - `static-schema`
 
 Anything in the first two buckets is authoritative. Everything else is an offline or static view and must carry a freshness caveat.
+
+## Outcome And Remediation Matrix
+
+These states are not interchangeable. Operators and agents should read them as different classes of truth.
+
+| State | What it means | How to react |
+|---|---|---|
+| `live-runtime` | The host answered and the payload is authoritative | Continue with current runtime assumptions |
+| `offline-artifact` | The payload is useful, but it came from manifests, cache, or static schema | Treat it as preparation data and re-run against `--host` before assuming live truth |
+| `denied` | The runtime path was real, but policy/auth/approval/zone rules blocked it | Inspect policy, zone, approvals, or `fwc auth status` |
+| `unsupported` | The connector or host definitively does not implement the surface | Stop retrying the same shape and inspect supported operations or upgrade paths |
+| `planned` | The command currently exposes a contract preview only | Do not automate against it as though it were live |
+| `unavailable` | The live surface should exist, but the host or endpoint is unreachable | Restore reachability or intentionally switch to `--offline` |
+| `unknown` | The system cannot truthfully classify the runtime state yet | Query a specific host, inspect provenance, or run `fwc doctor` |
+
+### Example: Live Runtime Success
+
+```bash
+fwc --host http://127.0.0.1:8765 show github
+```
+
+What to look for:
+
+- resolved mode is live, not offline
+- availability is `live-runtime`
+- provenance is host-backed (`live-host-introspection` or `live-host-inventory`)
+
+### Example: Explicit Offline Preparation
+
+```bash
+fwc show github --offline
+```
+
+What to look for:
+
+- resolved mode is `explicit-offline`
+- availability is `offline-artifact`
+- provenance is `workspace-manifest`, `local-catalog-cache`, or `static-schema`
+- output carries a caveat that it may not match the running system
+
+### Example: Denial Is A Real Runtime Answer
+
+When a preflight or invoke path returns `denied`, that is not a transport failure and not a reason to fall back to manifest-backed output.
+
+What to look for:
+
+- availability is `denied`
+- the payload or error explains whether policy, approval, auth, or zone rules blocked the request
+- `next_actions` point to auth, policy, zone, or approval remediation
+
+### Example: Planned Or Unsupported
+
+`planned` means "contract preview only." `unsupported` means "definitively not implemented here." Both are non-authoritative and non-recoverable in the short term, but they mean different things operationally:
+
+- `planned`: wait for the bead to land; do not treat the preview as a live feature
+- `unsupported`: inspect `fwc ops <connector>` or upgrade/change connector strategy
+
+### Example: Unavailable Or Unknown
+
+These are the two recoverable "not ready to trust this answer yet" states:
+
+- `unavailable`: the live path exists but is down or unreachable
+- `unknown`: the system lacks enough trustworthy signal to classify the state
+
+The fix is to restore reachability, target a specific host, or intentionally switch to `--offline` with eyes open. The fix is not to silently re-label offline data as runtime truth.
 
 ## Operator Playbooks
 
@@ -142,6 +226,18 @@ The enforcement types live in `crates/fwc/src/catalog.rs`:
 - `SimulateResult`
 - `DiscoveryDataSource`
 
+## Migration Checklist
+
+Use this checklist whenever you move an older or ambiguous `fwc` surface into the host-first truthful model.
+
+1. Decide whether the command is `live_host`, `offline_artifact`, `hybrid`, or `passthrough` in `crates/fwc/src/catalog.rs`.
+2. Resolve runtime mode before doing any real work. Do not let handlers invent fallback behavior ad hoc.
+3. Make offline behavior explicit with `--offline` and non-authoritative provenance markers.
+4. Remove guessed capability bits, placeholder hashes, demo bundles, and local-file mutation shortcuts from the canonical runtime path.
+5. Emit `CommandAvailability` and provenance information so callers can tell live truth from local preparation data.
+6. Add or update tests proving the live path, refusal/degradation path, and explicit offline path.
+7. Extend the docs and playbooks so operators know how to read the resulting evidence without reopening the planning thread.
+
 ## Agent Playbooks
 
 ### Adding or changing a command
@@ -173,6 +269,15 @@ Reject the change if it does any of the following:
 
 ## Verification Surfaces
 
+This bead is the documentation layer of a wider evidence stack. The sibling beads provide more of the executable proof surface:
+
+| Bead | Evidence role |
+|---|---|
+| `flywheel_connectors-1g7z0.29.8.1` | Host-backed integration matrix for live/offline/auth/simulate/MCP boundaries |
+| `flywheel_connectors-1g7z0.29.8.2` | End-to-end regression scenarios for the no-fakes invariants |
+| `flywheel_connectors-1g7z0.29.8.5` | Transcript scripts, detailed logging, replay bundle contract |
+| `flywheel_connectors-1g7z0.29.8.3` | Operator/agent guide for interpreting the evidence correctly |
+
 ### Fast semantic checks
 
 The main local truthfulness semantics already live in:
@@ -185,6 +290,12 @@ Relevant tests already exercise offline/live boundaries and artifact labeling in
 
 - `crates/fwc/tests/cual_integration.rs`
 - `crates/fwc/src/main.rs` unit-style command tests
+
+Read these first when a behavior looks suspicious:
+
+- `catalog.rs` tells you which source-of-truth contract the command is supposed to obey
+- `readiness.rs` tells you how the result should be labeled, whether it is authoritative, and what remediation should be suggested
+- `main.rs` tests show the actual envelope, refusal, and labeling semantics the CLI emits today
 
 ### Artifact bundles and replay
 
@@ -203,6 +314,13 @@ The same module also defines:
 - redaction rules for sensitive fields and token-like prefixes
 - replay instructions derived from the captured environment and command line
 
+How to read the bundle:
+
+- `trace.jsonl`: the step-by-step timeline and correlation trail
+- `summary.json`: the machine-readable verdict and short explanation of why the run passed or failed
+- `environment.json`: the execution context needed to decide whether a mismatch is environmental or semantic
+- `replay.sh`: the deterministic rerun entrypoint; if it cannot reproduce the scenario, the evidence is incomplete
+
 ### Structured E2E logs
 
 `docs/testing/e2e_log_schema.md` defines the shared JSONL schema for E2E/conformance/script runs.
@@ -213,6 +331,8 @@ Use it when you need:
 - correlation IDs
 - replayable scenario artifacts
 - predictable CI failure evidence
+
+For a wider map of which surfaces are already covered versus still missing, use `docs/testing/coverage-inventory.md`.
 
 ## Verification Commands
 
@@ -225,7 +345,7 @@ rch exec -- cargo check --workspace --all-targets
 rch exec -- cargo clippy --workspace --all-targets -- -D warnings
 rch exec -- cargo test -p fwc
 rch exec -- cargo test --workspace
-cargo fmt --check
+rch exec -- cargo fmt --check
 ```
 
 If you add scripted transcript or scenario runners, the replay instructions and playbooks should preserve the `rch exec -- ...` prefix for any cargo-backed step.

@@ -23,6 +23,7 @@ mod error;
 mod progress;
 mod resilience;
 mod rollout;
+mod supervisor;
 mod supply_chain;
 
 pub use admin_state::*;
@@ -35,4 +36,5 @@ pub use error::*;
 pub use progress::*;
 pub use resilience::*;
 pub use rollout::*;
+pub use supervisor::*;
 pub use supply_chain::*;

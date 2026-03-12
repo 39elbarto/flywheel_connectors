@@ -1968,7 +1968,10 @@ mod tests {
         let plan = executor.plan(&req).unwrap();
         assert_eq!(plan.depth(), 3);
         assert_eq!(plan.max_width(), 5);
-        assert_eq!(plan.tiers[1].operation_ids, vec!["e"]);
+        assert_eq!(
+            plan.tiers[1].operation_ids,
+            vec!["a", "b", "c", "d", "e"]
+        );
     }
 
     // ── Cycle detection extended ──
@@ -2112,9 +2115,9 @@ mod tests {
         let err = validator.validate(&ops).unwrap_err();
         let msg = err.to_string();
         // Owner tools (i % 3 == 2) should be violations: 2, 5, 8, 11, 14, 17
-        assert!(msg.contains("op2"));
-        assert!(msg.contains("op5"));
-        assert!(msg.contains("op8"));
+        assert!(msg.contains("op002"));
+        assert!(msg.contains("op005"));
+        assert!(msg.contains("op008"));
     }
 
     #[test]
@@ -2256,16 +2259,16 @@ mod tests {
 
     #[test]
     fn stop_on_error_failure_in_middle_of_tier() {
-        // Tier 1: ok1, fail1, ok2 (all independent)
-        // Tier 2: ok3 (depends on ok1)
-        // fail1 triggers abort; ok3 should be skipped even though ok1 succeeded
+        // Tier 0: a_ok (sorts first), fail1 (sorts second), z_ok (sorts third)
+        // Tier 1: dep (depends on a_ok)
+        // a_ok succeeds, then fail1 triggers abort; z_ok and dep should be skipped
         let executor = BatchExecutor::new();
         let req = BatchInvokeRequest {
             operations: vec![
-                op("ok1", "t", &[]),
+                op("a_ok", "t", &[]),
                 op("fail1", "t", &[]),
-                op("ok2", "t", &[]),
-                op("ok3", "t", &["ok1"]),
+                op("z_ok", "t", &[]),
+                op("z_dep", "t", &["a_ok"]),
             ],
             options: BatchOptions {
                 stop_on_first_error: true,
@@ -2274,18 +2277,18 @@ mod tests {
         };
         let resp = executor.execute_sync(&req, selective_handler).unwrap();
         assert_eq!(resp.status, BatchStatus::Aborted);
-        // ok1 should be marked as success (independent)
-        let ok1 = resp.results.iter().find(|r| r.id == "ok1").unwrap();
-        assert_eq!(ok1.status, OperationResultStatus::Success);
-        // fail1 should be marked as error
+        // a_ok runs first (sorts before fail1) and succeeds
+        let a_ok = resp.results.iter().find(|r| r.id == "a_ok").unwrap();
+        assert_eq!(a_ok.status, OperationResultStatus::Success);
+        // fail1 runs second and triggers abort
         let fail1 = resp.results.iter().find(|r| r.id == "fail1").unwrap();
         assert_eq!(fail1.status, OperationResultStatus::Error);
-        // ok2 should be skipped (in tier 2, aborted)
-        let ok2 = resp.results.iter().find(|r| r.id == "ok2").unwrap();
-        assert_eq!(ok2.status, OperationResultStatus::Skipped);
-        // ok3 should be skipped (in tier 2, aborted)
-        let ok3 = resp.results.iter().find(|r| r.id == "ok3").unwrap();
-        assert_eq!(ok3.status, OperationResultStatus::Skipped);
+        // z_ok should be skipped (same tier, aborted after fail1)
+        let z_ok = resp.results.iter().find(|r| r.id == "z_ok").unwrap();
+        assert_eq!(z_ok.status, OperationResultStatus::Skipped);
+        // z_dep should be skipped (tier 1, aborted)
+        let z_dep = resp.results.iter().find(|r| r.id == "z_dep").unwrap();
+        assert_eq!(z_dep.status, OperationResultStatus::Skipped);
     }
 
     #[test]
@@ -2402,7 +2405,7 @@ mod tests {
     #[test]
     fn very_long_dependency_chain_hundred_ops() {
         let executor = BatchExecutor::new();
-        let mut ops = vec![op("op000", "t", &[])];
+        let mut ops = vec![op("n000", "t", &[])];
         for i in 1..100 {
             ops.push(op(&format!("n{i:03}"), "t", &[&format!("n{:03}", i - 1)]));
         }

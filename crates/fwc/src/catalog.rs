@@ -2058,6 +2058,635 @@ pub fn workflow_can_proceed(
     }
 }
 
+// ── Template, validate, and example materialization truth contract ────────────
+// Defines how template/validate/examples commands honestly label the source
+// and freshness of their data.  Templates generated from live host introspection
+// are authoritative; those from workspace manifests or static schemas are not.
+
+/// Where template / example data actually came from.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TemplateDataSource {
+    /// Template/example generated from live host introspection (authoritative, fresh).
+    LiveHostIntrospection,
+    /// Generated from local workspace manifest (stale, offline).
+    WorkspaceManifest,
+    /// Generated from embedded static schemas (always available, never live).
+    StaticSchema,
+    /// Source is unknown or not yet determined.
+    Unknown,
+}
+
+impl TemplateDataSource {
+    /// Whether this source is authoritative (reflects current live state).
+    #[must_use]
+    pub fn is_authoritative(&self) -> bool {
+        matches!(self, Self::LiveHostIntrospection)
+    }
+
+    /// Whether this source is from offline/local artifacts.
+    #[must_use]
+    pub fn is_offline(&self) -> bool {
+        matches!(self, Self::WorkspaceManifest | Self::StaticSchema)
+    }
+
+    /// Machine-readable tag.
+    #[must_use]
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Self::LiveHostIntrospection => "live-host-introspection",
+            Self::WorkspaceManifest => "workspace-manifest",
+            Self::StaticSchema => "static-schema",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// Freshness caveat for this source.
+    #[must_use]
+    pub fn freshness_caveat(&self) -> &'static str {
+        match self {
+            Self::LiveHostIntrospection => {
+                "Template reflects the current connector introspection state."
+            }
+            Self::WorkspaceManifest => {
+                "Template is from workspace manifests and may not reflect current host state."
+            }
+            Self::StaticSchema => {
+                "Template is from embedded static schemas, not live connector state."
+            }
+            Self::Unknown => {
+                "Template source is unknown; freshness cannot be determined."
+            }
+        }
+    }
+}
+
+/// Provenance envelope for template/validate/examples command output.
+///
+/// Every template response must include this so consumers know whether
+/// they are looking at live host data or offline artifacts.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TemplateProvenance {
+    /// The command that produced this output (template/validate/examples).
+    pub command: String,
+    /// Where the template data came from.
+    pub source: TemplateDataSource,
+    /// Whether output reflects live runtime state.
+    pub authoritative: bool,
+    /// Freshness caveat.
+    pub caveat: String,
+    /// When data was fetched (for staleness tracking).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetched_at: Option<String>,
+}
+
+/// Build a template provenance envelope for a command.
+#[allow(dead_code)]
+#[must_use]
+pub fn template_provenance(command: &str, source: TemplateDataSource) -> TemplateProvenance {
+    TemplateProvenance {
+        command: command.to_owned(),
+        authoritative: source.is_authoritative(),
+        caveat: source.freshness_caveat().to_owned(),
+        source,
+        fetched_at: None,
+    }
+}
+
+/// The outcome of a payload validation against a schema.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationOutcome {
+    /// Payload validated successfully against live schema.
+    Valid,
+    /// Payload has validation errors.
+    Invalid { errors: Vec<String> },
+    /// Cannot validate because schema is not available from this source.
+    SchemaUnavailable,
+    /// Validated against offline schema (may not reflect current runtime).
+    OfflineValidation,
+}
+
+impl ValidationOutcome {
+    /// Whether the validation succeeded.
+    #[must_use]
+    pub fn is_success(&self) -> bool {
+        matches!(self, Self::Valid)
+    }
+
+    /// Whether the outcome is definitive (reflects live state).
+    #[must_use]
+    pub fn is_definitive(&self) -> bool {
+        matches!(self, Self::Valid | Self::Invalid { .. })
+    }
+
+    /// Machine-readable tag.
+    #[must_use]
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Self::Valid => "valid",
+            Self::Invalid { .. } => "invalid",
+            Self::SchemaUnavailable => "schema-unavailable",
+            Self::OfflineValidation => "offline-validation",
+        }
+    }
+}
+
+/// All template-family commands that should carry a [`TemplateProvenance`] envelope.
+#[allow(dead_code)]
+pub const TEMPLATE_COMMANDS: &[&str] = &["template", "validate", "examples"];
+
+/// Check if a command is a template-family command.
+#[allow(dead_code)]
+#[must_use]
+pub fn is_template_command(command: &str) -> bool {
+    TEMPLATE_COMMANDS.contains(&command)
+}
+
+/// Determine the expected template data source for a command given the runtime mode.
+///
+/// Returns `None` for non-template commands or when the mode is [`RuntimeMode::Refused`].
+#[allow(dead_code)]
+#[must_use]
+pub fn expected_template_source(
+    command: &str,
+    mode: RuntimeMode,
+) -> Option<TemplateDataSource> {
+    if !is_template_command(command) {
+        return None;
+    }
+
+    Some(match mode {
+        RuntimeMode::Live => TemplateDataSource::LiveHostIntrospection,
+        RuntimeMode::ExplicitOffline | RuntimeMode::DegradedOffline => {
+            TemplateDataSource::WorkspaceManifest
+        }
+        RuntimeMode::Refused => return None,
+    })
+}
+
+// ── Intent and planning layer truth contract ─────────────────────────────────
+// Bead 1g7z0.29.7.2. Intent/planning layers MUST only expose host-backed
+// control primitives. Types below enforce that suggestion and plan layers
+// never promise actions the runtime cannot deliver.
+
+/// Whether an intent-layer action is actually available at runtime.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IntentActionAvailability {
+    /// Action is available via live host-backed RPC.
+    HostBacked,
+    /// Action is available but only in explicit offline mode.
+    OfflineOnly,
+    /// Action is planned but not yet implemented (not available).
+    Planned,
+    /// Action is not supported by the current host/connector.
+    Unsupported,
+    /// Availability of this action is not known.
+    Unknown,
+}
+
+#[allow(dead_code)]
+impl IntentActionAvailability {
+    /// Whether this action can actually be executed right now.
+    #[must_use]
+    pub fn is_executable(self) -> bool {
+        matches!(self, Self::HostBacked | Self::OfflineOnly)
+    }
+
+    /// Whether this action can be suggested to the user (everything except Unknown).
+    #[must_use]
+    pub fn is_suggestable(self) -> bool {
+        !matches!(self, Self::Unknown)
+    }
+
+    /// Stable wire tag for serialisation contexts.
+    #[must_use]
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::HostBacked => "host_backed",
+            Self::OfflineOnly => "offline_only",
+            Self::Planned => "planned",
+            Self::Unsupported => "unsupported",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// Human-readable label.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::HostBacked => "Host-backed (live)",
+            Self::OfflineOnly => "Offline only",
+            Self::Planned => "Planned (not yet available)",
+            Self::Unsupported => "Unsupported",
+            Self::Unknown => "Unknown availability",
+        }
+    }
+}
+
+/// The kind of suggestion an intent layer can make.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IntentSuggestionKind {
+    /// Suggestion to execute an action that is host-backed and available now.
+    ExecuteNow,
+    /// Suggestion to prepare offline artifacts (manifest, config).
+    OfflinePreparation,
+    /// Suggestion to fix something before proceeding (install, configure, auth).
+    Remediation,
+    /// Suggestion that provides information only (no side effects).
+    Informational,
+}
+
+#[allow(dead_code)]
+impl IntentSuggestionKind {
+    /// Stable wire tag.
+    #[must_use]
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::ExecuteNow => "execute_now",
+            Self::OfflinePreparation => "offline_preparation",
+            Self::Remediation => "remediation",
+            Self::Informational => "informational",
+        }
+    }
+
+    /// Whether this suggestion kind requires a live host to be meaningful.
+    #[must_use]
+    pub fn requires_host(self) -> bool {
+        matches!(self, Self::ExecuteNow)
+    }
+}
+
+/// Classification of an intent-layer action with its availability and kind.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IntentActionClassification {
+    /// The action/verb being suggested.
+    pub action: String,
+    /// Whether it's available.
+    pub availability: IntentActionAvailability,
+    /// What kind of suggestion this is.
+    pub suggestion_kind: IntentSuggestionKind,
+    /// Optional caveat about availability/scope.
+    pub caveat: Option<String>,
+    /// Whether this action requires a live host to execute.
+    pub host_required: bool,
+}
+
+/// A single step in a plan with truthfulness metadata.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanStepTruth {
+    /// What the step does.
+    pub step_description: String,
+    /// The underlying action/command.
+    pub action: String,
+    /// Whether it can actually execute.
+    pub availability: IntentActionAvailability,
+    /// Whether this step has real host backing.
+    pub backed_by_host: bool,
+    /// Truthfulness caveat.
+    pub caveat: String,
+}
+
+/// Well-known intent actions that the planning layer can suggest.
+#[allow(dead_code)]
+pub const INTENT_ACTIONS: &[&str] = &[
+    "invoke", "simulate", "install", "update", "config", "enable", "disable",
+];
+
+/// Check whether a string is a recognised intent action.
+#[allow(dead_code)]
+#[must_use]
+pub fn is_intent_action(action: &str) -> bool {
+    INTENT_ACTIONS.contains(&action)
+}
+
+/// Classify an intent action based on runtime mode and host availability.
+#[allow(dead_code)]
+#[must_use]
+pub fn classify_intent_action(
+    action: &str,
+    mode: RuntimeMode,
+    host_available: bool,
+) -> IntentActionClassification {
+    let (availability, suggestion_kind, caveat, host_required) = match mode {
+        RuntimeMode::Live if host_available => (
+            IntentActionAvailability::HostBacked,
+            IntentSuggestionKind::ExecuteNow,
+            None,
+            true,
+        ),
+        RuntimeMode::Live => (
+            IntentActionAvailability::Unsupported,
+            IntentSuggestionKind::Remediation,
+            Some("Host unavailable".to_string()),
+            true,
+        ),
+        RuntimeMode::ExplicitOffline | RuntimeMode::DegradedOffline => (
+            IntentActionAvailability::OfflineOnly,
+            IntentSuggestionKind::OfflinePreparation,
+            None,
+            false,
+        ),
+        RuntimeMode::Refused => (
+            IntentActionAvailability::Unsupported,
+            IntentSuggestionKind::Informational,
+            Some("Command refused — host required but absent".to_string()),
+            true,
+        ),
+    };
+
+    IntentActionClassification {
+        action: action.to_string(),
+        availability,
+        suggestion_kind,
+        caveat,
+        host_required,
+    }
+}
+
+/// Build a truthful plan step with availability and caveat metadata.
+#[allow(dead_code)]
+#[must_use]
+pub fn plan_step_truth(
+    step: &str,
+    action: &str,
+    mode: RuntimeMode,
+    host_available: bool,
+) -> PlanStepTruth {
+    let classification = classify_intent_action(action, mode, host_available);
+    let caveat = match classification.availability {
+        IntentActionAvailability::HostBacked => {
+            "Step is host-backed and will execute against the live host.".to_string()
+        }
+        IntentActionAvailability::OfflineOnly => {
+            "Step operates on local artifacts only — results may be stale.".to_string()
+        }
+        IntentActionAvailability::Planned => {
+            "Step references a planned feature that is not yet available.".to_string()
+        }
+        IntentActionAvailability::Unsupported => {
+            format!(
+                "Step cannot execute: {}.",
+                classification.caveat.as_deref().unwrap_or("unsupported")
+            )
+        }
+        IntentActionAvailability::Unknown => {
+            "Step availability is unknown — cannot guarantee execution.".to_string()
+        }
+    };
+
+    PlanStepTruth {
+        step_description: step.to_string(),
+        action: action.to_string(),
+        availability: classification.availability,
+        backed_by_host: classification.availability == IntentActionAvailability::HostBacked,
+        caveat,
+    }
+}
+
+/// Filter a list of actions to only those that are suggestable in the current context.
+#[allow(dead_code)]
+#[must_use]
+pub fn filter_suggestable_actions(
+    actions: &[&str],
+    mode: RuntimeMode,
+    host_available: bool,
+) -> Vec<String> {
+    actions
+        .iter()
+        .filter(|a| {
+            let c = classify_intent_action(a, mode, host_available);
+            c.availability.is_suggestable()
+        })
+        .map(|a| (*a).to_string())
+        .collect()
+}
+
+// ── Export-tools and serve-mcp inventory truth contract ─────────────────────
+// Bead 1g7z0.29.5.3: Types that track where tool inventories come from,
+// whether tools are actually reachable, and what the MCP surface state is.
+// These prevent FWC from silently inventing tool availability.
+
+/// Where a tool listing was sourced from.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolInventorySource {
+    /// Tools exported from live host inventory RPC (authoritative, fresh).
+    LiveHostInventory,
+    /// Tools derived from local workspace manifest (stale, offline).
+    WorkspaceManifest,
+    /// Tools from embedded static catalog (always available, never live).
+    StaticCatalog,
+    /// Source is unknown or not yet determined.
+    Unknown,
+}
+
+#[allow(dead_code)]
+impl ToolInventorySource {
+    /// Returns `true` if this source reflects live, authoritative state.
+    #[must_use]
+    pub fn is_authoritative(&self) -> bool {
+        matches!(self, Self::LiveHostInventory)
+    }
+
+    /// Returns `true` if this source is offline (not backed by a live host).
+    #[must_use]
+    pub fn is_offline(&self) -> bool {
+        matches!(self, Self::WorkspaceManifest | Self::StaticCatalog | Self::Unknown)
+    }
+
+    /// Stable tag for serialization and display.
+    #[must_use]
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Self::LiveHostInventory => "live_host_inventory",
+            Self::WorkspaceManifest => "workspace_manifest",
+            Self::StaticCatalog => "static_catalog",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// Human-readable freshness caveat for this source.
+    #[must_use]
+    pub fn freshness_caveat(&self) -> &'static str {
+        match self {
+            Self::LiveHostInventory => "Live data from host; reflects current state.",
+            Self::WorkspaceManifest => "Derived from local manifest; may be stale.",
+            Self::StaticCatalog => "Embedded static catalog; never reflects live state.",
+            Self::Unknown => "Source unknown; treat as potentially stale.",
+        }
+    }
+}
+
+/// Whether a specific tool is actually usable right now.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolAvailability {
+    /// Tool is available and backed by running host.
+    Live,
+    /// Tool exists but host is not reachable.
+    Unavailable,
+    /// Tool/operation not supported by this connector.
+    Unsupported,
+    /// Tool is withheld due to auth/zone/policy scope.
+    Withheld,
+    /// Availability is not known.
+    Unknown,
+}
+
+#[allow(dead_code)]
+impl ToolAvailability {
+    /// Returns `true` only if the tool can be invoked right now.
+    #[must_use]
+    pub fn is_usable(&self) -> bool {
+        matches!(self, Self::Live)
+    }
+
+    /// Stable tag for serialization and display.
+    #[must_use]
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Self::Live => "live",
+            Self::Unavailable => "unavailable",
+            Self::Unsupported => "unsupported",
+            Self::Withheld => "withheld",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// Human-readable explanation for this availability state.
+    #[must_use]
+    pub fn explanation(&self) -> &'static str {
+        match self {
+            Self::Live => "Tool is live and backed by a running host.",
+            Self::Unavailable => "Tool exists but the host is not reachable.",
+            Self::Unsupported => "Tool or operation is not supported by this connector.",
+            Self::Withheld => "Tool is withheld due to auth, zone, or policy scope.",
+            Self::Unknown => "Tool availability has not been determined.",
+        }
+    }
+}
+
+/// Provenance record for an exported tool — tracks where it came from and
+/// whether it is actually usable.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportedToolProvenance {
+    /// Tool identifier.
+    pub tool_name: String,
+    /// Connector that owns the tool.
+    pub connector_id: String,
+    /// Where the tool listing came from.
+    pub source: ToolInventorySource,
+    /// Whether the tool is actually usable.
+    pub availability: ToolAvailability,
+    /// Whether this reflects live state.
+    pub authoritative: bool,
+    /// Freshness/scope caveat.
+    pub caveat: String,
+}
+
+/// Build an [`ExportedToolProvenance`] with derived authoritative + caveat fields.
+#[allow(dead_code)]
+#[must_use]
+pub fn tool_provenance(
+    tool_name: &str,
+    connector_id: &str,
+    source: ToolInventorySource,
+    availability: ToolAvailability,
+) -> ExportedToolProvenance {
+    let authoritative = source.is_authoritative() && availability.is_usable();
+    let caveat = source.freshness_caveat().to_string();
+    ExportedToolProvenance {
+        tool_name: tool_name.to_string(),
+        connector_id: connector_id.to_string(),
+        source,
+        availability,
+        authoritative,
+        caveat,
+    }
+}
+
+/// State of the MCP surface that `serve-mcp` exposes.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpSurfaceState {
+    /// MCP surface is serving live host-backed tools.
+    LiveServing,
+    /// MCP surface is serving from offline/stale data (explicit mode).
+    OfflineServing,
+    /// MCP surface refused to start because live host truth is unavailable.
+    Refused,
+    /// MCP surface is serving but with known gaps.
+    Degraded {
+        /// Reason the surface is degraded.
+        reason: String,
+    },
+}
+
+#[allow(dead_code)]
+impl McpSurfaceState {
+    /// Returns `true` if the MCP surface is healthy (live serving).
+    #[must_use]
+    pub fn is_healthy(&self) -> bool {
+        matches!(self, Self::LiveServing)
+    }
+
+    /// Stable tag for serialization and display.
+    #[must_use]
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Self::LiveServing => "live_serving",
+            Self::OfflineServing => "offline_serving",
+            Self::Refused => "refused",
+            Self::Degraded { .. } => "degraded",
+        }
+    }
+}
+
+/// Commands related to tool export and MCP serving.
+#[allow(dead_code)]
+pub const EXPORT_COMMANDS: &[&str] = &["export-tools", "serve-mcp"];
+
+/// Returns `true` if the command is an export/serve-mcp command.
+#[allow(dead_code)]
+#[must_use]
+pub fn is_export_command(command: &str) -> bool {
+    EXPORT_COMMANDS.contains(&command)
+}
+
+/// Evaluate what [`McpSurfaceState`] the export surface should be in given
+/// the current runtime mode and host availability.
+#[allow(dead_code)]
+#[must_use]
+pub fn evaluate_export_readiness(mode: RuntimeMode, host_available: bool) -> McpSurfaceState {
+    match mode {
+        RuntimeMode::Live => {
+            if host_available {
+                McpSurfaceState::LiveServing
+            } else {
+                McpSurfaceState::Refused
+            }
+        }
+        RuntimeMode::ExplicitOffline | RuntimeMode::DegradedOffline => {
+            McpSurfaceState::OfflineServing
+        }
+        RuntimeMode::Refused => McpSurfaceState::Refused,
+    }
+}
+
 pub const COMMANDS: &[&str] = &[
     "guide",
     "task",
@@ -2556,16 +3185,26 @@ mod tests {
         HYBRID_MODE_HELP, HostAbsentBehavior, HostAbsentReason, MeshNodeState, MeshNodeSummary,
         OFFLINE_FLAG_HELP, OfflineSource, PackageArtifactSource, PlacementStrategy,
         RegistryCatalogSource, RegistryEntrySummary, RuntimeContext, RuntimeMode,
-        SYNTHETIC_TOKEN_MARKERS, SimulateCapability, WorkflowKind, WorkflowStepReality,
+        SYNTHETIC_TOKEN_MARKERS, SimulateCapability, TEMPLATE_COMMANDS, TemplateDataSource,
+        TemplateProvenance, ValidationOutcome, WorkflowKind, WorkflowStepReality,
         admin_introspection, auth_required_commands, auth_ux_guidance, check_auth_requirement,
         classify_command, classify_token_source, command_requires_host, contains_demo_marker,
         contains_synthetic_token_marker, default_offline_source, demo_source_rejection_payload,
-        discovery_provenance, evaluate_simulate_request, expected_discovery_source, guide_payload,
-        host_absent_error, host_absent_error_payload, is_admin_command, is_discovery_command,
-        live_host_commands, offline_capable_commands, offline_provenance,
-        offline_provenance_payload, planned_payload, resolve_boundary, resolve_runtime_mode,
-        simulate_result, simulate_result_payload, validate_capability_token_source,
-        validate_mode_consistency, validate_package_source, workflow_can_proceed, workflow_kind,
+        discovery_provenance, evaluate_simulate_request, expected_discovery_source,
+        expected_template_source, guide_payload, host_absent_error, host_absent_error_payload,
+        is_admin_command, is_discovery_command, is_template_command, live_host_commands,
+        offline_capable_commands, offline_provenance, offline_provenance_payload, planned_payload,
+        resolve_boundary, resolve_runtime_mode, simulate_result, simulate_result_payload,
+        template_provenance, validate_capability_token_source, validate_mode_consistency,
+        validate_package_source, workflow_can_proceed, workflow_kind,
+    };
+    use super::{
+        INTENT_ACTIONS, IntentActionAvailability, IntentSuggestionKind, classify_intent_action,
+        filter_suggestable_actions, is_intent_action, plan_step_truth,
+    };
+    use super::{
+        EXPORT_COMMANDS, ExportedToolProvenance, McpSurfaceState, ToolAvailability,
+        ToolInventorySource, evaluate_export_readiness, is_export_command, tool_provenance,
     };
     use serde_json::json;
 
@@ -7454,5 +8093,630 @@ mod tests {
         assert!(!is_admin_command("list"));
         assert!(!is_admin_command("invoke"));
         assert!(!is_admin_command("show"));
+    }
+
+    // ── Template, validate, and example materialization truth contract tests ──
+
+    #[test]
+    fn template_data_source_tags_are_stable() {
+        assert_eq!(
+            TemplateDataSource::LiveHostIntrospection.tag(),
+            "live-host-introspection"
+        );
+        assert_eq!(TemplateDataSource::WorkspaceManifest.tag(), "workspace-manifest");
+        assert_eq!(TemplateDataSource::StaticSchema.tag(), "static-schema");
+        assert_eq!(TemplateDataSource::Unknown.tag(), "unknown");
+    }
+
+    #[test]
+    fn template_data_source_serde_roundtrip() {
+        for src in [
+            TemplateDataSource::LiveHostIntrospection,
+            TemplateDataSource::WorkspaceManifest,
+            TemplateDataSource::StaticSchema,
+            TemplateDataSource::Unknown,
+        ] {
+            let json = serde_json::to_string(&src).unwrap();
+            let back: TemplateDataSource = serde_json::from_str(&json).unwrap();
+            assert_eq!(src, back);
+        }
+    }
+
+    #[test]
+    fn template_live_sources_are_authoritative() {
+        assert!(TemplateDataSource::LiveHostIntrospection.is_authoritative());
+    }
+
+    #[test]
+    fn template_offline_sources_are_not_authoritative() {
+        assert!(!TemplateDataSource::WorkspaceManifest.is_authoritative());
+        assert!(!TemplateDataSource::StaticSchema.is_authoritative());
+        assert!(!TemplateDataSource::Unknown.is_authoritative());
+    }
+
+    #[test]
+    fn template_offline_sources_are_offline() {
+        assert!(TemplateDataSource::WorkspaceManifest.is_offline());
+        assert!(TemplateDataSource::StaticSchema.is_offline());
+    }
+
+    #[test]
+    fn template_live_sources_are_not_offline() {
+        assert!(!TemplateDataSource::LiveHostIntrospection.is_offline());
+    }
+
+    #[test]
+    fn template_all_sources_have_freshness_caveat() {
+        for src in [
+            TemplateDataSource::LiveHostIntrospection,
+            TemplateDataSource::WorkspaceManifest,
+            TemplateDataSource::StaticSchema,
+            TemplateDataSource::Unknown,
+        ] {
+            assert!(!src.freshness_caveat().is_empty(), "Empty caveat for {src:?}");
+        }
+    }
+
+    // -- template_provenance --
+
+    #[test]
+    fn template_provenance_live_is_authoritative() {
+        let prov = template_provenance("template", TemplateDataSource::LiveHostIntrospection);
+        assert!(prov.authoritative);
+        assert_eq!(prov.command, "template");
+    }
+
+    #[test]
+    fn template_provenance_offline_is_not_authoritative() {
+        let prov = template_provenance("template", TemplateDataSource::WorkspaceManifest);
+        assert!(!prov.authoritative);
+    }
+
+    #[test]
+    fn template_provenance_has_caveat() {
+        let prov = template_provenance("validate", TemplateDataSource::StaticSchema);
+        assert!(!prov.caveat.is_empty());
+    }
+
+    // -- ValidationOutcome --
+
+    #[test]
+    fn validation_outcome_valid_is_success() {
+        assert!(ValidationOutcome::Valid.is_success());
+    }
+
+    #[test]
+    fn validation_outcome_invalid_is_not_success() {
+        let outcome = ValidationOutcome::Invalid {
+            errors: vec!["missing field".into()],
+        };
+        assert!(!outcome.is_success());
+    }
+
+    #[test]
+    fn validation_outcome_schema_unavailable_is_not_definitive() {
+        assert!(!ValidationOutcome::SchemaUnavailable.is_definitive());
+    }
+
+    #[test]
+    fn validation_outcome_offline_validation_is_not_definitive() {
+        assert!(!ValidationOutcome::OfflineValidation.is_definitive());
+    }
+
+    #[test]
+    fn validation_outcome_serde_roundtrip() {
+        for outcome in [
+            ValidationOutcome::Valid,
+            ValidationOutcome::Invalid {
+                errors: vec!["err1".into(), "err2".into()],
+            },
+            ValidationOutcome::SchemaUnavailable,
+            ValidationOutcome::OfflineValidation,
+        ] {
+            let json = serde_json::to_string(&outcome).unwrap();
+            let back: ValidationOutcome = serde_json::from_str(&json).unwrap();
+            assert_eq!(outcome, back);
+        }
+    }
+
+    // -- TEMPLATE_COMMANDS --
+
+    #[test]
+    fn template_commands_is_nonempty() {
+        assert!(!TEMPLATE_COMMANDS.is_empty());
+    }
+
+    #[test]
+    fn template_commands_contains_expected() {
+        assert!(is_template_command("template"));
+        assert!(is_template_command("validate"));
+        assert!(is_template_command("examples"));
+    }
+
+    #[test]
+    fn template_commands_excludes_non_template() {
+        assert!(!is_template_command("invoke"));
+        assert!(!is_template_command("list"));
+        assert!(!is_template_command("guide"));
+    }
+
+    // -- expected_template_source --
+
+    #[test]
+    fn expected_template_source_live_is_introspection() {
+        let src = expected_template_source("template", RuntimeMode::Live);
+        assert_eq!(src, Some(TemplateDataSource::LiveHostIntrospection));
+    }
+
+    #[test]
+    fn expected_template_source_offline_is_workspace_manifest() {
+        let src = expected_template_source("validate", RuntimeMode::ExplicitOffline);
+        assert_eq!(src, Some(TemplateDataSource::WorkspaceManifest));
+    }
+
+    #[test]
+    fn expected_template_source_degraded_is_workspace_manifest() {
+        let src = expected_template_source("examples", RuntimeMode::DegradedOffline);
+        assert_eq!(src, Some(TemplateDataSource::WorkspaceManifest));
+    }
+
+    #[test]
+    fn expected_template_source_refused_is_none() {
+        let src = expected_template_source("template", RuntimeMode::Refused);
+        assert!(src.is_none());
+    }
+
+    #[test]
+    fn expected_template_source_non_template_is_none() {
+        let src = expected_template_source("invoke", RuntimeMode::Live);
+        assert!(src.is_none());
+    }
+
+    // ── Intent and planning layer truth contract tests ────────────────────
+
+    #[test]
+    fn intent_availability_host_backed_is_executable() {
+        assert!(IntentActionAvailability::HostBacked.is_executable());
+    }
+
+    #[test]
+    fn intent_availability_offline_only_is_executable() {
+        assert!(IntentActionAvailability::OfflineOnly.is_executable());
+    }
+
+    #[test]
+    fn intent_availability_planned_is_not_executable() {
+        assert!(!IntentActionAvailability::Planned.is_executable());
+    }
+
+    #[test]
+    fn intent_availability_unsupported_is_not_executable() {
+        assert!(!IntentActionAvailability::Unsupported.is_executable());
+    }
+
+    #[test]
+    fn intent_availability_unknown_is_not_executable() {
+        assert!(!IntentActionAvailability::Unknown.is_executable());
+    }
+
+    #[test]
+    fn intent_availability_host_backed_is_suggestable() {
+        assert!(IntentActionAvailability::HostBacked.is_suggestable());
+    }
+
+    #[test]
+    fn intent_availability_planned_is_suggestable() {
+        assert!(IntentActionAvailability::Planned.is_suggestable());
+    }
+
+    #[test]
+    fn intent_availability_unsupported_is_suggestable() {
+        assert!(IntentActionAvailability::Unsupported.is_suggestable());
+    }
+
+    #[test]
+    fn intent_availability_unknown_is_not_suggestable() {
+        assert!(!IntentActionAvailability::Unknown.is_suggestable());
+    }
+
+    #[test]
+    fn intent_availability_tags_stable() {
+        assert_eq!(IntentActionAvailability::HostBacked.tag(), "host_backed");
+        assert_eq!(IntentActionAvailability::OfflineOnly.tag(), "offline_only");
+        assert_eq!(IntentActionAvailability::Planned.tag(), "planned");
+        assert_eq!(IntentActionAvailability::Unsupported.tag(), "unsupported");
+        assert_eq!(IntentActionAvailability::Unknown.tag(), "unknown");
+    }
+
+    #[test]
+    fn intent_availability_labels_nonempty() {
+        for variant in &[
+            IntentActionAvailability::HostBacked,
+            IntentActionAvailability::OfflineOnly,
+            IntentActionAvailability::Planned,
+            IntentActionAvailability::Unsupported,
+            IntentActionAvailability::Unknown,
+        ] {
+            assert!(!variant.label().is_empty());
+        }
+    }
+
+    #[test]
+    fn intent_availability_serde_roundtrip() {
+        let original = IntentActionAvailability::HostBacked;
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: IntentActionAvailability = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, restored);
+    }
+
+    #[test]
+    fn intent_suggestion_execute_now_requires_host() {
+        assert!(IntentSuggestionKind::ExecuteNow.requires_host());
+    }
+
+    #[test]
+    fn intent_suggestion_offline_preparation_does_not_require_host() {
+        assert!(!IntentSuggestionKind::OfflinePreparation.requires_host());
+    }
+
+    #[test]
+    fn intent_suggestion_remediation_does_not_require_host() {
+        assert!(!IntentSuggestionKind::Remediation.requires_host());
+    }
+
+    #[test]
+    fn intent_suggestion_informational_does_not_require_host() {
+        assert!(!IntentSuggestionKind::Informational.requires_host());
+    }
+
+    #[test]
+    fn intent_suggestion_tags_stable() {
+        assert_eq!(IntentSuggestionKind::ExecuteNow.tag(), "execute_now");
+        assert_eq!(IntentSuggestionKind::OfflinePreparation.tag(), "offline_preparation");
+        assert_eq!(IntentSuggestionKind::Remediation.tag(), "remediation");
+        assert_eq!(IntentSuggestionKind::Informational.tag(), "informational");
+    }
+
+    #[test]
+    fn classify_intent_live_with_host_is_host_backed() {
+        let c = classify_intent_action("invoke", RuntimeMode::Live, true);
+        assert_eq!(c.availability, IntentActionAvailability::HostBacked);
+        assert_eq!(c.suggestion_kind, IntentSuggestionKind::ExecuteNow);
+        assert!(c.host_required);
+        assert!(c.caveat.is_none());
+    }
+
+    #[test]
+    fn classify_intent_live_no_host_is_remediation() {
+        let c = classify_intent_action("invoke", RuntimeMode::Live, false);
+        assert_eq!(c.availability, IntentActionAvailability::Unsupported);
+        assert_eq!(c.suggestion_kind, IntentSuggestionKind::Remediation);
+        assert!(c.caveat.as_deref().unwrap().contains("unavailable"));
+    }
+
+    #[test]
+    fn classify_intent_explicit_offline_is_offline_only() {
+        let c = classify_intent_action("config", RuntimeMode::ExplicitOffline, false);
+        assert_eq!(c.availability, IntentActionAvailability::OfflineOnly);
+        assert_eq!(c.suggestion_kind, IntentSuggestionKind::OfflinePreparation);
+        assert!(!c.host_required);
+    }
+
+    #[test]
+    fn classify_intent_degraded_offline_is_offline_only() {
+        let c = classify_intent_action("update", RuntimeMode::DegradedOffline, false);
+        assert_eq!(c.availability, IntentActionAvailability::OfflineOnly);
+    }
+
+    #[test]
+    fn classify_intent_refused_is_unsupported() {
+        let c = classify_intent_action("enable", RuntimeMode::Refused, false);
+        assert_eq!(c.availability, IntentActionAvailability::Unsupported);
+        assert_eq!(c.suggestion_kind, IntentSuggestionKind::Informational);
+        assert!(c.host_required);
+    }
+
+    #[test]
+    fn plan_step_live_host_is_backed() {
+        let step = plan_step_truth("Run invoke", "invoke", RuntimeMode::Live, true);
+        assert!(step.backed_by_host);
+        assert_eq!(step.availability, IntentActionAvailability::HostBacked);
+        assert!(!step.caveat.is_empty());
+    }
+
+    #[test]
+    fn plan_step_offline_is_not_backed() {
+        let step = plan_step_truth("Prepare config", "config", RuntimeMode::ExplicitOffline, false);
+        assert!(!step.backed_by_host);
+        assert_eq!(step.availability, IntentActionAvailability::OfflineOnly);
+        assert!(!step.caveat.is_empty());
+    }
+
+    #[test]
+    fn plan_step_refused_has_nonempty_caveat() {
+        let step = plan_step_truth("Enable feature", "enable", RuntimeMode::Refused, false);
+        assert!(!step.caveat.is_empty());
+        assert_eq!(step.availability, IntentActionAvailability::Unsupported);
+    }
+
+    #[test]
+    fn intent_actions_is_nonempty() {
+        assert!(!INTENT_ACTIONS.is_empty());
+    }
+
+    #[test]
+    fn intent_actions_contains_expected() {
+        assert!(is_intent_action("invoke"));
+        assert!(is_intent_action("simulate"));
+        assert!(is_intent_action("install"));
+        assert!(is_intent_action("config"));
+        assert!(is_intent_action("enable"));
+        assert!(is_intent_action("disable"));
+    }
+
+    #[test]
+    fn intent_actions_excludes_non_intent() {
+        assert!(!is_intent_action("list"));
+        assert!(!is_intent_action("search"));
+        assert!(!is_intent_action("guide"));
+        assert!(!is_intent_action(""));
+    }
+
+    #[test]
+    fn filter_suggestable_includes_host_backed_in_live() {
+        let actions = vec!["invoke", "simulate", "config"];
+        let result = filter_suggestable_actions(&actions, RuntimeMode::Live, true);
+        assert_eq!(result.len(), 3);
+        assert!(result.contains(&"invoke".to_string()));
+    }
+
+    #[test]
+    fn filter_suggestable_includes_all_in_offline() {
+        let actions = vec!["invoke", "config"];
+        let result = filter_suggestable_actions(&actions, RuntimeMode::ExplicitOffline, false);
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn filter_suggestable_includes_refused() {
+        // Refused maps to Unsupported which IS suggestable (just not executable)
+        let actions = vec!["invoke"];
+        let result = filter_suggestable_actions(&actions, RuntimeMode::Refused, false);
+        assert_eq!(result.len(), 1);
+    }
+
+    // -- Export-tools and serve-mcp inventory truth contract (bead 1g7z0.29.5.3) --
+
+    // ToolInventorySource tests
+
+    #[test]
+    fn tool_inventory_source_tags_are_stable() {
+        assert_eq!(ToolInventorySource::LiveHostInventory.tag(), "live_host_inventory");
+        assert_eq!(ToolInventorySource::WorkspaceManifest.tag(), "workspace_manifest");
+        assert_eq!(ToolInventorySource::StaticCatalog.tag(), "static_catalog");
+        assert_eq!(ToolInventorySource::Unknown.tag(), "unknown");
+    }
+
+    #[test]
+    fn tool_inventory_source_live_is_authoritative() {
+        assert!(ToolInventorySource::LiveHostInventory.is_authoritative());
+    }
+
+    #[test]
+    fn tool_inventory_source_offline_sources_are_not_authoritative() {
+        assert!(!ToolInventorySource::WorkspaceManifest.is_authoritative());
+        assert!(!ToolInventorySource::StaticCatalog.is_authoritative());
+        assert!(!ToolInventorySource::Unknown.is_authoritative());
+    }
+
+    #[test]
+    fn tool_inventory_source_offline_flag() {
+        assert!(!ToolInventorySource::LiveHostInventory.is_offline());
+        assert!(ToolInventorySource::WorkspaceManifest.is_offline());
+        assert!(ToolInventorySource::StaticCatalog.is_offline());
+        assert!(ToolInventorySource::Unknown.is_offline());
+    }
+
+    #[test]
+    fn tool_inventory_source_freshness_caveats_are_nonempty() {
+        assert!(!ToolInventorySource::LiveHostInventory.freshness_caveat().is_empty());
+        assert!(!ToolInventorySource::WorkspaceManifest.freshness_caveat().is_empty());
+        assert!(!ToolInventorySource::StaticCatalog.freshness_caveat().is_empty());
+        assert!(!ToolInventorySource::Unknown.freshness_caveat().is_empty());
+    }
+
+    #[test]
+    fn tool_inventory_source_serde_roundtrip() {
+        let src = ToolInventorySource::LiveHostInventory;
+        let json = serde_json::to_string(&src).unwrap();
+        let back: ToolInventorySource = serde_json::from_str(&json).unwrap();
+        assert_eq!(src, back);
+    }
+
+    // ToolAvailability tests
+
+    #[test]
+    fn tool_availability_only_live_is_usable() {
+        assert!(ToolAvailability::Live.is_usable());
+        assert!(!ToolAvailability::Unavailable.is_usable());
+        assert!(!ToolAvailability::Unsupported.is_usable());
+        assert!(!ToolAvailability::Withheld.is_usable());
+        assert!(!ToolAvailability::Unknown.is_usable());
+    }
+
+    #[test]
+    fn tool_availability_tags_are_stable() {
+        assert_eq!(ToolAvailability::Live.tag(), "live");
+        assert_eq!(ToolAvailability::Unavailable.tag(), "unavailable");
+        assert_eq!(ToolAvailability::Unsupported.tag(), "unsupported");
+        assert_eq!(ToolAvailability::Withheld.tag(), "withheld");
+        assert_eq!(ToolAvailability::Unknown.tag(), "unknown");
+    }
+
+    #[test]
+    fn tool_availability_explanations_are_nonempty() {
+        assert!(!ToolAvailability::Live.explanation().is_empty());
+        assert!(!ToolAvailability::Unavailable.explanation().is_empty());
+        assert!(!ToolAvailability::Unsupported.explanation().is_empty());
+        assert!(!ToolAvailability::Withheld.explanation().is_empty());
+        assert!(!ToolAvailability::Unknown.explanation().is_empty());
+    }
+
+    #[test]
+    fn tool_availability_serde_roundtrip() {
+        let avail = ToolAvailability::Withheld;
+        let json = serde_json::to_string(&avail).unwrap();
+        let back: ToolAvailability = serde_json::from_str(&json).unwrap();
+        assert_eq!(avail, back);
+    }
+
+    // ExportedToolProvenance tests
+
+    #[test]
+    fn tool_provenance_live_source_is_authoritative() {
+        let p = tool_provenance(
+            "list_items",
+            "airtable:saas:0.1",
+            ToolInventorySource::LiveHostInventory,
+            ToolAvailability::Live,
+        );
+        assert!(p.authoritative);
+        assert_eq!(p.tool_name, "list_items");
+        assert_eq!(p.connector_id, "airtable:saas:0.1");
+    }
+
+    #[test]
+    fn tool_provenance_offline_source_is_not_authoritative() {
+        let p = tool_provenance(
+            "list_items",
+            "airtable:saas:0.1",
+            ToolInventorySource::WorkspaceManifest,
+            ToolAvailability::Live,
+        );
+        assert!(!p.authoritative);
+    }
+
+    #[test]
+    fn tool_provenance_live_source_unavailable_is_not_authoritative() {
+        let p = tool_provenance(
+            "list_items",
+            "airtable:saas:0.1",
+            ToolInventorySource::LiveHostInventory,
+            ToolAvailability::Unavailable,
+        );
+        assert!(!p.authoritative);
+    }
+
+    #[test]
+    fn tool_provenance_serializes_correctly() {
+        let p = tool_provenance(
+            "get_user",
+            "github:saas:0.1",
+            ToolInventorySource::StaticCatalog,
+            ToolAvailability::Unsupported,
+        );
+        let json = serde_json::to_value(&p).unwrap();
+        assert_eq!(json["tool_name"], "get_user");
+        assert_eq!(json["connector_id"], "github:saas:0.1");
+        assert_eq!(json["source"], "static_catalog");
+        assert_eq!(json["availability"], "unsupported");
+        assert_eq!(json["authoritative"], false);
+        assert!(!json["caveat"].as_str().unwrap().is_empty());
+    }
+
+    // McpSurfaceState tests
+
+    #[test]
+    fn mcp_surface_live_serving_is_healthy() {
+        assert!(McpSurfaceState::LiveServing.is_healthy());
+    }
+
+    #[test]
+    fn mcp_surface_refused_is_not_healthy() {
+        assert!(!McpSurfaceState::Refused.is_healthy());
+    }
+
+    #[test]
+    fn mcp_surface_degraded_is_not_healthy() {
+        let state = McpSurfaceState::Degraded {
+            reason: "partial connector failure".to_string(),
+        };
+        assert!(!state.is_healthy());
+    }
+
+    #[test]
+    fn mcp_surface_offline_serving_is_not_healthy() {
+        assert!(!McpSurfaceState::OfflineServing.is_healthy());
+    }
+
+    #[test]
+    fn mcp_surface_tags_are_stable() {
+        assert_eq!(McpSurfaceState::LiveServing.tag(), "live_serving");
+        assert_eq!(McpSurfaceState::OfflineServing.tag(), "offline_serving");
+        assert_eq!(McpSurfaceState::Refused.tag(), "refused");
+        let degraded = McpSurfaceState::Degraded {
+            reason: "x".to_string(),
+        };
+        assert_eq!(degraded.tag(), "degraded");
+    }
+
+    #[test]
+    fn mcp_surface_serde_roundtrip() {
+        let state = McpSurfaceState::LiveServing;
+        let json = serde_json::to_string(&state).unwrap();
+        let back: McpSurfaceState = serde_json::from_str(&json).unwrap();
+        assert_eq!(state, back);
+    }
+
+    // EXPORT_COMMANDS and is_export_command tests
+
+    #[test]
+    fn export_commands_is_nonempty() {
+        assert!(!EXPORT_COMMANDS.is_empty());
+    }
+
+    #[test]
+    fn export_commands_contains_expected() {
+        assert!(is_export_command("export-tools"));
+        assert!(is_export_command("serve-mcp"));
+    }
+
+    #[test]
+    fn export_commands_excludes_non_export() {
+        assert!(!is_export_command("list"));
+        assert!(!is_export_command("invoke"));
+        assert!(!is_export_command("guide"));
+    }
+
+    // evaluate_export_readiness tests
+
+    #[test]
+    fn export_readiness_live_host_available() {
+        let state = evaluate_export_readiness(RuntimeMode::Live, true);
+        assert_eq!(state, McpSurfaceState::LiveServing);
+    }
+
+    #[test]
+    fn export_readiness_live_no_host() {
+        let state = evaluate_export_readiness(RuntimeMode::Live, false);
+        assert_eq!(state, McpSurfaceState::Refused);
+    }
+
+    #[test]
+    fn export_readiness_explicit_offline() {
+        let state = evaluate_export_readiness(RuntimeMode::ExplicitOffline, false);
+        assert_eq!(state, McpSurfaceState::OfflineServing);
+    }
+
+    #[test]
+    fn export_readiness_degraded_offline() {
+        let state = evaluate_export_readiness(RuntimeMode::DegradedOffline, false);
+        assert_eq!(state, McpSurfaceState::OfflineServing);
+    }
+
+    #[test]
+    fn export_readiness_refused_mode() {
+        let state = evaluate_export_readiness(RuntimeMode::Refused, false);
+        assert_eq!(state, McpSurfaceState::Refused);
     }
 }

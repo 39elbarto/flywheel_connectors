@@ -417,7 +417,7 @@ impl CronConnector {
         Ok(json!({
             "connector_id": "fcp.cron",
             "version": "0.1.0",
-            "status": if self.configured { "ready" } else { "unconfigured" },
+            "status": if self.configured { "ok" } else { "degraded" },
         }))
     }
 

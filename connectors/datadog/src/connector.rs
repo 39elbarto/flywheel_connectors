@@ -291,7 +291,7 @@ impl DatadogConnector {
         Ok(json!({
             "connector_id": "fcp.datadog",
             "version": "0.1.0",
-            "status": if self.config.is_some() { "ready" } else { "unconfigured" },
+            "status": if self.config.is_some() { "ok" } else { "degraded" },
             "provisioning": self.provisioning_readiness(),
         }))
     }
@@ -1971,7 +1971,7 @@ mod tests {
             base_url: "https://api.datadoghq.eu/api/v1".into(),
         });
         let result = c.handle_self_check().await.unwrap();
-        assert_eq!(result["status"], "ready");
+        assert_eq!(result["status"], "ok");
         let prov = &result["provisioning"];
         assert_eq!(prov["auth_mode"], "api_keys");
         assert_eq!(prov["region"], "eu1");

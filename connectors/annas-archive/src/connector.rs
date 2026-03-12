@@ -138,7 +138,7 @@ impl AnnasArchiveConnector {
         Ok(json!({
             "connector_id": "fcp.annas-archive",
             "version": "0.1.0",
-            "status": if self.client.is_some() { "ready" } else { "unconfigured" },
+            "status": if self.client.is_some() { "ok" } else { "degraded" },
         }))
     }
 
@@ -787,7 +787,7 @@ mod tests {
         let resp = c.handle_self_check().await.unwrap();
         assert_eq!(resp["connector_id"], "fcp.annas-archive");
         assert_eq!(resp["version"], "0.1.0");
-        assert_eq!(resp["status"], "unconfigured");
+        assert_eq!(resp["status"], "degraded");
     }
 
     #[fcp_async_core::runtime::test]
@@ -795,7 +795,7 @@ mod tests {
         let mut c = connector();
         c.handle_configure(json!({})).await.unwrap();
         let resp = c.handle_self_check().await.unwrap();
-        assert_eq!(resp["status"], "ready");
+        assert_eq!(resp["status"], "ok");
     }
 
     #[fcp_async_core::runtime::test]

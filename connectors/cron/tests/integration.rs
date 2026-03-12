@@ -135,7 +135,7 @@ async fn lifecycle_shutdown() {
 async fn lifecycle_self_check_configured() {
     let c = setup_connector().await;
     let check = c.handle_self_check().await.unwrap();
-    assert_eq!(check["status"], "ready");
+    assert_eq!(check["status"], "ok");
     assert_eq!(check["connector_id"], "fcp.cron");
 }
 

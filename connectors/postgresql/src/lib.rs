@@ -794,7 +794,7 @@ mod tests {
         let c = configured_connector();
         let rt = tokio_runtime();
         let result = rt.block_on(c.handle_self_check()).unwrap();
-        assert_eq!(result["status"], "ready");
+        assert_eq!(result["status"], "ok");
     }
 
     // ===== Introspect tests =====

@@ -145,7 +145,7 @@ async fn lifecycle_configure_handshake_health() {
         .await
         .expect("health should succeed");
     // Health reports "ready" when configured
-    assert_eq!(health["status"], "ready");
+    assert_eq!(health["status"], "ok");
 }
 
 #[fcp_async_core::runtime::test]

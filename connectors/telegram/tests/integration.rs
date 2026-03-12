@@ -393,7 +393,7 @@ async fn health_configured_and_ready() {
         .handle_health()
         .await
         .expect("health should succeed");
-    assert_eq!(result["status"], "ready");
+    assert_eq!(result["status"], "ok");
 }
 
 #[fcp_async_core::test]

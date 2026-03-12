@@ -269,7 +269,7 @@ impl GrafanaConnector {
         Ok(json!({
             "connector_id": "fcp.grafana",
             "version": "0.1.0",
-            "status": if self.config.is_some() { "ready" } else { "unconfigured" },
+            "status": if self.config.is_some() { "ok" } else { "degraded" },
             "provisioning": provisioning,
         }))
     }

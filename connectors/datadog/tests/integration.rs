@@ -140,7 +140,7 @@ async fn self_check_configured() {
         .await
         .unwrap();
     let result = connector.handle_self_check().await.unwrap();
-    assert_eq!(result["status"], "ready");
+    assert_eq!(result["status"], "ok");
 }
 
 #[fcp_async_core::runtime::test]

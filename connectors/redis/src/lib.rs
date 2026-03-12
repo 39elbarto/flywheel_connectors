@@ -912,7 +912,7 @@ mod tests {
         rt.block_on(c.handle_configure(json!({ "api_token": "tok" })))
             .unwrap();
         let sc = rt.block_on(c.handle_self_check()).unwrap();
-        assert_eq!(sc["status"], "ready");
+        assert_eq!(sc["status"], "ok");
     }
 
     // ===== Introspect tests =====

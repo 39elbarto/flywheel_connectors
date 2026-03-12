@@ -62,20 +62,19 @@ async fn lifecycle_shutdown() {
     c.handle_shutdown(json!({})).await.unwrap();
     assert_eq!(c.handle_health().await.unwrap()["status"], "unconfigured");
 }
-
 #[fcp_async_core::runtime::test]
 async fn lifecycle_self_check() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     let check = c.handle_self_check().await.unwrap();
-    assert_eq!(check["status"], "ready");
+    assert_eq!(check["status"], "ok");
 }
 
 #[fcp_async_core::runtime::test]
 async fn lifecycle_self_check_unconfigured() {
     let c = BoxConnector::new();
     let check = c.handle_self_check().await.unwrap();
-    assert_eq!(check["status"], "unconfigured");
+    assert_eq!(check["status"], "degraded");
 }
 
 #[fcp_async_core::runtime::test]

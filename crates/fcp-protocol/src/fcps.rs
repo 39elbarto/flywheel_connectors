@@ -1323,10 +1323,6 @@ mod tests {
 
     #[test]
     fn decode_status_validates_hint_bounds() {
-        use fcp_cbor::SchemaId;
-        use fcp_core::Provenance;
-        use semver::Version;
-
         let zone_id: ZoneId = "z:bounds".parse().expect("zone parse");
         let status = DecodeStatus {
             header: make_test_object_header(),
@@ -1566,7 +1562,7 @@ mod tests {
         let request_bad = SymbolRequest::new(
             header,
             ObjectId::from_bytes([0; 32]),
-            zone_id.clone(),
+            zone_id,
             ZoneKeyId::from_bytes([0; 8]),
             0,
             32,
@@ -2960,7 +2956,7 @@ mod tests {
         let status_with = DecodeStatus {
             header: make_test_object_header(),
             object_id: ObjectId::from_bytes([0; 32]),
-            zone_id: zone_id.clone(),
+            zone_id,
             zone_key_id: ZoneKeyId::from_bytes([0; 8]),
             epoch_id: 0,
             received_unique: 0,

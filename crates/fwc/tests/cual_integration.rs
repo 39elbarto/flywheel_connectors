@@ -33,8 +33,7 @@ fn run_json(args: &[&str]) -> (i32, Value, String) {
     let stderr = String::from_utf8(output.stderr).expect("stderr should be valid UTF-8");
     let payload = serde_json::from_str(stdout.trim()).unwrap_or_else(|error| {
         panic!(
-            "expected JSON output for {:?}: {error}\nstdout:\n{}\nstderr:\n{}",
-            args, stdout, stderr
+            "expected JSON output for {args:?}: {error}\nstdout:\n{stdout}\nstderr:\n{stderr}"
         )
     });
     (code, payload, stderr)

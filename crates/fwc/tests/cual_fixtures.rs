@@ -76,6 +76,7 @@ struct InstallOutputFixture {
     installed_at_iso: String,
 }
 
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Deserialize)]
 struct InstallVerificationFixture {
     publisher_signature_verified: bool,
@@ -210,7 +211,7 @@ fn validate_schema(value: &Value, schema: &Value) -> Result<(), String> {
     }
 }
 
-fn value_type_name(value: &Value) -> &'static str {
+const fn value_type_name(value: &Value) -> &'static str {
     match value {
         Value::Null => "null",
         Value::Bool(_) => "boolean",
@@ -264,12 +265,11 @@ fn validate_pipeline_fixture(relative: &str) -> Result<(), String> {
         }
     }
 
-    let mut queue = VecDeque::from_iter(
-        in_degree
-            .iter()
-            .filter(|(_, degree)| **degree == 0)
-            .map(|(id, _)| id.clone()),
-    );
+    let mut queue = in_degree
+        .iter()
+        .filter(|(_, degree)| **degree == 0)
+        .map(|(id, _)| id.clone())
+        .collect::<VecDeque<_>>();
     let mut visited = 0usize;
 
     while let Some(id) = queue.pop_front() {

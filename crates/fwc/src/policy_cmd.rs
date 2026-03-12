@@ -2593,7 +2593,7 @@ mod tests {
 
     #[test]
     fn validate_rollback_transition_invalid() {
-        let bundle_a = test_bundle("bundle-a", ZoneId::work(), 1, None);
+        let _bundle_a = test_bundle("bundle-a", ZoneId::work(), 1, None);
         let bundle_b = test_bundle("bundle-b", ZoneId::work(), 2, Some("bundle-a"));
         let state = PolicyBundleState::new(bundle_b, Utc::now());
         let bundle_c = test_bundle("bundle-c", ZoneId::work(), 3, None);

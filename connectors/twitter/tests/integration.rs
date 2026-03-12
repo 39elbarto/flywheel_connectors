@@ -27,13 +27,31 @@ use fcp_twitter::TwitterConnector;
 // Helpers
 // ============================================================================
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> fcp_core::CapabilityToken {
+fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> fcp_core::CapabilityToken {
+    let cap = match op {
+        "twitter.user.me" | "twitter.user.timeline" | "twitter.user.mentions" => {
+            "twitter.read.account"
+        }
+        "twitter.tweet.retweet"
+        | "twitter.tweet.unretweet"
+        | "twitter.tweet.like"
+        | "twitter.tweet.unlike"
+        | "twitter.tweet.create"
+        | "twitter.tweet.reply"
+        | "twitter.tweet.delete" => "twitter.write.tweets",
+        "twitter.dm.send" => "twitter.write.dms",
+        "twitter.dm.events" => "twitter.read.dms",
+        "twitter.stream.rules.list"
+        | "twitter.stream.rules.add"
+        | "twitter.stream.rules.delete" => "twitter.stream.read",
+        _ => "twitter.read.public",
+    };
     let now = Utc::now();
     let cose = CapabilityTokenBuilder::new()
         .capability_id(cap)
         .zone_id("z:work")
         .principal("user:test")
-        .operations(&[cap])
+        .operations(&[op])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
         .sign(signing_key)

@@ -1989,14 +1989,20 @@ mod tests {
 
     fn generate_valid_token(
         signing_key: &Ed25519SigningKey,
-        cap: &str,
+        op: &str,
     ) -> fcp_core::CapabilityToken {
+        let cap = match op {
+            "telegram.send_message" | "telegram.send_media" | "telegram.answer_callback_query" => {
+                "telegram.send"
+            }
+            _ => "telegram.read",
+        };
         let now = Utc::now();
         let cose = CapabilityTokenBuilder::new()
             .capability_id(cap)
             .zone_id("z:work")
             .principal("user:test")
-            .operations(&[cap])
+            .operations(&[op])
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
             .sign(signing_key)

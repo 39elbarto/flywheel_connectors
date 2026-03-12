@@ -28,13 +28,17 @@ use fcp_youtube::connector::YouTubeConnector;
 // Helpers
 // ============================================================================
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> fcp_core::CapabilityToken {
+fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> fcp_core::CapabilityToken {
+    let cap = match op {
+        "youtube.post_comment" | "youtube.upload_caption" => "youtube.write",
+        _ => "youtube.read",
+    };
     let now = Utc::now();
     let cose = CapabilityTokenBuilder::new()
         .capability_id(cap)
         .zone_id("z:work")
         .principal("user:test")
-        .operations(&[cap])
+        .operations(&[op])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
         .sign(signing_key)

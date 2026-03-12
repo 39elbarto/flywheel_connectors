@@ -3469,13 +3469,23 @@ mod tests {
     use fcp_manifest::ConnectorManifest;
     use std::path::PathBuf;
 
-    fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> CapabilityToken {
+    fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+        let cap = match op {
+            "jira.delete_issue" | "jira.worklog.delete" | "jira.automation.rule.delete" => "jira.delete",
+            "jira.create_issue" | "jira.update_issue" | "jira.transition_issue"
+            | "jira.move_to_sprint" | "jira.add_comment" | "jira.worklog.add"
+            | "jira.worklog.update" | "jira.add_attachment"
+            | "jira.automation.rule.create" | "jira.automation.rule.update"
+            | "jira.automation.rule.enable" | "jira.automation.rule.disable"
+            | "jira.sync.push_bead" => "jira.write",
+            _ => "jira.read",
+        };
         let now = Utc::now();
         let cose = CapabilityTokenBuilder::new()
             .capability_id(cap)
             .zone_id("z:work")
             .principal("user:test")
-            .operations(&[cap])
+            .operations(&[op])
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
             .sign(signing_key)

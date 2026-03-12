@@ -3298,13 +3298,37 @@ mod tests {
         }
     }
 
-    fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> CapabilityToken {
+    fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+        let cap = match op {
+            "openai.chat" | "openai.simple_chat" | "openai.get_usage" => "openai.chat",
+            "openai.embeddings" => "openai.embeddings",
+            "openai.images.generate" => "openai.images",
+            "openai.audio.transcribe" => "openai.audio.transcribe",
+            "openai.audio.tts" => "openai.audio.tts",
+            "openai.finetune.create" => "openai.finetune.create",
+            "openai.finetune.list" => "openai.finetune.list",
+            "openai.finetune.get" => "openai.finetune.get",
+            "openai.finetune.cancel" => "openai.finetune.cancel",
+            "openai.finetune.events" => "openai.finetune.events",
+            "openai.assistants.create" => "openai.assistants.create",
+            "openai.assistants.list" => "openai.assistants.list",
+            "openai.assistants.get" => "openai.assistants.get",
+            "openai.assistants.delete" => "openai.assistants.delete",
+            "openai.threads.create" => "openai.threads.create",
+            "openai.threads.get" => "openai.threads.get",
+            "openai.threads.messages.create" => "openai.threads.messages.create",
+            "openai.threads.messages.list" => "openai.threads.messages.list",
+            "openai.threads.runs.create" => "openai.threads.runs.create",
+            "openai.threads.runs.get" => "openai.threads.runs.get",
+            "openai.threads.runs.cancel" => "openai.threads.runs.cancel",
+            _ => "openai.chat",
+        };
         let now = Utc::now();
         let cose = CapabilityTokenBuilder::new()
             .capability_id(cap)
             .zone_id("z:work")
             .principal("user:test")
-            .operations(&[cap])
+            .operations(&[op])
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
             .sign(signing_key)

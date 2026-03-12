@@ -2940,13 +2940,37 @@ mod tests {
     use fcp_manifest::ConnectorManifest;
     use std::path::PathBuf;
 
-    fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> CapabilityToken {
+    fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+        let cap = match op {
+            "twilio.send_message" => "twilio.message",
+            "twilio.create_call" | "twilio.hangup_call" | "twilio.generate_twiml" => {
+                "twilio.voice"
+            }
+            "twilio.whatsapp_send" | "twilio.whatsapp_send_template" => "twilio.whatsapp",
+            "twilio.conversation.create" | "twilio.conversation.message.send" => {
+                "twilio.conversations"
+            }
+            "twilio.conversation.participant.add"
+            | "twilio.conversation.participant.remove" => "twilio.conversations.participants",
+            "twilio.verify.send" | "twilio.verify.check" | "twilio.verify.cancel" => {
+                "twilio.verify"
+            }
+            "twilio.video.room.create" | "twilio.video.room.end" => "twilio.video.rooms.write",
+            "twilio.video.room.get" | "twilio.video.room.list" => "twilio.video.rooms.read",
+            "twilio.video.room.participants" => "twilio.video.participants.read",
+            "twilio.video.recording.list" => "twilio.video.recordings.read",
+            "twilio.webhook.validate_signature"
+            | "twilio.webhook.parse_sms_event"
+            | "twilio.webhook.parse_status_callback"
+            | "twilio.webhook.parse_voice_event" => "twilio.webhook",
+            _ => "twilio.read",
+        };
         let now = Utc::now();
         let cose = CapabilityTokenBuilder::new()
             .capability_id(cap)
             .zone_id("z:work")
             .principal("user:test")
-            .operations(&[cap])
+            .operations(&[op])
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
             .sign(signing_key)

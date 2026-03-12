@@ -1286,13 +1286,20 @@ mod tests {
         matchers::{header, method, path},
     };
 
-    fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> CapabilityToken {
+    fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+        let cap = match op {
+            "anthropic.message" => "anthropic.message",
+            "anthropic.chat" => "anthropic.chat",
+            "anthropic.message.stream" => "anthropic.message.stream",
+            "anthropic.get_usage" => "anthropic.get_usage",
+            _ => "anthropic.message",
+        };
         let now = Utc::now();
         let cose = CapabilityTokenBuilder::new()
             .capability_id(cap)
             .zone_id("z:work")
             .principal("user:test")
-            .operations(&[cap])
+            .operations(&[op])
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
             .sign(signing_key)

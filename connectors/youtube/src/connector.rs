@@ -1198,13 +1198,17 @@ mod tests {
     use fcp_manifest::ConnectorManifest;
     use std::path::PathBuf;
 
-    fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> CapabilityToken {
+    fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+        let cap = match op {
+            "youtube.post_comment" | "youtube.upload_caption" => "youtube.write",
+            _ => "youtube.read",
+        };
         let now = Utc::now();
         let cose = CapabilityTokenBuilder::new()
             .capability_id(cap)
             .zone_id("z:work")
             .principal("user:test")
-            .operations(&[cap])
+            .operations(&[op])
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
             .sign(signing_key)

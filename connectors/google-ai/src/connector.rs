@@ -1419,13 +1419,22 @@ mod tests {
         matchers::{method, path},
     };
 
-    fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> CapabilityToken {
+    fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+        let cap = match op {
+            "google-ai.generate_content" | "google-ai.generate_content_stream" => "google-ai.generate",
+            "google-ai.embed_content" | "google-ai.batch_embed_contents" => "google-ai.embed",
+            "google-ai.count_tokens" | "google-ai.list_models" | "google-ai.get_model" => "google-ai.models",
+            "google-ai.tuning.create" | "google-ai.tuning.list" | "google-ai.tuning.get"
+            | "google-ai.tuning.get_operation" | "google-ai.tuning.cancel" => "google-ai.tuning",
+            "google-ai.get_usage" => "google-ai.usage",
+            _ => "google-ai.generate",
+        };
         let now = Utc::now();
         let cose = CapabilityTokenBuilder::new()
             .capability_id(cap)
             .zone_id("z:work")
             .principal("user:test")
-            .operations(&[cap])
+            .operations(&[op])
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
             .sign(signing_key)

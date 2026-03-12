@@ -4061,13 +4061,50 @@ mod tests {
         matchers::{method, path, query_param},
     };
 
-    fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> CapabilityToken {
+    fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+        let cap = match op {
+            // Mail
+            "m365.mail.list_messages" | "m365.mail.get_message"
+            | "m365.mail.search_messages" | "m365.mail.list_threads"
+            | "m365.mail.list_attachments" => "m365.mail.read",
+            "m365.mail.send_message" | "m365.mail.reply_message"
+            | "m365.mail.forward_message" => "m365.mail.send",
+            "m365.mail.create_draft" | "m365.mail.add_attachment" => "m365.mail.write",
+            // Files
+            "m365.files.list_items" | "m365.files.get_item"
+            | "m365.files.download_file" | "m365.files.search" => "m365.files.read",
+            "m365.files.upload_file" | "m365.files.delete_item"
+            | "m365.files.create_share_link" => "m365.files.write",
+            // Word
+            "m365.word.list_documents" | "m365.word.get_document"
+            | "m365.word.extract_text" | "m365.word.export_document" => "m365.word.read",
+            "m365.word.create_document" | "m365.word.update_document" => "m365.word.write",
+            // OneNote
+            "m365.onenote.list_notebooks" | "m365.onenote.list_sections"
+            | "m365.onenote.list_pages" | "m365.onenote.get_page"
+            | "m365.onenote.get_page_content" => "m365.onenote.read",
+            "m365.onenote.create_page" | "m365.onenote.update_page" => "m365.onenote.write",
+            // Calendar
+            "m365.calendar.list_events" | "m365.calendar.get_event"
+            | "m365.calendar.get_freebusy" => "m365.calendar.read",
+            "m365.calendar.create_event" | "m365.calendar.delete_event"
+            | "m365.calendar.update_event" => "m365.calendar.write",
+            // Tasks
+            "m365.tasks.list_task_lists" | "m365.tasks.list_tasks" => "m365.tasks.read",
+            "m365.tasks.create_task" => "m365.tasks.write",
+            // Subscriptions
+            "m365.subscriptions.create" | "m365.subscriptions.renew"
+            | "m365.subscriptions.delete" => "m365.subscriptions.write",
+            // Delta
+            "m365.delta.sync" => "m365.delta.read",
+            _ => "m365.mail.read",
+        };
         let now = Utc::now();
         let cose = CapabilityTokenBuilder::new()
             .capability_id(cap)
             .zone_id("z:work")
             .principal("user:test")
-            .operations(&[cap])
+            .operations(&[op])
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
             .sign(signing_key)

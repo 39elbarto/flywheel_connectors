@@ -27,13 +27,20 @@ use fcp_zendesk::connector::ZendeskConnector;
 // ============================================================================
 
 /// Generate a valid COSE capability token signed by the given key.
-fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> fcp_core::CapabilityToken {
+fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> fcp_core::CapabilityToken {
+    let cap = match op {
+        "zendesk.create_ticket" | "zendesk.update_ticket" | "zendesk.apply_macro" => {
+            "zendesk.write"
+        }
+        "zendesk.delete_ticket" => "zendesk.delete",
+        _ => "zendesk.read",
+    };
     let now = Utc::now();
     let cose = CapabilityTokenBuilder::new()
         .capability_id(cap)
         .zone_id("z:work")
         .principal("user:test")
-        .operations(&[cap])
+        .operations(&[op])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
         .sign(signing_key)

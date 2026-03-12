@@ -800,6 +800,18 @@ Delivers the core safety story ("zones + explicit authority + auditable operatio
 - `fcp` is retired and no longer part of the supported workspace surface.
 - Runtime-facing `fwc` commands must either hit live `fcp-host` state or fail explicitly. They must not fabricate connector execution, simulated inventory, or placeholder results.
 
+## FWC Truth Model
+
+`fwc` follows a host-first truthful model.
+
+- The command-source classification matrix lives in `crates/fwc/src/catalog.rs` and explicitly marks commands as `live_host`, `offline_artifact`, `hybrid`, or `passthrough`.
+- Runtime resolution is performed before dispatch and yields `live`, `explicit-offline`, `degraded-offline`, or `refused` rather than allowing silent live-to-offline switching.
+- User-facing result semantics are carried by `CommandAvailability` in `crates/fwc/src/readiness.rs`, with explicit states such as `live-runtime`, `offline-artifact`, `unsupported`, `planned`, `unavailable`, `denied`, and `unknown`.
+- Hybrid catalog commands such as `list`, `search`, `show`, `ops`, `schema`, `examples`, `suggest`, `template`, `validate`, and `export-tools` require an explicit `--offline` opt-in for artifact-backed behavior when live host truth is unavailable or not desired.
+- Offline results are useful, but they are not authoritative for current runtime state. They must carry provenance markers and stale-data caveats.
+
+For operator and agent workflows, migration guidance, and evidence-bundle expectations, see [docs/FWC_Host_First_Truthfulness_Playbook.md](docs/FWC_Host_First_Truthfulness_Playbook.md).
+
 ## Project Structure
 
 ```

@@ -943,4 +943,578 @@ mod tests {
         assert_eq!(cloned.name, comp.name);
         assert_eq!(cloned.component_type, comp.component_type);
     }
+
+    // ── PackageOutput JSON shape: field types ────────────────
+
+    #[test]
+    fn package_output_all_string_fields_are_json_strings() {
+        let output = PackageOutput {
+            output_dir: PathBuf::from("/a"),
+            binary_path: PathBuf::from("/b"),
+            manifest_path: PathBuf::from("/c"),
+            sbom_path: Some(PathBuf::from("/d")),
+            build_metadata_path: PathBuf::from("/e"),
+            binary_sha256: "fff".to_string(),
+            connector_id: "x:y:1".to_string(),
+            version: "1".to_string(),
+        };
+        let v: serde_json::Value = serde_json::to_value(&output).unwrap();
+        assert!(v["binary_sha256"].is_string());
+        assert!(v["connector_id"].is_string());
+        assert!(v["version"].is_string());
+        assert!(v["sbom_path"].is_string());
+    }
+
+    #[test]
+    fn package_output_deserialize_unknown_fields_ignored() {
+        // serde default: unknown fields are ignored during deserialization
+        let json = r#"{
+            "output_dir": "/tmp",
+            "binary_path": "/tmp/bin",
+            "manifest_path": "/tmp/m.toml",
+            "build_metadata_path": "/tmp/b.json",
+            "binary_sha256": "abc",
+            "connector_id": "c:t:1",
+            "version": "1.0.0",
+            "extra_field": "should be ignored",
+            "another_extra": 42
+        }"#;
+        let output: PackageOutput = serde_json::from_str(json).unwrap();
+        assert_eq!(output.connector_id, "c:t:1");
+    }
+
+    // ── BuildMetadata edge cases ─────────────────────────────
+
+    #[test]
+    fn build_metadata_all_optional_none_roundtrip() {
+        let meta = BuildMetadata {
+            rust_version: String::new(),
+            cargo_version: String::new(),
+            target_triple: String::new(),
+            build_timestamp: String::new(),
+            profile: String::new(),
+            git_commit: None,
+            git_dirty: None,
+            features: vec![],
+            build_env: std::collections::HashMap::new(),
+            cargo_flags: vec![],
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        let back: BuildMetadata = serde_json::from_str(&json).unwrap();
+        assert!(back.rust_version.is_empty());
+        assert!(back.git_commit.is_none());
+        assert!(back.git_dirty.is_none());
+    }
+
+    #[test]
+    fn build_metadata_many_env_vars() {
+        let mut env = std::collections::HashMap::new();
+        for i in 0..50 {
+            env.insert(format!("VAR_{i}"), format!("value_{i}"));
+        }
+        let meta = BuildMetadata {
+            rust_version: "1.85.0".to_string(),
+            cargo_version: "1.85.0".to_string(),
+            target_triple: "x86_64".to_string(),
+            build_timestamp: "now".to_string(),
+            profile: "release".to_string(),
+            git_commit: None,
+            git_dirty: None,
+            features: vec![],
+            build_env: env,
+            cargo_flags: vec![],
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        let back: BuildMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.build_env.len(), 50);
+        assert_eq!(back.build_env["VAR_0"], "value_0");
+        assert_eq!(back.build_env["VAR_49"], "value_49");
+    }
+
+    #[test]
+    fn build_metadata_env_vars_with_special_chars() {
+        let mut env = std::collections::HashMap::new();
+        env.insert(
+            "RUSTFLAGS".to_string(),
+            "-C link-arg=-Wl,--no-as-needed -ldl".to_string(),
+        );
+        env.insert(
+            "CARGO_ENCODED_RUSTFLAGS".to_string(),
+            "-Cdebuginfo=0\x1f-Csplit-debuginfo=off".to_string(),
+        );
+        let meta = BuildMetadata {
+            rust_version: "1.85.0".to_string(),
+            cargo_version: "1.85.0".to_string(),
+            target_triple: "x86_64".to_string(),
+            build_timestamp: "now".to_string(),
+            profile: "release".to_string(),
+            git_commit: None,
+            git_dirty: None,
+            features: vec![],
+            build_env: env,
+            cargo_flags: vec![],
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        let back: BuildMetadata = serde_json::from_str(&json).unwrap();
+        assert!(back.build_env["RUSTFLAGS"].contains("--no-as-needed"));
+    }
+
+    #[test]
+    fn build_metadata_many_features() {
+        let features: Vec<String> = (0..20).map(|i| format!("feature_{i}")).collect();
+        let meta = BuildMetadata {
+            rust_version: "1.85.0".to_string(),
+            cargo_version: "1.85.0".to_string(),
+            target_triple: "x86_64".to_string(),
+            build_timestamp: "now".to_string(),
+            profile: "release".to_string(),
+            git_commit: None,
+            git_dirty: None,
+            features,
+            build_env: std::collections::HashMap::new(),
+            cargo_flags: vec![],
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        let back: BuildMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.features.len(), 20);
+        assert_eq!(back.features[0], "feature_0");
+        assert_eq!(back.features[19], "feature_19");
+    }
+
+    #[test]
+    fn build_metadata_pretty_json_contains_all_keys() {
+        let meta = BuildMetadata {
+            rust_version: "1.85.0".to_string(),
+            cargo_version: "1.85.0".to_string(),
+            target_triple: "x86_64".to_string(),
+            build_timestamp: "now".to_string(),
+            profile: "release".to_string(),
+            git_commit: Some("abc".to_string()),
+            git_dirty: Some(true),
+            features: vec![],
+            build_env: std::collections::HashMap::new(),
+            cargo_flags: vec![],
+        };
+        let json = serde_json::to_string_pretty(&meta).unwrap();
+        assert!(json.contains("rust_version"));
+        assert!(json.contains("cargo_version"));
+        assert!(json.contains("target_triple"));
+        assert!(json.contains("build_timestamp"));
+        assert!(json.contains("profile"));
+        assert!(json.contains("git_commit"));
+        assert!(json.contains("git_dirty"));
+        assert!(json.contains("features"));
+        assert!(json.contains("build_env"));
+        assert!(json.contains("cargo_flags"));
+    }
+
+    // ── SimpleSbom edge cases ────────────────────────────────
+
+    #[test]
+    fn simple_sbom_many_dependencies() {
+        let deps: Vec<SbomDependency> = (0..100)
+            .map(|i| SbomDependency {
+                name: format!("crate-{i}"),
+                version: format!("{i}.0.0"),
+                purl: format!("pkg:cargo/crate-{i}@{i}.0.0"),
+                source: "crates.io".to_string(),
+            })
+            .collect();
+        let sbom = SimpleSbom {
+            format_version: "1.0".to_string(),
+            created: "2026-01-01T00:00:00Z".to_string(),
+            tool: "fwc 1.0.0".to_string(),
+            component: SbomComponent {
+                component_type: "application".to_string(),
+                name: "big-conn".to_string(),
+                version: "1.0.0".to_string(),
+                purl: "pkg:fcp/big-conn@1.0.0".to_string(),
+            },
+            dependencies: deps,
+        };
+        let json = serde_json::to_string(&sbom).unwrap();
+        let back: SimpleSbom = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.dependencies.len(), 100);
+        assert_eq!(back.dependencies[0].name, "crate-0");
+        assert_eq!(back.dependencies[99].name, "crate-99");
+    }
+
+    #[test]
+    fn simple_sbom_json_shape() {
+        let sbom = SimpleSbom {
+            format_version: "1.0".to_string(),
+            created: "2026-01-01T00:00:00Z".to_string(),
+            tool: "fwc".to_string(),
+            component: SbomComponent {
+                component_type: "application".to_string(),
+                name: "test".to_string(),
+                version: "1.0.0".to_string(),
+                purl: "pkg:fcp/test@1.0.0".to_string(),
+            },
+            dependencies: vec![],
+        };
+        let v: serde_json::Value = serde_json::to_value(&sbom).unwrap();
+        assert!(v["format_version"].is_string());
+        assert!(v["created"].is_string());
+        assert!(v["tool"].is_string());
+        assert!(v["component"].is_object());
+        assert!(v["dependencies"].is_array());
+    }
+
+    #[test]
+    fn simple_sbom_component_is_nested_object() {
+        let sbom = SimpleSbom {
+            format_version: "1.0".to_string(),
+            created: "2026-01-01T00:00:00Z".to_string(),
+            tool: "fwc".to_string(),
+            component: SbomComponent {
+                component_type: "application".to_string(),
+                name: "nested-test".to_string(),
+                version: "2.0.0".to_string(),
+                purl: "pkg:fcp/nested-test@2.0.0".to_string(),
+            },
+            dependencies: vec![],
+        };
+        let v: serde_json::Value = serde_json::to_value(&sbom).unwrap();
+        let comp = v["component"].as_object().unwrap();
+        assert_eq!(comp["component_type"].as_str().unwrap(), "application");
+        assert_eq!(comp["name"].as_str().unwrap(), "nested-test");
+        assert_eq!(comp["version"].as_str().unwrap(), "2.0.0");
+        assert!(comp["purl"].as_str().unwrap().starts_with("pkg:fcp/"));
+    }
+
+    // ── SbomDependency edge cases ────────────────────────────
+
+    #[test]
+    fn sbom_dependency_empty_strings() {
+        let dep = SbomDependency {
+            name: String::new(),
+            version: String::new(),
+            purl: String::new(),
+            source: String::new(),
+        };
+        let json = serde_json::to_string(&dep).unwrap();
+        let back: SbomDependency = serde_json::from_str(&json).unwrap();
+        assert!(back.name.is_empty());
+        assert!(back.version.is_empty());
+    }
+
+    #[test]
+    fn sbom_dependency_json_field_count() {
+        let dep = SbomDependency {
+            name: "serde".to_string(),
+            version: "1.0.0".to_string(),
+            purl: "pkg:cargo/serde@1.0.0".to_string(),
+            source: "crates.io".to_string(),
+        };
+        let v: serde_json::Value = serde_json::to_value(&dep).unwrap();
+        assert_eq!(v.as_object().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn sbom_dependency_registry_source() {
+        let dep = SbomDependency {
+            name: "my-lib".to_string(),
+            version: "0.3.0".to_string(),
+            purl: "pkg:cargo/my-lib@0.3.0".to_string(),
+            source: "registry+https://github.com/rust-lang/crates.io-index".to_string(),
+        };
+        let json = serde_json::to_string(&dep).unwrap();
+        let back: SbomDependency = serde_json::from_str(&json).unwrap();
+        assert!(back.source.starts_with("registry+"));
+    }
+
+    // ── SbomComponent edge cases ─────────────────────────────
+
+    #[test]
+    fn sbom_component_json_field_count() {
+        let comp = SbomComponent {
+            component_type: "application".to_string(),
+            name: "test".to_string(),
+            version: "1.0.0".to_string(),
+            purl: "pkg:fcp/test@1.0.0".to_string(),
+        };
+        let v: serde_json::Value = serde_json::to_value(&comp).unwrap();
+        assert_eq!(v.as_object().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn sbom_component_non_application_type() {
+        let comp = SbomComponent {
+            component_type: "library".to_string(),
+            name: "shared-lib".to_string(),
+            version: "0.5.0".to_string(),
+            purl: "pkg:cargo/shared-lib@0.5.0".to_string(),
+        };
+        let json = serde_json::to_string(&comp).unwrap();
+        let back: SbomComponent = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.component_type, "library");
+    }
+
+    #[test]
+    fn sbom_component_empty_fields_roundtrip() {
+        let comp = SbomComponent {
+            component_type: String::new(),
+            name: String::new(),
+            version: String::new(),
+            purl: String::new(),
+        };
+        let json = serde_json::to_string(&comp).unwrap();
+        let back: SbomComponent = serde_json::from_str(&json).unwrap();
+        assert!(back.component_type.is_empty());
+        assert!(back.name.is_empty());
+    }
+
+    // ── OutputFormat variant coverage ────────────────────────
+
+    #[test]
+    fn output_format_copy_semantics() {
+        let a = OutputFormat::Human;
+        let b = a; // Copy
+        let _c = a; // Can still use `a` after copy
+        assert!(matches!(b, OutputFormat::Human));
+    }
+
+    #[test]
+    fn output_format_json_debug_stable() {
+        let fmt = OutputFormat::Json;
+        let d1 = format!("{fmt:?}");
+        let d2 = format!("{fmt:?}");
+        assert_eq!(d1, d2);
+    }
+
+    #[test]
+    fn output_format_human_debug_stable() {
+        let fmt = OutputFormat::Human;
+        let d1 = format!("{fmt:?}");
+        let d2 = format!("{fmt:?}");
+        assert_eq!(d1, d2);
+    }
+
+    // ── PackageArgs edge cases ───────────────────────────────
+
+    #[test]
+    fn package_args_empty_cargo_flags() {
+        let args = PackageArgs {
+            path: PathBuf::from("."),
+            output: None,
+            skip_sbom: false,
+            release: true,
+            cargo_flags: vec![],
+            format: OutputFormat::Human,
+        };
+        assert!(args.cargo_flags.is_empty());
+    }
+
+    #[test]
+    fn package_args_many_cargo_flags() {
+        let args = PackageArgs {
+            path: PathBuf::from("."),
+            output: None,
+            skip_sbom: false,
+            release: true,
+            cargo_flags: vec![
+                "--locked".to_string(),
+                "--target".to_string(),
+                "x86_64-unknown-linux-gnu".to_string(),
+                "--features".to_string(),
+                "tls,compression".to_string(),
+                "--no-default-features".to_string(),
+            ],
+            format: OutputFormat::Json,
+        };
+        assert_eq!(args.cargo_flags.len(), 6);
+    }
+
+    #[test]
+    fn package_args_skip_sbom_true() {
+        let args = PackageArgs {
+            path: PathBuf::from("/project"),
+            output: Some(PathBuf::from("/out")),
+            skip_sbom: true,
+            release: true,
+            cargo_flags: vec![],
+            format: OutputFormat::Human,
+        };
+        assert!(args.skip_sbom);
+        assert!(args.output.is_some());
+    }
+
+    #[test]
+    fn package_args_debug_format_contains_all_fields() {
+        let args = PackageArgs {
+            path: PathBuf::from("/my/project"),
+            output: Some(PathBuf::from("/my/output")),
+            skip_sbom: true,
+            release: false,
+            cargo_flags: vec!["--locked".to_string()],
+            format: OutputFormat::Json,
+        };
+        let dbg = format!("{args:?}");
+        assert!(dbg.contains("skip_sbom"));
+        assert!(dbg.contains("release"));
+        assert!(dbg.contains("cargo_flags"));
+        assert!(dbg.contains("format"));
+    }
+
+    #[test]
+    fn package_args_clone_independence() {
+        let args = PackageArgs {
+            path: PathBuf::from("/p"),
+            output: Some(PathBuf::from("/o")),
+            skip_sbom: false,
+            release: true,
+            cargo_flags: vec!["--release".to_string()],
+            format: OutputFormat::Json,
+        };
+        let mut cloned = args.clone();
+        cloned.cargo_flags.push("--locked".to_string());
+        // Original should be unaffected
+        assert_eq!(args.cargo_flags.len(), 1);
+        assert_eq!(cloned.cargo_flags.len(), 2);
+    }
+
+    // ── BuildMetadata deserialization with extra fields ──────
+
+    #[test]
+    fn build_metadata_deserialize_unknown_fields_ignored() {
+        let json = r#"{
+            "rust_version": "1.85.0",
+            "cargo_version": "1.85.0",
+            "target_triple": "x86_64",
+            "build_timestamp": "now",
+            "profile": "debug",
+            "features": [],
+            "build_env": {},
+            "cargo_flags": [],
+            "unknown_field": "should be ignored",
+            "another_unknown": 123
+        }"#;
+        let meta: BuildMetadata = serde_json::from_str(json).unwrap();
+        assert_eq!(meta.rust_version, "1.85.0");
+    }
+
+    // ── PackageOutput: large hash and id values ──────────────
+
+    #[test]
+    fn package_output_long_connector_id() {
+        let long_id = format!("org.{}:conn:1.0.0", "x".repeat(500));
+        let output = PackageOutput {
+            output_dir: PathBuf::from("/a"),
+            binary_path: PathBuf::from("/b"),
+            manifest_path: PathBuf::from("/c"),
+            sbom_path: None,
+            build_metadata_path: PathBuf::from("/d"),
+            binary_sha256: "abc".to_string(),
+            connector_id: long_id.clone(),
+            version: "1.0.0".to_string(),
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        let back: PackageOutput = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.connector_id, long_id);
+    }
+
+    #[test]
+    fn package_output_version_zero() {
+        let output = PackageOutput {
+            output_dir: PathBuf::from("/a"),
+            binary_path: PathBuf::from("/b"),
+            manifest_path: PathBuf::from("/c"),
+            sbom_path: None,
+            build_metadata_path: PathBuf::from("/d"),
+            binary_sha256: "abc".to_string(),
+            connector_id: "c:t:0.0.0".to_string(),
+            version: "0.0.0".to_string(),
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        let back: PackageOutput = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.version, "0.0.0");
+    }
+
+    // ── SimpleSbom deserialization edge cases ─────────────────
+
+    #[test]
+    fn simple_sbom_deserialize_extra_fields_ignored() {
+        let json = r#"{
+            "format_version": "1.0",
+            "created": "2026-01-01T00:00:00Z",
+            "tool": "fwc",
+            "component": {
+                "component_type": "application",
+                "name": "test",
+                "version": "1.0.0",
+                "purl": "pkg:fcp/test@1.0.0",
+                "extra": "ignored"
+            },
+            "dependencies": [],
+            "extra_top": true
+        }"#;
+        let sbom: SimpleSbom = serde_json::from_str(json).unwrap();
+        assert_eq!(sbom.component.name, "test");
+    }
+
+    #[test]
+    fn simple_sbom_dep_order_preserved() {
+        let deps = vec![
+            SbomDependency {
+                name: "zzz".to_string(),
+                version: "1.0.0".to_string(),
+                purl: "pkg:cargo/zzz@1.0.0".to_string(),
+                source: "crates.io".to_string(),
+            },
+            SbomDependency {
+                name: "aaa".to_string(),
+                version: "2.0.0".to_string(),
+                purl: "pkg:cargo/aaa@2.0.0".to_string(),
+                source: "crates.io".to_string(),
+            },
+        ];
+        let sbom = SimpleSbom {
+            format_version: "1.0".to_string(),
+            created: "now".to_string(),
+            tool: "fwc".to_string(),
+            component: SbomComponent {
+                component_type: "application".to_string(),
+                name: "t".to_string(),
+                version: "1".to_string(),
+                purl: "pkg:fcp/t@1".to_string(),
+            },
+            dependencies: deps,
+        };
+        let json = serde_json::to_string(&sbom).unwrap();
+        let back: SimpleSbom = serde_json::from_str(&json).unwrap();
+        // Order is preserved
+        assert_eq!(back.dependencies[0].name, "zzz");
+        assert_eq!(back.dependencies[1].name, "aaa");
+    }
+
+    // ── Cross-type consistency ───────────────────────────────
+
+    #[test]
+    fn sbom_dependency_purl_format_consistency() {
+        let dep = SbomDependency {
+            name: "my-crate".to_string(),
+            version: "3.2.1".to_string(),
+            purl: format!("pkg:cargo/{}@{}", "my-crate", "3.2.1"),
+            source: "crates.io".to_string(),
+        };
+        assert!(dep.purl.starts_with("pkg:cargo/"));
+        assert!(dep.purl.contains('@'));
+        assert!(dep.purl.contains(&dep.name));
+        assert!(dep.purl.contains(&dep.version));
+    }
+
+    #[test]
+    fn sbom_component_purl_format_consistency() {
+        let comp = SbomComponent {
+            component_type: "application".to_string(),
+            name: "my-conn".to_string(),
+            version: "1.0.0".to_string(),
+            purl: format!("pkg:fcp/{}@{}", "my-conn", "1.0.0"),
+        };
+        assert!(comp.purl.starts_with("pkg:fcp/"));
+        assert!(comp.purl.contains('@'));
+        assert!(comp.purl.contains(&comp.name));
+        assert!(comp.purl.contains(&comp.version));
+    }
 }

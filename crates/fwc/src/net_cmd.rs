@@ -1172,10 +1172,7 @@ mod tests {
             port: None,
         };
         let id = rule_id_for(DenyReason::IpLiteralDenied, &constraints, &parsed, None);
-        assert_eq!(
-            id.as_deref(),
-            Some("network_constraints.deny_ip_literals")
-        );
+        assert_eq!(id.as_deref(), Some("network_constraints.deny_ip_literals"));
     }
 
     #[test]
@@ -1186,10 +1183,7 @@ mod tests {
             port: None,
         };
         let id = rule_id_for(DenyReason::LocalhostDenied, &constraints, &parsed, None);
-        assert_eq!(
-            id.as_deref(),
-            Some("network_constraints.deny_localhost")
-        );
+        assert_eq!(id.as_deref(), Some("network_constraints.deny_localhost"));
     }
 
     #[test]
@@ -1261,10 +1255,7 @@ mod tests {
             port: None,
         };
         let id = rule_id_for(DenyReason::DnsMaxIpsExceeded, &constraints, &parsed, None);
-        assert_eq!(
-            id.as_deref(),
-            Some("network_constraints.dns_max_ips")
-        );
+        assert_eq!(id.as_deref(), Some("network_constraints.dns_max_ips"));
     }
 
     #[test]
@@ -1275,10 +1266,7 @@ mod tests {
             port: None,
         };
         let id = rule_id_for(DenyReason::SpkiPinMismatch, &constraints, &parsed, None);
-        assert_eq!(
-            id.as_deref(),
-            Some("network_constraints.spki_pins")
-        );
+        assert_eq!(id.as_deref(), Some("network_constraints.spki_pins"));
     }
 
     #[test]
@@ -1294,10 +1282,7 @@ mod tests {
             &parsed,
             None,
         );
-        assert_eq!(
-            id.as_deref(),
-            Some("capability.allow_credentials")
-        );
+        assert_eq!(id.as_deref(), Some("capability.allow_credentials"));
     }
 
     #[test]
@@ -1313,10 +1298,7 @@ mod tests {
             &parsed,
             None,
         );
-        assert_eq!(
-            id.as_deref(),
-            Some("credential.host_allow")
-        );
+        assert_eq!(id.as_deref(), Some("credential.host_allow"));
     }
 
     #[test]
@@ -1332,10 +1314,7 @@ mod tests {
             &parsed,
             None,
         );
-        assert_eq!(
-            id.as_deref(),
-            Some("network_constraints.max_redirects")
-        );
+        assert_eq!(id.as_deref(), Some("network_constraints.max_redirects"));
     }
 
     #[test]
@@ -1482,14 +1461,7 @@ mod tests {
             host: None,
             port: None,
         };
-        let s = suggestion_for(
-            DenyReason::SniMismatch,
-            &constraints,
-            &parsed,
-            None,
-            None,
-        )
-        .unwrap();
+        let s = suggestion_for(DenyReason::SniMismatch, &constraints, &parsed, None, None).unwrap();
         assert_eq!(s.field, "network_constraints.require_sni");
         assert_eq!(s.action, "set");
         assert_eq!(s.value.as_deref(), Some("false"));
@@ -1712,10 +1684,7 @@ mod tests {
         assert_eq!(report.canonical_host.as_deref(), Some("api.example.com"));
         assert_eq!(report.port, Some(443));
         assert_eq!(report.tls_required, Some(true));
-        assert_eq!(
-            report.expected_sni.as_deref(),
-            Some("api.example.com")
-        );
+        assert_eq!(report.expected_sni.as_deref(), Some("api.example.com"));
         assert!(report.reason_code.is_none());
     }
 
@@ -1785,11 +1754,13 @@ mod tests {
             decision,
         );
         assert!(!report.allowed);
-        assert!(report
-            .details
-            .as_deref()
-            .unwrap()
-            .contains("redirect count 10"));
+        assert!(
+            report
+                .details
+                .as_deref()
+                .unwrap()
+                .contains("redirect count 10")
+        );
     }
 
     #[test]
@@ -1844,11 +1815,7 @@ mod tests {
             decision,
         );
         assert!(!report.allowed);
-        assert!(report
-            .details
-            .as_deref()
-            .unwrap()
-            .contains("SNI mismatch"));
+        assert!(report.details.as_deref().unwrap().contains("SNI mismatch"));
     }
 
     #[test]

@@ -1,15 +1,15 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use clap::ValueEnum;
-use handlebars::{Handlebars, handlebars_helper, no_escape};
+use handlebars::{handlebars_helper, no_escape, Handlebars};
 use jaq_core::{
-    Ctx, RcIter,
     load::{Arena, File, Loader},
+    Ctx, RcIter,
 };
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, ValueEnum)]
 pub enum OutputFormat {
@@ -235,7 +235,7 @@ fn render_tabular_value(
     format: OutputFormat,
     options: &RenderOptions,
 ) -> Result<String> {
-    use crate::format_table::{TabularFormat, TabularOptions, render_tabular};
+    use crate::format_table::{render_tabular, TabularFormat, TabularOptions};
 
     let tab_fmt = match format {
         OutputFormat::Table => TabularFormat::Table,
@@ -544,11 +544,13 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use chrono::{Duration, Utc};
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
+
+    use crate::error_taxonomy::{FcpErrorCode, StructuredError};
 
     use super::{
-        ExtractRender, OutputFormat, RenderOptions, TemplateRender, TemplateSource,
         humanize_timestamp, relative_time_label, render, render_with_options, token_stats,
+        ExtractRender, OutputFormat, RenderOptions, TemplateRender, TemplateSource,
     };
 
     // ── Basic format rendering ──────────────────────────────────────────
@@ -877,6 +879,71 @@ mod tests {
         assert!(toon_text.contains("validation"));
         assert!(toon_text.contains("recoverable"));
         assert!(toon_text.contains("github"));
+    }
+
+    #[test]
+    fn structured_error_payload_preserves_live_refusal_guidance_across_formats() {
+        let error = StructuredError::new(
+            FcpErrorCode::FcpErrMissingCapabilityToken,
+            "Live invoke requires a capability token",
+        )
+        .with_details(json!({
+            "command_mode": "live-runtime",
+            "reason": "missing_capability_token",
+        }));
+        let payload = json!({
+            "status": "error",
+            "error": error.to_value(),
+        });
+
+        let json_text = render(payload.clone(), OutputFormat::Json).unwrap();
+        let reparsed: Value = serde_json::from_str(json_text.trim()).unwrap();
+        assert_eq!(
+            reparsed["error"]["code"],
+            "FCP_ERR_MISSING_CAPABILITY_TOKEN"
+        );
+        assert_eq!(reparsed["error"]["details"]["command_mode"], "live-runtime");
+        assert_eq!(
+            reparsed["error"]["recovery"]["command"],
+            "fwc invoke --capability-token <token>"
+        );
+
+        let jsonl_text = render(payload.clone(), OutputFormat::Jsonl).unwrap();
+        let reparsed_jsonl: Value = serde_json::from_str(jsonl_text.trim()).unwrap();
+        assert_eq!(reparsed_jsonl["error"]["category"], "auth");
+        assert_eq!(
+            reparsed_jsonl["error"]["details"]["reason"],
+            "missing_capability_token"
+        );
+
+        let toon_text = render(payload, OutputFormat::Toon).unwrap();
+        assert!(toon_text.contains("FCP_ERR_MISSING_CAPABILITY_TOKEN"));
+        assert!(toon_text.contains("live-runtime"));
+        assert!(toon_text.contains("--capability-token"));
+        assert!(toon_text.contains("simulate"));
+    }
+
+    #[test]
+    fn structured_error_payload_for_elevation_required_avoids_offline_hint_in_toon() {
+        let error = StructuredError::new(
+            FcpErrorCode::FcpErrElevationRequired,
+            "Live invoke requires approval",
+        )
+        .with_details(json!({
+            "command_mode": "live-runtime",
+            "reason": "elevation_required",
+        }));
+        let payload = json!({
+            "status": "error",
+            "error": error.to_value(),
+            "next_actions": ["Request approval from the issuing authority"],
+        });
+
+        let toon_text = render(payload, OutputFormat::Toon).unwrap();
+        assert!(toon_text.contains("FCP_ERR_ELEVATION_REQUIRED"));
+        assert!(toon_text.contains("--approval-token"));
+        assert!(!toon_text.contains("--offline"));
+        assert!(!toon_text.contains("placeholder"));
     }
 
     // ── Format-specific structure tests ──────────────────────────────────

@@ -1015,11 +1015,9 @@ pub fn validate_mode_consistency(command: &str, mode: RuntimeMode) -> Option<Str
         (
             CommandTruthSource::LiveHost,
             RuntimeMode::ExplicitOffline | RuntimeMode::DegradedOffline,
-        ) => {
-            Some(format!(
-                "Command '{command}' is LiveHost but resolved to offline mode"
-            ))
-        }
+        ) => Some(format!(
+            "Command '{command}' is LiveHost but resolved to offline mode"
+        )),
         // OfflineArtifact commands should never be Live.
         (CommandTruthSource::OfflineArtifact, RuntimeMode::Live) => Some(format!(
             "Command '{command}' is OfflineArtifact but resolved to Live mode"
@@ -1133,10 +1131,7 @@ pub struct SimulateResult {
 /// Build a simulate result with honest labeling based on what actually happened.
 #[allow(dead_code)]
 #[must_use]
-pub fn simulate_result(
-    requested_dry_run: bool,
-    actual: SimulateCapability,
-) -> SimulateResult {
+pub fn simulate_result(requested_dry_run: bool, actual: SimulateCapability) -> SimulateResult {
     let downgraded = requested_dry_run && actual == SimulateCapability::PreflightOnly;
     let is_connector_dry_run = actual == SimulateCapability::FullDryRun;
 
@@ -1194,14 +1189,14 @@ pub fn evaluate_simulate_request(
                 )
             }
         }
-        SimulateCapability::Unknown => Err(
-            "This connector has not been audited for simulate support. \
-             Cannot proceed without a known capability.",
-        ),
-        SimulateCapability::Unsupported => Err(
-            "This connector does not support simulation or preflight. \
-             The request cannot proceed.",
-        ),
+        SimulateCapability::Unknown => {
+            Err("This connector has not been audited for simulate support. \
+             Cannot proceed without a known capability.")
+        }
+        SimulateCapability::Unsupported => {
+            Err("This connector does not support simulation or preflight. \
+             The request cannot proceed.")
+        }
     }
 }
 
@@ -1230,10 +1225,7 @@ impl DiscoveryDataSource {
     /// Whether this source is authoritative (reflects current live state).
     #[must_use]
     pub fn is_authoritative(&self) -> bool {
-        matches!(
-            self,
-            Self::LiveHostInventory | Self::LiveHostIntrospection
-        )
+        matches!(self, Self::LiveHostInventory | Self::LiveHostIntrospection)
     }
 
     /// Whether this source is from offline/local artifacts.
@@ -1268,12 +1260,8 @@ impl DiscoveryDataSource {
             Self::WorkspaceManifest => {
                 "Data is from workspace manifests and may not reflect current host state."
             }
-            Self::LocalCatalogCache => {
-                "Data is from a local cache and may be stale."
-            }
-            Self::StaticSchema => {
-                "Data is from embedded static schemas, not live connector state."
-            }
+            Self::LocalCatalogCache => "Data is from a local cache and may be stale.",
+            Self::StaticSchema => "Data is from embedded static schemas, not live connector state.",
         }
     }
 }
@@ -1327,19 +1315,17 @@ pub fn is_discovery_command(command: &str) -> bool {
 /// Determine the expected discovery source for a command given the runtime mode.
 #[allow(dead_code)]
 #[must_use]
-pub fn expected_discovery_source(
-    command: &str,
-    mode: RuntimeMode,
-) -> Option<DiscoveryDataSource> {
+pub fn expected_discovery_source(command: &str, mode: RuntimeMode) -> Option<DiscoveryDataSource> {
     if !is_discovery_command(command) {
         return None;
     }
 
     Some(match mode {
         RuntimeMode::Live => {
-            // show and ops use introspection; others use inventory
+            // Commands that need operation-level detail rely on host
+            // introspection rather than inventory alone.
             match command {
-                "show" | "ops" | "schema" | "examples" => {
+                "show" | "ops" | "schema" | "examples" | "search" | "suggest" => {
                     DiscoveryDataSource::LiveHostIntrospection
                 }
                 _ => DiscoveryDataSource::LiveHostInventory,
@@ -1472,7 +1458,10 @@ impl AdminMutationOutcome {
     /// Whether the caller can potentially retry or remediate.
     #[must_use]
     pub fn is_recoverable(&self) -> bool {
-        matches!(self, Self::Denied { .. } | Self::Unavailable { .. } | Self::Unknown)
+        matches!(
+            self,
+            Self::Denied { .. } | Self::Unavailable { .. } | Self::Unknown
+        )
     }
 
     /// Machine-readable tag.
@@ -1579,8 +1568,13 @@ pub fn admin_introspection(command: &str, source: RegistryCatalogSource) -> Admi
 /// Admin commands that produce mesh/registry introspection.
 #[allow(dead_code)]
 pub const ADMIN_COMMANDS: &[&str] = &[
-    "mesh-status", "mesh-nodes", "registry-search", "registry-show",
-    "registry-sync", "node-drain", "node-restore",
+    "mesh-status",
+    "mesh-nodes",
+    "registry-search",
+    "registry-show",
+    "registry-sync",
+    "node-drain",
+    "node-restore",
 ];
 
 /// Check if a command is an admin command.
@@ -2126,9 +2120,7 @@ impl TemplateDataSource {
             Self::StaticSchema => {
                 "Template is from embedded static schemas, not live connector state."
             }
-            Self::Unknown => {
-                "Template source is unknown; freshness cannot be determined."
-            }
+            Self::Unknown => "Template source is unknown; freshness cannot be determined.",
         }
     }
 }
@@ -2222,10 +2214,7 @@ pub fn is_template_command(command: &str) -> bool {
 /// Returns `None` for non-template commands or when the mode is [`RuntimeMode::Refused`].
 #[allow(dead_code)]
 #[must_use]
-pub fn expected_template_source(
-    command: &str,
-    mode: RuntimeMode,
-) -> Option<TemplateDataSource> {
+pub fn expected_template_source(command: &str, mode: RuntimeMode) -> Option<TemplateDataSource> {
     if !is_template_command(command) {
         return None;
     }
@@ -2513,7 +2502,10 @@ impl ToolInventorySource {
     /// Returns `true` if this source is offline (not backed by a live host).
     #[must_use]
     pub fn is_offline(&self) -> bool {
-        matches!(self, Self::WorkspaceManifest | Self::StaticCatalog | Self::Unknown)
+        matches!(
+            self,
+            Self::WorkspaceManifest | Self::StaticCatalog | Self::Unknown
+        )
     }
 
     /// Stable tag for serialization and display.
@@ -2854,10 +2846,7 @@ pub fn transcript_entry(
 /// `offline_evidence` from the entries.
 #[allow(dead_code)]
 #[must_use]
-pub fn build_replay_artifact(
-    scenario_id: &str,
-    entries: Vec<TranscriptEntry>,
-) -> ReplayArtifact {
+pub fn build_replay_artifact(scenario_id: &str, entries: Vec<TranscriptEntry>) -> ReplayArtifact {
     let live_evidence = entries.iter().any(|e| e.authoritative);
     let offline_evidence = entries.iter().any(|e| !e.authoritative);
     ReplayArtifact {
@@ -3404,16 +3393,16 @@ mod tests {
         workflow_can_proceed, workflow_kind,
     };
     use super::{
-        INTENT_ACTIONS, IntentActionAvailability, IntentSuggestionKind, classify_intent_action,
-        filter_suggestable_actions, is_intent_action, plan_step_truth,
-    };
-    use super::{
         EXPORT_COMMANDS, McpSurfaceState, ToolAvailability, ToolInventorySource,
         evaluate_export_readiness, is_export_command, tool_provenance,
     };
     use super::{
         EvidenceBundleMetadata, ReplayArtifact, TranscriptPhase, build_replay_artifact,
         evidence_bundle_metadata, transcript_entry,
+    };
+    use super::{
+        INTENT_ACTIONS, IntentActionAvailability, IntentSuggestionKind, classify_intent_action,
+        filter_suggestable_actions, is_intent_action, plan_step_truth,
     };
     use serde_json::json;
 
@@ -5206,10 +5195,7 @@ mod tests {
         let variants = [
             (WorkflowStepReality::Executed, "\"executed\""),
             (WorkflowStepReality::Planned, "\"planned\""),
-            (
-                WorkflowStepReality::HostUnavailable,
-                "\"host_unavailable\"",
-            ),
+            (WorkflowStepReality::HostUnavailable, "\"host_unavailable\""),
             (WorkflowStepReality::AuthDenied, "\"auth_denied\""),
             (WorkflowStepReality::Unsupported, "\"unsupported\""),
             (WorkflowStepReality::Skipped, "\"skipped\""),
@@ -5325,9 +5311,7 @@ mod tests {
         // Execution-family mutating commands (invoke, map, batch-file, recipe,
         // pipeline) must require a capability token or approval. Lifecycle/admin
         // commands (install, update, config, etc.) are exempt — they're admin ops.
-        let execution_mutating = [
-            "invoke", "map", "batch-file", "recipe", "pipeline",
-        ];
+        let execution_mutating = ["invoke", "map", "batch-file", "recipe", "pipeline"];
         for cmd in execution_mutating {
             let cls = classify_command(cmd).unwrap();
             assert!(
@@ -5414,7 +5398,11 @@ mod tests {
     fn classify_command_returns_some_for_all_classified() {
         for cls in COMMAND_CLASSIFICATIONS {
             let found = classify_command(cls.command);
-            assert!(found.is_some(), "classify_command({}) should find it", cls.command);
+            assert!(
+                found.is_some(),
+                "classify_command({}) should find it",
+                cls.command
+            );
             assert_eq!(found.unwrap().command, cls.command);
         }
     }
@@ -5435,8 +5423,7 @@ mod tests {
     fn host_absent_error_not_configured_says_will_not_simulate() {
         let err = host_absent_error("invoke", HostAbsentReason::NotConfigured);
         assert!(
-            err.message.contains("will not simulate")
-                || err.message.contains("will not fabricate"),
+            err.message.contains("will not simulate") || err.message.contains("will not fabricate"),
             "NotConfigured error should state refusal: {}",
             err.message
         );
@@ -5735,10 +5722,7 @@ mod tests {
 
     #[test]
     fn default_offline_source_golden_pipe_local_history() {
-        assert_eq!(
-            default_offline_source("pipe"),
-            OfflineSource::LocalHistory
-        );
+        assert_eq!(default_offline_source("pipe"), OfflineSource::LocalHistory);
     }
 
     #[test]
@@ -6466,8 +6450,16 @@ mod tests {
         ];
         for reason in reasons {
             let err = host_absent_error("test-cmd", reason);
-            assert!(!err.message.is_empty(), "host_absent_error for {:?} has empty message", reason);
-            assert!(!err.next_actions.is_empty(), "host_absent_error for {:?} has no next_actions", reason);
+            assert!(
+                !err.message.is_empty(),
+                "host_absent_error for {:?} has empty message",
+                reason
+            );
+            assert!(
+                !err.next_actions.is_empty(),
+                "host_absent_error for {:?} has no next_actions",
+                reason
+            );
         }
     }
 
@@ -6980,7 +6972,10 @@ mod tests {
             SimulateCapability::Unknown,
             SimulateCapability::Unsupported,
         ] {
-            assert!(!cap.explanation().is_empty(), "Empty explanation for {cap:?}");
+            assert!(
+                !cap.explanation().is_empty(),
+                "Empty explanation for {cap:?}"
+            );
         }
     }
 
@@ -7409,7 +7404,10 @@ mod tests {
             .tag(),
             "host-issued"
         );
-        assert_eq!(CapabilityTokenSource::EnvironmentVariable.tag(), "environment-variable");
+        assert_eq!(
+            CapabilityTokenSource::EnvironmentVariable.tag(),
+            "environment-variable"
+        );
         assert_eq!(CapabilityTokenSource::CliFlag.tag(), "cli-flag");
         assert_eq!(CapabilityTokenSource::TestGenerated.tag(), "test-generated");
         assert_eq!(CapabilityTokenSource::Placeholder.tag(), "placeholder");
@@ -7435,10 +7433,12 @@ mod tests {
 
     #[test]
     fn capability_real_sources_are_live_acceptable() {
-        assert!(CapabilityTokenSource::HostIssued {
-            endpoint: "h".into()
-        }
-        .is_live_acceptable());
+        assert!(
+            CapabilityTokenSource::HostIssued {
+                endpoint: "h".into()
+            }
+            .is_live_acceptable()
+        );
         assert!(CapabilityTokenSource::EnvironmentVariable.is_live_acceptable());
         assert!(CapabilityTokenSource::CliFlag.is_live_acceptable());
     }
@@ -7457,10 +7457,12 @@ mod tests {
 
     #[test]
     fn capability_real_sources_are_not_synthetic() {
-        assert!(!CapabilityTokenSource::HostIssued {
-            endpoint: "h".into()
-        }
-        .is_synthetic());
+        assert!(
+            !CapabilityTokenSource::HostIssued {
+                endpoint: "h".into()
+            }
+            .is_synthetic()
+        );
         assert!(!CapabilityTokenSource::EnvironmentVariable.is_synthetic());
         assert!(!CapabilityTokenSource::CliFlag.is_synthetic());
     }
@@ -7492,9 +7494,8 @@ mod tests {
 
     #[test]
     fn validate_token_source_rejects_test_generated() {
-        let err =
-            validate_capability_token_source(&CapabilityTokenSource::TestGenerated, "invoke")
-                .unwrap_err();
+        let err = validate_capability_token_source(&CapabilityTokenSource::TestGenerated, "invoke")
+            .unwrap_err();
         assert!(err.reason.contains("invoke"));
         assert!(err.reason.contains("test-generated"));
         assert!(!err.next_actions.is_empty());
@@ -7511,11 +7512,14 @@ mod tests {
 
     #[test]
     fn validate_token_rejection_has_actionable_next_steps() {
-        let err =
-            validate_capability_token_source(&CapabilityTokenSource::TestGenerated, "invoke")
-                .unwrap_err();
+        let err = validate_capability_token_source(&CapabilityTokenSource::TestGenerated, "invoke")
+            .unwrap_err();
         assert!(err.next_actions.len() >= 2);
-        assert!(err.next_actions.iter().any(|a| a.contains("capabilities issue")));
+        assert!(
+            err.next_actions
+                .iter()
+                .any(|a| a.contains("capabilities issue"))
+        );
     }
 
     // -- SYNTHETIC_TOKEN_MARKERS and contains_synthetic_token_marker --
@@ -7547,7 +7551,9 @@ mod tests {
         assert!(!contains_synthetic_token_marker(
             "eyJhbGciOiJFZDI1NTE5IiwidHlwIjoiSldUIn0"
         ));
-        assert!(!contains_synthetic_token_marker("dGhpcyBpcyBhIHJlYWwgdG9rZW4"));
+        assert!(!contains_synthetic_token_marker(
+            "dGhpcyBpcyBhIHJlYWwgdG9rZW4"
+        ));
     }
 
     // -- classify_token_source --
@@ -7620,13 +7626,22 @@ mod tests {
 
     #[test]
     fn discovery_data_source_tags_are_stable() {
-        assert_eq!(DiscoveryDataSource::LiveHostInventory.tag(), "live-host-inventory");
+        assert_eq!(
+            DiscoveryDataSource::LiveHostInventory.tag(),
+            "live-host-inventory"
+        );
         assert_eq!(
             DiscoveryDataSource::LiveHostIntrospection.tag(),
             "live-host-introspection"
         );
-        assert_eq!(DiscoveryDataSource::WorkspaceManifest.tag(), "workspace-manifest");
-        assert_eq!(DiscoveryDataSource::LocalCatalogCache.tag(), "local-catalog-cache");
+        assert_eq!(
+            DiscoveryDataSource::WorkspaceManifest.tag(),
+            "workspace-manifest"
+        );
+        assert_eq!(
+            DiscoveryDataSource::LocalCatalogCache.tag(),
+            "local-catalog-cache"
+        );
         assert_eq!(DiscoveryDataSource::StaticSchema.tag(), "static-schema");
     }
 
@@ -7680,7 +7695,10 @@ mod tests {
             DiscoveryDataSource::LocalCatalogCache,
             DiscoveryDataSource::StaticSchema,
         ] {
-            assert!(!src.freshness_caveat().is_empty(), "Empty caveat for {src:?}");
+            assert!(
+                !src.freshness_caveat().is_empty(),
+                "Empty caveat for {src:?}"
+            );
         }
     }
 
@@ -7745,6 +7763,18 @@ mod tests {
     }
 
     #[test]
+    fn expected_source_live_search_is_introspection() {
+        let src = expected_discovery_source("search", RuntimeMode::Live);
+        assert_eq!(src, Some(DiscoveryDataSource::LiveHostIntrospection));
+    }
+
+    #[test]
+    fn expected_source_live_suggest_is_introspection() {
+        let src = expected_discovery_source("suggest", RuntimeMode::Live);
+        assert_eq!(src, Some(DiscoveryDataSource::LiveHostIntrospection));
+    }
+
+    #[test]
     fn expected_source_live_ops_is_introspection() {
         let src = expected_discovery_source("ops", RuntimeMode::Live);
         assert_eq!(src, Some(DiscoveryDataSource::LiveHostIntrospection));
@@ -7779,7 +7809,10 @@ mod tests {
     #[test]
     fn all_discovery_commands_are_in_commands_list() {
         for cmd in DISCOVERY_COMMANDS {
-            assert!(COMMANDS.contains(cmd), "Discovery command '{cmd}' not in COMMANDS");
+            assert!(
+                COMMANDS.contains(cmd),
+                "Discovery command '{cmd}' not in COMMANDS"
+            );
         }
     }
 
@@ -8036,21 +8069,35 @@ mod tests {
     #[test]
     fn registry_source_all_have_freshness_caveats() {
         let sources = vec![
-            RegistryCatalogSource::LiveRegistry { endpoint: "x".into() },
-            RegistryCatalogSource::CachedRegistry { endpoint: "x".into(), cached_at: "t".into() },
+            RegistryCatalogSource::LiveRegistry {
+                endpoint: "x".into(),
+            },
+            RegistryCatalogSource::CachedRegistry {
+                endpoint: "x".into(),
+                cached_at: "t".into(),
+            },
             RegistryCatalogSource::LocalManifest,
             RegistryCatalogSource::Unknown,
         ];
         for src in &sources {
-            assert!(!src.freshness_caveat().is_empty(), "Empty caveat for {:?}", src);
+            assert!(
+                !src.freshness_caveat().is_empty(),
+                "Empty caveat for {:?}",
+                src
+            );
         }
     }
 
     #[test]
     fn registry_source_serde_roundtrip() {
         let sources = vec![
-            RegistryCatalogSource::LiveRegistry { endpoint: "https://r.io".into() },
-            RegistryCatalogSource::CachedRegistry { endpoint: "https://r.io".into(), cached_at: "2026-01-01".into() },
+            RegistryCatalogSource::LiveRegistry {
+                endpoint: "https://r.io".into(),
+            },
+            RegistryCatalogSource::CachedRegistry {
+                endpoint: "https://r.io".into(),
+                cached_at: "2026-01-01".into(),
+            },
             RegistryCatalogSource::LocalManifest,
             RegistryCatalogSource::Unknown,
         ];
@@ -8118,7 +8165,9 @@ mod tests {
 
     #[test]
     fn mutation_applied_is_success() {
-        let o = AdminMutationOutcome::Applied { receipt_id: "r-123".into() };
+        let o = AdminMutationOutcome::Applied {
+            receipt_id: "r-123".into(),
+        };
         assert!(o.is_success());
         assert!(!o.is_recoverable());
         assert_eq!(o.tag(), "applied");
@@ -8126,7 +8175,9 @@ mod tests {
 
     #[test]
     fn mutation_denied_is_recoverable() {
-        let o = AdminMutationOutcome::Denied { reason: "no caps".into() };
+        let o = AdminMutationOutcome::Denied {
+            reason: "no caps".into(),
+        };
         assert!(!o.is_success());
         assert!(o.is_recoverable());
         assert_eq!(o.tag(), "denied");
@@ -8142,7 +8193,9 @@ mod tests {
 
     #[test]
     fn mutation_unavailable_is_recoverable() {
-        let o = AdminMutationOutcome::Unavailable { retry_hint: "30s".into() };
+        let o = AdminMutationOutcome::Unavailable {
+            retry_hint: "30s".into(),
+        };
         assert!(!o.is_success());
         assert!(o.is_recoverable());
         assert_eq!(o.tag(), "unavailable");
@@ -8159,10 +8212,16 @@ mod tests {
     #[test]
     fn mutation_outcome_serde_roundtrip() {
         let outcomes = vec![
-            AdminMutationOutcome::Applied { receipt_id: "r-1".into() },
-            AdminMutationOutcome::Denied { reason: "no cap".into() },
+            AdminMutationOutcome::Applied {
+                receipt_id: "r-1".into(),
+            },
+            AdminMutationOutcome::Denied {
+                reason: "no cap".into(),
+            },
             AdminMutationOutcome::Unsupported,
-            AdminMutationOutcome::Unavailable { retry_hint: "5s".into() },
+            AdminMutationOutcome::Unavailable {
+                retry_hint: "5s".into(),
+            },
             AdminMutationOutcome::Unknown,
         ];
         for o in &outcomes {
@@ -8240,7 +8299,9 @@ mod tests {
     fn admin_introspection_live_is_authoritative() {
         let ai = admin_introspection(
             "registry-search",
-            RegistryCatalogSource::LiveRegistry { endpoint: "https://r.io".into() },
+            RegistryCatalogSource::LiveRegistry {
+                endpoint: "https://r.io".into(),
+            },
         );
         assert!(ai.authoritative);
         assert_eq!(ai.command, "registry-search");
@@ -8260,10 +8321,7 @@ mod tests {
 
     #[test]
     fn admin_introspection_has_caveat() {
-        let ai = admin_introspection(
-            "mesh-status",
-            RegistryCatalogSource::Unknown,
-        );
+        let ai = admin_introspection("mesh-status", RegistryCatalogSource::Unknown);
         assert!(!ai.caveat.is_empty());
         assert!(!ai.authoritative);
     }
@@ -8272,7 +8330,9 @@ mod tests {
     fn admin_introspection_serializes() {
         let ai = admin_introspection(
             "mesh-nodes",
-            RegistryCatalogSource::LiveRegistry { endpoint: "https://r.io".into() },
+            RegistryCatalogSource::LiveRegistry {
+                endpoint: "https://r.io".into(),
+            },
         );
         let json = serde_json::to_value(&ai).unwrap();
         assert_eq!(json["command"], "mesh-nodes");
@@ -8312,7 +8372,10 @@ mod tests {
             TemplateDataSource::LiveHostIntrospection.tag(),
             "live-host-introspection"
         );
-        assert_eq!(TemplateDataSource::WorkspaceManifest.tag(), "workspace-manifest");
+        assert_eq!(
+            TemplateDataSource::WorkspaceManifest.tag(),
+            "workspace-manifest"
+        );
         assert_eq!(TemplateDataSource::StaticSchema.tag(), "static-schema");
         assert_eq!(TemplateDataSource::Unknown.tag(), "unknown");
     }
@@ -8362,7 +8425,10 @@ mod tests {
             TemplateDataSource::StaticSchema,
             TemplateDataSource::Unknown,
         ] {
-            assert!(!src.freshness_caveat().is_empty(), "Empty caveat for {src:?}");
+            assert!(
+                !src.freshness_caveat().is_empty(),
+                "Empty caveat for {src:?}"
+            );
         }
     }
 
@@ -8581,7 +8647,10 @@ mod tests {
     #[test]
     fn intent_suggestion_tags_stable() {
         assert_eq!(IntentSuggestionKind::ExecuteNow.tag(), "execute_now");
-        assert_eq!(IntentSuggestionKind::OfflinePreparation.tag(), "offline_preparation");
+        assert_eq!(
+            IntentSuggestionKind::OfflinePreparation.tag(),
+            "offline_preparation"
+        );
         assert_eq!(IntentSuggestionKind::Remediation.tag(), "remediation");
         assert_eq!(IntentSuggestionKind::Informational.tag(), "informational");
     }
@@ -8635,7 +8704,12 @@ mod tests {
 
     #[test]
     fn plan_step_offline_is_not_backed() {
-        let step = plan_step_truth("Prepare config", "config", RuntimeMode::ExplicitOffline, false);
+        let step = plan_step_truth(
+            "Prepare config",
+            "config",
+            RuntimeMode::ExplicitOffline,
+            false,
+        );
         assert!(!step.backed_by_host);
         assert_eq!(step.availability, IntentActionAvailability::OfflineOnly);
         assert!(!step.caveat.is_empty());
@@ -8700,8 +8774,14 @@ mod tests {
 
     #[test]
     fn tool_inventory_source_tags_are_stable() {
-        assert_eq!(ToolInventorySource::LiveHostInventory.tag(), "live_host_inventory");
-        assert_eq!(ToolInventorySource::WorkspaceManifest.tag(), "workspace_manifest");
+        assert_eq!(
+            ToolInventorySource::LiveHostInventory.tag(),
+            "live_host_inventory"
+        );
+        assert_eq!(
+            ToolInventorySource::WorkspaceManifest.tag(),
+            "workspace_manifest"
+        );
         assert_eq!(ToolInventorySource::StaticCatalog.tag(), "static_catalog");
         assert_eq!(ToolInventorySource::Unknown.tag(), "unknown");
     }
@@ -8728,9 +8808,21 @@ mod tests {
 
     #[test]
     fn tool_inventory_source_freshness_caveats_are_nonempty() {
-        assert!(!ToolInventorySource::LiveHostInventory.freshness_caveat().is_empty());
-        assert!(!ToolInventorySource::WorkspaceManifest.freshness_caveat().is_empty());
-        assert!(!ToolInventorySource::StaticCatalog.freshness_caveat().is_empty());
+        assert!(
+            !ToolInventorySource::LiveHostInventory
+                .freshness_caveat()
+                .is_empty()
+        );
+        assert!(
+            !ToolInventorySource::WorkspaceManifest
+                .freshness_caveat()
+                .is_empty()
+        );
+        assert!(
+            !ToolInventorySource::StaticCatalog
+                .freshness_caveat()
+                .is_empty()
+        );
         assert!(!ToolInventorySource::Unknown.freshness_caveat().is_empty());
     }
 
@@ -9026,7 +9118,14 @@ mod tests {
     #[test]
     fn replay_artifact_entry_count() {
         let entries = vec![
-            transcript_entry("list", TranscriptPhase::Discovery, "live", "host", true, "d1"),
+            transcript_entry(
+                "list",
+                TranscriptPhase::Discovery,
+                "live",
+                "host",
+                true,
+                "d1",
+            ),
             transcript_entry("do", TranscriptPhase::Execution, "live", "host", true, "e1"),
         ];
         let artifact = build_replay_artifact("scenario-1", entries);
@@ -9036,8 +9135,22 @@ mod tests {
     #[test]
     fn replay_artifact_has_mixed_sources() {
         let entries = vec![
-            transcript_entry("list", TranscriptPhase::Discovery, "live", "host", true, "live entry"),
-            transcript_entry("list", TranscriptPhase::Discovery, "explicit-offline", "cache", false, "offline entry"),
+            transcript_entry(
+                "list",
+                TranscriptPhase::Discovery,
+                "live",
+                "host",
+                true,
+                "live entry",
+            ),
+            transcript_entry(
+                "list",
+                TranscriptPhase::Discovery,
+                "explicit-offline",
+                "cache",
+                false,
+                "offline entry",
+            ),
         ];
         let artifact = build_replay_artifact("mixed-scenario", entries);
         assert!(artifact.has_mixed_sources());
@@ -9046,8 +9159,22 @@ mod tests {
     #[test]
     fn replay_artifact_is_replay_safe_when_no_mixed() {
         let entries = vec![
-            transcript_entry("list", TranscriptPhase::Discovery, "live", "host", true, "live"),
-            transcript_entry("do", TranscriptPhase::Execution, "live", "host", true, "live"),
+            transcript_entry(
+                "list",
+                TranscriptPhase::Discovery,
+                "live",
+                "host",
+                true,
+                "live",
+            ),
+            transcript_entry(
+                "do",
+                TranscriptPhase::Execution,
+                "live",
+                "host",
+                true,
+                "live",
+            ),
         ];
         let artifact = build_replay_artifact("pure-live", entries);
         assert!(artifact.is_replay_safe());
@@ -9063,9 +9190,14 @@ mod tests {
 
     #[test]
     fn replay_artifact_serializes() {
-        let entries = vec![
-            transcript_entry("search", TranscriptPhase::Preflight, "live", "host", true, "s"),
-        ];
+        let entries = vec![transcript_entry(
+            "search",
+            TranscriptPhase::Preflight,
+            "live",
+            "host",
+            true,
+            "s",
+        )];
         let artifact = build_replay_artifact("ser-test", entries);
         let json = serde_json::to_string(&artifact).unwrap();
         let back: ReplayArtifact = serde_json::from_str(&json).unwrap();
@@ -9078,8 +9210,22 @@ mod tests {
     #[test]
     fn evidence_bundle_counts_correct() {
         let entries = vec![
-            transcript_entry("list", TranscriptPhase::Discovery, "live", "host", true, "l"),
-            transcript_entry("list", TranscriptPhase::Discovery, "offline", "cache", false, "o"),
+            transcript_entry(
+                "list",
+                TranscriptPhase::Discovery,
+                "live",
+                "host",
+                true,
+                "l",
+            ),
+            transcript_entry(
+                "list",
+                TranscriptPhase::Discovery,
+                "offline",
+                "cache",
+                false,
+                "o",
+            ),
             transcript_entry("do", TranscriptPhase::Execution, "live", "host", true, "l2"),
         ];
         let artifact = build_replay_artifact("count-test", entries);
@@ -9094,7 +9240,14 @@ mod tests {
     fn evidence_bundle_live_offline_counts_match() {
         let entries = vec![
             transcript_entry("a", TranscriptPhase::Discovery, "live", "host", true, "x"),
-            transcript_entry("b", TranscriptPhase::Preflight, "offline", "cache", false, "y"),
+            transcript_entry(
+                "b",
+                TranscriptPhase::Preflight,
+                "offline",
+                "cache",
+                false,
+                "y",
+            ),
         ];
         let artifact = build_replay_artifact("match-test", entries);
         let meta = evidence_bundle_metadata(&artifact, false);
@@ -9118,9 +9271,14 @@ mod tests {
 
     #[test]
     fn build_replay_artifact_derives_live_evidence() {
-        let entries = vec![
-            transcript_entry("do", TranscriptPhase::Execution, "live", "host", true, "exec"),
-        ];
+        let entries = vec![transcript_entry(
+            "do",
+            TranscriptPhase::Execution,
+            "live",
+            "host",
+            true,
+            "exec",
+        )];
         let artifact = build_replay_artifact("live-only", entries);
         assert!(artifact.live_evidence);
         assert!(!artifact.offline_evidence);
@@ -9128,9 +9286,14 @@ mod tests {
 
     #[test]
     fn build_replay_artifact_derives_offline_evidence() {
-        let entries = vec![
-            transcript_entry("list", TranscriptPhase::Discovery, "explicit-offline", "cache", false, "offline"),
-        ];
+        let entries = vec![transcript_entry(
+            "list",
+            TranscriptPhase::Discovery,
+            "explicit-offline",
+            "cache",
+            false,
+            "offline",
+        )];
         let artifact = build_replay_artifact("offline-only", entries);
         assert!(!artifact.live_evidence);
         assert!(artifact.offline_evidence);
@@ -9140,8 +9303,22 @@ mod tests {
 
     #[test]
     fn transcript_never_conflates_live_and_offline_source_tags() {
-        let live_entry = transcript_entry("do", TranscriptPhase::Execution, "live", "host", true, "live op");
-        let offline_entry = transcript_entry("list", TranscriptPhase::Discovery, "explicit-offline", "cache", false, "offline op");
+        let live_entry = transcript_entry(
+            "do",
+            TranscriptPhase::Execution,
+            "live",
+            "host",
+            true,
+            "live op",
+        );
+        let offline_entry = transcript_entry(
+            "list",
+            TranscriptPhase::Discovery,
+            "explicit-offline",
+            "cache",
+            false,
+            "offline op",
+        );
         // A live entry must have authoritative=true and an offline entry must not
         assert!(live_entry.authoritative);
         assert!(!offline_entry.authoritative);
@@ -9154,8 +9331,22 @@ mod tests {
     #[test]
     fn replay_artifact_mixed_is_not_replay_safe() {
         let entries = vec![
-            transcript_entry("do", TranscriptPhase::Execution, "live", "host", true, "live"),
-            transcript_entry("list", TranscriptPhase::Discovery, "offline", "cache", false, "offline"),
+            transcript_entry(
+                "do",
+                TranscriptPhase::Execution,
+                "live",
+                "host",
+                true,
+                "live",
+            ),
+            transcript_entry(
+                "list",
+                TranscriptPhase::Discovery,
+                "offline",
+                "cache",
+                false,
+                "offline",
+            ),
         ];
         let artifact = build_replay_artifact("mixed", entries);
         assert!(artifact.has_mixed_sources());
@@ -9232,7 +9423,10 @@ mod tests {
             DiscoveryDataSource::LocalCatalogCache,
             DiscoveryDataSource::StaticSchema,
         ] {
-            assert!(!src.tag().is_empty(), "DiscoveryDataSource tag empty for {src:?}");
+            assert!(
+                !src.tag().is_empty(),
+                "DiscoveryDataSource tag empty for {src:?}"
+            );
         }
 
         // TemplateDataSource
@@ -9242,7 +9436,10 @@ mod tests {
             TemplateDataSource::StaticSchema,
             TemplateDataSource::Unknown,
         ] {
-            assert!(!src.tag().is_empty(), "TemplateDataSource tag empty for {src:?}");
+            assert!(
+                !src.tag().is_empty(),
+                "TemplateDataSource tag empty for {src:?}"
+            );
         }
 
         // ToolInventorySource
@@ -9252,7 +9449,10 @@ mod tests {
             ToolInventorySource::StaticCatalog,
             ToolInventorySource::Unknown,
         ] {
-            assert!(!src.tag().is_empty(), "ToolInventorySource tag empty for {src:?}");
+            assert!(
+                !src.tag().is_empty(),
+                "ToolInventorySource tag empty for {src:?}"
+            );
         }
 
         // CapabilityTokenSource
@@ -9265,7 +9465,10 @@ mod tests {
             CapabilityTokenSource::TestGenerated,
             CapabilityTokenSource::Placeholder,
         ] {
-            assert!(!src.tag().is_empty(), "CapabilityTokenSource tag empty for {src:?}");
+            assert!(
+                !src.tag().is_empty(),
+                "CapabilityTokenSource tag empty for {src:?}"
+            );
         }
 
         // RuntimeMode
@@ -9285,7 +9488,10 @@ mod tests {
             SimulateCapability::Unknown,
             SimulateCapability::Unsupported,
         ] {
-            assert!(!cap.tag().is_empty(), "SimulateCapability tag empty for {cap:?}");
+            assert!(
+                !cap.tag().is_empty(),
+                "SimulateCapability tag empty for {cap:?}"
+            );
         }
 
         // PackageArtifactSource
@@ -9297,7 +9503,10 @@ mod tests {
             PackageArtifactSource::DemoFixture("x".into()),
             PackageArtifactSource::StubPlaceholder("x".into()),
         ] {
-            assert!(!src.tag().is_empty(), "PackageArtifactSource tag empty for {src:?}");
+            assert!(
+                !src.tag().is_empty(),
+                "PackageArtifactSource tag empty for {src:?}"
+            );
         }
     }
 
@@ -9380,14 +9589,12 @@ mod tests {
         assert!(!dp_offline.source.is_authoritative());
 
         // Template: live source -> authoritative
-        let tp_live =
-            template_provenance("template", TemplateDataSource::LiveHostIntrospection);
+        let tp_live = template_provenance("template", TemplateDataSource::LiveHostIntrospection);
         assert!(tp_live.authoritative);
         assert!(tp_live.source.is_authoritative());
 
         // Template: offline source -> not authoritative
-        let tp_offline =
-            template_provenance("template", TemplateDataSource::WorkspaceManifest);
+        let tp_offline = template_provenance("template", TemplateDataSource::WorkspaceManifest);
         assert!(!tp_offline.authoritative);
         assert!(!tp_offline.source.is_authoritative());
     }
@@ -9547,11 +9754,8 @@ mod tests {
             validate_capability_token_source(&CapabilityTokenSource::CliFlag, "invoke").is_ok()
         );
         assert!(
-            validate_capability_token_source(
-                &CapabilityTokenSource::EnvironmentVariable,
-                "invoke"
-            )
-            .is_ok()
+            validate_capability_token_source(&CapabilityTokenSource::EnvironmentVariable, "invoke")
+                .is_ok()
         );
     }
 

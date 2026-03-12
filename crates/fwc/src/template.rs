@@ -1381,10 +1381,7 @@ mod tests {
     #[test]
     fn parse_fill_args_special_characters_in_value() {
         let fill = parse_fill_args("url=https://example.com/path?q=1&r=2");
-        assert_eq!(
-            fill.get("url").unwrap(),
-            "https://example.com/path?q=1&r=2"
-        );
+        assert_eq!(fill.get("url").unwrap(), "https://example.com/path?q=1&r=2");
     }
 
     #[test]

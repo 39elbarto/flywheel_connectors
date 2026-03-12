@@ -11,7 +11,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::intent::{self, CompiledIntent, IntentMode};
+use crate::{
+    intent::{self, CompiledIntent, IntentMode, WorkflowTruth},
+    readiness::CommandAvailability,
+};
 
 const TASK_SCHEMA_VERSION: u32 = 1;
 const PAYLOAD_PLACEHOLDER: &str = "./intent-payload.json";
@@ -153,6 +156,7 @@ impl WorkflowTask {
 pub struct TaskOverview {
     pub id: String,
     pub capsule_status: String,
+    pub workflow_truth: WorkflowTruth,
     pub intent: String,
     pub chosen_connector: Option<String>,
     pub approval_required: bool,
@@ -265,18 +269,28 @@ impl TaskStore {
                 let last_execution_status =
                     task.last_execution().map(|receipt| receipt.status.clone());
                 let unresolved_bindings = task.unresolved_bindings.len();
+                let workflow_truth = current_workflow_truth(&task);
+                let id = task.id;
+                let capsule_status = task.capsule_status;
+                let intent = task.request.intent;
+                let chosen_connector = task.compiled.chosen_connector.map(|candidate| candidate.id);
+                let approved = task.approval.workflow;
+                let pending_question = task.resolution.pending_question.is_some();
+                let resolution_history_count = task.resolution.history.len();
+                let updated_at = task.updated_at;
                 TaskOverview {
-                    id: task.id,
-                    capsule_status: task.capsule_status,
-                    intent: task.request.intent,
-                    chosen_connector: task.compiled.chosen_connector.map(|candidate| candidate.id),
+                    id,
+                    capsule_status,
+                    workflow_truth,
+                    intent,
+                    chosen_connector,
                     approval_required,
-                    approved: task.approval.workflow,
+                    approved,
                     unresolved_bindings,
-                    pending_question: task.resolution.pending_question.is_some(),
-                    resolution_history_count: task.resolution.history.len(),
+                    pending_question,
+                    resolution_history_count,
                     last_execution_status,
-                    updated_at: task.updated_at,
+                    updated_at,
                 }
             })
             .collect::<Vec<_>>();
@@ -675,6 +689,70 @@ fn resolution_stop_reason(task: &WorkflowTask, changed: bool) -> String {
     }
 }
 
+fn current_workflow_truth(task: &WorkflowTask) -> WorkflowTruth {
+    if let Some(receipt) = task.last_execution()
+        && receipt.status == "stopped-on-primitive-error"
+        && let Some(truth) = execution_failure_truth(&receipt.execution)
+    {
+        return truth;
+    }
+
+    task.compiled.workflow_truth.clone()
+}
+
+fn execution_failure_truth(execution: &Value) -> Option<WorkflowTruth> {
+    let availability_payload = execution
+        .get("executed_steps")?
+        .as_array()?
+        .last()?
+        .get("result")?
+        .get("availability")?;
+    let availability_tag = availability_payload.get("availability")?.as_str()?;
+    let availability = parse_command_availability(availability_tag)?;
+    let authoritative = availability_payload
+        .get("authoritative")
+        .and_then(Value::as_bool)
+        .unwrap_or_else(|| availability.is_authoritative());
+    let recoverable = availability_payload
+        .get("recoverable")
+        .and_then(Value::as_bool)
+        .unwrap_or_else(|| availability.is_recoverable());
+    let explanation = availability_payload
+        .get("explanation")
+        .and_then(Value::as_str)
+        .map_or_else(|| availability.explanation().to_owned(), str::to_owned);
+    Some(WorkflowTruth::from_execution_receipt(
+        availability,
+        authoritative,
+        recoverable,
+        explanation,
+    ))
+}
+
+fn parse_command_availability(tag: &str) -> Option<CommandAvailability> {
+    Some(match tag {
+        "live-runtime" => CommandAvailability::LiveRuntime,
+        "offline-artifact" => CommandAvailability::OfflineArtifact,
+        "unsupported" => CommandAvailability::Unsupported,
+        "planned" => CommandAvailability::Planned,
+        "unavailable" => CommandAvailability::Unavailable,
+        "denied" => CommandAvailability::Denied,
+        "unknown" => CommandAvailability::Unknown,
+        _ => return None,
+    })
+}
+
+fn execution_failure_capsule_status(execution: &Value) -> Option<&'static str> {
+    match execution_failure_truth(execution)?.availability {
+        CommandAvailability::Denied => Some("denied"),
+        CommandAvailability::Unavailable => Some("unavailable"),
+        CommandAvailability::Unsupported => Some("unsupported"),
+        CommandAvailability::Planned => Some("planned"),
+        CommandAvailability::Unknown => Some("unknown"),
+        CommandAvailability::LiveRuntime | CommandAvailability::OfflineArtifact => None,
+    }
+}
+
 fn derive_capsule_status(task: &WorkflowTask) -> String {
     if task.compiled.status != "ready" {
         return task.compiled.status.clone();
@@ -690,6 +768,9 @@ fn derive_capsule_status(task: &WorkflowTask) -> String {
 
     if let Some(last) = task.last_execution() {
         if last.status == "stopped-on-primitive-error" {
+            if let Some(status) = execution_failure_capsule_status(&last.execution) {
+                return status.to_owned();
+            }
             return "execution-error".to_owned();
         }
         if last.mode == "approve" && last.status == "materialized" {
@@ -1206,9 +1287,11 @@ fn now_rfc3339() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ResolutionPatch, TaskStore, WorkflowRequest, effective_bindings, ready_for_execution,
-        resolution_patch, resolution_patch_would_change, validate_binding_entries,
+        ResolutionPatch, TaskStore, WorkflowRequest, current_workflow_truth, effective_bindings,
+        ready_for_execution, resolution_patch, resolution_patch_would_change,
+        validate_binding_entries,
     };
+    use crate::readiness::CommandAvailability;
     use serde_json::json;
     use std::collections::BTreeMap;
     use uuid::Uuid;
@@ -1392,6 +1475,92 @@ mod tests {
 
         assert_eq!(updated.capsule_status, "ready-to-approve");
         assert_eq!(updated.execution_history.len(), 1);
+    }
+
+    #[test]
+    fn append_execution_surfaces_denied_capsule_status_from_primitive_payload() {
+        let store = store();
+        let task = store
+            .create(WorkflowRequest {
+                intent: "create a GitHub issue titled \"FWC: denied\"".to_owned(),
+                connector_override: None,
+                zone_override: None,
+            })
+            .expect("task should be created");
+
+        let updated = store
+            .append_execution(
+                &task.id,
+                "run",
+                "approve",
+                json!({
+                    "status": "stopped-on-primitive-error",
+                    "executed_count": 1,
+                    "withheld_count": 0,
+                    "stopped_before_side_effect": false,
+                    "executed_steps": [{
+                        "result": {
+                            "availability": {
+                                "availability": "denied",
+                                "authoritative": false,
+                                "recoverable": true,
+                                "explanation": "The operation was blocked by policy."
+                            }
+                        }
+                    }]
+                }),
+            )
+            .expect("execution should persist")
+            .expect("task should exist");
+
+        assert_eq!(updated.capsule_status, "denied");
+        assert_eq!(
+            current_workflow_truth(&updated).availability,
+            CommandAvailability::Denied
+        );
+    }
+
+    #[test]
+    fn append_execution_surfaces_unavailable_capsule_status_from_primitive_payload() {
+        let store = store();
+        let task = store
+            .create(WorkflowRequest {
+                intent: "create a GitHub issue titled \"FWC: unavailable\"".to_owned(),
+                connector_override: None,
+                zone_override: None,
+            })
+            .expect("task should be created");
+
+        let updated = store
+            .append_execution(
+                &task.id,
+                "run",
+                "approve",
+                json!({
+                    "status": "stopped-on-primitive-error",
+                    "executed_count": 1,
+                    "withheld_count": 0,
+                    "stopped_before_side_effect": false,
+                    "executed_steps": [{
+                        "result": {
+                            "availability": {
+                                "availability": "unavailable",
+                                "authoritative": false,
+                                "recoverable": true,
+                                "explanation": "The live host was unreachable."
+                            }
+                        }
+                    }]
+                }),
+            )
+            .expect("execution should persist")
+            .expect("task should exist");
+
+        assert_eq!(updated.capsule_status, "unavailable");
+        assert_eq!(
+            current_workflow_truth(&updated).availability,
+            CommandAvailability::Unavailable
+        );
     }
 
     #[test]
@@ -2557,6 +2726,10 @@ mod tests {
             .find(|o| o.id == task.id)
             .expect("task should be in list");
         assert_eq!(overview.last_execution_status.as_deref(), Some("simulated"));
+        assert_eq!(
+            overview.workflow_truth.availability,
+            CommandAvailability::LiveRuntime
+        );
     }
 
     #[test]
@@ -2582,6 +2755,57 @@ mod tests {
             .expect("task should be in list");
         assert!(overview.pending_question);
         assert_eq!(overview.resolution_history_count, 1);
+    }
+
+    #[test]
+    fn task_overview_uses_execution_receipt_truth_when_latest_run_failed() {
+        let store = store();
+        let task = store
+            .create(WorkflowRequest {
+                intent: "create a GitHub issue titled \"overview denied\"".to_owned(),
+                connector_override: None,
+                zone_override: None,
+            })
+            .expect("task should be created");
+
+        store
+            .append_execution(
+                &task.id,
+                "run",
+                "approve",
+                json!({
+                    "status": "stopped-on-primitive-error",
+                    "executed_count": 1,
+                    "withheld_count": 0,
+                    "stopped_before_side_effect": false,
+                    "executed_steps": [{
+                        "result": {
+                            "availability": {
+                                "availability": "denied",
+                                "authoritative": false,
+                                "recoverable": true,
+                                "explanation": "Approval was rejected."
+                            }
+                        }
+                    }]
+                }),
+            )
+            .expect("execution should persist");
+
+        let overviews = store.list(50, None).expect("list should succeed");
+        let overview = overviews
+            .iter()
+            .find(|o| o.id == task.id)
+            .expect("task should be in list");
+        assert_eq!(overview.capsule_status, "denied");
+        assert_eq!(
+            overview.workflow_truth.availability,
+            CommandAvailability::Denied
+        );
+        assert_eq!(
+            overview.workflow_truth.source_of_truth,
+            "workflow-execution-receipt"
+        );
     }
 
     // ── ApprovalState default ────────────────────────────────────────

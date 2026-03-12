@@ -1110,20 +1110,14 @@ mod tests {
     fn session_context_numeric_value() {
         let mut session = Session::new("Agent", "goal", None);
         session.set_context("count", serde_json::json!(42));
-        assert_eq!(
-            session.get_context("count"),
-            Some(&serde_json::json!(42))
-        );
+        assert_eq!(session.get_context("count"), Some(&serde_json::json!(42)));
     }
 
     #[test]
     fn session_context_boolean_value() {
         let mut session = Session::new("Agent", "goal", None);
         session.set_context("flag", serde_json::json!(true));
-        assert_eq!(
-            session.get_context("flag"),
-            Some(&serde_json::json!(true))
-        );
+        assert_eq!(session.get_context("flag"), Some(&serde_json::json!(true)));
     }
 
     #[test]
@@ -1139,10 +1133,7 @@ mod tests {
         let mut session = Session::new("Agent", "goal", None);
         session.set_context("temp", serde_json::json!("data"));
         session.set_context("temp", serde_json::Value::Null);
-        assert_eq!(
-            session.get_context("temp"),
-            Some(&serde_json::Value::Null)
-        );
+        assert_eq!(session.get_context("temp"), Some(&serde_json::Value::Null));
     }
 
     #[test]
@@ -1152,14 +1143,8 @@ mod tests {
         let mut cloned = session.clone();
         cloned.set_context("k", serde_json::json!("changed"));
         // Original unchanged
-        assert_eq!(
-            session.get_context("k"),
-            Some(&serde_json::json!("v"))
-        );
-        assert_eq!(
-            cloned.get_context("k"),
-            Some(&serde_json::json!("changed"))
-        );
+        assert_eq!(session.get_context("k"), Some(&serde_json::json!("v")));
+        assert_eq!(cloned.get_context("k"), Some(&serde_json::json!("changed")));
     }
 
     #[test]

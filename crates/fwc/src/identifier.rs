@@ -1485,7 +1485,10 @@ mod tests {
         };
         let json = serde_json::to_string(&candidate).unwrap();
         let back: ResourceCandidate = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.display_name, "\u{65e5}\u{672c}\u{8a9e}\u{30c6}\u{30b9}\u{30c8}");
+        assert_eq!(
+            back.display_name,
+            "\u{65e5}\u{672c}\u{8a9e}\u{30c6}\u{30b9}\u{30c8}"
+        );
     }
 
     // ── resolve_candidates additional edge cases ────────────────────
@@ -1597,8 +1600,13 @@ mod tests {
 
     #[test]
     fn resolve_not_found_mentions_connector_in_suggestion() {
-        let result =
-            resolve_candidates("xyz", "key", "salesforce", vec![], "fwc invoke salesforce {id}");
+        let result = resolve_candidates(
+            "xyz",
+            "key",
+            "salesforce",
+            vec![],
+            "fwc invoke salesforce {id}",
+        );
         match &result.outcome {
             LookupOutcome::NotFound { suggestions } => {
                 assert!(suggestions.iter().any(|s| s.contains("salesforce")));

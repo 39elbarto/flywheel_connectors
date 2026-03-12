@@ -1400,7 +1400,9 @@ mod tests {
     fn replay_mode_clone_from_checkpoint() {
         let mode = ReplayMode::FromCheckpoint(PathBuf::from("/some/path"));
         let cloned = mode.clone();
-        assert!(matches!(cloned, ReplayMode::FromCheckpoint(p) if p == PathBuf::from("/some/path")));
+        assert!(
+            matches!(cloned, ReplayMode::FromCheckpoint(p) if p == PathBuf::from("/some/path"))
+        );
     }
 
     #[test]
@@ -1425,7 +1427,13 @@ mod tests {
         assert!(seq.contains("42"));
         let cp = format!("{:?}", ReplayMode::FromCheckpoint(PathBuf::from("/x")));
         assert!(cp.contains("FromCheckpoint"));
-        let tr = format!("{:?}", ReplayMode::TimeRange { from: Utc::now(), to: None });
+        let tr = format!(
+            "{:?}",
+            ReplayMode::TimeRange {
+                from: Utc::now(),
+                to: None
+            }
+        );
         assert!(tr.contains("TimeRange"));
     }
 
@@ -1434,7 +1442,10 @@ mod tests {
         let cap = full_capability("fcp.cap");
         let cloned = cap.clone();
         assert_eq!(cloned.connector_id, "fcp.cap");
-        assert_eq!(cloned.supports_sequence_replay, cap.supports_sequence_replay);
+        assert_eq!(
+            cloned.supports_sequence_replay,
+            cap.supports_sequence_replay
+        );
         assert_eq!(cloned.supports_time_replay, cap.supports_time_replay);
     }
 
@@ -1888,16 +1899,17 @@ mod tests {
         };
         let resolved = resolve_replay_mode(&req, &store, &cap).unwrap();
         match resolved {
-            ResolvedReplay::Unsupported { fallback, .. } => {
-                match *fallback {
-                    ResolvedReplay::StartFromTime { from: clamped, to: fb_to } => {
-                        let expected_clamped = to - Duration::hours(max_hours);
-                        assert_eq!(clamped, expected_clamped);
-                        assert_eq!(fb_to, Some(to));
-                    }
-                    other => panic!("expected StartFromTime fallback, got {other:?}"),
+            ResolvedReplay::Unsupported { fallback, .. } => match *fallback {
+                ResolvedReplay::StartFromTime {
+                    from: clamped,
+                    to: fb_to,
+                } => {
+                    let expected_clamped = to - Duration::hours(max_hours);
+                    assert_eq!(clamped, expected_clamped);
+                    assert_eq!(fb_to, Some(to));
                 }
-            }
+                other => panic!("expected StartFromTime fallback, got {other:?}"),
+            },
             other => panic!("expected Unsupported, got {other:?}"),
         }
     }

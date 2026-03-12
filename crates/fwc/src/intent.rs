@@ -6,10 +6,21 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+use crate::catalog::{CommandTruthSource, classify_command};
+use crate::readiness::CommandAvailability;
+
 const EXECUTION_NOTICE: &str = "The plan compiler emits concrete `fwc` primitives. A step only succeeds if that primitive is actually implemented and the live host or local state it needs is configured; `fwc` does not fabricate success.";
+const WORKFLOW_TRUTH_COMPILER_SOURCE: &str = "local-intent-compiler";
 
 fn default_execution_notice() -> String {
     EXECUTION_NOTICE.to_owned()
+}
+
+fn default_workflow_truth() -> WorkflowTruth {
+    WorkflowTruth::from_compiler(
+        CommandAvailability::Unknown,
+        "The intent compiler has not derived a truthful execution path yet.",
+    )
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -53,6 +64,8 @@ pub struct IntentRequest {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CompiledIntent {
     pub status: String,
+    #[serde(default = "default_workflow_truth")]
+    pub workflow_truth: WorkflowTruth,
     pub mode: String,
     pub summary: String,
     pub template: String,
@@ -79,6 +92,68 @@ pub struct CompiledIntent {
     pub explanation: Explanation,
     #[serde(default = "default_execution_notice")]
     pub execution_notice: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WorkflowTruth {
+    pub availability: CommandAvailability,
+    pub source_of_truth: String,
+    pub authoritative: bool,
+    pub recoverable: bool,
+    pub exit_code_hint: u8,
+    pub explanation: String,
+}
+
+impl WorkflowTruth {
+    #[must_use]
+    pub fn new(
+        availability: CommandAvailability,
+        source_of_truth: impl Into<String>,
+        authoritative: bool,
+        recoverable: bool,
+        explanation: impl Into<String>,
+    ) -> Self {
+        let exit_code_hint = availability.exit_code_u8();
+        Self {
+            availability,
+            source_of_truth: source_of_truth.into(),
+            authoritative,
+            recoverable,
+            exit_code_hint,
+            explanation: explanation.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn from_compiler(
+        availability: CommandAvailability,
+        explanation: impl Into<String>,
+    ) -> Self {
+        let recoverable = availability.is_recoverable();
+        Self::new(
+            availability,
+            WORKFLOW_TRUTH_COMPILER_SOURCE,
+            false,
+            recoverable,
+            explanation,
+        )
+    }
+
+    #[must_use]
+    pub fn from_execution_receipt(
+        availability: CommandAvailability,
+        authoritative: bool,
+        recoverable: bool,
+        explanation: impl Into<String>,
+    ) -> Self {
+        Self::new(
+            availability,
+            "workflow-execution-receipt",
+            authoritative,
+            recoverable,
+            explanation,
+        )
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -216,8 +291,54 @@ pub fn compile(request: &IntentRequest) -> CompiledIntent {
         &action_signals,
     );
     let confidence = confidence_for(&connector_candidates, !plan.ambiguities.is_empty());
+    let (status, workflow_truth, suggested_command_lines, next_actions) =
+        compile_status_metadata(request, chosen_connector.as_ref(), &plan);
+    let explanation = compile_explanation(&action_signals, &connector_candidates, &mut plan);
+
+    CompiledIntent {
+        status,
+        workflow_truth,
+        mode: request.mode.label().to_owned(),
+        summary: std::mem::take(&mut plan.summary),
+        template: action_signals.family.to_owned(),
+        confidence,
+        raw_intent,
+        normalized_intent,
+        connector_override: request.connector_override.clone(),
+        zone,
+        quoted_literals: literals.quoted,
+        lookup_literal,
+        payload_literal,
+        chosen_connector,
+        alternative_connectors,
+        action: action_inference(&action_signals),
+        operation_hint: plan.operation_hint.take(),
+        missing_information: plan.missing_information,
+        unsupported_reasons: plan.unsupported_reasons,
+        ambiguities: plan.ambiguities,
+        assumptions: plan.assumptions,
+        suggested_command_lines,
+        next_actions,
+        steps: plan.steps,
+        explanation,
+        execution_notice: EXECUTION_NOTICE.to_owned(),
+    }
+}
+
+fn compile_status_metadata(
+    request: &IntentRequest,
+    chosen_connector: Option<&ConnectorCandidate>,
+    plan: &PlanBuild,
+) -> (String, WorkflowTruth, Vec<String>, Vec<String>) {
     let status = status_for(
         chosen_connector.is_some(),
+        &plan.missing_information,
+        &plan.unsupported_reasons,
+        &plan.ambiguities,
+    );
+    let workflow_truth = compiled_workflow_truth(
+        &status,
+        &plan.steps,
         &plan.missing_information,
         &plan.unsupported_reasons,
         &plan.ambiguities,
@@ -232,49 +353,40 @@ pub fn compile(request: &IntentRequest) -> CompiledIntent {
         request,
         &status,
         &plan.steps,
-        chosen_connector.as_ref(),
+        chosen_connector,
         !plan.ambiguities.is_empty(),
         !plan.missing_information.is_empty(),
     );
 
-    CompiledIntent {
+    (
         status,
-        mode: request.mode.label().to_owned(),
-        summary: std::mem::take(&mut plan.summary),
-        template: action_signals.family.to_owned(),
-        confidence,
-        raw_intent,
-        normalized_intent,
-        connector_override: request.connector_override.clone(),
-        zone,
-        quoted_literals: literals.quoted,
-        lookup_literal,
-        payload_literal,
-        chosen_connector,
-        alternative_connectors,
-        action: ActionInference {
-            family: action_signals.family.to_owned(),
-            verb: action_signals.verb.to_owned(),
-            resource: action_signals.resource.map(str::to_owned),
-            risk: action_signals.risk.to_owned(),
-            mutating: action_signals.mutating,
-            matched_terms: action_signals.matched_terms.clone(),
-        },
-        operation_hint: plan.operation_hint.take(),
-        missing_information: plan.missing_information,
-        unsupported_reasons: plan.unsupported_reasons,
-        ambiguities: plan.ambiguities,
-        assumptions: plan.assumptions,
+        workflow_truth,
         suggested_command_lines,
         next_actions,
-        steps: plan.steps,
-        explanation: Explanation {
-            connector_evidence: connector_evidence(&connector_candidates),
-            action_evidence: action_evidence(&action_signals),
-            lookup_evidence: plan.lookup_evidence,
-            template_reasoning: plan.template_reasoning,
-        },
-        execution_notice: EXECUTION_NOTICE.to_owned(),
+    )
+}
+
+fn action_inference(action_signals: &ActionSignals) -> ActionInference {
+    ActionInference {
+        family: action_signals.family.to_owned(),
+        verb: action_signals.verb.to_owned(),
+        resource: action_signals.resource.map(str::to_owned),
+        risk: action_signals.risk.to_owned(),
+        mutating: action_signals.mutating,
+        matched_terms: action_signals.matched_terms.clone(),
+    }
+}
+
+fn compile_explanation(
+    action_signals: &ActionSignals,
+    connector_candidates: &[ConnectorCandidate],
+    plan: &mut PlanBuild,
+) -> Explanation {
+    Explanation {
+        connector_evidence: connector_evidence(connector_candidates),
+        action_evidence: action_evidence(action_signals),
+        lookup_evidence: std::mem::take(&mut plan.lookup_evidence),
+        template_reasoning: std::mem::take(&mut plan.template_reasoning),
     }
 }
 
@@ -1469,6 +1581,112 @@ fn lookup_literal(literals: &ParsedLiterals, action: &ActionSignals) -> Option<S
     None
 }
 
+fn compiled_workflow_truth(
+    status: &str,
+    steps: &[CompiledStep],
+    missing_information: &[String],
+    unsupported_reasons: &[String],
+    ambiguities: &[Ambiguity],
+) -> WorkflowTruth {
+    let availability = if status == "unsupported" || !unsupported_reasons.is_empty() {
+        CommandAvailability::Unsupported
+    } else if status == "planned" {
+        CommandAvailability::Planned
+    } else if status == "ambiguous"
+        || status == "needs-clarification"
+        || !ambiguities.is_empty()
+        || !missing_information.is_empty()
+    {
+        CommandAvailability::Unknown
+    } else {
+        aggregate_compiled_step_availability(steps)
+    };
+
+    let explanation = match availability {
+        CommandAvailability::Unsupported => unsupported_reasons.first().cloned().unwrap_or_else(
+            || CommandAvailability::Unsupported.explanation().to_owned(),
+        ),
+        CommandAvailability::Planned => CommandAvailability::Planned.explanation().to_owned(),
+        CommandAvailability::Unknown if !ambiguities.is_empty() => {
+            "The intent remains ambiguous, so the compiler cannot truthfully choose one executable connector path yet."
+                .to_owned()
+        }
+        CommandAvailability::Unknown if !missing_information.is_empty() => {
+            "The compiler still needs concrete identifiers, payload content, or connector selection before it can truthfully materialize an executable workflow."
+                .to_owned()
+        }
+        CommandAvailability::Unknown => {
+            "The intent compiler has not derived a truthful execution path yet.".to_owned()
+        }
+        CommandAvailability::LiveRuntime if steps.iter().any(|step| {
+            classify_command(&step.command)
+                .is_some_and(|classification| classification.truth_source == CommandTruthSource::Hybrid)
+        }) => {
+            "The compiled workflow includes primitives that default to live host truth when materialized."
+                .to_owned()
+        }
+        CommandAvailability::LiveRuntime => {
+            "The compiled workflow requires live host-backed primitives when materialized."
+                .to_owned()
+        }
+        CommandAvailability::OfflineArtifact => {
+            "The compiled workflow only uses local or offline primitives, so any resulting data will be artifact-backed rather than live runtime truth."
+                .to_owned()
+        }
+        CommandAvailability::Unavailable => {
+            CommandAvailability::Unavailable.explanation().to_owned()
+        }
+        CommandAvailability::Denied => CommandAvailability::Denied.explanation().to_owned(),
+    };
+
+    WorkflowTruth::from_compiler(availability, explanation)
+}
+
+fn aggregate_compiled_step_availability(steps: &[CompiledStep]) -> CommandAvailability {
+    let mut saw_live_runtime = false;
+    let mut saw_offline_artifact = false;
+
+    for step in steps {
+        match compiled_step_availability(step) {
+            CommandAvailability::LiveRuntime => saw_live_runtime = true,
+            CommandAvailability::OfflineArtifact => saw_offline_artifact = true,
+            CommandAvailability::Planned => return CommandAvailability::Planned,
+            CommandAvailability::Unsupported => return CommandAvailability::Unsupported,
+            CommandAvailability::Unavailable | CommandAvailability::Denied => {
+                return CommandAvailability::Unknown;
+            }
+            CommandAvailability::Unknown => {}
+        }
+    }
+
+    if saw_live_runtime {
+        CommandAvailability::LiveRuntime
+    } else if saw_offline_artifact {
+        CommandAvailability::OfflineArtifact
+    } else {
+        CommandAvailability::Unknown
+    }
+}
+
+fn compiled_step_availability(step: &CompiledStep) -> CommandAvailability {
+    let Some(classification) = classify_command(&step.command) else {
+        return CommandAvailability::Unknown;
+    };
+
+    match classification.truth_source {
+        CommandTruthSource::OfflineArtifact => CommandAvailability::OfflineArtifact,
+        CommandTruthSource::LiveHost => CommandAvailability::LiveRuntime,
+        CommandTruthSource::Hybrid => {
+            if step.argv.iter().any(|segment| segment == "--offline") {
+                CommandAvailability::OfflineArtifact
+            } else {
+                CommandAvailability::LiveRuntime
+            }
+        }
+        CommandTruthSource::Passthrough => CommandAvailability::Unknown,
+    }
+}
+
 fn status_for(
     has_connector: bool,
     missing_information: &[String],
@@ -2584,6 +2802,32 @@ mod tests {
         assert_eq!(status_for(false, &[], &[], &[]), "needs-clarification");
     }
 
+    #[test]
+    fn compiled_step_availability_treats_offline_hybrid_steps_as_offline_artifact() {
+        let step = CompiledStep {
+            ordinal: 1,
+            phase: "inspect".to_owned(),
+            purpose: "Inspect offline schema".to_owned(),
+            command: "schema".to_owned(),
+            command_line: "fwc schema github issues.get --offline".to_owned(),
+            argv: vec![
+                "fwc".to_owned(),
+                "schema".to_owned(),
+                "github".to_owned(),
+                "issues.get".to_owned(),
+                "--offline".to_owned(),
+            ],
+            side_effecting: false,
+            approval_required: false,
+            notes: Vec::new(),
+        };
+
+        assert_eq!(
+            compiled_step_availability(&step),
+            CommandAvailability::OfflineArtifact
+        );
+    }
+
     // ── connector_evidence / action_evidence ────────────────
 
     #[test]
@@ -2657,6 +2901,16 @@ mod tests {
         ));
         assert_eq!(plan.status, "ready");
         assert_eq!(
+            plan.workflow_truth.availability,
+            CommandAvailability::LiveRuntime
+        );
+        assert_eq!(
+            plan.workflow_truth.source_of_truth,
+            WORKFLOW_TRUTH_COMPILER_SOURCE
+        );
+        assert!(!plan.workflow_truth.authoritative);
+        assert_eq!(plan.workflow_truth.exit_code_hint, 0);
+        assert_eq!(
             plan.chosen_connector.as_ref().map(|c| c.id.as_str()),
             Some("github")
         );
@@ -2671,6 +2925,11 @@ mod tests {
     fn compiler_surfaces_ambiguity_for_generic_message_intent() {
         let plan = compile(&request("send a message to a channel"));
         assert_eq!(plan.status, "ambiguous");
+        assert_eq!(
+            plan.workflow_truth.availability,
+            CommandAvailability::Unknown
+        );
+        assert!(plan.workflow_truth.recoverable);
         assert!(
             plan.alternative_connectors
                 .iter()
@@ -2683,6 +2942,10 @@ mod tests {
         let plan = compile(&request("disable the slack connector in z:work"));
         assert_eq!(plan.template, "unsupported");
         assert_eq!(plan.status, "unsupported");
+        assert_eq!(
+            plan.workflow_truth.availability,
+            CommandAvailability::Unsupported
+        );
         assert_eq!(plan.steps[0].command_line, "fwc status slack");
         assert_eq!(plan.steps[1].command_line, "fwc show slack");
         assert_eq!(plan.zone.as_deref(), Some("z:work"));

@@ -1243,7 +1243,10 @@ mod tests {
         assert_eq!(event_types::SECRET_ACCESS, "secret.access");
         assert_eq!(event_types::CAPABILITY_INVOKE, "capability.invoke");
         assert_eq!(event_types::ELEVATION_GRANTED, "elevation.granted");
-        assert_eq!(event_types::DECLASSIFICATION_GRANTED, "declassification.granted");
+        assert_eq!(
+            event_types::DECLASSIFICATION_GRANTED,
+            "declassification.granted"
+        );
         assert_eq!(event_types::ZONE_TRANSITION, "zone.transition");
         assert_eq!(event_types::REVOCATION_ISSUED, "revocation.issued");
         assert_eq!(event_types::SECURITY_VIOLATION, "security.violation");

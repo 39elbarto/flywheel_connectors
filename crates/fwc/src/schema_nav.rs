@@ -186,12 +186,7 @@ pub fn validate_input(schema: &Value, input: &Value) -> Vec<ValidationError> {
     errors
 }
 
-fn validate_object(
-    schema: &Value,
-    input: &Value,
-    prefix: &str,
-    errors: &mut Vec<ValidationError>,
-) {
+fn validate_object(schema: &Value, input: &Value, prefix: &str, errors: &mut Vec<ValidationError>) {
     // Check required fields
     let required: Vec<&str> = schema
         .get("required")
@@ -208,10 +203,7 @@ fn validate_object(
             format!("{prefix}.{req}")
         };
 
-        let present = input_obj.is_some_and(|obj| {
-            obj.get(*req)
-                .is_some_and(|v| !v.is_null())
-        });
+        let present = input_obj.is_some_and(|obj| obj.get(*req).is_some_and(|v| !v.is_null()));
 
         if !present {
             errors.push(ValidationError {
@@ -247,12 +239,7 @@ fn validate_object(
     }
 }
 
-fn validate_type(
-    schema: &Value,
-    value: &Value,
-    path: &str,
-    errors: &mut Vec<ValidationError>,
-) {
+fn validate_type(schema: &Value, value: &Value, path: &str, errors: &mut Vec<ValidationError>) {
     // Check enum constraints
     if let Some(enum_values) = schema.get("enum").and_then(Value::as_array) {
         if !enum_values.contains(value) {
@@ -1107,12 +1094,16 @@ mod tests {
             }
         });
         let fields = walk_schema(&schema, &[]);
-        assert!(fields
-            .iter()
-            .any(|f| f.path == "spec.replicas" && f.required));
-        assert!(fields
-            .iter()
-            .any(|f| f.path == "spec.selector" && !f.required));
+        assert!(
+            fields
+                .iter()
+                .any(|f| f.path == "spec.replicas" && f.required)
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|f| f.path == "spec.selector" && !f.required)
+        );
     }
 
     #[test]
@@ -1135,15 +1126,21 @@ mod tests {
             }
         });
         let fields = walk_schema(&schema, &[]);
-        assert!(fields
-            .iter()
-            .any(|f| f.path == "containers[].name" && f.required));
-        assert!(fields
-            .iter()
-            .any(|f| f.path == "containers[].image" && f.required));
-        assert!(fields
-            .iter()
-            .any(|f| f.path == "containers[].ports" && !f.required));
+        assert!(
+            fields
+                .iter()
+                .any(|f| f.path == "containers[].name" && f.required)
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|f| f.path == "containers[].image" && f.required)
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|f| f.path == "containers[].ports" && !f.required)
+        );
     }
 
     #[test]
@@ -1219,28 +1216,36 @@ mod tests {
         let fields = walk_schema(&schema, &[]);
         let assignee = fields.iter().find(|f| f.path == "assignee").unwrap();
         assert!(assignee.field_type.starts_with("oneOf<"));
-        assert!(assignee
-            .variants
-            .as_ref()
-            .unwrap()
-            .iter()
-            .any(|variant| variant
-                == "kind=user: object {id: integer, kind: const user, name: string}"));
-        assert!(assignee
-            .constraints
-            .as_ref()
-            .unwrap()
-            .contains(&"discriminator: kind".to_owned()));
+        assert!(
+            assignee
+                .variants
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|variant| variant
+                    == "kind=user: object {id: integer, kind: const user, name: string}")
+        );
+        assert!(
+            assignee
+                .constraints
+                .as_ref()
+                .unwrap()
+                .contains(&"discriminator: kind".to_owned())
+        );
 
         let assignee_id = fields.iter().find(|f| f.path == "assignee.id").unwrap();
         assert!(!assignee_id.required);
         let child_constraints = assignee_id.constraints.as_ref().unwrap();
-        assert!(child_constraints
-            .iter()
-            .any(|constraint| constraint == "available when kind=user"));
-        assert!(child_constraints
-            .iter()
-            .any(|constraint| constraint == "required when kind=user"));
+        assert!(
+            child_constraints
+                .iter()
+                .any(|constraint| constraint == "available when kind=user")
+        );
+        assert!(
+            child_constraints
+                .iter()
+                .any(|constraint| constraint == "required when kind=user")
+        );
     }
 
     #[test]
@@ -1336,11 +1341,12 @@ mod tests {
         });
         let fields = walk_schema(&schema, &[]);
         let mode = fields.iter().find(|f| f.path == "mode").unwrap();
-        assert!(mode
-            .constraints
-            .as_ref()
-            .unwrap()
-            .contains(&"not enum {legacy}".to_owned()));
+        assert!(
+            mode.constraints
+                .as_ref()
+                .unwrap()
+                .contains(&"not enum {legacy}".to_owned())
+        );
     }
 
     // ── scaffold_template tests ─────────────────────────────────────
@@ -2024,9 +2030,11 @@ mod tests {
         let fields = walk_schema(&schema, &[]);
         let filtered = filter_by_field(&fields, "config");
         assert_eq!(filtered.len(), 3); // config + config.timeout + config.retries
-        assert!(filtered
-            .iter()
-            .all(|f| f.path == "config" || f.path.starts_with("config.")));
+        assert!(
+            filtered
+                .iter()
+                .all(|f| f.path == "config" || f.path.starts_with("config."))
+        );
     }
 
     #[test]

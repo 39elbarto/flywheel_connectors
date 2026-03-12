@@ -395,10 +395,7 @@ mod tests {
     #[test]
     fn make_report_capturing_node_is_node_a() {
         let report = make_report(0, 0, vec![]);
-        assert_eq!(
-            report.source_capturing_node.as_deref(),
-            Some("node-a")
-        );
+        assert_eq!(report.source_capturing_node.as_deref(), Some("node-a"));
     }
 
     #[test]
@@ -420,7 +417,10 @@ mod tests {
     fn make_report_matched_events_equals_total_minus_mismatched() {
         for m in 0..=10 {
             let report = make_report(m, 0, vec![]);
-            assert_eq!(report.summary.matched_events + report.summary.mismatched_events, 10);
+            assert_eq!(
+                report.summary.matched_events + report.summary.mismatched_events,
+                10
+            );
         }
     }
 
@@ -428,21 +428,22 @@ mod tests {
     fn make_report_matched_decisions_equals_eight_minus_mismatched() {
         for m in 0..=8 {
             let report = make_report(0, m, vec![]);
-            assert_eq!(report.summary.matched_decisions + report.summary.mismatched_decisions, 8);
+            assert_eq!(
+                report.summary.matched_decisions + report.summary.mismatched_decisions,
+                8
+            );
         }
     }
 
     #[test]
     fn make_report_diffs_forwarded_unchanged() {
-        let diffs = vec![
-            fcp_mesh::TraceReplayDiff {
-                index: 7,
-                event_type: "audit".to_string(),
-                expected_decision: None,
-                actual_decision: None,
-                detail: "missing audit trail".to_string(),
-            },
-        ];
+        let diffs = vec![fcp_mesh::TraceReplayDiff {
+            index: 7,
+            event_type: "audit".to_string(),
+            expected_decision: None,
+            actual_decision: None,
+            detail: "missing audit trail".to_string(),
+        }];
         let report = make_report(1, 1, diffs);
         assert_eq!(report.diffs.len(), 1);
         assert_eq!(report.diffs[0].index, 7);
@@ -719,13 +720,17 @@ mod tests {
 
     #[test]
     fn report_clone_equals_original() {
-        let report = make_report(2, 1, vec![fcp_mesh::TraceReplayDiff {
-            index: 0,
-            event_type: "routing".to_string(),
-            expected_decision: Some("allow".to_string()),
-            actual_decision: Some("deny".to_string()),
-            detail: "cloned".to_string(),
-        }]);
+        let report = make_report(
+            2,
+            1,
+            vec![fcp_mesh::TraceReplayDiff {
+                index: 0,
+                event_type: "routing".to_string(),
+                expected_decision: Some("allow".to_string()),
+                actual_decision: Some("deny".to_string()),
+                detail: "cloned".to_string(),
+            }],
+        );
         let cloned = report.clone();
         assert_eq!(report, cloned);
     }
@@ -749,13 +754,17 @@ mod tests {
     #[test]
     fn report_ne_when_diffs_differ() {
         let r1 = make_report(0, 0, vec![]);
-        let r2 = make_report(0, 1, vec![fcp_mesh::TraceReplayDiff {
-            index: 0,
-            event_type: "x".to_string(),
-            expected_decision: None,
-            actual_decision: None,
-            detail: "d".to_string(),
-        }]);
+        let r2 = make_report(
+            0,
+            1,
+            vec![fcp_mesh::TraceReplayDiff {
+                index: 0,
+                event_type: "x".to_string(),
+                expected_decision: None,
+                actual_decision: None,
+                detail: "d".to_string(),
+            }],
+        );
         assert_ne!(r1, r2);
     }
 

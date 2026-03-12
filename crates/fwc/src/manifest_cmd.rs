@@ -614,10 +614,7 @@ mod tests {
         let report = sample_report(false, false, Some("error: \"quotes\" & <angle>"));
         let json = serde_json::to_string(&report).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(
-            v["validation_error"],
-            "error: \"quotes\" & <angle>"
-        );
+        assert_eq!(v["validation_error"], "error: \"quotes\" & <angle>");
     }
 
     #[test]

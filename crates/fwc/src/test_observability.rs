@@ -9,14 +9,16 @@
 //! - **Redaction**: Automatic secret scrubbing with correlation digests.
 //! - **Replay**: Captures everything needed to reproduce a scenario run.
 
-use std::collections::BTreeMap;
+use crate::readiness::CommandAvailability;
+
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Write as _};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
 use serde::{
-    Deserialize, Deserializer, Serialize, Serializer,
     de::{self, Visitor},
+    Deserialize, Deserializer, Serialize, Serializer,
 };
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -311,6 +313,190 @@ impl fmt::Display for TraceCategory {
     }
 }
 
+/// Canonical phase marker for truthfulness scenarios.
+///
+/// These markers let replayable evidence distinguish offline preparation,
+/// host-backed discovery, preflight, real invocation, reconnect, and
+/// cancellation paths instead of collapsing everything into a generic
+/// "command ran" story.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TruthPhase {
+    Setup,
+    OfflineArtifact,
+    HostDiscovery,
+    Preflight,
+    Simulate,
+    Invoke,
+    HostReceipt,
+    Reconnect,
+    Cancellation,
+    Teardown,
+}
+
+impl TruthPhase {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Setup => "setup",
+            Self::OfflineArtifact => "offline-artifact",
+            Self::HostDiscovery => "host-discovery",
+            Self::Preflight => "preflight",
+            Self::Simulate => "simulate",
+            Self::Invoke => "invoke",
+            Self::HostReceipt => "host-receipt",
+            Self::Reconnect => "reconnect",
+            Self::Cancellation => "cancellation",
+            Self::Teardown => "teardown",
+        }
+    }
+}
+
+impl fmt::Display for TruthPhase {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Explicit reconnect marker for long-lived live-runtime scenarios.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReconnectEvent {
+    Attempted,
+    Succeeded,
+    Failed,
+}
+
+impl ReconnectEvent {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Attempted => "attempted",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// Explicit cancellation marker for live operations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CancellationEvent {
+    Requested,
+    Acknowledged,
+    Completed,
+    Rejected,
+}
+
+impl CancellationEvent {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Requested => "requested",
+            Self::Acknowledged => "acknowledged",
+            Self::Completed => "completed",
+            Self::Rejected => "rejected",
+        }
+    }
+}
+
+/// Truthfulness evidence attached to a trace entry.
+///
+/// This is the structured payload that makes `trace.jsonl`, `summary.json`,
+/// and `replay.sh` mechanically useful for the host-first migration: it
+/// records which truth surface a step used, where the data came from, which
+/// phase of the request path ran, and which host/request identifiers allow
+/// replay and auditing.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TruthContext {
+    /// Machine-readable command mode aligned with `CommandAvailability`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_mode: Option<CommandAvailability>,
+    /// One or more provenance/source markers (for example
+    /// `live-host-introspection` or `workspace-manifest`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provenance_markers: Vec<String>,
+    /// Which phase of the truthfulness path this entry belongs to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<TruthPhase>,
+    /// Host request correlation identifier, if the step crossed into the live
+    /// control plane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_request_id: Option<String>,
+    /// Host response identifier, if the host produced a distinct response id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_response_id: Option<String>,
+    /// Receipt identifier associated with the step, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_id: Option<String>,
+    /// Reconnect marker for long-lived streams or MCP sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reconnect_event: Option<ReconnectEvent>,
+    /// Cancellation marker for stop/cancel flows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancellation_event: Option<CancellationEvent>,
+}
+
+impl TruthContext {
+    /// Create a new truth context anchored to a command mode.
+    #[must_use]
+    pub fn new(command_mode: CommandAvailability) -> Self {
+        Self {
+            command_mode: Some(command_mode),
+            ..Self::default()
+        }
+    }
+
+    /// Add a provenance/source marker.
+    #[must_use]
+    pub fn with_provenance_marker(mut self, marker: impl Into<String>) -> Self {
+        self.provenance_markers.push(marker.into());
+        self
+    }
+
+    /// Set the phase marker.
+    #[must_use]
+    pub fn with_phase(mut self, phase: TruthPhase) -> Self {
+        self.phase = Some(phase);
+        self
+    }
+
+    /// Set the host request correlation identifier.
+    #[must_use]
+    pub fn with_host_request_id(mut self, id: impl Into<String>) -> Self {
+        self.host_request_id = Some(id.into());
+        self
+    }
+
+    /// Set the host response identifier.
+    #[must_use]
+    pub fn with_host_response_id(mut self, id: impl Into<String>) -> Self {
+        self.host_response_id = Some(id.into());
+        self
+    }
+
+    /// Set the receipt identifier.
+    #[must_use]
+    pub fn with_receipt_id(mut self, id: impl Into<String>) -> Self {
+        self.receipt_id = Some(id.into());
+        self
+    }
+
+    /// Mark the step as part of a reconnect sequence.
+    #[must_use]
+    pub fn with_reconnect_event(mut self, event: ReconnectEvent) -> Self {
+        self.reconnect_event = Some(event);
+        self
+    }
+
+    /// Mark the step as part of a cancellation sequence.
+    #[must_use]
+    pub fn with_cancellation_event(mut self, event: CancellationEvent) -> Self {
+        self.cancellation_event = Some(event);
+        self
+    }
+}
+
 /// A single structured log entry.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TraceEntry {
@@ -323,6 +509,8 @@ pub struct TraceEntry {
     pub fields: BTreeMap<String, serde_json::Value>,
     pub duration_ms: Option<u64>,
     pub redacted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truth: Option<TruthContext>,
 }
 
 impl TraceEntry {
@@ -345,6 +533,7 @@ impl TraceEntry {
             fields: BTreeMap::new(),
             duration_ms: None,
             redacted: false,
+            truth: None,
         }
     }
 
@@ -368,6 +557,13 @@ impl TraceEntry {
         self.redacted = true;
         self
     }
+
+    /// Attach structured truthfulness evidence to this entry.
+    #[must_use]
+    pub fn with_truth_context(mut self, truth: TruthContext) -> Self {
+        self.truth = Some(truth);
+        self
+    }
 }
 
 /// Ordered collection of trace entries with query helpers.
@@ -386,6 +582,98 @@ pub struct TraceLogSummary {
     pub error_count: usize,
     pub categories: BTreeMap<String, usize>,
     pub redacted_count: usize,
+}
+
+/// Aggregated truthfulness evidence extracted from a trace log.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TruthfulnessSummary {
+    /// Count of entries by command mode / availability tag.
+    pub command_modes: BTreeMap<String, usize>,
+    /// Distinct provenance/source markers emitted during the run.
+    pub provenance_markers: Vec<String>,
+    /// Distinct phase markers emitted during the run.
+    pub phases: Vec<String>,
+    /// Distinct host request identifiers observed in the run.
+    pub host_request_ids: Vec<String>,
+    /// Distinct host response identifiers observed in the run.
+    pub host_response_ids: Vec<String>,
+    /// Distinct receipt identifiers observed in the run.
+    pub receipt_ids: Vec<String>,
+    /// Distinct reconnect events observed in the run.
+    pub reconnect_events: Vec<String>,
+    /// Distinct cancellation events observed in the run.
+    pub cancellation_events: Vec<String>,
+    /// Number of entries that explicitly used live runtime truth.
+    pub live_entry_count: usize,
+    /// Number of entries that explicitly used offline artifact truth.
+    pub offline_entry_count: usize,
+}
+
+impl TruthfulnessSummary {
+    /// Build a summary from the trace log's per-entry truth context.
+    #[must_use]
+    pub fn from_trace_log(log: &TraceLog) -> Self {
+        let mut summary = Self::default();
+        let mut provenance_markers = BTreeSet::new();
+        let mut phases = BTreeSet::new();
+        let mut host_request_ids = BTreeSet::new();
+        let mut host_response_ids = BTreeSet::new();
+        let mut receipt_ids = BTreeSet::new();
+        let mut reconnect_events = BTreeSet::new();
+        let mut cancellation_events = BTreeSet::new();
+
+        for entry in log.entries() {
+            let Some(truth) = &entry.truth else {
+                continue;
+            };
+
+            if let Some(mode) = truth.command_mode {
+                *summary
+                    .command_modes
+                    .entry(mode.tag().to_owned())
+                    .or_insert(0) += 1;
+                match mode {
+                    CommandAvailability::LiveRuntime => summary.live_entry_count += 1,
+                    CommandAvailability::OfflineArtifact => summary.offline_entry_count += 1,
+                    CommandAvailability::Unsupported
+                    | CommandAvailability::Planned
+                    | CommandAvailability::Unavailable
+                    | CommandAvailability::Denied
+                    | CommandAvailability::Unknown => {}
+                }
+            }
+
+            provenance_markers.extend(truth.provenance_markers.iter().cloned());
+
+            if let Some(phase) = truth.phase {
+                phases.insert(phase.as_str().to_owned());
+            }
+            if let Some(id) = &truth.host_request_id {
+                host_request_ids.insert(id.clone());
+            }
+            if let Some(id) = &truth.host_response_id {
+                host_response_ids.insert(id.clone());
+            }
+            if let Some(id) = &truth.receipt_id {
+                receipt_ids.insert(id.clone());
+            }
+            if let Some(event) = truth.reconnect_event {
+                reconnect_events.insert(event.as_str().to_owned());
+            }
+            if let Some(event) = truth.cancellation_event {
+                cancellation_events.insert(event.as_str().to_owned());
+            }
+        }
+
+        summary.provenance_markers = provenance_markers.into_iter().collect();
+        summary.phases = phases.into_iter().collect();
+        summary.host_request_ids = host_request_ids.into_iter().collect();
+        summary.host_response_ids = host_response_ids.into_iter().collect();
+        summary.receipt_ids = receipt_ids.into_iter().collect();
+        summary.reconnect_events = reconnect_events.into_iter().collect();
+        summary.cancellation_events = cancellation_events.into_iter().collect();
+        summary
+    }
 }
 
 impl TraceLog {
@@ -457,6 +745,12 @@ impl TraceLog {
             }
         }
         s
+    }
+
+    /// Extract the truthfulness evidence summary for this log.
+    #[must_use]
+    pub fn truthfulness_summary(&self) -> TruthfulnessSummary {
+        TruthfulnessSummary::from_trace_log(self)
     }
 
     /// Serialize all entries as newline-delimited JSON (JSONL).
@@ -607,6 +901,10 @@ pub struct ArtifactManifest {
     pub file_count: usize,
     pub total_bytes: u64,
     pub outcome: BundleOutcome,
+    #[serde(default)]
+    pub log_summary: TraceLogSummary,
+    #[serde(default)]
+    pub truthfulness: TruthfulnessSummary,
 }
 
 impl ArtifactManifest {
@@ -626,7 +924,17 @@ impl ArtifactManifest {
             file_count,
             total_bytes,
             outcome,
+            log_summary: TraceLogSummary::default(),
+            truthfulness: TruthfulnessSummary::default(),
         }
+    }
+
+    /// Attach trace-derived summaries to the manifest.
+    #[must_use]
+    pub fn with_trace_log(mut self, log: &TraceLog) -> Self {
+        self.log_summary = log.summary();
+        self.truthfulness = log.truthfulness_summary();
+        self
     }
 }
 
@@ -878,6 +1186,13 @@ pub struct ReplayEnvelope {
     pub git_sha: Option<String>,
     /// Rust toolchain version.
     pub rust_version: Option<String>,
+    /// Optional command runner prefix. Cargo-backed replay defaults to
+    /// `rch exec --` so CPU-heavy verification stays offloaded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_runner: Option<String>,
+    /// Truthfulness evidence captured for replay/debugging.
+    #[serde(default)]
+    pub truthfulness: TruthfulnessSummary,
 }
 
 impl ReplayEnvelope {
@@ -889,15 +1204,18 @@ impl ReplayEnvelope {
         command_line: impl Into<String>,
         working_directory: impl Into<String>,
     ) -> Self {
+        let command_line = command_line.into();
         Self {
             scenario_id,
             trace_id,
             timestamp: SystemTime::now(),
-            command_line: command_line.into(),
+            command_line: command_line.clone(),
             working_directory: working_directory.into(),
             environment: BTreeMap::new(),
             git_sha: None,
             rust_version: None,
+            command_runner: default_command_runner(&command_line),
+            truthfulness: TruthfulnessSummary::default(),
         }
     }
 
@@ -919,6 +1237,20 @@ impl ReplayEnvelope {
     #[must_use]
     pub fn with_rust_version(mut self, version: impl Into<String>) -> Self {
         self.rust_version = Some(version.into());
+        self
+    }
+
+    /// Override the command runner prefix.
+    #[must_use]
+    pub fn with_command_runner(mut self, runner: impl Into<String>) -> Self {
+        self.command_runner = Some(runner.into());
+        self
+    }
+
+    /// Attach truthfulness evidence for replay/debugging.
+    #[must_use]
+    pub fn with_truthfulness(mut self, truthfulness: TruthfulnessSummary) -> Self {
+        self.truthfulness = truthfulness;
         self
     }
 }
@@ -957,14 +1289,63 @@ impl ReplayInstructions {
         }
 
         // Step 4: run command
-        steps.push(envelope.command_line.clone());
+        let command = if let Some(runner) = &envelope.command_runner {
+            format!("{runner} {}", envelope.command_line)
+        } else {
+            envelope.command_line.clone()
+        };
+        steps.push(command);
 
         if let Some(rv) = &envelope.rust_version {
             prerequisites.push(format!("rustc {rv}"));
         }
+        if envelope.command_runner.is_some() {
+            prerequisites.push("rch".to_string());
+        }
 
         notes.push(format!("Original trace ID: {}", envelope.trace_id));
         notes.push(format!("Scenario: {}", envelope.scenario_id));
+        if envelope.command_runner.as_deref() == Some("rch exec --") {
+            notes.push(
+                "Cargo-backed replay remains offloaded through `rch exec -- ...`.".to_owned(),
+            );
+        }
+        if !envelope.truthfulness.command_modes.is_empty() {
+            notes.push(format!(
+                "Observed command modes: {}",
+                envelope
+                    .truthfulness
+                    .command_modes
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if !envelope.truthfulness.provenance_markers.is_empty() {
+            notes.push(format!(
+                "Provenance markers: {}",
+                envelope.truthfulness.provenance_markers.join(", ")
+            ));
+        }
+        if !envelope.truthfulness.phases.is_empty() {
+            notes.push(format!(
+                "Truthfulness phases: {}",
+                envelope.truthfulness.phases.join(", ")
+            ));
+        }
+        if !envelope.truthfulness.host_request_ids.is_empty() {
+            notes.push(format!(
+                "Host request ids: {}",
+                envelope.truthfulness.host_request_ids.join(", ")
+            ));
+        }
+        if !envelope.truthfulness.receipt_ids.is_empty() {
+            notes.push(format!(
+                "Receipt ids: {}",
+                envelope.truthfulness.receipt_ids.join(", ")
+            ));
+        }
 
         Self {
             steps,
@@ -1036,7 +1417,7 @@ pub fn emit_entry(
 pub fn create_bundle(
     base: &std::path::Path,
     ctx: &ScenarioContext,
-    _log: &TraceLog,
+    log: &TraceLog,
     outcome: BundleOutcome,
 ) -> (ArtifactBundle, ArtifactManifest) {
     let bundle = ArtifactBundle::new(base, &ctx.scenario_id, &ctx.trace_id);
@@ -1046,8 +1427,17 @@ pub fn create_bundle(
         4, // trace.jsonl, summary.json, environment.json, replay.sh
         0, // no actual bytes written in-memory
         outcome,
-    );
+    )
+    .with_trace_log(log);
     (bundle, manifest)
+}
+
+fn default_command_runner(command_line: &str) -> Option<String> {
+    if command_line.trim_start().starts_with("cargo ") {
+        Some("rch exec --".to_owned())
+    } else {
+        None
+    }
 }
 
 // We use hex encoding for SHA-256 digests. The `sha2` crate produces raw bytes;
@@ -1311,6 +1701,54 @@ mod tests {
         }
     }
 
+    // ── TruthPhase / TruthContext ──────────────────────────────────────
+
+    #[test]
+    fn truth_phase_as_str_and_serde_roundtrip() {
+        let phases = [
+            TruthPhase::Setup,
+            TruthPhase::OfflineArtifact,
+            TruthPhase::HostDiscovery,
+            TruthPhase::Preflight,
+            TruthPhase::Simulate,
+            TruthPhase::Invoke,
+            TruthPhase::HostReceipt,
+            TruthPhase::Reconnect,
+            TruthPhase::Cancellation,
+            TruthPhase::Teardown,
+        ];
+        for phase in phases {
+            assert!(!phase.as_str().is_empty());
+            let json = serde_json::to_string(&phase).unwrap();
+            let back: TruthPhase = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, phase);
+        }
+    }
+
+    #[test]
+    fn truth_context_builder_sets_all_markers() {
+        let truth = TruthContext::new(CommandAvailability::LiveRuntime)
+            .with_provenance_marker("live-host-introspection")
+            .with_phase(TruthPhase::Invoke)
+            .with_host_request_id("req-1")
+            .with_host_response_id("resp-1")
+            .with_receipt_id("receipt-1")
+            .with_reconnect_event(ReconnectEvent::Succeeded)
+            .with_cancellation_event(CancellationEvent::Acknowledged);
+
+        assert_eq!(truth.command_mode, Some(CommandAvailability::LiveRuntime));
+        assert_eq!(truth.provenance_markers, vec!["live-host-introspection"]);
+        assert_eq!(truth.phase, Some(TruthPhase::Invoke));
+        assert_eq!(truth.host_request_id.as_deref(), Some("req-1"));
+        assert_eq!(truth.host_response_id.as_deref(), Some("resp-1"));
+        assert_eq!(truth.receipt_id.as_deref(), Some("receipt-1"));
+        assert_eq!(truth.reconnect_event, Some(ReconnectEvent::Succeeded));
+        assert_eq!(
+            truth.cancellation_event,
+            Some(CancellationEvent::Acknowledged)
+        );
+    }
+
     // ── TraceEntry ──────────────────────────────────────────────────────
 
     #[test]
@@ -1330,6 +1768,7 @@ mod tests {
         assert!(!entry.redacted);
         assert!(entry.duration_ms.is_none());
         assert!(entry.fields.is_empty());
+        assert!(entry.truth.is_none());
     }
 
     #[test]
@@ -1351,6 +1790,18 @@ mod tests {
         let entry = TraceEntry::new(&tid, &sid, TraceLevel::Info, TraceCategory::CliStep, "step")
             .with_duration_ms(150);
         assert_eq!(entry.duration_ms, Some(150));
+    }
+
+    #[test]
+    fn trace_entry_with_truth_context() {
+        let tid = TraceId::from_string("t1");
+        let sid = ScenarioId::new(ScenarioLayer::Unit, "s", "c");
+        let truth = TruthContext::new(CommandAvailability::OfflineArtifact)
+            .with_provenance_marker("workspace-manifest")
+            .with_phase(TruthPhase::OfflineArtifact);
+        let entry = TraceEntry::new(&tid, &sid, TraceLevel::Info, TraceCategory::CliStep, "step")
+            .with_truth_context(truth.clone());
+        assert_eq!(entry.truth, Some(truth));
     }
 
     #[test]
@@ -1719,6 +2170,8 @@ mod tests {
         assert_eq!(m.file_count, 4);
         assert_eq!(m.total_bytes, 1024);
         assert!(m.outcome.is_pass());
+        assert_eq!(m.log_summary.total_entries, 0);
+        assert!(m.truthfulness.command_modes.is_empty());
     }
 
     #[test]
@@ -1975,19 +2428,36 @@ mod tests {
         assert_eq!(env.working_directory, "/home/user/project");
         assert!(env.git_sha.is_none());
         assert!(env.rust_version.is_none());
+        assert!(env.command_runner.is_none());
     }
 
     #[test]
     fn replay_envelope_builder() {
         let sid = ScenarioId::new(ScenarioLayer::E2E, "s", "c");
         let tid = TraceId::from_string("t");
+        let truthfulness = TruthfulnessSummary {
+            command_modes: BTreeMap::from([("offline-artifact".to_string(), 1)]),
+            provenance_markers: vec!["workspace-manifest".to_string()],
+            phases: vec!["offline-artifact".to_string()],
+            host_request_ids: Vec::new(),
+            host_response_ids: Vec::new(),
+            receipt_ids: Vec::new(),
+            reconnect_events: Vec::new(),
+            cancellation_events: Vec::new(),
+            live_entry_count: 0,
+            offline_entry_count: 1,
+        };
         let env = ReplayEnvelope::new(sid, tid, "cmd", "/dir")
             .with_env("RUST_LOG", "debug")
             .with_git_sha("abc123")
-            .with_rust_version("1.85.0");
+            .with_rust_version("1.85.0")
+            .with_command_runner("custom-runner --")
+            .with_truthfulness(truthfulness.clone());
         assert_eq!(env.environment["RUST_LOG"], "debug");
         assert_eq!(env.git_sha.as_deref(), Some("abc123"));
         assert_eq!(env.rust_version.as_deref(), Some("1.85.0"));
+        assert_eq!(env.command_runner.as_deref(), Some("custom-runner --"));
+        assert_eq!(env.truthfulness, truthfulness);
     }
 
     #[test]
@@ -1999,6 +2469,14 @@ mod tests {
         let back: ReplayEnvelope = serde_json::from_str(&json).unwrap();
         assert_eq!(back.git_sha.as_deref(), Some("deadbeef"));
         assert_eq!(back.command_line, "cmd");
+    }
+
+    #[test]
+    fn replay_envelope_defaults_cargo_to_rch_runner() {
+        let sid = ScenarioId::new(ScenarioLayer::E2E, "verify", "cargo");
+        let tid = TraceId::from_string("t");
+        let env = ReplayEnvelope::new(sid, tid, "cargo test -p fwc test_observability", "/repo");
+        assert_eq!(env.command_runner.as_deref(), Some("rch exec --"));
     }
 
     // ── ReplayInstructions ──────────────────────────────────────────────
@@ -2017,19 +2495,15 @@ mod tests {
         assert!(instructions.steps[0].contains("/home/user"));
         assert!(instructions.steps.iter().any(|s| s.contains("abc123")));
         assert!(instructions.steps.iter().any(|s| s.contains("FWC_HOST")));
-        assert!(
-            instructions
-                .steps
-                .iter()
-                .any(|s| s.contains("github.list_repos"))
-        );
+        assert!(instructions
+            .steps
+            .iter()
+            .any(|s| s.contains("github.list_repos")));
         assert!(instructions.prerequisites.iter().any(|p| p.contains("git")));
-        assert!(
-            instructions
-                .prerequisites
-                .iter()
-                .any(|p| p.contains("1.85.0"))
-        );
+        assert!(instructions
+            .prerequisites
+            .iter()
+            .any(|p| p.contains("1.85.0")));
     }
 
     #[test]
@@ -2038,12 +2512,52 @@ mod tests {
         let tid = TraceId::from_string("t");
         let env = ReplayEnvelope::new(sid, tid, "cargo test", "/project");
         let instructions = ReplayInstructions::from_envelope(&env);
-        assert!(
-            !instructions
-                .steps
-                .iter()
-                .any(|s| s.contains("git checkout"))
-        );
+        assert!(!instructions
+            .steps
+            .iter()
+            .any(|s| s.contains("git checkout")));
+        assert!(instructions
+            .steps
+            .iter()
+            .any(|s| s.contains("rch exec -- cargo test")));
+        assert!(instructions.prerequisites.iter().any(|p| p == "rch"));
+    }
+
+    #[test]
+    fn replay_instructions_include_truthfulness_notes() {
+        let sid = ScenarioId::new(ScenarioLayer::E2E, "truth", "notes");
+        let tid = TraceId::from_string("trace-99");
+        let truthfulness = TruthfulnessSummary {
+            command_modes: BTreeMap::from([
+                ("live-runtime".to_string(), 1),
+                ("offline-artifact".to_string(), 1),
+            ]),
+            provenance_markers: vec!["live-host-inventory".to_string()],
+            phases: vec!["preflight".to_string(), "invoke".to_string()],
+            host_request_ids: vec!["req-1".to_string()],
+            host_response_ids: vec!["resp-1".to_string()],
+            receipt_ids: vec!["receipt-1".to_string()],
+            reconnect_events: Vec::new(),
+            cancellation_events: Vec::new(),
+            live_entry_count: 1,
+            offline_entry_count: 1,
+        };
+        let env = ReplayEnvelope::new(sid, tid, "cargo test -p fwc", "/repo")
+            .with_truthfulness(truthfulness);
+        let instructions = ReplayInstructions::from_envelope(&env);
+        assert!(instructions
+            .notes
+            .iter()
+            .any(|n| n.contains("Observed command modes")));
+        assert!(instructions
+            .notes
+            .iter()
+            .any(|n| n.contains("Provenance markers")));
+        assert!(instructions
+            .notes
+            .iter()
+            .any(|n| n.contains("Host request ids")));
+        assert!(instructions.notes.iter().any(|n| n.contains("Receipt ids")));
     }
 
     #[test]
@@ -2085,6 +2599,8 @@ mod tests {
         assert!(bundle.bundle_id.starts_with("unit:routing:alias_test@"));
         assert!(manifest.outcome.is_pass());
         assert_eq!(manifest.file_count, 4);
+        assert_eq!(manifest.log_summary.total_entries, 0);
+        assert!(manifest.truthfulness.command_modes.is_empty());
     }
 
     #[test]
@@ -2146,6 +2662,66 @@ mod tests {
         assert_eq!(back.categories["setup"], 5);
     }
 
+    #[test]
+    fn trace_log_truthfulness_summary_collects_modes_markers_and_ids() {
+        let ctx = scenario_context(ScenarioLayer::E2E, "truth", "markers");
+        let mut log = new_trace_log();
+        let live_truth = TruthContext::new(CommandAvailability::LiveRuntime)
+            .with_provenance_marker("live-host-introspection")
+            .with_phase(TruthPhase::Invoke)
+            .with_host_request_id("req-live")
+            .with_host_response_id("resp-live")
+            .with_receipt_id("receipt-live");
+        let offline_truth = TruthContext::new(CommandAvailability::OfflineArtifact)
+            .with_provenance_marker("workspace-manifest")
+            .with_phase(TruthPhase::OfflineArtifact)
+            .with_reconnect_event(ReconnectEvent::Attempted)
+            .with_cancellation_event(CancellationEvent::Requested);
+
+        log.append(
+            TraceEntry::new(
+                &ctx.trace_id,
+                &ctx.scenario_id,
+                TraceLevel::Info,
+                TraceCategory::HostRequest,
+                "live invoke",
+            )
+            .with_truth_context(live_truth),
+        );
+        log.append(
+            TraceEntry::new(
+                &ctx.trace_id,
+                &ctx.scenario_id,
+                TraceLevel::Info,
+                TraceCategory::CliStep,
+                "offline inspect",
+            )
+            .with_truth_context(offline_truth),
+        );
+
+        let summary = log.truthfulness_summary();
+        assert_eq!(summary.command_modes["live-runtime"], 1);
+        assert_eq!(summary.command_modes["offline-artifact"], 1);
+        assert_eq!(summary.live_entry_count, 1);
+        assert_eq!(summary.offline_entry_count, 1);
+        assert_eq!(
+            summary.provenance_markers,
+            vec![
+                "live-host-introspection".to_string(),
+                "workspace-manifest".to_string()
+            ]
+        );
+        assert_eq!(
+            summary.phases,
+            vec!["invoke".to_string(), "offline-artifact".to_string()]
+        );
+        assert_eq!(summary.host_request_ids, vec!["req-live".to_string()]);
+        assert_eq!(summary.host_response_ids, vec!["resp-live".to_string()]);
+        assert_eq!(summary.receipt_ids, vec!["receipt-live".to_string()]);
+        assert_eq!(summary.reconnect_events, vec!["attempted".to_string()]);
+        assert_eq!(summary.cancellation_events, vec!["requested".to_string()]);
+    }
+
     // ── Integration: full workflow ──────────────────────────────────────
 
     #[test]
@@ -2173,6 +2749,13 @@ mod tests {
         )
         .with_field("api_key", serde_json::json!("sk-live-test-key"))
         .with_field("endpoint", serde_json::json!("/v1/repos"))
+        .with_truth_context(
+            TruthContext::new(CommandAvailability::LiveRuntime)
+                .with_provenance_marker("live-host-inventory")
+                .with_phase(TruthPhase::Invoke)
+                .with_host_request_id("req-42")
+                .with_receipt_id("receipt-42"),
+        )
         .with_duration_ms(42);
         log.append(sensitive);
         emit_entry(
@@ -2203,6 +2786,15 @@ mod tests {
         assert_eq!(summary.total_entries, 3);
         assert_eq!(summary.redacted_count, 1);
         assert_eq!(summary.info_count, 3);
+        assert_eq!(manifest.truthfulness.command_modes["live-runtime"], 1);
+        assert_eq!(
+            manifest.truthfulness.provenance_markers,
+            vec!["live-host-inventory".to_string()]
+        );
+        assert_eq!(
+            manifest.truthfulness.receipt_ids,
+            vec!["receipt-42".to_string()]
+        );
     }
 
     #[test]

@@ -1470,10 +1470,7 @@ mod tests {
             strip_prefix: Some("github.list_issues".to_string()),
             ..ExportOptions::default()
         };
-        assert_eq!(
-            make_tool_name("github.list_issues", &opts, false),
-            ""
-        );
+        assert_eq!(make_tool_name("github.list_issues", &opts, false), "");
     }
 
     #[test]
@@ -1489,19 +1486,15 @@ mod tests {
 
     #[test]
     fn export_operation_infos_mcp_empty() {
-        let result =
-            export_operation_infos(&[], ToolSchemaFormat::Mcp, &ExportOptions::default());
+        let result = export_operation_infos(&[], ToolSchemaFormat::Mcp, &ExportOptions::default());
         assert_eq!(result, json!([]));
     }
 
     #[test]
     fn export_operation_infos_claude_single() {
         let op = sample_op().operation_info();
-        let result = export_operation_infos(
-            &[op],
-            ToolSchemaFormat::Claude,
-            &ExportOptions::default(),
-        );
+        let result =
+            export_operation_infos(&[op], ToolSchemaFormat::Claude, &ExportOptions::default());
         assert!(result.is_array());
         assert_eq!(result.as_array().unwrap().len(), 1);
     }
@@ -1509,11 +1502,8 @@ mod tests {
     #[test]
     fn export_operation_infos_openai_single() {
         let op = sample_op().operation_info();
-        let result = export_operation_infos(
-            &[op],
-            ToolSchemaFormat::OpenAi,
-            &ExportOptions::default(),
-        );
+        let result =
+            export_operation_infos(&[op], ToolSchemaFormat::OpenAi, &ExportOptions::default());
         assert!(result.is_array());
         assert_eq!(result[0]["type"], "function");
     }

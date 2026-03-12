@@ -6,8 +6,10 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 // ── Agent identity ────────────────────────────────────────────────
@@ -172,7 +174,7 @@ impl fmt::Display for MessageKind {
 // ── Coordination hub ──────────────────────────────────────────────
 
 /// Central coordination hub for multi-agent connector operations.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CoordinationHub {
     /// Active usage announcements.
     announcements: Vec<UsageAnnouncement>,
@@ -306,6 +308,14 @@ impl CoordinationHub {
             .collect()
     }
 
+    /// List all active reservations across connectors.
+    pub fn active_reservations(&self) -> Vec<&ResourceReservation> {
+        self.reservations
+            .values()
+            .filter(|r| !r.is_expired())
+            .collect()
+    }
+
     /// Purge expired reservations.
     pub fn purge_reservations(&mut self) -> usize {
         let before = self.reservations.len();
@@ -422,6 +432,11 @@ impl CoordinationHub {
             .filter(|a| !a.is_expired())
             .count()
     }
+
+    /// Purge all expired coordination state and return the number removed.
+    pub fn cleanup_expired(&mut self) -> usize {
+        self.purge_announcements() + self.purge_reservations()
+    }
 }
 
 /// Result of a conflict check.
@@ -469,6 +484,103 @@ impl fmt::Display for CoordError {
 
 impl std::error::Error for CoordError {}
 
+// ── Persistence ──────────────────────────────────────────────────
+
+/// File-backed coordination state stored under `~/.fwc/agent_mail/`.
+pub struct CoordinationStore {
+    path: PathBuf,
+}
+
+impl CoordinationStore {
+    /// Create a store at the default location.
+    #[must_use]
+    pub fn default_path() -> Self {
+        if let Ok(path) = std::env::var("FWC_AGENT_COORD_PATH")
+            && !path.trim().is_empty()
+        {
+            return Self {
+                path: PathBuf::from(path),
+            };
+        }
+
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .map_or_else(|_| PathBuf::from("."), PathBuf::from);
+        Self {
+            path: home
+                .join(".fwc")
+                .join("agent_mail")
+                .join("coordination.json"),
+        }
+    }
+
+    /// Create a store at a custom path (primarily for testing).
+    #[must_use]
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+
+    /// Return the underlying file path.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Load the coordination hub from disk, returning an empty hub if no file exists yet.
+    pub fn load(&self) -> anyhow::Result<CoordinationHub> {
+        if !self.path.exists() {
+            return Ok(CoordinationHub::new());
+        }
+
+        let raw = std::fs::read_to_string(&self.path).with_context(|| {
+            format!(
+                "failed to read coordination store `{}`",
+                self.path.display()
+            )
+        })?;
+        serde_json::from_str(&raw).with_context(|| {
+            format!(
+                "failed to parse coordination store `{}`",
+                self.path.display()
+            )
+        })
+    }
+
+    /// Persist the coordination hub atomically.
+    pub fn save(&self, hub: &CoordinationHub) -> anyhow::Result<()> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "failed to create the parent directory for `{}`",
+                    self.path.display()
+                )
+            })?;
+        }
+
+        let tmp_path = coordination_tmp_path(&self.path);
+        let raw =
+            serde_json::to_string_pretty(hub).context("failed to serialize coordination state")?;
+        std::fs::write(&tmp_path, raw)
+            .with_context(|| format!("failed to write `{}`", tmp_path.display()))?;
+        if self.path.exists() {
+            std::fs::remove_file(&self.path).with_context(|| {
+                format!(
+                    "failed to replace the existing coordination store `{}`",
+                    self.path.display()
+                )
+            })?;
+        }
+        std::fs::rename(&tmp_path, &self.path).with_context(|| {
+            format!(
+                "failed to persist coordination state from `{}` to `{}`",
+                tmp_path.display(),
+                self.path.display()
+            )
+        })?;
+        Ok(())
+    }
+}
+
 // ── Helpers ───────────────────────────────────────────────────────
 
 fn epoch_seconds() -> u64 {
@@ -478,12 +590,17 @@ fn epoch_seconds() -> u64 {
         .as_secs()
 }
 
+fn coordination_tmp_path(path: &Path) -> PathBuf {
+    path.with_extension("tmp")
+}
+
 // ── Tests ─────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    use tempfile::TempDir;
 
     fn agent(name: &str) -> AgentId {
         AgentId::new(name)
@@ -1358,5 +1475,50 @@ mod tests {
         hub.announce(UsageAnnouncement::new(agent("B"), "slack", "test2"));
         assert_eq!(hub.announcement_count(), 2);
         assert_eq!(hub2.announcement_count(), 1);
+    }
+
+    #[test]
+    fn coordination_store_load_missing_returns_empty_hub() {
+        let dir = TempDir::new().unwrap();
+        let store = CoordinationStore::new(dir.path().join("coordination.json"));
+        let hub = store.load().unwrap();
+        assert_eq!(hub.announcement_count(), 0);
+        assert_eq!(hub.reservation_count(), 0);
+    }
+
+    #[test]
+    fn coordination_store_round_trips_announcements_reservations_and_mail() {
+        let dir = TempDir::new().unwrap();
+        let store = CoordinationStore::new(dir.path().join("coordination.json"));
+
+        let mut hub = CoordinationHub::new();
+        hub.announce(
+            UsageAnnouncement::new(agent("BronzeValley"), "github", "triage")
+                .with_operation("issues.create")
+                .with_duration(300),
+        );
+        let reservation_id = hub
+            .reserve(
+                agent("BronzeValley"),
+                "github",
+                "repo:octocat/hello-world",
+                120,
+                true,
+            )
+            .unwrap();
+        hub.send(
+            agent("BronzeValley"),
+            &agent("GoldenWolf"),
+            MessageKind::Info,
+            json!({"task":"flywheel_connectors-qnchs.13.3"}),
+        );
+
+        store.save(&hub).unwrap();
+        let loaded = store.load().unwrap();
+
+        assert_eq!(loaded.announcement_count(), 1);
+        assert_eq!(loaded.reservation_count(), 1);
+        assert_eq!(loaded.active_reservations()[0].id, reservation_id);
+        assert_eq!(loaded.inbox(&agent("GoldenWolf")).len(), 1);
     }
 }

@@ -969,7 +969,10 @@ mod tests {
         // Core invariant: when allow_unsigned=false, both attestation
         // and sbom must be required regardless of presence
         let p = build_verification_policy(false, false, 0, false, false);
-        assert!(p.require_attestation, "unsigned disallowed → must require attestation");
+        assert!(
+            p.require_attestation,
+            "unsigned disallowed → must require attestation"
+        );
         assert!(p.require_sbom, "unsigned disallowed → must require sbom");
     }
 
@@ -1618,8 +1621,7 @@ mod tests {
 
     #[test]
     fn evaluate_with_digest_no_attestation_allow_unsigned() {
-        let result =
-            evaluate_supply_chain(None, None, Some("blake3-256:abc123"), 0, true);
+        let result = evaluate_supply_chain(None, None, Some("blake3-256:abc123"), 0, true);
         assert!(result.is_ok());
         let eval = result.unwrap();
         assert_eq!(eval.artifact_digest, "blake3-256:abc123");
@@ -1630,8 +1632,7 @@ mod tests {
 
     #[test]
     fn evaluate_with_digest_deny_when_strict() {
-        let result =
-            evaluate_supply_chain(None, None, Some("blake3-256:strict"), 0, false);
+        let result = evaluate_supply_chain(None, None, Some("blake3-256:strict"), 0, false);
         assert!(result.is_ok());
         let eval = result.unwrap();
         assert_eq!(eval.evidence.decision, VerificationDecision::Deny);
@@ -1639,8 +1640,7 @@ mod tests {
 
     #[test]
     fn evaluate_evidence_digest_is_nonempty() {
-        let result =
-            evaluate_supply_chain(None, None, Some("blake3-256:hash"), 0, true);
+        let result = evaluate_supply_chain(None, None, Some("blake3-256:hash"), 0, true);
         let eval = result.unwrap();
         assert!(!eval.evidence_digest.is_empty());
         assert!(eval.evidence_digest.starts_with("blake3-256:"));

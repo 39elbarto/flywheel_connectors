@@ -2617,8 +2617,7 @@ mod tests {
         let bundle = test_bundle("bundle-z", ZoneId::work(), 1, None);
         let state = PolicyBundleState::new(bundle, Utc::now());
         let other: ZoneId = "z:personal".parse().unwrap();
-        let err =
-            validate_bundle_state_zone(&state, &other, Path::new("/tmp/s.json")).unwrap_err();
+        let err = validate_bundle_state_zone(&state, &other, Path::new("/tmp/s.json")).unwrap_err();
         assert!(err.to_string().contains("but bundle targets zone"));
     }
 
@@ -2702,7 +2701,10 @@ mod tests {
             pattern: "user:admin".to_string(),
         });
         let diff = diff_zone_policy(&before, &after).unwrap();
-        assert!(diff.risk_flags.contains(&"principal_allow_expanded".to_string()));
+        assert!(
+            diff.risk_flags
+                .contains(&"principal_allow_expanded".to_string())
+        );
     }
 
     #[test]
@@ -2714,7 +2716,10 @@ mod tests {
             pattern: "cap:admin".to_string(),
         });
         let diff = diff_zone_policy(&before, &after).unwrap();
-        assert!(diff.risk_flags.contains(&"capability_allow_expanded".to_string()));
+        assert!(
+            diff.risk_flags
+                .contains(&"capability_allow_expanded".to_string())
+        );
     }
 
     #[test]
@@ -2732,7 +2737,11 @@ mod tests {
             .get("connector_allow")
             .and_then(Value::as_array)
             .unwrap();
-        assert!(removed_connectors.iter().any(|v| v.as_str() == Some("fcp.test:*")));
+        assert!(
+            removed_connectors
+                .iter()
+                .any(|v| v.as_str() == Some("fcp.test:*"))
+        );
     }
 
     #[test]
@@ -2743,7 +2752,10 @@ mod tests {
         let mut after = base_policy(zone);
         after.transport_policy.allow_lan = true;
         let diff = diff_zone_policy(&before, &after).unwrap();
-        assert!(diff.risk_flags.contains(&"transport_lan_enabled".to_string()));
+        assert!(
+            diff.risk_flags
+                .contains(&"transport_lan_enabled".to_string())
+        );
     }
 
     #[test]
@@ -2754,7 +2766,10 @@ mod tests {
         let mut after = base_policy(zone);
         after.transport_policy.allow_funnel = true;
         let diff = diff_zone_policy(&before, &after).unwrap();
-        assert!(diff.risk_flags.contains(&"transport_funnel_enabled".to_string()));
+        assert!(
+            diff.risk_flags
+                .contains(&"transport_funnel_enabled".to_string())
+        );
     }
 
     // ---- diff_policy_lists ----
@@ -2787,10 +2802,16 @@ mod tests {
     #[test]
     fn diff_patterns_duplicate_entries() {
         let before = vec![
-            PolicyPattern { pattern: "a".to_string() },
-            PolicyPattern { pattern: "a".to_string() },
+            PolicyPattern {
+                pattern: "a".to_string(),
+            },
+            PolicyPattern {
+                pattern: "a".to_string(),
+            },
         ];
-        let after = vec![PolicyPattern { pattern: "a".to_string() }];
+        let after = vec![PolicyPattern {
+            pattern: "a".to_string(),
+        }];
         let (added, removed) = diff_patterns(&before, &after);
         assert!(added.is_empty());
         assert!(removed.is_empty());
@@ -2928,8 +2949,9 @@ mod tests {
 
     #[test]
     fn load_bundle_state_optional_missing_file() {
-        let result = load_bundle_state_optional(Path::new("/tmp/nonexistent_policy_state_xyz.json"))
-            .unwrap();
+        let result =
+            load_bundle_state_optional(Path::new("/tmp/nonexistent_policy_state_xyz.json"))
+                .unwrap();
         assert!(result.is_none());
     }
 

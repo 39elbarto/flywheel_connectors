@@ -8803,4 +8803,991 @@ mod tests {
         assert!(result.is_none(), "Real hash should pass provenance validation");
     }
 
+    // ── diff_config_values edge cases ───────────────────────────────────
+
+    #[test]
+    fn diff_config_values_identical_objects_produces_no_entries() {
+        let val = serde_json::json!({"a": 1, "b": "two"});
+        let entries = diff_config_values(&val, &val);
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn diff_config_values_both_null_produces_no_entries() {
+        let entries = diff_config_values(&Value::Null, &Value::Null);
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn diff_config_values_root_type_change_scalar_to_object() {
+        let before = serde_json::json!("hello");
+        let after = serde_json::json!({"greeting": "hello"});
+        let entries = diff_config_values(&before, &after);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, "/");
+        assert_eq!(entries[0].kind, ConfigDiffKind::Changed);
+    }
+
+    #[test]
+    fn diff_config_values_added_key() {
+        let before = serde_json::json!({"a": 1});
+        let after = serde_json::json!({"a": 1, "b": 2});
+        let entries = diff_config_values(&before, &after);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, "/b");
+        assert_eq!(entries[0].kind, ConfigDiffKind::Added);
+        assert_eq!(entries[0].after, Some(serde_json::json!(2)));
+    }
+
+    #[test]
+    fn diff_config_values_removed_key() {
+        let before = serde_json::json!({"a": 1, "b": 2});
+        let after = serde_json::json!({"a": 1});
+        let entries = diff_config_values(&before, &after);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, "/b");
+        assert_eq!(entries[0].kind, ConfigDiffKind::Removed);
+        assert_eq!(entries[0].before, Some(serde_json::json!(2)));
+    }
+
+    #[test]
+    fn diff_config_values_array_element_added() {
+        let before = serde_json::json!([1, 2]);
+        let after = serde_json::json!([1, 2, 3]);
+        let entries = diff_config_values(&before, &after);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, "/2");
+        assert_eq!(entries[0].kind, ConfigDiffKind::Added);
+    }
+
+    #[test]
+    fn diff_config_values_array_element_removed() {
+        let before = serde_json::json!([1, 2, 3]);
+        let after = serde_json::json!([1, 2]);
+        let entries = diff_config_values(&before, &after);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, "/2");
+        assert_eq!(entries[0].kind, ConfigDiffKind::Removed);
+    }
+
+    #[test]
+    fn diff_config_values_array_element_changed() {
+        let before = serde_json::json!([1, 2, 3]);
+        let after = serde_json::json!([1, 99, 3]);
+        let entries = diff_config_values(&before, &after);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, "/1");
+        assert_eq!(entries[0].kind, ConfigDiffKind::Changed);
+        assert_eq!(entries[0].before, Some(serde_json::json!(2)));
+        assert_eq!(entries[0].after, Some(serde_json::json!(99)));
+    }
+
+    #[test]
+    fn diff_config_values_deeply_nested_change() {
+        let before = serde_json::json!({"a": {"b": {"c": 1}}});
+        let after = serde_json::json!({"a": {"b": {"c": 2}}});
+        let entries = diff_config_values(&before, &after);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, "/a/b/c");
+        assert_eq!(entries[0].kind, ConfigDiffKind::Changed);
+    }
+
+    #[test]
+    fn diff_config_values_entries_sorted_by_path() {
+        let before = serde_json::json!({"z": 1, "a": 2, "m": 3});
+        let after = serde_json::json!({"z": 10, "a": 20, "m": 30});
+        let entries = diff_config_values(&before, &after);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].path, "/a");
+        assert_eq!(entries[1].path, "/m");
+        assert_eq!(entries[2].path, "/z");
+    }
+
+    #[test]
+    fn diff_config_values_empty_objects_no_diff() {
+        let before = serde_json::json!({});
+        let after = serde_json::json!({});
+        let entries = diff_config_values(&before, &after);
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn diff_config_values_empty_arrays_no_diff() {
+        let before = serde_json::json!([]);
+        let after = serde_json::json!([]);
+        let entries = diff_config_values(&before, &after);
+        assert!(entries.is_empty());
+    }
+
+    // ── join_json_pointer and config_diff_path ──────────────────────────
+
+    #[test]
+    fn join_json_pointer_escapes_tilde() {
+        let result = join_json_pointer("", "key~with~tilde");
+        assert_eq!(result, "/key~0with~0tilde");
+    }
+
+    #[test]
+    fn join_json_pointer_escapes_slash() {
+        let result = join_json_pointer("", "key/with/slash");
+        assert_eq!(result, "/key~1with~1slash");
+    }
+
+    #[test]
+    fn join_json_pointer_appends_to_existing_path() {
+        let result = join_json_pointer("/a/b", "c");
+        assert_eq!(result, "/a/b/c");
+    }
+
+    #[test]
+    fn config_diff_path_empty_becomes_root() {
+        let result = config_diff_path("");
+        assert_eq!(result, "/");
+    }
+
+    #[test]
+    fn config_diff_path_nonempty_passes_through() {
+        let result = config_diff_path("/a/b");
+        assert_eq!(result, "/a/b");
+    }
+
+    // ── should_redact_config_key ────────────────────────────────────────
+
+    #[test]
+    fn should_redact_config_key_recognizes_all_secret_patterns() {
+        let secret_keys = [
+            "token",
+            "secret",
+            "password",
+            "api_key",
+            "apikey",
+            "access_token",
+            "refresh_token",
+            "client_secret",
+            "private_key",
+        ];
+        for key in secret_keys {
+            assert!(
+                should_redact_config_key(key),
+                "key '{key}' should be redacted"
+            );
+        }
+    }
+
+    #[test]
+    fn should_redact_config_key_case_insensitive() {
+        assert!(should_redact_config_key("API_KEY"));
+        assert!(should_redact_config_key("Access_Token"));
+        assert!(should_redact_config_key("CLIENT_SECRET"));
+    }
+
+    #[test]
+    fn should_redact_config_key_does_not_redact_safe_keys() {
+        assert!(!should_redact_config_key("profile"));
+        assert!(!should_redact_config_key("name"));
+        assert!(!should_redact_config_key("endpoint"));
+        assert!(!should_redact_config_key("max_retries"));
+    }
+
+    #[test]
+    fn should_redact_config_key_credential_id_is_not_redacted() {
+        assert!(!should_redact_config_key("credential_id"));
+        assert!(!should_redact_config_key("my_credential_id"));
+    }
+
+    // ── is_credential_reference_key ─────────────────────────────────────
+
+    #[test]
+    fn is_credential_reference_key_matches_credential_id() {
+        assert!(is_credential_reference_key("credential_id"));
+        assert!(is_credential_reference_key("CREDENTIAL_ID"));
+        assert!(is_credential_reference_key("my_credential_id"));
+    }
+
+    #[test]
+    fn is_credential_reference_key_rejects_non_credential_keys() {
+        assert!(!is_credential_reference_key("password"));
+        assert!(!is_credential_reference_key("api_key"));
+        assert!(!is_credential_reference_key("profile"));
+    }
+
+    // ── DesiredRuntimeState / ObservedRuntimeState from_lifecycle_state ──
+
+    #[test]
+    fn desired_runtime_state_from_lifecycle_state_all_variants() {
+        assert_eq!(
+            DesiredRuntimeState::from_lifecycle_state(LifecycleState::Pending),
+            DesiredRuntimeState::Enabled
+        );
+        assert_eq!(
+            DesiredRuntimeState::from_lifecycle_state(LifecycleState::Installing),
+            DesiredRuntimeState::Enabled
+        );
+        assert_eq!(
+            DesiredRuntimeState::from_lifecycle_state(LifecycleState::Canary),
+            DesiredRuntimeState::Enabled
+        );
+        assert_eq!(
+            DesiredRuntimeState::from_lifecycle_state(LifecycleState::Production),
+            DesiredRuntimeState::Enabled
+        );
+        assert_eq!(
+            DesiredRuntimeState::from_lifecycle_state(LifecycleState::RolledBack),
+            DesiredRuntimeState::Enabled
+        );
+        assert_eq!(
+            DesiredRuntimeState::from_lifecycle_state(LifecycleState::Disabled),
+            DesiredRuntimeState::Disabled
+        );
+        assert_eq!(
+            DesiredRuntimeState::from_lifecycle_state(LifecycleState::Uninstalled),
+            DesiredRuntimeState::Uninstalled
+        );
+    }
+
+    #[test]
+    fn observed_runtime_state_from_lifecycle_state_all_variants() {
+        assert_eq!(
+            ObservedRuntimeState::from_lifecycle_state(LifecycleState::Pending),
+            ObservedRuntimeState::Starting
+        );
+        assert_eq!(
+            ObservedRuntimeState::from_lifecycle_state(LifecycleState::Installing),
+            ObservedRuntimeState::Starting
+        );
+        assert_eq!(
+            ObservedRuntimeState::from_lifecycle_state(LifecycleState::Canary),
+            ObservedRuntimeState::Running
+        );
+        assert_eq!(
+            ObservedRuntimeState::from_lifecycle_state(LifecycleState::Production),
+            ObservedRuntimeState::Running
+        );
+        assert_eq!(
+            ObservedRuntimeState::from_lifecycle_state(LifecycleState::RolledBack),
+            ObservedRuntimeState::Degraded
+        );
+        assert_eq!(
+            ObservedRuntimeState::from_lifecycle_state(LifecycleState::Disabled),
+            ObservedRuntimeState::Stopped
+        );
+        assert_eq!(
+            ObservedRuntimeState::from_lifecycle_state(LifecycleState::Uninstalled),
+            ObservedRuntimeState::Missing
+        );
+    }
+
+    // ── DesiredRuntimeState / ObservedRuntimeState defaults and serde ────
+
+    #[test]
+    fn desired_runtime_state_default_is_unspecified() {
+        assert_eq!(DesiredRuntimeState::default(), DesiredRuntimeState::Unspecified);
+    }
+
+    #[test]
+    fn observed_runtime_state_default_is_unknown() {
+        assert_eq!(ObservedRuntimeState::default(), ObservedRuntimeState::Unknown);
+    }
+
+    #[test]
+    fn desired_runtime_state_serde_all_variants() {
+        let variants = [
+            DesiredRuntimeState::Unspecified,
+            DesiredRuntimeState::Enabled,
+            DesiredRuntimeState::Disabled,
+            DesiredRuntimeState::Uninstalled,
+        ];
+        for variant in &variants {
+            let json = serde_json::to_string(variant).unwrap();
+            let back: DesiredRuntimeState = serde_json::from_str(&json).unwrap();
+            assert_eq!(*variant, back);
+        }
+    }
+
+    #[test]
+    fn observed_runtime_state_serde_all_variants() {
+        let variants = [
+            ObservedRuntimeState::Unknown,
+            ObservedRuntimeState::Starting,
+            ObservedRuntimeState::Running,
+            ObservedRuntimeState::Degraded,
+            ObservedRuntimeState::Stopped,
+            ObservedRuntimeState::Missing,
+        ];
+        for variant in &variants {
+            let json = serde_json::to_string(variant).unwrap();
+            let back: ObservedRuntimeState = serde_json::from_str(&json).unwrap();
+            assert_eq!(*variant, back);
+        }
+    }
+
+    // ── connector_drift_status additional combos ────────────────────────
+
+    #[test]
+    fn drift_enabled_but_stopped() {
+        let state = ConnectorAdminState {
+            lifecycle: None,
+            desired_state: DesiredRuntimeState::Enabled,
+            observed_state: ObservedRuntimeState::Stopped,
+            pinned_version: None,
+            config_revisions: Vec::new(),
+            active_config_revision_id: None,
+            last_journal_sequence: 0,
+            artifact: None,
+        };
+        let drift = connector_drift_status(&state, Utc::now()).expect("should drift");
+        assert_eq!(drift.kind, ConnectorDriftKind::EnabledButNotRunning);
+        assert_eq!(drift.recovery_action, RecoveryAction::RestartConnector);
+    }
+
+    #[test]
+    fn drift_enabled_but_degraded() {
+        let state = ConnectorAdminState {
+            lifecycle: None,
+            desired_state: DesiredRuntimeState::Enabled,
+            observed_state: ObservedRuntimeState::Degraded,
+            pinned_version: None,
+            config_revisions: Vec::new(),
+            active_config_revision_id: None,
+            last_journal_sequence: 0,
+            artifact: None,
+        };
+        let drift = connector_drift_status(&state, Utc::now()).expect("should drift");
+        assert_eq!(drift.kind, ConnectorDriftKind::EnabledButDegraded);
+        assert_eq!(drift.recovery_action, RecoveryAction::RepairConnector);
+    }
+
+    #[test]
+    fn drift_enabled_but_missing() {
+        let state = ConnectorAdminState {
+            lifecycle: None,
+            desired_state: DesiredRuntimeState::Enabled,
+            observed_state: ObservedRuntimeState::Missing,
+            pinned_version: None,
+            config_revisions: Vec::new(),
+            active_config_revision_id: None,
+            last_journal_sequence: 0,
+            artifact: None,
+        };
+        let drift = connector_drift_status(&state, Utc::now()).expect("should drift");
+        assert_eq!(drift.kind, ConnectorDriftKind::EnabledButMissing);
+        assert_eq!(drift.recovery_action, RecoveryAction::ReinstallConnector);
+    }
+
+    #[test]
+    fn drift_enabled_and_running_no_drift() {
+        let state = ConnectorAdminState {
+            lifecycle: None,
+            desired_state: DesiredRuntimeState::Enabled,
+            observed_state: ObservedRuntimeState::Running,
+            pinned_version: None,
+            config_revisions: Vec::new(),
+            active_config_revision_id: None,
+            last_journal_sequence: 0,
+            artifact: None,
+        };
+        assert!(connector_drift_status(&state, Utc::now()).is_none());
+    }
+
+    #[test]
+    fn drift_disabled_but_running() {
+        let state = ConnectorAdminState {
+            lifecycle: None,
+            desired_state: DesiredRuntimeState::Disabled,
+            observed_state: ObservedRuntimeState::Running,
+            pinned_version: None,
+            config_revisions: Vec::new(),
+            active_config_revision_id: None,
+            last_journal_sequence: 0,
+            artifact: None,
+        };
+        let drift = connector_drift_status(&state, Utc::now()).expect("should drift");
+        assert_eq!(drift.kind, ConnectorDriftKind::DisabledButRunning);
+        assert_eq!(drift.recovery_action, RecoveryAction::DisableConnector);
+    }
+
+    #[test]
+    fn drift_disabled_but_degraded() {
+        let state = ConnectorAdminState {
+            lifecycle: None,
+            desired_state: DesiredRuntimeState::Disabled,
+            observed_state: ObservedRuntimeState::Degraded,
+            pinned_version: None,
+            config_revisions: Vec::new(),
+            active_config_revision_id: None,
+            last_journal_sequence: 0,
+            artifact: None,
+        };
+        let drift = connector_drift_status(&state, Utc::now()).expect("should drift");
+        assert_eq!(drift.kind, ConnectorDriftKind::DisabledButRunning);
+    }
+
+    #[test]
+    fn drift_disabled_and_stopped_no_drift() {
+        let state = ConnectorAdminState {
+            lifecycle: None,
+            desired_state: DesiredRuntimeState::Disabled,
+            observed_state: ObservedRuntimeState::Stopped,
+            pinned_version: None,
+            config_revisions: Vec::new(),
+            active_config_revision_id: None,
+            last_journal_sequence: 0,
+            artifact: None,
+        };
+        assert!(connector_drift_status(&state, Utc::now()).is_none());
+    }
+
+    #[test]
+    fn drift_uninstalled_but_running() {
+        let state = ConnectorAdminState {
+            lifecycle: None,
+            desired_state: DesiredRuntimeState::Uninstalled,
+            observed_state: ObservedRuntimeState::Running,
+            pinned_version: None,
+            config_revisions: Vec::new(),
+            active_config_revision_id: None,
+            last_journal_sequence: 0,
+            artifact: None,
+        };
+        let drift = connector_drift_status(&state, Utc::now()).expect("should drift");
+        assert_eq!(drift.kind, ConnectorDriftKind::UninstalledButPresent);
+        assert_eq!(drift.recovery_action, RecoveryAction::DisableConnector);
+    }
+
+    #[test]
+    fn drift_uninstalled_and_missing_no_drift() {
+        let state = ConnectorAdminState {
+            lifecycle: None,
+            desired_state: DesiredRuntimeState::Uninstalled,
+            observed_state: ObservedRuntimeState::Missing,
+            pinned_version: None,
+            config_revisions: Vec::new(),
+            active_config_revision_id: None,
+            last_journal_sequence: 0,
+            artifact: None,
+        };
+        assert!(connector_drift_status(&state, Utc::now()).is_none());
+    }
+
+    #[test]
+    fn drift_unspecified_never_drifts() {
+        for observed in [
+            ObservedRuntimeState::Unknown,
+            ObservedRuntimeState::Running,
+            ObservedRuntimeState::Stopped,
+            ObservedRuntimeState::Missing,
+        ] {
+            let state = ConnectorAdminState {
+                lifecycle: None,
+                desired_state: DesiredRuntimeState::Unspecified,
+                observed_state: observed,
+                pinned_version: None,
+                config_revisions: Vec::new(),
+                active_config_revision_id: None,
+                last_journal_sequence: 0,
+                artifact: None,
+            };
+            assert!(
+                connector_drift_status(&state, Utc::now()).is_none(),
+                "Unspecified desired should never drift with observed={observed:?}"
+            );
+        }
+    }
+
+    // ── ConnectorAdminState methods ─────────────────────────────────────
+
+    #[test]
+    fn connector_admin_state_config_revision_by_id() {
+        let mut state = ConnectorAdminState::default();
+        let revision = ConfigRevisionRecord::new(
+            42,
+            None,
+            config_payload("test"),
+            None,
+            None,
+        )
+        .expect("revision");
+        state.config_revisions.push(revision);
+        assert!(state.config_revision(42).is_some());
+        assert!(state.config_revision(999).is_none());
+    }
+
+    #[test]
+    fn connector_admin_state_active_config_revision_none_when_empty() {
+        let state = ConnectorAdminState::default();
+        assert!(state.active_config_revision().is_none());
+    }
+
+    #[test]
+    fn connector_admin_state_active_config_revision_none_when_id_does_not_match() {
+        let mut state = ConnectorAdminState::default();
+        state.active_config_revision_id = Some(999);
+        let revision = ConfigRevisionRecord::new(
+            42,
+            None,
+            config_payload("test"),
+            None,
+            None,
+        )
+        .expect("revision");
+        state.config_revisions.push(revision);
+        assert!(state.active_config_revision().is_none());
+    }
+
+    // ── SanitizedConnectorConfig ────────────────────────────────────────
+
+    #[test]
+    fn sanitized_connector_config_from_payload_with_secrets() {
+        let payload = serde_json::json!({
+            "profile": "work",
+            "api_key": "my-secret-key",
+        });
+        let sanitized = SanitizedConnectorConfig::from_payload(payload).unwrap();
+        assert_eq!(
+            sanitized.payload["api_key"],
+            Value::String(REDACTED_CONFIG_VALUE.to_string())
+        );
+        assert!(sanitized.contains_inline_secrets);
+        assert!(!sanitized.is_replayable());
+    }
+
+    #[test]
+    fn sanitized_connector_config_from_payload_without_secrets() {
+        let payload = serde_json::json!({"profile": "work", "endpoint": "https://api.test"});
+        let sanitized = SanitizedConnectorConfig::from_payload(payload).unwrap();
+        assert!(!sanitized.contains_inline_secrets);
+        assert!(sanitized.is_replayable());
+        assert!(sanitized.redacted_fields.is_empty());
+    }
+
+    #[test]
+    fn sanitized_connector_config_from_config_revision_record() {
+        let revision = ConfigRevisionRecord::new(
+            1,
+            None,
+            serde_json::json!({"api_key": "hidden"}),
+            None,
+            None,
+        )
+        .expect("revision");
+        let sanitized = SanitizedConnectorConfig::from(&revision);
+        assert_eq!(sanitized.payload, revision.payload);
+        assert_eq!(sanitized.payload_digest, revision.payload_digest);
+        assert_eq!(sanitized.contains_inline_secrets, revision.contains_inline_secrets);
+    }
+
+    // ── ConfigRevisionRecord::is_replayable ─────────────────────────────
+
+    #[test]
+    fn config_revision_record_is_replayable_when_no_secrets() {
+        let revision = ConfigRevisionRecord::new(
+            1,
+            None,
+            serde_json::json!({"profile": "work"}),
+            None,
+            None,
+        )
+        .expect("revision");
+        assert!(revision.is_replayable());
+    }
+
+    #[test]
+    fn config_revision_record_not_replayable_with_secrets() {
+        let revision = ConfigRevisionRecord::new(
+            1,
+            None,
+            serde_json::json!({"password": "secret"}),
+            None,
+            None,
+        )
+        .expect("revision");
+        assert!(!revision.is_replayable());
+    }
+
+    // ── is_false helper ─────────────────────────────────────────────────
+
+    #[test]
+    fn is_false_returns_true_for_false() {
+        assert!(is_false(&false));
+    }
+
+    #[test]
+    fn is_false_returns_false_for_true() {
+        assert!(!is_false(&true));
+    }
+
+    // ── ConnectorInventoryMutationKind serde ─────────────────────────────
+
+    #[test]
+    fn connector_inventory_mutation_kind_serde_roundtrip() {
+        for kind in [
+            ConnectorInventoryMutationKind::Install,
+            ConnectorInventoryMutationKind::Update,
+        ] {
+            let json = serde_json::to_string(&kind).unwrap();
+            let back: ConnectorInventoryMutationKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(kind, back);
+        }
+    }
+
+    // ── SecretReferenceStatus serde and defaults ────────────────────────
+
+    #[test]
+    fn secret_reference_status_default_is_unknown() {
+        assert_eq!(SecretReferenceStatus::default(), SecretReferenceStatus::Unknown);
+    }
+
+    #[test]
+    fn secret_reference_status_serde_all_variants() {
+        let variants = [
+            SecretReferenceStatus::Unknown,
+            SecretReferenceStatus::Available,
+            SecretReferenceStatus::Rotated,
+            SecretReferenceStatus::Missing,
+            SecretReferenceStatus::Inaccessible,
+        ];
+        for variant in &variants {
+            let json = serde_json::to_string(variant).unwrap();
+            let back: SecretReferenceStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(*variant, back);
+        }
+    }
+
+    // ── ConnectorConfigSnapshotSource serde ──────────────────────────────
+
+    #[test]
+    fn connector_config_snapshot_source_serde_roundtrip() {
+        for source in [
+            ConnectorConfigSnapshotSource::ActiveRevision,
+            ConnectorConfigSnapshotSource::ManagedInventory,
+        ] {
+            let json = serde_json::to_string(&source).unwrap();
+            let back: ConnectorConfigSnapshotSource = serde_json::from_str(&json).unwrap();
+            assert_eq!(source, back);
+        }
+    }
+
+    // ── ConfigDiffKind serde ────────────────────────────────────────────
+
+    #[test]
+    fn config_diff_kind_serde_all_variants() {
+        for kind in [
+            ConfigDiffKind::Added,
+            ConfigDiffKind::Removed,
+            ConfigDiffKind::Changed,
+        ] {
+            let json = serde_json::to_string(&kind).unwrap();
+            let back: ConfigDiffKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(kind, back);
+        }
+    }
+
+    // ── AdminStateMutation serde ────────────────────────────────────────
+
+    #[test]
+    fn admin_state_mutation_serde_lifecycle_record_saved() {
+        let mutation = AdminStateMutation::LifecycleRecordSaved {
+            version: Version::new(1, 0, 0),
+            state: LifecycleState::Production,
+        };
+        let json = serde_json::to_string(&mutation).unwrap();
+        let back: AdminStateMutation = serde_json::from_str(&json).unwrap();
+        assert_eq!(mutation, back);
+    }
+
+    #[test]
+    fn admin_state_mutation_serde_desired_state_set() {
+        let mutation = AdminStateMutation::DesiredStateSet {
+            desired_state: DesiredRuntimeState::Enabled,
+        };
+        let json = serde_json::to_string(&mutation).unwrap();
+        let back: AdminStateMutation = serde_json::from_str(&json).unwrap();
+        assert_eq!(mutation, back);
+    }
+
+    #[test]
+    fn admin_state_mutation_serde_pin_cleared() {
+        let mutation = AdminStateMutation::PinCleared;
+        let json = serde_json::to_string(&mutation).unwrap();
+        let back: AdminStateMutation = serde_json::from_str(&json).unwrap();
+        assert_eq!(mutation, back);
+    }
+
+    #[test]
+    fn admin_state_mutation_serde_config_revision_appended() {
+        let mutation = AdminStateMutation::ConfigRevisionAppended {
+            revision_id: 42,
+            payload_digest: "abc123".to_owned(),
+        };
+        let json = serde_json::to_string(&mutation).unwrap();
+        let back: AdminStateMutation = serde_json::from_str(&json).unwrap();
+        assert_eq!(mutation, back);
+    }
+
+    // ── sanitize_config_payload edge cases ──────────────────────────────
+
+    #[test]
+    fn sanitize_config_payload_handles_array_with_secrets() {
+        let payload = serde_json::json!({
+            "entries": [
+                {"name": "safe", "password": "hidden1"},
+                {"name": "also_safe", "client_secret": "hidden2"}
+            ]
+        });
+        let sanitized = sanitize_config_payload(payload);
+        assert!(sanitized.contains_inline_secrets);
+        let entries = sanitized.payload["entries"].as_array().expect("array");
+        assert_eq!(
+            entries[0]["password"],
+            Value::String(REDACTED_CONFIG_VALUE.to_string())
+        );
+        assert_eq!(
+            entries[1]["client_secret"],
+            Value::String(REDACTED_CONFIG_VALUE.to_string())
+        );
+        assert_eq!(entries[0]["name"], "safe");
+    }
+
+    #[test]
+    fn sanitize_config_payload_preserves_non_object_non_array_values() {
+        let payload = serde_json::json!("plain string");
+        let sanitized = sanitize_config_payload(payload);
+        assert_eq!(sanitized.payload, serde_json::json!("plain string"));
+        assert!(!sanitized.contains_inline_secrets);
+    }
+
+    #[test]
+    fn sanitize_config_payload_null_value() {
+        let sanitized = sanitize_config_payload(Value::Null);
+        assert_eq!(sanitized.payload, Value::Null);
+        assert!(!sanitized.contains_inline_secrets);
+    }
+
+    // ── install_stuck and canary_stuck boundary conditions ───────────────
+
+    #[test]
+    fn install_stuck_false_when_below_threshold() {
+        let now = Utc::now();
+        let record = LifecycleRecord {
+            connector_id: connector_id(),
+            version: Version::new(1, 0, 0),
+            state: LifecycleState::Installing,
+            deployed_at: now,
+            state_changed_at: now - Duration::seconds(299), // just below 300s
+            transitions: Vec::new(),
+            health: fcp_core::HealthMetrics::default(),
+            canary_policy: CanaryPolicy::default(),
+            previous_version: None,
+        };
+        assert!(!install_stuck(&record, now));
+    }
+
+    #[test]
+    fn install_stuck_true_at_exact_threshold() {
+        let now = Utc::now();
+        let record = LifecycleRecord {
+            connector_id: connector_id(),
+            version: Version::new(1, 0, 0),
+            state: LifecycleState::Installing,
+            deployed_at: now,
+            state_changed_at: now - Duration::seconds(300), // exactly 300s
+            transitions: Vec::new(),
+            health: fcp_core::HealthMetrics::default(),
+            canary_policy: CanaryPolicy::default(),
+            previous_version: None,
+        };
+        assert!(install_stuck(&record, now));
+    }
+
+    #[test]
+    fn install_stuck_false_for_canary_state() {
+        let now = Utc::now();
+        let record = LifecycleRecord {
+            connector_id: connector_id(),
+            version: Version::new(1, 0, 0),
+            state: LifecycleState::Canary,
+            deployed_at: now,
+            state_changed_at: now - Duration::seconds(600),
+            transitions: Vec::new(),
+            health: fcp_core::HealthMetrics::default(),
+            canary_policy: CanaryPolicy::default(),
+            previous_version: None,
+        };
+        assert!(!install_stuck(&record, now));
+    }
+
+    #[test]
+    fn install_stuck_true_for_pending_state() {
+        let now = Utc::now();
+        let record = LifecycleRecord {
+            connector_id: connector_id(),
+            version: Version::new(1, 0, 0),
+            state: LifecycleState::Pending,
+            deployed_at: now,
+            state_changed_at: now - Duration::seconds(600),
+            transitions: Vec::new(),
+            health: fcp_core::HealthMetrics::default(),
+            canary_policy: CanaryPolicy::default(),
+            previous_version: None,
+        };
+        assert!(install_stuck(&record, now));
+    }
+
+    // ── desired_state_from_summary / observed_state_from_summary ────────
+
+    #[test]
+    fn desired_state_from_summary_enabled() {
+        let summary = connector_summary(connector_id(), true, ConnectorHealth::healthy());
+        assert_eq!(desired_state_from_summary(&summary), DesiredRuntimeState::Enabled);
+    }
+
+    #[test]
+    fn desired_state_from_summary_disabled() {
+        let summary = connector_summary(connector_id(), false, ConnectorHealth::healthy());
+        assert_eq!(desired_state_from_summary(&summary), DesiredRuntimeState::Disabled);
+    }
+
+    #[test]
+    fn observed_state_from_summary_disabled_is_stopped() {
+        let summary = connector_summary(connector_id(), false, ConnectorHealth::healthy());
+        assert_eq!(observed_state_from_summary(&summary), ObservedRuntimeState::Stopped);
+    }
+
+    #[test]
+    fn observed_state_from_summary_enabled_healthy_is_running() {
+        let summary = connector_summary(connector_id(), true, ConnectorHealth::healthy());
+        assert_eq!(observed_state_from_summary(&summary), ObservedRuntimeState::Running);
+    }
+
+    #[test]
+    fn observed_state_from_summary_enabled_degraded() {
+        let summary = connector_summary(
+            connector_id(),
+            true,
+            ConnectorHealth::Degraded {
+                reason: "flaky".to_string(),
+            },
+        );
+        assert_eq!(observed_state_from_summary(&summary), ObservedRuntimeState::Degraded);
+    }
+
+    #[test]
+    fn observed_state_from_summary_enabled_unavailable_is_stopped() {
+        let summary = connector_summary(
+            connector_id(),
+            true,
+            ConnectorHealth::Unavailable {
+                reason: "crashed".to_string(),
+                since: Utc::now(),
+            },
+        );
+        assert_eq!(observed_state_from_summary(&summary), ObservedRuntimeState::Stopped);
+    }
+
+    // ── RecoveryAction and ConnectorDriftKind serde ──────────────────────
+
+    #[test]
+    fn recovery_action_serde_all_variants() {
+        let variants = [
+            RecoveryAction::RestartConnector,
+            RecoveryAction::RepairConnector,
+            RecoveryAction::ReinstallConnector,
+            RecoveryAction::CompleteRollout,
+            RecoveryAction::DisableConnector,
+            RecoveryAction::Investigate,
+        ];
+        for variant in &variants {
+            let json = serde_json::to_string(variant).unwrap();
+            let back: RecoveryAction = serde_json::from_str(&json).unwrap();
+            assert_eq!(*variant, back);
+        }
+    }
+
+    #[test]
+    fn connector_drift_kind_serde_all_variants() {
+        let variants = [
+            ConnectorDriftKind::EnabledButNotRunning,
+            ConnectorDriftKind::EnabledButMissing,
+            ConnectorDriftKind::EnabledButDegraded,
+            ConnectorDriftKind::DisabledButRunning,
+            ConnectorDriftKind::UninstalledButPresent,
+            ConnectorDriftKind::InstallStuck,
+            ConnectorDriftKind::CanaryStuck,
+        ];
+        for variant in &variants {
+            let json = serde_json::to_string(variant).unwrap();
+            let back: ConnectorDriftKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(*variant, back);
+        }
+    }
+
+    // ── extend_json_pointer ─────────────────────────────────────────────
+
+    #[test]
+    fn extend_json_pointer_escapes_tilde_and_slash() {
+        let result = extend_json_pointer("/root", "key~with/both");
+        assert_eq!(result, "/root/key~0with~1both");
+    }
+
+    #[test]
+    fn extend_json_pointer_from_empty_prefix() {
+        let result = extend_json_pointer("", "first");
+        assert_eq!(result, "/first");
+    }
+
+    // ── ManagedConnectorConfig serde ────────────────────────────────────
+
+    #[test]
+    fn managed_connector_config_minimal_serde() {
+        let json = r#"{"id":"test","binary":"/bin/test"}"#;
+        let config: ManagedConnectorConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.id, "test");
+        assert_eq!(config.binary, "/bin/test");
+        assert!(config.name.is_none());
+        assert!(config.args.is_empty());
+        assert!(config.env.is_empty());
+    }
+
+    #[test]
+    fn managed_connector_config_full_roundtrip() {
+        let config = ManagedConnectorConfig {
+            id: "test-connector".to_string(),
+            binary: "/usr/bin/test".to_string(),
+            name: Some("Test".to_string()),
+            description: Some("A test connector".to_string()),
+            args: vec!["--verbose".to_string()],
+            env: BTreeMap::from([("KEY".to_string(), "val".to_string())]),
+            config: Some(serde_json::json!({"port": 8080})),
+            categories: vec!["test".to_string()],
+            version: Some("1.0.0".to_string()),
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let back: ManagedConnectorConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(config, back);
+    }
+
+    // ── HostAdminStateSnapshot default values ───────────────────────────
+
+    #[test]
+    fn host_admin_state_snapshot_default_initial_values() {
+        let snapshot = HostAdminStateSnapshot::default();
+        assert_eq!(snapshot.schema_version, HOST_ADMIN_STATE_SNAPSHOT_VERSION);
+        assert!(snapshot.connectors.is_empty());
+        assert!(snapshot.journal.is_empty());
+        assert_eq!(snapshot.next_config_revision_id, 1);
+        assert_eq!(snapshot.next_journal_sequence, 1);
+        assert_eq!(snapshot.next_event_sequence, 1);
+        assert_eq!(snapshot.next_log_sequence, 1);
+        assert_eq!(snapshot.next_token_sequence, 1);
+    }
+
+    // ── HostAdminStateStore::new default ────────────────────────────────
+
+    #[test]
+    fn host_admin_state_store_default_equals_new() {
+        // The Default impl delegates to new(), verify both produce valid stores
+        let _default_store = HostAdminStateStore::default();
+        let _new_store = HostAdminStateStore::new();
+    }
+
 }

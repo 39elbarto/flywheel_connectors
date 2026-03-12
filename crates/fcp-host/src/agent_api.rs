@@ -3094,4 +3094,1058 @@ mod tests {
         assert_eq!(router.route("fcp/custom"), McpMethodCategory::Unknown);
         assert_eq!(router.route("x"), McpMethodCategory::Unknown);
     }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // Additional coverage: edge cases, boundary conditions, error paths
+    // ══════════════════════════════════════════════════════════════════════
+
+    // ── McpProtocolVersion extras ────────────────────────────────────────
+
+    #[test]
+    fn protocol_version_hash_consistent() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(McpProtocolVersion::V2025_03);
+        set.insert(McpProtocolVersion::V2025_03);
+        assert_eq!(set.len(), 1);
+        set.insert(McpProtocolVersion::V2024_11);
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn protocol_version_copy_semantics() {
+        let v = McpProtocolVersion::V2025_03;
+        let v2 = v; // Copy
+        assert_eq!(v, v2);
+        // Both still usable after copy.
+        assert_eq!(v.as_str(), v2.as_str());
+    }
+
+    #[test]
+    fn protocol_version_deserialize_invalid_fails() {
+        let result: Result<McpProtocolVersion, _> = serde_json::from_str("\"3000-01-01\"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn protocol_version_deserialize_non_string_fails() {
+        let result: Result<McpProtocolVersion, _> = serde_json::from_str("42");
+        assert!(result.is_err());
+    }
+
+    // ── McpServerCapabilities extras ─────────────────────────────────────
+
+    #[test]
+    fn capabilities_with_tools_full_field_check() {
+        let caps = McpServerCapabilities::with_tools();
+        let tool_cap = caps.tools.unwrap();
+        assert_eq!(tool_cap.list_changed, Some(true));
+        assert!(caps.resources.is_none());
+        assert!(caps.prompts.is_none());
+        assert!(caps.logging.is_none());
+    }
+
+    #[test]
+    fn capabilities_full_resource_fields() {
+        let caps = McpServerCapabilities::full();
+        let res = caps.resources.unwrap();
+        assert_eq!(res.subscribe, Some(true));
+        assert_eq!(res.list_changed, Some(true));
+    }
+
+    #[test]
+    fn capabilities_full_prompt_fields() {
+        let caps = McpServerCapabilities::full();
+        let prompt = caps.prompts.unwrap();
+        assert_eq!(prompt.list_changed, Some(true));
+    }
+
+    #[test]
+    fn capabilities_serialize_roundtrip_with_tools() {
+        let caps = McpServerCapabilities::with_tools();
+        let json = serde_json::to_string(&caps).unwrap();
+        let back: McpServerCapabilities = serde_json::from_str(&json).unwrap();
+        assert!(back.has_tools());
+        assert!(!back.has_resources());
+    }
+
+    // ── McpErrorCode extras ──────────────────────────────────────────────
+
+    #[test]
+    fn error_code_all_default_messages_non_empty() {
+        let codes = [
+            McpErrorCode::InvalidRequest,
+            McpErrorCode::MethodNotFound,
+            McpErrorCode::InvalidParams,
+            McpErrorCode::InternalError,
+            McpErrorCode::ToolNotFound,
+            McpErrorCode::ToolExecutionError,
+            McpErrorCode::ResourceNotFound,
+            McpErrorCode::AuthenticationRequired,
+            McpErrorCode::PermissionDenied,
+            McpErrorCode::RateLimited,
+        ];
+        for code in codes {
+            assert!(!code.default_message().is_empty(), "empty message for {code:?}");
+        }
+    }
+
+    #[test]
+    fn error_code_serde_roundtrip_all() {
+        let codes = [
+            McpErrorCode::InvalidRequest,
+            McpErrorCode::MethodNotFound,
+            McpErrorCode::InvalidParams,
+            McpErrorCode::InternalError,
+            McpErrorCode::ToolNotFound,
+            McpErrorCode::ToolExecutionError,
+            McpErrorCode::ResourceNotFound,
+            McpErrorCode::AuthenticationRequired,
+            McpErrorCode::PermissionDenied,
+            McpErrorCode::RateLimited,
+        ];
+        for code in codes {
+            let json = serde_json::to_string(&code).unwrap();
+            let back: McpErrorCode = serde_json::from_str(&json).unwrap();
+            assert_eq!(code, back, "roundtrip failed for {code:?}");
+        }
+    }
+
+    #[test]
+    fn error_code_display_all_contain_code_number() {
+        let codes = [
+            (McpErrorCode::InvalidRequest, "-32600"),
+            (McpErrorCode::MethodNotFound, "-32601"),
+            (McpErrorCode::InvalidParams, "-32602"),
+            (McpErrorCode::InternalError, "-32603"),
+            (McpErrorCode::ToolNotFound, "-32001"),
+            (McpErrorCode::ToolExecutionError, "-32002"),
+            (McpErrorCode::ResourceNotFound, "-32003"),
+            (McpErrorCode::AuthenticationRequired, "-32004"),
+            (McpErrorCode::PermissionDenied, "-32005"),
+            (McpErrorCode::RateLimited, "-32006"),
+        ];
+        for (code, expected_num) in codes {
+            let s = code.to_string();
+            assert!(s.contains(expected_num), "{s} does not contain {expected_num}");
+        }
+    }
+
+    #[test]
+    fn error_code_from_code_boundary_values() {
+        // Just outside valid ranges
+        assert!(McpErrorCode::from_code(-32599).is_none());
+        assert!(McpErrorCode::from_code(-32604).is_none());
+        assert!(McpErrorCode::from_code(-32000).is_none());
+        assert!(McpErrorCode::from_code(-32007).is_none());
+        assert!(McpErrorCode::from_code(i32::MIN).is_none());
+        assert!(McpErrorCode::from_code(i32::MAX).is_none());
+    }
+
+    #[test]
+    fn error_code_standard_vs_mcp_mutual_exclusion() {
+        let codes = [
+            McpErrorCode::InvalidRequest,
+            McpErrorCode::MethodNotFound,
+            McpErrorCode::InvalidParams,
+            McpErrorCode::InternalError,
+            McpErrorCode::ToolNotFound,
+            McpErrorCode::ToolExecutionError,
+            McpErrorCode::ResourceNotFound,
+            McpErrorCode::AuthenticationRequired,
+            McpErrorCode::PermissionDenied,
+            McpErrorCode::RateLimited,
+        ];
+        for code in codes {
+            assert_ne!(
+                code.is_standard_jsonrpc(),
+                code.is_mcp_specific(),
+                "code {code:?} must be exactly one of standard or mcp-specific"
+            );
+        }
+    }
+
+    #[test]
+    fn error_code_hash_in_map() {
+        use std::collections::HashMap;
+        let mut map = HashMap::new();
+        map.insert(McpErrorCode::ToolNotFound, "tool");
+        map.insert(McpErrorCode::InvalidRequest, "request");
+        assert_eq!(map.get(&McpErrorCode::ToolNotFound), Some(&"tool"));
+        assert_eq!(map.get(&McpErrorCode::InvalidRequest), Some(&"request"));
+        assert!(map.get(&McpErrorCode::RateLimited).is_none());
+    }
+
+    // ── McpJsonRpcRequest extras ─────────────────────────────────────────
+
+    #[test]
+    fn jsonrpc_request_with_params_has_params() {
+        let req = McpJsonRpcRequest::with_params(
+            serde_json::json!(1),
+            "test",
+            serde_json::json!(null),
+        );
+        // params is Some even if the value is null
+        assert!(req.params.is_some());
+    }
+
+    #[test]
+    fn jsonrpc_request_is_valid_requires_both() {
+        // Valid version but empty method
+        let req = McpJsonRpcRequest {
+            jsonrpc: "2.0".to_owned(),
+            id: serde_json::json!(1),
+            method: String::new(),
+            params: None,
+        };
+        assert!(!req.is_valid());
+
+        // Invalid version but non-empty method
+        let req2 = McpJsonRpcRequest {
+            jsonrpc: "1.0".to_owned(),
+            id: serde_json::json!(1),
+            method: "test".to_owned(),
+            params: None,
+        };
+        assert!(!req2.is_valid());
+    }
+
+    #[test]
+    fn jsonrpc_request_complex_id() {
+        // JSON-RPC spec allows array or object IDs (though unusual)
+        let req = McpJsonRpcRequest::new(serde_json::json!([1, 2, 3]), "test");
+        let json = serde_json::to_value(&req).unwrap();
+        assert!(json["id"].is_array());
+    }
+
+    // ── McpJsonRpcResponse extras ────────────────────────────────────────
+
+    #[test]
+    fn jsonrpc_response_roundtrip() {
+        let resp = McpJsonRpcResponse::success(
+            serde_json::json!("req-42"),
+            serde_json::json!({"tools": [], "nextCursor": null}),
+        );
+        let json = serde_json::to_string(&resp).unwrap();
+        let back: McpJsonRpcResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.jsonrpc, "2.0");
+        assert_eq!(back.id, serde_json::json!("req-42"));
+        assert!(back.result["tools"].is_array());
+    }
+
+    #[test]
+    fn jsonrpc_error_response_roundtrip() {
+        let resp = build_error_response(
+            serde_json::json!(7),
+            McpErrorCode::ResourceNotFound,
+            "Resource gone",
+        );
+        let json = serde_json::to_string(&resp).unwrap();
+        let back: McpJsonRpcErrorResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.jsonrpc, "2.0");
+        assert_eq!(back.id, serde_json::json!(7));
+        assert_eq!(back.error.code, McpErrorCode::ResourceNotFound.code());
+        assert_eq!(back.error.message, "Resource gone");
+    }
+
+    // ── McpContentBlock extras ───────────────────────────────────────────
+
+    #[test]
+    fn content_block_text_empty_string() {
+        let block = McpContentBlock::text("");
+        assert!(block.is_text());
+        assert_eq!(block.as_text(), Some(""));
+    }
+
+    #[test]
+    fn content_block_image_as_text_returns_none() {
+        let block = McpContentBlock::image("abc", "image/png");
+        assert_eq!(block.as_text(), None);
+    }
+
+    #[test]
+    fn content_block_resource_as_text_returns_none() {
+        let block = McpContentBlock::resource("uri://x");
+        assert_eq!(block.as_text(), None);
+    }
+
+    #[test]
+    fn content_block_resource_with_mime_and_text() {
+        let block = McpContentBlock::Resource {
+            uri: "file:///data.csv".to_owned(),
+            mime_type: Some("text/csv".to_owned()),
+            text: Some("a,b,c\n1,2,3".to_owned()),
+        };
+        let json = serde_json::to_value(&block).unwrap();
+        assert_eq!(json["mimeType"], "text/csv");
+        assert_eq!(json["text"], "a,b,c\n1,2,3");
+    }
+
+    #[test]
+    fn content_block_resource_without_optional_fields_omits_them() {
+        let block = McpContentBlock::resource("conn://test");
+        let json = serde_json::to_value(&block).unwrap();
+        assert!(json.get("mimeType").is_none());
+        assert!(json.get("text").is_none());
+    }
+
+    // ── McpToolCallRequest extras ────────────────────────────────────────
+
+    #[test]
+    fn tool_call_request_default_arguments() {
+        // When arguments is missing in JSON, it should default to null via #[serde(default)]
+        let json_str = r#"{"name":"test_tool"}"#;
+        let req: McpToolCallRequest = serde_json::from_str(json_str).unwrap();
+        assert_eq!(req.name, "test_tool");
+        assert!(req.arguments.is_null());
+    }
+
+    #[test]
+    fn tool_call_request_with_nested_arguments() {
+        let req = McpToolCallRequest {
+            name: "complex_tool".to_owned(),
+            arguments: serde_json::json!({
+                "query": "test",
+                "filters": [{"field": "status", "value": "active"}],
+                "options": {"limit": 10, "offset": 0}
+            }),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let back: McpToolCallRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.arguments["options"]["limit"], 10);
+    }
+
+    // ── McpToolCallResponse extras ───────────────────────────────────────
+
+    #[test]
+    fn tool_call_response_with_content_error() {
+        let blocks = vec![McpContentBlock::text("Error occurred")];
+        let resp = McpToolCallResponse::with_content(blocks, true);
+        assert!(resp.is_error);
+        assert_eq!(resp.content.len(), 1);
+    }
+
+    #[test]
+    fn tool_call_response_roundtrip_success() {
+        let resp = McpToolCallResponse::text("result data");
+        let json = serde_json::to_string(&resp).unwrap();
+        let back: McpToolCallResponse = serde_json::from_str(&json).unwrap();
+        assert!(!back.is_error);
+        assert_eq!(back.content.len(), 1);
+    }
+
+    #[test]
+    fn tool_call_response_roundtrip_error() {
+        let resp = McpToolCallResponse::error("failure");
+        let json = serde_json::to_string(&resp).unwrap();
+        let back: McpToolCallResponse = serde_json::from_str(&json).unwrap();
+        assert!(back.is_error);
+    }
+
+    #[test]
+    fn tool_call_response_empty_content_vec() {
+        let resp = McpToolCallResponse::with_content(vec![], false);
+        assert!(resp.content.is_empty());
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["content"].as_array().unwrap().len(), 0);
+    }
+
+    // ── McpResourceListRequest/Response extras ───────────────────────────
+
+    #[test]
+    fn resource_list_request_with_cursor() {
+        let req = McpResourceListRequest {
+            cursor: Some("next-page".to_owned()),
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["cursor"], "next-page");
+    }
+
+    #[test]
+    fn resource_list_request_no_cursor_omits_field() {
+        let req = McpResourceListRequest::default();
+        let json = serde_json::to_value(&req).unwrap();
+        assert!(json.get("cursor").is_none());
+    }
+
+    #[test]
+    fn resource_entry_without_optionals() {
+        let entry = McpResourceEntry {
+            uri: "conn://test".to_owned(),
+            name: "Test".to_owned(),
+            description: None,
+            mime_type: None,
+        };
+        let json = serde_json::to_value(&entry).unwrap();
+        assert!(json.get("description").is_none());
+        assert!(json.get("mimeType").is_none());
+    }
+
+    #[test]
+    fn resource_entry_roundtrip() {
+        let entry = McpResourceEntry {
+            uri: "conn://slack/channels".to_owned(),
+            name: "Channels".to_owned(),
+            description: Some("List of channels".to_owned()),
+            mime_type: Some("application/json".to_owned()),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let back: McpResourceEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.uri, "conn://slack/channels");
+        assert_eq!(back.name, "Channels");
+        assert_eq!(back.description.as_deref(), Some("List of channels"));
+        assert_eq!(back.mime_type.as_deref(), Some("application/json"));
+    }
+
+    // ── SessionStatus extras ─────────────────────────────────────────────
+
+    #[test]
+    fn session_status_deserialize_all() {
+        let variants = [
+            ("\"active\"", SessionStatus::Active),
+            ("\"idle\"", SessionStatus::Idle),
+            ("\"expired\"", SessionStatus::Expired),
+            ("\"terminated\"", SessionStatus::Terminated),
+        ];
+        for (json_str, expected) in variants {
+            let status: SessionStatus = serde_json::from_str(json_str).unwrap();
+            assert_eq!(status, expected);
+        }
+    }
+
+    #[test]
+    fn session_status_deserialize_invalid_fails() {
+        let result: Result<SessionStatus, _> = serde_json::from_str("\"unknown\"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn session_status_copy_semantics() {
+        let s = SessionStatus::Active;
+        let s2 = s;
+        assert_eq!(s, s2);
+    }
+
+    #[test]
+    fn session_status_hash() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(SessionStatus::Active);
+        set.insert(SessionStatus::Active);
+        set.insert(SessionStatus::Idle);
+        assert_eq!(set.len(), 2);
+    }
+
+    // ── AgentSessionConfig extras ────────────────────────────────────────
+
+    #[test]
+    fn session_config_multiple_validation_errors() {
+        let config = AgentSessionConfig {
+            idle_timeout: Duration::ZERO,
+            max_lifetime: Duration::ZERO,
+            max_concurrent_calls: 0,
+            rate_limit_per_minute: 0,
+        };
+        let errors = config.validate();
+        // idle_timeout zero, max_lifetime zero, concurrent zero, rate_limit zero
+        // Also max_lifetime < idle_timeout won't fire since both are zero
+        assert!(errors.len() >= 4, "expected at least 4 errors, got {}", errors.len());
+    }
+
+    #[test]
+    fn session_config_boundary_lifetime_equals_idle() {
+        let config = AgentSessionConfig {
+            idle_timeout: Duration::from_secs(300),
+            max_lifetime: Duration::from_secs(300),
+            max_concurrent_calls: 1,
+            rate_limit_per_minute: 1,
+        };
+        assert!(config.is_valid(), "equal idle and lifetime should be valid");
+    }
+
+    #[test]
+    fn session_config_serialize_uses_seconds() {
+        let config = AgentSessionConfig {
+            idle_timeout: Duration::from_secs(120),
+            max_lifetime: Duration::from_secs(3600),
+            max_concurrent_calls: 5,
+            rate_limit_per_minute: 30,
+        };
+        let json = serde_json::to_value(&config).unwrap();
+        assert_eq!(json["idle_timeout"], 120);
+        assert_eq!(json["max_lifetime"], 3600);
+    }
+
+    #[test]
+    fn session_config_deserialize_from_seconds() {
+        let json_str = r#"{"idle_timeout":60,"max_lifetime":1800,"max_concurrent_calls":8,"rate_limit_per_minute":100}"#;
+        let config: AgentSessionConfig = serde_json::from_str(json_str).unwrap();
+        assert_eq!(config.idle_timeout, Duration::from_secs(60));
+        assert_eq!(config.max_lifetime, Duration::from_secs(1800));
+        assert_eq!(config.max_concurrent_calls, 8);
+        assert_eq!(config.rate_limit_per_minute, 100);
+    }
+
+    // ── AgentSession extras ──────────────────────────────────────────────
+
+    #[test]
+    fn session_touch_does_not_reactivate_expired() {
+        let req = make_init_request();
+        let mut session = AgentSession::new("sess-exp", &req, AgentSessionConfig::default());
+        session.expire();
+        session.touch();
+        // touch only reactivates Idle, not Expired
+        assert_eq!(session.status, SessionStatus::Expired);
+    }
+
+    #[test]
+    fn session_touch_does_not_reactivate_terminated() {
+        let req = make_init_request();
+        let mut session = AgentSession::new("sess-term", &req, AgentSessionConfig::default());
+        session.terminate();
+        session.touch();
+        assert_eq!(session.status, SessionStatus::Terminated);
+    }
+
+    #[test]
+    fn session_record_tool_call_also_touches() {
+        let req = make_init_request();
+        let mut session = AgentSession::new("sess-rtc", &req, AgentSessionConfig::default());
+        session.mark_idle();
+        assert_eq!(session.status, SessionStatus::Idle);
+        session.record_tool_call();
+        // record_tool_call calls touch(), which reactivates from Idle
+        assert_eq!(session.status, SessionStatus::Active);
+        assert_eq!(session.tool_call_count, 1);
+    }
+
+    #[test]
+    fn session_mark_idle_only_from_active_not_terminated() {
+        let req = make_init_request();
+        let mut session = AgentSession::new("sess-mi", &req, AgentSessionConfig::default());
+        session.terminate();
+        session.mark_idle();
+        assert_eq!(session.status, SessionStatus::Terminated);
+    }
+
+    #[test]
+    fn session_new_with_v2024_protocol() {
+        let req = McpInitializeRequest {
+            protocol_version: McpProtocolVersion::V2024_11,
+            capabilities: McpClientCapabilities::default(),
+            client_info: McpClientInfo {
+                name: "old-client".to_owned(),
+                version: "0.5.0".to_owned(),
+            },
+        };
+        let session = AgentSession::new("old-sess", &req, AgentSessionConfig::default());
+        assert_eq!(session.protocol_version, McpProtocolVersion::V2024_11);
+        assert_eq!(session.client_info.name, "old-client");
+    }
+
+    #[test]
+    fn session_connected_at_before_last_activity_or_equal() {
+        let req = make_init_request();
+        let session = AgentSession::new("sess-ts", &req, AgentSessionConfig::default());
+        assert!(session.connected_at <= session.last_activity);
+    }
+
+    #[test]
+    fn session_serialize_after_state_changes() {
+        let req = make_init_request();
+        let mut session = AgentSession::new("sess-sc", &req, AgentSessionConfig::default());
+        session.record_tool_call();
+        session.record_tool_call();
+        session.mark_idle();
+        let json = serde_json::to_string(&session).unwrap();
+        let back: AgentSession = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.tool_call_count, 2);
+        assert_eq!(back.status, SessionStatus::Idle);
+    }
+
+    // ── McpMethodCategory extras ─────────────────────────────────────────
+
+    #[test]
+    fn method_category_display_all_variants() {
+        let expected = [
+            (McpMethodCategory::Initialize, "initialize"),
+            (McpMethodCategory::ToolsList, "tools/list"),
+            (McpMethodCategory::ToolsCall, "tools/call"),
+            (McpMethodCategory::ResourcesList, "resources/list"),
+            (McpMethodCategory::ResourcesRead, "resources/read"),
+            (McpMethodCategory::PromptsList, "prompts/list"),
+            (McpMethodCategory::PromptsGet, "prompts/get"),
+            (McpMethodCategory::Completion, "completion/complete"),
+            (McpMethodCategory::Logging, "logging/setLevel"),
+            (McpMethodCategory::Ping, "ping"),
+            (McpMethodCategory::Notification, "notification"),
+            (McpMethodCategory::Unknown, "unknown"),
+        ];
+        for (cat, s) in expected {
+            assert_eq!(cat.to_string(), s);
+        }
+    }
+
+    #[test]
+    fn method_category_requires_session_all() {
+        let requires = [
+            McpMethodCategory::ToolsList,
+            McpMethodCategory::ToolsCall,
+            McpMethodCategory::ResourcesList,
+            McpMethodCategory::ResourcesRead,
+            McpMethodCategory::PromptsList,
+            McpMethodCategory::PromptsGet,
+            McpMethodCategory::Completion,
+            McpMethodCategory::Logging,
+            McpMethodCategory::Notification,
+        ];
+        for cat in requires {
+            assert!(cat.requires_session(), "{cat:?} should require session");
+        }
+        let does_not = [
+            McpMethodCategory::Initialize,
+            McpMethodCategory::Ping,
+            McpMethodCategory::Unknown,
+        ];
+        for cat in does_not {
+            assert!(!cat.requires_session(), "{cat:?} should not require session");
+        }
+    }
+
+    #[test]
+    fn method_category_expects_response_all() {
+        // Only Notification does not expect a response
+        let expects = [
+            McpMethodCategory::Initialize,
+            McpMethodCategory::ToolsList,
+            McpMethodCategory::ToolsCall,
+            McpMethodCategory::ResourcesList,
+            McpMethodCategory::ResourcesRead,
+            McpMethodCategory::PromptsList,
+            McpMethodCategory::PromptsGet,
+            McpMethodCategory::Completion,
+            McpMethodCategory::Logging,
+            McpMethodCategory::Ping,
+            McpMethodCategory::Unknown,
+        ];
+        for cat in expects {
+            assert!(cat.expects_response(), "{cat:?} should expect response");
+        }
+        assert!(!McpMethodCategory::Notification.expects_response());
+    }
+
+    // ── Route MCP method extras ──────────────────────────────────────────
+
+    #[test]
+    fn route_various_notification_prefixes() {
+        assert_eq!(
+            route_mcp_method("notifications/tools/list_changed"),
+            McpMethodCategory::Notification
+        );
+        assert_eq!(
+            route_mcp_method("notifications/resources/list_changed"),
+            McpMethodCategory::Notification
+        );
+        assert_eq!(
+            route_mcp_method("notifications/progress"),
+            McpMethodCategory::Notification
+        );
+    }
+
+    #[test]
+    fn route_case_sensitive() {
+        // MCP methods are case-sensitive
+        assert_eq!(route_mcp_method("Initialize"), McpMethodCategory::Unknown);
+        assert_eq!(route_mcp_method("PING"), McpMethodCategory::Unknown);
+        assert_eq!(route_mcp_method("Tools/List"), McpMethodCategory::Unknown);
+    }
+
+    // ── McpMethodRouter extras ───────────────────────────────────────────
+
+    #[test]
+    fn router_overwrite_custom_route() {
+        let mut router = McpMethodRouter::new();
+        router.add_route("custom/x", McpMethodCategory::ToolsList);
+        router.add_route("custom/x", McpMethodCategory::Logging);
+        assert_eq!(router.route("custom/x"), McpMethodCategory::Logging);
+        assert_eq!(router.custom_route_count(), 1);
+    }
+
+    #[test]
+    fn router_notification_passthrough() {
+        let router = McpMethodRouter::new();
+        assert_eq!(
+            router.route("notifications/test"),
+            McpMethodCategory::Notification
+        );
+    }
+
+    #[test]
+    fn router_all_methods_count() {
+        let router = McpMethodRouter::new();
+        // 10 standard methods
+        assert_eq!(router.all_methods().len(), 10);
+    }
+
+    #[test]
+    fn router_all_methods_with_custom_count() {
+        let mut router = McpMethodRouter::new();
+        router.add_route("fcp/a", McpMethodCategory::Unknown);
+        router.add_route("fcp/b", McpMethodCategory::Unknown);
+        assert_eq!(router.all_methods().len(), 12);
+    }
+
+    #[test]
+    fn router_clone() {
+        let mut router = McpMethodRouter::new();
+        router.add_route("fcp/test", McpMethodCategory::ToolsCall);
+        let cloned = router.clone();
+        assert_eq!(cloned.route("fcp/test"), McpMethodCategory::ToolsCall);
+        assert_eq!(cloned.custom_route_count(), 1);
+    }
+
+    // ── ToolCallResult extras ────────────────────────────────────────────
+
+    #[test]
+    fn tool_call_result_success_roundtrip() {
+        let result = ToolCallResult::success_text("data output", 200);
+        let json = serde_json::to_string(&result).unwrap();
+        let back: ToolCallResult = serde_json::from_str(&json).unwrap();
+        assert!(!back.is_error);
+        assert_eq!(back.duration_ms, 200);
+        assert_eq!(back.content.len(), 1);
+    }
+
+    #[test]
+    fn tool_call_result_error_roundtrip() {
+        let result = ToolCallResult::error("timeout", 5000);
+        let json = serde_json::to_string(&result).unwrap();
+        let back: ToolCallResult = serde_json::from_str(&json).unwrap();
+        assert!(back.is_error);
+        assert_eq!(back.duration_ms, 5000);
+    }
+
+    #[test]
+    fn tool_call_result_with_metadata_roundtrip() {
+        let mut result = ToolCallResult::success_text("ok", 10);
+        result.metadata.insert("key1".to_owned(), serde_json::json!("val1"));
+        result.metadata.insert("key2".to_owned(), serde_json::json!(42));
+        let json = serde_json::to_string(&result).unwrap();
+        let back: ToolCallResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.metadata.len(), 2);
+        assert_eq!(back.metadata["key1"], serde_json::json!("val1"));
+        assert_eq!(back.metadata["key2"], serde_json::json!(42));
+    }
+
+    #[test]
+    fn tool_call_result_zero_duration() {
+        let result = ToolCallResult::success_text("instant", 0);
+        assert_eq!(result.duration_ms, 0);
+    }
+
+    #[test]
+    fn tool_call_result_error_to_mcp_preserves_content() {
+        let result = ToolCallResult::error("detailed error message", 100);
+        let resp = result.to_mcp_response();
+        assert!(resp.is_error);
+        assert_eq!(resp.content[0].as_text(), Some("detailed error message"));
+    }
+
+    // ── ToolCallError extras ─────────────────────────────────────────────
+
+    #[test]
+    fn tool_call_error_with_data_to_jsonrpc_preserves_data() {
+        let err = ToolCallError::with_data(
+            McpErrorCode::ToolExecutionError,
+            "Failed to execute",
+            serde_json::json!({"retry_after": 30, "request_id": "r-99"}),
+        );
+        let rpc_err = err.to_jsonrpc_error();
+        assert_eq!(rpc_err.code, -32002);
+        assert_eq!(rpc_err.message, "Failed to execute");
+        let data = rpc_err.data.unwrap();
+        assert_eq!(data["retry_after"], 30);
+        assert_eq!(data["request_id"], "r-99");
+    }
+
+    #[test]
+    fn tool_call_error_display_all_codes() {
+        let codes = [
+            McpErrorCode::InvalidRequest,
+            McpErrorCode::MethodNotFound,
+            McpErrorCode::InvalidParams,
+            McpErrorCode::InternalError,
+            McpErrorCode::ToolNotFound,
+            McpErrorCode::ToolExecutionError,
+            McpErrorCode::ResourceNotFound,
+            McpErrorCode::AuthenticationRequired,
+            McpErrorCode::PermissionDenied,
+            McpErrorCode::RateLimited,
+        ];
+        for code in codes {
+            let err = ToolCallError::new(code, "test message");
+            let s = err.to_string();
+            assert!(s.contains("test message"), "display missing message for {code:?}");
+            assert!(s.contains(&code.code().to_string()), "display missing code for {code:?}");
+        }
+    }
+
+    #[test]
+    fn tool_call_error_serialize_roundtrip() {
+        let err = ToolCallError::new(McpErrorCode::PermissionDenied, "Access denied");
+        let json = serde_json::to_string(&err).unwrap();
+        let back: ToolCallError = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.code, McpErrorCode::PermissionDenied);
+        assert_eq!(back.message, "Access denied");
+        assert!(back.data.is_none());
+    }
+
+    #[test]
+    fn tool_call_error_with_data_serialize_roundtrip() {
+        let err = ToolCallError::with_data(
+            McpErrorCode::RateLimited,
+            "Slow down",
+            serde_json::json!({"retry_ms": 1000}),
+        );
+        let json = serde_json::to_string(&err).unwrap();
+        let back: ToolCallError = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.code, McpErrorCode::RateLimited);
+        assert_eq!(back.data.unwrap()["retry_ms"], 1000);
+    }
+
+    // ── build_error_response extras ──────────────────────────────────────
+
+    #[test]
+    fn build_error_response_all_codes() {
+        let codes = [
+            McpErrorCode::InvalidRequest,
+            McpErrorCode::MethodNotFound,
+            McpErrorCode::InvalidParams,
+            McpErrorCode::InternalError,
+            McpErrorCode::ToolNotFound,
+            McpErrorCode::ToolExecutionError,
+            McpErrorCode::ResourceNotFound,
+            McpErrorCode::AuthenticationRequired,
+            McpErrorCode::PermissionDenied,
+            McpErrorCode::RateLimited,
+        ];
+        for code in codes {
+            let resp = build_error_response(
+                serde_json::json!(1),
+                code,
+                code.default_message(),
+            );
+            assert_eq!(resp.error.code, code.code());
+            assert_eq!(resp.error.message, code.default_message());
+        }
+    }
+
+    #[test]
+    fn build_error_response_with_data_complex_data() {
+        let resp = build_error_response_with_data(
+            serde_json::json!("req-x"),
+            McpErrorCode::InternalError,
+            "Crash",
+            serde_json::json!({
+                "stack": ["frame1", "frame2"],
+                "code": "PANIC",
+                "timestamp": "2026-03-12T00:00:00Z"
+            }),
+        );
+        let data = resp.error.data.unwrap();
+        assert!(data["stack"].is_array());
+        assert_eq!(data["stack"].as_array().unwrap().len(), 2);
+        assert_eq!(data["code"], "PANIC");
+    }
+
+    // ── McpToolAnnotations extras ────────────────────────────────────────
+
+    #[test]
+    fn annotations_partial_fields() {
+        let ann = McpToolAnnotations {
+            risk_level: Some("low".to_owned()),
+            safety_tier: None,
+            idempotency: None,
+            capability: None,
+            read_only: Some(true),
+            destructive: None,
+        };
+        let json = serde_json::to_value(&ann).unwrap();
+        assert_eq!(json["riskLevel"], "low");
+        assert_eq!(json["readOnly"], true);
+        // None fields should be omitted
+        assert!(json.get("safetyTier").is_none());
+        assert!(json.get("idempotency").is_none());
+        assert!(json.get("capability").is_none());
+        assert!(json.get("destructive").is_none());
+    }
+
+    #[test]
+    fn annotations_all_none() {
+        let ann = McpToolAnnotations {
+            risk_level: None,
+            safety_tier: None,
+            idempotency: None,
+            capability: None,
+            read_only: None,
+            destructive: None,
+        };
+        let json = serde_json::to_value(&ann).unwrap();
+        // All fields should be omitted
+        assert!(json.as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn annotations_roundtrip() {
+        let ann = McpToolAnnotations {
+            risk_level: Some("critical".to_owned()),
+            safety_tier: Some("critical".to_owned()),
+            idempotency: Some("none".to_owned()),
+            capability: Some("admin.nuke".to_owned()),
+            read_only: Some(false),
+            destructive: Some(true),
+        };
+        let json = serde_json::to_string(&ann).unwrap();
+        let back: McpToolAnnotations = serde_json::from_str(&json).unwrap();
+        assert_eq!(ann, back);
+    }
+
+    #[test]
+    fn annotations_inequality() {
+        let a = McpToolAnnotations {
+            risk_level: Some("low".to_owned()),
+            safety_tier: None,
+            idempotency: None,
+            capability: None,
+            read_only: None,
+            destructive: None,
+        };
+        let b = McpToolAnnotations {
+            risk_level: Some("high".to_owned()),
+            safety_tier: None,
+            idempotency: None,
+            capability: None,
+            read_only: None,
+            destructive: None,
+        };
+        assert_ne!(a, b);
+    }
+
+    // ── McpClientCapabilities extras ─────────────────────────────────────
+
+    #[test]
+    fn client_capabilities_with_sampling() {
+        let caps = McpClientCapabilities {
+            sampling: Some(serde_json::json!({})),
+            roots: None,
+        };
+        let json = serde_json::to_value(&caps).unwrap();
+        assert!(json.get("sampling").is_some());
+        assert!(json.get("roots").is_none());
+    }
+
+    #[test]
+    fn client_capabilities_with_roots() {
+        let caps = McpClientCapabilities {
+            sampling: None,
+            roots: Some(serde_json::json!({"listChanged": true})),
+        };
+        let json = serde_json::to_value(&caps).unwrap();
+        assert!(json.get("roots").is_some());
+        assert!(json.get("sampling").is_none());
+    }
+
+    #[test]
+    fn client_capabilities_roundtrip() {
+        let caps = McpClientCapabilities {
+            sampling: Some(serde_json::json!({"supported": true})),
+            roots: Some(serde_json::json!({"listChanged": false})),
+        };
+        let json = serde_json::to_string(&caps).unwrap();
+        let back: McpClientCapabilities = serde_json::from_str(&json).unwrap();
+        assert!(back.sampling.is_some());
+        assert!(back.roots.is_some());
+    }
+
+    // ── McpToolListEntry extras ──────────────────────────────────────────
+
+    #[test]
+    fn tool_list_entry_no_description_no_annotations() {
+        let entry = McpToolListEntry {
+            name: "bare_tool".to_owned(),
+            description: None,
+            input_schema: serde_json::json!({"type": "object"}),
+            annotations: None,
+        };
+        let json = serde_json::to_value(&entry).unwrap();
+        assert!(json.get("description").is_none());
+        assert!(json.get("annotations").is_none());
+    }
+
+    #[test]
+    fn tool_list_entry_roundtrip_with_annotations() {
+        let entry = McpToolListEntry {
+            name: "annotated_tool".to_owned(),
+            description: Some("A tool with annotations".to_owned()),
+            input_schema: serde_json::json!({"type": "object", "properties": {}}),
+            annotations: Some(McpToolAnnotations {
+                risk_level: Some("medium".to_owned()),
+                safety_tier: Some("risky".to_owned()),
+                idempotency: Some("strict".to_owned()),
+                capability: Some("test.cap".to_owned()),
+                read_only: Some(false),
+                destructive: Some(false),
+            }),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let back: McpToolListEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.name, "annotated_tool");
+        assert!(back.annotations.is_some());
+        let ann = back.annotations.unwrap();
+        assert_eq!(ann.risk_level, Some("medium".to_owned()));
+    }
+
+    // ── McpServerInfo extras ─────────────────────────────────────────────
+
+    #[test]
+    fn server_info_roundtrip() {
+        let info = McpServerInfo::fcp_host();
+        let json = serde_json::to_string(&info).unwrap();
+        let back: McpServerInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.name, "fcp-host");
+        assert_eq!(back.version, info.version);
+    }
+
+    // ── ToolCallContext extras ───────────────────────────────────────────
+
+    #[test]
+    fn tool_call_context_roundtrip() {
+        let ctx = ToolCallContext::new(
+            "sess-rt",
+            serde_json::json!(99),
+            "my_tool",
+            ConnectorId::from_static("conn:utility:2.0.0"),
+            OperationId::from_static("my_tool"),
+            serde_json::json!({"a": 1}),
+        );
+        let json = serde_json::to_string(&ctx).unwrap();
+        let back: ToolCallContext = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.session_id, "sess-rt");
+        assert_eq!(back.tool_name, "my_tool");
+        assert_eq!(back.request_id, serde_json::json!(99));
+        assert_eq!(back.arguments["a"], 1);
+    }
+
+    #[test]
+    fn tool_call_context_empty_arguments() {
+        let ctx = ToolCallContext::new(
+            "s",
+            serde_json::json!(1),
+            "noop",
+            ConnectorId::from_static("x:utility:1.0.0"),
+            OperationId::from_static("noop"),
+            serde_json::json!({}),
+        );
+        assert!(ctx.arguments.as_object().unwrap().is_empty());
+    }
 }

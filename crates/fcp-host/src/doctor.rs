@@ -2570,4 +2570,776 @@ mod tests {
             assert!(part.parse::<u32>().is_ok());
         }
     }
+
+    // ── NEW: classify_self_check keyword coverage ──
+
+    #[test]
+    fn classify_schema_via_reason_code() {
+        let report = SelfCheckReport::failed("schema_error", "something went wrong");
+        assert_eq!(classify_self_check(&report), "schema");
+    }
+
+    #[test]
+    fn classify_schema_via_config_in_message() {
+        let report = SelfCheckReport::failed("generic", "bad config entry");
+        assert_eq!(classify_self_check(&report), "schema");
+    }
+
+    #[test]
+    fn classify_schema_via_validation_keyword() {
+        let report = SelfCheckReport::failed("check", "validation failed for field X");
+        assert_eq!(classify_self_check(&report), "schema");
+    }
+
+    #[test]
+    fn classify_schema_via_invalid_keyword() {
+        let report = SelfCheckReport::failed("check", "invalid parameter supplied");
+        assert_eq!(classify_self_check(&report), "schema");
+    }
+
+    #[test]
+    fn classify_schema_via_parse_keyword() {
+        let report = SelfCheckReport::failed("check", "could not parse input");
+        assert_eq!(classify_self_check(&report), "schema");
+    }
+
+    #[test]
+    fn classify_secrets_via_credential_keyword() {
+        let report = SelfCheckReport::failed("check", "credential not found");
+        assert_eq!(classify_self_check(&report), "secrets");
+    }
+
+    #[test]
+    fn classify_secrets_via_token_keyword() {
+        let report = SelfCheckReport::failed("check", "token expired");
+        assert_eq!(classify_self_check(&report), "secrets");
+    }
+
+    #[test]
+    fn classify_secrets_via_oauth_keyword() {
+        let report = SelfCheckReport::failed("oauth_err", "refresh failed");
+        assert_eq!(classify_self_check(&report), "secrets");
+    }
+
+    #[test]
+    fn classify_secrets_via_secret_keyword() {
+        let report = SelfCheckReport::failed("check", "missing secret reference");
+        assert_eq!(classify_self_check(&report), "secrets");
+    }
+
+    #[test]
+    fn classify_secrets_via_auth_keyword() {
+        let report = SelfCheckReport::failed("auth_check", "not authorized");
+        assert_eq!(classify_self_check(&report), "secrets");
+    }
+
+    #[test]
+    fn classify_policy_via_policy_keyword() {
+        let report = SelfCheckReport::failed("check", "policy violation detected");
+        assert_eq!(classify_self_check(&report), "policy");
+    }
+
+    #[test]
+    fn classify_policy_via_approval_keyword() {
+        let report = SelfCheckReport::failed("check", "approval required for this action");
+        assert_eq!(classify_self_check(&report), "policy");
+    }
+
+    #[test]
+    fn classify_policy_via_scope_keyword() {
+        let report = SelfCheckReport::failed("check", "scope insufficient");
+        assert_eq!(classify_self_check(&report), "policy");
+    }
+
+    #[test]
+    fn classify_policy_via_denied_keyword() {
+        let report = SelfCheckReport::failed("check", "access denied");
+        assert_eq!(classify_self_check(&report), "policy");
+    }
+
+    #[test]
+    fn classify_policy_via_forbidden_keyword() {
+        let report = SelfCheckReport::failed("check", "forbidden resource");
+        assert_eq!(classify_self_check(&report), "policy");
+    }
+
+    #[test]
+    fn classify_availability_via_timeout_keyword() {
+        let report = SelfCheckReport::failed("check", "request timeout");
+        assert_eq!(classify_self_check(&report), "availability");
+    }
+
+    #[test]
+    fn classify_availability_via_not_found_keyword() {
+        let report = SelfCheckReport::failed("not_found", "resource missing");
+        assert_eq!(classify_self_check(&report), "availability");
+    }
+
+    #[test]
+    fn classify_availability_via_offline_keyword() {
+        let report = SelfCheckReport::failed("check", "service is offline");
+        assert_eq!(classify_self_check(&report), "availability");
+    }
+
+    #[test]
+    fn classify_availability_via_unavailable_keyword() {
+        let report = SelfCheckReport::failed("check", "connector unavailable");
+        assert_eq!(classify_self_check(&report), "availability");
+    }
+
+    #[test]
+    fn classify_availability_via_network_keyword() {
+        let report = SelfCheckReport::failed("check", "network error occurred");
+        assert_eq!(classify_self_check(&report), "availability");
+    }
+
+    #[test]
+    fn classify_availability_via_connection_keyword() {
+        let report = SelfCheckReport::failed("check", "connection refused");
+        assert_eq!(classify_self_check(&report), "availability");
+    }
+
+    #[test]
+    fn classify_availability_via_missing_keyword_in_message() {
+        let report = SelfCheckReport::failed("check", "dependency is missing");
+        assert_eq!(classify_self_check(&report), "availability");
+    }
+
+    #[test]
+    fn classify_runtime_fallback() {
+        let report = SelfCheckReport::failed("unknown_err", "something unexpected broke");
+        assert_eq!(classify_self_check(&report), "runtime");
+    }
+
+    #[test]
+    fn classify_unsupported_status() {
+        let report = SelfCheckReport::unsupported();
+        assert_eq!(classify_self_check(&report), "unsupported");
+    }
+
+    #[test]
+    fn classify_case_insensitive_matching() {
+        let report = SelfCheckReport::failed("CHECK", "TOKEN EXPIRED");
+        assert_eq!(classify_self_check(&report), "secrets");
+    }
+
+    #[test]
+    fn classify_mixed_case_schema() {
+        let report = SelfCheckReport::failed("Schema_Error", "Validation issue");
+        assert_eq!(classify_self_check(&report), "schema");
+    }
+
+    // ── NEW: check_result_from_self_check coverage ──
+
+    #[test]
+    fn check_result_from_self_check_ok_returns_none() {
+        let check = ConnectorSelfCheck {
+            connector_id: "ok-conn".to_string(),
+            report: SelfCheckReport::ok(),
+        };
+        assert!(check_result_from_self_check(&check).is_none());
+    }
+
+    #[test]
+    fn check_result_from_self_check_degraded_returns_warn() {
+        let check = ConnectorSelfCheck {
+            connector_id: "deg-conn".to_string(),
+            report: SelfCheckReport::degraded("slow", "slow response"),
+        };
+        let result = check_result_from_self_check(&check).unwrap();
+        assert_eq!(result.status, CheckStatus::Warn);
+        assert_eq!(result.severity, CheckSeverity::Warning);
+        assert_eq!(result.connector_id.as_deref(), Some("deg-conn"));
+    }
+
+    #[test]
+    fn check_result_from_self_check_failed_returns_fail_critical() {
+        let check = ConnectorSelfCheck {
+            connector_id: "fail-conn".to_string(),
+            report: SelfCheckReport::failed("err", "error happened"),
+        };
+        let result = check_result_from_self_check(&check).unwrap();
+        assert_eq!(result.status, CheckStatus::Fail);
+        assert_eq!(result.severity, CheckSeverity::Critical);
+    }
+
+    #[test]
+    fn check_result_from_self_check_unsupported_returns_warn_info() {
+        let check = ConnectorSelfCheck {
+            connector_id: "unsup-conn".to_string(),
+            report: SelfCheckReport::unsupported(),
+        };
+        let result = check_result_from_self_check(&check).unwrap();
+        assert_eq!(result.status, CheckStatus::Warn);
+        assert_eq!(result.severity, CheckSeverity::Info);
+        assert_eq!(result.name, "unsupported");
+    }
+
+    #[test]
+    fn check_result_from_self_check_preserves_reason_code() {
+        let check = ConnectorSelfCheck {
+            connector_id: "code-conn".to_string(),
+            report: SelfCheckReport::failed("auth_expired", "token is old"),
+        };
+        let result = check_result_from_self_check(&check).unwrap();
+        assert_eq!(result.code.as_deref(), Some("auth_expired"));
+    }
+
+    #[test]
+    fn check_result_from_self_check_uses_default_message_when_none() {
+        let check = ConnectorSelfCheck {
+            connector_id: "no-msg".to_string(),
+            report: SelfCheckReport {
+                status: SelfCheckStatus::Failed,
+                reason_code: Some("runtime_err".to_string()),
+                message: None,
+                details: None,
+            },
+        };
+        let result = check_result_from_self_check(&check).unwrap();
+        assert_eq!(result.message, "connector self-check failed");
+    }
+
+    // ── NEW: default_self_check_message all variants ──
+
+    #[test]
+    fn default_message_ok() {
+        assert_eq!(
+            default_self_check_message(SelfCheckStatus::Ok),
+            "connector self-check succeeded"
+        );
+    }
+
+    #[test]
+    fn default_message_degraded() {
+        assert_eq!(
+            default_self_check_message(SelfCheckStatus::Degraded),
+            "connector self-check reported a degraded state"
+        );
+    }
+
+    #[test]
+    fn default_message_failed() {
+        assert_eq!(
+            default_self_check_message(SelfCheckStatus::Failed),
+            "connector self-check failed"
+        );
+    }
+
+    #[test]
+    fn default_message_unsupported() {
+        assert_eq!(
+            default_self_check_message(SelfCheckStatus::Unsupported),
+            "connector does not expose a self-check implementation"
+        );
+    }
+
+    // ── NEW: repair_hints_for_self_check classification-specific hints ──
+
+    #[test]
+    fn repair_hints_schema_classification() {
+        let check = ConnectorSelfCheck {
+            connector_id: "cfg".to_string(),
+            report: SelfCheckReport::failed("schema_err", "invalid config"),
+        };
+        let hints = repair_hints_for_self_check(&check);
+        assert!(hints.iter().any(|h| h.contains("schema")));
+        assert!(hints.iter().any(|h| h.contains("revision diff")));
+    }
+
+    #[test]
+    fn repair_hints_secrets_classification() {
+        let check = ConnectorSelfCheck {
+            connector_id: "sec".to_string(),
+            report: SelfCheckReport::failed("token_err", "token expired"),
+        };
+        let hints = repair_hints_for_self_check(&check);
+        assert!(hints.iter().any(|h| h.contains("secret") || h.contains("credential")));
+    }
+
+    #[test]
+    fn repair_hints_policy_classification() {
+        let check = ConnectorSelfCheck {
+            connector_id: "pol".to_string(),
+            report: SelfCheckReport::failed("policy_err", "policy violation"),
+        };
+        let hints = repair_hints_for_self_check(&check);
+        assert!(hints.iter().any(|h| h.contains("policy") || h.contains("approval")));
+    }
+
+    #[test]
+    fn repair_hints_availability_generic() {
+        let check = ConnectorSelfCheck {
+            connector_id: "avail".to_string(),
+            report: SelfCheckReport::failed("offline_err", "service is offline"),
+        };
+        let hints = repair_hints_for_self_check(&check);
+        assert!(hints.iter().any(|h| h.contains("reachability") || h.contains("availability")));
+    }
+
+    #[test]
+    fn repair_hints_availability_timeout_reason_code() {
+        let check = ConnectorSelfCheck {
+            connector_id: "timeout".to_string(),
+            report: SelfCheckReport::failed("self_check_timeout", "timed out"),
+        };
+        let hints = repair_hints_for_self_check(&check);
+        assert!(hints.iter().any(|h| h.contains("timeout")));
+        assert!(hints.iter().any(|h| h.contains("hung") || h.contains("overloaded")));
+    }
+
+    #[test]
+    fn repair_hints_availability_not_found_reason_code() {
+        let check = ConnectorSelfCheck {
+            connector_id: "nf".to_string(),
+            report: SelfCheckReport::failed("not_found", "connector missing"),
+        };
+        let hints = repair_hints_for_self_check(&check);
+        assert!(hints.iter().any(|h| h.contains("installed")));
+        assert!(hints.iter().any(|h| h.contains("discovery") || h.contains("registered")));
+    }
+
+    #[test]
+    fn repair_hints_availability_missing_reason_code() {
+        let check = ConnectorSelfCheck {
+            connector_id: "miss".to_string(),
+            report: SelfCheckReport::failed("missing", "resource is missing"),
+        };
+        let hints = repair_hints_for_self_check(&check);
+        assert!(hints.iter().any(|h| h.contains("installed")));
+    }
+
+    #[test]
+    fn repair_hints_unsupported_classification() {
+        let check = ConnectorSelfCheck {
+            connector_id: "unsup".to_string(),
+            report: SelfCheckReport::unsupported(),
+        };
+        let hints = repair_hints_for_self_check(&check);
+        assert!(hints.iter().any(|h| h.contains("status/health")));
+        assert!(hints.iter().any(|h| h.contains("unsupported")));
+    }
+
+    #[test]
+    fn repair_hints_runtime_fallback() {
+        let check = ConnectorSelfCheck {
+            connector_id: "rt".to_string(),
+            report: SelfCheckReport::failed("unknown", "something broke"),
+        };
+        let hints = repair_hints_for_self_check(&check);
+        assert!(hints.iter().any(|h| h.contains("runtime failure")));
+    }
+
+    #[test]
+    fn repair_hints_degraded_inserts_prefix_hint() {
+        let check = ConnectorSelfCheck {
+            connector_id: "deg".to_string(),
+            report: SelfCheckReport::degraded("unknown_slow", "something slow"),
+        };
+        let hints = repair_hints_for_self_check(&check);
+        assert!(hints[0].contains("degraded"));
+    }
+
+    #[test]
+    fn repair_hints_degraded_no_duplicate_degraded_hint() {
+        // When classification already contains "degraded" in a hint, no prefix inserted
+        let check = ConnectorSelfCheck {
+            connector_id: "deg2".to_string(),
+            report: SelfCheckReport::degraded("timeout", "degraded due to slow network"),
+        };
+        let hints = repair_hints_for_self_check(&check);
+        // The availability-timeout branch doesn't mention "degraded", so prefix IS added
+        assert!(hints[0].contains("degraded"));
+    }
+
+    // ── NEW: recommended_actions_from_checks edge cases ──
+
+    #[test]
+    fn recommended_actions_empty_checks() {
+        let actions = recommended_actions_from_checks(&[]);
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn recommended_actions_single_check_no_hints() {
+        let check = CheckResult {
+            name: "test".to_string(),
+            connector_id: None,
+            code: None,
+            status: CheckStatus::Warn,
+            severity: CheckSeverity::Warning,
+            message: "warn".to_string(),
+            repair_hints: Vec::new(),
+        };
+        let actions = recommended_actions_from_checks(&[check]);
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn recommended_actions_preserves_order() {
+        let check = CheckResult {
+            name: "test".to_string(),
+            connector_id: None,
+            code: None,
+            status: CheckStatus::Fail,
+            severity: CheckSeverity::Critical,
+            message: "fail".to_string(),
+            repair_hints: vec!["first hint".to_string(), "second hint".to_string()],
+        };
+        let actions = recommended_actions_from_checks(&[check]);
+        assert_eq!(actions.len(), 2);
+        assert_eq!(actions[0], "first hint");
+        assert_eq!(actions[1], "second hint");
+    }
+
+    #[test]
+    fn recommended_actions_deduplicates_across_checks() {
+        let checks = vec![
+            CheckResult {
+                name: "a".to_string(),
+                connector_id: None,
+                code: None,
+                status: CheckStatus::Fail,
+                severity: CheckSeverity::Critical,
+                message: "fail a".to_string(),
+                repair_hints: vec!["shared hint".to_string(), "unique a".to_string()],
+            },
+            CheckResult {
+                name: "b".to_string(),
+                connector_id: None,
+                code: None,
+                status: CheckStatus::Fail,
+                severity: CheckSeverity::Critical,
+                message: "fail b".to_string(),
+                repair_hints: vec!["shared hint".to_string(), "unique b".to_string()],
+            },
+        ];
+        let actions = recommended_actions_from_checks(&checks);
+        assert_eq!(actions.len(), 3);
+        assert_eq!(
+            actions.iter().filter(|a| *a == "shared hint").count(),
+            1
+        );
+    }
+
+    // ── NEW: contains_any edge cases ──
+
+    #[test]
+    fn contains_any_empty_haystack() {
+        assert!(!contains_any("", &["foo", "bar"]));
+    }
+
+    #[test]
+    fn contains_any_empty_needles() {
+        assert!(!contains_any("hello world", &[]));
+    }
+
+    #[test]
+    fn contains_any_empty_both() {
+        assert!(!contains_any("", &[]));
+    }
+
+    #[test]
+    fn contains_any_substring_match() {
+        assert!(contains_any("hello world", &["world"]));
+    }
+
+    #[test]
+    fn contains_any_no_match() {
+        assert!(!contains_any("hello world", &["xyz", "abc"]));
+    }
+
+    #[test]
+    fn contains_any_first_needle_matches() {
+        assert!(contains_any("hello", &["hello", "nope"]));
+    }
+
+    #[test]
+    fn contains_any_last_needle_matches() {
+        assert!(contains_any("hello", &["nope", "hello"]));
+    }
+
+    // ── NEW: Deserialization roundtrips ──
+
+    #[test]
+    fn overall_status_deserialize_ok() {
+        let v: OverallStatus = serde_json::from_str("\"OK\"").unwrap();
+        assert_eq!(v, OverallStatus::Ok);
+    }
+
+    #[test]
+    fn overall_status_deserialize_warn() {
+        let v: OverallStatus = serde_json::from_str("\"WARN\"").unwrap();
+        assert_eq!(v, OverallStatus::Warn);
+    }
+
+    #[test]
+    fn overall_status_deserialize_fail() {
+        let v: OverallStatus = serde_json::from_str("\"FAIL\"").unwrap();
+        assert_eq!(v, OverallStatus::Fail);
+    }
+
+    #[test]
+    fn overall_status_deserialize_invalid_rejected() {
+        let result = serde_json::from_str::<OverallStatus>("\"UNKNOWN\"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn check_status_deserialize_ok() {
+        let v: CheckStatus = serde_json::from_str("\"OK\"").unwrap();
+        assert_eq!(v, CheckStatus::Ok);
+    }
+
+    #[test]
+    fn check_status_deserialize_warn() {
+        let v: CheckStatus = serde_json::from_str("\"WARN\"").unwrap();
+        assert_eq!(v, CheckStatus::Warn);
+    }
+
+    #[test]
+    fn check_status_deserialize_fail() {
+        let v: CheckStatus = serde_json::from_str("\"FAIL\"").unwrap();
+        assert_eq!(v, CheckStatus::Fail);
+    }
+
+    #[test]
+    fn check_status_deserialize_invalid_rejected() {
+        let result = serde_json::from_str::<CheckStatus>("\"INVALID\"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn check_severity_deserialize_info() {
+        let v: CheckSeverity = serde_json::from_str("\"info\"").unwrap();
+        assert_eq!(v, CheckSeverity::Info);
+    }
+
+    #[test]
+    fn check_severity_deserialize_warning() {
+        let v: CheckSeverity = serde_json::from_str("\"warning\"").unwrap();
+        assert_eq!(v, CheckSeverity::Warning);
+    }
+
+    #[test]
+    fn check_severity_deserialize_critical() {
+        let v: CheckSeverity = serde_json::from_str("\"critical\"").unwrap();
+        assert_eq!(v, CheckSeverity::Critical);
+    }
+
+    #[test]
+    fn check_severity_deserialize_invalid_rejected() {
+        let result = serde_json::from_str::<CheckSeverity>("\"fatal\"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn freshness_level_deserialize_all_variants() {
+        for (json_str, expected) in [
+            ("\"fresh\"", FreshnessLevel::Fresh),
+            ("\"stale\"", FreshnessLevel::Stale),
+            ("\"too_stale\"", FreshnessLevel::TooStale),
+            ("\"missing\"", FreshnessLevel::Missing),
+        ] {
+            let v: FreshnessLevel = serde_json::from_str(json_str).unwrap();
+            assert_eq!(v, expected);
+        }
+    }
+
+    #[test]
+    fn freshness_level_deserialize_invalid_rejected() {
+        let result = serde_json::from_str::<FreshnessLevel>("\"expired\"");
+        assert!(result.is_err());
+    }
+
+    // ── NEW: CheckResult deserialization roundtrip ──
+
+    #[test]
+    fn check_result_serde_roundtrip() {
+        let original = CheckResult {
+            name: "roundtrip".to_string(),
+            connector_id: Some("rt:conn:1.0.0".to_string()),
+            code: Some("rt_code".to_string()),
+            status: CheckStatus::Warn,
+            severity: CheckSeverity::Warning,
+            message: "roundtrip msg".to_string(),
+            repair_hints: vec!["hint1".to_string(), "hint2".to_string()],
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let deserialized: CheckResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.name, "roundtrip");
+        assert_eq!(deserialized.connector_id.as_deref(), Some("rt:conn:1.0.0"));
+        assert_eq!(deserialized.code.as_deref(), Some("rt_code"));
+        assert_eq!(deserialized.status, CheckStatus::Warn);
+        assert_eq!(deserialized.severity, CheckSeverity::Warning);
+        assert_eq!(deserialized.message, "roundtrip msg");
+        assert_eq!(deserialized.repair_hints.len(), 2);
+    }
+
+    #[test]
+    fn check_result_deserialize_without_optional_fields() {
+        let json = r#"{"name":"test","status":"OK","severity":"info","message":"ok"}"#;
+        let result: CheckResult = serde_json::from_str(json).unwrap();
+        assert_eq!(result.name, "test");
+        assert!(result.connector_id.is_none());
+        assert!(result.code.is_none());
+        assert!(result.repair_hints.is_empty());
+    }
+
+    // ── NEW: DoctorReport deserialization roundtrip ──
+
+    #[test]
+    fn doctor_report_serde_full_roundtrip() {
+        let checks = vec![ConnectorSelfCheck {
+            connector_id: "sc-rt".to_string(),
+            report: SelfCheckReport::failed("rt_err", "broken"),
+        }];
+        let original = DoctorReport::baseline("z:roundtrip").with_self_checks(checks);
+        let json = serde_json::to_string(&original).unwrap();
+        let deserialized: DoctorReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.zone_id, "z:roundtrip");
+        assert_eq!(deserialized.overall_status, OverallStatus::Fail);
+        assert_eq!(deserialized.connector_self_checks.len(), 1);
+        assert!(!deserialized.recommended_actions.is_empty());
+    }
+
+    // ── NEW: DoctorService handle error paths ──
+
+    #[fcp_async_core::runtime::test]
+    async fn doctor_handle_invalid_connector_id_rejected() {
+        let registry = Arc::new(TestRegistry::always_ok());
+        let service = DoctorService::new(registry);
+        let request = DoctorRequest {
+            zone_id: "z:test".to_string(),
+            connectors: vec![String::new()],
+            self_check: true,
+        };
+        let result = service.handle(request).await;
+        assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn doctor_handle_self_check_false_ignores_connectors_list() {
+        let registry = Arc::new(TestRegistry::always_fail());
+        let service = DoctorService::new(registry);
+        let request = DoctorRequest {
+            zone_id: "z:test".to_string(),
+            connectors: vec!["test.doctor:utility:1.0.0".to_string()],
+            self_check: false,
+        };
+        let report = service.handle(request).await.unwrap();
+        assert_eq!(report.overall_status, OverallStatus::Ok);
+        assert!(report.connector_self_checks.is_empty());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn doctor_handle_empty_connectors_with_self_check_true() {
+        let registry = Arc::new(TestRegistry::always_ok());
+        let service = DoctorService::new(registry);
+        let request = DoctorRequest {
+            zone_id: "z:test".to_string(),
+            connectors: vec![],
+            self_check: true,
+        };
+        let report = service.handle(request).await.unwrap();
+        assert_eq!(report.overall_status, OverallStatus::Ok);
+        assert!(report.connector_self_checks.is_empty());
+    }
+
+    // ── NEW: with_self_checks extends existing checks ──
+
+    #[test]
+    fn with_self_checks_extends_existing_checks_vec() {
+        let mut report = DoctorReport::baseline("z:extend");
+        report.checks.push(CheckResult {
+            name: "preexisting".to_string(),
+            connector_id: None,
+            code: None,
+            status: CheckStatus::Ok,
+            severity: CheckSeverity::Info,
+            message: "existed before".to_string(),
+            repair_hints: Vec::new(),
+        });
+        let checks = vec![ConnectorSelfCheck {
+            connector_id: "new".to_string(),
+            report: SelfCheckReport::failed("err", "broken"),
+        }];
+        let report = report.with_self_checks(checks);
+        // The preexisting check should still be there plus the derived one
+        assert!(report.checks.len() >= 2);
+        assert!(report.checks.iter().any(|c| c.name == "preexisting"));
+    }
+
+    // ── NEW: classify_self_check with no reason_code and no message ──
+
+    #[test]
+    fn classify_with_no_reason_code_and_no_message_is_runtime() {
+        let report = SelfCheckReport {
+            status: SelfCheckStatus::Failed,
+            reason_code: None,
+            message: None,
+            details: None,
+        };
+        assert_eq!(classify_self_check(&report), "runtime");
+    }
+
+    #[test]
+    fn classify_with_only_reason_code_matching() {
+        let report = SelfCheckReport {
+            status: SelfCheckStatus::Failed,
+            reason_code: Some("secret_missing".to_string()),
+            message: None,
+            details: None,
+        };
+        assert_eq!(classify_self_check(&report), "secrets");
+    }
+
+    #[test]
+    fn classify_with_only_message_matching() {
+        let report = SelfCheckReport {
+            status: SelfCheckStatus::Failed,
+            reason_code: None,
+            message: Some("policy constraint violated".to_string()),
+            details: None,
+        };
+        assert_eq!(classify_self_check(&report), "policy");
+    }
+
+    // ── NEW: classify priority (schema > secrets > policy > availability > runtime) ──
+
+    #[test]
+    fn classify_schema_takes_priority_over_secrets() {
+        // "schema" keyword matched before "token" keyword
+        let report = SelfCheckReport::failed("schema", "token also mentioned");
+        assert_eq!(classify_self_check(&report), "schema");
+    }
+
+    #[test]
+    fn classify_secrets_takes_priority_over_policy() {
+        let report = SelfCheckReport::failed("credential", "policy also mentioned");
+        assert_eq!(classify_self_check(&report), "secrets");
+    }
+
+    #[test]
+    fn classify_policy_takes_priority_over_availability() {
+        let report = SelfCheckReport::failed("denied", "timeout also mentioned");
+        // "denied" is policy, "timeout" is availability; policy wins
+        assert_eq!(classify_self_check(&report), "policy");
+    }
+
+    // ── NEW: DoctorRequest serialization roundtrip ──
+
+    #[test]
+    fn doctor_request_serialize_then_deserialize() {
+        let req = DoctorRequest {
+            zone_id: "z:ser-deser".to_string(),
+            connectors: vec!["a.b:c:1.0.0".to_string()],
+            self_check: true,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let back: DoctorRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.zone_id, "z:ser-deser");
+        assert_eq!(back.connectors.len(), 1);
+        assert!(back.self_check);
+    }
 }

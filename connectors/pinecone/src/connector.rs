@@ -862,7 +862,7 @@ impl PineconeConnector {
 
     async fn invoke_query(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
-        let index_name = require_str(&input, "index_name")?;
+        let _index_name = require_str(&input, "index_name")?;
         let top_k = input
             .get("top_k")
             .and_then(|v| v.as_u64())

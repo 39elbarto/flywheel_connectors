@@ -118,30 +118,26 @@ impl GoogleAiClient {
             self.base_url.trim_end_matches('/'),
             path.trim_start_matches('/')
         );
-
-        match Url::parse(&raw) {
-            Ok(mut url) => {
-                {
-                    let mut pairs = url.query_pairs_mut();
-                    if let GoogleAiAuth::ApiKey(key) = &self.auth {
-                        pairs.append_pair("key", key);
-                    }
-                    for (name, value) in query {
-                        pairs.append_pair(name, value);
-                    }
-                }
-                url.to_string()
-            }
-            Err(_) => {
-                let mut url = raw;
+        if let Ok(mut url) = Url::parse(&raw) {
+            {
+                let mut pairs = url.query_pairs_mut();
                 if let GoogleAiAuth::ApiKey(key) = &self.auth {
-                    url = append_query_param(url, "key", key);
+                    pairs.append_pair("key", key);
                 }
                 for (name, value) in query {
-                    url = append_query_param(url, name, value);
+                    pairs.append_pair(name, value);
                 }
-                url
             }
+            url.to_string()
+        } else {
+            let mut url = raw;
+            if let GoogleAiAuth::ApiKey(key) = &self.auth {
+                url = append_query_param(url, "key", key);
+            }
+            for (name, value) in query {
+                url = append_query_param(url, name, value);
+            }
+            url
         }
     }
 

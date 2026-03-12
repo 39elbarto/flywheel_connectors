@@ -28,7 +28,7 @@ struct WebhookReceiverConfig {
 }
 
 impl WebhookReceiverConfig {
-    fn from_params(params: &serde_json::Value) -> FcpResult<Self> {
+    fn from_params(params: &serde_json::Value) -> Self {
         let public_base_url = params
             .get("public_base_url")
             .and_then(serde_json::Value::as_str)
@@ -37,7 +37,7 @@ impl WebhookReceiverConfig {
             .unwrap_or(DEFAULT_PUBLIC_BASE_URL)
             .to_string();
 
-        Ok(Self { public_base_url })
+        Self { public_base_url }
     }
 
     fn provisioning_readiness(&self, store: &WebhookStore) -> ProvisioningReadiness {
@@ -174,7 +174,7 @@ impl WebhookReceiverConnector {
         &mut self,
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
-        let config = WebhookReceiverConfig::from_params(&params)?;
+        let config = WebhookReceiverConfig::from_params(&params);
         info!(public_base_url = %config.public_base_url, "Configuring Webhook Receiver connector");
         self.store.set_public_base_url(&config.public_base_url);
         self.config = Some(config);
@@ -456,13 +456,12 @@ impl WebhookReceiverConnector {
         let signature_header = optional_str(input, "signature_header")?
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| provider.default_signature_header().to_string());
+            .map_or_else(|| provider.default_signature_header().to_string(), str::to_string);
+
         let signature_algorithm = optional_str(input, "signature_algorithm")?
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| provider.default_signature_algorithm().to_string());
+            .map_or_else(|| provider.default_signature_algorithm().to_string(), str::to_string);
         let allowed_sources = parse_string_array(input, "allowed_sources")?;
 
         let endpoint = self.store.create_endpoint_profile(

@@ -178,7 +178,7 @@ impl Default for SendGridConnector {
 }
 
 impl SendGridConnector {
-    /// Build the SendGrid operation catalog for host introspection.
+    /// Build the `SendGrid` operation catalog for host introspection.
     #[must_use]
     pub fn introspection() -> Introspection {
         Introspection {

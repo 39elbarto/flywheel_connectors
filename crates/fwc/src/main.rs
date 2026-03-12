@@ -26614,4 +26614,799 @@ depends_on = ["missing"]
         assert_eq!(payload["phase"], "execution");
         assert_eq!(payload["request"]["deadline_ms"], 5000);
     }
+
+    // ── lifecycle commands: status ────────────────────────────────
+
+    #[test]
+    fn status_fleet_offline_reports_missing_host() {
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "status"]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["status"], "error");
+        assert_eq!(payload["command"], "status");
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
+        assert!(payload["error"]["recoverable"].as_bool().unwrap_or(false));
+        assert_eq!(payload["details"]["scope"], "fleet");
+        assert!(payload["details"]["connector"].is_null());
+    }
+
+    #[test]
+    fn status_connector_offline_reports_missing_host() {
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "status", "github"]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["status"], "error");
+        assert_eq!(payload["command"], "status");
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
+        assert_eq!(payload["details"]["scope"], "connector");
+        assert_eq!(payload["details"]["connector"], "github");
+    }
+
+    #[test]
+    fn status_fleet_host_lists_connectors() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "GET /rpc/health".to_owned(),
+                    json!({
+                        "status": "healthy",
+                        "connectors": {},
+                        "uptime_seconds": 3600,
+                        "active_connections": 2,
+                        "timestamp": "2026-03-12T00:00:00Z",
+                    }),
+                ),
+            ]),
+            2,
+        );
+
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "--host", &host, "status"]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "status");
+        assert_eq!(payload["scope"], "fleet");
+        assert_eq!(payload["source"], "host-admin-api");
+        assert!(payload["connectors"]
+            .as_array()
+            .is_some_and(|arr| !arr.is_empty()));
+        assert_eq!(payload["connectors"][0]["slug"], "github");
+        assert_eq!(payload["host_health"]["status"], "healthy");
+        assert_eq!(payload["registry_version"], 7);
+    }
+
+    #[test]
+    fn status_connector_host_returns_admin_details() {
+        let cid = "fcp.github:enterprise:v1";
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "GET /rpc/health".to_owned(),
+                    json!({
+                        "status": "healthy",
+                        "connectors": {},
+                        "uptime_seconds": 3600,
+                        "active_connections": 2,
+                        "timestamp": "2026-03-12T00:00:00Z",
+                    }),
+                ),
+                (
+                    format!("GET /rpc/connectors/{cid}/status"),
+                    json!({
+                        "connector_id": cid,
+                        "desired_state": "enabled",
+                        "observed_state": "running",
+                        "config_revision_count": 1,
+                        "last_journal_sequence": 9,
+                        "evaluated_at": "2026-03-12T00:00:00Z",
+                    }),
+                ),
+                (
+                    format!("GET /rpc/rollout/pin/{cid}"),
+                    json!({
+                        "connector_id": cid,
+                        "pinned": false,
+                    }),
+                ),
+                (
+                    format!("GET /rpc/rollout/{cid}"),
+                    json!({
+                        "connector_id": cid,
+                        "state": "production",
+                        "version": "1.2.3",
+                        "health": {
+                            "successes": 100,
+                            "failures": 0,
+                            "samples": 100,
+                            "success_rate": 100,
+                            "total_latency_ms": 500,
+                            "latency_samples": 100,
+                            "max_latency_ms": 10,
+                            "last_updated": "2026-03-12T00:00:00Z",
+                        },
+                        "auto_promote_pending": false,
+                        "auto_rollback_pending": false,
+                        "crash_loop_detected": false,
+                        "pinned": false,
+                        "canary_percent": 0,
+                    }),
+                ),
+            ]),
+            5,
+        );
+
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "--host", &host, "status", "github"]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "status");
+        assert_eq!(payload["scope"], "connector");
+        assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["connector"]["slug"], "github");
+        assert_eq!(payload["connector"]["canonical_id"], cid);
+        assert!(!payload["admin"].is_null());
+        assert!(!payload["pin"].is_null());
+        assert!(!payload["rollout"].is_null());
+        assert_eq!(payload["host_health"]["status"], "healthy");
+    }
+
+    #[test]
+    fn status_connector_host_unknown_connector() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "GET /rpc/health".to_owned(),
+                    json!({
+                        "status": "healthy",
+                        "connectors": {},
+                        "uptime_seconds": 3600,
+                        "active_connections": 2,
+                        "timestamp": "2026-03-12T00:00:00Z",
+                    }),
+                ),
+            ]),
+            2,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "status",
+            "nonexistent-connector",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["status"], "error");
+        assert_eq!(payload["error"]["type"], "connector-not-found");
+    }
+
+    // ── lifecycle commands: pin ────────────────────────────────
+
+    #[test]
+    fn pin_offline_reports_missing_host() {
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "pin", "github", "--to", "1.2.3"]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["status"], "error");
+        assert_eq!(payload["command"], "pin");
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
+        assert_eq!(payload["details"]["connector"], "github");
+        assert_eq!(payload["details"]["to"], "1.2.3");
+    }
+
+    #[test]
+    fn pin_host_unknown_connector() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([(
+                "POST /rpc/discover".to_owned(),
+                mock_discovery_response_json(),
+            )]),
+            1,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "pin",
+            "nonexistent-connector",
+            "--to",
+            "1.0.0",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["status"], "error");
+        assert_eq!(payload["error"]["type"], "connector-not-found");
+    }
+
+    // ── lifecycle commands: install ────────────────────────────
+
+    #[test]
+    fn install_verify_only_validates_without_host() {
+        let (_package_dir, package_output_path) =
+            write_test_package_output("fcp.github:enterprise:v1", "1.2.5");
+        let package_output_path = package_output_path.display().to_string();
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "install",
+            &package_output_path,
+            "--verify-only",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "install");
+        assert_eq!(payload["mode"], "verify-only");
+        assert_eq!(
+            payload["candidate"]["canonical_id"],
+            "fcp.github:enterprise:v1"
+        );
+        assert_eq!(payload["candidate"]["version"], "1.2.5");
+        assert!(payload["verification"]
+            .as_array()
+            .is_some_and(|arr| !arr.is_empty()));
+    }
+
+    #[test]
+    fn install_invalid_source_returns_validation_error() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "install",
+            "/nonexistent/path/to/package",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["status"], "error");
+        assert_eq!(payload["command"], "install");
+        assert_eq!(payload["error"]["type"], "invalid-install-source");
+        assert!(payload["next_actions"]
+            .as_array()
+            .is_some_and(|arr| !arr.is_empty()));
+    }
+
+    #[test]
+    fn install_without_host_reports_missing_endpoint() {
+        let (_package_dir, package_output_path) =
+            write_test_package_output("fcp.github:enterprise:v1", "1.2.5");
+        let package_output_path = package_output_path.display().to_string();
+
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "install", &package_output_path]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["status"], "error");
+        assert_eq!(payload["command"], "install");
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
+        assert!(payload["error"]["recoverable"].as_bool().unwrap_or(false));
+    }
+
+    // ── lifecycle commands: update ────────────────────────────
+
+    #[test]
+    fn update_offline_reports_missing_host() {
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "update", "github"]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["status"], "error");
+        assert_eq!(payload["command"], "update");
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
+        assert_eq!(payload["details"]["connector"], "github");
+    }
+
+    #[test]
+    fn update_host_unknown_connector() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([(
+                "POST /rpc/discover".to_owned(),
+                mock_discovery_response_json(),
+            )]),
+            1,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "update",
+            "nonexistent-connector",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["status"], "error");
+        assert_eq!(payload["error"]["type"], "connector-not-found");
+    }
+
+    #[test]
+    fn update_host_id_mismatch_returns_error() {
+        let (_package_dir, package_output_path) =
+            write_test_package_output("fcp.other:connector:v1", "2.0.0");
+        let package_output_path = package_output_path.display().to_string();
+
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([(
+                "POST /rpc/discover".to_owned(),
+                mock_discovery_response_json(),
+            )]),
+            1,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "update",
+            "github",
+            "--source",
+            &package_output_path,
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["status"], "error");
+        assert_eq!(payload["command"], "update");
+        assert_eq!(payload["error"]["type"], "connector-id-mismatch");
+        assert_eq!(
+            payload["target_connector_id"],
+            "fcp.github:enterprise:v1"
+        );
+    }
+
+    // ── config commands ─────────────────────────────────────────
+
+    #[test]
+    fn config_schema_offline_returns_schema() {
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "config", "schema", "github"]);
+        assert!(
+            exit_code == CliExitCode::Success.into()
+                || exit_code == CliExitCode::Validation.into()
+        );
+        assert_eq!(payload["command"], "config");
+        assert_eq!(payload["subcommand"], "schema");
+        assert_eq!(payload["source"], "workspace-discovery");
+        assert!(payload["connector"]["slug"].is_string());
+        assert!(payload["connector"]["canonical_id"].is_string());
+    }
+
+    #[test]
+    fn config_schema_unknown_connector_returns_resolution_error() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "config",
+            "schema",
+            "nonexistent-connector-xyz",
+        ]);
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["command"], "config schema");
+        assert_eq!(payload["error"]["type"], "connector-not-found");
+        assert!(payload["error"]["recoverable"].as_bool().unwrap_or(false));
+    }
+
+    #[test]
+    fn config_schema_offline_has_envelope() {
+        let (_, payload) = execute_json(&["fwc", "--json", "config", "schema", "github"]);
+        assert_eq!(payload["command"], "config");
+        assert_eq!(payload["subcommand"], "schema");
+        if payload["status"] == "ok" {
+            assert!(payload.get("envelope").is_some() || payload.get("command_envelope").is_some()
+                || payload.get("availability").is_some());
+        }
+    }
+
+    #[test]
+    fn config_get_offline_reports_missing_host() {
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "config", "get", "github"]);
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "config");
+        assert_eq!(payload["subcommand"], "get");
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
+        assert!(payload["error"]["recoverable"].as_bool().unwrap_or(false));
+        assert!(
+            payload["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("requires a live")
+        );
+    }
+
+    #[test]
+    fn config_set_offline_reports_missing_host() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "config", "set", "github", "profile", "prod",
+        ]);
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "config");
+        assert_eq!(payload["subcommand"], "set");
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
+        assert!(payload["error"]["recoverable"].as_bool().unwrap_or(false));
+        assert_eq!(payload["details"]["connector"], "github");
+        assert_eq!(payload["details"]["updated_path"], "profile");
+    }
+
+    #[test]
+    fn config_unset_offline_reports_missing_host() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "config", "unset", "github", "profile",
+        ]);
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "config");
+        assert_eq!(payload["subcommand"], "unset");
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
+        assert!(payload["error"]["recoverable"].as_bool().unwrap_or(false));
+        assert_eq!(payload["details"]["connector"], "github");
+        assert_eq!(payload["details"]["updated_path"], "profile");
+    }
+
+    #[test]
+    fn config_import_offline_reports_missing_host() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "config", "import", "github", "--file", "/tmp/config.json",
+        ]);
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "config");
+        assert_eq!(payload["subcommand"], "import");
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
+        assert!(payload["error"]["recoverable"].as_bool().unwrap_or(false));
+        assert_eq!(payload["details"]["connector"], "github");
+    }
+
+    #[test]
+    fn config_export_offline_reports_missing_host() {
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "config", "export", "github"]);
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "config");
+        assert_eq!(payload["subcommand"], "export");
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
+        assert!(payload["error"]["recoverable"].as_bool().unwrap_or(false));
+        assert_eq!(payload["details"]["connector"], "github");
+    }
+
+    #[test]
+    fn config_doctor_offline_reports_missing_host() {
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "config", "doctor", "github"]);
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "config");
+        assert_eq!(payload["subcommand"], "doctor");
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
+        assert!(payload["error"]["recoverable"].as_bool().unwrap_or(false));
+        assert_eq!(payload["details"]["connector"], "github");
+    }
+
+    #[test]
+    fn config_missing_host_next_actions_include_remediation() {
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "config", "get", "github"]);
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        let next_actions = payload["next_actions"]
+            .as_array()
+            .expect("next_actions should be an array");
+        assert!(next_actions.len() >= 2);
+        assert!(
+            next_actions
+                .iter()
+                .any(|action| action.as_str().unwrap().contains("--host"))
+        );
+        assert!(
+            next_actions
+                .iter()
+                .any(|action| action.as_str().unwrap().contains("FWC_HOST"))
+        );
+    }
+
+    #[test]
+    fn config_get_host_unknown_connector() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([(
+                "POST /rpc/discover".to_owned(),
+                mock_discovery_response_json(),
+            )]),
+            1,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "config",
+            "get",
+            "nonexistent-connector-xyz",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["command"], "config get");
+        assert_eq!(payload["error"]["type"], "connector-not-found");
+        assert!(payload["error"]["recoverable"].as_bool().unwrap_or(false));
+    }
+
+    #[test]
+    fn config_get_host_redacted_snapshot() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "GET /rpc/connectors/fcp.github:enterprise:v1/config".to_owned(),
+                    mock_redacted_config_snapshot_json(json!({
+                        "profile": "work",
+                        "client_secret": "<redacted>"
+                    })),
+                ),
+            ]),
+            2,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "--host", &host, "config", "get", "github",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "config");
+        assert_eq!(payload["subcommand"], "get");
+        assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["replayable"], false);
+        assert!(
+            payload["message"]
+                .as_str()
+                .unwrap()
+                .contains("not replayable")
+        );
+        assert_eq!(
+            payload["snapshot"]["current"]["contains_inline_secrets"],
+            true
+        );
+    }
+
+    #[test]
+    fn config_set_host_validation_failure() {
+        let current = json!({ "profile": "work" });
+        let candidate = json!({ "profile": "invalid!" });
+        let (host, server) = spawn_mock_host_sequence(vec![
+            (
+                "POST /rpc/discover".to_owned(),
+                mock_discovery_response_json(),
+            ),
+            (
+                "GET /rpc/connectors/fcp.github:enterprise:v1/config".to_owned(),
+                mock_config_snapshot_json(current.clone()),
+            ),
+            (
+                "POST /rpc/connectors/fcp.github:enterprise:v1/config/validate".to_owned(),
+                mock_config_validation_response_json(
+                    false,
+                    current,
+                    candidate,
+                    Some("profile value 'invalid!' is not allowed"),
+                ),
+            ),
+        ]);
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "config",
+            "set",
+            "github",
+            "profile",
+            "invalid!",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["command"], "config");
+        assert_eq!(payload["subcommand"], "set");
+        assert_eq!(payload["status"], "invalid");
+        assert_eq!(payload["error"]["type"], "config-validation-failed");
+        assert!(payload["error"]["recoverable"].as_bool().unwrap_or(false));
+        assert_eq!(payload["details"]["updated_path"], "profile");
+        assert_eq!(payload["validation"]["valid"], false);
+    }
+
+    #[test]
+    fn config_set_host_unknown_connector() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([(
+                "POST /rpc/discover".to_owned(),
+                mock_discovery_response_json(),
+            )]),
+            1,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "config",
+            "set",
+            "nonexistent-connector-xyz",
+            "profile",
+            "prod",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["command"], "config set");
+        assert_eq!(payload["error"]["type"], "connector-not-found");
+    }
+
+    #[test]
+    fn config_unset_host_unknown_connector() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([(
+                "POST /rpc/discover".to_owned(),
+                mock_discovery_response_json(),
+            )]),
+            1,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "config",
+            "unset",
+            "nonexistent-connector-xyz",
+            "profile",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["command"], "config unset");
+        assert_eq!(payload["error"]["type"], "connector-not-found");
+    }
+
+    #[test]
+    fn config_doctor_host_invalid_config() {
+        let current = json!({ "profile": "broken" });
+        let (host, server) = spawn_mock_host_sequence(vec![
+            (
+                "POST /rpc/discover".to_owned(),
+                mock_discovery_response_json(),
+            ),
+            (
+                "GET /rpc/connectors/fcp.github:enterprise:v1/config".to_owned(),
+                mock_config_snapshot_json(current.clone()),
+            ),
+            (
+                "POST /rpc/connectors/fcp.github:enterprise:v1/config/validate".to_owned(),
+                mock_config_validation_response_json(
+                    false,
+                    current.clone(),
+                    current,
+                    Some("config is invalid: missing required field 'api_key'"),
+                ),
+            ),
+        ]);
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "--host", &host, "config", "doctor", "github",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["command"], "config");
+        assert_eq!(payload["subcommand"], "doctor");
+        assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["status"], "invalid");
+        assert_eq!(payload["validation"]["valid"], false);
+        let checks = payload["checks"].as_array().expect("checks should be an array");
+        assert!(checks.len() >= 3);
+        assert_eq!(checks[0]["name"], "host");
+        assert_eq!(checks[0]["status"], "ok");
+        assert_eq!(checks[1]["name"], "connector");
+        assert_eq!(checks[1]["status"], "ok");
+        assert_eq!(checks[2]["name"], "snapshot");
+        assert_eq!(checks[2]["status"], "ok");
+    }
+
+    #[test]
+    fn config_doctor_host_redacted_skips_validation() {
+        let (host, server) = spawn_mock_host_sequence(vec![
+            (
+                "POST /rpc/discover".to_owned(),
+                mock_discovery_response_json(),
+            ),
+            (
+                "GET /rpc/connectors/fcp.github:enterprise:v1/config".to_owned(),
+                mock_redacted_config_snapshot_json(json!({
+                    "profile": "work",
+                    "client_secret": "<redacted>"
+                })),
+            ),
+        ]);
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "--host", &host, "config", "doctor", "github",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "config");
+        assert_eq!(payload["subcommand"], "doctor");
+        assert_eq!(payload["status"], "limited");
+        assert!(payload["validation"].is_null());
+        let checks = payload["checks"].as_array().expect("checks should be an array");
+        let validation_check = checks
+            .iter()
+            .find(|check| check["name"] == "validation")
+            .expect("should have a validation check");
+        assert_eq!(validation_check["status"], "unavailable");
+    }
+
+    #[test]
+    fn config_export_host_replayable_snapshot() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "GET /rpc/connectors/fcp.github:enterprise:v1/config".to_owned(),
+                    mock_config_snapshot_json(json!({
+                        "profile": "work",
+                        "api_url": "https://api.github.com"
+                    })),
+                ),
+            ]),
+            2,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "--host", &host, "config", "export", "github",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "config");
+        assert_eq!(payload["subcommand"], "export");
+        assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["replayable"], true);
+        assert_eq!(payload["config"]["profile"], "work");
+        assert_eq!(payload["config"]["api_url"], "https://api.github.com");
+        assert!(
+            payload["next_actions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry.as_str().unwrap().contains("config import"))
+        );
+    }
 }

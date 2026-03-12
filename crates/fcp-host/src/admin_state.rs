@@ -8589,4 +8589,218 @@ mod tests {
             "rejected artifact registrations must not mutate persisted state"
         );
     }
+
+    // ── Placeholder hash detection (bead 29.12) ─────────────────────────
+
+    fn make_provenance(hash: &str) -> ArtifactProvenance {
+        ArtifactProvenance {
+            source_kind: ArtifactSourceKind::Registry,
+            source_uri: "registry:fcp.test:1.0.0".to_owned(),
+            content_hash: hash.to_owned(),
+            hash_verified: true,
+            signature_b64: Some("dGVzdC1zaWduYXR1cmU=".to_owned()),
+            signature_verified: true,
+            manifest_version: Some("1.0.0".to_owned()),
+            size_bytes: 1024,
+        }
+    }
+
+    #[test]
+    fn placeholder_hash_detects_placeholder_hash_literal() {
+        assert!(is_placeholder_hash("PLACEHOLDER_HASH"));
+    }
+
+    #[test]
+    fn placeholder_hash_detects_all_zeros_64() {
+        assert!(is_placeholder_hash(
+            "0000000000000000000000000000000000000000000000000000000000000000"
+        ));
+    }
+
+    #[test]
+    fn placeholder_hash_detects_sha256_of_empty() {
+        assert!(is_placeholder_hash(
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ));
+    }
+
+    #[test]
+    fn placeholder_hash_detects_blake3_of_empty() {
+        assert!(is_placeholder_hash(
+            "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
+        ));
+    }
+
+    #[test]
+    fn placeholder_hash_every_known_entry_is_detected() {
+        for hash in KNOWN_PLACEHOLDER_HASHES {
+            assert!(
+                is_placeholder_hash(hash),
+                "KNOWN_PLACEHOLDER_HASHES entry '{hash}' was not detected"
+            );
+        }
+    }
+
+    #[test]
+    fn placeholder_hash_empty_string_is_placeholder() {
+        assert!(is_placeholder_hash(""));
+    }
+
+    #[test]
+    fn placeholder_hash_whitespace_only_is_not_matched() {
+        // Whitespace-only strings are not empty (is_empty check) and after trim+lowercase
+        // become "" which doesn't match any KNOWN_PLACEHOLDER_HASHES entry.
+        assert!(!is_placeholder_hash("  "));
+    }
+
+    // ── Case insensitivity ───────────────────────────────────────────────
+
+    #[test]
+    fn placeholder_hash_case_insensitive_placeholder_hash() {
+        assert!(is_placeholder_hash("placeholder_hash"));
+        assert!(is_placeholder_hash("Placeholder_Hash"));
+        assert!(is_placeholder_hash("PLACEHOLDER_HASH"));
+    }
+
+    #[test]
+    fn placeholder_hash_case_insensitive_all_zeros() {
+        // All zeros is case-insensitive by nature (no letters), but verify trim works
+        assert!(is_placeholder_hash(
+            "  0000000000000000000000000000000000000000000000000000000000000000  "
+        ));
+    }
+
+    #[test]
+    fn placeholder_hash_case_insensitive_sha256_empty_uppercase() {
+        assert!(is_placeholder_hash(
+            "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+        ));
+    }
+
+    #[test]
+    fn placeholder_hash_case_insensitive_blake3_empty_mixed() {
+        assert!(is_placeholder_hash(
+            "AF1349B9F5F9A1A6A0404DEA36DCC9499BCB25C9ADC112B7CC9A93CAE41F3262"
+        ));
+    }
+
+    // ── Real hashes are NOT falsely rejected ─────────────────────────────
+
+    #[test]
+    fn real_blake3_hash_not_rejected() {
+        assert!(!is_placeholder_hash(
+            "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae"
+        ));
+    }
+
+    #[test]
+    fn real_sha256_hash_not_rejected() {
+        assert!(!is_placeholder_hash(
+            "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+        ));
+    }
+
+    #[test]
+    fn real_arbitrary_hex_hash_not_rejected() {
+        assert!(!is_placeholder_hash(
+            "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2"
+        ));
+    }
+
+    #[test]
+    fn real_short_hash_not_rejected() {
+        assert!(!is_placeholder_hash("abc123def456"));
+    }
+
+    #[test]
+    fn real_production_hash_samples_not_rejected() {
+        let hashes = [
+            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
+            "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8",
+            "6ca13d52ca70c883e0f0bb101e425a89e8624de51db2d2392593af6a84118090",
+            "3e23e8160039594a33894f6564e1b1348bbd7a0088d42c4acb73eeaed59c009d",
+        ];
+        for hash in &hashes {
+            assert!(
+                !is_placeholder_hash(hash),
+                "Real hash '{hash}' must not be treated as placeholder"
+            );
+        }
+    }
+
+    // ── validate_artifact_provenance with placeholder hashes ─────────────
+
+    #[test]
+    fn validate_provenance_rejects_placeholder_hash_literal() {
+        let prov = make_provenance("PLACEHOLDER_HASH");
+        let rejection = validate_artifact_provenance("fcp.test:util:1.0", &prov, false, None);
+        assert!(rejection.is_some());
+        let r = rejection.unwrap();
+        assert!(matches!(r.kind, ArtifactRejectionKind::PlaceholderHash));
+        assert!(r.message.contains("placeholder") || r.message.contains("PLACEHOLDER"));
+    }
+
+    #[test]
+    fn validate_provenance_rejects_all_zeros_hash() {
+        let prov = make_provenance(
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        );
+        let rejection = validate_artifact_provenance("fcp.test:util:1.0", &prov, false, None);
+        assert!(rejection.is_some());
+        assert!(matches!(
+            rejection.unwrap().kind,
+            ArtifactRejectionKind::PlaceholderHash
+        ));
+    }
+
+    #[test]
+    fn validate_provenance_rejects_empty_hash() {
+        let prov = make_provenance("");
+        let rejection = validate_artifact_provenance("fcp.test:util:1.0", &prov, false, None);
+        assert!(rejection.is_some());
+        assert!(matches!(
+            rejection.unwrap().kind,
+            ArtifactRejectionKind::PlaceholderHash
+        ));
+    }
+
+    #[test]
+    fn validate_provenance_rejection_has_informative_message() {
+        let prov = make_provenance("PLACEHOLDER_HASH");
+        let r = validate_artifact_provenance("fcp.slack:comm:2.0", &prov, false, None).unwrap();
+        assert!(r.message.contains("fcp.slack:comm:2.0"));
+        assert!(r.message.contains("PLACEHOLDER_HASH"));
+        assert!(!r.remediation.is_empty());
+        assert_eq!(r.policy_gate, "provenance.hash.no_placeholder");
+        assert_eq!(r.connector_id, "fcp.slack:comm:2.0");
+    }
+
+    #[test]
+    fn validate_provenance_rejection_includes_provenance() {
+        let prov = make_provenance("PLACEHOLDER_HASH");
+        let r = validate_artifact_provenance("fcp.test:util:1.0", &prov, false, None).unwrap();
+        assert!(r.provenance.is_some());
+        assert_eq!(r.provenance.unwrap().content_hash, "PLACEHOLDER_HASH");
+    }
+
+    #[test]
+    fn validate_provenance_rejection_remediation_is_actionable() {
+        let prov = make_provenance("PLACEHOLDER_HASH");
+        let r = validate_artifact_provenance("fcp.test:util:1.0", &prov, false, None).unwrap();
+        assert!(r.remediation.len() >= 2);
+        for hint in &r.remediation {
+            assert!(!hint.is_empty(), "remediation hint must not be empty");
+            assert!(hint.len() > 10, "remediation should be meaningful: {hint}");
+        }
+    }
+
+    #[test]
+    fn validate_provenance_accepts_real_hash() {
+        let prov = make_provenance(
+            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
+        );
+        let result = validate_artifact_provenance("fcp.test:util:1.0", &prov, false, None);
+        assert!(result.is_none(), "Real hash should pass provenance validation");
+    }
+
 }

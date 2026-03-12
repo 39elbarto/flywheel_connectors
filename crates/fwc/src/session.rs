@@ -135,6 +135,7 @@ impl Session {
     /// Resume a paused session.
     pub fn resume(&mut self) {
         self.status = SessionStatus::Active;
+        self.ended_at = None;
         self.updated_at = Utc::now();
     }
 

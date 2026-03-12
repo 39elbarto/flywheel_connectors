@@ -100,6 +100,15 @@ pub const COMMAND_CLASSIFICATIONS: &[CommandClassification] = &[
         transport_note: "Local workflow capsule management",
     },
     CommandClassification {
+        command: "session",
+        truth_source: CommandTruthSource::OfflineArtifact,
+        execution_mode: CommandExecutionMode::LocalOnly,
+        host_absent: HostAbsentBehavior::Unaffected,
+        requires_capability_token: false,
+        may_need_approval: false,
+        transport_note: "Local agent session state persisted under ~/.fwc/sessions",
+    },
+    CommandClassification {
         command: "plan",
         truth_source: CommandTruthSource::OfflineArtifact,
         execution_mode: CommandExecutionMode::LocalOnly,
@@ -2881,6 +2890,7 @@ pub fn evidence_bundle_metadata(
 pub const COMMANDS: &[&str] = &[
     "guide",
     "task",
+    "session",
     "plan",
     "explain",
     "do",
@@ -3110,6 +3120,10 @@ fn command_contract(command: &str) -> Option<Value> {
         "task" => Some(workflow_contract(
             "Create and resume durable workflow capsules for connector jobs.",
             "A resumable capsule view over compiled intent, bindings, approvals, and execution receipts so agents can operate on a short task id instead of replaying the full workflow from scratch.",
+        )),
+        "session" => Some(workflow_contract(
+            "Track the current agent session and persist resumable context.",
+            "A local session ledger over agent identity, goal, zone binding, active locks, and operation counts so context survives agent rotations.",
         )),
         "plan" => Some(intent_contract(
             "Compile a natural-language goal into explicit primitive `fwc` steps.",
@@ -3370,36 +3384,36 @@ fn execution_contract(summary: &str, intended_shape: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        ADMIN_COMMANDS, AdminIntrospection, AdminMutationOutcome, AuthAcquisitionFlow,
-        COMMAND_CLASSIFICATIONS, COMMANDS, CapabilityTokenSource, CommandExecutionMode,
-        CommandTruthSource, DEMO_MARKERS, DISCOVERY_COMMANDS, DiscoveryDataSource,
-        HYBRID_MODE_HELP, HostAbsentBehavior, HostAbsentReason, MeshNodeState, MeshNodeSummary,
-        OFFLINE_FLAG_HELP, OfflineSource, PackageArtifactSource, PlacementStrategy,
-        RegistryCatalogSource, RegistryEntrySummary, RuntimeContext, RuntimeMode,
-        SYNTHETIC_TOKEN_MARKERS, SimulateCapability, TEMPLATE_COMMANDS, TemplateDataSource,
-        TemplateProvenance, ValidationOutcome, WorkflowKind, WorkflowStepReality,
-        admin_introspection, auth_required_commands, auth_ux_guidance, check_auth_requirement,
-        classify_command, classify_token_source, command_requires_host, contains_demo_marker,
-        contains_synthetic_token_marker, default_offline_source, demo_source_rejection_payload,
-        discovery_provenance, evaluate_simulate_request, expected_discovery_source,
-        expected_template_source, guide_payload, host_absent_error, host_absent_error_payload,
-        is_admin_command, is_discovery_command, is_template_command, live_host_commands,
-        offline_capable_commands, offline_provenance, offline_provenance_payload, planned_payload,
-        resolve_boundary, resolve_runtime_mode, simulate_result, simulate_result_payload,
-        template_provenance, validate_capability_token_source, validate_mode_consistency,
-        validate_package_source, workflow_can_proceed, workflow_kind,
+        ADMIN_COMMANDS, AdminMutationOutcome, AuthAcquisitionFlow, COMMAND_CLASSIFICATIONS,
+        COMMANDS, CapabilityTokenSource, CommandExecutionMode, CommandTruthSource, DEMO_MARKERS,
+        DISCOVERY_COMMANDS, DiscoveryDataSource, HYBRID_MODE_HELP, HostAbsentBehavior,
+        HostAbsentReason, MeshNodeState, MeshNodeSummary, OFFLINE_FLAG_HELP, OfflineSource,
+        PackageArtifactSource, PlacementStrategy, RegistryCatalogSource, RegistryEntrySummary,
+        RuntimeContext, RuntimeMode, SYNTHETIC_TOKEN_MARKERS, SimulateCapability,
+        TEMPLATE_COMMANDS, TemplateDataSource, ValidationOutcome, WorkflowKind,
+        WorkflowStepReality, admin_introspection, auth_required_commands, auth_ux_guidance,
+        check_auth_requirement, classify_command, classify_token_source, command_requires_host,
+        contains_demo_marker, contains_synthetic_token_marker, default_offline_source,
+        demo_source_rejection_payload, discovery_provenance, evaluate_simulate_request,
+        expected_discovery_source, expected_template_source, guide_payload, host_absent_error,
+        host_absent_error_payload, is_admin_command, is_discovery_command, is_template_command,
+        live_host_commands, offline_capable_commands, offline_provenance,
+        offline_provenance_payload, planned_payload, resolve_boundary, resolve_runtime_mode,
+        simulate_result, simulate_result_payload, template_provenance,
+        validate_capability_token_source, validate_mode_consistency, validate_package_source,
+        workflow_can_proceed, workflow_kind,
     };
     use super::{
         INTENT_ACTIONS, IntentActionAvailability, IntentSuggestionKind, classify_intent_action,
         filter_suggestable_actions, is_intent_action, plan_step_truth,
     };
     use super::{
-        EXPORT_COMMANDS, ExportedToolProvenance, McpSurfaceState, ToolAvailability,
-        ToolInventorySource, evaluate_export_readiness, is_export_command, tool_provenance,
+        EXPORT_COMMANDS, McpSurfaceState, ToolAvailability, ToolInventorySource,
+        evaluate_export_readiness, is_export_command, tool_provenance,
     };
     use super::{
-        EvidenceBundleMetadata, ReplayArtifact, TranscriptEntry, TranscriptPhase,
-        build_replay_artifact, evidence_bundle_metadata, transcript_entry,
+        EvidenceBundleMetadata, ReplayArtifact, TranscriptPhase, build_replay_artifact,
+        evidence_bundle_metadata, transcript_entry,
     };
     use serde_json::json;
 

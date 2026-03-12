@@ -181,6 +181,9 @@ Examples:
   fwc task bind w:deadbeef connector=notion payload_json='{...}'
   fwc task approve w:deadbeef
   fwc task run w:deadbeef
+  fwc session start --agent BronzeValley --goal \"triage issues\" --zone z:work
+  fwc session show
+  fwc session list --status active
   fwc list
   fwc plan \"create a GitHub issue titled 'FWC: add workflow macros'\"
   fwc explain \"find the Notion page named Roadmap and append this summary\"
@@ -276,6 +279,9 @@ enum Commands {
     /// Create and resume durable workflow capsules for connector jobs.
     #[command(visible_alias = "tasks")]
     Task(TaskArgs),
+
+    /// Track the current agent session and persist resumable context.
+    Session(SessionArgs),
 
     /// Compile a natural-language goal into exact primitive fwc steps.
     #[command(visible_alias = "workflow")]
@@ -665,6 +671,67 @@ struct TaskBindArgs {
 
     /// One or more `key=value` bindings, for example `connector=notion` or `payload_file=payload.json`.
     bindings: Vec<String>,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct SessionArgs {
+    #[command(subcommand)]
+    command: SessionCommand,
+}
+
+#[derive(Subcommand, Debug, Serialize)]
+#[serde(tag = "subcommand", content = "args", rename_all = "kebab-case")]
+enum SessionCommand {
+    /// Start a new active agent session.
+    Start(SessionStartArgs),
+
+    /// List recent agent sessions.
+    List(SessionListArgs),
+
+    /// Show one session, defaulting to the current active session.
+    Show(SessionTargetArgs),
+
+    /// End one session, defaulting to the current active session.
+    End(SessionTargetArgs),
+
+    /// Resume a paused or ended session.
+    Resume(SessionTargetArgs),
+}
+
+#[derive(Args, Debug, Serialize)]
+struct SessionStartArgs {
+    /// Agent identity recorded in the session.
+    #[arg(long)]
+    agent: String,
+
+    /// Short goal statement describing the session intent.
+    #[arg(long)]
+    goal: String,
+
+    /// Optional zone binding for the session.
+    #[arg(long)]
+    zone: Option<String>,
+
+    /// Initial session context entries as `key=value` pairs.
+    #[arg(long = "context", value_name = "KEY=VALUE")]
+    context: Vec<String>,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct SessionListArgs {
+    /// Optional status filter: active, paused, or ended.
+    #[arg(long)]
+    status: Option<String>,
+
+    /// Maximum number of sessions to return (0 = unlimited).
+    #[arg(long, default_value_t = 20)]
+    limit: usize,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct SessionTargetArgs {
+    /// Session id such as `s:deadbeef`.
+    session_id: Option<String>,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -1685,8 +1752,8 @@ fn execute_serve_mcp(prepared: &PreparedCli, args: &ServeMcpArgs) -> Result<Exec
         return render_dispatch(
             live_auth_dispatch(
                 "serve-mcp",
-                error,
-                vec![
+                &error,
+                &[
                     "Pass `--capability-token` or `--capability-token-file` so MCP tool calls can execute against the live host."
                         .to_owned(),
                     "Pass `--approval-token` or `--approval-token-file` as needed for risky or dangerous tools."
@@ -2225,6 +2292,7 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         }
         Commands::Context(args) => context_dispatch(args)?,
         Commands::Task(args) => task_dispatch(args)?,
+        Commands::Session(args) => session_dispatch(args)?,
         Commands::Plan(args) => intent_plan_dispatch(&args.request(intent::IntentMode::Plan))?,
         Commands::Explain(args) => {
             intent_explain_dispatch(&args.request(intent::IntentMode::Explain))?
@@ -4222,6 +4290,412 @@ fn context_dispatch(args: &ContextArgs) -> Result<DispatchOutcome> {
                 exit_code: CliExitCode::Success,
             })
         }
+    }
+}
+
+fn session_dispatch(args: &SessionArgs) -> Result<DispatchOutcome> {
+    match &args.command {
+        SessionCommand::Start(args) => {
+            let store = cli_session_store();
+            let mut paused_session = store.active_session()?;
+            if let Some(session) = paused_session.as_mut() {
+                session.pause();
+                store.save(session)?;
+            }
+
+            let mut session = session::Session::new(&args.agent, &args.goal, args.zone.clone());
+            for binding in &args.context {
+                let (key, value) = parse_session_context_binding(binding).map_err(|message| {
+                    anyhow::anyhow!("invalid `--context` binding `{binding}`: {message}")
+                })?;
+                session.set_context(key, value);
+            }
+            store.save(&session)?;
+
+            let (active_locks, lock_warning) = session_active_locks(&session.agent_name);
+            let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "session");
+            let mut payload = json!({
+                "status": "ok",
+                "command": "session",
+                "subcommand": "start",
+                "message": format!(
+                    "Started session `{}` for agent `{}`.",
+                    session.id, session.agent_name
+                ),
+                "session": session_detail_value(&session, &active_locks),
+                "paused_previous_session": paused_session
+                    .as_ref()
+                    .map(|session| session_summary_value(session, 0))
+                    .unwrap_or(Value::Null),
+                "next_actions": [
+                    "fwc session show".to_owned(),
+                    "fwc session list".to_owned(),
+                    format!("fwc session end {}", session.id),
+                ],
+            });
+            if let Some(warning) = lock_warning {
+                payload["warnings"] = json!([warning]);
+            }
+            envelope.inject_into(&mut payload);
+            Ok(DispatchOutcome {
+                payload,
+                exit_code: CliExitCode::Success,
+            })
+        }
+        SessionCommand::List(args) => {
+            let filter = match parse_session_status_filter(args.status.as_deref(), "list") {
+                Ok(filter) => filter,
+                Err(outcome) => return Ok(outcome),
+            };
+            let store = cli_session_store();
+            let mut sessions = store.list(filter)?;
+            if args.limit > 0 && sessions.len() > args.limit {
+                sessions.truncate(args.limit);
+            }
+
+            let mut warnings = Vec::new();
+            let sessions = sessions
+                .iter()
+                .map(|session| {
+                    let (count, warning) = session_active_lock_count(&session.agent_name);
+                    if let Some(warning) = warning {
+                        warnings.push(warning);
+                    }
+                    session_summary_value(session, count)
+                })
+                .collect::<Vec<_>>();
+
+            let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "session");
+            let mut payload = json!({
+                "status": "ok",
+                "command": "session",
+                "subcommand": "list",
+                "status_filter": args.status.as_deref(),
+                "sessions": sessions,
+                "next_actions": [
+                    "fwc session show".to_owned(),
+                    "fwc session start --agent <name> --goal <goal>".to_owned(),
+                ],
+            });
+            if !warnings.is_empty() {
+                payload["warnings"] = json!(warnings);
+            }
+            envelope.inject_into(&mut payload);
+            Ok(DispatchOutcome {
+                payload,
+                exit_code: CliExitCode::Success,
+            })
+        }
+        SessionCommand::Show(args) => {
+            let store = cli_session_store();
+            let session =
+                match resolve_session_for_show_or_end(&store, args.session_id.as_deref(), "show") {
+                    Ok(session) => session,
+                    Err(outcome) => return Ok(outcome),
+                };
+            let (active_locks, lock_warning) = session_active_locks(&session.agent_name);
+            let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "session");
+            let mut payload = json!({
+                "status": "ok",
+                "command": "session",
+                "subcommand": "show",
+                "session": session_detail_value(&session, &active_locks),
+                "next_actions": session_next_actions(&session),
+            });
+            if let Some(warning) = lock_warning {
+                payload["warnings"] = json!([warning]);
+            }
+            envelope.inject_into(&mut payload);
+            Ok(DispatchOutcome {
+                payload,
+                exit_code: CliExitCode::Success,
+            })
+        }
+        SessionCommand::End(args) => {
+            let store = cli_session_store();
+            let mut session =
+                match resolve_session_for_show_or_end(&store, args.session_id.as_deref(), "end") {
+                    Ok(session) => session,
+                    Err(outcome) => return Ok(outcome),
+                };
+            session.end();
+            store.save(&session)?;
+
+            let (active_locks, lock_warning) = session_active_locks(&session.agent_name);
+            let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "session");
+            let mut payload = json!({
+                "status": "ok",
+                "command": "session",
+                "subcommand": "end",
+                "message": format!("Ended session `{}`.", session.id),
+                "session": session_detail_value(&session, &active_locks),
+                "next_actions": [
+                    "fwc session list".to_owned(),
+                    format!("fwc session resume {}", session.id),
+                ],
+            });
+            if let Some(warning) = lock_warning {
+                payload["warnings"] = json!([warning]);
+            }
+            envelope.inject_into(&mut payload);
+            Ok(DispatchOutcome {
+                payload,
+                exit_code: CliExitCode::Success,
+            })
+        }
+        SessionCommand::Resume(args) => {
+            let store = cli_session_store();
+            let mut paused_session = store.active_session()?;
+            let mut session = match resolve_session_for_resume(&store, args.session_id.as_deref())
+            {
+                Ok(session) => session,
+                Err(outcome) => return Ok(outcome),
+            };
+
+            if let Some(current) = paused_session.as_mut()
+                && current.id != session.id
+            {
+                current.pause();
+                store.save(current)?;
+            }
+
+            session.resume();
+            store.save(&session)?;
+
+            let (active_locks, lock_warning) = session_active_locks(&session.agent_name);
+            let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "session");
+            let mut payload = json!({
+                "status": "ok",
+                "command": "session",
+                "subcommand": "resume",
+                "message": format!("Resumed session `{}`.", session.id),
+                "session": session_detail_value(&session, &active_locks),
+                "paused_previous_session": paused_session
+                    .as_ref()
+                    .filter(|current| current.id != session.id)
+                    .map(|current| session_summary_value(current, 0))
+                    .unwrap_or(Value::Null),
+                "next_actions": [
+                    "fwc session show".to_owned(),
+                    "fwc session list".to_owned(),
+                    format!("fwc session end {}", session.id),
+                ],
+            });
+            if let Some(warning) = lock_warning {
+                payload["warnings"] = json!([warning]);
+            }
+            envelope.inject_into(&mut payload);
+            Ok(DispatchOutcome {
+                payload,
+                exit_code: CliExitCode::Success,
+            })
+        }
+    }
+}
+
+fn parse_session_context_binding(binding: &str) -> std::result::Result<(String, Value), String> {
+    let (key, raw_value) = binding
+        .split_once('=')
+        .ok_or_else(|| "expected `key=value`".to_owned())?;
+    let key = key.trim();
+    if key.is_empty() {
+        return Err("context key cannot be empty".to_owned());
+    }
+
+    let value = if raw_value.is_empty() {
+        Value::String(String::new())
+    } else {
+        serde_json::from_str(raw_value).unwrap_or_else(|_| Value::String(raw_value.to_owned()))
+    };
+    Ok((key.to_owned(), value))
+}
+
+fn parse_session_status_filter(
+    raw_status: Option<&str>,
+    subcommand: &str,
+) -> std::result::Result<Option<session::SessionStatus>, DispatchOutcome> {
+    let Some(raw_status) = raw_status else {
+        return Ok(None);
+    };
+    session::SessionStatus::parse(raw_status).map(Some).ok_or_else(|| DispatchOutcome {
+        payload: json!({
+            "status": "error",
+            "command": "session",
+            "subcommand": subcommand,
+            "error": {
+                "type": "invalid-session-status",
+                "message": format!(
+                    "`{raw_status}` is not a supported session status. Use `active`, `paused`, or `ended`."
+                ),
+                "recoverable": true,
+            },
+            "next_actions": [
+                "fwc session list".to_owned(),
+                "fwc session list --status active".to_owned(),
+            ],
+        }),
+        exit_code: CliExitCode::Validation,
+    })
+}
+
+fn resolve_session_for_show_or_end(
+    store: &session::SessionStore,
+    session_id: Option<&str>,
+    subcommand: &str,
+) -> std::result::Result<session::Session, DispatchOutcome> {
+    if let Some(session_id) = session_id {
+        return store
+            .load_resolved(session_id)
+            .map_err(|error| session_store_error_dispatch(subcommand, &error.to_string()))?
+            .ok_or_else(|| session_missing_dispatch(subcommand, session_id));
+    }
+
+    store
+        .active_session()
+        .map_err(|error| session_store_error_dispatch(subcommand, &error.to_string()))?
+        .ok_or_else(|| session_missing_dispatch(subcommand, "<active>"))
+}
+
+fn resolve_session_for_resume(
+    store: &session::SessionStore,
+    session_id: Option<&str>,
+) -> std::result::Result<session::Session, DispatchOutcome> {
+    if let Some(session_id) = session_id {
+        return store
+            .load_resolved(session_id)
+            .map_err(|error| session_store_error_dispatch("resume", &error.to_string()))?
+            .ok_or_else(|| session_missing_dispatch("resume", session_id));
+    }
+
+    let paused = store
+        .list(Some(session::SessionStatus::Paused))
+        .map_err(|error| session_store_error_dispatch("resume", &error.to_string()))?
+        .into_iter()
+        .next();
+    if let Some(session) = paused {
+        return Ok(session);
+    }
+
+    store
+        .list(Some(session::SessionStatus::Ended))
+        .map_err(|error| session_store_error_dispatch("resume", &error.to_string()))?
+        .into_iter()
+        .next()
+        .ok_or_else(|| session_missing_dispatch("resume", "<paused-or-ended>"))
+}
+
+fn session_store_error_dispatch(subcommand: &str, message: &str) -> DispatchOutcome {
+    DispatchOutcome {
+        payload: json!({
+            "status": "error",
+            "command": "session",
+            "subcommand": subcommand,
+            "error": {
+                "type": "session-store-error",
+                "message": format!("Failed to access the session store: {message}"),
+                "recoverable": true,
+            },
+            "next_actions": [
+                "fwc session list".to_owned(),
+            ],
+        }),
+        exit_code: CliExitCode::Internal,
+    }
+}
+
+fn session_missing_dispatch(subcommand: &str, session_id: &str) -> DispatchOutcome {
+    let message = if session_id == "<active>" {
+        "There is no active session to use as the default target.".to_owned()
+    } else if session_id == "<paused-or-ended>" {
+        "There is no paused or ended session available to resume.".to_owned()
+    } else {
+        format!("Session `{session_id}` was not found.")
+    };
+    DispatchOutcome {
+        payload: json!({
+            "status": "error",
+            "command": "session",
+            "subcommand": subcommand,
+            "error": {
+                "type": "session-not-found",
+                "message": message,
+                "recoverable": true,
+            },
+            "next_actions": [
+                "fwc session list".to_owned(),
+                "fwc session start --agent <name> --goal <goal>".to_owned(),
+            ],
+        }),
+        exit_code: CliExitCode::Validation,
+    }
+}
+
+fn session_active_locks(agent_name: &str) -> (Vec<Value>, Option<String>) {
+    match cli_lock_store().list_by_agent(agent_name) {
+        Ok(locks) => (
+            locks.into_iter()
+                .map(|lock| {
+                    json!({
+                        "resource": lock.resource,
+                        "agent": lock.agent,
+                        "acquired_at": lock.acquired_at,
+                        "expires_at": lock.expires_at,
+                        "remaining": lock.remaining_display(),
+                        "reason": lock.reason,
+                    })
+                })
+                .collect(),
+            None,
+        ),
+        Err(error) => (
+            Vec::new(),
+            Some(format!(
+                "Failed to inspect active locks for agent `{agent_name}`: {error}"
+            )),
+        ),
+    }
+}
+
+fn session_active_lock_count(agent_name: &str) -> (usize, Option<String>) {
+    let (locks, warning) = session_active_locks(agent_name);
+    (locks.len(), warning)
+}
+
+fn session_summary_value(session: &session::Session, active_lock_count: usize) -> Value {
+    json!({
+        "id": session.id.to_string(),
+        "agent_name": &session.agent_name,
+        "goal": &session.goal,
+        "status": session.status.as_str(),
+        "zone": &session.zone,
+        "created_at": session.created_at,
+        "updated_at": session.updated_at,
+        "ended_at": session.ended_at,
+        "operations_completed": session.operations_completed,
+        "context_key_count": session.context.len(),
+        "active_lock_count": active_lock_count,
+    })
+}
+
+fn session_detail_value(session: &session::Session, active_locks: &[Value]) -> Value {
+    let mut detail = session_summary_value(session, active_locks.len());
+    if let Some(object) = detail.as_object_mut() {
+        object.insert("context".to_owned(), json!(session.context));
+        object.insert("active_locks".to_owned(), json!(active_locks));
+    }
+    detail
+}
+
+fn session_next_actions(session: &session::Session) -> Vec<String> {
+    match session.status {
+        session::SessionStatus::Active => vec![
+            format!("fwc session end {}", session.id),
+            "fwc session list".to_owned(),
+        ],
+        session::SessionStatus::Paused | session::SessionStatus::Ended => vec![
+            format!("fwc session resume {}", session.id),
+            "fwc session list".to_owned(),
+        ],
     }
 }
 
@@ -7809,7 +8283,7 @@ enum LiveAuthError {
 }
 
 impl LiveAuthError {
-    fn error_type(&self) -> &'static str {
+    const fn error_type(&self) -> &'static str {
         match self {
             Self::MissingCapabilityToken => "missing-capability-token",
             Self::ConflictingCapabilityTokenSources => "ambiguous-capability-token-source",
@@ -7969,8 +8443,8 @@ fn parse_approval_tokens_str(
 
 fn live_auth_dispatch(
     command: &str,
-    error: LiveAuthError,
-    next_actions: Vec<String>,
+    error: &LiveAuthError,
+    next_actions: &[String],
 ) -> DispatchOutcome {
     DispatchOutcome {
         payload: json!({
@@ -8036,8 +8510,8 @@ fn invoke_dispatch_host(
         Err(error) => {
             return Ok(live_auth_dispatch(
                 command,
-                error,
-                vec![
+                &error,
+                &[
                     format!(
                         "fwc {command} {} {} --host {} --capability-token-file <token.cbor> --input '{{...}}'",
                         args.connector, args.operation, host.endpoint
@@ -8223,7 +8697,7 @@ fn invoke_dispatch_host(
         connector_id: connector_id.clone(),
         operation: operation.name.clone(),
         params: Some(prepared_payload.clone()),
-        principal: effective_principal.clone(),
+        principal: effective_principal,
         zone_id: Some(zone_id.clone()),
         capability_token: Some(auth.capability_token.clone()),
         approval_tokens: auth.approval_tokens.clone(),
@@ -9135,6 +9609,74 @@ fn invoke_leaf_field_count(value: &Value) -> usize {
 
 #[cfg(test)]
 thread_local! {
+    static TEST_SESSION_DIR_OVERRIDE: std::cell::RefCell<Option<PathBuf>> = const {
+        std::cell::RefCell::new(None)
+    };
+    static TEST_LOCK_DIR_OVERRIDE: std::cell::RefCell<Option<PathBuf>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+fn cli_session_store() -> session::SessionStore {
+    #[cfg(test)]
+    if let Some(path) = TEST_SESSION_DIR_OVERRIDE.with(|slot| slot.borrow().clone()) {
+        return session::SessionStore::new(path);
+    }
+
+    session::SessionStore::default_path()
+}
+
+fn cli_lock_store() -> op_lock::LockStore {
+    #[cfg(test)]
+    if let Some(path) = TEST_LOCK_DIR_OVERRIDE.with(|slot| slot.borrow().clone()) {
+        return op_lock::LockStore::new(path);
+    }
+
+    op_lock::LockStore::default_path()
+}
+
+#[cfg(test)]
+struct SessionDirOverrideGuard;
+
+#[cfg(test)]
+fn install_test_session_dir(path: PathBuf) -> SessionDirOverrideGuard {
+    TEST_SESSION_DIR_OVERRIDE.with(|slot| {
+        *slot.borrow_mut() = Some(path);
+    });
+    SessionDirOverrideGuard
+}
+
+#[cfg(test)]
+impl Drop for SessionDirOverrideGuard {
+    fn drop(&mut self) {
+        TEST_SESSION_DIR_OVERRIDE.with(|slot| {
+            slot.borrow_mut().take();
+        });
+    }
+}
+
+#[cfg(test)]
+struct LockDirOverrideGuard;
+
+#[cfg(test)]
+fn install_test_lock_dir(path: PathBuf) -> LockDirOverrideGuard {
+    TEST_LOCK_DIR_OVERRIDE.with(|slot| {
+        *slot.borrow_mut() = Some(path);
+    });
+    LockDirOverrideGuard
+}
+
+#[cfg(test)]
+impl Drop for LockDirOverrideGuard {
+    fn drop(&mut self) {
+        TEST_LOCK_DIR_OVERRIDE.with(|slot| {
+            slot.borrow_mut().take();
+        });
+    }
+}
+
+#[cfg(test)]
+thread_local! {
     static TEST_HISTORY_PATH_OVERRIDE: std::cell::RefCell<Option<PathBuf>> = const {
         std::cell::RefCell::new(None)
     };
@@ -9186,6 +9728,7 @@ fn append_history_entry(
     latency_ms: u64,
 ) -> Result<()> {
     let store = cli_history_store()?;
+    let active_session = cli_session_store().active_session().ok().flatten();
     let entry = history::HistoryEntry {
         entry_id: RequestId::random().to_string(),
         timestamp: chrono::Utc::now(),
@@ -9200,9 +9743,16 @@ fn append_history_entry(
         latency_ms,
         error_code,
         idempotency_key: idempotency_key.map(ToOwned::to_owned),
-        agent_session: None,
+        agent_session: active_session.as_ref().map(|session| session.id.to_string()),
     };
-    store.append(&entry)
+    store.append(&entry)?;
+
+    if let Some(mut session) = active_session {
+        session.record_operation();
+        let _ = cli_session_store().save(&session);
+    }
+
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -10584,8 +11134,7 @@ fn pipeline_evaluate_condition(template: &str, context: &Value) -> Result<bool> 
         Value::Bool(flag) => Ok(flag),
         Value::Null => Ok(false),
         other => bail!(
-            "pipeline condition `{template}` did not evaluate to a boolean: {}",
-            other
+            "pipeline condition `{template}` did not evaluate to a boolean: {other}"
         ),
     }
 }
@@ -10607,7 +11156,7 @@ fn pipeline_step_uses_dynamic_outputs(step: &pipe::PlannedPipelineStep) -> bool 
             .is_some_and(|condition| condition.contains("{{steps."))
 }
 
-fn pipeline_dry_run_can_materialize_output(operation: &HostToolDescriptor) -> bool {
+const fn pipeline_dry_run_can_materialize_output(operation: &HostToolDescriptor) -> bool {
     operation.idempotent
         && operation.approval_mode.is_none()
         && matches!(operation.safety_tier, SafetyTier::Safe)
@@ -10875,11 +11424,7 @@ fn execute_live_pipeline_plan(
                 .reason
                 .clone()
                 .unwrap_or_else(|| "preflight denied pipeline step".to_owned());
-            let history_status = if mode == PipelinePlanMode::DryRun {
-                history::OpStatus::Denied
-            } else {
-                history::OpStatus::Denied
-            };
+            let history_status = history::OpStatus::Denied;
             let _ = append_history_entry(
                 history_status,
                 resolved.connector.summary.id.as_str(),
@@ -11335,8 +11880,8 @@ fn recipe_run_dispatch(
         Err(error) => {
             return Ok(live_auth_dispatch(
                 "recipe",
-                error,
-                vec![
+                &error,
+                &[
                     format!(
                         "fwc recipe {} {} --host {} --capability-token-file <token.cbor>",
                         mode.subcommand(),
@@ -11871,8 +12416,8 @@ fn pipeline_run_dispatch(
         Err(error) => {
             return Ok(live_auth_dispatch(
                 "pipeline",
-                error,
-                vec![
+                &error,
+                &[
                     format!(
                         "fwc pipeline {} {} --host {} --capability-token-file <token.cbor>",
                         subcommand,
@@ -12295,8 +12840,8 @@ fn map_dispatch(args: &MapArgs, explicit_host: Option<&str>) -> Result<DispatchO
         Err(error) => {
             return Ok(live_auth_dispatch(
                 "map",
-                error,
-                vec![
+                &error,
+                &[
                     format!(
                         "fwc map {} --host {} --capability-token-file <token.cbor> --inputs '[{{...}}]'",
                         args.operation, host.endpoint
@@ -12467,8 +13012,8 @@ fn batch_file_dispatch(
         Err(error) => {
             return Ok(live_auth_dispatch(
                 "batch-file",
-                error,
-                vec![
+                &error,
+                &[
                     format!(
                         "fwc batch-file {} --host {} --capability-token-file <token.cbor>",
                         args.file.display(),
@@ -13993,7 +14538,7 @@ fn normalize_args(
                     to: "--tool-format".to_owned(),
                     rationale: "Interpreted `export-tools --format` as the tool schema format flag to avoid colliding with the global output `--format` option.",
                 });
-                args[index] = "--tool-format".to_owned();
+                "--tool-format".clone_into(&mut args[index]);
                 break;
             }
             if let Some(value) = args[index].strip_prefix("--format=") {
@@ -15088,6 +15633,7 @@ mod tests {
         })
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn mock_discovery_response_with_connectors(connectors: Vec<Value>) -> Value {
         json!({
             "connectors": connectors,
@@ -15124,6 +15670,7 @@ mod tests {
         })
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn mock_introspection_response_with_tools(connector: Value, tools: Vec<Value>) -> Value {
         json!({
             "connector": connector,
@@ -15143,6 +15690,7 @@ mod tests {
         })
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn mock_tool_descriptor_json(
         name: &str,
         capability: &str,
@@ -15336,9 +15884,9 @@ deny_ptrace = true
         let package_output = PackageOutput {
             output_dir: package_dir.clone(),
             binary_path: binary_path.clone(),
-            manifest_path: manifest_path.clone(),
+            manifest_path,
             sbom_path: None,
-            build_metadata_path: build_metadata_path.clone(),
+            build_metadata_path,
             binary_sha256: super::compute_file_sha256(&binary_path).expect("binary sha"),
             connector_id: manifest.connector.id.to_string(),
             version: manifest.connector.version.to_string(),
@@ -15389,7 +15937,7 @@ deny_ptrace = true
                 reconciled_at: chrono::Utc::now(),
                 tracked_connectors: 1,
                 created_connectors: 0,
-                observed_updates: if dry_run { 0 } else { 1 },
+                observed_updates: usize::from(!dry_run),
                 drifted_connectors: 0,
                 entries: Vec::new(),
             },
@@ -16946,7 +17494,7 @@ deny_ptrace = true
             uuid::Uuid::new_v4()
         ));
         let history_path = root.join("history.jsonl");
-        let _guard = super::install_test_history_path(history_path.clone());
+        let _guard = super::install_test_history_path(history_path);
 
         super::append_history_entry(
             super::history::OpStatus::Success,
@@ -17017,7 +17565,7 @@ deny_ptrace = true
             uuid::Uuid::new_v4()
         ));
         let history_path = root.join("history.jsonl");
-        let _guard = super::install_test_history_path(history_path.clone());
+        let _guard = super::install_test_history_path(history_path);
 
         super::append_history_entry(
             super::history::OpStatus::Denied,
@@ -18756,7 +19304,10 @@ depends_on = ["missing"]
             ),
             (
                 "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
-                mock_introspection_response_with_tools(github_connector, vec![github_get_pr_tool]),
+                mock_introspection_response_with_tools(
+                    github_connector,
+                    vec![github_get_pr_tool],
+                ),
             ),
             (
                 "GET /rpc/introspect/fcp.slack:team:v1".to_owned(),
@@ -19080,6 +19631,41 @@ depends_on = ["missing"]
     }
 
     #[test]
+    fn prepare_cli_parses_session_start_command() {
+        let prepared = prepare_cli(&[
+            "fwc".to_owned(),
+            "session".to_owned(),
+            "start".to_owned(),
+            "--agent".to_owned(),
+            "BronzeValley".to_owned(),
+            "--goal".to_owned(),
+            "triage active beads".to_owned(),
+            "--zone".to_owned(),
+            "z:work".to_owned(),
+            "--context".to_owned(),
+            "bead=\"flywheel_connectors-qnchs.13.1\"".to_owned(),
+            "--context".to_owned(),
+            "attempt=1".to_owned(),
+        ])
+        .unwrap();
+
+        match prepared.cli.command {
+            Commands::Session(args) => match args.command {
+                super::SessionCommand::Start(args) => {
+                    assert_eq!(args.agent, "BronzeValley");
+                    assert_eq!(args.goal, "triage active beads");
+                    assert_eq!(args.zone.as_deref(), Some("z:work"));
+                    assert_eq!(args.context.len(), 2);
+                    assert_eq!(args.context[0], "bead=\"flywheel_connectors-qnchs.13.1\"");
+                    assert_eq!(args.context[1], "attempt=1");
+                }
+                command => panic!("expected session start command, got {command:?}"),
+            },
+            command => panic!("expected session command, got {command:?}"),
+        }
+    }
+
+    #[test]
     fn execute_serve_mcp_requires_live_host() {
         let outcome = execute(&[
             "fwc".to_owned(),
@@ -19113,6 +19699,205 @@ depends_on = ["missing"]
         assert_eq!(outcome.exit_code, CliExitCode::Validation.into());
         assert_eq!(payload["command"], "serve-mcp");
         assert_eq!(payload["error"]["type"], "missing-capability-token");
+    }
+
+    #[test]
+    fn execute_session_start_show_end_resume_flow() {
+        let session_dir = TempDir::new().expect("session tempdir should exist");
+        let lock_dir = TempDir::new().expect("lock tempdir should exist");
+        let _session_guard = super::install_test_session_dir(session_dir.path().join("sessions"));
+        let _lock_guard = super::install_test_lock_dir(lock_dir.path().join("locks"));
+
+        let acquire = super::cli_lock_store()
+            .acquire(
+                "github.issues",
+                "BronzeValley",
+                30,
+                Some("triage lane".to_owned()),
+            )
+            .expect("lock acquisition should succeed");
+        match acquire {
+            super::op_lock::AcquireResult::Acquired { lock } => {
+                assert_eq!(lock.resource, "github.issues");
+            }
+            other => panic!("expected acquired lock, got {other:?}"),
+        }
+
+        let (start_exit, start_payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "session",
+            "start",
+            "--agent",
+            "BronzeValley",
+            "--goal",
+            "triage active beads",
+            "--zone",
+            "z:work",
+            "--context",
+            "bead=\"flywheel_connectors-qnchs.13.1\"",
+            "--context",
+            "attempt=1",
+        ]);
+
+        assert_eq!(start_exit, CliExitCode::Success.into());
+        assert_eq!(start_payload["command"], "session");
+        assert_eq!(start_payload["subcommand"], "start");
+        assert!(start_payload["paused_previous_session"].is_null());
+        assert_eq!(start_payload["session"]["agent_name"], "BronzeValley");
+        assert_eq!(start_payload["session"]["goal"], "triage active beads");
+        assert_eq!(start_payload["session"]["zone"], "z:work");
+        assert_eq!(
+            start_payload["session"]["context"]["bead"],
+            "flywheel_connectors-qnchs.13.1"
+        );
+        assert_eq!(start_payload["session"]["context"]["attempt"], 1);
+        assert_eq!(start_payload["session"]["active_lock_count"], 1);
+        assert_eq!(
+            start_payload["session"]["active_locks"][0]["resource"],
+            "github.issues"
+        );
+        assert_eq!(
+            start_payload["session"]["active_locks"][0]["reason"],
+            "triage lane"
+        );
+        let session_id = start_payload["session"]["id"]
+            .as_str()
+            .expect("session id should be present")
+            .to_owned();
+
+        let (show_exit, show_payload) = execute_json(&["fwc", "--json", "session", "show"]);
+        assert_eq!(show_exit, CliExitCode::Success.into());
+        assert_eq!(show_payload["subcommand"], "show");
+        assert_eq!(show_payload["session"]["id"], session_id);
+        assert_eq!(show_payload["session"]["status"], "active");
+        assert_eq!(show_payload["session"]["active_lock_count"], 1);
+
+        let (end_exit, end_payload) = execute_json(&["fwc", "--json", "session", "end"]);
+        assert_eq!(end_exit, CliExitCode::Success.into());
+        assert_eq!(end_payload["subcommand"], "end");
+        assert_eq!(end_payload["session"]["id"], session_id);
+        assert_eq!(end_payload["session"]["status"], "ended");
+        assert!(end_payload["session"]["ended_at"].is_string());
+
+        let (resume_exit, resume_payload) = execute_json(&["fwc", "--json", "session", "resume"]);
+        assert_eq!(resume_exit, CliExitCode::Success.into());
+        assert_eq!(resume_payload["subcommand"], "resume");
+        assert_eq!(resume_payload["session"]["id"], session_id);
+        assert_eq!(resume_payload["session"]["status"], "active");
+        assert!(resume_payload["session"]["ended_at"].is_null());
+        assert!(resume_payload["paused_previous_session"].is_null());
+    }
+
+    #[test]
+    fn execute_session_start_pauses_previous_active_session() {
+        let session_dir = TempDir::new().expect("session tempdir should exist");
+        let _session_guard = super::install_test_session_dir(session_dir.path().join("sessions"));
+
+        let (first_exit, first_payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "session",
+            "start",
+            "--agent",
+            "BronzeValley",
+            "--goal",
+            "first sweep",
+        ]);
+        assert_eq!(first_exit, CliExitCode::Success.into());
+        let first_id = first_payload["session"]["id"]
+            .as_str()
+            .expect("first session id should exist")
+            .to_owned();
+
+        let (second_exit, second_payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "session",
+            "start",
+            "--agent",
+            "BronzeValley",
+            "--goal",
+            "second sweep",
+        ]);
+        assert_eq!(second_exit, CliExitCode::Success.into());
+        assert_eq!(
+            second_payload["paused_previous_session"]["id"],
+            Value::String(first_id.clone())
+        );
+
+        let previous = super::cli_session_store()
+            .load_resolved(&first_id)
+            .expect("session load should succeed")
+            .expect("first session should still exist");
+        assert_eq!(previous.status, super::session::SessionStatus::Paused);
+
+        let active = super::cli_session_store()
+            .active_session()
+            .expect("active session lookup should succeed")
+            .expect("second session should be active");
+        assert_eq!(active.goal, "second sweep");
+        assert_eq!(active.status, super::session::SessionStatus::Active);
+    }
+
+    #[test]
+    fn append_history_entry_records_active_session_metadata_and_increments_operations() {
+        let session_dir = TempDir::new().expect("session tempdir should exist");
+        let history_dir = TempDir::new().expect("history tempdir should exist");
+        let _session_guard = super::install_test_session_dir(session_dir.path().join("sessions"));
+        let _history_guard =
+            super::install_test_history_path(history_dir.path().join("history.jsonl"));
+
+        let session = super::session::Session::new(
+            "BronzeValley",
+            "triage active beads",
+            Some("z:work".to_owned()),
+        );
+        let session_id = session.id.to_string();
+        super::cli_session_store()
+            .save(&session)
+            .expect("session save should succeed");
+
+        super::append_history_entry(
+            super::history::OpStatus::Success,
+            "fcp.github",
+            "github.create_issue",
+            Some("z:work"),
+            &json!({"owner":"octocat","repo":"hello-world","title":"bead fix"}),
+            Some(&json!({"ok":true})),
+            None,
+            Some("idemp-1"),
+            14,
+        )
+        .expect("history append should succeed");
+        super::append_history_entry(
+            super::history::OpStatus::Denied,
+            "fcp.github",
+            "github.delete_issue",
+            Some("z:work"),
+            &json!({"owner":"octocat","repo":"hello-world","number":42}),
+            Some(&json!({"allowed":false})),
+            Some("policy denied".to_owned()),
+            None,
+            0,
+        )
+        .expect("history append should succeed");
+
+        let entries = super::cli_history_store()
+            .expect("history store should open")
+            .query(&super::history::HistoryFilter::new())
+            .expect("history query should succeed");
+        assert_eq!(entries.len(), 2);
+        assert!(entries
+            .iter()
+            .all(|entry| entry.agent_session.as_deref() == Some(session_id.as_str())));
+
+        let updated_session = super::cli_session_store()
+            .load_resolved(&session_id)
+            .expect("session load should succeed")
+            .expect("session should still exist");
+        assert_eq!(updated_session.operations_completed, 2);
+        assert_eq!(updated_session.status, super::session::SessionStatus::Active);
     }
 
     #[test]

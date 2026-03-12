@@ -1241,10 +1241,16 @@ impl LatencyEwma {
         self.value_millis = Some(match self.value_millis {
             None => sample_millis,
             Some(current) => {
-                let alpha = u64::from(self.alpha_per_mille).min(u64::from(MAX_PER_MILLE));
-                let retained = u64::from(MAX_PER_MILLE).saturating_sub(alpha);
-                ((current.saturating_mul(retained)) + (sample_millis.saturating_mul(alpha)))
-                    / u64::from(MAX_PER_MILLE)
+                let alpha = u128::from(self.alpha_per_mille).min(u128::from(MAX_PER_MILLE));
+                let retained = u128::from(MAX_PER_MILLE).saturating_sub(alpha);
+                
+                let current_128 = u128::from(current);
+                let sample_128 = u128::from(sample_millis);
+                
+                let new_value = ((current_128 * retained) + (sample_128 * alpha))
+                    / u128::from(MAX_PER_MILLE);
+                    
+                u64::try_from(new_value).unwrap_or(u64::MAX)
             }
         });
     }
@@ -1311,9 +1317,10 @@ fn ratio_per_mille(numerator: usize, denominator: usize) -> u32 {
     if denominator == 0 {
         return MAX_PER_MILLE;
     }
-    let numerator = u64::try_from(numerator).unwrap_or(u64::MAX);
-    let denominator = u64::try_from(denominator).unwrap_or(1);
-    u32::try_from((numerator.saturating_mul(u64::from(MAX_PER_MILLE))) / denominator)
+    let numerator = numerator as u128;
+    let denominator = denominator as u128;
+    let ratio = (numerator.saturating_mul(u128::from(MAX_PER_MILLE))) / denominator;
+    u32::try_from(ratio)
         .unwrap_or(MAX_PER_MILLE)
         .min(MAX_PER_MILLE)
 }

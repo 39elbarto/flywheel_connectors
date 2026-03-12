@@ -959,8 +959,8 @@ fn success_rate_bps(record: &LifecycleRecord) -> u16 {
     if record.health.samples == 0 {
         return 10_000;
     }
-    let numerator = record.health.successes.saturating_mul(10_000);
-    let rate = numerator / record.health.samples;
+    let numerator = u128::from(record.health.successes).saturating_mul(10_000);
+    let rate = numerator / u128::from(record.health.samples);
     u16::try_from(rate.min(10_000)).unwrap_or(10_000)
 }
 
@@ -968,8 +968,8 @@ fn error_rate_bps(record: &LifecycleRecord) -> u16 {
     if record.health.samples == 0 {
         return 0;
     }
-    let numerator = record.health.failures.saturating_mul(10_000);
-    let rate = numerator / record.health.samples;
+    let numerator = u128::from(record.health.failures).saturating_mul(10_000);
+    let rate = numerator / u128::from(record.health.samples);
     u16::try_from(rate.min(10_000)).unwrap_or(10_000)
 }
 

@@ -161,25 +161,25 @@ pub mod runtime {
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    enum RuntimeFlavor {
+    pub(crate) enum RuntimeFlavor {
         CurrentThread,
         MultiThread,
     }
 
     #[derive(Clone)]
-    struct RuntimeContext {
-        handle: AsupersyncRuntimeHandle,
-        flavor: RuntimeFlavor,
+    pub(crate) struct RuntimeContext {
+        pub(crate) handle: AsupersyncRuntimeHandle,
+        pub(crate) flavor: RuntimeFlavor,
     }
 
     std::thread_local! {
         static CURRENT_RUNTIME: RefCell<Vec<RuntimeContext>> = const { RefCell::new(Vec::new()) };
     }
 
-    struct RuntimeGuard;
+    pub(crate) struct RuntimeGuard;
 
     impl RuntimeGuard {
-        fn enter(context: RuntimeContext) -> Self {
+        pub(crate) fn enter(context: RuntimeContext) -> Self {
             CURRENT_RUNTIME.with(|slot| {
                 slot.borrow_mut().push(context);
             });
@@ -195,8 +195,8 @@ pub mod runtime {
         }
     }
 
-    pub(crate) fn current_runtime_handle() -> Option<AsupersyncRuntimeHandle> {
-        CURRENT_RUNTIME.with(|slot| slot.borrow().last().map(|context| context.handle.clone()))
+    pub(crate) fn current_runtime_context() -> Option<RuntimeContext> {
+        CURRENT_RUNTIME.with(|slot| slot.borrow().last().cloned())
     }
 
     /// Runtime builder abstraction owned by async-core.
@@ -1689,8 +1689,6 @@ pub mod task {
 
     use futures_util::future::{AbortHandle, Abortable, FutureExt};
 
-    use crate::runtime::current_runtime_handle;
-
     /// Join error returned by spawned tasks.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct JoinError {
@@ -1816,8 +1814,9 @@ pub mod task {
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        let runtime = current_runtime_handle()
+        let runtime_context = crate::runtime::current_runtime_context()
             .expect("fcp_async_core::task::spawn called outside an active runtime");
+        let runtime = runtime_context.handle.clone();
 
         // Capture the Tokio compat handle from the calling thread so the
         // spawned task can enter the Tokio runtime context on whatever
@@ -1836,6 +1835,7 @@ pub mod task {
         };
 
         let inner = runtime.spawn(async move {
+            let _guard = crate::runtime::RuntimeGuard::enter(runtime_context);
             match wrapped.await {
                 Ok(Ok(output)) => Ok(output),
                 Ok(Err(payload)) => Err(JoinError::panicked(payload.as_ref())),

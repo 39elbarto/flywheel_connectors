@@ -589,10 +589,18 @@ impl CommandAvailability {
     pub fn next_actions(&self, command: &str) -> Vec<String> {
         match self {
             Self::LiveRuntime => vec![],
-            Self::OfflineArtifact => vec![
-                format!("Use `fwc {command} --host <endpoint>` for live host truth."),
-                "Offline data may be stale; verify against the running system.".to_owned(),
-            ],
+            Self::OfflineArtifact => match classify_command(command).map(|entry| &entry.mode) {
+                Some(CommandTruthMode::OfflineOnly) => vec![
+                    "This command already operates on local artifacts and has no live-host mode."
+                        .to_owned(),
+                    "Inspect the local state or workflow artifacts if you need different output."
+                        .to_owned(),
+                ],
+                _ => vec![
+                    format!("Use `fwc {command} --host <endpoint>` for live host truth."),
+                    "Offline data may be stale; verify against the running system.".to_owned(),
+                ],
+            },
             Self::Unsupported => vec![
                 "Check if a newer connector version supports this operation.".to_owned(),
                 format!("Use `fwc ops <connector>` to see available operations."),
@@ -656,9 +664,14 @@ impl CommandAvailability {
             Self::LiveRuntime => {
                 format!("'{command}' returned live host-authoritative data.")
             }
-            Self::OfflineArtifact => {
-                format!("'{command}' used offline artifacts. Add --host <endpoint> for live data.")
-            }
+            Self::OfflineArtifact => match classify_command(command).map(|entry| &entry.mode) {
+                Some(CommandTruthMode::OfflineOnly) => {
+                    format!("'{command}' uses local artifacts only. There is no live-host mode.")
+                }
+                _ => {
+                    format!("'{command}' used offline artifacts. Add --host <endpoint> for live data.")
+                }
+            },
             Self::Unsupported => {
                 format!(
                     "'{command}' is not supported by this connector. Check `fwc ops` for available operations."
@@ -851,7 +864,7 @@ pub const COMMAND_FAMILY_CLASSIFICATION: &[CommandFamilyEntry] = &[
     },
     CommandFamilyEntry {
         name: "capabilities",
-        mode: CommandTruthMode::LiveOnly,
+        mode: CommandTruthMode::Hybrid,
     },
     // ── Offline-only commands (operate on local state, never contact host) ──
     CommandFamilyEntry {
@@ -900,7 +913,7 @@ pub const COMMAND_FAMILY_CLASSIFICATION: &[CommandFamilyEntry] = &[
     },
     CommandFamilyEntry {
         name: "config",
-        mode: CommandTruthMode::OfflineOnly,
+        mode: CommandTruthMode::Hybrid,
     },
     // ── Hybrid commands (live with --host, offline otherwise) ──
     CommandFamilyEntry {
@@ -980,10 +993,18 @@ pub const COMMAND_FAMILY_CLASSIFICATION: &[CommandFamilyEntry] = &[
         name: "package",
         mode: CommandTruthMode::Passthrough,
     },
-    // ── Planned commands (not yet implemented, contract preview only) ──
+    CommandFamilyEntry {
+        name: "bench",
+        mode: CommandTruthMode::Passthrough,
+    },
+    CommandFamilyEntry {
+        name: "new",
+        mode: CommandTruthMode::Passthrough,
+    },
+    // ── Additional live-only service surfaces ───────────────────────
     CommandFamilyEntry {
         name: "serve-mcp",
-        mode: CommandTruthMode::PlannedOnly,
+        mode: CommandTruthMode::LiveOnly,
     },
 ];
 
@@ -4405,6 +4426,13 @@ mod tests {
     fn availability_next_actions_offline_suggests_host() {
         let actions = CommandAvailability::OfflineArtifact.next_actions("list");
         assert!(actions.iter().any(|a| a.contains("--host")));
+    }
+
+    #[test]
+    fn availability_next_actions_offline_only_command_stays_local() {
+        let actions = CommandAvailability::OfflineArtifact.next_actions("task");
+        assert!(actions.iter().all(|action| !action.contains("--host")));
+        assert!(actions.iter().any(|action| action.contains("local")));
     }
 
     #[test]
@@ -8291,6 +8319,13 @@ output_schema = { type = "object" }
     }
 
     #[test]
+    fn help_text_offline_only_command_stays_local() {
+        let text = CommandAvailability::OfflineArtifact.help_text("task");
+        assert!(!text.contains("--host"));
+        assert!(text.contains("local"));
+    }
+
+    #[test]
     fn help_text_unsupported_mentions_ops() {
         let text = CommandAvailability::Unsupported.help_text("invoke");
         assert!(text.contains("ops"));
@@ -8926,7 +8961,7 @@ output_schema = { type = "object" }
         assert!(offline.contains(&"context"));
         assert!(offline.contains(&"session"));
         assert!(offline.contains(&"guide"));
-        assert!(offline.contains(&"config"));
+        assert!(offline.contains(&"task"));
     }
 
     #[test]
@@ -8940,6 +8975,7 @@ output_schema = { type = "object" }
         assert!(hybrid.contains(&"show"));
         assert!(hybrid.contains(&"ops"));
         assert!(hybrid.contains(&"export-tools"));
+        assert!(hybrid.contains(&"config"));
     }
 
     #[test]
@@ -8952,16 +8988,18 @@ output_schema = { type = "object" }
         assert!(passthrough.contains(&"supply-chain"));
         assert!(passthrough.contains(&"audit"));
         assert!(passthrough.contains(&"manifest"));
+        assert!(passthrough.contains(&"bench"));
+        assert!(passthrough.contains(&"new"));
     }
 
     #[test]
-    fn family_classification_serve_mcp_is_planned_only() {
+    fn family_classification_serve_mcp_is_live_only() {
         let entry = classify_command("serve-mcp").unwrap();
-        assert_eq!(entry.mode, CommandTruthMode::PlannedOnly);
+        assert_eq!(entry.mode, CommandTruthMode::LiveOnly);
     }
 
     #[test]
-    fn family_classification_all_five_modes_represented() {
+    fn family_classification_current_modes_are_represented() {
         let modes: std::collections::HashSet<&str> = COMMAND_FAMILY_CLASSIFICATION
             .iter()
             .map(|e| e.mode.tag())
@@ -8970,7 +9008,6 @@ output_schema = { type = "object" }
         assert!(modes.contains("offline-only"));
         assert!(modes.contains("hybrid"));
         assert!(modes.contains("passthrough"));
-        assert!(modes.contains("planned-only"));
     }
 
     #[test]
@@ -9229,7 +9266,7 @@ output_schema = { type = "object" }
             .iter()
             .filter(|e| e.mode == CommandTruthMode::OfflineOnly)
             .count();
-        assert_eq!(count, 12, "Expected 12 offline-only commands, got {count}");
+        assert_eq!(count, 11, "Expected 11 offline-only commands, got {count}");
     }
 
     #[test]
@@ -9238,7 +9275,7 @@ output_schema = { type = "object" }
             .iter()
             .filter(|e| e.mode == CommandTruthMode::Hybrid)
             .count();
-        assert_eq!(count, 12, "Expected 12 hybrid commands, got {count}");
+        assert_eq!(count, 14, "Expected 14 hybrid commands, got {count}");
     }
 
     #[test]
@@ -9247,7 +9284,7 @@ output_schema = { type = "object" }
             .iter()
             .filter(|e| e.mode == CommandTruthMode::Passthrough)
             .count();
-        assert_eq!(count, 7, "Expected 7 passthrough commands, got {count}");
+        assert_eq!(count, 9, "Expected 9 passthrough commands, got {count}");
     }
 
     #[test]
@@ -9256,7 +9293,7 @@ output_schema = { type = "object" }
             .iter()
             .filter(|e| e.mode == CommandTruthMode::PlannedOnly)
             .count();
-        assert_eq!(count, 1, "Expected 1 planned-only command, got {count}");
+        assert_eq!(count, 0, "Expected 0 planned-only commands, got {count}");
     }
 
     // ── Exhaustive per-command classification ───────────────────────
@@ -9366,10 +9403,10 @@ output_schema = { type = "object" }
     }
 
     #[test]
-    fn classify_capabilities_is_live_only() {
+    fn classify_capabilities_is_hybrid() {
         assert_eq!(
             classify_command("capabilities").unwrap().mode,
-            CommandTruthMode::LiveOnly
+            CommandTruthMode::Hybrid
         );
     }
 
@@ -9446,10 +9483,10 @@ output_schema = { type = "object" }
     }
 
     #[test]
-    fn classify_config_is_offline_only() {
+    fn classify_config_is_hybrid() {
         assert_eq!(
             classify_command("config").unwrap().mode,
-            CommandTruthMode::OfflineOnly
+            CommandTruthMode::Hybrid
         );
     }
 
@@ -9590,10 +9627,26 @@ output_schema = { type = "object" }
     }
 
     #[test]
-    fn classify_serve_mcp_is_planned() {
+    fn classify_bench_is_passthrough() {
+        assert_eq!(
+            classify_command("bench").unwrap().mode,
+            CommandTruthMode::Passthrough
+        );
+    }
+
+    #[test]
+    fn classify_new_is_passthrough() {
+        assert_eq!(
+            classify_command("new").unwrap().mode,
+            CommandTruthMode::Passthrough
+        );
+    }
+
+    #[test]
+    fn classify_serve_mcp_is_live_only() {
         assert_eq!(
             classify_command("serve-mcp").unwrap().mode,
-            CommandTruthMode::PlannedOnly
+            CommandTruthMode::LiveOnly
         );
     }
 
@@ -9677,6 +9730,22 @@ output_schema = { type = "object" }
                 has_host_hint,
                 "Hybrid command '{}' in offline mode should suggest --host, got: {:?}",
                 entry.name, envelope.next_actions,
+            );
+        }
+    }
+
+    #[test]
+    fn invariant_offline_only_envelope_does_not_suggest_host() {
+        let offline_commands = COMMAND_FAMILY_CLASSIFICATION
+            .iter()
+            .filter(|e| e.mode == CommandTruthMode::OfflineOnly);
+        for entry in offline_commands {
+            let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, entry.name);
+            assert!(
+                envelope.next_actions.iter().all(|action| !action.contains("--host")),
+                "Offline-only command '{}' should stay local, got {:?}",
+                entry.name,
+                envelope.next_actions,
             );
         }
     }
@@ -10649,7 +10718,7 @@ output_schema = { type = "object" }
     #[test]
     fn golden_classification_count() {
         // Pinned count — if commands are added/removed, update this.
-        assert_eq!(COMMAND_FAMILY_CLASSIFICATION.len(), 47);
+        assert_eq!(COMMAND_FAMILY_CLASSIFICATION.len(), 49);
     }
 
     #[test]

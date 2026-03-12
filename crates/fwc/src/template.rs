@@ -14,17 +14,24 @@ pub fn generate_template(
     fill: &BTreeMap<String, String>,
 ) -> Value {
     let resolved = resolve_schema(schema);
-    match resolved.get("type").and_then(Value::as_str) {
-        Some("object") => generate_object(&resolved, required_only, fill, &[]),
-        Some("array") => generate_array(&resolved, required_only, fill, &[]),
-        Some(type_name) => placeholder_for_type(type_name, false),
-        None if resolved.get("properties").is_some() => {
-            generate_object(&resolved, required_only, fill, &[])
-        }
-        None if resolved.get("items").is_some() => {
-            generate_array(&resolved, required_only, fill, &[])
-        }
-        None => json!("<unknown>"),
+    let preferred_types = preferred_schema_types(&resolved);
+    match preferred_types.as_slice() {
+        [type_name] if type_name == "object" => generate_object(&resolved, required_only, fill, &[]),
+        [type_name] if type_name == "array" => generate_array(&resolved, required_only, fill, &[]),
+        [_] => generate_property(&resolved, false, required_only, fill, &[]),
+        [_, _, ..] => generate_property(&resolved, false, required_only, fill, &[]),
+        [] => match resolved.get("type").and_then(Value::as_str) {
+            Some("object") => generate_object(&resolved, required_only, fill, &[]),
+            Some("array") => generate_array(&resolved, required_only, fill, &[]),
+            Some(_) => generate_property(&resolved, false, required_only, fill, &[]),
+            None if resolved.get("properties").is_some() => {
+                generate_object(&resolved, required_only, fill, &[])
+            }
+            None if resolved.get("items").is_some() => {
+                generate_array(&resolved, required_only, fill, &[])
+            }
+            None => json!("<unknown>"),
+        },
     }
 }
 
@@ -53,28 +60,13 @@ fn generate_object(
             continue;
         }
 
-        // Check if this field has a pre-filled value.
-        let fill_key = if path.is_empty() {
-            key.clone()
-        } else {
-            format!("{}.{key}", path.join("."))
-        };
-
-        if let Some(value) = fill.get(&fill_key) {
-            // Parse the fill value as JSON, fallback to string.
-            let parsed = serde_json::from_str(value).unwrap_or(Value::String(value.clone()));
-            result.insert(key.clone(), parsed);
-            continue;
-        }
-        // Also check just the key name (flat fill).
-        if let Some(value) = fill.get(key) {
-            let parsed = serde_json::from_str(value).unwrap_or(Value::String(value.clone()));
-            result.insert(key.clone(), parsed);
-            continue;
-        }
-
         let mut child_path = path.to_vec();
         child_path.push(key.clone());
+
+        if let Some(value) = lookup_fill_value(fill, &child_path) {
+            result.insert(key.clone(), value);
+            continue;
+        }
 
         let prop_value =
             generate_property(prop_schema, is_required, required_only, fill, &child_path);
@@ -92,6 +84,11 @@ fn generate_property(
     path: &[String],
 ) -> Value {
     let resolved = resolve_schema(schema);
+    let preferred_types = preferred_schema_types(&resolved);
+
+    if let Some(value) = lookup_fill_value(fill, path) {
+        return value;
+    }
 
     // If there's a default value, use it.
     if let Some(default) = resolved.get("default") {
@@ -126,17 +123,23 @@ fn generate_property(
         }
     }
 
-    match resolved.get("type").and_then(Value::as_str) {
-        Some("object") => generate_object(&resolved, required_only, fill, path),
-        Some("array") => generate_array(&resolved, required_only, fill, path),
-        Some(type_name) => placeholder_for_type(type_name, is_required),
-        None if resolved.get("properties").is_some() => {
-            generate_object(&resolved, required_only, fill, path)
-        }
-        None if resolved.get("items").is_some() => {
-            generate_array(&resolved, required_only, fill, path)
-        }
-        None => placeholder_for_type("string", is_required),
+    match preferred_types.as_slice() {
+        [type_name] if type_name == "object" => generate_object(&resolved, required_only, fill, path),
+        [type_name] if type_name == "array" => generate_array(&resolved, required_only, fill, path),
+        [type_name] => placeholder_for_type(type_name, is_required),
+        [_, _, ..] => placeholder_for_union(&preferred_types, is_required),
+        [] => match resolved.get("type").and_then(Value::as_str) {
+            Some("object") => generate_object(&resolved, required_only, fill, path),
+            Some("array") => generate_array(&resolved, required_only, fill, path),
+            Some(type_name) => placeholder_for_type(type_name, is_required),
+            None if resolved.get("properties").is_some() => {
+                generate_object(&resolved, required_only, fill, path)
+            }
+            None if resolved.get("items").is_some() => {
+                generate_array(&resolved, required_only, fill, path)
+            }
+            None => placeholder_for_type("string", is_required),
+        },
     }
 }
 
@@ -147,12 +150,91 @@ fn generate_array(
     path: &[String],
 ) -> Value {
     let resolved = resolve_schema(schema);
+    if let Some(value) = lookup_fill_value(fill, path) {
+        return value;
+    }
     let item_schema = resolved
         .get("items")
         .cloned()
         .unwrap_or(json!({"type": "string"}));
-    let item = generate_property(&item_schema, false, required_only, fill, path);
+    let item_path = array_item_path(path);
+    let item = generate_property(&item_schema, false, required_only, fill, &item_path);
     json!([item])
+}
+
+fn lookup_fill_value(fill: &BTreeMap<String, String>, path: &[String]) -> Option<Value> {
+    if path.is_empty() {
+        for root_key in ["$", ".", ""] {
+            if let Some(value) = fill.get(root_key) {
+                return Some(parse_fill_value(value));
+            }
+        }
+        return None;
+    }
+
+    let joined = path_key(path);
+    if let Some(value) = fill.get(&joined) {
+        return Some(parse_fill_value(value));
+    }
+
+    let leaf = path.last()?;
+    if !leaf.contains("[]") {
+        return fill.get(leaf).map(|v| parse_fill_value(v));
+    }
+
+    None
+}
+
+fn parse_fill_value(value: &str) -> Value {
+    serde_json::from_str(value).unwrap_or_else(|_| Value::String(value.to_owned()))
+}
+
+fn path_key(path: &[String]) -> String {
+    path.join(".")
+}
+
+fn array_item_path(path: &[String]) -> Vec<String> {
+    let mut item_path = path.to_vec();
+    if let Some(last) = item_path.last_mut() {
+        last.push_str("[]");
+    } else {
+        item_path.push("[]".to_owned());
+    }
+    item_path
+}
+
+fn preferred_schema_types(schema: &Value) -> Vec<String> {
+    let mut types = schema_type_variants(schema);
+    if types.len() > 1 {
+        types.retain(|type_name| type_name != "null");
+        if types.is_empty() {
+            types.push("null".to_owned());
+        }
+    }
+    types
+}
+
+fn schema_type_variants(schema: &Value) -> Vec<String> {
+    let mut variants = Vec::new();
+    match schema.get("type") {
+        Some(Value::String(type_name)) => variants.push(type_name.clone()),
+        Some(Value::Array(type_names)) => {
+            for type_name in type_names.iter().filter_map(Value::as_str) {
+                if !variants.iter().any(|existing| existing == type_name) {
+                    variants.push(type_name.to_owned());
+                }
+            }
+        }
+        _ => {}
+    }
+    variants
+}
+
+fn placeholder_for_union(type_names: &[String], is_required: bool) -> Value {
+    if type_names.len() == 1 {
+        return placeholder_for_type(&type_names[0], is_required);
+    }
+    placeholder_for_type(&type_names.join("|"), is_required)
 }
 
 fn resolve_schema(schema: &Value) -> Value {
@@ -256,9 +338,7 @@ fn merge_schema_values(base: &Value, overlay: &Value) -> Value {
                 merged.insert(key.clone(), combined);
             }
             _ => {
-                merged
-                    .entry(key.clone())
-                    .or_insert_with(|| overlay_value.clone());
+                merged.insert(key.clone(), overlay_value.clone());
             }
         }
     }
@@ -394,6 +474,35 @@ mod tests {
         });
         let result = generate_template(&schema, false, &BTreeMap::new());
         assert_eq!(result["email"], "user@example.com");
+    }
+
+    #[test]
+    fn top_level_default_value_used() {
+        let schema = json!({
+            "type": "string",
+            "default": "root-default"
+        });
+        let result = generate_template(&schema, false, &BTreeMap::new());
+        assert_eq!(result, "root-default");
+    }
+
+    #[test]
+    fn top_level_enum_shows_options() {
+        let schema = json!({
+            "type": "string",
+            "enum": ["open", "closed"]
+        });
+        let result = generate_template(&schema, false, &BTreeMap::new());
+        assert_eq!(result, "open|closed");
+    }
+
+    #[test]
+    fn top_level_fill_uses_root_marker() {
+        let schema = json!({ "type": "string" });
+        let mut fill = BTreeMap::new();
+        fill.insert("$".to_string(), "root-value".to_string());
+        let result = generate_template(&schema, false, &fill);
+        assert_eq!(result, "root-value");
     }
 
     #[test]
@@ -710,6 +819,56 @@ mod tests {
         assert_eq!(result["kind"], "user|service");
         assert_eq!(result["id"], "<integer:required>");
         assert!(result.get("name").is_none());
+    }
+
+    #[test]
+    fn one_of_variant_overrides_base_scalar_metadata() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "chat_id": {
+                    "type": "string",
+                    "default": "base-chat",
+                    "oneOf": [
+                        {
+                            "type": "integer",
+                            "default": 42
+                        }
+                    ]
+                }
+            }
+        });
+        let result = generate_template(&schema, false, &BTreeMap::new());
+        assert_eq!(result["chat_id"], 42);
+    }
+
+    #[test]
+    fn nullable_union_prefers_concrete_type_placeholder() {
+        let schema = json!({
+            "type": "object",
+            "required": ["chat_id"],
+            "properties": {
+                "chat_id": {
+                    "type": ["string", "null"]
+                }
+            }
+        });
+        let result = generate_template(&schema, false, &BTreeMap::new());
+        assert_eq!(result["chat_id"], "<string:required>");
+    }
+
+    #[test]
+    fn concrete_type_union_emits_union_placeholder() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "chat_id": {
+                    "type": ["string", "integer"]
+                }
+            }
+        });
+        let result = generate_template(&schema, false, &BTreeMap::new());
+        assert_eq!(result["chat_id"], "<string|integer:optional>");
     }
 
     #[test]
@@ -1423,6 +1582,31 @@ mod tests {
         fill.insert("a.b.c".to_string(), "deep-value".to_string());
         let result = generate_template(&schema, false, &fill);
         assert_eq!(result["a"]["b"]["c"], "deep-value");
+    }
+
+    #[test]
+    fn fill_array_item_path_applies_to_object_items() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": { "type": "string" },
+                            "count": { "type": "integer" }
+                        }
+                    }
+                }
+            }
+        });
+        let mut fill = BTreeMap::new();
+        fill.insert("items[].name".to_string(), "widget".to_string());
+        fill.insert("items[].count".to_string(), "2".to_string());
+        let result = generate_template(&schema, false, &fill);
+        assert_eq!(result["items"][0]["name"], "widget");
+        assert_eq!(result["items"][0]["count"], 2);
     }
 
     #[test]

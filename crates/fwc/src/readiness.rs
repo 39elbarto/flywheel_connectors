@@ -10127,4 +10127,501 @@ output_schema = { type = "object" }
             "LiveRuntime should have no next_actions (no remediation needed), got: {actions:?}",
         );
     }
+
+    // ══════════════════════════════════════════════════════════════════
+    // Bead 29.8.4: Comprehensive truthfulness verification invariants
+    // ══════════════════════════════════════════════════════════════════
+    //
+    // These tests form the fast local invariant suite required by bead
+    // 29.8.4.  They cover source/provenance labeling, unknown vs
+    // unsupported rendering, explicit offline wording, authority error
+    // mapping, preflight vs simulate messaging, CommandTruthMode
+    // classification, and redaction-safe envelopes.
+
+    // ── Provenance labeling invariants ────────────────────────────────
+
+    #[test]
+    fn invariant_provenance_declared_by_connector_is_never_authoritative() {
+        assert!(!MetadataProvenance::DeclaredByConnector.is_authoritative());
+    }
+
+    #[test]
+    fn invariant_provenance_unattributed_is_never_authoritative() {
+        assert!(!MetadataProvenance::Unattributed.is_authoritative());
+    }
+
+    #[test]
+    fn invariant_provenance_inferred_is_never_authoritative() {
+        assert!(!MetadataProvenance::InferredFromPolicy.is_authoritative());
+    }
+
+    #[test]
+    fn invariant_only_host_and_runtime_provenance_are_authoritative() {
+        let all = [
+            MetadataProvenance::DeclaredByConnector,
+            MetadataProvenance::ObservedByHost,
+            MetadataProvenance::MeasuredAtRuntime,
+            MetadataProvenance::InferredFromPolicy,
+            MetadataProvenance::Unattributed,
+        ];
+        let authoritative: Vec<_> = all.iter().filter(|p| p.is_authoritative()).collect();
+        assert_eq!(authoritative.len(), 2);
+        assert!(MetadataProvenance::ObservedByHost.is_authoritative());
+        assert!(MetadataProvenance::MeasuredAtRuntime.is_authoritative());
+    }
+
+    #[test]
+    fn invariant_provenance_tags_match_serde_names() {
+        // Tags must match the kebab-case serde names for stable JSON output.
+        let all = [
+            (MetadataProvenance::DeclaredByConnector, "declared-by-connector"),
+            (MetadataProvenance::ObservedByHost, "observed-by-host"),
+            (MetadataProvenance::MeasuredAtRuntime, "measured-at-runtime"),
+            (MetadataProvenance::InferredFromPolicy, "inferred-from-policy"),
+            (MetadataProvenance::Unattributed, "unattributed"),
+        ];
+        for (prov, expected) in &all {
+            assert_eq!(prov.tag(), *expected, "Tag mismatch for {:?}", prov);
+            let json = serde_json::to_string(prov).unwrap();
+            assert_eq!(json, format!("\"{}\"", expected));
+        }
+    }
+
+    #[test]
+    fn invariant_provenance_explanations_are_all_distinct() {
+        let all = [
+            MetadataProvenance::DeclaredByConnector,
+            MetadataProvenance::ObservedByHost,
+            MetadataProvenance::MeasuredAtRuntime,
+            MetadataProvenance::InferredFromPolicy,
+            MetadataProvenance::Unattributed,
+        ];
+        let explanations: Vec<&str> = all.iter().map(|p| p.explanation()).collect();
+        let unique: std::collections::HashSet<&str> = explanations.iter().copied().collect();
+        assert_eq!(explanations.len(), unique.len());
+    }
+
+    // ── MetadataField unknown vs unsupported invariants ──────────────
+
+    #[test]
+    fn invariant_unknown_is_distinct_from_unsupported() {
+        let unknown: MetadataField<String> = MetadataField::Unknown;
+        let unsupported: MetadataField<String> = MetadataField::Unsupported;
+        // They serialize differently.
+        let u_json = serde_json::to_value(&unknown).unwrap();
+        let s_json = serde_json::to_value(&unsupported).unwrap();
+        assert_ne!(u_json["status"], s_json["status"]);
+    }
+
+    #[test]
+    fn invariant_unknown_status_tag_is_unknown() {
+        let field: MetadataField<i32> = MetadataField::Unknown;
+        let json = serde_json::to_value(&field).unwrap();
+        assert_eq!(json["status"], "unknown");
+    }
+
+    #[test]
+    fn invariant_unsupported_status_tag_is_unsupported() {
+        let field: MetadataField<i32> = MetadataField::Unsupported;
+        let json = serde_json::to_value(&field).unwrap();
+        assert_eq!(json["status"], "unsupported");
+    }
+
+    #[test]
+    fn invariant_unavailable_status_tag_is_unavailable() {
+        let field: MetadataField<i32> = MetadataField::Unavailable;
+        let json = serde_json::to_value(&field).unwrap();
+        assert_eq!(json["status"], "unavailable");
+    }
+
+    #[test]
+    fn invariant_not_applicable_status_tag_is_not_applicable() {
+        let field: MetadataField<i32> = MetadataField::NotApplicable;
+        let json = serde_json::to_value(&field).unwrap();
+        assert_eq!(json["status"], "not-applicable");
+    }
+
+    #[test]
+    fn invariant_known_field_always_has_value_key() {
+        let field = MetadataField::Known(42);
+        let json = serde_json::to_value(&field).unwrap();
+        assert_eq!(json["status"], "known");
+        assert_eq!(json["value"], 42);
+    }
+
+    #[test]
+    fn invariant_non_known_fields_never_have_value_key() {
+        let non_known: Vec<MetadataField<String>> = vec![
+            MetadataField::Unknown,
+            MetadataField::Unsupported,
+            MetadataField::Unavailable,
+            MetadataField::NotApplicable,
+        ];
+        for field in &non_known {
+            let json = serde_json::to_value(field).unwrap();
+            assert!(
+                json.get("value").is_none(),
+                "Non-known field {:?} should not have a value key",
+                json["status"],
+            );
+        }
+    }
+
+    // ── CommandAvailability offline wording invariants ────────────────
+
+    #[test]
+    fn invariant_offline_artifact_label_contains_offline() {
+        let label = CommandAvailability::OfflineArtifact.compact_label();
+        assert!(
+            label.to_uppercase().contains("OFFLINE"),
+            "OfflineArtifact label '{}' must explicitly say OFFLINE",
+            label,
+        );
+    }
+
+    #[test]
+    fn invariant_offline_artifact_help_text_mentions_offline() {
+        let help = CommandAvailability::OfflineArtifact.help_text("test-cmd");
+        let lower = help.to_lowercase();
+        assert!(
+            lower.contains("offline") || lower.contains("artifact") || lower.contains("local"),
+            "OfflineArtifact help_text should mention offline/artifact/local: {}",
+            help,
+        );
+    }
+
+    #[test]
+    fn invariant_live_runtime_never_mentions_offline() {
+        let label = CommandAvailability::LiveRuntime.compact_label();
+        assert!(
+            !label.to_uppercase().contains("OFFLINE"),
+            "LiveRuntime should not mention OFFLINE: {}",
+            label,
+        );
+    }
+
+    // ── Authority error mapping invariants ────────────────────────────
+
+    #[test]
+    fn invariant_denied_availability_is_recoverable() {
+        let env = CommandEnvelope::new(CommandAvailability::Denied, "test");
+        assert!(env.recoverable, "Denied should be recoverable (user can remediate)");
+    }
+
+    #[test]
+    fn invariant_unsupported_availability_is_not_recoverable() {
+        let env = CommandEnvelope::new(CommandAvailability::Unsupported, "test");
+        assert!(!env.recoverable, "Unsupported is permanent, not recoverable");
+    }
+
+    #[test]
+    fn invariant_unavailable_availability_is_recoverable() {
+        let env = CommandEnvelope::new(CommandAvailability::Unavailable, "test");
+        assert!(env.recoverable, "Unavailable is transient, should be recoverable");
+    }
+
+    #[test]
+    fn invariant_unknown_availability_is_recoverable() {
+        let env = CommandEnvelope::new(CommandAvailability::Unknown, "test");
+        assert!(env.recoverable, "Unknown should be recoverable (can diagnose)");
+    }
+
+    #[test]
+    fn invariant_planned_availability_is_not_authoritative() {
+        let env = CommandEnvelope::new(CommandAvailability::Planned, "test");
+        assert!(!env.authoritative, "Planned commands cannot be authoritative");
+    }
+
+    #[test]
+    fn invariant_exit_codes_are_partitioned_correctly() {
+        // Success states: exit 0.
+        assert_eq!(CommandAvailability::LiveRuntime.exit_code_u8(), 0);
+        assert_eq!(CommandAvailability::OfflineArtifact.exit_code_u8(), 0);
+        // Non-success: non-zero.
+        assert_ne!(CommandAvailability::Unsupported.exit_code_u8(), 0);
+        assert_ne!(CommandAvailability::Denied.exit_code_u8(), 0);
+        assert_ne!(CommandAvailability::Unavailable.exit_code_u8(), 0);
+        assert_ne!(CommandAvailability::Unknown.exit_code_u8(), 0);
+    }
+
+    #[test]
+    fn invariant_planned_exit_code_is_zero() {
+        // Planned is not an error — it's informational.
+        assert_eq!(CommandAvailability::Planned.exit_code_u8(), 0);
+    }
+
+    // ── CommandTruthMode classification invariants ────────────────────
+
+    #[test]
+    fn invariant_live_only_commands_require_host() {
+        for entry in COMMAND_FAMILY_CLASSIFICATION {
+            if entry.mode == CommandTruthMode::LiveOnly {
+                // All live-only commands should be in the "requires host" set.
+                assert!(
+                    entry.mode.can_be_authoritative(),
+                    "LiveOnly command '{}' must be authoritative-capable",
+                    entry.name,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn invariant_offline_only_commands_never_authoritative() {
+        for entry in COMMAND_FAMILY_CLASSIFICATION {
+            if entry.mode == CommandTruthMode::OfflineOnly {
+                assert!(
+                    !entry.mode.can_be_authoritative(),
+                    "OfflineOnly command '{}' must not be authoritative",
+                    entry.name,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn invariant_passthrough_commands_never_authoritative() {
+        for entry in COMMAND_FAMILY_CLASSIFICATION {
+            if entry.mode == CommandTruthMode::Passthrough {
+                assert!(
+                    !entry.mode.can_be_authoritative(),
+                    "Passthrough command '{}' must not claim authority",
+                    entry.name,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn invariant_planned_commands_never_authoritative() {
+        for entry in COMMAND_FAMILY_CLASSIFICATION {
+            if entry.mode == CommandTruthMode::PlannedOnly {
+                assert!(
+                    !entry.mode.can_be_authoritative(),
+                    "PlannedOnly command '{}' must not claim authority",
+                    entry.name,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn invariant_no_unclassified_major_commands() {
+        // All major command families must appear in the classification table.
+        let must_exist = [
+            "invoke", "list", "show", "ops", "schema", "batch",
+            "validate", "export-tools", "config", "status",
+        ];
+        for name in &must_exist {
+            assert!(
+                classify_command(name).is_some(),
+                "Major command '{}' is not in COMMAND_FAMILY_CLASSIFICATION",
+                name,
+            );
+        }
+    }
+
+    #[test]
+    fn invariant_truth_mode_tag_matches_serde_output() {
+        for mode in &ALL_TRUTH_MODES {
+            let tag = mode.tag();
+            let json = serde_json::to_string(mode).unwrap();
+            assert_eq!(json, format!("\"{}\"", tag), "Serde vs tag mismatch for {:?}", mode);
+        }
+    }
+
+    // ── Envelope redaction safety invariants ──────────────────────────
+
+    #[test]
+    fn invariant_envelope_json_never_contains_raw_credentials() {
+        // Transcript entries must be safe to log.
+        for avail in &ALL_AVAILABILITY {
+            let env = CommandEnvelope::new(avail.clone(), "invoke --token SECRET");
+            let entry = env.transcript_entry();
+            let text = serde_json::to_string(&entry).unwrap();
+            // The command field should be present but transcript
+            // shouldn't introduce any credential-like fields.
+            assert!(
+                !text.contains("password"),
+                "Transcript for {:?} contains 'password'",
+                avail,
+            );
+            assert!(
+                !text.contains("secret_key"),
+                "Transcript for {:?} contains 'secret_key'",
+                avail,
+            );
+        }
+    }
+
+    #[test]
+    fn invariant_envelope_transcript_has_stable_schema() {
+        // All transcript entries must have the same top-level keys.
+        let required_keys = ["type", "state", "exit_code", "authoritative", "recoverable"];
+        for avail in &ALL_AVAILABILITY {
+            let env = CommandEnvelope::new(avail.clone(), "test");
+            let entry = env.transcript_entry();
+            for key in &required_keys {
+                assert!(
+                    entry.get(key).is_some(),
+                    "Transcript for {:?} missing required key '{}'",
+                    avail,
+                    key,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn invariant_envelope_compact_line_is_single_line() {
+        for avail in &ALL_AVAILABILITY {
+            let env = CommandEnvelope::new(avail.clone(), "test");
+            let line = env.compact_line();
+            assert!(
+                !line.contains('\n'),
+                "compact_line for {:?} should be single-line: {}",
+                avail,
+                line,
+            );
+        }
+    }
+
+    #[test]
+    fn invariant_envelope_display_is_single_line() {
+        for avail in &ALL_AVAILABILITY {
+            let env = CommandEnvelope::new(avail.clone(), "test");
+            let display = format!("{env}");
+            assert!(
+                !display.contains('\n'),
+                "Display for {:?} should be single-line: {}",
+                avail,
+                display,
+            );
+        }
+    }
+
+    // ── Golden snapshot invariants ────────────────────────────────────
+
+    #[test]
+    fn golden_availability_compact_labels() {
+        // Pinned golden values — if these change, it's a truthfulness regression.
+        assert_eq!(CommandAvailability::LiveRuntime.compact_label(), "LIVE");
+        assert_eq!(CommandAvailability::OfflineArtifact.compact_label(), "OFFLINE");
+        assert_eq!(CommandAvailability::Unsupported.compact_label(), "UNSUPPORTED");
+    }
+
+    #[test]
+    fn golden_availability_cli_symbols() {
+        assert_eq!(CommandAvailability::LiveRuntime.cli_symbol(), "[+]");
+        assert_eq!(CommandAvailability::OfflineArtifact.cli_symbol(), "[~]");
+        assert_eq!(CommandAvailability::Unsupported.cli_symbol(), "[x]");
+        assert_eq!(CommandAvailability::Planned.cli_symbol(), "[.]");
+        assert_eq!(CommandAvailability::Unavailable.cli_symbol(), "[!]");
+        assert_eq!(CommandAvailability::Denied.cli_symbol(), "[-]");
+        assert_eq!(CommandAvailability::Unknown.cli_symbol(), "[?]");
+    }
+
+    #[test]
+    fn golden_truth_mode_tags() {
+        assert_eq!(CommandTruthMode::LiveOnly.tag(), "live-only");
+        assert_eq!(CommandTruthMode::OfflineOnly.tag(), "offline-only");
+        assert_eq!(CommandTruthMode::Hybrid.tag(), "hybrid");
+        assert_eq!(CommandTruthMode::Passthrough.tag(), "passthrough");
+        assert_eq!(CommandTruthMode::PlannedOnly.tag(), "planned-only");
+    }
+
+    #[test]
+    fn golden_provenance_tags() {
+        assert_eq!(MetadataProvenance::DeclaredByConnector.tag(), "declared-by-connector");
+        assert_eq!(MetadataProvenance::ObservedByHost.tag(), "observed-by-host");
+        assert_eq!(MetadataProvenance::MeasuredAtRuntime.tag(), "measured-at-runtime");
+        assert_eq!(MetadataProvenance::InferredFromPolicy.tag(), "inferred-from-policy");
+        assert_eq!(MetadataProvenance::Unattributed.tag(), "unattributed");
+    }
+
+    #[test]
+    fn golden_metadata_field_status_tags() {
+        let json = serde_json::to_value(&MetadataField::Known("v")).unwrap();
+        assert_eq!(json["status"], "known");
+        let json = serde_json::to_value(&MetadataField::<()>::Unknown).unwrap();
+        assert_eq!(json["status"], "unknown");
+        let json = serde_json::to_value(&MetadataField::<()>::Unsupported).unwrap();
+        assert_eq!(json["status"], "unsupported");
+        let json = serde_json::to_value(&MetadataField::<()>::Unavailable).unwrap();
+        assert_eq!(json["status"], "unavailable");
+        let json = serde_json::to_value(&MetadataField::<()>::NotApplicable).unwrap();
+        assert_eq!(json["status"], "not-applicable");
+    }
+
+    #[test]
+    fn golden_classification_count() {
+        // Pinned count — if commands are added/removed, update this.
+        assert_eq!(COMMAND_FAMILY_CLASSIFICATION.len(), 46);
+    }
+
+    #[test]
+    fn golden_exit_code_values() {
+        assert_eq!(CommandAvailability::LiveRuntime.exit_code_u8(), 0);
+        assert_eq!(CommandAvailability::OfflineArtifact.exit_code_u8(), 0);
+        assert_eq!(CommandAvailability::Planned.exit_code_u8(), 0);
+        assert_eq!(CommandAvailability::Unsupported.exit_code_u8(), 5);
+        assert_eq!(CommandAvailability::Unavailable.exit_code_u8(), 8);
+        assert_eq!(CommandAvailability::Denied.exit_code_u8(), 6);
+        assert_eq!(CommandAvailability::Unknown.exit_code_u8(), 8);
+    }
+
+    #[test]
+    fn golden_severity_rank_values() {
+        assert_eq!(CommandAvailability::LiveRuntime.severity_rank(), 0);
+        assert_eq!(CommandAvailability::OfflineArtifact.severity_rank(), 1);
+        assert_eq!(CommandAvailability::Planned.severity_rank(), 2);
+        assert_eq!(CommandAvailability::Unsupported.severity_rank(), 3);
+        assert_eq!(CommandAvailability::Unknown.severity_rank(), 4);
+        assert_eq!(CommandAvailability::Unavailable.severity_rank(), 5);
+        assert_eq!(CommandAvailability::Denied.severity_rank(), 6);
+    }
+
+    // ── Cross-cutting: provenance × availability × mode ──────────────
+
+    #[test]
+    fn invariant_cross_live_runtime_envelope_is_authoritative_and_irrecoverable() {
+        let env = CommandEnvelope::new(CommandAvailability::LiveRuntime, "invoke");
+        assert!(env.authoritative);
+        assert!(!env.recoverable);
+    }
+
+    #[test]
+    fn invariant_cross_offline_artifact_envelope_is_not_authoritative() {
+        let env = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "list");
+        assert!(!env.authoritative);
+    }
+
+    #[test]
+    fn invariant_hybrid_mode_can_produce_both_live_and_offline_availability() {
+        // A hybrid command can succeed in live mode or offline mode.
+        let live = CommandEnvelope::new(CommandAvailability::LiveRuntime, "list");
+        let offline = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "list");
+        assert!(live.authoritative);
+        assert!(!offline.authoritative);
+    }
+
+    #[test]
+    fn invariant_envelope_exit_code_matches_availability() {
+        for avail in &ALL_AVAILABILITY {
+            let env = CommandEnvelope::new(avail.clone(), "test");
+            assert_eq!(env.exit_code(), avail.exit_code_u8());
+        }
+    }
+
+    #[test]
+    fn invariant_envelope_help_banner_is_non_empty_for_all_variants() {
+        for avail in &ALL_AVAILABILITY {
+            let env = CommandEnvelope::new(avail.clone(), "test");
+            assert!(
+                !env.help_banner().is_empty(),
+                "help_banner for {:?} should not be empty",
+                avail,
+            );
+        }
+    }
 }

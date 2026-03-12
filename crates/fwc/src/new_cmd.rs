@@ -2425,3 +2425,400 @@ fn capability_id_lint_message(error: &ManifestError) -> Option<String> {
         _ => None,
     }
 }
+
+/// Check an existing connector directory for compliance.
+#[allow(clippy::too_many_lines)]
+fn check_connector(path: &Path) -> Result<CheckResult> {
+    let mut checks = Vec::new();
+    let mut suggested_fixes = Vec::new();
+
+    // Check directory exists
+    if !path.exists() {
+        anyhow::bail!("path does not exist: {}", path.display());
+    }
+
+    // Try to read manifest.toml
+    let manifest_path = path.join("manifest.toml");
+    let mut parsed_manifest: Option<ConnectorManifest> = None;
+    let connector_id = if manifest_path.exists() {
+        let content = fs::read_to_string(&manifest_path)?;
+
+        match ConnectorManifest::parse_str(&content) {
+            Ok(manifest) => {
+                checks.push(PrecheckItem {
+                    id: "manifest.valid".to_string(),
+                    description: "Manifest passes FCP validation".to_string(),
+                    passed: true,
+                    message: None,
+                    severity: CheckSeverity::Error,
+                });
+                let id = manifest.connector.id.to_string();
+                parsed_manifest = Some(manifest);
+                Some(id)
+            }
+            Err(e) => {
+                checks.push(PrecheckItem {
+                    id: "manifest.valid".to_string(),
+                    description: "Manifest passes FCP validation".to_string(),
+                    passed: false,
+                    message: Some(e.to_string()),
+                    severity: CheckSeverity::Error,
+                });
+                if let Some(message) = capability_id_lint_message(&e) {
+                    checks.push(PrecheckItem {
+                        id: "manifest.capability_id_lint".to_string(),
+                        description: "Capability IDs do not embed hostnames/ports/URLs".to_string(),
+                        passed: false,
+                        message: Some(message),
+                        severity: CheckSeverity::Error,
+                    });
+                    suggested_fixes.push(SuggestedFix {
+                        check_id: "manifest.capability_id_lint".to_string(),
+                        action: "Move host/port details into network_constraints and keep capability IDs abstract".to_string(),
+                        file: Some("manifest.toml".to_string()),
+                    });
+                }
+                suggested_fixes.push(SuggestedFix {
+                    check_id: "manifest.valid".to_string(),
+                    action: "Fix manifest validation errors".to_string(),
+                    file: Some("manifest.toml".to_string()),
+                });
+                None
+            }
+        }
+    } else {
+        checks.push(PrecheckItem {
+            id: "manifest.exists".to_string(),
+            description: "Manifest file exists".to_string(),
+            passed: false,
+            message: Some("manifest.toml not found".to_string()),
+            severity: CheckSeverity::Error,
+        });
+        suggested_fixes.push(SuggestedFix {
+            check_id: "manifest.exists".to_string(),
+            action: "Create manifest.toml with required FCP2 fields".to_string(),
+            file: Some("manifest.toml".to_string()),
+        });
+        None
+    };
+
+    if parsed_manifest.is_some() {
+        checks.push(PrecheckItem {
+            id: "manifest.capability_id_lint".to_string(),
+            description: "Capability IDs do not embed hostnames/ports/URLs".to_string(),
+            passed: true,
+            message: None,
+            severity: CheckSeverity::Error,
+        });
+    }
+
+    if let Some(id) = &connector_id {
+        let valid = validate_connector_id(id).is_ok();
+        checks.push(PrecheckItem {
+            id: "manifest.connector_id_format".to_string(),
+            description: "Connector ID follows naming convention".to_string(),
+            passed: valid,
+            message: if valid {
+                None
+            } else {
+                Some(format!("Invalid connector ID: {id}"))
+            },
+            severity: CheckSeverity::Error,
+        });
+    }
+
+    // Check single-zone binding
+    let single_zone_ok = parsed_manifest.as_ref().is_some_and(|manifest| {
+        let home = &manifest.zones.home;
+        manifest.zones.allowed_sources.len() == 1
+            && manifest.zones.allowed_targets.len() == 1
+            && manifest.zones.allowed_sources[0] == *home
+            && manifest.zones.allowed_targets[0] == *home
+    });
+    checks.push(PrecheckItem {
+        id: "manifest.single_zone".to_string(),
+        description: "Connector uses single-zone binding".to_string(),
+        passed: single_zone_ok,
+        message: None,
+        severity: CheckSeverity::Error,
+    });
+
+    // Check default-deny NetworkConstraints
+    let mut missing_constraints = Vec::new();
+    let mut weak_defaults = Vec::new();
+    if let Some(manifest) = &parsed_manifest {
+        for (op_id, op) in &manifest.provides.operations {
+            match &op.network_constraints {
+                Some(nc) => {
+                    if nc.host_allow.is_empty() || nc.port_allow.is_empty() {
+                        missing_constraints.push(op_id.clone());
+                    }
+                    if !(nc.deny_localhost
+                        && nc.deny_private_ranges
+                        && nc.deny_tailnet_ranges
+                        && nc.deny_ip_literals)
+                    {
+                        weak_defaults.push(op_id.clone());
+                    }
+                }
+                None => missing_constraints.push(op_id.clone()),
+            }
+        }
+    }
+    let network_ok = missing_constraints.is_empty() && weak_defaults.is_empty();
+    checks.push(PrecheckItem {
+        id: "manifest.network_default_deny".to_string(),
+        description: "NetworkConstraints use default-deny".to_string(),
+        passed: network_ok,
+        message: if network_ok {
+            None
+        } else {
+            Some(format!(
+                "Missing/weak constraints in ops: missing={missing_constraints:?} weak={weak_defaults:?}"
+            ))
+        },
+        severity: CheckSeverity::Error,
+    });
+
+    // Check forbidden capabilities include system.exec
+    let forbids_exec = parsed_manifest.as_ref().is_some_and(|manifest| {
+        manifest
+            .capabilities
+            .forbidden
+            .iter()
+            .any(|cap| cap.as_str() == "system.exec")
+    });
+    checks.push(PrecheckItem {
+        id: "manifest.forbidden_exec".to_string(),
+        description: "system.exec is in forbidden capabilities".to_string(),
+        passed: forbids_exec,
+        message: None,
+        severity: CheckSeverity::Error,
+    });
+
+    // Check for #![forbid(unsafe_code)] in main.rs and lib.rs
+    let main_rs_path = path.join("src/main.rs");
+    let lib_rs_path = path.join("src/lib.rs");
+    let mut forbids_unsafe = true;
+
+    if main_rs_path.exists() {
+        let content = fs::read_to_string(&main_rs_path)?;
+        if !content.contains("#![forbid(unsafe_code)]") {
+            forbids_unsafe = false;
+            suggested_fixes.push(SuggestedFix {
+                check_id: "code.forbid_unsafe".to_string(),
+                action: "Add #![forbid(unsafe_code)] at the top of main.rs".to_string(),
+                file: Some("src/main.rs".to_string()),
+            });
+        }
+    } else {
+        forbids_unsafe = false;
+    }
+
+    if lib_rs_path.exists() {
+        let content = fs::read_to_string(&lib_rs_path)?;
+        if !content.contains("#![forbid(unsafe_code)]") {
+            forbids_unsafe = false;
+            suggested_fixes.push(SuggestedFix {
+                check_id: "code.forbid_unsafe".to_string(),
+                action: "Add #![forbid(unsafe_code)] at the top of lib.rs".to_string(),
+                file: Some("src/lib.rs".to_string()),
+            });
+        }
+    } else {
+        forbids_unsafe = false;
+    }
+
+    checks.push(PrecheckItem {
+        id: "code.forbid_unsafe".to_string(),
+        description: "Code forbids unsafe Rust".to_string(),
+        passed: forbids_unsafe,
+        message: if forbids_unsafe {
+            None
+        } else {
+            Some("Add #![forbid(unsafe_code)] to src/main.rs and src/lib.rs".to_string())
+        },
+        severity: CheckSeverity::Error,
+    });
+
+    // Check for test directory
+    let tests_dir = path.join("tests");
+    checks.push(PrecheckItem {
+        id: "tests.directory".to_string(),
+        description: "Tests directory exists".to_string(),
+        passed: tests_dir.exists(),
+        message: None,
+        severity: CheckSeverity::Warning,
+    });
+
+    let prechecks = PrecheckResults::passed(checks);
+
+    Ok(CheckResult {
+        path: path.display().to_string(),
+        connector_id,
+        prechecks,
+        suggested_fixes,
+    })
+}
+
+/// Generate next steps for the developer.
+fn generate_next_steps(
+    connector_id: &str,
+    crate_path: &str,
+    archetype: ConnectorArchetype,
+    no_e2e: bool,
+) -> Vec<String> {
+    let mut steps = vec![
+        format!("cd {crate_path}"),
+        "Fill in TODO placeholders in manifest.toml:".to_string(),
+        "  - Update connector description".to_string(),
+        "  - Define required capabilities".to_string(),
+        "  - Configure network constraints for your API endpoints".to_string(),
+        "Implement operations in src/connector.rs:".to_string(),
+        "  - Replace placeholder_operation with real operations".to_string(),
+        "  - Add capability verification".to_string(),
+        "  - Implement error handling with FCP error taxonomy".to_string(),
+    ];
+
+    // Add archetype-specific hints
+    match archetype {
+        ConnectorArchetype::Streaming | ConnectorArchetype::Bidirectional => {
+            steps.push("  - Implement event streaming logic".to_string());
+        }
+        ConnectorArchetype::Polling => {
+            steps.push("  - Configure polling interval and backoff".to_string());
+        }
+        ConnectorArchetype::Webhook => {
+            steps.push("  - Implement webhook signature verification".to_string());
+        }
+        _ => {}
+    }
+
+    steps.push("Update src/types.rs with your request/response types".to_string());
+    steps.push("Run tests: cargo test".to_string());
+
+    if !no_e2e {
+        steps.push("Run E2E tests: cargo test --test e2e_tests -- --ignored".to_string());
+    }
+
+    steps.push(format!("Validate: fwc new --check {crate_path}"));
+    let crate_slug = normalize_crate_slug(extract_short_name(connector_id));
+    steps.push(format!("Build: cargo build -p fcp-{crate_slug}"));
+
+    steps
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Display helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Print scaffold result in human-readable format.
+fn print_scaffold_result(result: &ScaffoldResult, dry_run: bool) {
+    let reset = "\x1b[0m";
+    let bold = "\x1b[1m";
+    let green = "\x1b[32m";
+    let yellow = "\x1b[33m";
+    let cyan = "\x1b[36m";
+    let dim = "\x1b[2m";
+
+    println!();
+    if dry_run {
+        println!("{yellow}{bold}DRY RUN{reset} - No files written");
+        println!();
+    }
+    println!(
+        "{bold}Created connector:{reset} {cyan}{}{reset}",
+        result.connector_id
+    );
+    println!("{bold}Path:{reset} {}", result.crate_path);
+    println!();
+
+    println!("{bold}Files:{reset}");
+    for file in &result.files_created {
+        println!(
+            "  {green}+{reset} {:<30} {dim}({} bytes) - {}{reset}",
+            file.path, file.size, file.purpose
+        );
+    }
+    println!();
+
+    print_precheck_results(&result.prechecks);
+
+    println!("{bold}Next steps:{reset}");
+    for (i, step) in result.next_steps.iter().enumerate() {
+        if step.starts_with("  ") {
+            println!("   {step}");
+        } else {
+            println!("{dim}{:2}.{reset} {step}", i + 1);
+        }
+    }
+    println!();
+}
+
+/// Print check result in human-readable format.
+fn print_check_result(result: &CheckResult) {
+    let reset = "\x1b[0m";
+    let bold = "\x1b[1m";
+    let cyan = "\x1b[36m";
+
+    println!();
+    println!("{bold}Checking:{reset} {}", result.path);
+    if let Some(id) = &result.connector_id {
+        println!("{bold}Connector ID:{reset} {cyan}{id}{reset}");
+    }
+    println!();
+
+    print_precheck_results(&result.prechecks);
+
+    if !result.suggested_fixes.is_empty() {
+        let yellow = "\x1b[33m";
+        println!("{bold}Suggested fixes:{reset}");
+        for fix in &result.suggested_fixes {
+            print!("  {yellow}*{reset} {}", fix.action);
+            if let Some(file) = &fix.file {
+                print!(" ({file})");
+            }
+            println!();
+        }
+        println!();
+    }
+}
+
+/// Print precheck results.
+fn print_precheck_results(prechecks: &PrecheckResults) {
+    let reset = "\x1b[0m";
+    let bold = "\x1b[1m";
+    let green = "\x1b[32m";
+    let yellow = "\x1b[33m";
+    let red = "\x1b[31m";
+    let dim = "\x1b[2m";
+
+    println!("{bold}Compliance Prechecks:{reset}");
+    for check in &prechecks.checks {
+        let (color, symbol) = if check.passed {
+            (green, "✓")
+        } else {
+            match check.severity {
+                CheckSeverity::Error => (red, "✗"),
+                CheckSeverity::Warning => (yellow, "!"),
+                CheckSeverity::Info => (dim, "·"),
+            }
+        };
+
+        print!("  {color}{symbol}{reset} {}", check.description);
+        if let Some(msg) = &check.message {
+            print!(" {dim}({msg}){reset}");
+        }
+        println!();
+    }
+    println!();
+
+    let summary = &prechecks.summary;
+    let status_color = if prechecks.passed { green } else { red };
+    let status_text = if prechecks.passed { "PASSED" } else { "FAILED" };
+    println!(
+        "{bold}Result:{reset} {status_color}{status_text}{reset} ({}/{} checks, {} warnings)",
+        summary.passed, summary.total, summary.warnings
+    );
+    println!();
+}

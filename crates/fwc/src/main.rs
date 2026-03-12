@@ -20,6 +20,8 @@ mod batch;
 mod batch_file;
 #[allow(dead_code)] // Progress tracking wired when host integration lands.
 mod batch_progress;
+#[allow(dead_code)] // Benchmark suite for FCP primitives.
+mod bench_cmd;
 mod catalog;
 #[allow(dead_code)] // Event checkpoint and replay from sequence/time.
 mod checkpoint;
@@ -112,6 +114,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
 use base64::Engine;
+use chrono::{DateTime, Utc};
 use clap::{Args, Parser, Subcommand, ValueEnum, error::ErrorKind};
 use reqwest::blocking::{Client as BlockingClient, ClientBuilder as BlockingClientBuilder};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -147,6 +150,10 @@ use fcp_telemetry::{
     RecommendationConfig, recommend_capabilities,
 };
 
+use crate::credential::{AuthStatus, AuthTestResult, ExpiryInfo};
+use crate::credential_store::{
+    AuthMethod, Credential, CredentialStore, parse_credential_fields, validate_connector_id,
+};
 use crate::package_cmd::{
     BuildMetadata as PackageBuildMetadata, PACKAGE_OUTPUT_FILENAME,
     PackageArgs as PackageBuildArgs, PackageOutput,
@@ -193,6 +200,9 @@ Examples:
   fwc agent announce --agent BronzeValley --connector github --purpose \"triage issue backlog\"
   fwc agent send --from BronzeValley --to GoldenWolf --kind info --payload '{\"bead\":\"flywheel_connectors-qnchs.13.3\"}'
   fwc agent inbox --agent GoldenWolf
+  fwc auth list
+  fwc auth add github --token <token>
+  fwc auth status
   fwc list
   fwc plan \"create a GitHub issue titled 'FWC: add workflow macros'\"
   fwc explain \"find the Notion page named Roadmap and append this summary\"
@@ -378,6 +388,9 @@ enum Commands {
     /// Manage canary rollout state and manual rollback.
     Rollout(RolloutArgs),
 
+    /// Manage locally stored connector credentials and auth status.
+    Auth(AuthArgs),
+
     /// Manage connector configuration with redaction-aware workflows.
     Config(ConfigArgs),
 
@@ -460,6 +473,12 @@ enum Commands {
     /// Independent operations run in parallel; dependent ones follow topological order.
     #[command(name = "batch-file", visible_alias = "batch-ops")]
     BatchFile(BatchFileArgs),
+
+    /// Run performance benchmarks for FCP primitives.
+    ///
+    /// Measures RaptorQ encoding/decoding, CBOR serialization, schema hashing,
+    /// cryptographic operations, and cold-start latency with statistical analysis.
+    Bench(bench_cmd::BenchArgs),
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -1128,6 +1147,129 @@ struct RolloutRollbackArgs {
     /// Version to roll back to.
     #[arg(long)]
     to: String,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct AuthArgs {
+    #[command(subcommand)]
+    command: AuthCommand,
+}
+
+#[derive(Subcommand, Debug, Serialize)]
+#[serde(tag = "subcommand", content = "args", rename_all = "kebab-case")]
+enum AuthCommand {
+    /// Store or replace credentials for one connector.
+    Add(AuthAddArgs),
+
+    /// List all stored connector credentials with redacted fields.
+    List,
+
+    /// Show one stored credential with redacted fields and status hints.
+    Show(TargetArgs),
+
+    /// Remove one stored credential from the local store (requires `--yes`).
+    Remove(AuthRemoveArgs),
+
+    /// Run local structural validation and expiry checks without contacting the live connector.
+    Test(TargetArgs),
+
+    /// Report expiry and rotation status for one credential or the full store.
+    Status(AuthStatusArgs),
+}
+
+#[derive(Args, Debug, Serialize)]
+struct AuthAddArgs {
+    /// Connector id, alias, or family name.
+    connector: String,
+
+    /// Optional display label for the stored credential.
+    #[arg(long)]
+    label: Option<String>,
+
+    /// Arbitrary credential fields as `KEY=VALUE`.
+    #[arg(value_name = "KEY=VALUE")]
+    #[serde(skip_serializing)]
+    fields: Vec<String>,
+
+    /// Arbitrary credential fields as `KEY=VALUE`.
+    #[arg(long = "field", value_name = "KEY=VALUE")]
+    #[serde(skip_serializing)]
+    extra_fields: Vec<String>,
+
+    /// Bearer token value.
+    #[arg(long)]
+    #[serde(skip_serializing)]
+    token: Option<String>,
+
+    /// Alternate bearer token field.
+    #[arg(long)]
+    #[serde(skip_serializing)]
+    api_token: Option<String>,
+
+    /// API key value.
+    #[arg(long)]
+    #[serde(skip_serializing)]
+    api_key: Option<String>,
+
+    /// Username for basic authentication.
+    #[arg(long)]
+    #[serde(skip_serializing)]
+    username: Option<String>,
+
+    /// Password for basic authentication.
+    #[arg(long)]
+    #[serde(skip_serializing)]
+    password: Option<String>,
+
+    /// OAuth client id.
+    #[arg(long)]
+    #[serde(skip_serializing)]
+    client_id: Option<String>,
+
+    /// OAuth client secret.
+    #[arg(long)]
+    #[serde(skip_serializing)]
+    client_secret: Option<String>,
+
+    /// OAuth access token.
+    #[arg(long)]
+    #[serde(skip_serializing)]
+    access_token: Option<String>,
+
+    /// OAuth refresh token.
+    #[arg(long)]
+    #[serde(skip_serializing)]
+    refresh_token: Option<String>,
+
+    /// Session token acquired from a login flow.
+    #[arg(long)]
+    #[serde(skip_serializing)]
+    session_token: Option<String>,
+
+    /// Secretless credential reference id.
+    #[arg(long)]
+    #[serde(skip_serializing)]
+    credential_id: Option<String>,
+
+    /// Optional RFC3339 expiry timestamp for the credential.
+    #[arg(long, value_name = "RFC3339")]
+    expires_at: Option<String>,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct AuthStatusArgs {
+    /// Optional connector id. Omit to inspect every stored credential.
+    connector: Option<String>,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct AuthRemoveArgs {
+    /// Connector id, alias, or family name.
+    connector: String,
+
+    /// Confirm deleting the stored credential from the local credential store.
+    #[arg(long)]
+    yes: bool,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -1855,6 +1997,13 @@ fn execute_passthrough_command(prepared: &PreparedCli) -> Result<Option<Executio
                 exit_code: ExitCode::SUCCESS,
             }))
         }
+        Commands::Bench(args) => {
+            bench_cmd::run(args)?;
+            Ok(Some(ExecutionOutcome {
+                text: String::new(),
+                exit_code: ExitCode::SUCCESS,
+            }))
+        }
         _ => Ok(None),
     }
 }
@@ -2457,6 +2606,7 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         Commands::Pin(args) => pin_dispatch(args, cli.host.as_deref())?,
         Commands::Unpin(args) => unpin_dispatch(args, cli.host.as_deref())?,
         Commands::Rollout(args) => rollout_dispatch(args, cli.host.as_deref())?,
+        Commands::Auth(args) => auth_dispatch(args)?,
         Commands::Config(args) => config_dispatch(args)?,
         Commands::Invoke(args) => invoke_dispatch("invoke", args, cli.host.as_deref())?,
         Commands::Simulate(args) => invoke_dispatch("simulate", args, cli.host.as_deref())?,
@@ -2472,6 +2622,7 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         Commands::Recipe(args) => recipe_dispatch(args, cli.host.as_deref())?,
         Commands::Map(args) => map_dispatch(args, cli.host.as_deref())?,
         Commands::BatchFile(args) => batch_file_dispatch(args, cli.host.as_deref())?,
+        Commands::Bench(_) => passthrough_only_dispatch("bench"),
     };
 
     Ok(outcome)
@@ -6786,6 +6937,786 @@ fn rollout_dispatch(args: &RolloutArgs, explicit_host: Option<&str>) -> Result<D
             })
         }
     }
+}
+
+fn auth_dispatch(args: &AuthArgs) -> Result<DispatchOutcome> {
+    let store = CredentialStore::default_path();
+    auth_dispatch_with_store(args, &store)
+}
+
+fn auth_dispatch_with_store(args: &AuthArgs, store: &CredentialStore) -> Result<DispatchOutcome> {
+    match &args.command {
+        AuthCommand::Add(add_args) => auth_add_dispatch(add_args, store),
+        AuthCommand::List => auth_list_dispatch(store),
+        AuthCommand::Show(target) => auth_show_dispatch(target, store),
+        AuthCommand::Remove(target) => auth_remove_dispatch(target, store),
+        AuthCommand::Test(target) => auth_test_dispatch(target, store),
+        AuthCommand::Status(status_args) => auth_status_dispatch(status_args, store),
+    }
+}
+
+fn auth_add_dispatch(args: &AuthAddArgs, store: &CredentialStore) -> Result<DispatchOutcome> {
+    if let Err(message) = validate_connector_id(&args.connector) {
+        return Ok(DispatchOutcome {
+            payload: json!({
+                "status": "error",
+                "command": "auth",
+                "subcommand": "add",
+                "error": {
+                    "type": "invalid-connector-id",
+                    "message": message,
+                    "recoverable": true,
+                },
+                "next_actions": [
+                    "Use a connector id containing only letters, digits, `.`, `_`, or `-`.".to_owned(),
+                    "Run `fwc auth list` to inspect the currently stored connector ids.".to_owned(),
+                ],
+            }),
+            exit_code: CliExitCode::Validation,
+        });
+    }
+
+    let fields = match auth_fields_from_add_args(args) {
+        Ok(fields) => fields,
+        Err(message) => {
+            return Ok(DispatchOutcome {
+                payload: json!({
+                    "status": "error",
+                    "command": "auth",
+                    "subcommand": "add",
+                    "error": {
+                        "type": "invalid-credential-fields",
+                        "message": message,
+                        "recoverable": true,
+                    },
+                    "next_actions": [
+                        format!("fwc auth add {} --token <token>", args.connector),
+                        format!("fwc auth add {} --username <user> --password <password>", args.connector),
+                        format!("fwc auth add {} api_key=<value>", args.connector),
+                    ],
+                }),
+                exit_code: CliExitCode::Validation,
+            });
+        }
+    };
+
+    let existing = match store.get(&args.connector) {
+        Ok(existing) => existing,
+        Err(error) => return Ok(auth_store_error_dispatch("add", store, &error)),
+    };
+
+    let mut credential = Credential::new(
+        args.connector.clone(),
+        fields,
+        args.label
+            .as_ref()
+            .map(|label| label.trim().to_owned())
+            .filter(|label| !label.is_empty()),
+    );
+    if let Some(existing) = existing.as_ref() {
+        credential.created_at = existing.created_at;
+        credential.last_used_at = existing.last_used_at;
+        if credential.label.is_none() {
+            credential.label = existing.label.clone();
+        }
+    }
+
+    if let Err(error) = store.add(credential.clone()) {
+        return Ok(auth_store_error_dispatch("add", store, &error));
+    }
+
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "auth");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "auth",
+        "subcommand": "add",
+        "source": "credential-store",
+        "message": if existing.is_some() {
+            format!("Updated the stored credential for `{}`.", args.connector)
+        } else {
+            format!("Stored a credential for `{}`.", args.connector)
+        },
+        "store_path": store.path().display().to_string(),
+        "replaced_existing": existing.is_some(),
+        "credential": credential.redacted_view(),
+        "next_actions": [
+            format!("fwc auth show {}", args.connector),
+            format!("fwc auth test {}", args.connector),
+            "fwc auth status".to_owned(),
+        ],
+    });
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn auth_list_dispatch(store: &CredentialStore) -> Result<DispatchOutcome> {
+    let credentials = match auth_load_all_credentials(store) {
+        Ok(credentials) => credentials,
+        Err(error) => return Ok(auth_store_error_dispatch("list", store, &error)),
+    };
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "auth");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "auth",
+        "subcommand": "list",
+        "source": "credential-store",
+        "store_path": store.path().display().to_string(),
+        "summary": {
+            "credential_count": credentials.len(),
+        },
+        "credentials": credentials
+            .iter()
+            .map(Credential::redacted_view)
+            .collect::<Vec<_>>(),
+        "next_actions": if credentials.is_empty() {
+            vec![
+                "fwc auth add <connector> --token <token>".to_owned(),
+                "fwc auth status".to_owned(),
+            ]
+        } else {
+            vec![
+                "fwc auth show <connector>".to_owned(),
+                "fwc auth test <connector>".to_owned(),
+                "fwc auth status".to_owned(),
+            ]
+        },
+    });
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn auth_show_dispatch(args: &TargetArgs, store: &CredentialStore) -> Result<DispatchOutcome> {
+    if let Err(message) = validate_connector_id(&args.connector) {
+        return Ok(auth_invalid_connector_dispatch("show", &message));
+    }
+    let credential = match auth_load_credential(store, &args.connector) {
+        Ok(credential) => credential,
+        Err(AuthLookupError::Missing) => {
+            return Ok(auth_missing_credential_dispatch(
+                "show",
+                &args.connector,
+                store,
+            ));
+        }
+        Err(AuthLookupError::Store(error)) => {
+            return Ok(auth_store_error_dispatch("show", store, &error));
+        }
+    };
+
+    let (status_entry, metadata, metadata_notes) = auth_status_record(&credential);
+    let test_result = verify_stored_credential(&credential);
+    let warnings = auth_status::check_expiry_warnings(std::slice::from_ref(&metadata));
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "auth");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "auth",
+        "subcommand": "show",
+        "source": "credential-store",
+        "store_path": store.path().display().to_string(),
+        "connector": &credential.connector_id,
+        "credential": credential.redacted_view(),
+        "status_entry": status_entry,
+        "test_result": test_result,
+        "warnings": warnings,
+        "metadata_notes": metadata_notes,
+        "rotation_guidance": auth_status::rotation_guidance(
+            &credential.connector_id,
+            auth_method_tag(&credential.auth_method),
+        ),
+        "next_actions": [
+            format!("fwc auth test {}", args.connector),
+            format!("fwc auth remove {} --yes", args.connector),
+            "fwc auth status".to_owned(),
+        ],
+    });
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn auth_remove_dispatch(args: &AuthRemoveArgs, store: &CredentialStore) -> Result<DispatchOutcome> {
+    if let Err(message) = validate_connector_id(&args.connector) {
+        return Ok(auth_invalid_connector_dispatch("remove", &message));
+    }
+    let credential = match auth_load_credential(store, &args.connector) {
+        Ok(credential) => credential,
+        Err(AuthLookupError::Missing) => {
+            return Ok(auth_missing_credential_dispatch(
+                "remove",
+                &args.connector,
+                store,
+            ));
+        }
+        Err(AuthLookupError::Store(error)) => {
+            return Ok(auth_store_error_dispatch("remove", store, &error));
+        }
+    };
+    if !args.yes {
+        return Ok(DispatchOutcome {
+            payload: json!({
+                "status": "error",
+                "command": "auth",
+                "subcommand": "remove",
+                "source": "credential-store",
+                "store_path": store.path().display().to_string(),
+                "connector": args.connector,
+                "credential": credential.redacted_view(),
+                "requires_confirmation": true,
+                "error": {
+                    "type": "confirmation-required",
+                    "message": format!(
+                        "Refusing to remove the stored credential for `{}` without `--yes`.",
+                        args.connector
+                    ),
+                    "recoverable": true,
+                },
+                "next_actions": [
+                    format!("fwc auth remove {} --yes", args.connector),
+                    format!("fwc auth show {}", args.connector),
+                    "fwc auth list".to_owned(),
+                ],
+            }),
+            exit_code: CliExitCode::Validation,
+        });
+    }
+    match store.remove(&args.connector) {
+        Ok(true) => {
+            let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "auth");
+            let mut payload = json!({
+                "status": "ok",
+                "command": "auth",
+                "subcommand": "remove",
+                "source": "credential-store",
+                "message": format!("Removed the stored credential for `{}`.", args.connector),
+                "store_path": store.path().display().to_string(),
+                "connector": args.connector,
+                "confirmed": true,
+                "next_actions": [
+                    "fwc auth list".to_owned(),
+                    "fwc auth status".to_owned(),
+                ],
+            });
+            envelope.inject_into(&mut payload);
+            Ok(DispatchOutcome {
+                payload,
+                exit_code: CliExitCode::Success,
+            })
+        }
+        Ok(false) => Ok(auth_missing_credential_dispatch(
+            "remove",
+            &args.connector,
+            store,
+        )),
+        Err(error) => Ok(auth_store_error_dispatch("remove", store, &error)),
+    }
+}
+
+fn auth_test_dispatch(args: &TargetArgs, store: &CredentialStore) -> Result<DispatchOutcome> {
+    if let Err(message) = validate_connector_id(&args.connector) {
+        return Ok(auth_invalid_connector_dispatch("test", &message));
+    }
+    let credential = match auth_load_credential(store, &args.connector) {
+        Ok(credential) => credential,
+        Err(AuthLookupError::Missing) => {
+            let result = AuthTestResult {
+                connector_id: args.connector.clone(),
+                status: AuthStatus::NoCredential,
+                message: "no credential stored".to_owned(),
+                expiry_info: None,
+            };
+            return Ok(DispatchOutcome {
+                payload: json!({
+                    "status": "error",
+                    "command": "auth",
+                    "subcommand": "test",
+                    "source": "credential-store",
+                    "store_path": store.path().display().to_string(),
+                    "result": result,
+                    "error": {
+                        "type": "credential-not-found",
+                        "message": format!("No stored credential exists for `{}`.", args.connector),
+                        "recoverable": true,
+                    },
+                    "next_actions": [
+                        format!("fwc auth add {} --token <token>", args.connector),
+                        "fwc auth list".to_owned(),
+                    ],
+                }),
+                exit_code: CliExitCode::Validation,
+            });
+        }
+        Err(AuthLookupError::Store(error)) => {
+            return Ok(auth_store_error_dispatch("test", store, &error));
+        }
+    };
+
+    let result = verify_stored_credential(&credential);
+    let exit_code = if matches!(result.status, AuthStatus::Valid) {
+        CliExitCode::Success
+    } else {
+        CliExitCode::Validation
+    };
+    let payload_status = if matches!(result.status, AuthStatus::Valid) {
+        "ok"
+    } else {
+        "error"
+    };
+    let mut payload = json!({
+        "status": payload_status,
+        "command": "auth",
+        "subcommand": "test",
+        "source": "credential-store",
+        "store_path": store.path().display().to_string(),
+        "verification_scope": {
+            "mode": "local-structural",
+            "description": "Checks stored credential structure and expiry metadata without contacting the live connector.",
+        },
+        "credential": credential.redacted_view(),
+        "result": result,
+        "next_actions": [
+            format!("fwc auth show {}", args.connector),
+            format!("fwc auth add {} ...", args.connector),
+            "fwc auth status".to_owned(),
+        ],
+    });
+    if exit_code.is_success() {
+        let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "auth");
+        envelope.inject_into(&mut payload);
+    }
+    Ok(DispatchOutcome { payload, exit_code })
+}
+
+fn auth_status_dispatch(args: &AuthStatusArgs, store: &CredentialStore) -> Result<DispatchOutcome> {
+    if let Some(connector) = args.connector.as_deref()
+        && let Err(message) = validate_connector_id(connector)
+    {
+        return Ok(auth_invalid_connector_dispatch("status", &message));
+    }
+
+    let credentials = if let Some(connector) = args.connector.as_deref() {
+        match auth_load_credential(store, connector) {
+            Ok(credential) => vec![credential],
+            Err(AuthLookupError::Missing) => {
+                return Ok(auth_missing_credential_dispatch("status", connector, store));
+            }
+            Err(AuthLookupError::Store(error)) => {
+                return Ok(auth_store_error_dispatch("status", store, &error));
+            }
+        }
+    } else {
+        match auth_load_all_credentials(store) {
+            Ok(credentials) => credentials,
+            Err(error) => return Ok(auth_store_error_dispatch("status", store, &error)),
+        }
+    };
+
+    let mut metadata = Vec::with_capacity(credentials.len());
+    let mut entries = Vec::with_capacity(credentials.len());
+    for credential in &credentials {
+        let (status_entry, credential_metadata, metadata_notes) = auth_status_record(credential);
+        let test_result = verify_stored_credential(credential);
+        metadata.push(credential_metadata);
+        entries.push(json!({
+            "connector_id": &credential.connector_id,
+            "auth_method": auth_method_tag(&credential.auth_method),
+            "label": &credential.label,
+            "status_entry": status_entry,
+            "structural_status": test_result.status,
+            "structural_message": test_result.message,
+            "expiry_info": test_result.expiry_info,
+            "metadata_notes": metadata_notes,
+        }));
+    }
+    let warnings = auth_status::check_expiry_warnings(&metadata);
+    let attention_count = entries
+        .iter()
+        .filter(|entry| {
+            entry["status_entry"]["expiry_status"]
+                .as_str()
+                .is_some_and(|status| {
+                    matches!(status, "expiring_soon" | "expiring_imminently" | "expired")
+                })
+                || entry["structural_status"]
+                    .as_str()
+                    .is_some_and(|status| status != "valid")
+        })
+        .count();
+
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "auth");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "auth",
+        "subcommand": "status",
+        "source": "credential-store",
+        "store_path": store.path().display().to_string(),
+        "summary": {
+            "credential_count": entries.len(),
+            "attention_count": attention_count,
+            "warning_count": warnings.len(),
+        },
+        "warnings": warnings,
+        "credentials": entries,
+        "next_actions": if let Some(connector) = args.connector.as_deref() {
+            vec![
+                format!("fwc auth show {connector}"),
+                format!("fwc auth test {connector}"),
+                format!("fwc auth add {connector} ..."),
+            ]
+        } else {
+            vec![
+                "fwc auth list".to_owned(),
+                "fwc auth show <connector>".to_owned(),
+                "fwc auth test <connector>".to_owned(),
+            ]
+        },
+    });
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn auth_store_error_dispatch(
+    subcommand: &str,
+    store: &CredentialStore,
+    message: &str,
+) -> DispatchOutcome {
+    DispatchOutcome {
+        payload: json!({
+            "status": "error",
+            "command": "auth",
+            "subcommand": subcommand,
+            "source": "credential-store",
+            "store_path": store.path().display().to_string(),
+            "error": {
+                "type": "credential-store-error",
+                "message": message,
+                "recoverable": true,
+            },
+            "next_actions": [
+                "Retry the command once the local keychain or credential store is available.".to_owned(),
+                "Run `fwc auth status` to verify the current local auth view.".to_owned(),
+            ],
+        }),
+        exit_code: CliExitCode::Internal,
+    }
+}
+
+fn auth_missing_credential_dispatch(
+    subcommand: &str,
+    connector: &str,
+    store: &CredentialStore,
+) -> DispatchOutcome {
+    DispatchOutcome {
+        payload: json!({
+            "status": "error",
+            "command": "auth",
+            "subcommand": subcommand,
+            "source": "credential-store",
+            "store_path": store.path().display().to_string(),
+            "error": {
+                "type": "credential-not-found",
+                "message": format!("No stored credential exists for `{connector}`."),
+                "recoverable": true,
+            },
+            "connector": connector,
+            "next_actions": [
+                format!("fwc auth add {connector} --token <token>"),
+                "fwc auth list".to_owned(),
+            ],
+        }),
+        exit_code: CliExitCode::Validation,
+    }
+}
+
+fn auth_invalid_connector_dispatch(subcommand: &str, message: &str) -> DispatchOutcome {
+    DispatchOutcome {
+        payload: json!({
+            "status": "error",
+            "command": "auth",
+            "subcommand": subcommand,
+            "error": {
+                "type": "invalid-connector-id",
+                "message": message,
+                "recoverable": true,
+            },
+            "next_actions": [
+                "Use a connector id containing only letters, digits, `.`, `_`, or `-`.".to_owned(),
+                "Run `fwc auth list` to inspect stored connector ids.".to_owned(),
+            ],
+        }),
+        exit_code: CliExitCode::Validation,
+    }
+}
+
+enum AuthLookupError {
+    Missing,
+    Store(String),
+}
+
+fn auth_load_credential(
+    store: &CredentialStore,
+    connector: &str,
+) -> std::result::Result<Credential, AuthLookupError> {
+    match store.get(connector) {
+        Ok(Some(credential)) => Ok(credential),
+        Ok(None) => Err(AuthLookupError::Missing),
+        Err(error) => Err(AuthLookupError::Store(error)),
+    }
+}
+
+fn auth_load_all_credentials(
+    store: &CredentialStore,
+) -> std::result::Result<Vec<Credential>, String> {
+    let mut credentials = Vec::new();
+    let mut ids = store.list_ids()?;
+    ids.sort();
+    for connector_id in ids {
+        if let Some(credential) = store.get(&connector_id)? {
+            credentials.push(credential);
+        }
+    }
+    Ok(credentials)
+}
+
+fn auth_fields_from_add_args(
+    args: &AuthAddArgs,
+) -> std::result::Result<BTreeMap<String, String>, String> {
+    let mut raw_fields = args.fields.clone();
+    raw_fields.extend(args.extra_fields.clone());
+    let mut fields = if raw_fields.is_empty() {
+        BTreeMap::new()
+    } else {
+        parse_credential_fields(&raw_fields)?
+    };
+
+    insert_auth_field(&mut fields, "token", args.token.clone())?;
+    insert_auth_field(&mut fields, "api_token", args.api_token.clone())?;
+    insert_auth_field(&mut fields, "api_key", args.api_key.clone())?;
+    insert_auth_field(&mut fields, "username", args.username.clone())?;
+    insert_auth_field(&mut fields, "password", args.password.clone())?;
+    insert_auth_field(&mut fields, "client_id", args.client_id.clone())?;
+    insert_auth_field(&mut fields, "client_secret", args.client_secret.clone())?;
+    insert_auth_field(&mut fields, "access_token", args.access_token.clone())?;
+    insert_auth_field(&mut fields, "refresh_token", args.refresh_token.clone())?;
+    insert_auth_field(&mut fields, "session_token", args.session_token.clone())?;
+    insert_auth_field(&mut fields, "credential_id", args.credential_id.clone())?;
+    insert_auth_field(&mut fields, "expires_at", args.expires_at.clone())?;
+
+    if fields.is_empty() {
+        return Err("at least one credential field is required".to_owned());
+    }
+    if let Some(raw) = fields.get("expires_at") {
+        parse_auth_expiry(raw)?;
+    }
+    Ok(fields)
+}
+
+fn insert_auth_field(
+    fields: &mut BTreeMap<String, String>,
+    key: &str,
+    value: Option<String>,
+) -> std::result::Result<(), String> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    match fields.get(key) {
+        Some(existing) if existing != &value => Err(format!(
+            "credential field `{key}` was provided more than once with conflicting values"
+        )),
+        Some(_) => Ok(()),
+        None => {
+            fields.insert(key.to_owned(), value);
+            Ok(())
+        }
+    }
+}
+
+fn auth_status_record(
+    credential: &Credential,
+) -> (
+    auth_status::AuthStatusEntry,
+    auth_status::AuthMetadata,
+    Vec<String>,
+) {
+    let mut notes = Vec::new();
+    let expires_at =
+        credential
+            .fields
+            .get("expires_at")
+            .and_then(|raw| match parse_auth_expiry(raw) {
+                Ok(timestamp) => Some(timestamp),
+                Err(message) => {
+                    notes.push(message);
+                    None
+                }
+            });
+    let mut metadata = auth_status::AuthMetadata::new(&credential.connector_id, expires_at);
+    metadata.created_at = credential.created_at;
+    metadata.last_used_at = credential.last_used_at;
+    if credential.updated_at > credential.created_at {
+        metadata.last_rotated_at = Some(credential.updated_at);
+        metadata.rotation_history.push(auth_status::RotationEvent {
+            rotated_at: credential.updated_at,
+            reason: auth_status::RotationReason::Manual,
+            notes: Some(
+                "Approximated from `credential.updated_at`; detailed rotation history is not yet persisted."
+                    .to_owned(),
+            ),
+        });
+        notes.push(
+            "rotation history is approximated from the latest stored update because detailed events are not yet persisted."
+                .to_owned(),
+        );
+    }
+    (
+        auth_status::AuthStatusEntry::from_metadata(&metadata),
+        metadata,
+        notes,
+    )
+}
+
+fn verify_stored_credential(credential: &Credential) -> AuthTestResult {
+    let connector_id = credential.connector_id.clone();
+    let fields = &credential.fields;
+    let has_value = |key: &str| {
+        fields
+            .get(key)
+            .is_some_and(|value| !value.trim().is_empty())
+    };
+
+    let missing = match credential.auth_method {
+        AuthMethod::BearerToken => {
+            if has_value("token") || has_value("api_token") {
+                Vec::new()
+            } else {
+                vec!["token/api_token"]
+            }
+        }
+        AuthMethod::BasicAuth => ["username", "password"]
+            .into_iter()
+            .filter(|key| !has_value(key))
+            .collect(),
+        AuthMethod::OAuth2 => {
+            let has_client_pair = has_value("client_id") && has_value("client_secret");
+            if has_value("access_token") || has_value("refresh_token") || has_client_pair {
+                Vec::new()
+            } else {
+                vec!["access_token|refresh_token|client_id+client_secret"]
+            }
+        }
+        AuthMethod::ApiKey => {
+            if has_value("api_key") {
+                Vec::new()
+            } else {
+                vec!["api_key"]
+            }
+        }
+        AuthMethod::SessionToken => {
+            if has_value("session_token") {
+                Vec::new()
+            } else {
+                vec!["session_token"]
+            }
+        }
+        AuthMethod::SecretlessRef => {
+            if has_value("credential_id") {
+                Vec::new()
+            } else {
+                vec!["credential_id"]
+            }
+        }
+        AuthMethod::Custom => {
+            if fields.values().any(|value| !value.trim().is_empty()) {
+                Vec::new()
+            } else {
+                vec!["at least one non-empty field"]
+            }
+        }
+    };
+
+    if !missing.is_empty() {
+        return AuthTestResult {
+            connector_id,
+            status: AuthStatus::Invalid,
+            message: format!("missing required fields: {}", missing.join(", ")),
+            expiry_info: None,
+        };
+    }
+
+    if let Some(raw_expiry) = fields.get("expires_at") {
+        let expires_at = match parse_auth_expiry(raw_expiry) {
+            Ok(expires_at) => expires_at,
+            Err(message) => {
+                return AuthTestResult {
+                    connector_id,
+                    status: AuthStatus::Invalid,
+                    message,
+                    expiry_info: None,
+                };
+            }
+        };
+        let now = Utc::now();
+        let days_remaining = (expires_at - now).num_days();
+        let expiry_info = ExpiryInfo {
+            expires_at: raw_expiry.clone(),
+            days_remaining,
+        };
+        if expires_at <= now {
+            return AuthTestResult {
+                connector_id,
+                status: AuthStatus::Expired,
+                message: "credential has expired".to_owned(),
+                expiry_info: Some(expiry_info),
+            };
+        }
+        return AuthTestResult {
+            connector_id,
+            status: AuthStatus::Valid,
+            message: format!(
+                "{} credential is structurally valid and not expired.",
+                auth_method_tag(&credential.auth_method)
+            ),
+            expiry_info: Some(expiry_info),
+        };
+    }
+
+    AuthTestResult {
+        connector_id,
+        status: AuthStatus::Valid,
+        message: format!(
+            "{} credential is structurally valid.",
+            auth_method_tag(&credential.auth_method)
+        ),
+        expiry_info: None,
+    }
+}
+
+fn auth_method_tag(method: &AuthMethod) -> &'static str {
+    match method {
+        AuthMethod::BearerToken => "bearer_token",
+        AuthMethod::BasicAuth => "basic_auth",
+        AuthMethod::OAuth2 => "oauth2",
+        AuthMethod::ApiKey => "api_key",
+        AuthMethod::SessionToken => "session_token",
+        AuthMethod::SecretlessRef => "secretless_ref",
+        AuthMethod::Custom => "custom",
+    }
+}
+
+fn parse_auth_expiry(raw: &str) -> std::result::Result<DateTime<Utc>, String> {
+    DateTime::parse_from_rfc3339(raw)
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+        .map_err(|error| format!("invalid `expires_at` timestamp `{raw}`: {error}"))
 }
 
 fn config_dispatch(args: &ConfigArgs) -> Result<DispatchOutcome> {
@@ -15284,6 +16215,7 @@ struct ErrorDetails {
 const CONFIG_SUBCOMMANDS: &[&str] = &[
     "schema", "get", "set", "unset", "import", "export", "doctor",
 ];
+const AUTH_SUBCOMMANDS: &[&str] = &["add", "list", "show", "remove", "test", "status"];
 const RECIPE_SUBCOMMANDS: &[&str] = &[
     "list", "show", "validate", "run", "dry-run", "estimate", "export",
 ];
@@ -15691,6 +16623,30 @@ fn parse_failure_dispatch(args: &[String], error: &clap::Error) -> DispatchOutco
     let command_index = first_command_index(args);
     let command = command_index.and_then(|index| args.get(index).map(String::as_str));
 
+    if command == Some("auth") && command_index.is_some_and(|index| index + 1 == args.len()) {
+        return structured_error(
+            "missing-auth-subcommand",
+            "No auth subcommand was provided.",
+            CliExitCode::Parse,
+            true,
+            args,
+            &normalized_args,
+            ErrorDetails {
+                did_you_mean: Vec::new(),
+                examples: vec![
+                    "fwc auth list".to_owned(),
+                    "fwc auth add github --token <token>".to_owned(),
+                    "fwc auth status".to_owned(),
+                ],
+                next_actions: vec![
+                    "Use `fwc auth list` to inspect the current credential store.".to_owned(),
+                    "Use `fwc auth add|show|remove|test|status` for concrete credential workflows."
+                        .to_owned(),
+                ],
+            },
+        );
+    }
+
     match error.kind() {
         ErrorKind::MissingSubcommand => {
             if command == Some("task") {
@@ -15732,6 +16688,30 @@ fn parse_failure_dispatch(args: &[String], error: &clap::Error) -> DispatchOutco
                         next_actions: vec![
                             "Use `fwc agent list` to inspect the local coordination hub.".to_owned(),
                             "Use `fwc agent announce|reserve|send|inbox` to record or inspect coordinated work.".to_owned(),
+                        ],
+                    },
+                );
+            }
+
+            if command == Some("auth") {
+                return structured_error(
+                    "missing-auth-subcommand",
+                    "No auth subcommand was provided.",
+                    CliExitCode::Parse,
+                    true,
+                    args,
+                    &normalized_args,
+                    ErrorDetails {
+                        did_you_mean: Vec::new(),
+                        examples: vec![
+                            "fwc auth list".to_owned(),
+                            "fwc auth add github --token <token>".to_owned(),
+                            "fwc auth status".to_owned(),
+                        ],
+                        next_actions: vec![
+                            "Use `fwc auth list` to inspect the current credential store.".to_owned(),
+                            "Use `fwc auth add|show|remove|test|status` for concrete credential workflows."
+                                .to_owned(),
                         ],
                     },
                 );
@@ -15803,6 +16783,21 @@ fn parse_failure_dispatch(args: &[String], error: &clap::Error) -> DispatchOutco
             )
         }
         ErrorKind::InvalidSubcommand | ErrorKind::UnknownArgument => match command {
+            Some("auth") => unknown_subcommand_dispatch(
+                "auth-subcommand",
+                "auth",
+                args,
+                &normalized_args,
+                command_index
+                    .and_then(|index| args.get(index + 1))
+                    .map(String::as_str),
+                AUTH_SUBCOMMANDS,
+                vec![
+                    "fwc auth list".to_owned(),
+                    "fwc auth add github --token <token>".to_owned(),
+                    "fwc auth status".to_owned(),
+                ],
+            ),
             Some("config") => unknown_subcommand_dispatch(
                 "config-subcommand",
                 "config",
@@ -16040,6 +17035,12 @@ fn unknown_subcommand_dispatch(
             "Use `fwc config schema <connector>` to inspect configuration requirements.".to_owned(),
             "Use `fwc config doctor <connector>` after any config change.".to_owned(),
         ]
+    } else if scope == "auth" {
+        vec![
+            "Use `fwc auth list` to inspect the current local credential store.".to_owned(),
+            "Use `fwc auth add|show|remove|test|status` for explicit credential workflows."
+                .to_owned(),
+        ]
     } else if scope == "task" {
         vec![
             "Use `fwc task \"<intent>\"` to create a new workflow capsule.".to_owned(),
@@ -16079,6 +17080,8 @@ fn structured_error(
     normalized_args: &[String],
     details: ErrorDetails,
 ) -> DispatchOutcome {
+    let received_args = redact_sensitive_args(received_args);
+    let normalized_args = redact_sensitive_args(normalized_args);
     DispatchOutcome {
         payload: json!({
             "status": "error",
@@ -16159,11 +17162,124 @@ fn annotate_with_corrections(
             "input_normalization".to_owned(),
             json!({
                 "applied": corrections,
-                "received": received_args,
-                "normalized": normalized_args,
+                "received": redact_sensitive_args(received_args),
+                "normalized": redact_sensitive_args(normalized_args),
             }),
         );
     }
+}
+
+fn redact_sensitive_args(args: &[String]) -> Vec<String> {
+    let auth_add_index = args
+        .iter()
+        .position(|arg| arg == "auth")
+        .and_then(|auth_index| {
+            args.iter()
+                .skip(auth_index + 1)
+                .position(|arg| arg == "add")
+                .map(|relative| auth_index + 1 + relative)
+        });
+    let mut redacted = Vec::with_capacity(args.len());
+    let mut redact_next_value = false;
+    let mut redact_next_field = false;
+
+    for (index, arg) in args.iter().enumerate() {
+        if redact_next_value {
+            redacted.push("<redacted>".to_owned());
+            redact_next_value = false;
+            continue;
+        }
+        if redact_next_field {
+            redacted.push(redact_assignment_value(arg));
+            redact_next_field = false;
+            continue;
+        }
+
+        if let Some((flag, value)) = arg.split_once('=') {
+            if is_sensitive_flag(flag) {
+                redacted.push(format!("{flag}=<redacted>"));
+                continue;
+            }
+            if flag == "--field" {
+                redacted.push(format!("--field={}", redact_assignment_value(value)));
+                continue;
+            }
+            if auth_add_index.is_some_and(|add_index| index > add_index) && !flag.starts_with('-') {
+                redacted.push(redact_assignment_value(arg));
+                continue;
+            }
+            if !flag.starts_with('-') && is_sensitive_field_key(flag) {
+                redacted.push(redact_assignment_value(arg));
+                continue;
+            }
+            redacted.push(arg.clone());
+            continue;
+        }
+
+        if is_sensitive_flag(arg) {
+            redacted.push(arg.clone());
+            redact_next_value = true;
+            continue;
+        }
+        if arg == "--field" {
+            redacted.push(arg.clone());
+            redact_next_field = true;
+            continue;
+        }
+        if auth_add_index.is_some_and(|add_index| index > add_index)
+            && !arg.starts_with('-')
+            && arg.contains('=')
+        {
+            redacted.push(redact_assignment_value(arg));
+            continue;
+        }
+        redacted.push(arg.clone());
+    }
+
+    redacted
+}
+
+fn redact_assignment_value(raw: &str) -> String {
+    raw.split_once('=').map_or_else(
+        || "<redacted>".to_owned(),
+        |(key, _)| format!("{key}=<redacted>"),
+    )
+}
+
+fn is_sensitive_flag(flag: &str) -> bool {
+    matches!(
+        flag,
+        "--capability-token"
+            | "--approval-token"
+            | "--token"
+            | "--api-token"
+            | "--api-key"
+            | "--username"
+            | "--password"
+            | "--client-id"
+            | "--client-secret"
+            | "--access-token"
+            | "--refresh-token"
+            | "--session-token"
+            | "--credential-id"
+    )
+}
+
+fn is_sensitive_field_key(key: &str) -> bool {
+    matches!(
+        key,
+        "token"
+            | "api_token"
+            | "api_key"
+            | "username"
+            | "password"
+            | "client_id"
+            | "client_secret"
+            | "access_token"
+            | "refresh_token"
+            | "session_token"
+            | "credential_id"
+    )
 }
 
 fn enrich_unknown_guide_command(payload: &mut Value, command: Option<&str>) {
@@ -16241,6 +17357,12 @@ mod tests {
         let owned_args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
         let outcome = execute(&owned_args).expect("execution should not fail internally");
         (outcome.exit_code, outcome.text)
+    }
+
+    fn temp_auth_store() -> (TempDir, super::CredentialStore) {
+        let tempdir = tempfile::tempdir().expect("auth tempdir should exist");
+        let path = tempdir.path().join("credentials.enc");
+        (tempdir, super::CredentialStore::new(path, [7; 32]))
     }
 
     fn assert_discovery_provenance(payload: &Value, source: &str, authoritative: bool, mode: &str) {
@@ -17354,9 +18476,541 @@ deny_ptrace = true
     }
 
     #[test]
+    fn auth_dispatch_add_show_and_status_round_trip() {
+        let (_tempdir, store) = temp_auth_store();
+        let add = super::AuthArgs {
+            command: super::AuthCommand::Add(super::AuthAddArgs {
+                connector: "github".to_owned(),
+                label: Some("work".to_owned()),
+                fields: Vec::new(),
+                extra_fields: Vec::new(),
+                token: Some("ghp_exampletoken".to_owned()),
+                api_token: None,
+                api_key: None,
+                username: None,
+                password: None,
+                client_id: None,
+                client_secret: None,
+                access_token: None,
+                refresh_token: None,
+                session_token: None,
+                credential_id: None,
+                expires_at: Some("2030-01-01T00:00:00Z".to_owned()),
+            }),
+        };
+        let added = super::auth_dispatch_with_store(&add, &store).expect("auth add should work");
+        assert_eq!(added.exit_code, CliExitCode::Success);
+        assert_eq!(added.payload["credential"]["fields"]["token"], "g***n");
+
+        let show = super::auth_dispatch_with_store(
+            &super::AuthArgs {
+                command: super::AuthCommand::Show(super::TargetArgs {
+                    connector: "github".to_owned(),
+                }),
+            },
+            &store,
+        )
+        .expect("auth show should work");
+        assert_eq!(show.exit_code, CliExitCode::Success);
+        assert_eq!(show.payload["test_result"]["status"], "valid");
+        assert_eq!(show.payload["status_entry"]["expiry_status"], "valid");
+
+        let status = super::auth_dispatch_with_store(
+            &super::AuthArgs {
+                command: super::AuthCommand::Status(super::AuthStatusArgs {
+                    connector: Some("github".to_owned()),
+                }),
+            },
+            &store,
+        )
+        .expect("auth status should work");
+        assert_eq!(status.exit_code, CliExitCode::Success);
+        assert_eq!(status.payload["summary"]["credential_count"], 1);
+        assert_eq!(
+            status.payload["credentials"][0]["structural_status"],
+            "valid"
+        );
+    }
+
+    #[test]
+    fn auth_status_reports_expired_credentials() {
+        let (_tempdir, store) = temp_auth_store();
+        let add = super::AuthArgs {
+            command: super::AuthCommand::Add(super::AuthAddArgs {
+                connector: "slack".to_owned(),
+                label: None,
+                fields: Vec::new(),
+                extra_fields: Vec::new(),
+                token: Some("xoxb-expired-token".to_owned()),
+                api_token: None,
+                api_key: None,
+                username: None,
+                password: None,
+                client_id: None,
+                client_secret: None,
+                access_token: None,
+                refresh_token: None,
+                session_token: None,
+                credential_id: None,
+                expires_at: Some("2000-01-01T00:00:00Z".to_owned()),
+            }),
+        };
+        let _added = super::auth_dispatch_with_store(&add, &store).expect("auth add should work");
+
+        let status = super::auth_dispatch_with_store(
+            &super::AuthArgs {
+                command: super::AuthCommand::Status(super::AuthStatusArgs { connector: None }),
+            },
+            &store,
+        )
+        .expect("auth status should work");
+        assert_eq!(status.exit_code, CliExitCode::Success);
+        assert_eq!(status.payload["summary"]["warning_count"], 1);
+        assert_eq!(
+            status.payload["credentials"][0]["status_entry"]["expiry_status"],
+            "expired"
+        );
+        assert_eq!(
+            status.payload["credentials"][0]["structural_status"],
+            "expired"
+        );
+    }
+
+    #[test]
+    fn auth_list_dispatch_redacts_and_sorts_credentials() {
+        let (_tempdir, store) = temp_auth_store();
+        let slack = super::AuthArgs {
+            command: super::AuthCommand::Add(super::AuthAddArgs {
+                connector: "slack".to_owned(),
+                label: None,
+                fields: Vec::new(),
+                extra_fields: Vec::new(),
+                token: Some("xoxb-secret".to_owned()),
+                api_token: None,
+                api_key: None,
+                username: None,
+                password: None,
+                client_id: None,
+                client_secret: None,
+                access_token: None,
+                refresh_token: None,
+                session_token: None,
+                credential_id: None,
+                expires_at: None,
+            }),
+        };
+        let github = super::AuthArgs {
+            command: super::AuthCommand::Add(super::AuthAddArgs {
+                connector: "github".to_owned(),
+                label: None,
+                fields: Vec::new(),
+                extra_fields: Vec::new(),
+                token: Some("ghp-secret".to_owned()),
+                api_token: None,
+                api_key: None,
+                username: None,
+                password: None,
+                client_id: None,
+                client_secret: None,
+                access_token: None,
+                refresh_token: None,
+                session_token: None,
+                credential_id: None,
+                expires_at: None,
+            }),
+        };
+
+        super::auth_dispatch_with_store(&slack, &store).expect("slack add should work");
+        super::auth_dispatch_with_store(&github, &store).expect("github add should work");
+
+        let list = super::auth_dispatch_with_store(
+            &super::AuthArgs {
+                command: super::AuthCommand::List,
+            },
+            &store,
+        )
+        .expect("auth list should work");
+
+        assert_eq!(list.exit_code, CliExitCode::Success);
+        assert_eq!(list.payload["summary"]["credential_count"], 2);
+        assert_eq!(list.payload["credentials"][0]["connector_id"], "github");
+        assert_eq!(list.payload["credentials"][1]["connector_id"], "slack");
+        assert_eq!(list.payload["credentials"][0]["fields"]["token"], "g***t");
+        assert_eq!(list.payload["credentials"][1]["fields"]["token"], "x***t");
+    }
+
+    #[test]
+    fn auth_remove_requires_confirmation_before_mutating() {
+        let (_tempdir, store) = temp_auth_store();
+        let add = super::AuthArgs {
+            command: super::AuthCommand::Add(super::AuthAddArgs {
+                connector: "github".to_owned(),
+                label: None,
+                fields: Vec::new(),
+                extra_fields: Vec::new(),
+                token: Some("ghp-secret".to_owned()),
+                api_token: None,
+                api_key: None,
+                username: None,
+                password: None,
+                client_id: None,
+                client_secret: None,
+                access_token: None,
+                refresh_token: None,
+                session_token: None,
+                credential_id: None,
+                expires_at: None,
+            }),
+        };
+        super::auth_dispatch_with_store(&add, &store).expect("auth add should work");
+
+        let remove = super::auth_dispatch_with_store(
+            &super::AuthArgs {
+                command: super::AuthCommand::Remove(super::AuthRemoveArgs {
+                    connector: "github".to_owned(),
+                    yes: false,
+                }),
+            },
+            &store,
+        )
+        .expect("auth remove should return structured confirmation error");
+
+        assert_eq!(remove.exit_code, CliExitCode::Validation);
+        assert_eq!(remove.payload["error"]["type"], "confirmation-required");
+        assert_eq!(remove.payload["requires_confirmation"], true);
+        assert!(
+            store
+                .get("github")
+                .expect("store get should work")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn auth_remove_with_confirmation_deletes_credential() {
+        let (_tempdir, store) = temp_auth_store();
+        let add = super::AuthArgs {
+            command: super::AuthCommand::Add(super::AuthAddArgs {
+                connector: "github".to_owned(),
+                label: None,
+                fields: Vec::new(),
+                extra_fields: Vec::new(),
+                token: Some("ghp-secret".to_owned()),
+                api_token: None,
+                api_key: None,
+                username: None,
+                password: None,
+                client_id: None,
+                client_secret: None,
+                access_token: None,
+                refresh_token: None,
+                session_token: None,
+                credential_id: None,
+                expires_at: None,
+            }),
+        };
+        super::auth_dispatch_with_store(&add, &store).expect("auth add should work");
+
+        let remove = super::auth_dispatch_with_store(
+            &super::AuthArgs {
+                command: super::AuthCommand::Remove(super::AuthRemoveArgs {
+                    connector: "github".to_owned(),
+                    yes: true,
+                }),
+            },
+            &store,
+        )
+        .expect("auth remove should work");
+
+        assert_eq!(remove.exit_code, CliExitCode::Success);
+        assert_eq!(remove.payload["confirmed"], true);
+        assert!(
+            store
+                .get("github")
+                .expect("store get should work")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn auth_test_reports_missing_credential_without_leaking_state() {
+        let (_tempdir, store) = temp_auth_store();
+        let test = super::auth_dispatch_with_store(
+            &super::AuthArgs {
+                command: super::AuthCommand::Test(super::TargetArgs {
+                    connector: "github".to_owned(),
+                }),
+            },
+            &store,
+        )
+        .expect("auth test should produce a structured error");
+
+        assert_eq!(test.exit_code, CliExitCode::Validation);
+        assert_eq!(test.payload["error"]["type"], "credential-not-found");
+        assert_eq!(test.payload["result"]["status"], "no_credential");
+    }
+
+    #[test]
+    fn auth_test_reports_local_structural_scope_for_valid_credentials() {
+        let (_tempdir, store) = temp_auth_store();
+        let add = super::AuthArgs {
+            command: super::AuthCommand::Add(super::AuthAddArgs {
+                connector: "github".to_owned(),
+                label: None,
+                fields: Vec::new(),
+                extra_fields: Vec::new(),
+                token: Some("ghp-secret".to_owned()),
+                api_token: None,
+                api_key: None,
+                username: None,
+                password: None,
+                client_id: None,
+                client_secret: None,
+                access_token: None,
+                refresh_token: None,
+                session_token: None,
+                credential_id: None,
+                expires_at: Some("2030-01-01T00:00:00Z".to_owned()),
+            }),
+        };
+        super::auth_dispatch_with_store(&add, &store).expect("auth add should work");
+
+        let test = super::auth_dispatch_with_store(
+            &super::AuthArgs {
+                command: super::AuthCommand::Test(super::TargetArgs {
+                    connector: "github".to_owned(),
+                }),
+            },
+            &store,
+        )
+        .expect("auth test should succeed");
+
+        assert_eq!(test.exit_code, CliExitCode::Success);
+        assert_eq!(
+            test.payload["verification_scope"]["mode"],
+            "local-structural"
+        );
+        assert_eq!(test.payload["source"], "credential-store");
+        assert_eq!(test.payload["result"]["status"], "valid");
+        assert_eq!(test.payload["credential"]["fields"]["token"], "g***t");
+    }
+
+    #[test]
+    fn execute_auth_missing_subcommand_returns_structured_guidance() {
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "auth"]);
+
+        assert_eq!(exit_code, CliExitCode::Parse.into());
+        assert_eq!(payload["error"]["type"], "missing-auth-subcommand");
+        assert_eq!(payload["error"]["examples"][0], "fwc auth list");
+    }
+
+    #[test]
+    fn execute_auth_unknown_subcommand_returns_family_guidance() {
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "auth", "rotate"]);
+
+        assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
+        // Error type may be "auth-subcommand" or "unknown-command" depending on dispatch path.
+        let error_type = payload["error"]["type"].as_str().unwrap_or("");
+        assert!(
+            error_type.contains("auth") || error_type.contains("unknown"),
+            "Error type should reference auth or unknown: {error_type}"
+        );
+        // Next actions may be at top level or under error.
+        let next_actions = payload["next_actions"]
+            .as_array()
+            .or_else(|| payload["error"]["next_actions"].as_array());
+        assert!(
+            next_actions.is_some(),
+            "Response should include next_actions: {payload:?}"
+        );
+    }
+
+    #[test]
+    fn auth_help_contract_mentions_supported_subcommands_and_truthful_scope() {
+        let cmd = super::Cli::command();
+        let mut auth = cmd
+            .find_subcommand("auth")
+            .expect("auth subcommand should exist")
+            .clone();
+        let help = auth.render_long_help().to_string();
+
+        for subcommand in ["add", "list", "show", "remove", "test", "status"] {
+            assert!(
+                help.contains(subcommand),
+                "auth help should mention `{subcommand}`: {help}"
+            );
+        }
+        assert!(
+            help.contains("without contacting the live connector"),
+            "auth help should describe the local-only auth test boundary: {help}"
+        );
+    }
+
+    #[test]
+    fn auth_remove_help_mentions_confirmation_flag() {
+        let cmd = super::Cli::command();
+        let auth = cmd
+            .find_subcommand("auth")
+            .expect("auth subcommand should exist")
+            .clone();
+        let mut remove = auth
+            .find_subcommand("remove")
+            .expect("auth remove subcommand should exist")
+            .clone();
+        let help = remove.render_long_help().to_string();
+
+        assert!(
+            help.contains("--yes"),
+            "remove help should mention --yes: {help}"
+        );
+        assert!(
+            help.contains("Confirm deleting the stored credential"),
+            "remove help should explain confirmation semantics: {help}"
+        );
+    }
+
+    #[test]
+    fn prepare_cli_parses_auth_remove_confirmation_flag() {
+        let prepared = prepare_cli(&[
+            "fwc".to_owned(),
+            "auth".to_owned(),
+            "remove".to_owned(),
+            "github".to_owned(),
+            "--yes".to_owned(),
+        ])
+        .expect("auth remove should parse");
+
+        match prepared.cli.command {
+            Commands::Auth(args) => match args.command {
+                super::AuthCommand::Remove(args) => {
+                    assert_eq!(args.connector, "github");
+                    assert!(args.yes);
+                }
+                command => panic!("expected auth remove command, got {command:?}"),
+            },
+            command => panic!("expected auth command, got {command:?}"),
+        }
+    }
+
+    #[test]
+    fn auth_dispatch_transcript_preserves_redaction_and_confirmation_boundaries() {
+        let (_tempdir, store) = temp_auth_store();
+        let add = super::AuthArgs {
+            command: super::AuthCommand::Add(super::AuthAddArgs {
+                connector: "github".to_owned(),
+                label: Some("work".to_owned()),
+                fields: Vec::new(),
+                extra_fields: Vec::new(),
+                token: Some("ghp-transcript-secret".to_owned()),
+                api_token: None,
+                api_key: None,
+                username: None,
+                password: None,
+                client_id: None,
+                client_secret: None,
+                access_token: None,
+                refresh_token: None,
+                session_token: None,
+                credential_id: None,
+                expires_at: Some("2030-01-01T00:00:00Z".to_owned()),
+            }),
+        };
+
+        let added = super::auth_dispatch_with_store(&add, &store).expect("auth add should work");
+        assert_eq!(added.exit_code, CliExitCode::Success);
+        assert_eq!(added.payload["credential"]["fields"]["token"], "g***t");
+
+        let tested = super::auth_dispatch_with_store(
+            &super::AuthArgs {
+                command: super::AuthCommand::Test(super::TargetArgs {
+                    connector: "github".to_owned(),
+                }),
+            },
+            &store,
+        )
+        .expect("auth test should work");
+        assert_eq!(tested.exit_code, CliExitCode::Success);
+        assert_eq!(
+            tested.payload["verification_scope"]["mode"],
+            "local-structural"
+        );
+        assert_eq!(tested.payload["result"]["status"], "valid");
+
+        let blocked_remove = super::auth_dispatch_with_store(
+            &super::AuthArgs {
+                command: super::AuthCommand::Remove(super::AuthRemoveArgs {
+                    connector: "github".to_owned(),
+                    yes: false,
+                }),
+            },
+            &store,
+        )
+        .expect("auth remove should require confirmation");
+        assert_eq!(blocked_remove.exit_code, CliExitCode::Validation);
+        assert_eq!(
+            blocked_remove.payload["error"]["type"],
+            "confirmation-required"
+        );
+
+        let confirmed_remove = super::auth_dispatch_with_store(
+            &super::AuthArgs {
+                command: super::AuthCommand::Remove(super::AuthRemoveArgs {
+                    connector: "github".to_owned(),
+                    yes: true,
+                }),
+            },
+            &store,
+        )
+        .expect("auth remove with confirmation should work");
+        assert_eq!(confirmed_remove.exit_code, CliExitCode::Success);
+        assert_eq!(confirmed_remove.payload["confirmed"], true);
+
+        let listed = super::auth_dispatch_with_store(
+            &super::AuthArgs {
+                command: super::AuthCommand::List,
+            },
+            &store,
+        )
+        .expect("auth list should work");
+        assert_eq!(listed.exit_code, CliExitCode::Success);
+        assert_eq!(listed.payload["summary"]["credential_count"], 0);
+    }
+
+    #[test]
+    fn redact_sensitive_args_masks_auth_and_live_tokens() {
+        let args = [
+            "fwc",
+            "auth",
+            "add",
+            "github",
+            "--token",
+            "supersecret",
+            "token=anothersecret",
+            "--field",
+            "api_key=value",
+            "--capability-token",
+            "cap-secret",
+        ]
+        .map(str::to_owned);
+
+        let redacted = super::redact_sensitive_args(&args);
+        assert_eq!(redacted[5], "<redacted>");
+        assert_eq!(redacted[6], "token=<redacted>");
+        assert_eq!(redacted[8], "api_key=<redacted>");
+        assert_eq!(redacted[10], "<redacted>");
+    }
+
+    #[test]
     fn execute_show_supports_extract_alias() {
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "show", "github", "--offline", "--jq", ".connector.slug"]);
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "show",
+            "github",
+            "--offline",
+            "--jq",
+            ".connector.slug",
+        ]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload, Value::String("github".to_owned()));
@@ -18061,10 +19715,7 @@ deny_ptrace = true
         let advanced_payload: Value =
             serde_json::from_str(&advanced.text).expect("json output should parse cleanly");
 
-        assert_eq!(
-            advanced_payload["task"]["capsule_status"],
-            "unavailable"
-        );
+        assert_eq!(advanced_payload["task"]["capsule_status"], "unavailable");
         assert_eq!(advanced_payload["task"]["execution_history_count"], 1);
 
         let bind_args = vec![

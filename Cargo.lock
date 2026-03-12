@@ -4613,6 +4613,7 @@ dependencies = [
  "fcp-host",
  "fcp-manifest",
  "fcp-mesh",
+ "fcp-raptorq",
  "fcp-sandbox",
  "fcp-telemetry",
  "handlebars",

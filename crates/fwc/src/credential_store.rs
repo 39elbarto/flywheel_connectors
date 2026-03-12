@@ -41,7 +41,10 @@ impl AuthMethod {
         if fields.contains_key("credential_id") {
             return Self::SecretlessRef;
         }
-        if fields.contains_key("client_id") && fields.contains_key("client_secret") {
+        if (fields.contains_key("client_id") && fields.contains_key("client_secret"))
+            || fields.contains_key("access_token")
+            || fields.contains_key("refresh_token")
+        {
             return Self::OAuth2;
         }
         if fields.contains_key("username") && fields.contains_key("password") {
@@ -880,6 +883,20 @@ mod tests {
         let mut fields = BTreeMap::new();
         fields.insert("client_id".to_owned(), "id123".to_owned());
         fields.insert("client_secret".to_owned(), "secret456".to_owned());
+        assert_eq!(AuthMethod::detect(&fields), AuthMethod::OAuth2);
+    }
+
+    #[test]
+    fn detect_oauth2_access_token() {
+        let mut fields = BTreeMap::new();
+        fields.insert("access_token".to_owned(), "access-123".to_owned());
+        assert_eq!(AuthMethod::detect(&fields), AuthMethod::OAuth2);
+    }
+
+    #[test]
+    fn detect_oauth2_refresh_token() {
+        let mut fields = BTreeMap::new();
+        fields.insert("refresh_token".to_owned(), "refresh-123".to_owned());
         assert_eq!(AuthMethod::detect(&fields), AuthMethod::OAuth2);
     }
 

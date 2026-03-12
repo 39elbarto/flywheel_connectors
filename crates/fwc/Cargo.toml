@@ -23,6 +23,7 @@ fcp-core.workspace = true
 fcp-cbor.workspace = true
 fcp-crypto.workspace = true
 fcp-host.workspace = true
+fcp-raptorq.workspace = true
 fcp-manifest.workspace = true
 fcp-mesh.workspace = true
 fcp-sandbox.workspace = true

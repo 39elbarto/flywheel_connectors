@@ -783,3 +783,275 @@ fn pipeline_dry_run_records_history_entries_for_shared_fixture_workflow() {
     );
     assert_eq!(github_history["entries"][0]["status"], "success");
 }
+
+#[test]
+fn invoke_denial_records_history_and_suggests_recovery_actions() {
+    let capability_token = test_capability_token_arg();
+    let home = tempdir().expect("temp home should be created");
+    let github_connector =
+        mock_connector_summary_json("fcp.github:enterprise:v1", "GitHub Enterprise", 1, "risky");
+    let github_create_issue = mock_tool_descriptor_json(
+        "github.create_issue",
+        "github.issue_write",
+        "medium",
+        "risky",
+        "none",
+        Some("interactive"),
+        &json!({
+            "type": "object",
+            "properties": {
+                "owner": { "type": "string" },
+                "repo": { "type": "string" },
+                "title": { "type": "string" },
+                "body": { "type": "string" }
+            },
+            "required": ["owner", "repo", "title"]
+        }),
+        &json!({
+            "type": "object",
+            "properties": {
+                "number": { "type": "integer" }
+            },
+            "required": ["number"]
+        }),
+    );
+    let (host, server) = spawn_mock_host_sequence(vec![
+        (
+            "POST /rpc/discover".to_owned(),
+            mock_discovery_response_json(&[github_connector.clone()]),
+        ),
+        (
+            "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
+            mock_introspection_response_json(&github_connector, &[github_create_issue]),
+        ),
+        (
+            "POST /rpc/preflight".to_owned(),
+            mock_preflight_response_json(false),
+        ),
+    ]);
+
+    let (exit_code, payload, stderr) = run_json_in_home(
+        home.path(),
+        &[
+            "--json",
+            "--host",
+            &host,
+            "invoke",
+            "github",
+            "issues.create",
+            "--input",
+            "{\"owner\":\"octocat\",\"repo\":\"hello-world\",\"title\":\"Denied issue\"}",
+            "--capability-token",
+            &capability_token,
+        ],
+    );
+
+    server.join().expect("mock host thread should complete");
+    assert_ne!(
+        exit_code, 0,
+        "denied invoke should not report success, stderr:\n{stderr}"
+    );
+    assert_eq!(payload["command"], "invoke");
+    assert_eq!(payload["status"], "denied");
+    assert_eq!(payload["phase"], "preflight");
+    assert_eq!(payload["error"]["type"], "policy-denied");
+    assert_eq!(payload["preflight"]["allowed"], false);
+    assert_eq!(
+        payload["preflight"]["reason"],
+        "connector policy denied the request"
+    );
+    let next_actions = payload["next_actions"]
+        .as_array()
+        .expect("denied invoke should include recovery actions");
+    assert!(next_actions.iter().any(|action| {
+        action
+            .as_str()
+            .is_some_and(|value| value.contains("fwc status github --host"))
+    }));
+    assert!(next_actions.iter().any(|action| {
+        action
+            .as_str()
+            .is_some_and(|value| value.contains("fwc simulate github issues.create --host"))
+    }));
+
+    let history = run_json_ok_in_home(home.path(), &["--json", "history", "--status", "denied"]);
+    assert_eq!(history["command"], "history");
+    assert_eq!(history["scope"], "list");
+    assert_eq!(history["returned"], 1);
+    assert_eq!(history["entries"][0]["connector_id"], "fcp.github:enterprise:v1");
+    assert_eq!(history["entries"][0]["operation_id"], "github.create_issue");
+    assert_eq!(history["entries"][0]["status"], "denied");
+    assert_eq!(
+        history["entries"][0]["error_code"],
+        "connector policy denied the request"
+    );
+}
+
+#[allow(clippy::too_many_lines)]
+#[test]
+fn session_pipeline_history_workflow_persists_agent_context() {
+    let capability_token = test_capability_token_arg();
+    let home = tempdir().expect("temp home should be created");
+    let pipeline_path = fixture_path("pipelines/simple_pipe.toml");
+
+    let session_start = run_json_ok_in_home(
+        home.path(),
+        &[
+            "--json",
+            "session",
+            "start",
+            "--agent",
+            "OrangeSummit",
+            "--goal",
+            "exercise cross-module integration coverage",
+            "--zone",
+            "z:work",
+            "--context",
+            "bead=\"flywheel_connectors-qnchs.15.2\"",
+        ],
+    );
+    let session_id = session_start["session"]["id"]
+        .as_str()
+        .expect("session id should be present")
+        .to_owned();
+    assert_eq!(session_start["session"]["agent_name"], "OrangeSummit");
+    assert_eq!(
+        session_start["session"]["context"]["bead"],
+        "flywheel_connectors-qnchs.15.2"
+    );
+
+    let github_connector =
+        mock_connector_summary_json("fcp.github:enterprise:v1", "GitHub Enterprise", 1, "safe");
+    let slack_connector =
+        mock_connector_summary_json("fcp.slack:team:v1", "Slack Team", 1, "risky");
+    let github_list_issues = mock_tool_descriptor_json(
+        "github.list_issues",
+        "github.issue_read",
+        "low",
+        "safe",
+        "strict",
+        None,
+        &json!({
+            "type": "object",
+            "properties": {
+                "owner": { "type": "string" },
+                "repo": { "type": "string" }
+            },
+            "required": ["owner", "repo"]
+        }),
+        &json!({
+            "type": "object",
+            "properties": {
+                "issues": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "title": { "type": "string" }
+                        }
+                    }
+                }
+            }
+        }),
+    );
+    let slack_send_message = mock_tool_descriptor_json(
+        "slack.send_message",
+        "slack.post_message",
+        "medium",
+        "risky",
+        "none",
+        Some("interactive"),
+        &json!({
+            "type": "object",
+            "properties": {
+                "channel": { "type": "string" },
+                "text": { "type": "string" }
+            },
+            "required": ["channel", "text"]
+        }),
+        &json!({
+            "type": "object",
+            "properties": {
+                "ok": { "type": "boolean" }
+            }
+        }),
+    );
+    let (host, server) = spawn_mock_host_sequence(vec![
+        (
+            "POST /rpc/discover".to_owned(),
+            mock_discovery_response_json(&[github_connector.clone(), slack_connector.clone()]),
+        ),
+        (
+            "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
+            mock_introspection_response_json(&github_connector, &[github_list_issues]),
+        ),
+        (
+            "GET /rpc/introspect/fcp.slack:team:v1".to_owned(),
+            mock_introspection_response_json(&slack_connector, &[slack_send_message]),
+        ),
+        (
+            "POST /rpc/preflight".to_owned(),
+            mock_preflight_response_json(true),
+        ),
+        (
+            "POST /rpc/invoke".to_owned(),
+            mock_invoke_response_json(json!({
+                "issues": [
+                    { "title": "Bug report" }
+                ]
+            })),
+        ),
+        (
+            "POST /rpc/preflight".to_owned(),
+            mock_preflight_response_json(true),
+        ),
+    ]);
+
+    let payload = run_json_ok_in_home(
+        home.path(),
+        &[
+            "--json",
+            "--host",
+            &host,
+            "pipeline",
+            "dry-run",
+            pipeline_path
+                .to_str()
+                .expect("pipeline fixture path should be valid UTF-8"),
+            "--capability-token",
+            &capability_token,
+            "--param",
+            "owner=octocat",
+            "--param",
+            "repo=hello-world",
+        ],
+    );
+
+    server.join().expect("mock host thread should complete");
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["command"], "pipeline");
+    assert_eq!(payload["subcommand"], "dry-run");
+    assert_eq!(payload["execution"]["executed_steps"], 1);
+    assert_eq!(payload["execution"]["preflight_only_steps"], 1);
+
+    let history = run_json_ok_in_home(home.path(), &["--json", "history"]);
+    let entries = history["entries"]
+        .as_array()
+        .expect("history entries should be present");
+    assert_eq!(entries.len(), 2);
+    assert!(entries.iter().all(|entry| {
+        entry["agent_session"].as_str() == Some(session_id.as_str())
+    }));
+    assert_eq!(entries[0]["status"], "simulated");
+    assert_eq!(entries[1]["status"], "success");
+
+    let session_show = run_json_ok_in_home(home.path(), &["--json", "session", "show"]);
+    assert_eq!(session_show["session"]["id"], session_id);
+    assert_eq!(session_show["session"]["status"], "active");
+    assert_eq!(session_show["session"]["agent_name"], "OrangeSummit");
+    assert_eq!(
+        session_show["session"]["context"]["bead"],
+        "flywheel_connectors-qnchs.15.2"
+    );
+    assert_eq!(session_show["session"]["operations_completed"], 2);
+}

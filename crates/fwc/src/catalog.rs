@@ -4254,6 +4254,565 @@ pub fn validate_lifecycle_channel(
     }
 }
 
+// ── Real-time surface truth types (bead 29.15) ─────────────────────────
+// serve-mcp, audit tail, logs, events, and tool-call routing must be
+// genuinely live. These types enforce honest reporting of surface liveness.
+
+/// How a real-time surface (serve-mcp, audit tail, logs) is actually operating.
+///
+/// Ensures consumers know whether data flowing through a surface is genuinely
+/// live or is being served from cached/static sources.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RealtimeSurfaceMode {
+    /// Surface is connected to a live host and streaming real-time data.
+    LiveStream,
+    /// Surface is replaying data from a previously recorded cache.
+    CachedReplay,
+    /// Surface is serving a static snapshot (no updates will arrive).
+    StaticSnapshot,
+    /// Surface is not available (host unreachable, feature disabled, etc.).
+    Unavailable,
+}
+
+#[allow(dead_code)]
+impl RealtimeSurfaceMode {
+    /// Stable machine-readable tag for this mode.
+    #[must_use]
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Self::LiveStream => "live-stream",
+            Self::CachedReplay => "cached-replay",
+            Self::StaticSnapshot => "static-snapshot",
+            Self::Unavailable => "unavailable",
+        }
+    }
+
+    /// Returns `true` if this mode reflects a genuinely live data stream.
+    #[must_use]
+    pub fn is_live(&self) -> bool {
+        matches!(self, Self::LiveStream)
+    }
+
+    /// Returns `true` if this mode is serving cached or replayed data.
+    #[must_use]
+    pub fn is_cached(&self) -> bool {
+        matches!(self, Self::CachedReplay | Self::StaticSnapshot)
+    }
+
+    /// Freshness caveat for this surface mode.
+    #[must_use]
+    pub fn freshness_caveat(&self) -> &'static str {
+        match self {
+            Self::LiveStream => "Data is streaming from a live host connection.",
+            Self::CachedReplay => {
+                "Data is from a cached replay and does not reflect current state."
+            }
+            Self::StaticSnapshot => {
+                "Data is a static snapshot; no further updates will arrive."
+            }
+            Self::Unavailable => "Surface is unavailable; no data can be served.",
+        }
+    }
+}
+
+/// Where audit-tail events actually originate.
+///
+/// The audit tail can be backed by a live host event stream or by
+/// local log files / cached replays. Consumers must know the difference.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditTailSource {
+    /// Events are streamed from a live host connection.
+    LiveHostStream,
+    /// Events are read from a local log file on disk.
+    LocalLogFile,
+    /// Events are replayed from a previously cached recording.
+    CachedReplay,
+    /// Audit tail is not available.
+    NotAvailable,
+}
+
+#[allow(dead_code)]
+impl AuditTailSource {
+    /// Stable machine-readable tag.
+    #[must_use]
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Self::LiveHostStream => "live-host-stream",
+            Self::LocalLogFile => "local-log-file",
+            Self::CachedReplay => "cached-replay",
+            Self::NotAvailable => "not-available",
+        }
+    }
+
+    /// Returns `true` if this source is a genuinely live stream from the host.
+    #[must_use]
+    pub fn is_live(&self) -> bool {
+        matches!(self, Self::LiveHostStream)
+    }
+
+    /// Returns `true` if this source reflects authoritative, real-time state.
+    #[must_use]
+    pub fn is_authoritative(&self) -> bool {
+        matches!(self, Self::LiveHostStream)
+    }
+
+    /// Freshness caveat for this audit tail source.
+    #[must_use]
+    pub fn freshness_caveat(&self) -> &'static str {
+        match self {
+            Self::LiveHostStream => "Events are from a live host stream; reflects current state.",
+            Self::LocalLogFile => {
+                "Events are from a local log file; may not reflect current host state."
+            }
+            Self::CachedReplay => {
+                "Events are from a cached replay; does not reflect current state."
+            }
+            Self::NotAvailable => "Audit tail is not available; no events can be served.",
+        }
+    }
+}
+
+/// Whether tool-call routing is backed by a live connector or static definitions.
+///
+/// When tools are invoked through `serve-mcp` or direct dispatch, the caller
+/// must know if the backing connector is actually running or if the tool
+/// definition is merely a static stub.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCallBackingState {
+    /// Tool calls are routed to a live, running connector via the host.
+    LiveConnector,
+    /// Tool definitions exist but are not backed by a running connector.
+    StaticDefinition,
+    /// Tool was backed by a live connector but the connection is now stale.
+    Stale,
+    /// Tool call routing is unavailable (host unreachable, connector missing).
+    Unavailable,
+}
+
+#[allow(dead_code)]
+impl ToolCallBackingState {
+    /// Stable machine-readable tag.
+    #[must_use]
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Self::LiveConnector => "live-connector",
+            Self::StaticDefinition => "static-definition",
+            Self::Stale => "stale",
+            Self::Unavailable => "unavailable",
+        }
+    }
+
+    /// Returns `true` if tool calls are routed to a live, running connector.
+    #[must_use]
+    pub fn is_live_backed(&self) -> bool {
+        matches!(self, Self::LiveConnector)
+    }
+
+    /// Returns `true` if the tool backing needs to be refreshed before use.
+    #[must_use]
+    pub fn needs_refresh(&self) -> bool {
+        matches!(self, Self::Stale | Self::Unavailable)
+    }
+
+    /// Freshness caveat for this backing state.
+    #[must_use]
+    pub fn freshness_caveat(&self) -> &'static str {
+        match self {
+            Self::LiveConnector => "Tool is routed to a live, running connector.",
+            Self::StaticDefinition => {
+                "Tool exists as a static definition only; calls will not reach a live connector."
+            }
+            Self::Stale => {
+                "Tool was previously backed by a live connector, but the connection is stale."
+            }
+            Self::Unavailable => {
+                "Tool call routing is unavailable; the host or connector is unreachable."
+            }
+        }
+    }
+}
+
+/// Envelope for a real-time surface truthfulness check.
+///
+/// Captures the truthfulness state of a specific named surface (e.g.
+/// `serve-mcp`, `audit-tail`, `logs`) so that consumers know exactly what
+/// quality of data they are receiving.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RealtimeSurfaceResult {
+    /// The command that produced this result.
+    pub command: String,
+    /// Name of the surface being reported on.
+    pub surface_name: String,
+    /// Current operating mode of the surface.
+    pub mode: RealtimeSurfaceMode,
+    /// Freshness/truthfulness caveat.
+    pub caveat: String,
+    /// Whether this surface is authoritative (live and connected).
+    pub authoritative: bool,
+}
+
+/// Build a [`RealtimeSurfaceResult`] with derived caveat and authoritative fields.
+#[allow(dead_code)]
+#[must_use]
+pub fn realtime_surface_result(
+    command: &str,
+    surface_name: &str,
+    mode: RealtimeSurfaceMode,
+) -> RealtimeSurfaceResult {
+    let authoritative = mode.is_live();
+    let caveat = mode.freshness_caveat().to_owned();
+    RealtimeSurfaceResult {
+        command: command.to_owned(),
+        surface_name: surface_name.to_owned(),
+        mode,
+        caveat,
+        authoritative,
+    }
+}
+
+/// Convert a [`RealtimeSurfaceResult`] to a JSON payload suitable for output.
+#[allow(dead_code)]
+#[must_use]
+pub fn realtime_surface_payload(result: &RealtimeSurfaceResult) -> Value {
+    json!({
+        "command": result.command,
+        "surface_name": result.surface_name,
+        "mode": result.mode.tag(),
+        "caveat": result.caveat,
+        "authoritative": result.authoritative,
+        "is_live": result.mode.is_live(),
+        "is_cached": result.mode.is_cached(),
+    })
+}
+
+/// Real-time surface commands that should carry truthfulness envelopes.
+#[allow(dead_code)]
+pub const REALTIME_SURFACE_COMMANDS: &[&str] = &[
+    "serve-mcp", "audit-tail", "logs", "events", "tail",
+];
+
+/// Returns `true` if the command is a real-time surface command.
+#[allow(dead_code)]
+#[must_use]
+pub fn is_realtime_surface_command(command: &str) -> bool {
+    REALTIME_SURFACE_COMMANDS.contains(&command)
+}
+
+/// Determine the expected [`RealtimeSurfaceMode`] for a surface given the
+/// runtime mode and whether the host is available.
+#[allow(dead_code)]
+#[must_use]
+pub fn expected_realtime_mode(
+    mode: RuntimeMode,
+    host_available: bool,
+) -> RealtimeSurfaceMode {
+    match mode {
+        RuntimeMode::Live => {
+            if host_available {
+                RealtimeSurfaceMode::LiveStream
+            } else {
+                RealtimeSurfaceMode::Unavailable
+            }
+        }
+        RuntimeMode::ExplicitOffline | RuntimeMode::DegradedOffline => {
+            RealtimeSurfaceMode::CachedReplay
+        }
+        RuntimeMode::Refused => RealtimeSurfaceMode::Unavailable,
+    }
+}
+
+/// Determine the expected [`AuditTailSource`] given runtime mode and host
+/// availability.
+#[allow(dead_code)]
+#[must_use]
+pub fn expected_audit_tail_source(
+    mode: RuntimeMode,
+    host_available: bool,
+) -> AuditTailSource {
+    match mode {
+        RuntimeMode::Live => {
+            if host_available {
+                AuditTailSource::LiveHostStream
+            } else {
+                AuditTailSource::NotAvailable
+            }
+        }
+        RuntimeMode::ExplicitOffline | RuntimeMode::DegradedOffline => {
+            AuditTailSource::LocalLogFile
+        }
+        RuntimeMode::Refused => AuditTailSource::NotAvailable,
+    }
+}
+
+/// Determine the expected [`ToolCallBackingState`] given runtime mode and
+/// host availability.
+#[allow(dead_code)]
+#[must_use]
+pub fn expected_tool_call_backing(
+    mode: RuntimeMode,
+    host_available: bool,
+) -> ToolCallBackingState {
+    match mode {
+        RuntimeMode::Live => {
+            if host_available {
+                ToolCallBackingState::LiveConnector
+            } else {
+                ToolCallBackingState::Unavailable
+            }
+        }
+        RuntimeMode::ExplicitOffline | RuntimeMode::DegradedOffline => {
+            ToolCallBackingState::StaticDefinition
+        }
+        RuntimeMode::Refused => ToolCallBackingState::Unavailable,
+    }
+}
+
+// ── Pipeline / task / workflow execution truth (bead 29.16) ──────────────
+// Workflow steps, pipeline stages, and task progress must stay honest about
+// whether they have live host backing or are merely plan-only / simulated.
+
+/// Outcome of a single pipeline stage execution.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PipelineStageOutcome {
+    /// Stage executed through a live host-backed RPC.
+    Executed,
+    /// Stage was skipped (conditional skip or upstream dependency not met).
+    Skipped,
+    /// Stage was simulated (dry-run / plan-only).
+    Simulated,
+    /// Stage failed during execution.
+    Failed,
+    /// Stage has not yet been reached.
+    Pending,
+}
+
+#[allow(dead_code)]
+impl PipelineStageOutcome {
+    /// Machine-readable wire tag.
+    #[must_use]
+    pub const fn tag(self) -> &'static str {
+        match self {
+            Self::Executed => "executed",
+            Self::Skipped => "skipped",
+            Self::Simulated => "simulated",
+            Self::Failed => "failed",
+            Self::Pending => "pending",
+        }
+    }
+
+    /// Whether this stage actually ran against a live host.
+    #[must_use]
+    pub const fn ran_live(self) -> bool {
+        matches!(self, Self::Executed)
+    }
+
+    /// Whether this stage has reached a terminal state (no further action).
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Executed | Self::Skipped | Self::Failed)
+    }
+}
+
+/// Truthful summary of a pipeline execution, showing how many stages ran live.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PipelineTruthSummary {
+    /// Identifier for this pipeline execution.
+    pub pipeline_id: String,
+    /// Total number of stages in the pipeline.
+    pub total_stages: usize,
+    /// Number of stages that executed live.
+    pub executed_count: usize,
+    /// Number of stages that were simulated (dry-run).
+    pub simulated_count: usize,
+    /// Number of stages that were skipped.
+    pub skipped_count: usize,
+    /// Number of stages that failed.
+    pub failed_count: usize,
+    /// Whether every stage in the pipeline ran live (no simulated / skipped).
+    pub fully_live: bool,
+    /// Truthfulness caveat about this pipeline execution.
+    pub caveat: String,
+}
+
+/// Build a [`PipelineTruthSummary`] from per-stage outcomes.
+#[allow(dead_code)]
+#[must_use]
+pub fn pipeline_truth_summary(
+    pipeline_id: &str,
+    stages: &[PipelineStageOutcome],
+) -> PipelineTruthSummary {
+    let total_stages = stages.len();
+    let executed_count = stages.iter().filter(|s| **s == PipelineStageOutcome::Executed).count();
+    let simulated_count = stages.iter().filter(|s| **s == PipelineStageOutcome::Simulated).count();
+    let skipped_count = stages.iter().filter(|s| **s == PipelineStageOutcome::Skipped).count();
+    let failed_count = stages.iter().filter(|s| **s == PipelineStageOutcome::Failed).count();
+
+    let fully_live = total_stages > 0 && executed_count == total_stages;
+
+    let caveat = if total_stages == 0 {
+        "Pipeline has no stages — nothing was executed.".to_string()
+    } else if fully_live {
+        format!(
+            "All {total_stages} stages of pipeline `{pipeline_id}` executed against live host."
+        )
+    } else if failed_count > 0 {
+        format!(
+            "Pipeline `{pipeline_id}` had {failed_count} failed stage(s) out of {total_stages}. \
+             Results are incomplete."
+        )
+    } else if simulated_count > 0 {
+        format!(
+            "Pipeline `{pipeline_id}` has {simulated_count} simulated stage(s) — \
+             those results are NOT from the live host."
+        )
+    } else {
+        format!(
+            "Pipeline `{pipeline_id}`: {executed_count}/{total_stages} executed, \
+             {skipped_count} skipped."
+        )
+    };
+
+    PipelineTruthSummary {
+        pipeline_id: pipeline_id.to_owned(),
+        total_stages,
+        executed_count,
+        simulated_count,
+        skipped_count,
+        failed_count,
+        fully_live,
+        caveat,
+    }
+}
+
+/// Convert a [`PipelineTruthSummary`] to a JSON payload.
+#[allow(dead_code)]
+#[must_use]
+pub fn pipeline_truth_payload(summary: &PipelineTruthSummary) -> Value {
+    json!({
+        "pipeline_id": summary.pipeline_id,
+        "total_stages": summary.total_stages,
+        "executed_count": summary.executed_count,
+        "simulated_count": summary.simulated_count,
+        "skipped_count": summary.skipped_count,
+        "failed_count": summary.failed_count,
+        "fully_live": summary.fully_live,
+        "caveat": summary.caveat,
+    })
+}
+
+/// Where task progress information comes from.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskProgressSource {
+    /// Progress reported by the live host runtime.
+    LiveHostProgress,
+    /// Progress estimated locally (not from the host).
+    EstimatedProgress,
+    /// Origin of progress data is unknown.
+    Unknown,
+}
+
+#[allow(dead_code)]
+impl TaskProgressSource {
+    /// Machine-readable wire tag.
+    #[must_use]
+    pub const fn tag(self) -> &'static str {
+        match self {
+            Self::LiveHostProgress => "live_host_progress",
+            Self::EstimatedProgress => "estimated_progress",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// Whether this source is authoritative (backed by a live host).
+    #[must_use]
+    pub const fn is_authoritative(self) -> bool {
+        matches!(self, Self::LiveHostProgress)
+    }
+}
+
+/// Truthful summary of workflow execution across all steps.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowExecutionTruth {
+    /// Identifier for this workflow execution.
+    pub workflow_id: String,
+    /// The kind of workflow (local transform vs orchestrated).
+    pub kind: WorkflowKind,
+    /// Total number of steps in the workflow.
+    pub steps: usize,
+    /// Number of steps backed by live host execution.
+    pub live_backed_steps: usize,
+    /// Number of steps that are plan-only (no live backing).
+    pub plan_only_steps: usize,
+    /// Whether every step in the workflow has live host backing.
+    pub fully_live: bool,
+    /// Truthfulness caveat about this workflow execution.
+    pub caveat: String,
+}
+
+/// Build a [`WorkflowExecutionTruth`] from step counts.
+#[allow(dead_code)]
+#[must_use]
+pub fn workflow_execution_truth(
+    workflow_id: &str,
+    kind: WorkflowKind,
+    live_backed_steps: usize,
+    plan_only_steps: usize,
+) -> WorkflowExecutionTruth {
+    let steps = live_backed_steps + plan_only_steps;
+    let fully_live = steps > 0 && plan_only_steps == 0;
+
+    let caveat = if steps == 0 {
+        "Workflow has no steps — nothing was executed.".to_string()
+    } else if fully_live {
+        format!(
+            "All {steps} steps of workflow `{workflow_id}` are backed by live host execution."
+        )
+    } else {
+        format!(
+            "Workflow `{workflow_id}` has {plan_only_steps} plan-only step(s) out of {steps}. \
+             Those steps have no live host backing and their results may be aspirational."
+        )
+    };
+
+    WorkflowExecutionTruth {
+        workflow_id: workflow_id.to_owned(),
+        kind,
+        steps,
+        live_backed_steps,
+        plan_only_steps,
+        fully_live,
+        caveat,
+    }
+}
+
+/// Convert a [`WorkflowExecutionTruth`] to a JSON payload.
+#[allow(dead_code)]
+#[must_use]
+pub fn workflow_truth_payload(truth: &WorkflowExecutionTruth) -> Value {
+    json!({
+        "workflow_id": truth.workflow_id,
+        "kind": truth.kind,
+        "steps": truth.steps,
+        "live_backed_steps": truth.live_backed_steps,
+        "plan_only_steps": truth.plan_only_steps,
+        "fully_live": truth.fully_live,
+        "caveat": truth.caveat,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -4302,6 +4861,16 @@ mod tests {
         LifecycleMutationChannel, LifecycleMutationResult, ObservedLifecycleState,
         expected_lifecycle_channel, lifecycle_mutation_payload, lifecycle_mutation_result,
         validate_lifecycle_channel,
+    };
+    use super::{
+        PipelineStageOutcome, PipelineTruthSummary, TaskProgressSource,
+        WorkflowExecutionTruth, pipeline_truth_payload, pipeline_truth_summary,
+        workflow_execution_truth, workflow_truth_payload,
+    };
+    use super::{
+        AuditTailSource, REALTIME_SURFACE_COMMANDS, RealtimeSurfaceMode, ToolCallBackingState,
+        expected_audit_tail_source, expected_realtime_mode, expected_tool_call_backing,
+        is_realtime_surface_command, realtime_surface_payload, realtime_surface_result,
     };
     use serde_json::json;
 
@@ -14043,6 +14612,858 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    // ── Pipeline stage outcome tests (bead 29.16) ────────────────────────
+
+    #[test]
+    fn pipeline_stage_outcome_tags() {
+        assert_eq!(PipelineStageOutcome::Executed.tag(), "executed");
+        assert_eq!(PipelineStageOutcome::Skipped.tag(), "skipped");
+        assert_eq!(PipelineStageOutcome::Simulated.tag(), "simulated");
+        assert_eq!(PipelineStageOutcome::Failed.tag(), "failed");
+        assert_eq!(PipelineStageOutcome::Pending.tag(), "pending");
+    }
+
+    #[test]
+    fn pipeline_stage_outcome_ran_live() {
+        assert!(PipelineStageOutcome::Executed.ran_live());
+        assert!(!PipelineStageOutcome::Skipped.ran_live());
+        assert!(!PipelineStageOutcome::Simulated.ran_live());
+        assert!(!PipelineStageOutcome::Failed.ran_live());
+        assert!(!PipelineStageOutcome::Pending.ran_live());
+    }
+
+    #[test]
+    fn pipeline_stage_outcome_is_terminal() {
+        assert!(PipelineStageOutcome::Executed.is_terminal());
+        assert!(PipelineStageOutcome::Skipped.is_terminal());
+        assert!(PipelineStageOutcome::Failed.is_terminal());
+        assert!(!PipelineStageOutcome::Simulated.is_terminal());
+        assert!(!PipelineStageOutcome::Pending.is_terminal());
+    }
+
+    #[test]
+    fn pipeline_stage_outcome_serde_roundtrip() {
+        let variants = [
+            PipelineStageOutcome::Executed,
+            PipelineStageOutcome::Skipped,
+            PipelineStageOutcome::Simulated,
+            PipelineStageOutcome::Failed,
+            PipelineStageOutcome::Pending,
+        ];
+        for v in variants {
+            let json = serde_json::to_string(&v).unwrap();
+            let back: PipelineStageOutcome = serde_json::from_str(&json).unwrap();
+            assert_eq!(v, back);
+        }
+    }
+
+    #[test]
+    fn pipeline_truth_summary_all_executed() {
+        let stages = vec![
+            PipelineStageOutcome::Executed,
+            PipelineStageOutcome::Executed,
+            PipelineStageOutcome::Executed,
+        ];
+        let s = pipeline_truth_summary("p1", &stages);
+        assert_eq!(s.pipeline_id, "p1");
+        assert_eq!(s.total_stages, 3);
+        assert_eq!(s.executed_count, 3);
+        assert_eq!(s.simulated_count, 0);
+        assert_eq!(s.skipped_count, 0);
+        assert_eq!(s.failed_count, 0);
+        assert!(s.fully_live);
+        assert!(s.caveat.contains("All 3 stages"));
+    }
+
+    #[test]
+    fn pipeline_truth_summary_with_simulated_not_fully_live() {
+        let stages = vec![
+            PipelineStageOutcome::Executed,
+            PipelineStageOutcome::Simulated,
+            PipelineStageOutcome::Executed,
+        ];
+        let s = pipeline_truth_summary("p2", &stages);
+        assert!(!s.fully_live);
+        assert_eq!(s.simulated_count, 1);
+        assert!(s.caveat.contains("simulated"));
+    }
+
+    #[test]
+    fn pipeline_truth_summary_with_failures() {
+        let stages = vec![
+            PipelineStageOutcome::Executed,
+            PipelineStageOutcome::Failed,
+        ];
+        let s = pipeline_truth_summary("p3", &stages);
+        assert!(!s.fully_live);
+        assert_eq!(s.failed_count, 1);
+        assert!(s.caveat.contains("failed"));
+        assert!(s.caveat.contains("incomplete"));
+    }
+
+    #[test]
+    fn pipeline_truth_summary_empty_stages() {
+        let s = pipeline_truth_summary("empty", &[]);
+        assert_eq!(s.total_stages, 0);
+        assert!(!s.fully_live);
+        assert!(s.caveat.contains("no stages"));
+    }
+
+    #[test]
+    fn pipeline_truth_summary_all_skipped() {
+        let stages = vec![
+            PipelineStageOutcome::Skipped,
+            PipelineStageOutcome::Skipped,
+        ];
+        let s = pipeline_truth_summary("skip-all", &stages);
+        assert!(!s.fully_live);
+        assert_eq!(s.skipped_count, 2);
+        assert_eq!(s.executed_count, 0);
+    }
+
+    #[test]
+    fn pipeline_truth_summary_mixed_bag() {
+        let stages = vec![
+            PipelineStageOutcome::Executed,
+            PipelineStageOutcome::Simulated,
+            PipelineStageOutcome::Skipped,
+            PipelineStageOutcome::Failed,
+            PipelineStageOutcome::Pending,
+        ];
+        let s = pipeline_truth_summary("mixed", &stages);
+        assert_eq!(s.total_stages, 5);
+        assert_eq!(s.executed_count, 1);
+        assert_eq!(s.simulated_count, 1);
+        assert_eq!(s.skipped_count, 1);
+        assert_eq!(s.failed_count, 1);
+        assert!(!s.fully_live);
+    }
+
+    #[test]
+    fn pipeline_truth_summary_serde_roundtrip() {
+        let s = pipeline_truth_summary("rt", &[PipelineStageOutcome::Executed]);
+        let json = serde_json::to_string(&s).unwrap();
+        let back: PipelineTruthSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.pipeline_id, "rt");
+        assert!(back.fully_live);
+    }
+
+    #[test]
+    fn pipeline_truth_payload_has_all_fields() {
+        let s = pipeline_truth_summary("pay", &[
+            PipelineStageOutcome::Executed,
+            PipelineStageOutcome::Simulated,
+        ]);
+        let p = pipeline_truth_payload(&s);
+        assert_eq!(p["pipeline_id"], "pay");
+        assert_eq!(p["total_stages"], 2);
+        assert_eq!(p["executed_count"], 1);
+        assert_eq!(p["simulated_count"], 1);
+        assert_eq!(p["skipped_count"], 0);
+        assert_eq!(p["failed_count"], 0);
+        assert_eq!(p["fully_live"], false);
+        assert!(p["caveat"].as_str().unwrap().contains("simulated"));
+    }
+
+    #[test]
+    fn pipeline_truth_payload_fully_live() {
+        let s = pipeline_truth_summary("live", &[
+            PipelineStageOutcome::Executed,
+            PipelineStageOutcome::Executed,
+        ]);
+        let p = pipeline_truth_payload(&s);
+        assert_eq!(p["fully_live"], true);
+    }
+
+    // ── Task progress source tests ───────────────────────────────────────
+
+    #[test]
+    fn task_progress_source_tags() {
+        assert_eq!(TaskProgressSource::LiveHostProgress.tag(), "live_host_progress");
+        assert_eq!(TaskProgressSource::EstimatedProgress.tag(), "estimated_progress");
+        assert_eq!(TaskProgressSource::Unknown.tag(), "unknown");
+    }
+
+    #[test]
+    fn task_progress_source_authority() {
+        assert!(TaskProgressSource::LiveHostProgress.is_authoritative());
+        assert!(!TaskProgressSource::EstimatedProgress.is_authoritative());
+        assert!(!TaskProgressSource::Unknown.is_authoritative());
+    }
+
+    #[test]
+    fn task_progress_source_serde_roundtrip() {
+        let variants = [
+            TaskProgressSource::LiveHostProgress,
+            TaskProgressSource::EstimatedProgress,
+            TaskProgressSource::Unknown,
+        ];
+        for v in variants {
+            let json = serde_json::to_string(&v).unwrap();
+            let back: TaskProgressSource = serde_json::from_str(&json).unwrap();
+            assert_eq!(v, back);
+        }
+    }
+
+    #[test]
+    fn task_progress_only_live_host_is_authoritative() {
+        // Cross-cutting: estimated and unknown must never claim authority
+        let non_auth = [TaskProgressSource::EstimatedProgress, TaskProgressSource::Unknown];
+        for src in non_auth {
+            assert!(
+                !src.is_authoritative(),
+                "{:?} should not be authoritative",
+                src
+            );
+        }
+    }
+
+    // ── Workflow execution truth tests ───────────────────────────────────
+
+    #[test]
+    fn workflow_execution_truth_all_live() {
+        let t = workflow_execution_truth("w1", WorkflowKind::OrchestratedExecution, 5, 0);
+        assert_eq!(t.workflow_id, "w1");
+        assert_eq!(t.steps, 5);
+        assert_eq!(t.live_backed_steps, 5);
+        assert_eq!(t.plan_only_steps, 0);
+        assert!(t.fully_live);
+        assert!(t.caveat.contains("All 5 steps"));
+    }
+
+    #[test]
+    fn workflow_execution_truth_with_plan_only_not_fully_live() {
+        let t = workflow_execution_truth("w2", WorkflowKind::OrchestratedExecution, 3, 2);
+        assert!(!t.fully_live);
+        assert_eq!(t.plan_only_steps, 2);
+        assert!(t.caveat.contains("plan-only"));
+        assert!(t.caveat.contains("aspirational"));
+    }
+
+    #[test]
+    fn workflow_execution_truth_zero_steps() {
+        let t = workflow_execution_truth("empty", WorkflowKind::LocalTransform, 0, 0);
+        assert_eq!(t.steps, 0);
+        assert!(!t.fully_live);
+        assert!(t.caveat.contains("no steps"));
+    }
+
+    #[test]
+    fn workflow_execution_truth_local_transform_fully_live() {
+        let t = workflow_execution_truth("pipe1", WorkflowKind::LocalTransform, 3, 0);
+        assert!(t.fully_live);
+        assert!(matches!(t.kind, WorkflowKind::LocalTransform));
+    }
+
+    #[test]
+    fn workflow_execution_truth_serde_roundtrip() {
+        let t = workflow_execution_truth("rt", WorkflowKind::OrchestratedExecution, 2, 1);
+        let json = serde_json::to_string(&t).unwrap();
+        let back: WorkflowExecutionTruth = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.workflow_id, "rt");
+        assert_eq!(back.steps, 3);
+        assert!(!back.fully_live);
+    }
+
+    #[test]
+    fn workflow_truth_payload_has_all_fields() {
+        let t = workflow_execution_truth("wp", WorkflowKind::OrchestratedExecution, 4, 1);
+        let p = workflow_truth_payload(&t);
+        assert_eq!(p["workflow_id"], "wp");
+        assert_eq!(p["steps"], 5);
+        assert_eq!(p["live_backed_steps"], 4);
+        assert_eq!(p["plan_only_steps"], 1);
+        assert_eq!(p["fully_live"], false);
+        assert!(p["caveat"].as_str().unwrap().contains("plan-only"));
+        // kind is serialized
+        assert!(!p["kind"].is_null());
+    }
+
+    #[test]
+    fn workflow_truth_payload_fully_live() {
+        let t = workflow_execution_truth("wl", WorkflowKind::OrchestratedExecution, 3, 0);
+        let p = workflow_truth_payload(&t);
+        assert_eq!(p["fully_live"], true);
+    }
+
+    // ── Cross-cutting pipeline/workflow invariants ───────────────────────
+
+    #[test]
+    fn pipeline_any_simulated_stage_prevents_fully_live() {
+        // Even one simulated stage means the pipeline is NOT fully live
+        for extra in [
+            PipelineStageOutcome::Simulated,
+            PipelineStageOutcome::Skipped,
+            PipelineStageOutcome::Failed,
+            PipelineStageOutcome::Pending,
+        ] {
+            let stages = vec![PipelineStageOutcome::Executed, extra];
+            let s = pipeline_truth_summary("cross", &stages);
+            assert!(
+                !s.fully_live,
+                "Pipeline with {:?} stage should not be fully_live",
+                extra
+            );
+        }
+    }
+
+    #[test]
+    fn workflow_any_plan_only_step_prevents_fully_live() {
+        // Even one plan-only step means the workflow is NOT fully live
+        for plan_only in 1..=5 {
+            let t = workflow_execution_truth(
+                "cross",
+                WorkflowKind::OrchestratedExecution,
+                10,
+                plan_only,
+            );
+            assert!(
+                !t.fully_live,
+                "Workflow with {plan_only} plan-only step(s) should not be fully_live"
+            );
+        }
+    }
+
+    #[test]
+    fn pipeline_single_executed_stage_is_fully_live() {
+        let s = pipeline_truth_summary("single", &[PipelineStageOutcome::Executed]);
+        assert!(s.fully_live);
+        assert_eq!(s.total_stages, 1);
+    }
+
+    #[test]
+    fn workflow_single_live_step_is_fully_live() {
+        let t = workflow_execution_truth("single", WorkflowKind::LocalTransform, 1, 0);
+        assert!(t.fully_live);
+        assert_eq!(t.steps, 1);
+    }
+
+    #[test]
+    fn pipeline_truth_caveat_always_nonempty() {
+        let combos: Vec<Vec<PipelineStageOutcome>> = vec![
+            vec![],
+            vec![PipelineStageOutcome::Executed],
+            vec![PipelineStageOutcome::Simulated],
+            vec![PipelineStageOutcome::Failed],
+            vec![PipelineStageOutcome::Skipped],
+            vec![PipelineStageOutcome::Pending],
+            vec![PipelineStageOutcome::Executed, PipelineStageOutcome::Simulated],
+            vec![PipelineStageOutcome::Executed, PipelineStageOutcome::Failed],
+        ];
+        for (i, stages) in combos.iter().enumerate() {
+            let s = pipeline_truth_summary(&format!("caveat-{i}"), stages);
+            assert!(
+                !s.caveat.is_empty(),
+                "Caveat should never be empty for combo {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn workflow_truth_caveat_always_nonempty() {
+        let combos = [(0, 0), (1, 0), (0, 1), (3, 2), (5, 0)];
+        for (live, plan) in combos {
+            let t = workflow_execution_truth(
+                "caveat",
+                WorkflowKind::OrchestratedExecution,
+                live,
+                plan,
+            );
+            assert!(
+                !t.caveat.is_empty(),
+                "Caveat should never be empty for live={live}, plan={plan}"
+            );
+        }
+    }
+
+    // ── Real-time surface truth tests (bead 29.15) ───────────────────────
+
+    #[test]
+    fn realtime_surface_mode_tags_stable() {
+        assert_eq!(RealtimeSurfaceMode::LiveStream.tag(), "live-stream");
+        assert_eq!(RealtimeSurfaceMode::CachedReplay.tag(), "cached-replay");
+        assert_eq!(RealtimeSurfaceMode::StaticSnapshot.tag(), "static-snapshot");
+        assert_eq!(RealtimeSurfaceMode::Unavailable.tag(), "unavailable");
+    }
+
+    #[test]
+    fn realtime_surface_mode_is_live() {
+        assert!(RealtimeSurfaceMode::LiveStream.is_live());
+        assert!(!RealtimeSurfaceMode::CachedReplay.is_live());
+        assert!(!RealtimeSurfaceMode::StaticSnapshot.is_live());
+        assert!(!RealtimeSurfaceMode::Unavailable.is_live());
+    }
+
+    #[test]
+    fn realtime_surface_mode_is_cached() {
+        assert!(!RealtimeSurfaceMode::LiveStream.is_cached());
+        assert!(RealtimeSurfaceMode::CachedReplay.is_cached());
+        assert!(RealtimeSurfaceMode::StaticSnapshot.is_cached());
+        assert!(!RealtimeSurfaceMode::Unavailable.is_cached());
+    }
+
+    #[test]
+    fn realtime_surface_mode_freshness_caveat_nonempty() {
+        let modes = [
+            RealtimeSurfaceMode::LiveStream,
+            RealtimeSurfaceMode::CachedReplay,
+            RealtimeSurfaceMode::StaticSnapshot,
+            RealtimeSurfaceMode::Unavailable,
+        ];
+        for mode in &modes {
+            assert!(
+                !mode.freshness_caveat().is_empty(),
+                "RealtimeSurfaceMode freshness_caveat empty for {mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn realtime_surface_mode_serde_roundtrip() {
+        let modes = [
+            RealtimeSurfaceMode::LiveStream,
+            RealtimeSurfaceMode::CachedReplay,
+            RealtimeSurfaceMode::StaticSnapshot,
+            RealtimeSurfaceMode::Unavailable,
+        ];
+        for mode in &modes {
+            let json = serde_json::to_string(mode).unwrap();
+            let back: RealtimeSurfaceMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(&back, mode, "Serde roundtrip failed for {mode:?}");
+        }
+    }
+
+    #[test]
+    fn realtime_surface_mode_tags_unique() {
+        let modes = [
+            RealtimeSurfaceMode::LiveStream,
+            RealtimeSurfaceMode::CachedReplay,
+            RealtimeSurfaceMode::StaticSnapshot,
+            RealtimeSurfaceMode::Unavailable,
+        ];
+        let tags: Vec<_> = modes.iter().map(|m| m.tag()).collect();
+        let deduped: std::collections::HashSet<_> = tags.iter().collect();
+        assert_eq!(tags.len(), deduped.len(), "Duplicate RealtimeSurfaceMode tags found");
+    }
+
+    #[test]
+    fn audit_tail_source_tags_stable() {
+        assert_eq!(AuditTailSource::LiveHostStream.tag(), "live-host-stream");
+        assert_eq!(AuditTailSource::LocalLogFile.tag(), "local-log-file");
+        assert_eq!(AuditTailSource::CachedReplay.tag(), "cached-replay");
+        assert_eq!(AuditTailSource::NotAvailable.tag(), "not-available");
+    }
+
+    #[test]
+    fn audit_tail_source_is_live() {
+        assert!(AuditTailSource::LiveHostStream.is_live());
+        assert!(!AuditTailSource::LocalLogFile.is_live());
+        assert!(!AuditTailSource::CachedReplay.is_live());
+        assert!(!AuditTailSource::NotAvailable.is_live());
+    }
+
+    #[test]
+    fn audit_tail_source_is_authoritative() {
+        assert!(AuditTailSource::LiveHostStream.is_authoritative());
+        assert!(!AuditTailSource::LocalLogFile.is_authoritative());
+        assert!(!AuditTailSource::CachedReplay.is_authoritative());
+        assert!(!AuditTailSource::NotAvailable.is_authoritative());
+    }
+
+    #[test]
+    fn audit_tail_source_freshness_caveat_nonempty() {
+        let sources = [
+            AuditTailSource::LiveHostStream,
+            AuditTailSource::LocalLogFile,
+            AuditTailSource::CachedReplay,
+            AuditTailSource::NotAvailable,
+        ];
+        for src in &sources {
+            assert!(
+                !src.freshness_caveat().is_empty(),
+                "AuditTailSource freshness_caveat empty for {src:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn audit_tail_source_serde_roundtrip() {
+        let sources = [
+            AuditTailSource::LiveHostStream,
+            AuditTailSource::LocalLogFile,
+            AuditTailSource::CachedReplay,
+            AuditTailSource::NotAvailable,
+        ];
+        for src in &sources {
+            let json = serde_json::to_string(src).unwrap();
+            let back: AuditTailSource = serde_json::from_str(&json).unwrap();
+            assert_eq!(&back, src, "Serde roundtrip failed for {src:?}");
+        }
+    }
+
+    #[test]
+    fn audit_tail_source_tags_unique() {
+        let sources = [
+            AuditTailSource::LiveHostStream,
+            AuditTailSource::LocalLogFile,
+            AuditTailSource::CachedReplay,
+            AuditTailSource::NotAvailable,
+        ];
+        let tags: Vec<_> = sources.iter().map(|s| s.tag()).collect();
+        let deduped: std::collections::HashSet<_> = tags.iter().collect();
+        assert_eq!(tags.len(), deduped.len(), "Duplicate AuditTailSource tags found");
+    }
+
+    #[test]
+    fn tool_call_backing_state_tags_stable() {
+        assert_eq!(ToolCallBackingState::LiveConnector.tag(), "live-connector");
+        assert_eq!(ToolCallBackingState::StaticDefinition.tag(), "static-definition");
+        assert_eq!(ToolCallBackingState::Stale.tag(), "stale");
+        assert_eq!(ToolCallBackingState::Unavailable.tag(), "unavailable");
+    }
+
+    #[test]
+    fn tool_call_backing_state_is_live_backed() {
+        assert!(ToolCallBackingState::LiveConnector.is_live_backed());
+        assert!(!ToolCallBackingState::StaticDefinition.is_live_backed());
+        assert!(!ToolCallBackingState::Stale.is_live_backed());
+        assert!(!ToolCallBackingState::Unavailable.is_live_backed());
+    }
+
+    #[test]
+    fn tool_call_backing_state_needs_refresh() {
+        assert!(!ToolCallBackingState::LiveConnector.needs_refresh());
+        assert!(!ToolCallBackingState::StaticDefinition.needs_refresh());
+        assert!(ToolCallBackingState::Stale.needs_refresh());
+        assert!(ToolCallBackingState::Unavailable.needs_refresh());
+    }
+
+    #[test]
+    fn tool_call_backing_state_freshness_caveat_nonempty() {
+        let states = [
+            ToolCallBackingState::LiveConnector,
+            ToolCallBackingState::StaticDefinition,
+            ToolCallBackingState::Stale,
+            ToolCallBackingState::Unavailable,
+        ];
+        for st in &states {
+            assert!(
+                !st.freshness_caveat().is_empty(),
+                "ToolCallBackingState freshness_caveat empty for {st:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_call_backing_state_serde_roundtrip() {
+        let states = [
+            ToolCallBackingState::LiveConnector,
+            ToolCallBackingState::StaticDefinition,
+            ToolCallBackingState::Stale,
+            ToolCallBackingState::Unavailable,
+        ];
+        for st in &states {
+            let json = serde_json::to_string(st).unwrap();
+            let back: ToolCallBackingState = serde_json::from_str(&json).unwrap();
+            assert_eq!(&back, st, "Serde roundtrip failed for {st:?}");
+        }
+    }
+
+    #[test]
+    fn tool_call_backing_state_tags_unique() {
+        let states = [
+            ToolCallBackingState::LiveConnector,
+            ToolCallBackingState::StaticDefinition,
+            ToolCallBackingState::Stale,
+            ToolCallBackingState::Unavailable,
+        ];
+        let tags: Vec<_> = states.iter().map(|s| s.tag()).collect();
+        let deduped: std::collections::HashSet<_> = tags.iter().collect();
+        assert_eq!(tags.len(), deduped.len(), "Duplicate ToolCallBackingState tags found");
+    }
+
+    #[test]
+    fn realtime_surface_result_live_stream() {
+        let r = realtime_surface_result("serve-mcp", "mcp-surface", RealtimeSurfaceMode::LiveStream);
+        assert_eq!(r.command, "serve-mcp");
+        assert_eq!(r.surface_name, "mcp-surface");
+        assert!(r.authoritative);
+        assert!(!r.caveat.is_empty());
+        assert_eq!(r.mode, RealtimeSurfaceMode::LiveStream);
+    }
+
+    #[test]
+    fn realtime_surface_result_cached_replay() {
+        let r = realtime_surface_result("audit-tail", "audit", RealtimeSurfaceMode::CachedReplay);
+        assert!(!r.authoritative);
+        assert!(!r.caveat.is_empty());
+        assert_eq!(r.mode, RealtimeSurfaceMode::CachedReplay);
+    }
+
+    #[test]
+    fn realtime_surface_result_static_snapshot() {
+        let r = realtime_surface_result("logs", "log-surface", RealtimeSurfaceMode::StaticSnapshot);
+        assert!(!r.authoritative);
+        assert!(!r.caveat.is_empty());
+        assert_eq!(r.mode, RealtimeSurfaceMode::StaticSnapshot);
+    }
+
+    #[test]
+    fn realtime_surface_result_unavailable() {
+        let r = realtime_surface_result("events", "event-stream", RealtimeSurfaceMode::Unavailable);
+        assert!(!r.authoritative);
+        assert!(!r.caveat.is_empty());
+        assert_eq!(r.mode, RealtimeSurfaceMode::Unavailable);
+    }
+
+    #[test]
+    fn realtime_surface_payload_has_all_fields() {
+        let r = realtime_surface_result("serve-mcp", "mcp", RealtimeSurfaceMode::LiveStream);
+        let p = realtime_surface_payload(&r);
+        assert_eq!(p["command"], "serve-mcp");
+        assert_eq!(p["surface_name"], "mcp");
+        assert_eq!(p["mode"], "live-stream");
+        assert_eq!(p["authoritative"], true);
+        assert_eq!(p["is_live"], true);
+        assert_eq!(p["is_cached"], false);
+        assert!(p["caveat"].as_str().map_or(false, |s| !s.is_empty()));
+    }
+
+    #[test]
+    fn realtime_surface_payload_cached_mode() {
+        let r = realtime_surface_result("audit-tail", "audit", RealtimeSurfaceMode::CachedReplay);
+        let p = realtime_surface_payload(&r);
+        assert_eq!(p["mode"], "cached-replay");
+        assert_eq!(p["authoritative"], false);
+        assert_eq!(p["is_live"], false);
+        assert_eq!(p["is_cached"], true);
+    }
+
+    #[test]
+    fn realtime_surface_payload_static_snapshot_mode() {
+        let r = realtime_surface_result("logs", "log", RealtimeSurfaceMode::StaticSnapshot);
+        let p = realtime_surface_payload(&r);
+        assert_eq!(p["mode"], "static-snapshot");
+        assert_eq!(p["authoritative"], false);
+        assert_eq!(p["is_live"], false);
+        assert_eq!(p["is_cached"], true);
+    }
+
+    #[test]
+    fn is_realtime_surface_command_positive() {
+        for cmd in REALTIME_SURFACE_COMMANDS {
+            assert!(
+                is_realtime_surface_command(cmd),
+                "{cmd} should be a realtime surface command"
+            );
+        }
+    }
+
+    #[test]
+    fn is_realtime_surface_command_negative() {
+        assert!(!is_realtime_surface_command("list"));
+        assert!(!is_realtime_surface_command("show"));
+        assert!(!is_realtime_surface_command("install"));
+        assert!(!is_realtime_surface_command(""));
+    }
+
+    #[test]
+    fn expected_realtime_mode_live_host_available() {
+        let m = expected_realtime_mode(RuntimeMode::Live, true);
+        assert_eq!(m, RealtimeSurfaceMode::LiveStream);
+    }
+
+    #[test]
+    fn expected_realtime_mode_live_host_unavailable() {
+        let m = expected_realtime_mode(RuntimeMode::Live, false);
+        assert_eq!(m, RealtimeSurfaceMode::Unavailable);
+    }
+
+    #[test]
+    fn expected_realtime_mode_explicit_offline() {
+        let m = expected_realtime_mode(RuntimeMode::ExplicitOffline, true);
+        assert_eq!(m, RealtimeSurfaceMode::CachedReplay);
+        let m2 = expected_realtime_mode(RuntimeMode::ExplicitOffline, false);
+        assert_eq!(m2, RealtimeSurfaceMode::CachedReplay);
+    }
+
+    #[test]
+    fn expected_realtime_mode_degraded_offline() {
+        let m = expected_realtime_mode(RuntimeMode::DegradedOffline, true);
+        assert_eq!(m, RealtimeSurfaceMode::CachedReplay);
+    }
+
+    #[test]
+    fn expected_realtime_mode_refused() {
+        let m = expected_realtime_mode(RuntimeMode::Refused, true);
+        assert_eq!(m, RealtimeSurfaceMode::Unavailable);
+    }
+
+    #[test]
+    fn expected_audit_tail_source_live_available() {
+        let s = expected_audit_tail_source(RuntimeMode::Live, true);
+        assert_eq!(s, AuditTailSource::LiveHostStream);
+    }
+
+    #[test]
+    fn expected_audit_tail_source_live_unavailable() {
+        let s = expected_audit_tail_source(RuntimeMode::Live, false);
+        assert_eq!(s, AuditTailSource::NotAvailable);
+    }
+
+    #[test]
+    fn expected_audit_tail_source_offline() {
+        let s = expected_audit_tail_source(RuntimeMode::ExplicitOffline, false);
+        assert_eq!(s, AuditTailSource::LocalLogFile);
+    }
+
+    #[test]
+    fn expected_audit_tail_source_refused() {
+        let s = expected_audit_tail_source(RuntimeMode::Refused, true);
+        assert_eq!(s, AuditTailSource::NotAvailable);
+    }
+
+    #[test]
+    fn expected_tool_call_backing_live_available() {
+        let s = expected_tool_call_backing(RuntimeMode::Live, true);
+        assert_eq!(s, ToolCallBackingState::LiveConnector);
+    }
+
+    #[test]
+    fn expected_tool_call_backing_live_unavailable() {
+        let s = expected_tool_call_backing(RuntimeMode::Live, false);
+        assert_eq!(s, ToolCallBackingState::Unavailable);
+    }
+
+    #[test]
+    fn expected_tool_call_backing_offline() {
+        let s = expected_tool_call_backing(RuntimeMode::ExplicitOffline, true);
+        assert_eq!(s, ToolCallBackingState::StaticDefinition);
+    }
+
+    #[test]
+    fn expected_tool_call_backing_refused() {
+        let s = expected_tool_call_backing(RuntimeMode::Refused, false);
+        assert_eq!(s, ToolCallBackingState::Unavailable);
+    }
+
+    // ── Cross-cutting invariants (bead 29.15) ────────────────────────────
+
+    #[test]
+    fn cross_cutting_no_cached_source_claims_authoritative_realtime() {
+        // RealtimeSurfaceMode: cached/static must never be "live"
+        let non_live = [
+            RealtimeSurfaceMode::CachedReplay,
+            RealtimeSurfaceMode::StaticSnapshot,
+            RealtimeSurfaceMode::Unavailable,
+        ];
+        for mode in &non_live {
+            assert!(
+                !mode.is_live(),
+                "Non-live RealtimeSurfaceMode {mode:?} should not claim is_live"
+            );
+            let r = realtime_surface_result("test", "surface", mode.clone());
+            assert!(
+                !r.authoritative,
+                "Non-live result for {mode:?} must not be authoritative"
+            );
+        }
+    }
+
+    #[test]
+    fn cross_cutting_no_cached_audit_tail_claims_authoritative() {
+        let non_live = [
+            AuditTailSource::LocalLogFile,
+            AuditTailSource::CachedReplay,
+            AuditTailSource::NotAvailable,
+        ];
+        for src in &non_live {
+            assert!(
+                !src.is_authoritative(),
+                "Non-live AuditTailSource {src:?} should not claim authoritative"
+            );
+            assert!(
+                !src.is_live(),
+                "Non-live AuditTailSource {src:?} should not claim is_live"
+            );
+        }
+    }
+
+    #[test]
+    fn cross_cutting_no_static_tool_backing_claims_live() {
+        let non_live = [
+            ToolCallBackingState::StaticDefinition,
+            ToolCallBackingState::Stale,
+            ToolCallBackingState::Unavailable,
+        ];
+        for st in &non_live {
+            assert!(
+                !st.is_live_backed(),
+                "Non-live ToolCallBackingState {st:?} should not claim is_live_backed"
+            );
+        }
+    }
+
+    #[test]
+    fn cross_cutting_live_stream_always_has_nonempty_caveat() {
+        let r = realtime_surface_result("serve-mcp", "mcp", RealtimeSurfaceMode::LiveStream);
+        assert!(!r.caveat.is_empty(), "Live stream result must have a caveat");
+        assert!(
+            !RealtimeSurfaceMode::LiveStream.freshness_caveat().is_empty(),
+            "Live stream mode must have a freshness caveat"
+        );
+        assert!(
+            !AuditTailSource::LiveHostStream.freshness_caveat().is_empty(),
+            "Live host stream audit tail must have a freshness caveat"
+        );
+        assert!(
+            !ToolCallBackingState::LiveConnector.freshness_caveat().is_empty(),
+            "Live connector backing must have a freshness caveat"
+        );
+    }
+
+    #[test]
+    fn cross_cutting_live_sources_are_authoritative() {
+        // RealtimeSurfaceMode::LiveStream → authoritative
+        let r = realtime_surface_result("serve-mcp", "mcp", RealtimeSurfaceMode::LiveStream);
+        assert!(r.authoritative);
+        // AuditTailSource::LiveHostStream → authoritative
+        assert!(AuditTailSource::LiveHostStream.is_authoritative());
+        // ToolCallBackingState::LiveConnector → live-backed
+        assert!(ToolCallBackingState::LiveConnector.is_live_backed());
+    }
+
+    #[test]
+    fn cross_cutting_all_realtime_tags_nonempty() {
+        let modes = [
+            RealtimeSurfaceMode::LiveStream,
+            RealtimeSurfaceMode::CachedReplay,
+            RealtimeSurfaceMode::StaticSnapshot,
+            RealtimeSurfaceMode::Unavailable,
+        ];
+        for mode in &modes {
+            assert!(!mode.tag().is_empty(), "Tag must not be empty for {mode:?}");
+        }
+        let sources = [
+            AuditTailSource::LiveHostStream,
+            AuditTailSource::LocalLogFile,
+            AuditTailSource::CachedReplay,
+            AuditTailSource::NotAvailable,
+        ];
+        for src in &sources {
+            assert!(!src.tag().is_empty(), "Tag must not be empty for {src:?}");
+        }
+        let backings = [
+            ToolCallBackingState::LiveConnector,
+            ToolCallBackingState::StaticDefinition,
+            ToolCallBackingState::Stale,
+            ToolCallBackingState::Unavailable,
+        ];
+        for st in &backings {
+            assert!(!st.tag().is_empty(), "Tag must not be empty for {st:?}");
         }
     }
 }

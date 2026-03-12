@@ -1287,8 +1287,7 @@ fn now_rfc3339() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ResolutionPatch, TaskStore, WorkflowRequest, WorkflowTruth, build_task_next_actions,
-        current_workflow_truth, derive_capsule_status, effective_bindings,
+        ResolutionPatch, TaskStore, WorkflowRequest, current_workflow_truth, effective_bindings,
         execution_failure_capsule_status, execution_failure_truth, parse_command_availability,
         ready_for_execution, resolution_patch, resolution_patch_would_change,
         validate_binding_entries,

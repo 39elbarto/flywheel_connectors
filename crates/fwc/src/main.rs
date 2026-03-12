@@ -8339,7 +8339,8 @@ fn config_dispatch(args: &ConfigArgs, explicit_host: Option<&str>) -> Result<Dis
             };
             let snapshot = client.config_snapshot(connector.summary.id.as_str())?;
             let imported = read_json_file(import_path)?;
-            let placeholder_paths = config_redacted_placeholder_paths(&imported);
+            let placeholder_paths =
+                config_redacted_placeholder_paths(&imported, &snapshot.current.redacted_fields);
             if !placeholder_paths.is_empty() {
                 return Ok(config_redacted_placeholder_import_dispatch(
                     &host,
@@ -8780,36 +8781,63 @@ fn config_redacted_placeholder_import_dispatch(
     }
 }
 
-fn config_redacted_placeholder_paths(value: &Value) -> Vec<String> {
+fn config_redacted_placeholder_paths(value: &Value, redacted_fields: &[String]) -> Vec<String> {
+    let expected_redactions: std::collections::BTreeSet<&str> =
+        redacted_fields.iter().map(String::as_str).collect();
     let mut paths = Vec::new();
-    collect_config_redacted_placeholder_paths(value, "$", &mut paths);
+    collect_config_redacted_placeholder_paths(value, "$", "", &expected_redactions, &mut paths);
     paths
 }
 
-fn collect_config_redacted_placeholder_paths(value: &Value, path: &str, paths: &mut Vec<String>) {
+fn collect_config_redacted_placeholder_paths(
+    value: &Value,
+    display_path: &str,
+    pointer_path: &str,
+    expected_redactions: &std::collections::BTreeSet<&str>,
+    paths: &mut Vec<String>,
+) {
     match value {
-        Value::String(raw) if raw == "[REDACTED]" => paths.push(path.to_owned()),
+        Value::String(raw)
+            if raw == "[REDACTED]" && expected_redactions.contains(pointer_path) =>
+        {
+            paths.push(display_path.to_owned());
+        }
         Value::Array(items) => {
             for (index, item) in items.iter().enumerate() {
+                let child_display = format!("{display_path}[{index}]");
+                let child_pointer = format!("{pointer_path}/{index}");
                 collect_config_redacted_placeholder_paths(
                     item,
-                    &format!("{path}[{index}]"),
+                    &child_display,
+                    &child_pointer,
+                    expected_redactions,
                     paths,
                 );
             }
         }
         Value::Object(object) => {
             for (key, item) in object {
-                let next = if path == "$" {
+                let child_display = if display_path == "$" {
                     format!("$.{key}")
                 } else {
-                    format!("{path}.{key}")
+                    format!("{display_path}.{key}")
                 };
-                collect_config_redacted_placeholder_paths(item, &next, paths);
+                let child_pointer = format!("{pointer_path}/{}", encode_json_pointer_segment(key));
+                collect_config_redacted_placeholder_paths(
+                    item,
+                    &child_display,
+                    &child_pointer,
+                    expected_redactions,
+                    paths,
+                );
             }
         }
         _ => {}
     }
+}
+
+fn encode_json_pointer_segment(segment: &str) -> String {
+    segment.replace('~', "~0").replace('/', "~1")
 }
 
 fn write_json_file(path: &PathBuf, value: &Value) -> Result<()> {
@@ -21372,6 +21400,63 @@ deny_ptrace = true
         assert_eq!(payload["subcommand"], "import");
         assert_eq!(payload["error"]["type"], "redacted-placeholder-import");
         assert_eq!(payload["details"]["placeholder_paths"][0], "$.client_secret");
+    }
+
+    #[test]
+    fn execute_config_import_allows_literal_redacted_strings_outside_secret_paths() {
+        let tempdir = tempfile::tempdir().expect("temp config dir");
+        let input_path = tempdir.path().join("github-config.json");
+        std::fs::write(
+            &input_path,
+            "{\n  \"profile\": \"work\",\n  \"note\": \"[REDACTED]\"\n}\n",
+        )
+        .expect("config fixture should write");
+        let input_path = input_path.display().to_string();
+        let current = json!({
+            "profile": "work",
+            "client_secret": "[REDACTED]"
+        });
+        let candidate = json!({
+            "profile": "work",
+            "note": "[REDACTED]"
+        });
+        let (host, server) = spawn_mock_host_sequence(vec![
+            (
+                "POST /rpc/discover".to_owned(),
+                mock_discovery_response_json(),
+            ),
+            (
+                "GET /rpc/connectors/fcp.github:enterprise:v1/config".to_owned(),
+                mock_redacted_config_snapshot_json(current.clone()),
+            ),
+            (
+                "POST /rpc/connectors/fcp.github:enterprise:v1/config/validate".to_owned(),
+                mock_config_validation_response_json(
+                    false,
+                    current,
+                    candidate,
+                    Some("missing client_secret"),
+                ),
+            ),
+        ]);
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "config",
+            "import",
+            "github",
+            "--file",
+            &input_path,
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["command"], "config");
+        assert_eq!(payload["subcommand"], "import");
+        assert_eq!(payload["error"]["type"], "config-validation-failed");
     }
 
     #[test]

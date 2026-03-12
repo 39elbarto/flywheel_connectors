@@ -316,7 +316,7 @@ fn discovery_to_template_to_validate_offline_workflow() {
     let schema = run_json_ok(&["--json", "schema", "github", "issues.create", "--offline"]);
     let template = run_json_ok(&[
         "--json",
-        "scaffold",
+        "template",
         "github",
         "issues.create",
         "--offline",
@@ -1772,7 +1772,7 @@ fn e2e_offline_workflow_never_leaks_live_markers() {
     // Step 3: Offline scaffold.
     let scaffold = run_json_ok(&[
         "--json",
-        "scaffold",
+        "template",
         "github",
         "issues.create",
         "--offline",

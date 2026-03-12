@@ -48,23 +48,24 @@ use fcp_host::{
     BatchOptions, BatchStatus, BudgetPolicyEngine, BudgetReportRequest, BudgetReportResponse,
     CacheMetadata, CacheValidator, CancellationController, CancellationRequest,
     CancellationResponse, ConfigRevisionRecord, ConnectorAdminState, ConnectorAdminStatus,
-    ConnectorArchetype, ConnectorConfigApplyRequest, ConnectorConfigApplyResponse,
-    ConnectorConfigDiffRequest, ConnectorConfigDiffResponse, ConnectorConfigRevisionsResponse,
-    ConnectorConfigRollbackRequest, ConnectorConfigSnapshot, ConnectorConfigSnapshotSource,
-    ConnectorConfigValidateRequest, ConnectorConfigValidateResponse, ConnectorInventoryApplyReport,
-    ConnectorInventoryMutationKind, ConnectorInventoryMutationRequest,
-    ConnectorInventoryMutationResponse, ConnectorInventoryResponse, ConnectorRegistry,
-    ConnectorSummary, DiscoveryEndpoint, DiscoveryFilter, DiscoveryResponse, DoctorReport,
-    DoctorRequest, DoctorService, EventAcknowledgeRequest, EventAcknowledgeResponse,
-    EventQueryRequest, EventQueryResponse, GateOutcome, HostAdminStateStore, HostHealthResponse,
-    HostHealthStatus, HostPreflightRequest, IntrospectionResponse, JournalQueryRequest,
-    JournalQueryResponse, LifecycleTransitionRequest, LifecycleTransitionResponse, LogQueryRequest,
-    LogQueryResponse, ManagedConnectorConfig, OperationResult, OperationResultStatus,
-    PreflightRequest, PreflightResponse, ReceiptQueryRequest, ReceiptQueryResponse, ReceiptSummary,
-    RequestPriority, ResilienceError, ResilienceLayer, RolloutController, RolloutDecision,
-    RolloutObservation, RolloutOutcome, SafetyTierExt, SanitizedConnectorConfig,
-    StartupReconciliationReport, SupplyChainGate, SupplyChainGateConfig,
-    diff_sanitized_config_values, merge_connector_health,
+    ConnectorArchetype, ConnectorArtifactMetadataResponse, ConnectorArtifactRegistrationRequest,
+    ConnectorArtifactRegistrationResponse, ConnectorConfigApplyRequest,
+    ConnectorConfigApplyResponse, ConnectorConfigDiffRequest, ConnectorConfigDiffResponse,
+    ConnectorConfigRevisionsResponse, ConnectorConfigRollbackRequest, ConnectorConfigSnapshot,
+    ConnectorConfigSnapshotSource, ConnectorConfigValidateRequest, ConnectorConfigValidateResponse,
+    ConnectorInventoryApplyReport, ConnectorInventoryMutationKind,
+    ConnectorInventoryMutationRequest, ConnectorInventoryMutationResponse,
+    ConnectorInventoryResponse, ConnectorRegistry, ConnectorSummary, DiscoveryEndpoint,
+    DiscoveryFilter, DiscoveryResponse, DoctorReport, DoctorRequest, DoctorService,
+    EventAcknowledgeRequest, EventAcknowledgeResponse, EventQueryRequest, EventQueryResponse,
+    GateOutcome, HostAdminStateStore, HostHealthResponse, HostHealthStatus, HostPreflightRequest,
+    IntrospectionResponse, JournalQueryRequest, JournalQueryResponse, LifecycleTransitionRequest,
+    LifecycleTransitionResponse, LogQueryRequest, LogQueryResponse, ManagedConnectorConfig,
+    OperationResult, OperationResultStatus, PreflightRequest, PreflightResponse,
+    ReceiptQueryRequest, ReceiptQueryResponse, ReceiptSummary, RequestPriority, ResilienceError,
+    ResilienceLayer, RolloutController, RolloutDecision, RolloutObservation, RolloutOutcome,
+    SafetyTierExt, SanitizedConnectorConfig, StartupReconciliationReport, SupplyChainGate,
+    SupplyChainGateConfig, diff_sanitized_config_values, merge_connector_health,
 };
 use fcp_host::{HostError, HostResult};
 use futures_util::future::join_all;
@@ -1564,16 +1565,6 @@ fn read_env_usize(name: &str) -> HostResult<Option<usize>> {
     Ok(Some(parsed))
 }
 
-fn read_env_csv(name: &str) -> Option<Vec<String>> {
-    std::env::var(name).ok().map(|raw| {
-        raw.split(',')
-            .map(str::trim)
-            .filter(|entry| !entry.is_empty())
-            .map(ToOwned::to_owned)
-            .collect()
-    })
-}
-
 fn resolve_bind_target() -> HostResult<BindTarget> {
     let raw = std::env::var("FCP_HOST_BIND").unwrap_or_else(|_| "127.0.0.1:9090".to_string());
     parse_bind_target(&raw)
@@ -1740,6 +1731,10 @@ async fn async_main() -> HostResult<()> {
         .route(
             "/rpc/connectors/{connector_id}/status",
             get(connector_status_handler),
+        )
+        .route(
+            "/rpc/connectors/{connector_id}/artifact",
+            get(connector_artifact_metadata_handler).post(connector_artifact_register_handler),
         )
         .route(
             "/rpc/connectors/{connector_id}/config",
@@ -2068,6 +2063,94 @@ async fn connector_status_handler(
     }
 }
 
+async fn connector_artifact_metadata_handler(
+    State(state): State<Arc<AppState>>,
+    Path(connector_id): Path<String>,
+) -> Result<Json<ConnectorArtifactMetadataResponse>, (StatusCode, String)> {
+    let connector_id = parse_connector_id(&connector_id)?;
+    let started_at = Instant::now();
+    tracing::debug!(
+        event = "connector_artifact_metadata_request",
+        connector_id = %connector_id,
+        "processing connector artifact metadata request"
+    );
+
+    match state
+        .lifecycle
+        .connector_artifact_metadata(&connector_id)
+        .await
+    {
+        Ok(response) => {
+            tracing::debug!(
+                event = "connector_artifact_metadata_response",
+                connector_id = %connector_id,
+                has_artifact = response.artifact.is_some(),
+                duration_ms = started_at.elapsed().as_millis() as u64,
+                "connector artifact metadata request complete"
+            );
+            Ok(Json(response))
+        }
+        Err(err) => {
+            let host_error = map_lifecycle_host_error(err);
+            tracing::warn!(
+                event = "connector_artifact_metadata_error",
+                connector_id = %connector_id,
+                error = %host_error,
+                duration_ms = started_at.elapsed().as_millis() as u64,
+                "connector artifact metadata request failed"
+            );
+            Err(map_host_error(host_error))
+        }
+    }
+}
+
+async fn connector_artifact_register_handler(
+    State(state): State<Arc<AppState>>,
+    Path(connector_id): Path<String>,
+    Json(request): Json<ConnectorArtifactRegistrationRequest>,
+) -> Result<Json<ConnectorArtifactRegistrationResponse>, (StatusCode, String)> {
+    let connector_id = parse_connector_id(&connector_id)?;
+    let started_at = Instant::now();
+    tracing::debug!(
+        event = "connector_artifact_register_request",
+        connector_id = %connector_id,
+        dry_run = request.dry_run,
+        source_kind = ?request.provenance.source_kind,
+        has_placement = request.placement.is_some(),
+        "processing connector artifact registration request"
+    );
+
+    match state
+        .lifecycle
+        .register_connector_artifact(&connector_id, &request)
+        .await
+    {
+        Ok(response) => {
+            tracing::debug!(
+                event = "connector_artifact_register_response",
+                connector_id = %connector_id,
+                accepted = response.accepted,
+                dry_run = response.dry_run,
+                rejected = response.rejection.is_some(),
+                duration_ms = started_at.elapsed().as_millis() as u64,
+                "connector artifact registration request complete"
+            );
+            Ok(Json(response))
+        }
+        Err(err) => {
+            let host_error = map_lifecycle_host_error(err);
+            tracing::warn!(
+                event = "connector_artifact_register_error",
+                connector_id = %connector_id,
+                error = %host_error,
+                duration_ms = started_at.elapsed().as_millis() as u64,
+                "connector artifact registration request failed"
+            );
+            Err(map_host_error(host_error))
+        }
+    }
+}
+
 async fn connector_inventory_apply_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ConnectorInventoryMutationRequest>,
@@ -2372,7 +2455,7 @@ fn next_inventory_with_config(
 
 async fn rollback_connector_inventory(
     state: &AppState,
-    connectors_file: &PathBuf,
+    connectors_file: &std::path::Path,
     previous_configs: &[ConnectorConfig],
 ) -> String {
     let file_note = match write_connector_configs_file(connectors_file, previous_configs) {
@@ -3604,10 +3687,15 @@ async fn rollout_manual_rollback_handler(
         })?;
     let from_version = current.version.clone();
     let rollback_target = current.previous_version.clone().ok_or_else(|| {
-        map_host_error(HostError::InvalidFilter(format!(
-            "requested rollback target '{to_version}' does not match current rollback target '{rollback_target}'"
+        map_host_error(HostError::Unavailable(format!(
+            "connector '{connector_id}' has no rollback target for the current rollout state"
         )))
     })?;
+    if rollback_target != to_version {
+        return Err(map_host_error(HostError::InvalidFilter(format!(
+            "requested rollback target '{to_version}' does not match current rollback target '{rollback_target}'"
+        ))));
+    }
 
     let rolled_back = state
         .lifecycle

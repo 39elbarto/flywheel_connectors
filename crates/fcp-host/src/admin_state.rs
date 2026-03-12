@@ -14,7 +14,7 @@ use chrono::{DateTime, Utc};
 use fcp_async_core::sync::{Mutex, RwLock};
 use fcp_core::{
     ConnectorId, CredentialId, LifecycleError, LifecycleManager, LifecycleRecord, LifecycleState,
-    LifecycleStatus, TransitionReason,
+    LifecycleStatus, ObjectPlacementPolicy, TransitionReason,
 };
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -1130,6 +1130,83 @@ pub struct ArtifactRejection {
     pub policy_gate: String,
 }
 
+/// Persisted host-admin metadata describing the runtime artifact currently
+/// associated with a connector.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectorArtifactMetadata {
+    /// Provenance evidence for the artifact accepted by the host.
+    pub provenance: ArtifactProvenance,
+    /// Optional placement hint captured alongside the artifact metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<ObjectPlacementPolicy>,
+    /// When the host recorded this metadata.
+    pub recorded_at: DateTime<Utc>,
+    /// Optional initiating actor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded_by: Option<String>,
+}
+
+/// Response for the host-admin artifact metadata read path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectorArtifactMetadataResponse {
+    /// Connector identifier.
+    pub connector_id: ConnectorId,
+    /// Persisted artifact/admin metadata, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<ConnectorArtifactMetadata>,
+    /// Timestamp when the response was evaluated.
+    pub evaluated_at: DateTime<Utc>,
+}
+
+/// Request for registering connector artifact/admin provenance metadata through
+/// the host control plane.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectorArtifactRegistrationRequest {
+    /// Preview the result without persisting the metadata.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dry_run: bool,
+    /// Provenance evidence supplied for the artifact.
+    pub provenance: ArtifactProvenance,
+    /// Optional placement hint to persist alongside the artifact metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<ObjectPlacementPolicy>,
+    /// Whether host policy requires a verified signature for this registration.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub require_signature: bool,
+    /// Optional host policy size limit for the artifact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_size_bytes: Option<u64>,
+    /// Optional initiating actor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initiated_by: Option<String>,
+}
+
+/// Response from the host-admin artifact provenance registration path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectorArtifactRegistrationResponse {
+    /// Connector identifier.
+    pub connector_id: ConnectorId,
+    /// Whether this was a preview only.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dry_run: bool,
+    /// Whether the registration was accepted by host policy.
+    pub accepted: bool,
+    /// Previous persisted metadata, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous: Option<ConnectorArtifactMetadata>,
+    /// Current metadata after acceptance or preview.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<ConnectorArtifactMetadata>,
+    /// Structured rejection details when the request was denied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejection: Option<ArtifactRejection>,
+    /// Journal sequence recorded for accepted persisted updates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub journal_sequence: Option<u64>,
+    /// Timestamp when the host evaluated the request.
+    pub evaluated_at: DateTime<Utc>,
+}
+
 /// Known placeholder hashes that must be rejected on the live install path.
 pub const KNOWN_PLACEHOLDER_HASHES: &[&str] = &[
     "PLACEHOLDER_HASH",
@@ -1904,6 +1981,19 @@ pub enum AdminStateMutation {
         /// Stable payload digest for diff/audit linkage.
         payload_digest: String,
     },
+    /// Artifact/admin provenance metadata was updated.
+    ArtifactMetadataUpdated {
+        /// Source kind accepted by the host.
+        source_kind: ArtifactSourceKind,
+        /// Source URI or path recorded for the artifact.
+        source_uri: String,
+        /// Stable content digest recorded for the artifact.
+        content_hash: String,
+        /// Manifest version from the artifact metadata, when known.
+        manifest_version: Option<String>,
+        /// Whether placement metadata was recorded alongside the artifact.
+        placement_present: bool,
+    },
 }
 
 /// A monotonic admin-state journal entry.
@@ -1943,6 +2033,9 @@ pub struct ConnectorAdminState {
     /// Currently active config revision id.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_config_revision_id: Option<u64>,
+    /// Optional persisted runtime artifact/admin provenance metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<ConnectorArtifactMetadata>,
     /// Last journal sequence that mutated this connector.
     #[serde(default)]
     pub last_journal_sequence: u64,
@@ -2042,6 +2135,9 @@ pub struct ConnectorAdminStatus {
     /// Active config revision id, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_config_revision_id: Option<u64>,
+    /// Persisted runtime artifact/admin provenance metadata, when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<ConnectorArtifactMetadata>,
     /// Total config revisions tracked for this connector.
     pub config_revision_count: usize,
     /// Latest journal sequence touching this connector.
@@ -2212,6 +2308,7 @@ fn connector_admin_status_from_state(
             .map(|record| LifecycleStatus::from_record(record, now, false)),
         pinned_version: state.pinned_version.clone(),
         active_config_revision_id: state.active_config_revision_id,
+        artifact: state.artifact.clone(),
         config_revision_count: state.config_revisions.len(),
         last_journal_sequence: state.last_journal_sequence,
         drift: connector_drift_status(state, now),
@@ -2697,26 +2794,30 @@ impl HostAdminStateStore {
         let state = guard.connectors.get(connector_id)?;
         let active_revision = state.active_config_revision();
         let (current, source) = active_revision.map_or_else(
-            || (
-                SanitizedConnectorConfig {
-                    payload: Value::Null,
-                    payload_digest: String::new(),
-                    redacted_fields: Vec::new(),
-                    credential_references: Vec::new(),
-                    contains_inline_secrets: false,
-                },
-                ConnectorConfigSnapshotSource::ManagedInventory,
-            ),
-            |revision| (
-                SanitizedConnectorConfig {
-                    payload: revision.payload.clone(),
-                    payload_digest: revision.payload_digest.clone(),
-                    redacted_fields: revision.redacted_fields.clone(),
-                    credential_references: revision.credential_references.clone(),
-                    contains_inline_secrets: revision.contains_inline_secrets,
-                },
-                ConnectorConfigSnapshotSource::ActiveRevision,
-            )
+            || {
+                (
+                    SanitizedConnectorConfig {
+                        payload: Value::Null,
+                        payload_digest: String::new(),
+                        redacted_fields: Vec::new(),
+                        credential_references: Vec::new(),
+                        contains_inline_secrets: false,
+                    },
+                    ConnectorConfigSnapshotSource::ManagedInventory,
+                )
+            },
+            |revision| {
+                (
+                    SanitizedConnectorConfig {
+                        payload: revision.payload.clone(),
+                        payload_digest: revision.payload_digest.clone(),
+                        redacted_fields: revision.redacted_fields.clone(),
+                        credential_references: revision.credential_references.clone(),
+                        contains_inline_secrets: revision.contains_inline_secrets,
+                    },
+                    ConnectorConfigSnapshotSource::ActiveRevision,
+                )
+            },
         );
         Some(ConnectorConfigSnapshot {
             connector_id: connector_id.clone(),
@@ -3072,6 +3173,159 @@ impl HostAdminStateStore {
             connector_state,
             now,
         ))
+    }
+
+    /// Return the current artifact/admin provenance metadata for one connector.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LifecycleError::NotFound`] when the connector has no persisted
+    /// admin state.
+    pub async fn connector_artifact_metadata(
+        &self,
+        connector_id: &ConnectorId,
+    ) -> Result<ConnectorArtifactMetadataResponse, LifecycleError> {
+        self.connector_artifact_metadata_at(connector_id, Utc::now())
+            .await
+    }
+
+    async fn connector_artifact_metadata_at(
+        &self,
+        connector_id: &ConnectorId,
+        now: DateTime<Utc>,
+    ) -> Result<ConnectorArtifactMetadataResponse, LifecycleError> {
+        let state = self.state.read().await;
+        let connector_state =
+            state
+                .connectors
+                .get(connector_id)
+                .ok_or_else(|| LifecycleError::NotFound {
+                    connector_id: connector_id.clone(),
+                })?;
+        Ok(ConnectorArtifactMetadataResponse {
+            connector_id: connector_id.clone(),
+            artifact: connector_state.artifact.clone(),
+            evaluated_at: now,
+        })
+    }
+
+    /// Validate and optionally persist connector artifact/admin provenance
+    /// metadata through the host control plane.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LifecycleError::NotFound`] when the connector has no persisted
+    /// admin state. Validation denials are returned in the response payload so
+    /// callers can inspect precise rejection reasons without parsing host
+    /// transport errors.
+    pub async fn register_connector_artifact(
+        &self,
+        connector_id: &ConnectorId,
+        request: &ConnectorArtifactRegistrationRequest,
+    ) -> Result<ConnectorArtifactRegistrationResponse, LifecycleError> {
+        self.register_connector_artifact_at(connector_id, request, Utc::now())
+            .await
+    }
+
+    async fn register_connector_artifact_at(
+        &self,
+        connector_id: &ConnectorId,
+        request: &ConnectorArtifactRegistrationRequest,
+        now: DateTime<Utc>,
+    ) -> Result<ConnectorArtifactRegistrationResponse, LifecycleError> {
+        let previous = {
+            let state = self.state.read().await;
+            let connector_state =
+                state
+                    .connectors
+                    .get(connector_id)
+                    .ok_or_else(|| LifecycleError::NotFound {
+                        connector_id: connector_id.clone(),
+                    })?;
+            connector_state.artifact.clone()
+        };
+
+        if let Some(rejection) = validate_artifact_provenance(
+            connector_id.as_str(),
+            &request.provenance,
+            request.require_signature,
+            request.max_size_bytes,
+        ) {
+            return Ok(ConnectorArtifactRegistrationResponse {
+                connector_id: connector_id.clone(),
+                dry_run: request.dry_run,
+                accepted: false,
+                previous,
+                current: None,
+                rejection: Some(rejection),
+                journal_sequence: None,
+                evaluated_at: now,
+            });
+        }
+
+        let current = ConnectorArtifactMetadata {
+            provenance: request.provenance.clone(),
+            placement: request.placement.clone(),
+            recorded_at: now,
+            recorded_by: request.initiated_by.clone(),
+        };
+
+        if request.dry_run {
+            return Ok(ConnectorArtifactRegistrationResponse {
+                connector_id: connector_id.clone(),
+                dry_run: true,
+                accepted: true,
+                previous,
+                current: Some(current),
+                rejection: None,
+                journal_sequence: None,
+                evaluated_at: now,
+            });
+        }
+
+        let current_for_snapshot = current.clone();
+        let initiated_by = request.initiated_by.clone();
+        let (previous, journal_sequence) = self
+            .apply_mutation(|snapshot| {
+                if !snapshot.connectors.contains_key(connector_id) {
+                    return Err(LifecycleError::NotFound {
+                        connector_id: connector_id.clone(),
+                    });
+                }
+
+                let previous = snapshot
+                    .connectors
+                    .get(connector_id)
+                    .and_then(|state| state.artifact.clone());
+                let journal_sequence = snapshot.append_journal(
+                    connector_id,
+                    AdminStateMutation::ArtifactMetadataUpdated {
+                        source_kind: current_for_snapshot.provenance.source_kind.clone(),
+                        source_uri: current_for_snapshot.provenance.source_uri.clone(),
+                        content_hash: current_for_snapshot.provenance.content_hash.clone(),
+                        manifest_version: current_for_snapshot.provenance.manifest_version.clone(),
+                        placement_present: current_for_snapshot.placement.is_some(),
+                    },
+                    initiated_by.clone(),
+                );
+                if let Some(state) = snapshot.connectors.get_mut(connector_id) {
+                    state.artifact = Some(current_for_snapshot.clone());
+                    state.last_journal_sequence = journal_sequence;
+                }
+                Ok((previous, journal_sequence))
+            })
+            .await?;
+
+        Ok(ConnectorArtifactRegistrationResponse {
+            connector_id: connector_id.clone(),
+            dry_run: false,
+            accepted: true,
+            previous,
+            current: Some(current),
+            rejection: None,
+            journal_sequence: Some(journal_sequence),
+            evaluated_at: now,
+        })
     }
 
     /// Execute a lifecycle transition and return the resulting state.
@@ -4531,6 +4785,17 @@ mod tests {
         ConnectorId::from_static("fcp.test.admin-state-secondary:utility:1.0.0")
     }
 
+    const fn lifecycle_action_target(action: LifecycleAction) -> DesiredRuntimeState {
+        match action {
+            LifecycleAction::Enable | LifecycleAction::Restart | LifecycleAction::Reload => {
+                DesiredRuntimeState::Enabled
+            }
+            LifecycleAction::Disable => DesiredRuntimeState::Disabled,
+            LifecycleAction::Uninstall => DesiredRuntimeState::Uninstalled,
+            LifecycleAction::Promote => DesiredRuntimeState::Enabled,
+        }
+    }
+
     fn connector_summary(
         connector_id: ConnectorId,
         enabled: bool,
@@ -4555,6 +4820,17 @@ mod tests {
             "profile": name,
             "credential_id": format!("cred-{name}"),
         })
+    }
+
+    fn placement_policy() -> ObjectPlacementPolicy {
+        ObjectPlacementPolicy {
+            min_nodes: 2,
+            max_node_fraction_bps: 5_000,
+            preferred_devices: Vec::new(),
+            excluded_devices: Vec::new(),
+            target_coverage_bps: 9_000,
+            min_source_diversity: 2,
+        }
     }
 
     fn secretful_config_payload(credential_id: CredentialId) -> Value {
@@ -5023,6 +5299,7 @@ mod tests {
             config_revisions: Vec::new(),
             active_config_revision_id: None,
             last_journal_sequence: 0,
+            artifact: None,
         };
         let install_drift =
             connector_drift_status(&install_state, now).expect("install should be stuck");
@@ -5051,6 +5328,7 @@ mod tests {
             config_revisions: Vec::new(),
             active_config_revision_id: None,
             last_journal_sequence: 0,
+            artifact: None,
         };
         let canary_drift =
             connector_drift_status(&canary_state, now).expect("canary should be stuck");
@@ -5162,7 +5440,7 @@ mod tests {
 
     #[test]
     fn journal_query_request_defaults() {
-        let json = r#"{}"#;
+        let json = r"{}";
         let req: JournalQueryRequest = serde_json::from_str(json).unwrap();
         assert!(req.connector_id.is_none());
         assert_eq!(req.after_sequence, 0);
@@ -5673,7 +5951,7 @@ mod tests {
 
     #[test]
     fn log_query_request_defaults() {
-        let json = r#"{}"#;
+        let json = r"{}";
         let req: LogQueryRequest = serde_json::from_str(json).unwrap();
         assert!(req.connector_id.is_none());
         assert!(req.min_severity.is_none());
@@ -5720,7 +5998,7 @@ mod tests {
 
     #[test]
     fn event_query_request_defaults() {
-        let json = r#"{}"#;
+        let json = r"{}";
         let req: EventQueryRequest = serde_json::from_str(json).unwrap();
         assert!(req.connector_id.is_none());
         assert!(req.kind.is_none());
@@ -8129,17 +8407,165 @@ mod tests {
         let result = store.rollback_config(&cid, &request).await;
         assert!(result.is_err());
     }
-}
 
-/// Helper for test assertions on lifecycle action → desired state mapping.
-#[cfg(test)]
-fn lifecycle_action_target(action: LifecycleAction) -> DesiredRuntimeState {
-    match action {
-        LifecycleAction::Enable | LifecycleAction::Restart | LifecycleAction::Reload => {
-            DesiredRuntimeState::Enabled
-        }
-        LifecycleAction::Disable => DesiredRuntimeState::Disabled,
-        LifecycleAction::Uninstall => DesiredRuntimeState::Uninstalled,
-        LifecycleAction::Promote => DesiredRuntimeState::Enabled,
+    #[fcp_async_core::runtime::test]
+    async fn register_connector_artifact_dry_run_does_not_persist() {
+        let store = HostAdminStateStore::new();
+        let cid = connector_id();
+        let summaries = [connector_summary(
+            cid.clone(),
+            true,
+            ConnectorHealth::healthy(),
+        )];
+        store
+            .reconcile_registered_connectors(&summaries)
+            .await
+            .unwrap();
+
+        let request = ConnectorArtifactRegistrationRequest {
+            dry_run: true,
+            provenance: valid_provenance(),
+            placement: Some(placement_policy()),
+            require_signature: true,
+            max_size_bytes: Some(100_000),
+            initiated_by: Some("preview-agent".to_owned()),
+        };
+
+        let response = store
+            .register_connector_artifact(&cid, &request)
+            .await
+            .unwrap();
+        assert!(response.accepted);
+        assert!(response.dry_run);
+        assert!(response.previous.is_none());
+        assert!(response.journal_sequence.is_none());
+        let current = response.current.expect("dry run should project metadata");
+        assert_eq!(
+            current.provenance.source_uri,
+            "registry://connectors/test:saas:1.0.0"
+        );
+        assert!(current.placement.is_some());
+
+        let metadata = store.connector_artifact_metadata(&cid).await.unwrap();
+        assert!(metadata.artifact.is_none(), "dry run must not persist");
+        let status = store.connector_status(&cid).await.unwrap();
+        assert!(status.artifact.is_none(), "status should remain unchanged");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn register_connector_artifact_persists_and_surfaces_in_status() {
+        let store = HostAdminStateStore::new();
+        let cid = connector_id();
+        let summaries = [connector_summary(
+            cid.clone(),
+            true,
+            ConnectorHealth::healthy(),
+        )];
+        store
+            .reconcile_registered_connectors(&summaries)
+            .await
+            .unwrap();
+
+        let request = ConnectorArtifactRegistrationRequest {
+            dry_run: false,
+            provenance: valid_provenance(),
+            placement: Some(placement_policy()),
+            require_signature: true,
+            max_size_bytes: Some(100_000),
+            initiated_by: Some("registry-sync".to_owned()),
+        };
+
+        let response = store
+            .register_connector_artifact(&cid, &request)
+            .await
+            .unwrap();
+        assert!(response.accepted);
+        assert!(!response.dry_run);
+        assert!(response.rejection.is_none());
+        assert!(response.journal_sequence.is_some());
+
+        let metadata = store.connector_artifact_metadata(&cid).await.unwrap();
+        let artifact = metadata.artifact.expect("artifact metadata should persist");
+        assert_eq!(
+            artifact.provenance.source_kind,
+            ArtifactSourceKind::Registry
+        );
+        assert_eq!(artifact.recorded_by.as_deref(), Some("registry-sync"));
+        assert!(artifact.placement.is_some());
+
+        let status = store.connector_status(&cid).await.unwrap();
+        assert!(
+            status.artifact.is_some(),
+            "status should expose artifact metadata"
+        );
+        assert_eq!(
+            status
+                .artifact
+                .as_ref()
+                .and_then(|value| value.recorded_by.as_deref()),
+            Some("registry-sync")
+        );
+
+        let journal = store.journal(Some(&cid)).await;
+        let last = journal
+            .last()
+            .expect("artifact registration should journal");
+        assert!(matches!(
+            &last.mutation,
+            AdminStateMutation::ArtifactMetadataUpdated {
+                source_kind: ArtifactSourceKind::Registry,
+                placement_present: true,
+                ..
+            }
+        ));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn register_connector_artifact_rejects_placeholder_hash_without_persisting() {
+        let store = HostAdminStateStore::new();
+        let cid = connector_id();
+        let summaries = [connector_summary(
+            cid.clone(),
+            true,
+            ConnectorHealth::healthy(),
+        )];
+        store
+            .reconcile_registered_connectors(&summaries)
+            .await
+            .unwrap();
+
+        let mut provenance = valid_provenance();
+        provenance.content_hash = "PLACEHOLDER_HASH".to_owned();
+        let request = ConnectorArtifactRegistrationRequest {
+            dry_run: false,
+            provenance,
+            placement: None,
+            require_signature: true,
+            max_size_bytes: Some(100_000),
+            initiated_by: Some("registry-sync".to_owned()),
+        };
+
+        let response = store
+            .register_connector_artifact(&cid, &request)
+            .await
+            .unwrap();
+        assert!(!response.accepted);
+        assert!(response.current.is_none());
+        assert!(response.journal_sequence.is_none());
+        assert!(matches!(
+            response.rejection.as_ref().map(|value| &value.kind),
+            Some(&ArtifactRejectionKind::PlaceholderHash)
+        ));
+
+        let metadata = store.connector_artifact_metadata(&cid).await.unwrap();
+        assert!(metadata.artifact.is_none());
+        let journal = store.journal(Some(&cid)).await;
+        assert!(
+            journal.iter().all(|entry| !matches!(
+                &entry.mutation,
+                AdminStateMutation::ArtifactMetadataUpdated { .. }
+            )),
+            "rejected artifact registrations must not mutate persisted state"
+        );
     }
 }

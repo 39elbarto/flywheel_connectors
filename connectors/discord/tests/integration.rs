@@ -39,13 +39,21 @@ const ALL_REQUIRED_INTENTS: u64 =
 // Helpers
 // ============================================================================
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> fcp_core::CapabilityToken {
+fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> fcp_core::CapabilityToken {
+    let cap = match op {
+        "discord.send_message" | "discord.trigger_typing" => "discord.send",
+        "discord.edit_message" => "discord.edit",
+        "discord.delete_message" => "discord.delete",
+        "discord.add_reaction" => "discord.react",
+        "discord.create_thread" => "discord.threads",
+        _ => "discord.read",
+    };
     let now = Utc::now();
     let cose = CapabilityTokenBuilder::new()
         .capability_id(cap)
         .zone_id("z:work")
         .principal("user:test")
-        .operations(&[cap])
+        .operations(&[op])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
         .sign(signing_key)

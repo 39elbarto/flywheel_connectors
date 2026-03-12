@@ -1358,13 +1358,19 @@ mod tests {
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
 
-    fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> CapabilityToken {
+    fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+        let cap = match op {
+            "gcal.list_calendars" => "gcal.calendars.read",
+            "gcal.get_event" | "gcal.list_events" => "gcal.events.read",
+            "gcal.create_event" | "gcal.update_event" | "gcal.delete_event" | "gcal.quick_add" => "gcal.events.write",
+            _ => "gcal.read",
+        };
         let now = Utc::now();
         let cose = CapabilityTokenBuilder::new()
             .capability_id(cap)
             .zone_id("z:work")
             .principal("user:test")
-            .operations(&[cap])
+            .operations(&[op])
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
             .sign(signing_key)

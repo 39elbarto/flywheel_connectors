@@ -1290,13 +1290,21 @@ mod tests {
         matchers::{method, path},
     };
 
-    fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> CapabilityToken {
+    fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+        let cap = match op {
+            "qdrant.list_collections" | "qdrant.collection_info" => "qdrant.collections.read",
+            "qdrant.create_collection" | "qdrant.delete_collection" => "qdrant.collections.write",
+            "qdrant.search" | "qdrant.query_points" | "qdrant.batch_query_points"
+            | "qdrant.get_points" | "qdrant.scroll" | "qdrant.count" => "qdrant.points.read",
+            "qdrant.upsert_points" | "qdrant.delete_points" => "qdrant.points.write",
+            _ => "qdrant.collections.read",
+        };
         let now = Utc::now();
         let cose = CapabilityTokenBuilder::new()
             .capability_id(cap)
             .zone_id("z:work")
             .principal("user:test")
-            .operations(&[cap])
+            .operations(&[op])
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
             .sign(signing_key)

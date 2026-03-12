@@ -5,12 +5,19 @@
 //! stdio transport stays small and delegates tool execution to a callback so
 //! the CLI can reuse the existing invoke planning path.
 
-use anyhow::Result;
+use std::collections::{BTreeMap, BTreeSet};
+
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::export_tools;
+use crate::history::{HistoryFilter, HistoryStore};
+use crate::mcp_resources::{
+    self, McpPrompt as RegistryPrompt, McpResource as RegistryResource, McpResourceRegistry,
+    ParsedUri,
+};
 use crate::readiness::DiscoveredConnector;
 
 // ── JSON-RPC 2.0 Error Codes ────────────────────────────────────────────
@@ -397,6 +404,15 @@ impl McpResourceEntry {
     pub fn name(&self) -> &str {
         &self.name
     }
+
+    fn from_registry(resource: &RegistryResource) -> Self {
+        Self::new(
+            resource.uri.clone(),
+            resource.name.clone(),
+            resource.description.clone(),
+            resource.mime_type.clone(),
+        )
+    }
 }
 
 // ── MCP Prompt Entry ────────────────────────────────────────────────────
@@ -431,6 +447,18 @@ impl McpPromptEntry {
     /// Return the prompt name.
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    fn from_registry(prompt: &RegistryPrompt) -> Self {
+        let mut entry = Self::new(prompt.uri.clone(), prompt.description.clone());
+        for argument in &prompt.arguments {
+            entry = entry.with_argument(if argument.required {
+                PromptArgDef::required(argument.name.clone(), argument.description.clone())
+            } else {
+                PromptArgDef::optional(argument.name.clone(), argument.description.clone())
+            });
+        }
+        entry
     }
 }
 
@@ -570,18 +598,16 @@ impl McpServerState {
 /// Convenience constructor: build an `McpServerState` from a list of
 /// [`DiscoveredOperationEntry`] values.
 pub fn from_operations(ops: &[DiscoveredOperationEntry]) -> McpServerState {
-    let mut builder = McpServerState::builder();
-    for op in ops {
-        let tool = McpToolDefinition::new(
+    let tools = ops.iter().map(|op| {
+        McpToolDefinition::new(
             op.tool_name(),
             &op.description,
             op.input_schema.clone(),
             &op.connector_id,
             &op.operation_id,
-        );
-        builder = builder.with_tool(tool);
-    }
-    builder.build()
+        )
+    });
+    state_from_tools(tools, McpServerConfig::default())
 }
 
 /// Build an MCP server state from discovered connectors.
@@ -612,11 +638,41 @@ pub fn state_from_tools<I>(tools: I, config: McpServerConfig) -> McpServerState
 where
     I: IntoIterator<Item = McpToolDefinition>,
 {
+    let tools: Vec<McpToolDefinition> = tools.into_iter().collect();
+    let registry = registry_from_tools(&tools);
     let mut builder = McpServerState::builder().with_config(config);
-    for tool in tools {
-        builder = builder.with_tool(tool);
+    for tool in &tools {
+        builder = builder.with_tool(tool.clone());
+    }
+    for resource in registry.list_resources() {
+        builder = builder.with_resource(McpResourceEntry::from_registry(resource));
+    }
+    for prompt in registry.list_prompts() {
+        builder = builder.with_prompt(McpPromptEntry::from_registry(prompt));
     }
     builder.build()
+}
+
+fn registry_from_tools(tools: &[McpToolDefinition]) -> McpResourceRegistry {
+    let mut operations_by_connector: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for tool in tools {
+        operations_by_connector
+            .entry(tool.connector_id.clone())
+            .or_default()
+            .insert(tool.operation_id.clone());
+    }
+
+    let mut registry = McpResourceRegistry::new();
+    for (connector_id, operations) in &operations_by_connector {
+        registry.register_connector(connector_id);
+        for operation_id in operations {
+            registry.register_operation_prompt(connector_id, operation_id);
+        }
+    }
+    if !operations_by_connector.is_empty() {
+        registry.register_global_resources();
+    }
+    registry
 }
 
 // ── Builder ─────────────────────────────────────────────────────────────
@@ -951,20 +1007,25 @@ fn handle_resources_read(
         );
     };
 
-    let content = json!({
-        "uri": resource.uri,
-        "name": resource.name,
-        "description": resource.description,
-        "mimeType": resource.mime_type,
+    let content = resolve_resource_content(state, uri).unwrap_or_else(|| {
+        mcp_resources::ResourceContent::new(
+            resource.uri.clone(),
+            json!({
+                "uri": resource.uri,
+                "name": resource.name,
+                "description": resource.description,
+                "mimeType": resource.mime_type,
+            }),
+        )
     });
     JsonRpcResponse::success(
         id,
         json!({
             "contents": [{
-                "uri": resource.uri,
-                "mimeType": resource.mime_type,
-                "text": serde_json::to_string_pretty(&content)
-                    .unwrap_or_else(|_| content.to_string()),
+                "uri": content.uri,
+                "mimeType": content.mime_type,
+                "text": serde_json::to_string_pretty(&content.content)
+                    .unwrap_or_else(|_| content.content.to_string()),
             }],
         }),
     )
@@ -1044,6 +1105,29 @@ fn handle_prompts_get(
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
+    if let Some(content) = resolve_prompt_content(state, prompt, &provided_args) {
+        let messages = content
+            .messages
+            .iter()
+            .map(|message| {
+                json!({
+                    "role": message.role,
+                    "content": {
+                        "type": "text",
+                        "text": message.content,
+                    },
+                })
+            })
+            .collect::<Vec<_>>();
+        return JsonRpcResponse::success(
+            id,
+            json!({
+                "description": prompt.description,
+                "messages": messages,
+            }),
+        );
+    }
+
     let rendered_arguments = if prompt.arguments.is_empty() {
         "No prompt arguments.".to_string()
     } else {
@@ -1083,6 +1167,314 @@ fn handle_prompts_get(
             }],
         }),
     )
+}
+
+fn resolve_resource_content(
+    state: &McpServerState,
+    uri: &str,
+) -> Option<mcp_resources::ResourceContent> {
+    match mcp_resources::parse_uri(uri) {
+        ParsedUri::GlobalStatus => Some(global_status_content(state)),
+        ParsedUri::ConnectorResource {
+            connector_id,
+            resource_type,
+        } => {
+            let connector_tools = state.tools_for_connector(&connector_id);
+            if connector_tools.is_empty() {
+                return None;
+            }
+            match resource_type.as_str() {
+                "health" => Some(connector_health_content(
+                    uri,
+                    &connector_id,
+                    &connector_tools,
+                )),
+                "rate-limits" => Some(connector_rate_limits_content(uri, &connector_id)),
+                "operations" => Some(connector_operations_content(
+                    uri,
+                    &connector_id,
+                    &connector_tools,
+                )),
+                "history" => Some(connector_history_content(uri, &connector_id)),
+                _ => None,
+            }
+        }
+        ParsedUri::ConnectorPrompt { .. } | ParsedUri::Unknown(_) => None,
+    }
+}
+
+fn resolve_prompt_content(
+    state: &McpServerState,
+    prompt: &McpPromptEntry,
+    provided_args: &serde_json::Map<String, Value>,
+) -> Option<mcp_resources::PromptContent> {
+    let args = prompt_arguments_as_strings(provided_args);
+    match mcp_resources::parse_uri(prompt.name()) {
+        ParsedUri::ConnectorPrompt {
+            connector_id,
+            prompt_type,
+            operation,
+        } => {
+            let connector_tools = state.tools_for_connector(&connector_id);
+            if connector_tools.is_empty() {
+                return None;
+            }
+            match prompt_type.as_str() {
+                "how-to-use" => {
+                    let operations = connector_tools
+                        .iter()
+                        .map(|tool| tool.operation_id.clone())
+                        .collect::<Vec<_>>();
+                    Some(mcp_resources::generate_usage_guide(
+                        &connector_id,
+                        &operations,
+                        &args,
+                    ))
+                }
+                "troubleshoot" => Some(mcp_resources::generate_troubleshoot_guide(
+                    &connector_id,
+                    &args,
+                )),
+                "operation-example" => operation.and_then(|operation_id| {
+                    connector_tools
+                        .into_iter()
+                        .find(|tool| tool.operation_id == operation_id)
+                        .map(|tool| operation_example_prompt(prompt.name(), tool, &args))
+                }),
+                _ => None,
+            }
+        }
+        ParsedUri::ConnectorResource { .. } | ParsedUri::GlobalStatus | ParsedUri::Unknown(_) => {
+            None
+        }
+    }
+}
+
+fn prompt_arguments_as_strings(
+    provided_args: &serde_json::Map<String, Value>,
+) -> BTreeMap<String, String> {
+    provided_args
+        .iter()
+        .map(|(key, value)| {
+            let rendered = value
+                .as_str()
+                .map_or_else(|| value.to_string(), str::to_owned);
+            (key.clone(), rendered)
+        })
+        .collect()
+}
+
+fn connector_health_content(
+    uri: &str,
+    connector_id: &str,
+    tools: &[&McpToolDefinition],
+) -> mcp_resources::ResourceContent {
+    mcp_resources::ResourceContent::new(
+        uri.to_owned(),
+        json!({
+            "connector_id": connector_id,
+            "status": "available",
+            "authoritative": false,
+            "source": "serve-mcp-tool-inventory",
+            "operation_count": tools.len(),
+            "message": "This health snapshot is derived from the MCP tool inventory. Live host health telemetry is not yet attached to serve_mcp state.",
+        }),
+    )
+}
+
+fn connector_rate_limits_content(uri: &str, connector_id: &str) -> mcp_resources::ResourceContent {
+    mcp_resources::ResourceContent::new(
+        uri.to_owned(),
+        json!({
+            "connector_id": connector_id,
+            "status": "unknown",
+            "authoritative": false,
+            "source": "serve-mcp-tool-inventory",
+            "pools": [],
+            "message": "Live rate-limit telemetry is not yet attached to serve_mcp state.",
+        }),
+    )
+}
+
+fn connector_operations_content(
+    uri: &str,
+    connector_id: &str,
+    tools: &[&McpToolDefinition],
+) -> mcp_resources::ResourceContent {
+    let operations = tools
+        .iter()
+        .map(|tool| {
+            json!({
+                "tool_name": tool.name,
+                "connector_id": tool.connector_id,
+                "operation_id": tool.operation_id,
+                "description": tool.description,
+                "input_schema": tool.input_schema,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    mcp_resources::ResourceContent::new(
+        uri.to_owned(),
+        json!({
+            "connector_id": connector_id,
+            "operation_count": operations.len(),
+            "operations": operations,
+        }),
+    )
+}
+
+fn connector_history_content(uri: &str, connector_id: &str) -> mcp_resources::ResourceContent {
+    match load_connector_history(connector_id, 10) {
+        Ok((history_path, entries)) => mcp_resources::ResourceContent::new(
+            uri.to_owned(),
+            json!({
+                "connector_id": connector_id,
+                "source": "local-history-log",
+                "history_path": history_path.display().to_string(),
+                "entry_count": entries.len(),
+                "entries": entries,
+            }),
+        ),
+        Err(error) => mcp_resources::ResourceContent::new(
+            uri.to_owned(),
+            json!({
+                "connector_id": connector_id,
+                "source": "local-history-log",
+                "status": "unavailable",
+                "error": error.to_string(),
+            }),
+        ),
+    }
+}
+
+fn global_status_content(state: &McpServerState) -> mcp_resources::ResourceContent {
+    let connectors = state
+        .tools
+        .iter()
+        .fold(BTreeMap::<String, usize>::new(), |mut counts, tool| {
+            *counts.entry(tool.connector_id.clone()).or_insert(0) += 1;
+            counts
+        })
+        .into_iter()
+        .map(|(connector_id, operation_count)| {
+            json!({
+                "connector_id": connector_id,
+                "status": "available",
+                "authoritative": false,
+                "source": "serve-mcp-tool-inventory",
+                "operation_count": operation_count,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    mcp_resources::ResourceContent::new(
+        "resource://connectors/status",
+        json!({
+            "connector_count": connectors.len(),
+            "connectors": connectors,
+        }),
+    )
+}
+
+fn load_connector_history(
+    connector_id: &str,
+    limit: usize,
+) -> Result<(std::path::PathBuf, Vec<Value>)> {
+    let history_path = HistoryStore::default_path()?;
+    let store = HistoryStore::new(history_path.clone());
+    let mut filter = HistoryFilter::new();
+    filter.connector = Some(connector_id.to_owned());
+    filter.limit = limit;
+
+    let entries = store
+        .query(&filter)
+        .with_context(|| format!("failed to query history for connector `{connector_id}`"))?
+        .into_iter()
+        .map(serde_json::to_value)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("failed to serialize history entries")?;
+
+    Ok((history_path, entries))
+}
+
+fn operation_example_prompt(
+    uri: &str,
+    tool: &McpToolDefinition,
+    args: &BTreeMap<String, String>,
+) -> mcp_resources::PromptContent {
+    let requested_format = args.get("format").map_or("json", String::as_str);
+    let example_input = example_input_from_schema(&tool.input_schema);
+    let example_json =
+        serde_json::to_string_pretty(&example_input).unwrap_or_else(|_| example_input.to_string());
+    let cli_snippet = format!(
+        "fwc invoke {} {} --input '{}'",
+        tool.connector_id,
+        tool.operation_id,
+        example_json.replace('\n', " ")
+    );
+    let guidance = match requested_format {
+        "cli" => format!("CLI example:\n{cli_snippet}"),
+        "toml" => format!(
+            "Structured example (rendered from JSON schema because TOML-specific examples are not yet modeled):\n{example_json}"
+        ),
+        _ => format!("JSON example input:\n{example_json}"),
+    };
+
+    mcp_resources::PromptContent::new(uri.to_owned())
+        .with_message(mcp_resources::PromptMessage::user(format!(
+            "Show an example for {}.{}",
+            tool.connector_id, tool.operation_id
+        )))
+        .with_message(mcp_resources::PromptMessage::assistant(format!(
+            "Operation: {}.{}\nDescription: {}\n\n{}\n\nInput schema:\n{}",
+            tool.connector_id,
+            tool.operation_id,
+            tool.description,
+            guidance,
+            serde_json::to_string_pretty(&tool.input_schema)
+                .unwrap_or_else(|_| tool.input_schema.to_string()),
+        )))
+}
+
+fn example_input_from_schema(schema: &Value) -> Value {
+    if let Some(example) = schema.get("example") {
+        return example.clone();
+    }
+
+    match schema.get("type").and_then(Value::as_str) {
+        Some("string") => Value::String("<string>".to_owned()),
+        Some("integer") => json!(0),
+        Some("number") => json!(0.0),
+        Some("boolean") => Value::Bool(true),
+        Some("array") => {
+            let item = schema.get("items").map_or(
+                Value::String("<item>".to_owned()),
+                example_input_from_schema,
+            );
+            Value::Array(vec![item])
+        }
+        Some("object") => {
+            let mut object = serde_json::Map::new();
+            if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+                for (key, property_schema) in properties {
+                    object.insert(key.clone(), example_input_from_schema(property_schema));
+                }
+            }
+            Value::Object(object)
+        }
+        _ => schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .map(|properties| {
+                let mut object = serde_json::Map::new();
+                for (key, property_schema) in properties {
+                    object.insert(key.clone(), example_input_from_schema(property_schema));
+                }
+                Value::Object(object)
+            })
+            .unwrap_or_else(|| Value::String("<value>".to_owned())),
+    }
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────
@@ -1599,6 +1991,48 @@ mod tests {
     }
 
     #[test]
+    fn from_operations_derives_resources_and_prompts() {
+        let ops = vec![
+            DiscoveredOperationEntry::new("github", "list_issues", "List issues", json!({})),
+            DiscoveredOperationEntry::new("github", "create_issue", "Create issue", json!({})),
+            DiscoveredOperationEntry::new("slack", "send_message", "Send a message", json!({})),
+        ];
+        let state = from_operations(&ops);
+
+        assert!(
+            state
+                .find_resource("resource://connector/github/operations")
+                .is_some()
+        );
+        assert!(
+            state
+                .find_resource("resource://connector/slack/history")
+                .is_some()
+        );
+        assert!(
+            state
+                .find_resource("resource://connectors/status")
+                .is_some()
+        );
+
+        assert!(
+            state
+                .find_prompt("prompt://connector/github/how-to-use")
+                .is_some()
+        );
+        assert!(
+            state
+                .find_prompt("prompt://connector/github/op/list_issues/example")
+                .is_some()
+        );
+        assert!(
+            state
+                .find_prompt("prompt://connector/slack/troubleshoot")
+                .is_some()
+        );
+    }
+
+    #[test]
     fn from_operations_preserves_input_schema() {
         let schema = json!({"type": "object", "required": ["x"]});
         let ops = vec![DiscoveredOperationEntry::new(
@@ -1981,6 +2415,25 @@ mod tests {
     }
 
     #[test]
+    fn handle_resources_read_operations_from_derived_state() {
+        let state = from_operations(&[DiscoveredOperationEntry::new(
+            "github",
+            "list_issues",
+            "List issues",
+            json!({"type": "object"}),
+        )]);
+        let req = make_request(
+            "resources/read",
+            Some(json!({"uri": "resource://connector/github/operations"})),
+        );
+        let resp = handle_request(&state, &req);
+        assert!(!resp.is_error());
+        let result = resp.result().unwrap();
+        let rendered = result["contents"][0]["text"].as_str().unwrap();
+        assert!(rendered.contains("\"operation_id\": \"list_issues\""));
+    }
+
+    #[test]
     fn handle_resources_read_missing_params() {
         let state = sample_state();
         let req = make_request("resources/read", None);
@@ -2081,6 +2534,55 @@ mod tests {
         let result = resp.result().unwrap();
         assert!(result["messages"].is_array());
         assert_eq!(result["messages"][0]["role"], "user");
+    }
+
+    #[test]
+    fn handle_prompts_get_usage_guide_from_derived_state() {
+        let state = from_operations(&[DiscoveredOperationEntry::new(
+            "github",
+            "list_issues",
+            "List issues",
+            json!({"type": "object"}),
+        )]);
+        let req = make_request(
+            "prompts/get",
+            Some(json!({"name": "prompt://connector/github/how-to-use"})),
+        );
+        let resp = handle_request(&state, &req);
+        assert!(!resp.is_error());
+        let result = resp.result().unwrap();
+        let assistant = result["messages"][1]["content"]["text"].as_str().unwrap();
+        assert!(assistant.contains("list_issues"));
+        assert!(assistant.contains("fwc invoke github <operation>"));
+    }
+
+    #[test]
+    fn handle_prompts_get_operation_example_from_derived_state() {
+        let state = from_operations(&[DiscoveredOperationEntry::new(
+            "github",
+            "list_issues",
+            "List issues",
+            json!({
+                "type": "object",
+                "properties": {
+                    "owner": { "type": "string" },
+                    "repo": { "type": "string" }
+                }
+            }),
+        )]);
+        let req = make_request(
+            "prompts/get",
+            Some(json!({
+                "name": "prompt://connector/github/op/list_issues/example",
+                "arguments": { "format": "cli" }
+            })),
+        );
+        let resp = handle_request(&state, &req);
+        assert!(!resp.is_error());
+        let result = resp.result().unwrap();
+        let assistant = result["messages"][1]["content"]["text"].as_str().unwrap();
+        assert!(assistant.contains("fwc invoke github list_issues"));
+        assert!(assistant.contains("\"owner\": \"<string>\""));
     }
 
     #[test]

@@ -824,7 +824,7 @@ For operator and agent workflows, migration guidance, and evidence-bundle expect
 
 ## Project Structure
 
-This is a schematic map, not an exhaustive directory dump. The actual Cargo workspace currently includes 29 crates under `crates/` and 82 connector crates under `connectors/`. Default workspace operations focus on the core platform crates; connector crates are usually targeted explicitly.
+This is a schematic map, not an exhaustive directory dump. The current tree contains 29 directories under `crates/`, 28 of which are active Cargo workspace members today, plus 82 connector crates under `connectors/`. Default workspace operations focus on the core platform crates; connector crates are usually targeted explicitly.
 
 ```
 flywheel_connectors/

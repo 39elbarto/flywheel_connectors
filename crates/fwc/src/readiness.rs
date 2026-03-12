@@ -1395,10 +1395,8 @@ impl DiscoveredConnector {
         descriptor.display_name = Some(self.detail.summary.name.clone());
         descriptor.version = Some(self.detail.summary.version.clone());
         descriptor.description = Some(self.detail.summary.description.clone());
-        if let Some(archetypes) = self.detail.summary.archetypes.as_known() {
-            descriptor.archetypes.clone_from(archetypes);
-        }
-        descriptor.supported_zones.clone_from(&self.supported_zones);
+        descriptor.archetypes = self.detail.summary.archetypes.as_known().cloned();
+        descriptor.supported_zones = Some(self.supported_zones.clone());
         descriptor.runtime_format = Some(self.runtime_format.clone());
         descriptor.state_model = self.state_model.as_known().cloned();
         descriptor.operations = self

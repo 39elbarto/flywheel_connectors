@@ -159,11 +159,17 @@ pub struct ConnectorDescriptor {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// Declared connector archetypes.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub archetypes: Vec<String>,
+    ///
+    /// `None` means the source did not provide archetype information (unknown).
+    /// `Some(vec![])` means the source explicitly declared no archetypes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archetypes: Option<Vec<String>>,
     /// Supported zones surfaced by the current source.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub supported_zones: Vec<String>,
+    ///
+    /// `None` means zone information is not available from this source (unknown).
+    /// `Some(vec![])` means the source explicitly declared no zone restrictions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supported_zones: Option<Vec<String>>,
     /// Runtime format label such as `native` or `wasi`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime_format: Option<String>,
@@ -193,8 +199,8 @@ impl ConnectorDescriptor {
             display_name: None,
             version: None,
             description: None,
-            archetypes: Vec::new(),
-            supported_zones: Vec::new(),
+            archetypes: None,
+            supported_zones: None,
             runtime_format: None,
             state_model: None,
             operations: Vec::new(),
@@ -941,5 +947,102 @@ mod tests {
         );
 
         assert_eq!(descriptor.overall_status(), DescriptorStatus::Unavailable);
+    }
+
+    // --- Metadata truthfulness invariants (bead 29.6.1) ---
+
+    #[test]
+    fn new_descriptor_archetypes_are_unknown_not_empty() {
+        let descriptor = ConnectorDescriptor::new("github");
+        assert!(
+            descriptor.archetypes.is_none(),
+            "new() must set archetypes to None (unknown), not Some(vec![])"
+        );
+    }
+
+    #[test]
+    fn new_descriptor_supported_zones_are_unknown_not_empty() {
+        let descriptor = ConnectorDescriptor::new("github");
+        assert!(
+            descriptor.supported_zones.is_none(),
+            "new() must set supported_zones to None (unknown), not Some(vec![])"
+        );
+    }
+
+    #[test]
+    fn archetypes_none_vs_empty_are_distinct_in_json() {
+        let mut unknown = ConnectorDescriptor::new("test-unknown");
+        unknown.archetypes = None;
+
+        let mut empty = ConnectorDescriptor::new("test-empty");
+        empty.archetypes = Some(Vec::new());
+
+        let json_unknown = serde_json::to_value(&unknown).unwrap();
+        let json_empty = serde_json::to_value(&empty).unwrap();
+
+        // None (unknown) omits the field entirely
+        assert!(
+            json_unknown.get("archetypes").is_none(),
+            "archetypes=None must not appear in JSON output"
+        );
+        // Some(vec![]) serializes as an empty array
+        assert_eq!(
+            json_empty.get("archetypes"),
+            Some(&serde_json::json!([])),
+            "archetypes=Some(vec![]) must serialize as empty array"
+        );
+    }
+
+    #[test]
+    fn supported_zones_none_vs_empty_are_distinct_in_json() {
+        let mut unknown = ConnectorDescriptor::new("test-unknown");
+        unknown.supported_zones = None;
+
+        let mut empty = ConnectorDescriptor::new("test-empty");
+        empty.supported_zones = Some(Vec::new());
+
+        let json_unknown = serde_json::to_value(&unknown).unwrap();
+        let json_empty = serde_json::to_value(&empty).unwrap();
+
+        assert!(
+            json_unknown.get("supported_zones").is_none(),
+            "supported_zones=None must not appear in JSON output"
+        );
+        assert_eq!(
+            json_empty.get("supported_zones"),
+            Some(&serde_json::json!([])),
+            "supported_zones=Some(vec![]) must serialize as empty array"
+        );
+    }
+
+    #[test]
+    fn archetypes_declared_values_roundtrip_through_json() {
+        let mut descriptor = ConnectorDescriptor::new("github");
+        descriptor.archetypes = Some(vec!["request-response".to_string(), "webhook".to_string()]);
+
+        let json = serde_json::to_value(&descriptor).unwrap();
+        assert_eq!(
+            json["archetypes"],
+            serde_json::json!(["request-response", "webhook"])
+        );
+
+        let roundtrip: ConnectorDescriptor = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            roundtrip.archetypes,
+            Some(vec!["request-response".to_string(), "webhook".to_string()])
+        );
+    }
+
+    #[test]
+    fn absent_archetypes_in_json_deserialize_to_none() {
+        let json = serde_json::json!({
+            "connector_id": "test",
+            "operations": []
+        });
+        let descriptor: ConnectorDescriptor = serde_json::from_value(json).unwrap();
+        assert!(
+            descriptor.archetypes.is_none(),
+            "missing archetypes field must deserialize to None (unknown)"
+        );
     }
 }

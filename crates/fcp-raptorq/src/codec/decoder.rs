@@ -1337,6 +1337,7 @@ impl InactivationDecoder {
     ///
     /// `symbols` should contain at least `L` symbols (K source + S LDPC + H HDPC overhead).
     /// Returns the decoded source symbols on success.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn decode(&self, symbols: Vec<ReceivedSymbol>) -> Result<DecodeResult, DecodeError> {
         let k = self.params.k;
         let symbol_size = self.params.symbol_size;
@@ -1388,6 +1389,7 @@ impl InactivationDecoder {
     /// `batch_size` controls the wavefront width. Smaller batches increase
     /// overlap but add per-batch overhead. A batch size of 0 means "use
     /// all symbols at once" (equivalent to sequential mode).
+    #[allow(clippy::needless_pass_by_value)]
     pub fn decode_wavefront(
         &self,
         symbols: Vec<ReceivedSymbol>,
@@ -2243,19 +2245,6 @@ mod tests {
         let unsolved = vec![0, 1];
 
         let sig_a = DenseFactorSignature::from_equations(&equations_a, &dense_rows, &unsolved);
-        let sig_b = DenseFactorSignature::from_equations(&equations_b, &dense_rows, &unsolved);
-
-        assert_ne!(sig_a, sig_b);
-    }
-
-    #[test]
-    fn dense_factor_cache_requires_strict_signature_match() {
-        let equations_a = vec![Equation::new(vec![0, 1], vec![Gf256::ONE, Gf256::new(7)])];
-        let equations_b = vec![Equation::new(vec![0, 1], vec![Gf256::ONE, Gf256::new(9)])];
-        let dense_rows = vec![0];
-        let unsolved = vec![0, 1];
-
-        let sig_a = DenseFactorSignature::from_equations(&equations_a, &dense_rows, &unsolved);
         let mut sig_b = DenseFactorSignature::from_equations(&equations_b, &dense_rows, &unsolved);
         sig_b.fingerprint = sig_a.fingerprint;
 
@@ -2272,7 +2261,7 @@ mod tests {
     }
 
     #[test]
-    fn dense_factor_cache_detects_fingerprint_collision() {
+    fn dense_factor_cache_requires_strict_signature_match() {
         let equations_a = vec![Equation::new(vec![0, 1], vec![Gf256::ONE, Gf256::new(7)])];
         let equations_b = vec![Equation::new(vec![0, 1], vec![Gf256::ONE, Gf256::new(9)])];
         let dense_rows = vec![0];

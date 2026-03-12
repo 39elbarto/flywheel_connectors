@@ -1588,7 +1588,7 @@ mod tests {
 
     #[test]
     fn severity_min_max() {
-        let sevs = vec![Severity::Warning, Severity::Critical, Severity::Info];
+        let sevs = [Severity::Warning, Severity::Critical, Severity::Info];
         assert_eq!(sevs.iter().copied().min(), Some(Severity::Info));
         assert_eq!(sevs.iter().copied().max(), Some(Severity::Critical));
     }
@@ -1872,6 +1872,7 @@ mod tests {
             fixes: vec![FixAction::command("f", "c").safe()],
         }];
         let report = DiagnosticReport::from_diagnoses("x", diags);
+        #[allow(clippy::redundant_clone)]
         let cloned = report.clone();
         assert_eq!(cloned.connector_id, "x");
         assert_eq!(cloned.status, HealthStatus::Unhealthy);

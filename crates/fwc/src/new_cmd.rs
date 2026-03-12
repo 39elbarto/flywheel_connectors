@@ -4028,7 +4028,7 @@ members = [
     fn archetype_clone_copy() {
         let a = ConnectorArchetype::Queue;
         let b = a;
-        let c = a.clone();
+        let c = b;
         assert_eq!(a, b);
         assert_eq!(a, c);
     }

@@ -168,7 +168,7 @@
       "owner_bead": "flywheel_connectors-1ud0u.9.2",
       "expires_on": "2026-03-21T00:00:00Z",
       "reason": "WebSocket transport migration not complete"
-    },
+    }
   ],
   "source_invariants": [
     {

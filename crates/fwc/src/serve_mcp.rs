@@ -3346,6 +3346,7 @@ mod tests {
         .await;
 
         let response: JsonRpcResponse = serde_json::from_str(output.trim()).unwrap();
+        assert!(!response.is_error());
         let capabilities = &response.result().unwrap()["capabilities"];
         assert!(capabilities.get("tools").is_some());
         assert!(capabilities.get("resources").is_some());
@@ -3400,13 +3401,17 @@ mod tests {
         .await;
 
         let response: JsonRpcResponse = serde_json::from_str(output.trim()).unwrap();
+        assert!(!response.is_error());
         let resources = response.result().unwrap()["resources"].as_array().unwrap();
+        assert_eq!(resources.len(), 5);
         let uris = resources
             .iter()
             .filter_map(|resource| resource["uri"].as_str())
             .collect::<Vec<_>>();
         assert!(uris.contains(&"resource://connector/github/health"));
+        assert!(uris.contains(&"resource://connector/github/rate-limits"));
         assert!(uris.contains(&"resource://connector/github/operations"));
+        assert!(uris.contains(&"resource://connector/github/history"));
         assert!(uris.contains(&"resource://connectors/status"));
     }
 
@@ -3431,15 +3436,27 @@ mod tests {
         .await;
 
         let response: JsonRpcResponse = serde_json::from_str(output.trim()).unwrap();
+        assert!(!response.is_error());
         let text = response.result().unwrap()["contents"][0]["text"]
             .as_str()
             .expect("resource contents should include rendered text");
         let payload: Value = serde_json::from_str(text).expect("resource payload should be JSON");
+        assert_eq!(payload["connector_id"], "github");
+        assert_eq!(payload["operation_count"], 2);
         let operations = payload["operations"]
             .as_array()
             .expect("operations resource should render an operations array");
         assert_eq!(operations.len(), 2);
-        assert_eq!(operations[0]["connector_id"], "github");
+        assert!(
+            operations
+                .iter()
+                .all(|operation| operation["connector_id"] == "github")
+        );
+        assert!(
+            operations
+                .iter()
+                .any(|operation| operation["operation_id"] == "list_issues")
+        );
         assert!(
             operations
                 .iter()
@@ -3468,7 +3485,9 @@ mod tests {
         .await;
 
         let response: JsonRpcResponse = serde_json::from_str(output.trim()).unwrap();
+        assert!(!response.is_error());
         let prompts = response.result().unwrap()["prompts"].as_array().unwrap();
+        assert_eq!(prompts.len(), 4);
         let names = prompts
             .iter()
             .filter_map(|prompt| prompt["name"].as_str())
@@ -3500,9 +3519,11 @@ mod tests {
         .await;
 
         let response: JsonRpcResponse = serde_json::from_str(output.trim()).unwrap();
+        assert!(!response.is_error());
         let messages = response.result().unwrap()["messages"]
             .as_array()
             .expect("prompt response should include messages");
+        assert_eq!(messages.len(), 2);
         assert_eq!(messages[0]["role"], "user");
         let assistant = messages[1]["content"]["text"]
             .as_str()

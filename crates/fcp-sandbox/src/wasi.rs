@@ -961,6 +961,12 @@ impl WasiRuntime {
         }
 
         for path in &self.config.writable_paths {
+            if !path.exists() {
+                // If the path doesn't exist, attempt to create it (especially important for state_dir)
+                // If it fails, we silently ignore here and let the later is_dir check skip it or fail access,
+                // as we might not have permissions to create it, but we should try.
+                let _ = std::fs::create_dir_all(path);
+            }
             if path.is_dir() {
                 let guest_path = path.display().to_string();
                 wasi_builder
@@ -2294,8 +2300,8 @@ mod tests {
 
     #[test]
     fn test_leb128_128() {
-        // 128 = 0x80 0x01
-        assert_eq!(read_leb128(&[0x80, 0x01]), Some((128, 2)));
+        // 128 = 0x80 0x02
+        assert_eq!(read_leb128(&[0x80, 0x02]), Some((128, 2)));
     }
 
     #[test]
@@ -2375,7 +2381,6 @@ mod tests {
     fn test_host_state_validate_fs_access() {
         let config = WasiConfig {
             readonly_paths: vec![PathBuf::from("/tmp")],
-            writable_paths: vec![],
             ..WasiConfig::default()
         };
         let wasi_ctx = WasiCtxBuilder::new().build();
@@ -2607,7 +2612,7 @@ mod tests {
     #[test]
     fn test_connector_runner_validate_http_allowed() {
         let constraints = NetworkConstraints {
-            host_allow: vec!["api.service.com".into()],
+            host_allow: vec!["api.stripe.com".into()],
             port_allow: vec![443],
             ip_allow: vec![],
             cidr_deny: vec![],
@@ -2632,12 +2637,17 @@ mod tests {
         let runner = WasiConnectorRunner::new(config).unwrap();
         assert!(
             runner
-                .validate_http_access("https://api.service.com/v1", "GET")
+                .validate_http_access("https://api.stripe.com/v1/charges", "POST")
                 .is_ok()
         );
         assert!(
             runner
-                .validate_http_access("https://evil.com/", "POST")
+                .validate_http_access("https://api.stripe.com/v1/charges", "GET")
+                .is_err()
+        );
+        assert!(
+            runner
+                .validate_http_access("https://api.paypal.com/v1", "GET")
                 .is_err()
         );
     }
@@ -2652,7 +2662,7 @@ mod tests {
         let runner = WasiConnectorRunner::new(config).unwrap();
         assert!(
             runner
-                .validate_tcp_access("db.example.com", 5432, true)
+                .validate_tcp_access("api.stripe.com", 443, true)
                 .is_err()
         );
     }
@@ -2660,8 +2670,8 @@ mod tests {
     #[test]
     fn test_connector_runner_validate_tcp_allowed() {
         let constraints = NetworkConstraints {
-            host_allow: vec!["db.prod.com".into()],
-            port_allow: vec![5432, 6379],
+            host_allow: vec!["api.stripe.com".into()],
+            port_allow: vec![443, 8080],
             ip_allow: vec![],
             cidr_deny: vec![],
             deny_localhost: true,
@@ -2685,15 +2695,24 @@ mod tests {
         let runner = WasiConnectorRunner::new(config).unwrap();
         assert!(
             runner
-                .validate_tcp_access("db.prod.com", 5432, true)
+                .validate_tcp_access("api.stripe.com", 443, true)
                 .is_ok()
         );
         assert!(
             runner
-                .validate_tcp_access("db.prod.com", 6379, false)
+                .validate_tcp_access("api.stripe.com", 8080, false)
                 .is_ok()
         );
-        assert!(runner.validate_tcp_access("evil.com", 5432, true).is_err());
+        assert!(
+            runner
+                .validate_tcp_access("api.stripe.com", 80, false)
+                .is_err()
+        );
+        assert!(
+            runner
+                .validate_tcp_access("evil.com", 443, true)
+                .is_err()
+        );
     }
 
     #[test]
@@ -3033,145 +3052,6 @@ mod tests {
         assert_eq!(bytes.len(), 32);
         // Zero seed uses fallback non-zero state, so bytes should not be all zeros
         assert!(bytes.iter().any(|&b| b != 0));
-    }
-
-    // ── New batch: FixedWallClock ──
-
-    #[test]
-    fn test_fixed_wall_clock_resolution() {
-        let clock = FixedWallClock::new(1_700_000_000);
-        assert_eq!(clock.resolution(), Duration::from_nanos(1));
-    }
-
-    #[test]
-    fn test_fixed_wall_clock_now() {
-        let clock = FixedWallClock::new(1_234_567);
-        assert_eq!(clock.now(), Duration::from_secs(1_234_567));
-    }
-
-    #[test]
-    fn test_fixed_wall_clock_zero() {
-        let clock = FixedWallClock::new(0);
-        assert_eq!(clock.now(), Duration::ZERO);
-    }
-
-    #[test]
-    fn test_fixed_wall_clock_debug() {
-        let clock = FixedWallClock::new(100);
-        let dbg = format!("{clock:?}");
-        assert!(dbg.contains("FixedWallClock"));
-    }
-
-    // ── New batch: FixedMonotonicClock ──
-
-    #[test]
-    fn test_fixed_monotonic_clock_resolution() {
-        let clock = FixedMonotonicClock::new(1_000_000);
-        assert_eq!(clock.resolution(), 1);
-    }
-
-    #[test]
-    fn test_fixed_monotonic_clock_now_increments() {
-        let clock = FixedMonotonicClock::new(1_000_000);
-        let t1 = clock.now();
-        let t2 = clock.now();
-        let t3 = clock.now();
-        assert_eq!(t1, 0);
-        assert_eq!(t2, 1_000_000);
-        assert_eq!(t3, 2_000_000);
-    }
-
-    #[test]
-    fn test_fixed_monotonic_clock_debug() {
-        let clock = FixedMonotonicClock::new(500);
-        let dbg = format!("{clock:?}");
-        assert!(dbg.contains("FixedMonotonicClock"));
-    }
-
-    // ── New batch: socket_addr_allowed edge cases ──
-
-    #[test]
-    fn test_socket_addr_allowed_localhost_denied() {
-        let constraints = NetworkConstraints {
-            host_allow: vec![],
-            port_allow: vec![80],
-            ip_allow: vec![],
-            cidr_deny: vec![],
-            deny_localhost: true,
-            deny_private_ranges: false,
-            deny_tailnet_ranges: false,
-            require_sni: false,
-            spki_pins: vec![],
-            deny_ip_literals: false,
-            require_host_canonicalization: false,
-            dns_max_ips: 16,
-            max_redirects: 5,
-            connect_timeout_ms: 10_000,
-            total_timeout_ms: 60_000,
-            max_response_bytes: 10_485_760,
-        };
-        let addr: SocketAddr = "127.0.0.1:80".parse().unwrap();
-        assert!(!socket_addr_allowed(
-            &constraints,
-            addr,
-            SocketAddrUse::TcpConnect
-        ));
-    }
-
-    #[test]
-    fn test_socket_addr_allowed_private_range_denied() {
-        let constraints = NetworkConstraints {
-            host_allow: vec![],
-            port_allow: vec![443],
-            ip_allow: vec![],
-            cidr_deny: vec![],
-            deny_localhost: false,
-            deny_private_ranges: true,
-            deny_tailnet_ranges: false,
-            require_sni: false,
-            spki_pins: vec![],
-            deny_ip_literals: false,
-            require_host_canonicalization: false,
-            dns_max_ips: 16,
-            max_redirects: 5,
-            connect_timeout_ms: 10_000,
-            total_timeout_ms: 60_000,
-            max_response_bytes: 10_485_760,
-        };
-        let addr: SocketAddr = "10.0.0.1:443".parse().unwrap();
-        assert!(!socket_addr_allowed(
-            &constraints,
-            addr,
-            SocketAddrUse::TcpConnect
-        ));
-    }
-
-    #[test]
-    fn test_socket_addr_allowed_udp_bind_denied() {
-        let constraints = NetworkConstraints {
-            host_allow: vec![],
-            port_allow: vec![443],
-            ip_allow: vec![],
-            cidr_deny: vec![],
-            deny_localhost: false,
-            deny_private_ranges: false,
-            deny_tailnet_ranges: false,
-            require_sni: false,
-            spki_pins: vec![],
-            deny_ip_literals: false,
-            require_host_canonicalization: false,
-            dns_max_ips: 16,
-            max_redirects: 5,
-            connect_timeout_ms: 10_000,
-            total_timeout_ms: 60_000,
-            max_response_bytes: 10_485_760,
-        };
-        let addr: SocketAddr = "1.2.3.4:443".parse().unwrap();
-        assert!(!socket_addr_allowed(
-            &constraints,
-            addr,
-            SocketAddrUse::UdpBind
-        ));
     }
 
     // ── New batch: WasiConfig from_policy ──

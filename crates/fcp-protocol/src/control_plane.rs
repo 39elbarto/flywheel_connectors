@@ -68,8 +68,6 @@ impl ControlPlaneObject {
 /// Well-known schema patterns for retention classification.
 mod schema_patterns {
     /// Required retention schemas (must be stored for auditability).
-    /// Note: Not used in code (default is Required), kept for documentation.
-    #[allow(dead_code)]
     pub const REQUIRED_PREFIXES: &[&str] = &[
         "fcp.invoke",     // InvokeRequest/Response
         "fcp.receipt",    // Receipts

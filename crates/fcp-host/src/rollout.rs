@@ -534,16 +534,15 @@ where
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             
-            if !state.contains_key(connector_id) {
-                state.insert(connector_id.clone(), ConnectorRuntimeState {
+            let entry = state.entry(connector_id.clone()).or_insert_with(|| {
+                ConnectorRuntimeState {
                     failure_streak: 0,
                     crash_detector: CrashLoopDetector::new(
                         self.config.crash_loop_threshold,
                         self.config.crash_loop_window_secs,
                     ),
-                });
-            }
-            let entry = state.get_mut(connector_id).unwrap();
+                }
+            });
 
             if observation.invocation_succeeded {
                 entry.failure_streak = 0;
@@ -2422,7 +2421,7 @@ mod tests {
     fn rate_bps_all_failures() {
         let mut r = LifecycleRecord::new(connector_id(), semver::Version::new(1, 0, 0));
         for _ in 0..100 {
-            r.update_health(false, Some(100));
+            r.update_health(false, Some(10));
         }
         assert_eq!(success_rate_bps(&r), 0);
         assert_eq!(error_rate_bps(&r), 10_000);
@@ -2767,10 +2766,10 @@ mod tests {
         let evt = RolloutAuditEvent {
             connector_id: connector_id(),
             state_before: LifecycleState::Canary,
-            state_after: LifecycleState::Production,
-            decision: RolloutDecision::Promote,
-            reason_code: "promotion_thresholds_met".to_string(),
-            message: "canary met thresholds".to_string(),
+            state_after: LifecycleState::Canary,
+            decision: RolloutDecision::Hold,
+            reason_code: "canary_scheduled".to_string(),
+            message: "test".to_string(),
             observed_at: now,
             evidence_digest: "blake3-256:test".to_string(),
         };
@@ -2807,12 +2806,12 @@ mod tests {
         let evt = RolloutAuditEvent {
             connector_id: connector_id(),
             state_before: LifecycleState::Canary,
-            state_after: LifecycleState::RolledBack,
-            decision: RolloutDecision::Rollback,
-            reason_code: "crash_loop".to_string(),
-            message: "crashed".to_string(),
+            state_after: LifecycleState::Canary,
+            decision: RolloutDecision::Hold,
+            reason_code: "canary_scheduled".to_string(),
+            message: "test".to_string(),
             observed_at: Utc::now(),
-            evidence_digest: "blake3-256:xyz".to_string(),
+            evidence_digest: "blake3-256:test".to_string(),
         };
         let cloned = evt.clone();
         assert_eq!(evt, cloned);

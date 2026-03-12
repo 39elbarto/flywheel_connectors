@@ -949,6 +949,10 @@ pub const COMMAND_FAMILY_CLASSIFICATION: &[CommandFamilyEntry] = &[
         mode: CommandTruthMode::Hybrid,
     },
     CommandFamilyEntry {
+        name: "preflight",
+        mode: CommandTruthMode::Hybrid,
+    },
+    CommandFamilyEntry {
         name: "validate",
         mode: CommandTruthMode::Hybrid,
     },
@@ -9275,7 +9279,7 @@ output_schema = { type = "object" }
             .iter()
             .filter(|e| e.mode == CommandTruthMode::Hybrid)
             .count();
-        assert_eq!(count, 14, "Expected 14 hybrid commands, got {count}");
+        assert_eq!(count, 15, "Expected 15 hybrid commands, got {count}");
     }
 
     #[test]
@@ -10718,7 +10722,7 @@ output_schema = { type = "object" }
     #[test]
     fn golden_classification_count() {
         // Pinned count — if commands are added/removed, update this.
-        assert_eq!(COMMAND_FAMILY_CLASSIFICATION.len(), 49);
+        assert_eq!(COMMAND_FAMILY_CLASSIFICATION.len(), 50);
     }
 
     #[test]

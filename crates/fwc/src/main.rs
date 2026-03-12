@@ -146,14 +146,10 @@ use fcp_host::{
     ConnectorInventoryMutationResponse as HostConnectorInventoryMutationResponse,
     ConnectorInventoryResponse as HostConnectorInventoryResponse,
     DiscoveryFilter as HostDiscoveryFilter, DiscoveryResponse as HostDiscoveryResponse,
-    DoctorReport as HostDoctorReport, DoctorRequest as HostDoctorRequest,
-    EventAcknowledgeRequest, EventAcknowledgeResponse, EventQueryRequest, EventQueryResponse,
-    HostHealthResponse, HostPreflightRequest,
-    IntrospectionResponse as HostIntrospectionResponse, JournalQueryRequest, JournalQueryResponse,
-    LifecycleTransitionRequest, LifecycleTransitionResponse, LogQueryRequest, LogQueryResponse,
-    ManagedConnectorConfig, PreflightResponse as HostPreflightResponse,
-    ReceiptQueryRequest, ReceiptQueryResponse, SimulateReceiptQueryRequest,
-    SimulateReceiptQueryResponse, ToolDescriptor as HostToolDescriptor,
+    DoctorReport as HostDoctorReport, DoctorRequest as HostDoctorRequest, HostHealthResponse,
+    HostPreflightRequest, IntrospectionResponse as HostIntrospectionResponse,
+    LifecycleTransitionRequest, LifecycleTransitionResponse, ManagedConnectorConfig,
+    PreflightResponse as HostPreflightResponse, ToolDescriptor as HostToolDescriptor,
 };
 use fcp_manifest::ConnectorManifest;
 use fcp_telemetry::{
@@ -411,6 +407,13 @@ enum Commands {
     /// Preflight or dry-run a connector operation.
     Simulate(InvokeArgs),
 
+    /// Preflight check: analyze risk, approval requirements, and capabilities without executing.
+    ///
+    /// Returns the full host preflight analysis including risk level, required
+    /// capabilities, approval boundaries, and whether simulate is supported.
+    #[command(visible_alias = "check-approval")]
+    Preflight(PreflightArgs),
+
     /// Cancel an in-flight connector operation.
     Cancel(CancelArgs),
 
@@ -496,19 +499,6 @@ enum Commands {
     /// tests. Use `--check` to validate an existing connector instead.
     #[command(visible_alias = "scaffold")]
     New(new_cmd::NewArgs),
-
-    /// Query host admin logs.
-    Logs(LogsArgs),
-
-    /// Query host admin journal (operation audit trail).
-    Journal(JournalArgs),
-
-    /// Query operation receipts from the host.
-    #[command(visible_alias = "receipt")]
-    Receipts(ReceiptsArgs),
-
-    /// Query and acknowledge host control-plane events.
-    Events(EventsArgs),
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -1384,15 +1374,6 @@ enum ConfigCommand {
 
     /// Validate config and surface actionable remediation.
     Doctor(TargetArgs),
-
-    /// List config revision history.
-    Revisions(TargetArgs),
-
-    /// Show diff between current config and a candidate payload.
-    Diff(ConfigDiffArgs),
-
-    /// Rollback config to a previous revision.
-    Rollback(ConfigRollbackArgs),
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -1424,29 +1405,6 @@ struct ConfigFileArgs {
     /// File path for import/export.
     #[arg(long)]
     file: Option<PathBuf>,
-}
-
-#[derive(Args, Debug, Serialize)]
-struct ConfigDiffArgs {
-    /// Connector id, alias, or family name.
-    connector: String,
-
-    /// File containing the candidate config payload.
-    #[arg(long)]
-    file: PathBuf,
-
-    /// Optional baseline revision id (defaults to current).
-    #[arg(long)]
-    revision: Option<u64>,
-}
-
-#[derive(Args, Debug, Serialize)]
-struct ConfigRollbackArgs {
-    /// Connector id, alias, or family name.
-    connector: String,
-
-    /// Revision id to rollback to.
-    revision: u64,
 }
 
 #[derive(Args, Debug, Clone, Default, Serialize)]
@@ -1515,6 +1473,61 @@ struct InvokeArgs {
 }
 
 #[derive(Args, Debug, Serialize)]
+struct PreflightArgs {
+    /// Connector id, alias, or family name.
+    connector: String,
+
+    /// Operation name.
+    operation: String,
+
+    /// Inline JSON string for small requests.
+    #[arg(long)]
+    input: Option<String>,
+
+    /// File path for a request payload.
+    #[arg(long)]
+    file: Option<PathBuf>,
+
+    /// Read request payload from stdin.
+    #[arg(long, default_value_t = false)]
+    stdin: bool,
+
+    /// Set or override one payload field as `path=value`.
+    #[arg(long = "set", value_name = "PATH=VALUE")]
+    set: Vec<String>,
+
+    /// Execution zone. Defaults to the active context zone or `z:work`.
+    #[arg(long)]
+    zone: Option<String>,
+
+    /// Optional principal identity for preflight.
+    #[arg(long)]
+    principal: Option<String>,
+
+    #[command(flatten)]
+    auth: LiveAuthArgs,
+}
+
+impl PreflightArgs {
+    /// Convert to `InvokeArgs` for reuse with `prepare_invoke_input`.
+    fn as_invoke_args(&self) -> InvokeArgs {
+        InvokeArgs {
+            connector: self.connector.clone(),
+            operation: self.operation.clone(),
+            input: self.input.clone(),
+            file: self.file.clone(),
+            stdin: self.stdin,
+            set: self.set.clone(),
+            zone: self.zone.clone(),
+            principal: self.principal.clone(),
+            idempotency_key: None,
+            deadline_ms: None,
+            auth: self.auth.clone(),
+        }
+    }
+}
+
+#[derive(Args, Debug, Serialize)]
 struct CancelArgs {
     /// Operation id returned by a prior invoke or batch execution.
     operation_id: String,
@@ -1540,8 +1553,8 @@ struct CancelArgs {
     current: Option<u64>,
 
     /// Resource limit threshold when `--reason resource-limit` is used.
-    #[arg(long)]
-    limit: Option<u64>,
+    #[arg(long = "resource-limit")]
+    resource_limit: Option<u64>,
 
     /// Optional superseding operation id for `superseded`.
     #[arg(long)]
@@ -1908,91 +1921,6 @@ struct BatchFileArgs {
     auth: LiveAuthArgs,
 }
 
-#[derive(Args, Debug, Serialize)]
-struct LogsArgs {
-    /// Filter by connector id.
-    #[arg(long)]
-    connector: Option<String>,
-
-    /// Minimum severity level (debug, info, warn, error).
-    #[arg(long)]
-    severity: Option<String>,
-
-    /// Only return entries after this sequence number.
-    #[arg(long, default_value_t = 0)]
-    after: u64,
-
-    /// Maximum number of log entries.
-    #[arg(long, default_value_t = 100)]
-    limit: usize,
-}
-
-#[derive(Args, Debug, Serialize)]
-struct JournalArgs {
-    /// Filter by connector id.
-    #[arg(long)]
-    connector: Option<String>,
-
-    /// Only return entries after this sequence number.
-    #[arg(long, default_value_t = 0)]
-    after: u64,
-
-    /// Maximum number of journal entries.
-    #[arg(long, default_value_t = 100)]
-    limit: usize,
-}
-
-#[derive(Args, Debug, Serialize)]
-struct ReceiptsArgs {
-    /// Connector id (required).
-    connector: String,
-
-    /// Filter by operation name.
-    #[arg(long)]
-    operation: Option<String>,
-
-    /// Maximum number of receipts.
-    #[arg(long, default_value_t = 100)]
-    limit: usize,
-}
-
-#[derive(Args, Debug, Serialize)]
-struct EventsArgs {
-    #[command(subcommand)]
-    command: EventsCommand,
-}
-
-#[derive(Subcommand, Debug, Serialize)]
-#[serde(tag = "subcommand", content = "args", rename_all = "kebab-case")]
-enum EventsCommand {
-    /// List host control-plane events.
-    List(EventsListArgs),
-
-    /// Acknowledge one or more events by ID.
-    Ack(EventsAckArgs),
-}
-
-#[derive(Args, Debug, Serialize)]
-struct EventsListArgs {
-    /// Filter by connector id.
-    #[arg(long)]
-    connector: Option<String>,
-
-    /// Only show unacknowledged events.
-    #[arg(long)]
-    unacknowledged: bool,
-
-    /// Maximum number of events.
-    #[arg(long, default_value_t = 100)]
-    limit: usize,
-}
-
-#[derive(Args, Debug, Serialize)]
-struct EventsAckArgs {
-    /// Event IDs to acknowledge.
-    event_ids: Vec<String>,
-}
-
 fn main() -> ExitCode {
     let raw_args = std::env::args().collect::<Vec<_>>();
     let fallback_format = infer_output_format(&raw_args);
@@ -2252,11 +2180,8 @@ fn execute_serve_mcp(prepared: &PreparedCli, args: &ServeMcpArgs) -> Result<Exec
     };
 
     let mut config = serve_mcp::McpServerConfig::new();
-    if let Some(connector_filter) = normalized_serve_mcp_connector_filter(
-        args.connector.as_deref(),
-        connectors.first().map(|connector| connector.slug.as_str()),
-    ) {
-        config = config.with_connector_filter(connector_filter);
+    if let Some(connector) = &args.connector {
+        config = config.with_connector_filter(connector.clone());
     }
 
     let mut tools = Vec::new();
@@ -2296,13 +2221,6 @@ fn execute_serve_mcp(prepared: &PreparedCli, args: &ServeMcpArgs) -> Result<Exec
         text: String::new(),
         exit_code: ExitCode::SUCCESS,
     })
-}
-
-fn normalized_serve_mcp_connector_filter(
-    requested_selector: Option<&str>,
-    resolved_connector_slug: Option<&str>,
-) -> Option<String> {
-    requested_selector.and_then(|_| resolved_connector_slug.map(str::to_owned))
 }
 
 fn mcp_tool_call_response(
@@ -2777,6 +2695,7 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         Commands::Config(args) => config_dispatch(args, cli.host.as_deref())?,
         Commands::Invoke(args) => invoke_dispatch("invoke", args, cli.host.as_deref())?,
         Commands::Simulate(args) => invoke_dispatch("simulate", args, cli.host.as_deref())?,
+        Commands::Preflight(args) => preflight_dispatch(&args, cli.host.as_deref())?,
         Commands::Cancel(args) => cancel_dispatch(args, cli.host.as_deref())?,
         Commands::ExportTools(args) => export_tools_dispatch(args, cli.host.as_deref())?,
         Commands::ServeMcp(args) => planned("serve-mcp", args)?,
@@ -2791,10 +2710,6 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         Commands::BatchFile(args) => batch_file_dispatch(args, cli.host.as_deref())?,
         Commands::Bench(_) => passthrough_only_dispatch("bench"),
         Commands::New(_) => passthrough_only_dispatch("new"),
-        Commands::Logs(args) => logs_dispatch(&args, cli.host.as_deref())?,
-        Commands::Journal(args) => journal_dispatch(&args, cli.host.as_deref())?,
-        Commands::Receipts(args) => receipts_dispatch(&args, cli.host.as_deref())?,
-        Commands::Events(args) => events_dispatch(&args, cli.host.as_deref())?,
     };
 
     Ok(outcome)
@@ -3117,6 +3032,7 @@ impl HostAdminClient {
         self.get_json(&format!("/rpc/connectors/{connector_id}/config"))
     }
 
+    #[allow(dead_code)]
     fn config_revisions(&self, connector_id: &str) -> Result<ConnectorConfigRevisionsResponse> {
         self.get_json(&format!("/rpc/connectors/{connector_id}/config/revisions"))
     }
@@ -3132,6 +3048,7 @@ impl HostAdminClient {
         ))
     }
 
+    #[allow(dead_code)]
     fn config_diff(
         &self,
         connector_id: &str,
@@ -3165,6 +3082,7 @@ impl HostAdminClient {
         )
     }
 
+    #[allow(dead_code)]
     fn config_rollback(
         &self,
         connector_id: &str,
@@ -3256,36 +3174,6 @@ impl HostAdminClient {
                 "to_version": to_version,
             }),
         )
-    }
-
-    fn journal(&self, request: &JournalQueryRequest) -> Result<JournalQueryResponse> {
-        self.post_json("/rpc/admin/journal", request)
-    }
-
-    fn logs(&self, request: &LogQueryRequest) -> Result<LogQueryResponse> {
-        self.post_json("/rpc/admin/logs", request)
-    }
-
-    fn receipts(&self, request: &ReceiptQueryRequest) -> Result<ReceiptQueryResponse> {
-        self.post_json("/rpc/admin/receipts", request)
-    }
-
-    fn simulate_receipts(
-        &self,
-        request: &SimulateReceiptQueryRequest,
-    ) -> Result<SimulateReceiptQueryResponse> {
-        self.post_json("/rpc/admin/simulate-receipts", request)
-    }
-
-    fn events(&self, request: &EventQueryRequest) -> Result<EventQueryResponse> {
-        self.post_json("/rpc/admin/events", request)
-    }
-
-    fn acknowledge_events(
-        &self,
-        request: &EventAcknowledgeRequest,
-    ) -> Result<EventAcknowledgeResponse> {
-        self.post_json("/rpc/admin/events/acknowledge", request)
     }
 
     fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
@@ -8790,373 +8678,6 @@ fn config_dispatch(args: &ConfigArgs, explicit_host: Option<&str>) -> Result<Dis
             }
             Ok(DispatchOutcome { payload, exit_code })
         }
-        ConfigCommand::Revisions(target) => {
-            let Some(host) = resolve_host_config(explicit_host)? else {
-                return Ok(config_missing_host_dispatch(
-                    "revisions",
-                    json!({ "connector": &target.connector }),
-                    vec![
-                        format!(
-                            "fwc config revisions {} --host <endpoint>",
-                            target.connector
-                        ),
-                        "Set `FWC_HOST` or `FCP_HOST_ENDPOINT`, or configure an active FCP context."
-                            .to_owned(),
-                    ],
-                ));
-            };
-            let client = HostAdminClient::new(&host.endpoint)?;
-            let (catalog, _) = client.catalog(None)?;
-            let connector = match catalog.resolve_connector(&target.connector) {
-                Ok(connector) => connector.clone(),
-                Err(error) => {
-                    return Ok(connector_resolution_dispatch(
-                        "config revisions",
-                        &target.connector,
-                        &error,
-                    ));
-                }
-            };
-            let revisions = client.config_revisions(connector.summary.id.as_str())?;
-            let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "config");
-            let mut payload = json!({
-                "status": "ok",
-                "command": "config",
-                "subcommand": "revisions",
-                "source": "host-admin-api",
-                "message": format!(
-                    "Loaded {} config revision(s) for `{}`.",
-                    revisions.revisions.len(),
-                    connector.slug,
-                ),
-                "connector": host_connector_descriptor_json(&connector),
-                "revisions": revisions.revisions,
-            });
-            envelope.inject_into(&mut payload);
-            Ok(DispatchOutcome {
-                payload,
-                exit_code: CliExitCode::Success,
-            })
-        }
-        ConfigCommand::Diff(diff_args) => {
-            let Some(host) = resolve_host_config(explicit_host)? else {
-                return Ok(config_missing_host_dispatch(
-                    "diff",
-                    json!({ "connector": &diff_args.connector }),
-                    vec![
-                        format!("fwc config diff {} --host <endpoint> --file <path>", diff_args.connector),
-                        "Set `FWC_HOST` or `FCP_HOST_ENDPOINT`, or configure an active FCP context."
-                            .to_owned(),
-                    ],
-                ));
-            };
-            let client = HostAdminClient::new(&host.endpoint)?;
-            let (catalog, _) = client.catalog(None)?;
-            let connector = match catalog.resolve_connector(&diff_args.connector) {
-                Ok(connector) => connector.clone(),
-                Err(error) => {
-                    return Ok(connector_resolution_dispatch(
-                        "config diff",
-                        &diff_args.connector,
-                        &error,
-                    ));
-                }
-            };
-            let candidate_payload: Value = {
-                let raw = std::fs::read_to_string(&diff_args.file).map_err(|e| {
-                    anyhow::anyhow!(
-                        "failed to read diff candidate file '{}': {e}",
-                        diff_args.file.display()
-                    )
-                })?;
-                serde_json::from_str(&raw).map_err(|e| {
-                    anyhow::anyhow!(
-                        "invalid JSON in diff candidate file '{}': {e}",
-                        diff_args.file.display()
-                    )
-                })?
-            };
-            let diff_response = client.config_diff(
-                connector.summary.id.as_str(),
-                &ConnectorConfigDiffRequest {
-                    payload: candidate_payload,
-                    revision_id: diff_args.revision,
-                },
-            )?;
-            let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "config");
-            let mut payload = json!({
-                "status": "ok",
-                "command": "config",
-                "subcommand": "diff",
-                "source": "host-admin-api",
-                "message": format!(
-                    "Computed config diff for `{}` ({} change(s)).",
-                    connector.slug,
-                    diff_response.entries.len(),
-                ),
-                "connector": host_connector_descriptor_json(&connector),
-                "diff": diff_response,
-            });
-            envelope.inject_into(&mut payload);
-            Ok(DispatchOutcome {
-                payload,
-                exit_code: CliExitCode::Success,
-            })
-        }
-        ConfigCommand::Rollback(rollback_args) => {
-            let Some(host) = resolve_host_config(explicit_host)? else {
-                return Ok(config_missing_host_dispatch(
-                    "rollback",
-                    json!({ "connector": &rollback_args.connector }),
-                    vec![
-                        format!(
-                            "fwc config rollback {} --host <endpoint> <revision>",
-                            rollback_args.connector
-                        ),
-                        "Set `FWC_HOST` or `FCP_HOST_ENDPOINT`, or configure an active FCP context."
-                            .to_owned(),
-                    ],
-                ));
-            };
-            let client = HostAdminClient::new(&host.endpoint)?;
-            let (catalog, _) = client.catalog(None)?;
-            let connector = match catalog.resolve_connector(&rollback_args.connector) {
-                Ok(connector) => connector.clone(),
-                Err(error) => {
-                    return Ok(connector_resolution_dispatch(
-                        "config rollback",
-                        &rollback_args.connector,
-                        &error,
-                    ));
-                }
-            };
-            let result = client.config_rollback(
-                connector.summary.id.as_str(),
-                &ConnectorConfigRollbackRequest {
-                    revision_id: rollback_args.revision,
-                    expected_active_revision_id: None,
-                    created_by: Some("fwc".to_owned()),
-                    change_reason: Some(format!(
-                        "Rolled back to revision {} via fwc config rollback.",
-                        rollback_args.revision
-                    )),
-                },
-            )?;
-            let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "config");
-            let mut payload = json!({
-                "status": "ok",
-                "command": "config",
-                "subcommand": "rollback",
-                "source": "host-admin-api",
-                "message": format!(
-                    "Rolled back config for `{}` to revision {}.",
-                    connector.slug,
-                    rollback_args.revision,
-                ),
-                "connector": host_connector_descriptor_json(&connector),
-                "result": result,
-                "next_actions": [
-                    format!("fwc config get {} --host {}", connector.slug, host.endpoint),
-                    format!("fwc config revisions {} --host {}", connector.slug, host.endpoint),
-                ],
-            });
-            envelope.inject_into(&mut payload);
-            Ok(DispatchOutcome {
-                payload,
-                exit_code: CliExitCode::Success,
-            })
-        }
-    }
-}
-
-// ── Logs dispatch ─────────────────────────────────────────────────────────
-
-fn logs_dispatch(args: &LogsArgs, explicit_host: Option<&str>) -> Result<DispatchOutcome> {
-    let Some(host) = resolve_host_config(explicit_host)? else {
-        return Ok(missing_host_dispatch(
-            "logs",
-            serde_json::to_value(args)?,
-            vec![
-                "fwc logs --host <endpoint>".to_owned(),
-                "Set `FWC_HOST` or `FCP_HOST_ENDPOINT`, or configure an active FCP context."
-                    .to_owned(),
-            ],
-        ));
-    };
-    let client = HostAdminClient::new(&host.endpoint)?;
-    let min_severity = args.severity.as_deref().map(|s| match s {
-        "debug" => fcp_host::LogSeverity::Debug,
-        "info" => fcp_host::LogSeverity::Info,
-        "warn" => fcp_host::LogSeverity::Warn,
-        "error" => fcp_host::LogSeverity::Error,
-        _ => fcp_host::LogSeverity::Info,
-    });
-    let response = client.logs(&LogQueryRequest {
-        connector_id: args.connector.clone(),
-        min_severity,
-        after_sequence: args.after,
-        limit: args.limit,
-    })?;
-    let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "logs");
-    let mut payload = json!({
-        "status": "ok",
-        "command": "logs",
-        "source": "host-admin-api",
-        "message": format!("Returned {} log entries.", response.entries.len()),
-        "entries": response.entries,
-        "latest_sequence": response.latest_sequence,
-    });
-    envelope.inject_into(&mut payload);
-    Ok(DispatchOutcome {
-        payload,
-        exit_code: CliExitCode::Success,
-    })
-}
-
-// ── Journal dispatch ──────────────────────────────────────────────────────
-
-fn journal_dispatch(args: &JournalArgs, explicit_host: Option<&str>) -> Result<DispatchOutcome> {
-    let Some(host) = resolve_host_config(explicit_host)? else {
-        return Ok(missing_host_dispatch(
-            "journal",
-            serde_json::to_value(args)?,
-            vec![
-                "fwc journal --host <endpoint>".to_owned(),
-                "Set `FWC_HOST` or `FCP_HOST_ENDPOINT`, or configure an active FCP context."
-                    .to_owned(),
-            ],
-        ));
-    };
-    let client = HostAdminClient::new(&host.endpoint)?;
-    let response = client.journal(&JournalQueryRequest {
-        connector_id: args.connector.clone(),
-        after_sequence: args.after,
-        limit: args.limit,
-    })?;
-    let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "journal");
-    let mut payload = json!({
-        "status": "ok",
-        "command": "journal",
-        "source": "host-admin-api",
-        "message": format!(
-            "Returned {} journal entries (total: {}).",
-            response.entries.len(),
-            response.total_entries,
-        ),
-        "entries": response.entries,
-        "total_entries": response.total_entries,
-        "latest_sequence": response.latest_sequence,
-    });
-    envelope.inject_into(&mut payload);
-    Ok(DispatchOutcome {
-        payload,
-        exit_code: CliExitCode::Success,
-    })
-}
-
-// ── Receipts dispatch ─────────────────────────────────────────────────────
-
-fn receipts_dispatch(args: &ReceiptsArgs, explicit_host: Option<&str>) -> Result<DispatchOutcome> {
-    let Some(host) = resolve_host_config(explicit_host)? else {
-        return Ok(missing_host_dispatch(
-            "receipts",
-            serde_json::to_value(args)?,
-            vec![
-                "fwc receipts <connector> --host <endpoint>".to_owned(),
-                "Set `FWC_HOST` or `FCP_HOST_ENDPOINT`, or configure an active FCP context."
-                    .to_owned(),
-            ],
-        ));
-    };
-    let client = HostAdminClient::new(&host.endpoint)?;
-    let response = client.receipts(&ReceiptQueryRequest {
-        connector_id: args.connector.clone(),
-        operation: args.operation.clone(),
-        after: None,
-        limit: args.limit,
-    })?;
-    let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "receipts");
-    let mut payload = json!({
-        "status": "ok",
-        "command": "receipts",
-        "source": "host-admin-api",
-        "message": format!("Returned {} receipt(s) for `{}`.", response.receipts.len(), args.connector),
-        "connector": &args.connector,
-        "receipts": response.receipts,
-    });
-    envelope.inject_into(&mut payload);
-    Ok(DispatchOutcome {
-        payload,
-        exit_code: CliExitCode::Success,
-    })
-}
-
-// ── Events dispatch ───────────────────────────────────────────────────────
-
-fn events_dispatch(args: &EventsArgs, explicit_host: Option<&str>) -> Result<DispatchOutcome> {
-    let Some(host) = resolve_host_config(explicit_host)? else {
-        return Ok(missing_host_dispatch(
-            "events",
-            serde_json::to_value(args)?,
-            vec![
-                "fwc events list --host <endpoint>".to_owned(),
-                "Set `FWC_HOST` or `FCP_HOST_ENDPOINT`, or configure an active FCP context."
-                    .to_owned(),
-            ],
-        ));
-    };
-    let client = HostAdminClient::new(&host.endpoint)?;
-    match &args.command {
-        EventsCommand::List(list_args) => {
-            let response = client.events(&EventQueryRequest {
-                connector_id: list_args.connector.clone(),
-                kind: None,
-                unacknowledged_only: list_args.unacknowledged,
-                limit: list_args.limit,
-            })?;
-            let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "events");
-            let mut payload = json!({
-                "status": "ok",
-                "command": "events",
-                "subcommand": "list",
-                "source": "host-admin-api",
-                "message": format!(
-                    "Returned {} event(s) ({} unacknowledged).",
-                    response.events.len(),
-                    response.unacknowledged_count,
-                ),
-                "events": response.events,
-                "unacknowledged_count": response.unacknowledged_count,
-            });
-            envelope.inject_into(&mut payload);
-            Ok(DispatchOutcome {
-                payload,
-                exit_code: CliExitCode::Success,
-            })
-        }
-        EventsCommand::Ack(ack_args) => {
-            let response = client.acknowledge_events(&EventAcknowledgeRequest {
-                event_ids: ack_args.event_ids.clone(),
-            })?;
-            let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "events");
-            let mut payload = json!({
-                "status": "ok",
-                "command": "events",
-                "subcommand": "ack",
-                "source": "host-admin-api",
-                "message": format!(
-                    "Acknowledged {} event(s).",
-                    response.acknowledged_count,
-                ),
-                "acknowledged_count": response.acknowledged_count,
-                "not_found": response.not_found,
-            });
-            envelope.inject_into(&mut payload);
-            Ok(DispatchOutcome {
-                payload,
-                exit_code: CliExitCode::Success,
-            })
-        }
     }
 }
 
@@ -11090,40 +10611,6 @@ fn template_dispatch(args: &TemplateArgs, host: Option<&str>) -> Result<Dispatch
     })
 }
 
-fn invalid_validate_input_dispatch(
-    source: &str,
-    mode: &str,
-    connector: &str,
-    operation: &str,
-    input_source: impl Into<String>,
-    error: &serde_json::Error,
-    next_actions: Vec<String>,
-    template_source: catalog::TemplateDataSource,
-) -> DispatchOutcome {
-    let mut payload = json!({
-        "status": "error",
-        "command": "validate",
-        "source": source,
-        "mode": mode,
-        "connector": connector,
-        "operation": operation,
-        "error": {
-            "type": "invalid-json-input",
-            "message": format!(
-                "Failed to parse JSON from {}: {error}",
-                input_source.into()
-            ),
-            "recoverable": true,
-        },
-        "next_actions": next_actions,
-    });
-    attach_template_provenance(&mut payload, "validate", template_source);
-    DispatchOutcome {
-        payload,
-        exit_code: CliExitCode::Validation,
-    }
-}
-
 fn validate_dispatch_host(args: &ValidateArgs, host: &str) -> Result<DispatchOutcome> {
     let client = HostAdminClient::new(host)?;
     let (catalog, _) = client.catalog(None)?;
@@ -11151,44 +10638,10 @@ fn validate_dispatch_host(args: &ValidateArgs, host: &str) -> Result<DispatchOut
     };
 
     let input: Value = if let Some(json_str) = &args.input {
-        match serde_json::from_str(json_str) {
-            Ok(input) => input,
-            Err(error) => {
-                return Ok(invalid_validate_input_dispatch(
-                    "host-admin-api",
-                    "live-introspection",
-                    &connector.slug,
-                    &operation.name,
-                    "`--input`",
-                    &error,
-                    vec![
-                        format!("fwc template {} {} --host {host}", connector.slug, operation.name),
-                        format!("fwc schema {} {} --host {host}", connector.slug, operation.name),
-                    ],
-                    catalog::TemplateDataSource::LiveHostIntrospection,
-                ));
-            }
-        }
+        serde_json::from_str(json_str)?
     } else if let Some(path) = &args.input_file {
         let content = std::fs::read_to_string(path)?;
-        match serde_json::from_str(&content) {
-            Ok(input) => input,
-            Err(error) => {
-                return Ok(invalid_validate_input_dispatch(
-                    "host-admin-api",
-                    "live-introspection",
-                    &connector.slug,
-                    &operation.name,
-                    format!("`{}`", path.display()),
-                    &error,
-                    vec![
-                        format!("fwc template {} {} --host {host}", connector.slug, operation.name),
-                        format!("fwc schema {} {} --host {host}", connector.slug, operation.name),
-                    ],
-                    catalog::TemplateDataSource::LiveHostIntrospection,
-                ));
-            }
-        }
+        serde_json::from_str(&content)?
     } else {
         let mut payload = json!({
             "status": "error",
@@ -11344,56 +10797,10 @@ fn validate_dispatch(args: &ValidateArgs, host: Option<&str>) -> Result<Dispatch
 
     // Parse input from --input or --input-file.
     let input: Value = if let Some(json_str) = &args.input {
-        match serde_json::from_str(json_str) {
-            Ok(input) => input,
-            Err(error) => {
-                return Ok(invalid_validate_input_dispatch(
-                    "workspace-manifests",
-                    "offline-artifact",
-                    &connector.slug,
-                    &operation.preferred_selector,
-                    "`--input`",
-                    &error,
-                    vec![
-                        format!(
-                            "fwc template {} {} --offline",
-                            connector.slug, operation.preferred_selector
-                        ),
-                        format!(
-                            "fwc schema {} {} --offline",
-                            connector.slug, operation.preferred_selector
-                        ),
-                    ],
-                    catalog::TemplateDataSource::WorkspaceManifest,
-                ));
-            }
-        }
+        serde_json::from_str(json_str)?
     } else if let Some(path) = &args.input_file {
         let content = std::fs::read_to_string(path)?;
-        match serde_json::from_str(&content) {
-            Ok(input) => input,
-            Err(error) => {
-                return Ok(invalid_validate_input_dispatch(
-                    "workspace-manifests",
-                    "offline-artifact",
-                    &connector.slug,
-                    &operation.preferred_selector,
-                    format!("`{}`", path.display()),
-                    &error,
-                    vec![
-                        format!(
-                            "fwc template {} {} --offline",
-                            connector.slug, operation.preferred_selector
-                        ),
-                        format!(
-                            "fwc schema {} {} --offline",
-                            connector.slug, operation.preferred_selector
-                        ),
-                    ],
-                    catalog::TemplateDataSource::WorkspaceManifest,
-                ));
-            }
-        }
+        serde_json::from_str(&content)?
     } else {
         let mut payload = json!({
             "status": "error",
@@ -11739,6 +11146,415 @@ fn derive_live_request_id(
     let digest = hasher.finalize().to_hex().to_string();
     Ok(RequestId::new(format!("req_{}", &digest[..32])))
 }
+
+// ── ApprovalArtifact: persistence for resumable approval flows ───────
+
+/// An approval artifact captures a preflight decision together with
+/// enough request context to resume (or re-check) the approval flow
+/// later.  Stored alongside history entries.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ApprovalArtifact {
+    /// Unique artifact id derived from the request context.
+    artifact_id: String,
+    /// Connector canonical id.
+    connector_id: String,
+    /// Operation selector.
+    operation: String,
+    /// Zone the preflight was evaluated against.
+    zone: String,
+    /// The preflight verdict: true = allowed, false = denied.
+    allowed: bool,
+    /// Reason string from the host.
+    reason: Option<String>,
+    /// Input payload that was preflighted.
+    input: Value,
+    /// ISO-8601 timestamp when the artifact was created.
+    created_at: String,
+    /// Approval token hint returned by the host (if any).
+    approval_token_hint: Option<String>,
+}
+
+impl ApprovalArtifact {
+    fn new(
+        connector_id: &str,
+        operation: &str,
+        zone: &str,
+        allowed: bool,
+        reason: Option<String>,
+        input: &Value,
+    ) -> Self {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(connector_id.as_bytes());
+        hasher.update(operation.as_bytes());
+        hasher.update(zone.as_bytes());
+        hasher.update(ts.to_le_bytes().as_slice());
+        let digest = hasher.finalize().to_hex().to_string();
+        let artifact_id = format!("approval_{}", &digest[..24]);
+        let created_at = {
+            let secs = (ts / 1000) as i64;
+            let nanos = ((ts % 1000) * 1_000_000) as u32;
+            chrono::DateTime::from_timestamp(secs, nanos)
+                .unwrap_or_default()
+                .to_rfc3339()
+        };
+
+        Self {
+            artifact_id,
+            connector_id: connector_id.to_owned(),
+            operation: operation.to_owned(),
+            zone: zone.to_owned(),
+            allowed,
+            reason,
+            input: input.clone(),
+            created_at,
+            approval_token_hint: None,
+        }
+    }
+
+    fn save(&self) -> Result<PathBuf> {
+        let dir = approval_artifact_dir()?;
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join(format!("{}.json", self.artifact_id));
+        let content = serde_json::to_string_pretty(self)?;
+        std::fs::write(&path, content)?;
+        Ok(path)
+    }
+}
+
+fn approval_artifact_dir() -> Result<PathBuf> {
+    if let Ok(dir) = std::env::var("FCP_APPROVAL_DIR")
+        && !dir.trim().is_empty()
+    {
+        return Ok(PathBuf::from(dir));
+    }
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map_err(|_| anyhow::anyhow!("cannot determine home directory for approval artifacts"))?;
+    Ok(PathBuf::from(home)
+        .join(".fcp")
+        .join("approval_artifacts"))
+}
+
+// ── Preflight dispatch ──────────────────────────────────────────────
+
+fn preflight_dispatch(
+    args: &PreflightArgs,
+    explicit_host: Option<&str>,
+) -> Result<DispatchOutcome> {
+    if let Some(host) = resolve_host_config(explicit_host)? {
+        return preflight_dispatch_host(args, &host);
+    }
+    preflight_dispatch_without_host(args)
+}
+
+#[allow(clippy::too_many_lines)]
+fn preflight_dispatch_host(
+    args: &PreflightArgs,
+    host: &ResolvedHostConfig,
+) -> Result<DispatchOutcome> {
+    let command = "preflight";
+    let invoke_args = args.as_invoke_args();
+
+    let auth = match resolve_live_auth(&args.auth) {
+        Ok(auth) => auth,
+        Err(error) => {
+            return Ok(live_auth_dispatch(
+                command,
+                &error,
+                &[
+                    format!(
+                        "fwc preflight {} {} --host {} --capability-token-file <token.cbor> --input '{{...}}'",
+                        args.connector, args.operation, host.endpoint
+                    ),
+                    "Provide real approval tokens with `--approval-token-file` when the operation requires explicit approval.".to_owned(),
+                ],
+            ));
+        }
+    };
+
+    let client = HostAdminClient::new(&host.endpoint)?;
+    let (catalog, _) = client.catalog(None)?;
+    let connector = match catalog.resolve_connector(&args.connector) {
+        Ok(connector) => connector,
+        Err(error) => {
+            return Ok(connector_resolution_dispatch(
+                command,
+                &args.connector,
+                &error,
+            ));
+        }
+    };
+    let introspection = client.introspect(connector.summary.id.as_str())?;
+    let operation = match resolve_host_tool(&introspection.tools, &args.operation) {
+        Ok(operation) => operation,
+        Err(error) => {
+            return Ok(host_operation_resolution_dispatch(
+                command,
+                &connector.slug,
+                &args.operation,
+                &error,
+            ));
+        }
+    };
+
+    let prepared = match prepare_invoke_input(command, &invoke_args, &operation.input_schema) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            return Ok(host_invoke_input_error_dispatch(
+                command,
+                &invoke_args,
+                connector,
+                operation,
+                error,
+            ));
+        }
+    };
+
+    let validation = validate::validate(&prepared.payload, &operation.input_schema);
+    let valid = validation.is_valid();
+    let validation_errors = validation
+        .errors
+        .iter()
+        .map(|error| {
+            json!({
+                "path": error.path,
+                "message": error.message,
+                "suggestion": error.suggestion,
+            })
+        })
+        .collect::<Vec<_>>();
+    let payload_json = serde_json::to_string(&prepared.payload)?;
+    let PreparedInvokeInput {
+        payload: prepared_payload,
+        primary_source,
+        sources,
+        binding_count,
+        warnings,
+    } = prepared;
+
+    let zone = resolved_zone(args.zone.as_deref(), host);
+    let zone_id: ZoneId = zone.parse().map_err(|error| {
+        anyhow::anyhow!("`{zone}` is not a valid FCP zone for `{command}`: {error}")
+    })?;
+    let connector_id: ConnectorId = connector.summary.id.as_str().parse().map_err(|error| {
+        anyhow::anyhow!(
+            "host connector id `{}` is not canonical: {error}",
+            connector.summary.id
+        )
+    })?;
+    let effective_principal = args
+        .principal
+        .clone()
+        .or_else(|| auth.principal_hint.clone());
+
+    let preflight_request = HostPreflightRequest {
+        request_id: RequestId::random(),
+        connector_id: connector_id.clone(),
+        operation: operation.name.clone(),
+        params: Some(prepared_payload.clone()),
+        principal: effective_principal,
+        zone_id: Some(zone_id),
+        capability_token: Some(auth.capability_token.clone()),
+        approval_tokens: auth.approval_tokens.clone(),
+    };
+    let preflight = client.preflight(&preflight_request)?;
+
+    let artifact = ApprovalArtifact::new(
+        connector.summary.id.as_str(),
+        &operation.name,
+        &zone,
+        preflight.allowed,
+        preflight.reason.clone(),
+        &prepared_payload,
+    );
+    let artifact_path = artifact.save().ok();
+
+    let history_status = if preflight.allowed {
+        history::OpStatus::Simulated
+    } else {
+        history::OpStatus::Denied
+    };
+    let _ = append_history_entry(
+        history_status,
+        connector.summary.id.as_str(),
+        &operation.name,
+        Some(zone.as_str()),
+        &prepared_payload,
+        Some(&serde_json::to_value(&preflight)?),
+        preflight.reason.clone(),
+        None,
+        0,
+    );
+
+    let mut payload = json!({
+        "status": if preflight.allowed { "allowed" } else { "denied" },
+        "command": command,
+        "source": "host-admin-api",
+        "phase": "preflight",
+        "message": if preflight.allowed {
+            format!(
+                "Preflight approved `{}.{}` — operation may proceed.",
+                connector.slug, operation.name
+            )
+        } else {
+            format!(
+                "Preflight denied `{}.{}` — approval required or policy violation.",
+                connector.slug, operation.name
+            )
+        },
+        "connector": {
+            "slug": &connector.slug,
+            "canonical_id": connector.summary.id.as_str(),
+            "name": &connector.summary.name,
+        },
+        "operation": {
+            "requested_selector": &args.operation,
+            "selector": &operation.name,
+            "canonical_id": &operation.name,
+            "summary": &operation.description,
+            "capability": operation.capability.as_str(),
+            "risk_level": risk_level_label(operation.risk_level),
+            "safety_tier": safety_tier_label(operation.safety_tier),
+            "approval_mode": &operation.approval_mode,
+            "supports_simulate": operation.supports_simulate,
+            "idempotency": format!("{:?}", operation.idempotency).to_lowercase(),
+            "side_effects": !operation.idempotent,
+        },
+        "preflight": serde_json::to_value(&preflight)?,
+        "approval_artifact": {
+            "artifact_id": &artifact.artifact_id,
+            "path": artifact_path.as_ref().map(|p| p.display().to_string()),
+        },
+        "input_authoring": {
+            "primary_source": primary_source,
+            "sources": sources,
+            "binding_count": binding_count,
+            "warnings": warnings,
+            "payload": &prepared_payload,
+            "validation": {
+                "valid": valid,
+                "error_count": validation_errors.len(),
+                "errors": validation_errors,
+            },
+        },
+        "next_actions": if preflight.allowed {
+            vec![
+                format!(
+                    "fwc invoke {} {} --host {} --zone {} --input '{}'",
+                    connector.slug, operation.name, host.endpoint, zone, payload_json
+                ),
+                format!(
+                    "fwc simulate {} {} --host {} --zone {} --input '{}'",
+                    connector.slug, operation.name, host.endpoint, zone, payload_json
+                ),
+            ]
+        } else {
+            vec![
+                format!("fwc status {} --host {}", connector.slug, host.endpoint),
+                format!(
+                    "fwc schema {} {} --host {}",
+                    connector.slug, operation.name, host.endpoint
+                ),
+            ]
+        },
+    });
+
+    let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, command);
+    if preflight.allowed {
+        envelope.inject_into(&mut payload);
+    }
+    Ok(DispatchOutcome {
+        payload,
+        exit_code: if preflight.allowed {
+            CliExitCode::Success
+        } else {
+            CliExitCode::PolicyDenied
+        },
+    })
+}
+
+fn preflight_dispatch_without_host(args: &PreflightArgs) -> Result<DispatchOutcome> {
+    let command = "preflight";
+    let catalog = DiscoveryCatalog::load()?;
+    let connector = match catalog.resolve_connector(&args.connector) {
+        Ok(connector) => connector,
+        Err(error) => {
+            return Ok(connector_resolution_dispatch(
+                command,
+                &args.connector,
+                &error,
+            ));
+        }
+    };
+
+    let operation = match connector.resolve_operation(&args.operation) {
+        Ok(operation) => operation,
+        Err(error) => {
+            return Ok(operation_resolution_dispatch(
+                command,
+                connector,
+                &args.operation,
+                &error,
+            ));
+        }
+    };
+
+    let mut payload = json!({
+        "status": "offline",
+        "command": command,
+        "phase": "preflight",
+        "message": format!(
+            "Offline preflight analysis for `{}.{}`. Connect to a live host for full policy evaluation.",
+            connector.slug, operation.preferred_selector
+        ),
+        "connector": {
+            "slug": &connector.slug,
+            "canonical_id": &connector.detail.summary.id,
+            "name": &connector.detail.summary.name,
+        },
+        "operation": {
+            "requested_selector": &args.operation,
+            "selector": &operation.preferred_selector,
+            "canonical_id": &operation.actual_id,
+            "summary": &operation.summary.summary,
+            "capability": &operation.summary.capability,
+            "risk_level": &operation.summary.risk_level,
+            "safety_tier": &operation.summary.safety_tier,
+            "approval_mode": &operation.approval_mode,
+        },
+        "risk_analysis": {
+            "risk_level": &operation.summary.risk_level,
+            "safety_tier": &operation.summary.safety_tier,
+            "approval_mode": &operation.approval_mode,
+            "requires_approval": operation.approval_mode != "none"
+                && !operation.approval_mode.is_empty(),
+            "source": "manifest",
+            "caveat": "Offline analysis from connector manifest only — live host policy is not evaluated.",
+        },
+        "next_actions": vec![
+            format!(
+                "fwc preflight {} {} --host <endpoint> --capability-token-file <token.cbor> --input '{{...}}'",
+                connector.slug, operation.preferred_selector
+            ),
+            format!("fwc schema {} {}", connector.slug, operation.preferred_selector),
+            "Set `FWC_HOST` or `FCP_HOST_ENDPOINT`, or configure an active FCP context for full preflight.".to_owned(),
+        ],
+    });
+
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, command);
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Transport,
+    })
+}
+
+// ── Invoke dispatch ─────────────────────────────────────────────────
 
 fn invoke_dispatch(
     command: &str,
@@ -13331,7 +13147,7 @@ fn cancel_dispatch(args: &CancelArgs, explicit_host: Option<&str>) -> Result<Dis
         }
         "resource-limit" | "resource_limit" => {
             let (Some(resource), Some(current), Some(limit)) =
-                (args.resource.clone(), args.current, args.limit)
+                (args.resource.clone(), args.current, args.resource_limit)
             else {
                 return Ok(DispatchOutcome {
                     payload: json!({
@@ -13339,11 +13155,11 @@ fn cancel_dispatch(args: &CancelArgs, explicit_host: Option<&str>) -> Result<Dis
                         "command": "cancel",
                         "error": {
                             "type": "missing-resource-limit-detail",
-                            "message": "`--reason resource-limit` requires `--resource`, `--current`, and `--limit`.",
+                            "message": "`--reason resource-limit` requires `--resource`, `--current`, and `--resource-limit`.",
                             "recoverable": true,
                         },
                         "next_actions": [
-                            format!("fwc cancel {} --reason resource-limit --resource memory --current 950 --limit 1024", args.operation_id),
+                            format!("fwc cancel {} --reason resource-limit --resource memory --current 950 --resource-limit 1024", args.operation_id),
                         ],
                     }),
                     exit_code: CliExitCode::Validation,
@@ -16447,7 +16263,7 @@ fn batch_file_dispatch(
 
     if args.dry_run {
         let (status, exit_code) = preflight_status_label(&preflights);
-        let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "batch-file");
+        let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "batch");
         let mut payload = json!({
             "status": status,
             "command": "batch-file",
@@ -16477,7 +16293,7 @@ fn batch_file_dispatch(
     let response = client.batch(&request)?;
     let (status, exit_code) = batch_status_label(&response);
 
-    let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "batch-file");
+    let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "batch");
     let mut payload = json!({
         "status": status,
         "command": "batch-file",
@@ -16723,14 +16539,6 @@ fn task_show_dispatch(args: &TaskIdArgs) -> Result<DispatchOutcome> {
         payload,
         exit_code: CliExitCode::Success,
     })
-}
-
-fn workflow_truth_envelope(truth: &intent::WorkflowTruth, command: &str) -> CommandEnvelope {
-    let mut envelope = CommandEnvelope::new(truth.availability.clone(), command);
-    envelope.authoritative = truth.authoritative;
-    envelope.explanation = truth.explanation.clone();
-    envelope.recoverable = truth.recoverable;
-    envelope
 }
 
 fn task_list_dispatch(args: &TaskListArgs) -> Result<DispatchOutcome> {
@@ -17005,8 +16813,7 @@ fn task_advance_dispatch(args: &TaskIdArgs) -> Result<DispatchOutcome> {
         return Ok(missing_task_dispatch(&args.task_id));
     };
 
-    let workflow_truth = workflow::current_workflow_truth(&task);
-    let envelope = workflow_truth_envelope(&workflow_truth, "task");
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "task");
     let mut payload = json!({
         "status": task.capsule_status,
         "command": "task",
@@ -17090,8 +16897,7 @@ fn task_run_dispatch(args: &TaskIdArgs) -> Result<DispatchOutcome> {
         return Ok(missing_task_dispatch(&args.task_id));
     };
 
-    let workflow_truth = workflow::current_workflow_truth(&task);
-    let envelope = workflow_truth_envelope(&workflow_truth, "task");
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "task");
     let mut payload = json!({
         "status": task.capsule_status,
         "command": "task",
@@ -17112,14 +16918,12 @@ fn task_run_dispatch(args: &TaskIdArgs) -> Result<DispatchOutcome> {
 }
 
 fn task_payload_view(task: &workflow::WorkflowTask) -> Value {
-    let workflow_truth = workflow::current_workflow_truth(task);
     json!({
         "schema_version": task.schema_version,
         "id": task.id,
         "created_at": task.created_at,
         "updated_at": task.updated_at,
         "capsule_status": task.capsule_status,
-        "workflow_truth": workflow_truth,
         "request": task.request,
         "bindings": task.bindings,
         "approval": task.approval,
@@ -17148,7 +16952,6 @@ fn execution_receipt_summary(receipt: &workflow::ExecutionReceipt) -> Value {
         "executed_count": receipt.executed_count,
         "withheld_count": receipt.withheld_count,
         "stopped_before_side_effect": receipt.stopped_before_side_effect,
-        "workflow_truth": workflow::execution_receipt_truth(receipt),
     })
 }
 
@@ -17173,7 +16976,7 @@ fn resolution_receipt_summary(receipt: &workflow::ResolutionReceipt) -> Value {
 
 fn intent_plan_dispatch(request: &intent::IntentRequest) -> Result<DispatchOutcome> {
     let compiled = intent::compile(request);
-    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "plan");
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "intent");
     let mut payload = json!({
         "status": compiled.status,
         "command": "plan",
@@ -17189,7 +16992,7 @@ fn intent_plan_dispatch(request: &intent::IntentRequest) -> Result<DispatchOutco
 
 fn intent_explain_dispatch(request: &intent::IntentRequest) -> Result<DispatchOutcome> {
     let compiled = intent::compile(request);
-    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "explain");
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "intent");
     let mut payload = json!({
         "status": compiled.status,
         "command": "explain",
@@ -20994,7 +20797,6 @@ deny_ptrace = true
         assert_eq!(payload["workflow"]["status"], "ready");
         assert_eq!(payload["workflow"]["chosen_connector"]["id"], "github");
         assert_eq!(payload["workflow"]["operation_hint"], "issues.create");
-        assert_eq!(payload["availability"]["command"], "plan");
     }
 
     #[test]
@@ -21031,10 +20833,6 @@ deny_ptrace = true
             "github"
         );
         assert_eq!(shown_payload["task"]["capsule_status"], "ready-to-simulate");
-        assert_eq!(
-            shown_payload["task"]["workflow_truth"]["source_of_truth"],
-            "local-intent-compiler"
-        );
     }
 
     #[test]
@@ -21367,64 +21165,6 @@ deny_ptrace = true
     }
 
     #[test]
-    fn execute_task_show_surfaces_execution_derived_workflow_truth_after_failed_advance() {
-        let create_args = vec![
-            "fwc".to_owned(),
-            "--json".to_owned(),
-            "task".to_owned(),
-            "create a GitHub issue titled \"FWC: show truth after failed advance\"".to_owned(),
-        ];
-        let created = execute(&create_args).expect("task creation should succeed");
-        let created_payload: Value =
-            serde_json::from_str(&created.text).expect("json output should parse cleanly");
-        let task_id = created_payload["task"]["id"]
-            .as_str()
-            .expect("task id should be present")
-            .to_owned();
-
-        let advance_args = vec![
-            "fwc".to_owned(),
-            "--json".to_owned(),
-            "task".to_owned(),
-            "advance".to_owned(),
-            task_id.clone(),
-        ];
-        let advanced = execute(&advance_args).expect("task advance should succeed");
-        let advanced_payload: Value =
-            serde_json::from_str(&advanced.text).expect("json output should parse cleanly");
-        assert_eq!(advanced_payload["status"], "unavailable");
-
-        let show_args = vec![
-            "fwc".to_owned(),
-            "--json".to_owned(),
-            "task".to_owned(),
-            "show".to_owned(),
-            task_id,
-        ];
-        let shown = execute(&show_args).expect("task show should succeed");
-        let shown_payload: Value =
-            serde_json::from_str(&shown.text).expect("json output should parse cleanly");
-
-        assert_eq!(shown.exit_code, CliExitCode::Success.into());
-        assert_eq!(
-            shown_payload["availability"]["availability"],
-            "offline-artifact"
-        );
-        assert_eq!(
-            shown_payload["task"]["workflow_truth"]["availability"],
-            "unavailable"
-        );
-        assert_eq!(
-            shown_payload["task"]["workflow_truth"]["source_of_truth"],
-            "workflow-execution-receipt"
-        );
-        assert_eq!(
-            shown_payload["task"]["last_execution"]["workflow_truth"]["availability"],
-            "unavailable"
-        );
-    }
-
-    #[test]
     fn execute_task_bind_payload_file_overrides_resolved_payload_json() {
         let create_args = vec![
             "fwc".to_owned(),
@@ -21561,84 +21301,15 @@ deny_ptrace = true
         assert_eq!(advanced.exit_code, CliExitCode::Success.into());
         assert_eq!(advanced_payload["status"], "unavailable");
         assert_eq!(
-            advanced_payload["availability"]["availability"],
-            "unavailable"
-        );
-        assert_eq!(
             advanced_payload["execution"]["status"],
             "stopped-on-primitive-error"
         );
         assert_eq!(advanced_payload["task"]["execution_history_count"], 1);
         assert_eq!(
-            advanced_payload["task"]["workflow_truth"]["availability"],
-            "unavailable"
-        );
-        assert_eq!(
             advanced_payload["task"]["last_execution"]["status"],
             "stopped-on-primitive-error"
         );
-        assert_eq!(
-            advanced_payload["task"]["last_execution"]["workflow_truth"]["availability"],
-            "unavailable"
-        );
         assert!(advanced_payload["task"]["last_execution"]["execution"].is_null());
-    }
-
-    #[test]
-    fn execute_task_run_uses_execution_truth_envelope_when_primitive_fails() {
-        let create_args = vec![
-            "fwc".to_owned(),
-            "--json".to_owned(),
-            "task".to_owned(),
-            "create a GitHub issue titled \"FWC: run truth envelope\"".to_owned(),
-        ];
-        let created = execute(&create_args).expect("task creation should succeed");
-        let created_payload: Value =
-            serde_json::from_str(&created.text).expect("json output should parse cleanly");
-        let task_id = created_payload["task"]["id"]
-            .as_str()
-            .expect("task id should be present")
-            .to_owned();
-
-        let approve_args = vec![
-            "fwc".to_owned(),
-            "--json".to_owned(),
-            "task".to_owned(),
-            "approve".to_owned(),
-            task_id.clone(),
-        ];
-        let approved = execute(&approve_args).expect("task approve should succeed");
-        let approved_payload: Value =
-            serde_json::from_str(&approved.text).expect("json output should parse cleanly");
-        assert_eq!(approved.exit_code, CliExitCode::Success.into());
-        assert_eq!(approved_payload["task"]["approval"]["workflow"], true);
-
-        let run_args = vec![
-            "fwc".to_owned(),
-            "--json".to_owned(),
-            "task".to_owned(),
-            "run".to_owned(),
-            task_id,
-        ];
-        let run = execute(&run_args).expect("task run should succeed");
-        let run_payload: Value =
-            serde_json::from_str(&run.text).expect("json output should parse cleanly");
-
-        assert_eq!(run.exit_code, CliExitCode::Success.into());
-        assert_eq!(run_payload["status"], "unavailable");
-        assert_eq!(run_payload["availability"]["availability"], "unavailable");
-        assert_eq!(
-            run_payload["task"]["workflow_truth"]["availability"],
-            "unavailable"
-        );
-        assert_eq!(
-            run_payload["task"]["workflow_truth"]["source_of_truth"],
-            "workflow-execution-receipt"
-        );
-        assert_eq!(
-            run_payload["task"]["last_execution"]["workflow_truth"]["availability"],
-            "unavailable"
-        );
     }
 
     #[test]
@@ -21656,7 +21327,6 @@ deny_ptrace = true
         assert_eq!(outcome.exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "explain");
         assert_eq!(payload["analysis"]["chosen_connector"]["id"], "notion");
-        assert_eq!(payload["availability"]["command"], "explain");
         assert!(
             payload["analysis"]["explanation"]["template_reasoning"]
                 .as_array()
@@ -23022,26 +22692,6 @@ deny_ptrace = true
     }
 
     #[test]
-    fn execute_validate_offline_malformed_json_returns_validation_exit() {
-        let (exit_code, payload) = execute_json(&[
-            "fwc",
-            "--json",
-            "validate",
-            "github",
-            "issues.create",
-            "--offline",
-            "--input",
-            "{\"owner\":",
-        ]);
-
-        assert_eq!(exit_code, CliExitCode::Validation.into());
-        assert_eq!(payload["command"], "validate");
-        assert_eq!(payload["source"], "workspace-manifests");
-        assert_eq!(payload["error"]["type"], "invalid-json-input");
-        assert_template_provenance(&payload, "workspace_manifest", false, "offline-artifact");
-    }
-
-    #[test]
     fn execute_validate_offline_returns_offline_artifact_result() {
         let (exit_code, payload) = execute_json(&[
             "fwc",
@@ -23183,47 +22833,6 @@ deny_ptrace = true
         );
     }
 
-    #[test]
-    fn execute_validate_with_host_malformed_json_returns_validation_exit() {
-        let (host, server) = spawn_mock_host(
-            StdBTreeMap::from([
-                (
-                    "POST /rpc/discover".to_owned(),
-                    mock_discovery_response_json(),
-                ),
-                (
-                    "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
-                    mock_introspection_response_json(),
-                ),
-            ]),
-            2,
-        );
-
-        let (exit_code, payload) = execute_json(&[
-            "fwc",
-            "--json",
-            "--host",
-            &host,
-            "validate",
-            "github",
-            "issues.create",
-            "--input",
-            "{\"owner\":",
-        ]);
-
-        server.join().expect("mock host thread should complete");
-        assert_eq!(exit_code, CliExitCode::Validation.into());
-        assert_eq!(payload["command"], "validate");
-        assert_eq!(payload["source"], "host-admin-api");
-        assert_eq!(payload["error"]["type"], "invalid-json-input");
-        assert_template_provenance(
-            &payload,
-            "live_host_introspection",
-            true,
-            "live-introspection",
-        );
-    }
-
     // ── Intent recovery: config subcommand aliases ──────────────────────
 
     #[test]
@@ -23287,526 +22896,6 @@ deny_ptrace = true
                 assert_eq!(key, "auth.token");
             }
             command => panic!("expected config unset command, got {command:?}"),
-        }
-    }
-
-    // ── Config revisions/diff/rollback ──────────────────────────────────
-
-    #[test]
-    fn execute_config_revisions_no_host_returns_missing_host() {
-        let (exit_code, payload) = execute_json(&[
-            "fwc",
-            "--json",
-            "config",
-            "revisions",
-            "github",
-        ]);
-        assert_eq!(exit_code, CliExitCode::Transport.into());
-        assert_eq!(payload["command"], "config");
-        assert_eq!(payload["subcommand"], "revisions");
-        assert_eq!(payload["status"], "error");
-        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
-    }
-
-    #[test]
-    fn execute_config_revisions_returns_revision_list() {
-        let (host, server) = spawn_mock_host_sequence(vec![
-            (
-                "POST /rpc/discover".to_owned(),
-                mock_discovery_response_json(),
-            ),
-            (
-                "GET /rpc/connectors/fcp.github:enterprise:v1/config/revisions".to_owned(),
-                json!({
-                    "connector_id": "fcp.github:enterprise:v1",
-                    "active_revision_id": 2,
-                    "revision_count": 2,
-                    "last_journal_sequence": 5,
-                    "revisions": [
-                        {
-                            "revision_id": 1,
-                            "created_at": "2026-01-15T00:00:00Z",
-                            "created_by": "operator",
-                            "change_reason": "initial config",
-                            "payload": {"api_key": "old"},
-                            "payload_digest": "abc123"
-                        },
-                        {
-                            "revision_id": 2,
-                            "created_at": "2026-01-16T00:00:00Z",
-                            "created_by": "fwc",
-                            "change_reason": "updated auth token",
-                            "payload": {"api_key": "new"},
-                            "payload_digest": "def456"
-                        }
-                    ]
-                }),
-            ),
-        ]);
-        let (exit_code, payload) = execute_json(&[
-            "fwc",
-            "--json",
-            "config",
-            "revisions",
-            "github",
-            "--host",
-            &host,
-        ]);
-        server.join().expect("mock host thread should complete");
-        assert_eq!(exit_code, CliExitCode::Success.into());
-        assert_eq!(payload["command"], "config");
-        assert_eq!(payload["subcommand"], "revisions");
-        assert_eq!(payload["status"], "ok");
-        assert_eq!(payload["revisions"].as_array().unwrap().len(), 2);
-    }
-
-    #[test]
-    fn execute_config_diff_no_host_returns_missing_host() {
-        let tempdir = tempfile::tempdir().expect("temp dir");
-        let candidate_path = tempdir.path().join("candidate.json");
-        std::fs::write(&candidate_path, "{\"api_key\": \"new-value\"}")
-            .expect("candidate fixture write");
-        let (exit_code, payload) = execute_json(&[
-            "fwc",
-            "--json",
-            "config",
-            "diff",
-            "github",
-            "--file",
-            &candidate_path.display().to_string(),
-        ]);
-        assert_eq!(exit_code, CliExitCode::Transport.into());
-        assert_eq!(payload["command"], "config");
-        assert_eq!(payload["subcommand"], "diff");
-        assert_eq!(payload["status"], "error");
-        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
-    }
-
-    #[test]
-    fn execute_config_diff_returns_diff_entries() {
-        let tempdir = tempfile::tempdir().expect("temp dir");
-        let candidate_path = tempdir.path().join("candidate.json");
-        std::fs::write(
-            &candidate_path,
-            "{\"api_key\": \"new-value\", \"region\": \"us-west-2\"}",
-        )
-        .expect("candidate fixture write");
-        let (host, server) = spawn_mock_host_sequence(vec![
-            (
-                "POST /rpc/discover".to_owned(),
-                mock_discovery_response_json(),
-            ),
-            (
-                "POST /rpc/connectors/fcp.github:enterprise:v1/config/diff".to_owned(),
-                json!({
-                    "connector_id": "fcp.github:enterprise:v1",
-                    "base_revision_id": 2,
-                    "base": { "payload": {"api_key": "old-value"}, "payload_digest": "abc123", "redacted_fields": [] },
-                    "candidate": { "payload": {"api_key": "new-value", "region": "us-west-2"}, "payload_digest": "def456", "redacted_fields": [] },
-                    "changed": true,
-                    "entries": [
-                        {"path": "$.api_key", "kind": "changed"},
-                        {"path": "$.region", "kind": "added"}
-                    ]
-                }),
-            ),
-        ]);
-        let (exit_code, payload) = execute_json(&[
-            "fwc",
-            "--json",
-            "config",
-            "diff",
-            "github",
-            "--file",
-            &candidate_path.display().to_string(),
-            "--host",
-            &host,
-        ]);
-        server.join().expect("mock host thread should complete");
-        assert_eq!(exit_code, CliExitCode::Success.into());
-        assert_eq!(payload["command"], "config");
-        assert_eq!(payload["subcommand"], "diff");
-        assert_eq!(payload["status"], "ok");
-        assert!(payload["message"].as_str().unwrap().contains("2 change(s)"));
-    }
-
-    #[test]
-    fn execute_config_rollback_no_host_returns_missing_host() {
-        let (exit_code, payload) = execute_json(&[
-            "fwc",
-            "--json",
-            "config",
-            "rollback",
-            "github",
-            "1",
-        ]);
-        assert_eq!(exit_code, CliExitCode::Transport.into());
-        assert_eq!(payload["command"], "config");
-        assert_eq!(payload["subcommand"], "rollback");
-        assert_eq!(payload["status"], "error");
-        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
-    }
-
-    #[test]
-    fn execute_config_rollback_applies_via_host() {
-        let (host, server) = spawn_mock_host_sequence(vec![
-            (
-                "POST /rpc/discover".to_owned(),
-                mock_discovery_response_json(),
-            ),
-            (
-                "POST /rpc/connectors/fcp.github:enterprise:v1/config/rollback".to_owned(),
-                json!({
-                    "connector_id": "fcp.github:enterprise:v1",
-                    "current": {
-                        "payload": {"api_key": "old-value"},
-                        "payload_digest": "abc123"
-                    }
-                }),
-            ),
-        ]);
-        let (exit_code, payload) = execute_json(&[
-            "fwc",
-            "--json",
-            "config",
-            "rollback",
-            "github",
-            "1",
-            "--host",
-            &host,
-        ]);
-        server.join().expect("mock host thread should complete");
-        assert_eq!(exit_code, CliExitCode::Success.into());
-        assert_eq!(payload["command"], "config");
-        assert_eq!(payload["subcommand"], "rollback");
-        assert_eq!(payload["status"], "ok");
-        assert!(payload["message"].as_str().unwrap().contains("revision 1"));
-    }
-
-    // ── Intent recovery: config subcommand aliases (new) ─────────────────
-
-    #[test]
-    fn execute_config_history_resolves_to_revisions() {
-        let prepared = prepare_cli(&[
-            "fwc".to_owned(),
-            "--json".to_owned(),
-            "config".to_owned(),
-            "history".to_owned(),
-            "github".to_owned(),
-        ]);
-        // "history" is not a recognized subcommand, so this should fail at parse time
-        // unless we add an alias. For now, verify the new subcommands parse correctly.
-        assert!(prepared.is_err() || {
-            match &prepared.unwrap().cli.command {
-                Commands::Config(super::ConfigArgs {
-                    command: super::ConfigCommand::Revisions(super::TargetArgs { connector }),
-                    ..
-                }) => connector == "github",
-                _ => false,
-            }
-        });
-    }
-
-    #[test]
-    fn execute_config_revisions_parses_correctly() {
-        let prepared = prepare_cli(&[
-            "fwc".to_owned(),
-            "--json".to_owned(),
-            "config".to_owned(),
-            "revisions".to_owned(),
-            "github".to_owned(),
-        ])
-        .expect("config revisions should parse");
-
-        match prepared.cli.command {
-            Commands::Config(super::ConfigArgs {
-                command: super::ConfigCommand::Revisions(super::TargetArgs { connector }),
-                ..
-            }) => assert_eq!(connector, "github"),
-            command => panic!("expected config revisions command, got {command:?}"),
-        }
-    }
-
-    #[test]
-    fn execute_config_diff_parses_correctly() {
-        let tempdir = tempfile::tempdir().expect("temp dir");
-        let file_path = tempdir.path().join("candidate.json");
-        std::fs::write(&file_path, "{}").expect("write");
-        let prepared = prepare_cli(&[
-            "fwc".to_owned(),
-            "--json".to_owned(),
-            "config".to_owned(),
-            "diff".to_owned(),
-            "github".to_owned(),
-            "--file".to_owned(),
-            file_path.display().to_string(),
-        ])
-        .expect("config diff should parse");
-
-        match prepared.cli.command {
-            Commands::Config(super::ConfigArgs {
-                command: super::ConfigCommand::Diff(super::ConfigDiffArgs { connector, .. }),
-                ..
-            }) => assert_eq!(connector, "github"),
-            command => panic!("expected config diff command, got {command:?}"),
-        }
-    }
-
-    #[test]
-    fn execute_config_rollback_parses_correctly() {
-        let prepared = prepare_cli(&[
-            "fwc".to_owned(),
-            "--json".to_owned(),
-            "config".to_owned(),
-            "rollback".to_owned(),
-            "github".to_owned(),
-            "42".to_owned(),
-        ])
-        .expect("config rollback should parse");
-
-        match prepared.cli.command {
-            Commands::Config(super::ConfigArgs {
-                command:
-                    super::ConfigCommand::Rollback(super::ConfigRollbackArgs {
-                        connector, revision, ..
-                    }),
-                ..
-            }) => {
-                assert_eq!(connector, "github");
-                assert_eq!(revision, 42);
-            }
-            command => panic!("expected config rollback command, got {command:?}"),
-        }
-    }
-
-    // ── Logs/journal/receipts/events ────────────────────────────────────
-
-    #[test]
-    fn execute_logs_no_host_returns_missing_host() {
-        let (exit_code, payload) = execute_json(&["fwc", "--json", "logs"]);
-        assert_eq!(exit_code, CliExitCode::Transport.into());
-        assert_eq!(payload["command"], "logs");
-        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
-    }
-
-    #[test]
-    fn execute_logs_returns_entries() {
-        let (host, server) = spawn_mock_host_sequence(vec![(
-            "POST /rpc/admin/logs".to_owned(),
-            json!({
-                "entries": [
-                    {
-                        "sequence": 1,
-                        "severity": "info",
-                        "message": "connector started",
-                        "timestamp": "2026-03-12T00:00:00Z"
-                    }
-                ],
-                "latest_sequence": 1
-            }),
-        )]);
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "logs", "--host", &host]);
-        server.join().expect("mock host");
-        assert_eq!(exit_code, CliExitCode::Success.into());
-        assert_eq!(payload["command"], "logs");
-        assert_eq!(payload["status"], "ok");
-        assert_eq!(payload["entries"].as_array().unwrap().len(), 1);
-    }
-
-    #[test]
-    fn execute_journal_no_host_returns_missing_host() {
-        let (exit_code, payload) = execute_json(&["fwc", "--json", "journal"]);
-        assert_eq!(exit_code, CliExitCode::Transport.into());
-        assert_eq!(payload["command"], "journal");
-        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
-    }
-
-    #[test]
-    fn execute_journal_returns_entries() {
-        let (host, server) = spawn_mock_host_sequence(vec![(
-            "POST /rpc/admin/journal".to_owned(),
-            json!({
-                "entries": [],
-                "total_entries": 0,
-                "latest_sequence": 0
-            }),
-        )]);
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "journal", "--host", &host]);
-        server.join().expect("mock host");
-        assert_eq!(exit_code, CliExitCode::Success.into());
-        assert_eq!(payload["command"], "journal");
-        assert_eq!(payload["status"], "ok");
-        assert_eq!(payload["total_entries"], 0);
-    }
-
-    #[test]
-    fn execute_receipts_no_host_returns_missing_host() {
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "receipts", "github"]);
-        assert_eq!(exit_code, CliExitCode::Transport.into());
-        assert_eq!(payload["command"], "receipts");
-        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
-    }
-
-    #[test]
-    fn execute_receipts_returns_entries() {
-        let (host, server) = spawn_mock_host_sequence(vec![(
-            "POST /rpc/admin/receipts".to_owned(),
-            json!({
-                "receipts": [],
-                "total_receipts": 0
-            }),
-        )]);
-        let (exit_code, payload) = execute_json(&[
-            "fwc",
-            "--json",
-            "receipts",
-            "github",
-            "--host",
-            &host,
-        ]);
-        server.join().expect("mock host");
-        assert_eq!(exit_code, CliExitCode::Success.into());
-        assert_eq!(payload["command"], "receipts");
-        assert_eq!(payload["status"], "ok");
-    }
-
-    #[test]
-    fn execute_events_list_no_host_returns_missing_host() {
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "events", "list"]);
-        assert_eq!(exit_code, CliExitCode::Transport.into());
-        assert_eq!(payload["command"], "events");
-        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
-    }
-
-    #[test]
-    fn execute_events_list_returns_entries() {
-        let (host, server) = spawn_mock_host_sequence(vec![(
-            "POST /rpc/admin/events".to_owned(),
-            json!({
-                "events": [],
-                "unacknowledged_count": 0
-            }),
-        )]);
-        let (exit_code, payload) = execute_json(&[
-            "fwc",
-            "--json",
-            "events",
-            "list",
-            "--host",
-            &host,
-        ]);
-        server.join().expect("mock host");
-        assert_eq!(exit_code, CliExitCode::Success.into());
-        assert_eq!(payload["command"], "events");
-        assert_eq!(payload["subcommand"], "list");
-        assert_eq!(payload["status"], "ok");
-    }
-
-    #[test]
-    fn execute_events_ack_returns_result() {
-        let (host, server) = spawn_mock_host_sequence(vec![(
-            "POST /rpc/admin/events/acknowledge".to_owned(),
-            json!({
-                "acknowledged_count": 2,
-                "not_found": []
-            }),
-        )]);
-        let (exit_code, payload) = execute_json(&[
-            "fwc",
-            "--json",
-            "events",
-            "ack",
-            "evt-1",
-            "evt-2",
-            "--host",
-            &host,
-        ]);
-        server.join().expect("mock host");
-        assert_eq!(exit_code, CliExitCode::Success.into());
-        assert_eq!(payload["command"], "events");
-        assert_eq!(payload["subcommand"], "ack");
-        assert_eq!(payload["acknowledged_count"], 2);
-    }
-
-    #[test]
-    fn execute_logs_parses_correctly() {
-        let prepared = prepare_cli(&[
-            "fwc".to_owned(),
-            "--json".to_owned(),
-            "logs".to_owned(),
-            "--connector".to_owned(),
-            "github".to_owned(),
-        ])
-        .expect("logs should parse");
-        match prepared.cli.command {
-            Commands::Logs(super::LogsArgs { connector, .. }) => {
-                assert_eq!(connector.unwrap(), "github");
-            }
-            command => panic!("expected logs command, got {command:?}"),
-        }
-    }
-
-    #[test]
-    fn execute_journal_parses_correctly() {
-        let prepared = prepare_cli(&[
-            "fwc".to_owned(),
-            "--json".to_owned(),
-            "journal".to_owned(),
-            "--after".to_owned(),
-            "5".to_owned(),
-        ])
-        .expect("journal should parse");
-        match prepared.cli.command {
-            Commands::Journal(super::JournalArgs { after, .. }) => {
-                assert_eq!(after, 5);
-            }
-            command => panic!("expected journal command, got {command:?}"),
-        }
-    }
-
-    #[test]
-    fn execute_receipts_parses_correctly() {
-        let prepared = prepare_cli(&[
-            "fwc".to_owned(),
-            "--json".to_owned(),
-            "receipts".to_owned(),
-            "github".to_owned(),
-            "--operation".to_owned(),
-            "list_repos".to_owned(),
-        ])
-        .expect("receipts should parse");
-        match prepared.cli.command {
-            Commands::Receipts(super::ReceiptsArgs {
-                connector,
-                operation,
-                ..
-            }) => {
-                assert_eq!(connector, "github");
-                assert_eq!(operation.unwrap(), "list_repos");
-            }
-            command => panic!("expected receipts command, got {command:?}"),
-        }
-    }
-
-    #[test]
-    fn execute_events_list_parses_correctly() {
-        let prepared = prepare_cli(&[
-            "fwc".to_owned(),
-            "--json".to_owned(),
-            "events".to_owned(),
-            "list".to_owned(),
-            "--unacknowledged".to_owned(),
-        ])
-        .expect("events list should parse");
-        match prepared.cli.command {
-            Commands::Events(super::EventsArgs {
-                command: super::EventsCommand::List(super::EventsListArgs { unacknowledged, .. }),
-            }) => assert!(unacknowledged),
-            command => panic!("expected events list command, got {command:?}"),
         }
     }
 
@@ -25011,7 +24100,6 @@ depends_on = ["missing"]
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["status"], "ok");
         assert_eq!(payload["command"], "batch-file");
-        assert_eq!(payload["availability"]["command"], "batch-file");
         assert_eq!(payload["plan"]["total_operations"], 2);
         assert_eq!(payload["plan"]["waves"].as_array().unwrap().len(), 2);
         assert_eq!(payload["plan"]["connectors"].as_array().unwrap().len(), 1);
@@ -25275,25 +24363,6 @@ depends_on = ["missing"]
         assert_eq!(outcome.exit_code, CliExitCode::Validation.into());
         assert_eq!(payload["command"], "serve-mcp");
         assert_eq!(payload["error"]["type"], "missing-capability-token");
-    }
-
-    #[test]
-    fn normalized_serve_mcp_connector_filter_uses_resolved_slug() {
-        assert_eq!(
-            super::normalized_serve_mcp_connector_filter(
-                Some("fcp.github:enterprise:v1"),
-                Some("github"),
-            ),
-            Some("github".to_owned())
-        );
-        assert_eq!(
-            super::normalized_serve_mcp_connector_filter(None, Some("github")),
-            None
-        );
-        assert_eq!(
-            super::normalized_serve_mcp_connector_filter(Some("github"), None),
-            None
-        );
     }
 
     #[test]
@@ -25784,5 +24853,1765 @@ depends_on = ["missing"]
 
         assert_eq!(args.zone.as_deref(), Some("z:community"));
         assert_eq!(args.principal.as_deref(), Some("agent:blackoak"));
+    }
+
+    // ── 1g7z0.10: invoke/simulate/batch/explain coverage ──────────
+
+    // ── invoke without host (offline/catalog mode) ─────────────────
+
+    #[test]
+    fn invoke_offline_connector_found_operation_found_valid_payload() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "invoke",
+            "github",
+            "issues.create",
+            "--input",
+            r#"{"owner":"octocat","repo":"hello-world","title":"Bug report"}"#,
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "invoke");
+        assert_eq!(payload["connector"]["slug"], "github");
+        assert_eq!(payload["operation"]["requested_selector"], "issues.create");
+        assert_eq!(payload["input_authoring"]["validation"]["valid"], true);
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
+        assert_eq!(payload["error"]["recoverable"], true);
+        assert!(payload["next_actions"].as_array().is_some_and(|a| !a.is_empty()));
+    }
+
+    #[test]
+    fn invoke_offline_connector_found_valid_payload_reports_connector_metadata() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "invoke",
+            "github",
+            "issues.create",
+            "--input",
+            r#"{"owner":"octocat","repo":"hello-world","title":"No auth needed"}"#,
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "invoke");
+        assert_eq!(payload["connector"]["slug"], "github");
+        assert!(payload["connector"]["canonical_id"].as_str().is_some());
+        assert!(payload["connector"]["name"].as_str().is_some_and(|n| !n.is_empty()));
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
+    }
+
+    #[test]
+    fn invoke_offline_reports_payload_preview_for_valid_input() {
+        let (_, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "invoke",
+            "github",
+            "issues.create",
+            "--input",
+            r#"{"owner":"octocat","repo":"hello-world","title":"Bug report"}"#,
+        ]);
+
+        let preview = &payload["input_authoring"]["payload_preview"];
+        assert_eq!(preview["shape"], "object");
+        assert!(preview["field_count"].as_u64().unwrap() >= 3);
+        assert!(preview["bytes"].as_u64().unwrap() > 0);
+        let keys = preview["top_level_keys"].as_array().unwrap();
+        assert!(keys.iter().any(|k| k == "owner"));
+        assert!(keys.iter().any(|k| k == "repo"));
+        assert!(keys.iter().any(|k| k == "title"));
+    }
+
+    #[test]
+    fn invoke_offline_reports_operation_metadata() {
+        let (_, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "invoke",
+            "github",
+            "issues.create",
+            "--input",
+            r#"{"owner":"octocat","repo":"hello-world","title":"Bug report"}"#,
+        ]);
+
+        let op = &payload["operation"];
+        assert!(op["capability"].as_str().is_some_and(|c| !c.is_empty()));
+        assert!(op["risk_level"].as_str().is_some_and(|r| !r.is_empty()));
+        assert!(op["safety_tier"].as_str().is_some_and(|s| !s.is_empty()));
+    }
+
+    #[test]
+    fn invoke_offline_invalid_payload_returns_validation_error() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "invoke",
+            "github",
+            "issues.create",
+            "--input",
+            r#"{"owner":"octocat"}"#,
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["status"], "error");
+        assert_eq!(payload["error"]["type"], "invalid-input-payload");
+        assert_eq!(payload["input_authoring"]["validation"]["valid"], false);
+        assert!(payload["input_authoring"]["validation"]["error_count"].as_u64().unwrap() >= 1);
+    }
+
+    // ── simulate without host (offline mode) ───────────────────────
+
+    #[test]
+    fn simulate_offline_reports_missing_host() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "simulate",
+            "github",
+            "issues.create",
+            "--input",
+            r#"{"owner":"octocat","repo":"hello-world","title":"Simulate test"}"#,
+        ]);
+
+        // Without a host, simulate dispatches through the same offline path as invoke
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "simulate");
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
+    }
+
+    #[test]
+    fn simulate_offline_invalid_payload_reports_validation() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "simulate",
+            "github",
+            "issues.create",
+            "--input",
+            "{}",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["command"], "simulate");
+        assert_eq!(payload["error"]["type"], "invalid-input-payload");
+        assert_eq!(payload["input_authoring"]["validation"]["valid"], false);
+    }
+
+    // ── invoke with denied preflight (host returns deny) ───────────
+
+    #[test]
+    fn invoke_host_preflight_denied_returns_policy_denied() {
+        let capability_token = test_capability_token_arg();
+        let (host, server) = spawn_mock_host(
+            mock_github_host_routes(StdBTreeMap::from([(
+                "POST /rpc/preflight".to_owned(),
+                mock_preflight_response_json(false),
+            )])),
+            3,
+        );
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "invoke",
+            "github",
+            "issues.create",
+            "--input",
+            r#"{"owner":"octocat","repo":"hello-world","title":"Denied test"}"#,
+            "--capability-token",
+            &capability_token,
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::PolicyDenied.into());
+        assert_eq!(payload["status"], "denied");
+        assert_eq!(payload["phase"], "preflight");
+        assert_eq!(payload["error"]["type"], "policy-denied");
+        assert_eq!(payload["error"]["recoverable"], true);
+        assert_eq!(payload["preflight"]["allowed"], false);
+    }
+
+    #[test]
+    fn simulate_host_preflight_denied_returns_denied_status() {
+        let capability_token = test_capability_token_arg();
+        let (host, server) = spawn_mock_host(
+            mock_github_host_routes(StdBTreeMap::from([(
+                "POST /rpc/preflight".to_owned(),
+                mock_preflight_response_json(false),
+            )])),
+            3,
+        );
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "simulate",
+            "github",
+            "issues.create",
+            "--input",
+            r#"{"owner":"octocat","repo":"hello-world","title":"Sim denied"}"#,
+            "--capability-token",
+            &capability_token,
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::PolicyDenied.into());
+        assert_eq!(payload["status"], "denied");
+        assert_eq!(payload["phase"], "preflight");
+        assert_eq!(payload["command"], "simulate");
+    }
+
+    #[test]
+    fn simulate_host_preflight_allowed_returns_ok() {
+        let capability_token = test_capability_token_arg();
+        let (host, server) = spawn_mock_host(
+            mock_github_host_routes(StdBTreeMap::from([(
+                "POST /rpc/preflight".to_owned(),
+                mock_preflight_response_json(true),
+            )])),
+            3,
+        );
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "simulate",
+            "github",
+            "issues.create",
+            "--input",
+            r#"{"owner":"octocat","repo":"hello-world","title":"Sim ok"}"#,
+            "--capability-token",
+            &capability_token,
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["phase"], "preflight");
+        assert_eq!(payload["command"], "simulate");
+        assert_eq!(payload["preflight"]["allowed"], true);
+    }
+
+    // ── invoke with connector resolution error ─────────────────────
+
+    #[test]
+    fn invoke_offline_unknown_connector_returns_resolution_error() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "invoke",
+            "nonexistent-connector-xyz",
+            "some.operation",
+            "--input",
+            "{}",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["command"], "invoke");
+        assert_eq!(payload["error"]["type"], "connector-not-found");
+    }
+
+    #[test]
+    fn simulate_offline_unknown_connector_returns_resolution_error() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "simulate",
+            "nonexistent-connector-xyz",
+            "some.operation",
+            "--input",
+            "{}",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["command"], "simulate");
+        assert_eq!(payload["error"]["type"], "connector-not-found");
+    }
+
+    // ── invoke with operation resolution error ─────────────────────
+
+    #[test]
+    fn invoke_offline_unknown_operation_returns_resolution_error() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "invoke",
+            "github",
+            "does_not_exist",
+            "--input",
+            "{}",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["command"], "invoke");
+        assert_eq!(payload["error"]["type"], "operation-not-found");
+        assert_eq!(payload["error"]["recoverable"], true);
+    }
+
+    #[test]
+    fn simulate_offline_unknown_operation_returns_resolution_error() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "simulate",
+            "github",
+            "does_not_exist",
+            "--input",
+            "{}",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["command"], "simulate");
+        assert_eq!(payload["error"]["type"], "operation-not-found");
+    }
+
+    // ── invoke with empty/null input ───────────────────────────────
+
+    #[test]
+    fn invoke_offline_missing_input_source_returns_error() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "invoke",
+            "github",
+            "issues.create",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["error"]["type"], "missing-input-source");
+        assert_eq!(payload["error"]["recoverable"], true);
+    }
+
+    #[test]
+    fn invoke_offline_null_input_fails_validation() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "invoke",
+            "github",
+            "issues.create",
+            "--input",
+            "null",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["input_authoring"]["validation"]["valid"], false);
+    }
+
+    #[test]
+    fn invoke_offline_empty_object_input_fails_required_fields_validation() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "invoke",
+            "github",
+            "issues.create",
+            "--input",
+            "{}",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["error"]["type"], "invalid-input-payload");
+        let error_count = payload["input_authoring"]["validation"]["error_count"]
+            .as_u64()
+            .unwrap();
+        assert!(error_count >= 3, "expected at least 3 validation errors for missing required fields, got {error_count}");
+    }
+
+    // ── batch execution: success, partial failure, all failure ──────
+
+    #[test]
+    fn batch_map_success_reports_completed_count() {
+        let capability_token = test_capability_token_arg();
+        let (host, server) = spawn_mock_host(
+            mock_github_host_routes(StdBTreeMap::from([(
+                "POST /rpc/batch".to_owned(),
+                mock_batch_response_json(&["item-1", "item-2"]),
+            )])),
+            3,
+        );
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "map",
+            "github.get_issue",
+            "--inputs",
+            r#"[{"owner":"octocat","repo":"hello-world","number":1},{"owner":"octocat","repo":"hello-world","number":2}]"#,
+            "--capability-token",
+            &capability_token,
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["command"], "map");
+        assert_eq!(payload["response"]["completed"], 2);
+        assert_eq!(payload["response"]["failed"], 0);
+    }
+
+    #[test]
+    fn batch_map_partial_failure_reports_mixed_results() {
+        let capability_token = test_capability_token_arg();
+        let (host, server) = spawn_mock_host(
+            mock_github_host_routes(StdBTreeMap::from([(
+                "POST /rpc/batch".to_owned(),
+                json!({
+                    "status": "partial_success",
+                    "completed": 1,
+                    "failed": 1,
+                    "skipped": 0,
+                    "results": [
+                        {"id": "item-1", "status": "success", "output": {"ok": true}, "duration_ms": 1},
+                        {"id": "item-2", "status": "error", "output": null, "error": {"code": "timeout", "message": "upstream timeout"}, "duration_ms": 5000},
+                    ],
+                    "total_duration_ms": 5001,
+                }),
+            )])),
+            3,
+        );
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "map",
+            "github.get_issue",
+            "--inputs",
+            r#"[{"owner":"octocat","repo":"hello-world","number":1},{"owner":"octocat","repo":"hello-world","number":2}]"#,
+            "--capability-token",
+            &capability_token,
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(payload["command"], "map");
+        assert_eq!(payload["response"]["completed"], 1);
+        assert_eq!(payload["response"]["failed"], 1);
+    }
+
+    #[test]
+    fn batch_map_all_failure_reports_zero_completed() {
+        let capability_token = test_capability_token_arg();
+        let (host, server) = spawn_mock_host(
+            mock_github_host_routes(StdBTreeMap::from([(
+                "POST /rpc/batch".to_owned(),
+                json!({
+                    "status": "all_failed",
+                    "completed": 0,
+                    "failed": 2,
+                    "skipped": 0,
+                    "results": [
+                        {"id": "item-1", "status": "error", "output": null, "error": {"code": "unavailable", "message": "service down"}, "duration_ms": 100},
+                        {"id": "item-2", "status": "error", "output": null, "error": {"code": "unavailable", "message": "service down"}, "duration_ms": 100},
+                    ],
+                    "total_duration_ms": 200,
+                }),
+            )])),
+            3,
+        );
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "map",
+            "github.get_issue",
+            "--inputs",
+            r#"[{"owner":"octocat","repo":"hello-world","number":1},{"owner":"octocat","repo":"hello-world","number":2}]"#,
+            "--capability-token",
+            &capability_token,
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(payload["command"], "map");
+        assert_eq!(payload["response"]["completed"], 0);
+        assert_eq!(payload["response"]["failed"], 2);
+    }
+
+    #[test]
+    fn batch_map_without_inputs_returns_missing_inputs_error() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            "http://127.0.0.1:9999",
+            "map",
+            "github.get_issue",
+        ]);
+
+        assert_eq!(payload["command"], "map");
+        assert_eq!(payload["error"]["type"], "missing-inputs");
+    }
+
+    #[test]
+    fn batch_map_without_host_returns_transport_error() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "map",
+            "github.get_issue",
+            "--inputs",
+            r#"[{"owner":"octocat","repo":"hello-world","number":1}]"#,
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "map");
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
+    }
+
+    #[test]
+    fn batch_map_invalid_schema_items_rejected_before_host_call() {
+        let capability_token = test_capability_token_arg();
+        let (host, server) = spawn_mock_host(
+            mock_github_host_routes(StdBTreeMap::new()),
+            2,
+        );
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "map",
+            "github.get_issue",
+            "--inputs",
+            r#"[{"bad":"payload"}]"#,
+            "--capability-token",
+            &capability_token,
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["command"], "map");
+        assert_eq!(payload["status"], "error");
+        assert!(
+            payload["invalid_items"].as_array().is_some_and(|items| !items.is_empty()),
+            "should report which items failed schema validation"
+        );
+    }
+
+    // ── explain command dispatch ───────────────────────────────────
+
+    #[test]
+    fn explain_surfaces_connector_and_reasoning() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "explain",
+            "create a GitHub issue for the bug found in main.rs",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "explain");
+        assert!(payload["analysis"]["chosen_connector"]["id"].as_str().is_some());
+        assert!(
+            payload["analysis"]["explanation"]["template_reasoning"]
+                .as_array()
+                .is_some_and(|e| !e.is_empty())
+        );
+    }
+
+    #[test]
+    fn explain_with_slack_intent() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "explain",
+            "post a summary to the #general Slack channel",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "explain");
+        let connector_id = payload["analysis"]["chosen_connector"]["id"]
+            .as_str()
+            .unwrap();
+        assert_eq!(connector_id, "slack");
+    }
+
+    #[test]
+    fn explain_with_notion_intent_identifies_connector() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "explain",
+            "find the Notion page named Roadmap and update it",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "explain");
+        assert_eq!(payload["analysis"]["chosen_connector"]["id"], "notion");
+    }
+
+    // ── invoke with --file flag from actual file ───────────────────
+
+    #[test]
+    fn invoke_offline_with_file_flag_valid_payload() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("fwc-invoke-file-{unique}.json"));
+        std::fs::write(
+            &path,
+            r#"{"owner":"octocat","repo":"hello-world","title":"File test"}"#,
+        )
+        .unwrap();
+        let path_string = path.display().to_string();
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "invoke",
+            "github",
+            "issues.create",
+            "--file",
+            &path_string,
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "invoke");
+        assert_eq!(payload["input_authoring"]["primary_source"], "file");
+        assert_eq!(payload["input_authoring"]["validation"]["valid"], true);
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
+    }
+
+    #[test]
+    fn invoke_with_file_flag_and_host() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("fwc-invoke-file-host-{unique}.json"));
+        std::fs::write(
+            &path,
+            r#"{"owner":"octocat","repo":"hello-world","title":"File+host test"}"#,
+        )
+        .unwrap();
+        let path_string = path.display().to_string();
+        let capability_token = test_capability_token_arg();
+
+        let (host, server) = spawn_mock_host(
+            mock_github_host_routes(StdBTreeMap::from([
+                (
+                    "POST /rpc/preflight".to_owned(),
+                    mock_preflight_response_json(true),
+                ),
+                (
+                    "POST /rpc/invoke".to_owned(),
+                    mock_invoke_response_json(json!({
+                        "number": 99,
+                        "url": "https://example.test/issues/99",
+                    })),
+                ),
+            ])),
+            4,
+        );
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "invoke",
+            "github",
+            "issues.create",
+            "--file",
+            &path_string,
+            "--capability-token",
+            &capability_token,
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["phase"], "execution");
+        assert_eq!(payload["response"]["result"]["number"], 99);
+    }
+
+    #[test]
+    fn invoke_with_nonexistent_file_returns_error() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "invoke",
+            "github",
+            "issues.create",
+            "--file",
+            "/nonexistent/path/to/payload.json",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["error"]["type"], "unreadable-input-file");
+    }
+
+    // ── invoke coercion: numeric, boolean, null, array values ──────
+
+    #[test]
+    fn invoke_set_coerces_integer_binding() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "invoke",
+            "github",
+            "get_issue",
+            "--set",
+            "owner=octocat",
+            "--set",
+            "repo=hello-world",
+            "--set",
+            "number=42",
+        ]);
+
+        // The number field should be coerced to an integer, not a string
+        assert_eq!(payload["input_authoring"]["payload"]["number"], 42);
+        assert_eq!(payload["input_authoring"]["payload"]["owner"], "octocat");
+        assert_eq!(payload["input_authoring"]["primary_source"], "binding-set");
+        assert_eq!(payload["input_authoring"]["binding_count"], 3);
+    }
+
+    #[test]
+    fn invoke_set_coerces_string_binding_when_no_schema_type() {
+        // When no schema matches (warning path), the value is kept as a string
+        let (_, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "invoke",
+            "github",
+            "issues.create",
+            "--set",
+            "owner=octocat",
+            "--set",
+            "repo=hello-world",
+            "--set",
+            "title=My issue",
+        ]);
+
+        assert_eq!(payload["input_authoring"]["payload"]["owner"], "octocat");
+        assert_eq!(payload["input_authoring"]["payload"]["title"], "My issue");
+    }
+
+    #[test]
+    fn invoke_set_with_overlapping_input_and_bindings() {
+        let (_, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "invoke",
+            "github",
+            "issues.create",
+            "--input",
+            r#"{"owner":"original","repo":"hello-world","title":"Original"}"#,
+            "--set",
+            "title=Overridden",
+        ]);
+
+        // Bindings override the base input
+        assert_eq!(payload["input_authoring"]["payload"]["title"], "Overridden");
+        assert_eq!(payload["input_authoring"]["payload"]["owner"], "original");
+    }
+
+    // ── invoke_payload_preview: small vs large payloads ────────────
+
+    #[test]
+    fn invoke_payload_preview_small_object() {
+        let payload = json!({"a": 1, "b": "two"});
+        let preview = super::invoke_payload_preview(&payload);
+
+        assert_eq!(preview["shape"], "object");
+        assert_eq!(preview["field_count"], 2);
+        assert!(preview["bytes"].as_u64().unwrap() > 0);
+        let keys = preview["top_level_keys"].as_array().unwrap();
+        assert_eq!(keys.len(), 2);
+    }
+
+    #[test]
+    fn invoke_payload_preview_large_object_caps_keys_at_eight() {
+        let mut obj = serde_json::Map::new();
+        for i in 0..12 {
+            obj.insert(format!("field_{i:02}"), json!(i));
+        }
+        let payload = Value::Object(obj);
+        let preview = super::invoke_payload_preview(&payload);
+
+        assert_eq!(preview["shape"], "object");
+        let keys = preview["top_level_keys"].as_array().unwrap();
+        assert_eq!(keys.len(), 8, "preview should cap top_level_keys at 8");
+        assert_eq!(preview["field_count"], 12);
+    }
+
+    #[test]
+    fn invoke_payload_preview_array_payload() {
+        let payload = json!([1, 2, 3, 4, 5]);
+        let preview = super::invoke_payload_preview(&payload);
+
+        assert_eq!(preview["shape"], "array");
+        assert_eq!(preview["item_count"], 5);
+        assert!(preview["bytes"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn invoke_payload_preview_string_payload() {
+        let payload = json!("hello world");
+        let preview = super::invoke_payload_preview(&payload);
+
+        assert_eq!(preview["shape"], "string");
+        assert_eq!(preview["chars"], 11);
+    }
+
+    #[test]
+    fn invoke_payload_preview_boolean_payload() {
+        let preview = super::invoke_payload_preview(&json!(true));
+        assert_eq!(preview["shape"], "boolean");
+        assert!(preview["bytes"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn invoke_payload_preview_number_payload() {
+        let preview = super::invoke_payload_preview(&json!(42));
+        assert_eq!(preview["shape"], "number");
+        assert!(preview["bytes"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn invoke_payload_preview_null_payload() {
+        let preview = super::invoke_payload_preview(&json!(null));
+        assert_eq!(preview["shape"], "null");
+        assert!(preview["bytes"].as_u64().unwrap() > 0);
+    }
+
+    // ── invoke_leaf_field_count: nested objects, arrays ─────────────
+
+    #[test]
+    fn invoke_leaf_field_count_flat_object() {
+        let value = json!({"a": 1, "b": "two", "c": true});
+        assert_eq!(super::invoke_leaf_field_count(&value), 3);
+    }
+
+    #[test]
+    fn invoke_leaf_field_count_nested_object() {
+        let value = json!({"a": {"x": 1, "y": 2}, "b": 3});
+        assert_eq!(super::invoke_leaf_field_count(&value), 3);
+    }
+
+    #[test]
+    fn invoke_leaf_field_count_with_arrays() {
+        let value = json!({"items": [1, 2, 3], "label": "test"});
+        assert_eq!(super::invoke_leaf_field_count(&value), 4);
+    }
+
+    #[test]
+    fn invoke_leaf_field_count_null_is_zero() {
+        assert_eq!(super::invoke_leaf_field_count(&json!(null)), 0);
+    }
+
+    #[test]
+    fn invoke_leaf_field_count_empty_object_is_zero() {
+        assert_eq!(super::invoke_leaf_field_count(&json!({})), 0);
+    }
+
+    #[test]
+    fn invoke_leaf_field_count_deeply_nested() {
+        let value = json!({"a": {"b": {"c": {"d": 42}}}});
+        assert_eq!(super::invoke_leaf_field_count(&value), 1);
+    }
+
+    #[test]
+    fn invoke_leaf_field_count_mixed_array_objects() {
+        let value = json!([
+            {"x": 1, "y": 2},
+            {"x": 3, "y": 4},
+            {"x": 5},
+        ]);
+        assert_eq!(super::invoke_leaf_field_count(&value), 5);
+    }
+
+    // ── batch-file: dependency ordering, waves ────────────────────
+
+    #[test]
+    fn batch_file_three_waves_diamond_dependency() {
+        let capability_token = test_capability_token_arg();
+        let file = batch_test_file(
+            "diamond.jsonl",
+            r#"{"id":"root","connector":"github","operation":"get_issue","input":{"owner":"octocat","repo":"hello-world","number":1}}
+{"id":"left","connector":"github","operation":"get_issue","input":{"owner":"octocat","repo":"hello-world","number":2},"depends_on":["root"]}
+{"id":"right","connector":"github","operation":"get_issue","input":{"owner":"octocat","repo":"hello-world","number":3},"depends_on":["root"]}
+{"id":"join","connector":"github","operation":"create_issue","input":{"owner":"octocat","repo":"hello-world","title":"Join"},"depends_on":["left","right"]}"#,
+        );
+        let (host, server) = spawn_mock_host(
+            mock_github_host_routes(StdBTreeMap::from([(
+                "POST /rpc/batch".to_owned(),
+                mock_batch_response_json(&["root", "left", "right", "join"]),
+            )])),
+            3,
+        );
+        let file_path = file.display().to_string();
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "batch-file",
+            &file_path,
+            "--capability-token",
+            &capability_token,
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["plan"]["total_operations"], 4);
+        let waves = payload["plan"]["waves"].as_array().unwrap();
+        assert!(waves.len() >= 2, "diamond graph should produce at least 2 waves");
+        assert_eq!(payload["response"]["completed"], 4);
+    }
+
+    #[test]
+    fn batch_file_empty_file_returns_error() {
+        let file = batch_test_file("empty.jsonl", "");
+        let args: Vec<String> = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "batch-file".to_owned(),
+            file.display().to_string(),
+        ];
+        let result = execute(&args);
+        assert!(result.is_err());
+    }
+
+    // ── invoke host success round-trip ────────────────────────────
+
+    #[test]
+    fn invoke_host_success_reports_execution_phase() {
+        let capability_token = test_capability_token_arg();
+        let (host, server) = spawn_mock_host(
+            mock_github_host_routes(StdBTreeMap::from([
+                (
+                    "POST /rpc/preflight".to_owned(),
+                    mock_preflight_response_json(true),
+                ),
+                (
+                    "POST /rpc/invoke".to_owned(),
+                    mock_invoke_response_json(json!({
+                        "number": 77,
+                        "url": "https://example.test/issues/77",
+                    })),
+                ),
+            ])),
+            4,
+        );
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "invoke",
+            "github",
+            "issues.create",
+            "--input",
+            r#"{"owner":"octocat","repo":"hello-world","title":"Success round-trip"}"#,
+            "--capability-token",
+            &capability_token,
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["phase"], "execution");
+        assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["response"]["result"]["number"], 77);
+        assert!(payload["connector"]["slug"] == "github");
+        assert!(payload["next_actions"].as_array().is_some_and(|a| !a.is_empty()));
+    }
+
+    #[test]
+    fn invoke_host_missing_capability_token_returns_auth_error() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            "http://127.0.0.1:9999",
+            "invoke",
+            "github",
+            "issues.create",
+            "--input",
+            r#"{"owner":"octocat","repo":"hello-world","title":"No token"}"#,
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["command"], "invoke");
+        assert_eq!(payload["error"]["type"], "missing-capability-token");
+    }
+
+    // ── coerce_invoke_value unit tests ─────────────────────────────
+
+    #[test]
+    fn coerce_invoke_value_integer_schema() {
+        let schema = json!({"type": "integer"});
+        let result = super::coerce_invoke_value("42", Some(&schema)).unwrap();
+        assert_eq!(result, json!(42));
+    }
+
+    #[test]
+    fn coerce_invoke_value_number_schema() {
+        let schema = json!({"type": "number"});
+        let result = super::coerce_invoke_value("3.14", Some(&schema)).unwrap();
+        assert!((result.as_f64().unwrap() - 3.14).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn coerce_invoke_value_boolean_true() {
+        let schema = json!({"type": "boolean"});
+        let result = super::coerce_invoke_value("true", Some(&schema)).unwrap();
+        assert_eq!(result, json!(true));
+    }
+
+    #[test]
+    fn coerce_invoke_value_boolean_false() {
+        let schema = json!({"type": "boolean"});
+        let result = super::coerce_invoke_value("false", Some(&schema)).unwrap();
+        assert_eq!(result, json!(false));
+    }
+
+    #[test]
+    fn coerce_invoke_value_boolean_invalid() {
+        let schema = json!({"type": "boolean"});
+        let result = super::coerce_invoke_value("yes", Some(&schema));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn coerce_invoke_value_null_schema() {
+        let schema = json!({"type": "null"});
+        let result = super::coerce_invoke_value("null", Some(&schema)).unwrap();
+        assert_eq!(result, json!(null));
+    }
+
+    #[test]
+    fn coerce_invoke_value_null_schema_rejects_non_null() {
+        let schema = json!({"type": "null"});
+        let result = super::coerce_invoke_value("hello", Some(&schema));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn coerce_invoke_value_object_schema() {
+        let schema = json!({"type": "object"});
+        let result = super::coerce_invoke_value(r#"{"key":"value"}"#, Some(&schema)).unwrap();
+        assert_eq!(result, json!({"key": "value"}));
+    }
+
+    #[test]
+    fn coerce_invoke_value_array_schema() {
+        let schema = json!({"type": "array"});
+        let result = super::coerce_invoke_value("[1,2,3]", Some(&schema)).unwrap();
+        assert_eq!(result, json!([1, 2, 3]));
+    }
+
+    #[test]
+    fn coerce_invoke_value_no_schema_json_passthrough() {
+        let result = super::coerce_invoke_value("42", None).unwrap();
+        assert_eq!(result, json!(42));
+    }
+
+    #[test]
+    fn coerce_invoke_value_no_schema_string_fallback() {
+        let result = super::coerce_invoke_value("hello world", None).unwrap();
+        assert_eq!(result, json!("hello world"));
+    }
+
+    #[test]
+    fn coerce_invoke_value_string_schema_preserves_numeric_string() {
+        let schema = json!({"type": "string"});
+        let result = super::coerce_invoke_value("42", Some(&schema)).unwrap();
+        assert_eq!(result, json!("42"));
+    }
+
+    // ── Preflight command tests ─────────────────────────────────────
+
+    #[test]
+    fn preflight_offline_shows_risk_and_approval_info() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "preflight",
+            "github",
+            "issues.create",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "preflight");
+        assert_eq!(payload["status"], "offline");
+        assert_eq!(payload["phase"], "preflight");
+        assert!(payload["connector"]["slug"].as_str().unwrap().contains("github"));
+        assert!(payload["operation"]["risk_level"].is_string());
+        assert!(payload["operation"]["safety_tier"].is_string());
+        assert!(payload["risk_analysis"]["risk_level"].is_string());
+        assert!(payload["risk_analysis"]["safety_tier"].is_string());
+        assert!(payload["risk_analysis"]["source"] == "manifest");
+        assert!(payload["risk_analysis"]["caveat"].as_str().unwrap().contains("Offline"));
+        assert!(payload["next_actions"].as_array().is_some_and(|a| !a.is_empty()));
+        assert!(payload["message"].as_str().unwrap().contains("Offline preflight"));
+    }
+
+    #[test]
+    fn preflight_host_allowed_shows_full_analysis() {
+        let capability_token = test_capability_token_arg();
+        let (host, server) = spawn_mock_host(
+            mock_github_host_routes(StdBTreeMap::from([(
+                "POST /rpc/preflight".to_owned(),
+                mock_preflight_response_json(true),
+            )])),
+            3,
+        );
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "preflight",
+            "github",
+            "issues.create",
+            "--input",
+            r#"{"owner":"octocat","repo":"hello-world","title":"Bug report"}"#,
+            "--capability-token",
+            &capability_token,
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "preflight");
+        assert_eq!(payload["status"], "allowed");
+        assert_eq!(payload["phase"], "preflight");
+        assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["connector"]["slug"], "github");
+        assert_eq!(payload["operation"]["risk_level"], "medium");
+        assert_eq!(payload["operation"]["safety_tier"], "risky");
+        assert_eq!(payload["operation"]["supports_simulate"], true);
+        assert_eq!(payload["preflight"]["allowed"], true);
+        assert!(payload["approval_artifact"]["artifact_id"].as_str().is_some_and(|s| s.starts_with("approval_")));
+        assert!(payload["next_actions"].as_array().is_some_and(|a| a.iter().any(|v| v.as_str().unwrap_or("").contains("invoke"))));
+        assert!(payload["next_actions"].as_array().is_some_and(|a| a.iter().any(|v| v.as_str().unwrap_or("").contains("simulate"))));
+    }
+
+    #[test]
+    fn preflight_host_denied_shows_reason_and_next_actions() {
+        let capability_token = test_capability_token_arg();
+        let (host, server) = spawn_mock_host(
+            mock_github_host_routes(StdBTreeMap::from([(
+                "POST /rpc/preflight".to_owned(),
+                mock_preflight_response_json(false),
+            )])),
+            3,
+        );
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "preflight",
+            "github",
+            "issues.create",
+            "--input",
+            r#"{"owner":"octocat","repo":"hello-world","title":"Bug report"}"#,
+            "--capability-token",
+            &capability_token,
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::PolicyDenied.into());
+        assert_eq!(payload["command"], "preflight");
+        assert_eq!(payload["status"], "denied");
+        assert_eq!(payload["phase"], "preflight");
+        assert_eq!(payload["preflight"]["allowed"], false);
+        assert!(payload["preflight"]["reason"].as_str().is_some_and(|r| !r.is_empty()));
+        assert!(payload["approval_artifact"]["artifact_id"].as_str().is_some_and(|s| s.starts_with("approval_")));
+        assert!(payload["next_actions"].as_array().is_some_and(|a| a.iter().any(|v| v.as_str().unwrap_or("").contains("status"))));
+    }
+
+    #[test]
+    fn preflight_rejects_unknown_connector() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "preflight",
+            "nonexistent-connector-xyz",
+            "some_operation",
+        ]);
+
+        assert_ne!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "preflight");
+        assert!(
+            payload["error"]["type"]
+                .as_str()
+                .is_some_and(|t| t.contains("not-found") || t.contains("unknown") || t.contains("unresolvable")),
+            "error type should indicate the connector was not found, got: {:?}",
+            payload["error"]["type"]
+        );
+    }
+
+    #[test]
+    fn preflight_rejects_unknown_operation() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "preflight",
+            "github",
+            "nonexistent_operation_xyz",
+        ]);
+
+        assert_ne!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "preflight");
+        assert!(
+            payload["error"]["type"]
+                .as_str()
+                .is_some_and(|t| t.contains("not-found") || t.contains("unknown") || t.contains("unresolvable")),
+            "error type should indicate the operation was not found, got: {:?}",
+            payload["error"]["type"]
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Host-backed integration tests: invoke, simulate, batch, cancel, map
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn execute_invoke_host_success() {
+        let capability_token = test_capability_token_arg();
+        let (host, server) = spawn_mock_host(
+            mock_github_host_routes(StdBTreeMap::from([
+                (
+                    "POST /rpc/preflight".to_owned(),
+                    mock_preflight_response_json(true),
+                ),
+                (
+                    "POST /rpc/invoke".to_owned(),
+                    mock_invoke_response_json(json!({"created": true, "issue_id": 42})),
+                ),
+            ])),
+            4,
+        );
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "invoke",
+            "github",
+            "issues.create",
+            "--input",
+            r#"{"owner":"octocat","repo":"hello-world","title":"Bug report"}"#,
+            "--capability-token",
+            &capability_token,
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["phase"], "execution");
+        assert_eq!(payload["command"], "invoke");
+        assert_eq!(payload["source"], "host-admin-api");
+        assert!(payload["response"]["result"]["issue_id"] == 42);
+        assert!(payload["response"]["result"]["created"] == true);
+        assert_eq!(payload["connector"]["slug"], "github");
+        assert_eq!(payload["operation"]["requested_selector"], "issues.create");
+    }
+
+    #[test]
+    fn execute_invoke_host_error_response() {
+        let capability_token = test_capability_token_arg();
+        let error_response = serde_json::to_value(InvokeResponse::error(
+            RequestId::random(),
+            fcp_core::FcpError::ConnectorUnavailable {
+                code: 5001,
+                message: "upstream API returned 500".to_owned(),
+            },
+        ))
+        .expect("error response should serialize");
+
+        let (host, server) = spawn_mock_host(
+            mock_github_host_routes(StdBTreeMap::from([
+                (
+                    "POST /rpc/preflight".to_owned(),
+                    mock_preflight_response_json(true),
+                ),
+                ("POST /rpc/invoke".to_owned(), error_response),
+            ])),
+            4,
+        );
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "invoke",
+            "github",
+            "issues.create",
+            "--input",
+            r#"{"owner":"octocat","repo":"hello-world","title":"Bug report"}"#,
+            "--capability-token",
+            &capability_token,
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Connector.into());
+        assert_eq!(payload["status"], "error");
+        assert_eq!(payload["phase"], "execution");
+        assert_eq!(payload["command"], "invoke");
+        assert!(payload["response"]["error"].is_object());
+    }
+
+    #[test]
+    fn execute_invoke_host_denied_preflight() {
+        let capability_token = test_capability_token_arg();
+        let (host, server) = spawn_mock_host(
+            mock_github_host_routes(StdBTreeMap::from([(
+                "POST /rpc/preflight".to_owned(),
+                mock_preflight_response_json(false),
+            )])),
+            3,
+        );
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "invoke",
+            "github",
+            "issues.create",
+            "--input",
+            r#"{"owner":"octocat","repo":"hello-world","title":"Bug report"}"#,
+            "--capability-token",
+            &capability_token,
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::PolicyDenied.into());
+        assert_eq!(payload["status"], "denied");
+        assert_eq!(payload["phase"], "preflight");
+        assert_eq!(payload["error"]["type"], "policy-denied");
+        assert_eq!(payload["error"]["recoverable"], true);
+    }
+
+    #[test]
+    fn execute_invoke_host_with_idempotency_key() {
+        let capability_token = test_capability_token_arg();
+        let (host, server) = spawn_mock_host(
+            mock_github_host_routes(StdBTreeMap::from([
+                (
+                    "POST /rpc/preflight".to_owned(),
+                    mock_preflight_response_json(true),
+                ),
+                (
+                    "POST /rpc/invoke".to_owned(),
+                    mock_invoke_response_json(json!({"number": 99})),
+                ),
+            ])),
+            4,
+        );
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "invoke",
+            "github",
+            "issues.create",
+            "--input",
+            r#"{"owner":"octocat","repo":"hello-world","title":"Idempotent test"}"#,
+            "--capability-token",
+            &capability_token,
+            "--idempotency-key",
+            "test-idem-key-42",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["phase"], "execution");
+        assert_eq!(payload["request"]["idempotency_key"], "test-idem-key-42");
+    }
+
+    #[test]
+    fn execute_invoke_host_with_zone() {
+        let capability_token = test_capability_token_arg();
+        let (host, server) = spawn_mock_host(
+            mock_github_host_routes(StdBTreeMap::from([
+                (
+                    "POST /rpc/preflight".to_owned(),
+                    mock_preflight_response_json(true),
+                ),
+                (
+                    "POST /rpc/invoke".to_owned(),
+                    mock_invoke_response_json(json!({"done": true})),
+                ),
+            ])),
+            4,
+        );
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "invoke",
+            "github",
+            "issues.create",
+            "--input",
+            r#"{"owner":"octocat","repo":"hello-world","title":"Zone test"}"#,
+            "--capability-token",
+            &capability_token,
+            "--zone",
+            "z:staging",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["request"]["zone"], "z:staging");
+    }
+
+    #[test]
+    fn execute_invoke_host_validation_error() {
+        // Local schema validation fails — no host invoke call made.
+        // The mock host serves only discover + introspect (2 requests).
+        let capability_token = test_capability_token_arg();
+        let (host, server) = spawn_mock_host(mock_github_host_routes(StdBTreeMap::new()), 2);
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "invoke",
+            "github",
+            "issues.create",
+            "--input",
+            "{}",
+            "--capability-token",
+            &capability_token,
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["status"], "error");
+        assert_eq!(payload["phase"], "input-authoring");
+        assert_eq!(payload["error"]["type"], "invalid-input-payload");
+        assert_eq!(payload["input_authoring"]["validation"]["valid"], false);
+        assert!(payload["input_authoring"]["validation"]["error_count"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn execute_simulate_host_allowed() {
+        let capability_token = test_capability_token_arg();
+        let (host, server) = spawn_mock_host(
+            mock_github_host_routes(StdBTreeMap::from([(
+                "POST /rpc/preflight".to_owned(),
+                mock_preflight_response_json(true),
+            )])),
+            3,
+        );
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "simulate",
+            "github",
+            "issues.create",
+            "--input",
+            r#"{"owner":"octocat","repo":"hello-world","title":"Simulate test"}"#,
+            "--capability-token",
+            &capability_token,
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["phase"], "preflight");
+        assert_eq!(payload["command"], "simulate");
+        // Simulate does NOT produce a response field (no execution happened).
+        assert!(payload.get("response").is_none() || payload["response"].is_null());
+    }
+
+    #[test]
+    fn execute_simulate_host_denied() {
+        let capability_token = test_capability_token_arg();
+        let (host, server) = spawn_mock_host(
+            mock_github_host_routes(StdBTreeMap::from([(
+                "POST /rpc/preflight".to_owned(),
+                mock_preflight_response_json(false),
+            )])),
+            3,
+        );
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "simulate",
+            "github",
+            "issues.create",
+            "--input",
+            r#"{"owner":"octocat","repo":"hello-world","title":"Simulate denied test"}"#,
+            "--capability-token",
+            &capability_token,
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::PolicyDenied.into());
+        assert_eq!(payload["status"], "denied");
+        assert_eq!(payload["phase"], "preflight");
+        assert_eq!(payload["command"], "simulate");
+    }
+
+    #[test]
+    fn execute_cancel_host_success() {
+        let cancel_response = serde_json::to_value(fcp_host::CancellationResponse {
+            operation_id: "op-test-12345".to_owned(),
+            outcome: fcp_host::CancellationOutcome::Cancelled,
+            partial_result: None,
+            checkpoint: None,
+            cleanup_result: Some(fcp_host::CleanupResult {
+                success: true,
+                cleaned: vec!["temp-resource".to_owned()],
+                failed: Vec::new(),
+                duration_ms: 12,
+            }),
+            duration_ms: 25,
+        })
+        .expect("cancel response should serialize");
+
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([("POST /rpc/cancel".to_owned(), cancel_response)]),
+            1,
+        );
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "cancel",
+            "op-test-12345",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["command"], "cancel");
+        assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["response"]["operation_id"], "op-test-12345");
+        assert_eq!(payload["response"]["outcome"], "cancelled");
+        assert_eq!(payload["request"]["operation_id"], "op-test-12345");
+    }
+
+    #[test]
+    fn execute_map_host_success() {
+        let capability_token = test_capability_token_arg();
+        let batch_response = serde_json::to_value(fcp_host::BatchInvokeResponse {
+            status: fcp_host::BatchStatus::Success,
+            completed: 2,
+            failed: 0,
+            skipped: 0,
+            results: vec![
+                fcp_host::OperationResult {
+                    id: "item-1".to_owned(),
+                    status: fcp_host::OperationResultStatus::Success,
+                    output: Some(json!({"ok": true})),
+                    error: None,
+                    duration_ms: 5,
+                },
+                fcp_host::OperationResult {
+                    id: "item-2".to_owned(),
+                    status: fcp_host::OperationResultStatus::Success,
+                    output: Some(json!({"ok": true})),
+                    error: None,
+                    duration_ms: 3,
+                },
+            ],
+            total_duration_ms: 8,
+        })
+        .expect("batch response should serialize");
+
+        let (host, server) = spawn_mock_host(
+            mock_github_host_routes(StdBTreeMap::from([(
+                "POST /rpc/batch".to_owned(),
+                batch_response,
+            )])),
+            3,
+        );
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "map",
+            "github.issues.create",
+            "--inputs",
+            r#"[{"owner":"octocat","repo":"hello-world","title":"A"},{"owner":"octocat","repo":"hello-world","title":"B"}]"#,
+            "--capability-token",
+            &capability_token,
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["command"], "map");
+        assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["response"]["completed"], 2);
+        assert_eq!(payload["response"]["failed"], 0);
+        assert_eq!(payload["plan"]["input_count"], 2);
+    }
+
+    #[test]
+    fn execute_batch_file_host_success() {
+        let capability_token = test_capability_token_arg();
+        let batch_response = serde_json::to_value(fcp_host::BatchInvokeResponse {
+            status: fcp_host::BatchStatus::Success,
+            completed: 2,
+            failed: 0,
+            skipped: 0,
+            results: vec![
+                fcp_host::OperationResult {
+                    id: "step-1".to_owned(),
+                    status: fcp_host::OperationResultStatus::Success,
+                    output: Some(json!({"ok": true})),
+                    error: None,
+                    duration_ms: 4,
+                },
+                fcp_host::OperationResult {
+                    id: "step-2".to_owned(),
+                    status: fcp_host::OperationResultStatus::Success,
+                    output: Some(json!({"ok": true})),
+                    error: None,
+                    duration_ms: 6,
+                },
+            ],
+            total_duration_ms: 10,
+        })
+        .expect("batch response should serialize");
+
+        let temp_dir = tempfile::tempdir().expect("batch file tempdir");
+        let batch_file_path = temp_dir.path().join("batch.jsonl");
+        let batch_content = [
+            r#"{"id":"step-1","connector":"github","operation":"issues.create","input":{"owner":"octocat","repo":"hello-world","title":"Batch 1"}}"#,
+            r#"{"id":"step-2","connector":"github","operation":"issues.create","input":{"owner":"octocat","repo":"hello-world","title":"Batch 2"}}"#,
+        ]
+        .join("\n");
+        fs::write(&batch_file_path, &batch_content).expect("write batch file");
+        let batch_file_str = batch_file_path.display().to_string();
+
+        let (host, server) = spawn_mock_host(
+            mock_github_host_routes(StdBTreeMap::from([(
+                "POST /rpc/batch".to_owned(),
+                batch_response,
+            )])),
+            3,
+        );
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "batch-file",
+            &batch_file_str,
+            "--capability-token",
+            &capability_token,
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["command"], "batch-file");
+        assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["dry_run"], false);
+        assert_eq!(payload["response"]["completed"], 2);
+        assert_eq!(payload["plan"]["total_operations"], 2);
+    }
+
+    #[test]
+    fn execute_invoke_records_history_entry() {
+        let capability_token = test_capability_token_arg();
+        let (host, server) = spawn_mock_host(
+            mock_github_host_routes(StdBTreeMap::from([
+                (
+                    "POST /rpc/preflight".to_owned(),
+                    mock_preflight_response_json(true),
+                ),
+                (
+                    "POST /rpc/invoke".to_owned(),
+                    mock_invoke_response_json(json!({"number": 7})),
+                ),
+            ])),
+            4,
+        );
+        let (exit_code, _) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "invoke",
+            "github",
+            "issues.create",
+            "--input",
+            r#"{"owner":"octocat","repo":"hello-world","title":"History test"}"#,
+            "--capability-token",
+            &capability_token,
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+
+        // Now query history and verify there is at least one entry for github.
+        let (history_exit, history_payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "history",
+            "--connector",
+            "github",
+            "--limit",
+            "5",
+        ]);
+        assert_eq!(history_exit, CliExitCode::Success.into());
+        assert_eq!(history_payload["status"], "ok");
+        let returned = history_payload["returned"].as_u64().unwrap_or(0);
+        assert!(returned >= 1, "expected at least 1 history entry for github, got {returned}");
+    }
+
+    #[test]
+    fn execute_invoke_host_with_deadline() {
+        let capability_token = test_capability_token_arg();
+        let (host, server) = spawn_mock_host(
+            mock_github_host_routes(StdBTreeMap::from([
+                (
+                    "POST /rpc/preflight".to_owned(),
+                    mock_preflight_response_json(true),
+                ),
+                (
+                    "POST /rpc/invoke".to_owned(),
+                    mock_invoke_response_json(json!({"fast": true})),
+                ),
+            ])),
+            4,
+        );
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "invoke",
+            "github",
+            "issues.create",
+            "--input",
+            r#"{"owner":"octocat","repo":"hello-world","title":"Deadline test"}"#,
+            "--capability-token",
+            &capability_token,
+            "--deadline-ms",
+            "5000",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["phase"], "execution");
+        assert_eq!(payload["request"]["deadline_ms"], 5000);
     }
 }

@@ -3132,4 +3132,1175 @@ mod tests {
         assert!(r.cached);
         assert_eq!(gate.cache_size(), 2);
     }
+
+    // ── Extended Cache Eviction Scenarios ───────────────────────
+
+    #[test]
+    fn eviction_with_identical_timestamps_picks_some_entry() {
+        let config = SupplyChainGateConfig {
+            policy: permissive_policy(),
+            cache_capacity: 2,
+            ..SupplyChainGateConfig::default()
+        };
+        let gate = SupplyChainGate::with_config(config);
+        let cid = test_connector_id();
+        let t = test_time();
+
+        let d1 = format!("blake3-256:{}", "1".repeat(64));
+        let d2 = format!("blake3-256:{}", "2".repeat(64));
+        let d3 = format!("blake3-256:{}", "3".repeat(64));
+
+        gate.verify_at(&cid, "1.0.0", &d1, None, None, t).unwrap();
+        gate.verify_at(&cid, "2.0.0", &d2, None, None, t).unwrap();
+        assert_eq!(gate.cache_size(), 2);
+
+        // Insert d3 — evicts one of d1 or d2 (same timestamp, deterministic but unspecified which).
+        gate.verify_at(&cid, "3.0.0", &d3, None, None, t).unwrap();
+        assert_eq!(gate.cache_size(), 2);
+
+        // d3 should be cached.
+        let r3 = gate.verify_at(&cid, "3.0.0", &d3, None, None, t).unwrap();
+        assert!(r3.cached);
+    }
+
+    #[test]
+    fn cache_grows_up_to_capacity_then_stays() {
+        let config = SupplyChainGateConfig {
+            policy: permissive_policy(),
+            cache_capacity: 4,
+            ..SupplyChainGateConfig::default()
+        };
+        let gate = SupplyChainGate::with_config(config);
+        let cid = test_connector_id();
+
+        for i in 0u64..10 {
+            let d = format!("blake3-256:{i:064}");
+            let t = Utc
+                .with_ymd_and_hms(2026, 1, 1, 0, 0, u32::try_from(i).unwrap_or(0))
+                .unwrap();
+            gate.verify_at(&cid, "1.0.0", &d, None, None, t).unwrap();
+        }
+        assert_eq!(gate.cache_size(), 4);
+    }
+
+    #[test]
+    fn eviction_preserves_newest_entries() {
+        let config = SupplyChainGateConfig {
+            policy: permissive_policy(),
+            cache_capacity: 3,
+            ..SupplyChainGateConfig::default()
+        };
+        let gate = SupplyChainGate::with_config(config);
+        let cid = test_connector_id();
+
+        // Insert 5 entries with increasing timestamps.
+        for i in 0u64..5 {
+            let d = format!("blake3-256:{i:064}");
+            let t = Utc
+                .with_ymd_and_hms(2026, 1, 1, 0, u32::try_from(i).unwrap_or(0), 0)
+                .unwrap();
+            gate.verify_at(&cid, "1.0.0", &d, None, None, t).unwrap();
+        }
+        assert_eq!(gate.cache_size(), 3);
+
+        // The newest 3 (d2, d3, d4) should be cached; d0 and d1 evicted.
+        let d4 = format!("blake3-256:{:064}", 4);
+        let r4 = gate
+            .verify_at(&cid, "1.0.0", &d4, None, None, test_time())
+            .unwrap();
+        assert!(r4.cached);
+    }
+
+    #[test]
+    fn clear_cache_then_refill_works() {
+        let config = SupplyChainGateConfig {
+            policy: permissive_policy(),
+            cache_capacity: 3,
+            ..SupplyChainGateConfig::default()
+        };
+        let gate = SupplyChainGate::with_config(config);
+        let cid = test_connector_id();
+
+        for i in 0u64..3 {
+            let d = format!("blake3-256:{i:064}");
+            gate.verify_at(&cid, "1.0.0", &d, None, None, test_time())
+                .unwrap();
+        }
+        assert_eq!(gate.cache_size(), 3);
+
+        gate.clear_cache();
+        assert_eq!(gate.cache_size(), 0);
+
+        // Refill.
+        for i in 10u64..13 {
+            let d = format!("blake3-256:{i:064}");
+            gate.verify_at(&cid, "1.0.0", &d, None, None, test_time())
+                .unwrap();
+        }
+        assert_eq!(gate.cache_size(), 3);
+    }
+
+    #[test]
+    fn multiple_clear_cycles_are_safe() {
+        let gate = SupplyChainGate::new();
+        for _ in 0..5 {
+            gate.clear_cache();
+            assert_eq!(gate.cache_size(), 0);
+        }
+    }
+
+    // ── Cached Result Policy Snapshot Preservation ──────────────
+
+    #[test]
+    fn cached_result_preserves_policy_snapshot() {
+        let config = SupplyChainGateConfig {
+            policy: SupplyChainVerificationPolicy {
+                min_slsa_level: 1,
+                trusted_builders: vec!["ci.example.com/builder".to_string()],
+                ..default_policy()
+            },
+            ..SupplyChainGateConfig::default()
+        };
+        let gate = SupplyChainGate::with_config(config);
+        let digest = valid_digest();
+        let att = valid_attestation(&digest);
+        let sbom = valid_sbom();
+
+        let first = gate
+            .verify_at(
+                &test_connector_id(),
+                "1.0.0",
+                &digest,
+                Some(&att),
+                Some(&sbom),
+                test_time(),
+            )
+            .unwrap();
+        assert!(!first.cached);
+
+        let second = gate
+            .verify_at(
+                &test_connector_id(),
+                "1.0.0",
+                &digest,
+                Some(&att),
+                Some(&sbom),
+                test_time(),
+            )
+            .unwrap();
+        assert!(second.cached);
+        assert_eq!(
+            first.evidence.policy_snapshot,
+            second.evidence.policy_snapshot
+        );
+        assert_eq!(second.evidence.policy_snapshot.min_slsa_level, 1);
+    }
+
+    #[test]
+    fn cached_result_preserves_evidence_digest() {
+        let gate = SupplyChainGate::new();
+        let digest = valid_digest();
+        let att = valid_attestation(&digest);
+        let sbom = valid_sbom();
+
+        let first = gate
+            .verify_at(
+                &test_connector_id(),
+                "1.0.0",
+                &digest,
+                Some(&att),
+                Some(&sbom),
+                test_time(),
+            )
+            .unwrap();
+
+        let second = gate
+            .verify_at(
+                &test_connector_id(),
+                "1.0.0",
+                &digest,
+                Some(&att),
+                Some(&sbom),
+                test_time(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            first.audit_event.evidence_digest,
+            second.audit_event.evidence_digest
+        );
+    }
+
+    // ── Audit Event Step Counts Under Various Policies ──────────
+
+    #[test]
+    fn audit_event_step_counts_for_allowed_unsigned() {
+        let config = SupplyChainGateConfig {
+            policy: permissive_policy(),
+            ..SupplyChainGateConfig::default()
+        };
+        let gate = SupplyChainGate::with_config(config);
+
+        let outcome = gate
+            .verify_at(
+                &test_connector_id(),
+                "1.0.0",
+                &valid_digest(),
+                None,
+                None,
+                test_time(),
+            )
+            .unwrap();
+
+        assert!(outcome.allowed);
+        assert_eq!(
+            outcome.audit_event.steps_passed,
+            outcome.audit_event.steps_executed
+        );
+    }
+
+    #[test]
+    fn audit_event_decision_matches_evidence_decision() {
+        let gate = SupplyChainGate::new();
+        let digest = valid_digest();
+        let att = valid_attestation(&digest);
+        let sbom = valid_sbom();
+
+        let allowed = gate
+            .verify_at(
+                &test_connector_id(),
+                "1.0.0",
+                &digest,
+                Some(&att),
+                Some(&sbom),
+                test_time(),
+            )
+            .unwrap();
+        assert_eq!(allowed.audit_event.decision, allowed.evidence.decision);
+
+        gate.clear_cache();
+        let denied = gate
+            .verify_at(
+                &test_connector_id(),
+                "1.0.0",
+                &valid_digest(),
+                None,
+                None,
+                test_time(),
+            )
+            .unwrap();
+        assert_eq!(denied.audit_event.decision, denied.evidence.decision);
+    }
+
+    #[test]
+    fn audit_event_reason_code_matches_evidence() {
+        let gate = SupplyChainGate::new();
+
+        let outcome = gate
+            .verify_at(
+                &test_connector_id(),
+                "1.0.0",
+                &valid_digest(),
+                None,
+                Some(&valid_sbom()),
+                test_time(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            outcome.audit_event.reason_code,
+            outcome.evidence.reason_code
+        );
+        assert_eq!(
+            outcome.audit_event.reason_code,
+            VerificationReasonCode::AttestationMissing
+        );
+    }
+
+    // ── Cached Audit Event Timestamp ────────────────────────────
+
+    #[test]
+    fn cached_audit_event_preserves_original_timestamp() {
+        let gate = SupplyChainGate::new();
+        let cid = test_connector_id();
+        let digest = valid_digest();
+        let att = valid_attestation(&digest);
+        let sbom = valid_sbom();
+
+        let t1 = Utc.with_ymd_and_hms(2026, 3, 1, 10, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2026, 6, 1, 10, 0, 0).unwrap();
+
+        let first = gate
+            .verify_at(&cid, "1.0.0", &digest, Some(&att), Some(&sbom), t1)
+            .unwrap();
+        assert_eq!(first.audit_event.verified_at, t1);
+
+        // Cache hit uses original cache entry timestamp.
+        let second = gate
+            .verify_at(&cid, "1.0.0", &digest, Some(&att), Some(&sbom), t2)
+            .unwrap();
+        assert!(second.cached);
+        // The cached entry preserves its original verified_at.
+        assert_eq!(second.audit_event.verified_at, t1);
+    }
+
+    // ── Outcome Digest Edge Cases ──────────────────────────────
+
+    #[test]
+    fn outcome_digest_differs_for_different_connectors() {
+        let config = SupplyChainGateConfig {
+            policy: permissive_policy(),
+            ..SupplyChainGateConfig::default()
+        };
+        let gate = SupplyChainGate::with_config(config);
+
+        let cid_a = ConnectorId::from_static("fcp.alpha:utility:1.0.0");
+        let cid_b = ConnectorId::from_static("fcp.beta:utility:1.0.0");
+        let d1 = format!("blake3-256:{}", "a".repeat(64));
+        let d2 = format!("blake3-256:{}", "b".repeat(64));
+
+        gate.clear_cache();
+        let o1 = gate
+            .verify_at(&cid_a, "1.0.0", &d1, None, None, test_time())
+            .unwrap();
+        gate.clear_cache();
+        let o2 = gate
+            .verify_at(&cid_b, "1.0.0", &d2, None, None, test_time())
+            .unwrap();
+
+        assert_ne!(outcome_digest(&o1), outcome_digest(&o2));
+    }
+
+    #[test]
+    fn outcome_digest_differs_for_different_versions() {
+        let config = SupplyChainGateConfig {
+            policy: permissive_policy(),
+            ..SupplyChainGateConfig::default()
+        };
+        let gate = SupplyChainGate::with_config(config);
+        let cid = test_connector_id();
+
+        gate.clear_cache();
+        let o1 = gate
+            .verify_at(&cid, "1.0.0", &valid_digest(), None, None, test_time())
+            .unwrap();
+        gate.clear_cache();
+        let o2 = gate
+            .verify_at(&cid, "2.0.0", &valid_digest(), None, None, test_time())
+            .unwrap();
+
+        assert_ne!(outcome_digest(&o1), outcome_digest(&o2));
+    }
+
+    #[test]
+    fn outcome_digest_for_empty_version_is_valid() {
+        let config = SupplyChainGateConfig {
+            policy: permissive_policy(),
+            ..SupplyChainGateConfig::default()
+        };
+        let gate = SupplyChainGate::with_config(config);
+
+        let outcome = gate
+            .verify_at(
+                &test_connector_id(),
+                "",
+                &valid_digest(),
+                None,
+                None,
+                test_time(),
+            )
+            .unwrap();
+
+        let d = outcome_digest(&outcome);
+        assert!(d.starts_with("blake3-256:"));
+        assert_eq!(d.len(), "blake3-256:".len() + 64);
+    }
+
+    #[test]
+    fn outcome_digest_for_empty_digest_string_is_valid() {
+        let config = SupplyChainGateConfig {
+            policy: permissive_policy(),
+            ..SupplyChainGateConfig::default()
+        };
+        let gate = SupplyChainGate::with_config(config);
+
+        let outcome = gate
+            .verify_at(&test_connector_id(), "1.0.0", "", None, None, test_time())
+            .unwrap();
+
+        let d = outcome_digest(&outcome);
+        assert!(d.starts_with("blake3-256:"));
+        assert_eq!(d.len(), "blake3-256:".len() + 64);
+    }
+
+    // ── Dev Override Detailed Interactions ──────────────────────
+
+    #[test]
+    fn dev_override_with_strict_slsa_no_artifacts_still_allows() {
+        let config = SupplyChainGateConfig {
+            policy: SupplyChainVerificationPolicy {
+                min_slsa_level: 4,
+                ..default_policy()
+            },
+            allow_dev_overrides: true,
+            ..SupplyChainGateConfig::default()
+        };
+        let gate = SupplyChainGate::with_config(config);
+
+        // Dev override relaxes all requirements when both artifacts missing.
+        let outcome = gate
+            .verify_at(
+                &test_connector_id(),
+                "0.1.0-dev",
+                &valid_digest(),
+                None,
+                None,
+                test_time(),
+            )
+            .unwrap();
+
+        assert!(outcome.allowed);
+        assert_eq!(
+            outcome.evidence.reason_code,
+            VerificationReasonCode::AllowedUnsigned
+        );
+    }
+
+    #[test]
+    fn dev_override_effective_policy_does_not_mutate_stored_policy() {
+        let config = SupplyChainGateConfig {
+            policy: default_policy(),
+            allow_dev_overrides: true,
+            ..SupplyChainGateConfig::default()
+        };
+        let gate = SupplyChainGate::with_config(config);
+
+        // Trigger dev override.
+        gate.verify_at(
+            &test_connector_id(),
+            "dev",
+            &valid_digest(),
+            None,
+            None,
+            test_time(),
+        )
+        .unwrap();
+
+        // Stored policy should remain strict.
+        let p = gate.policy();
+        assert!(p.require_attestation);
+        assert!(p.require_sbom);
+        assert!(!p.allow_unsigned);
+    }
+
+    #[test]
+    fn dev_override_then_strict_verify_still_denies() {
+        let config = SupplyChainGateConfig {
+            policy: default_policy(),
+            allow_dev_overrides: true,
+            ..SupplyChainGateConfig::default()
+        };
+        let gate = SupplyChainGate::with_config(config);
+
+        // Dev override allows this.
+        let d1 = format!("blake3-256:{}", "1".repeat(64));
+        let dev = gate
+            .verify_at(
+                &test_connector_id(),
+                "dev",
+                &d1,
+                None,
+                None,
+                test_time(),
+            )
+            .unwrap();
+        assert!(dev.allowed);
+
+        // Strict verify (with attestation present) on different digest — should deny if SBOM missing.
+        let d2 = format!("blake3-256:{}", "2".repeat(64));
+        let att = valid_attestation(&d2);
+        let strict = gate
+            .verify_at(
+                &test_connector_id(),
+                "1.0.0",
+                &d2,
+                Some(&att),
+                None,
+                test_time(),
+            )
+            .unwrap();
+        assert!(!strict.allowed);
+        assert_eq!(
+            strict.evidence.reason_code,
+            VerificationReasonCode::SbomMissing
+        );
+    }
+
+    // ── GateOutcome Field Consistency ───────────────────────────
+
+    #[test]
+    fn outcome_connector_id_matches_input() {
+        let config = SupplyChainGateConfig {
+            policy: permissive_policy(),
+            ..SupplyChainGateConfig::default()
+        };
+        let gate = SupplyChainGate::with_config(config);
+        let cid = ConnectorId::from_static("fcp.custom-conn:utility:3.2.1");
+
+        let outcome = gate
+            .verify_at(&cid, "3.2.1", &valid_digest(), None, None, test_time())
+            .unwrap();
+
+        assert_eq!(outcome.connector_id, cid);
+        assert_eq!(outcome.audit_event.connector_id, cid);
+    }
+
+    #[test]
+    fn outcome_cached_flag_matches_audit_event() {
+        let gate = SupplyChainGate::new();
+        let cid = test_connector_id();
+        let digest = valid_digest();
+        let att = valid_attestation(&digest);
+        let sbom = valid_sbom();
+
+        let first = gate
+            .verify_at(&cid, "1.0.0", &digest, Some(&att), Some(&sbom), test_time())
+            .unwrap();
+        assert_eq!(first.cached, first.audit_event.cached);
+        assert!(!first.cached);
+
+        let second = gate
+            .verify_at(&cid, "1.0.0", &digest, Some(&att), Some(&sbom), test_time())
+            .unwrap();
+        assert_eq!(second.cached, second.audit_event.cached);
+        assert!(second.cached);
+    }
+
+    // ── Serialization Additional Scenarios ──────────────────────
+
+    #[test]
+    fn gate_outcome_denied_json_contains_deny() {
+        let gate = SupplyChainGate::new();
+        let outcome = gate
+            .verify_at(
+                &test_connector_id(),
+                "1.0.0",
+                &valid_digest(),
+                None,
+                None,
+                test_time(),
+            )
+            .unwrap();
+
+        let json = serde_json::to_string(&outcome).unwrap();
+        assert!(json.contains("\"allowed\":false"));
+        assert!(json.contains("\"decision\":\"deny\""));
+    }
+
+    #[test]
+    fn gate_outcome_cached_flag_serializes() {
+        let gate = SupplyChainGate::new();
+        let cid = test_connector_id();
+        let digest = valid_digest();
+        let att = valid_attestation(&digest);
+        let sbom = valid_sbom();
+
+        let first = gate
+            .verify_at(&cid, "1.0.0", &digest, Some(&att), Some(&sbom), test_time())
+            .unwrap();
+        let json1 = serde_json::to_string(&first).unwrap();
+        assert!(json1.contains("\"cached\":false"));
+
+        let second = gate
+            .verify_at(&cid, "1.0.0", &digest, Some(&att), Some(&sbom), test_time())
+            .unwrap();
+        let json2 = serde_json::to_string(&second).unwrap();
+        assert!(json2.contains("\"cached\":true"));
+    }
+
+    #[test]
+    fn gate_outcome_json_value_structure() {
+        let gate = SupplyChainGate::new();
+        let digest = valid_digest();
+        let att = valid_attestation(&digest);
+        let sbom = valid_sbom();
+
+        let outcome = gate
+            .verify_at(
+                &test_connector_id(),
+                "1.0.0",
+                &digest,
+                Some(&att),
+                Some(&sbom),
+                test_time(),
+            )
+            .unwrap();
+
+        let val = serde_json::to_value(&outcome).unwrap();
+        assert!(val["allowed"].as_bool().unwrap());
+        assert_eq!(val["version"].as_str().unwrap(), "1.0.0");
+        assert!(!val["cached"].as_bool().unwrap());
+        assert!(val["evidence"].is_object());
+        assert!(val["audit_event"].is_object());
+    }
+
+    // ── Verify with Different Connector IDs But Same Digest ────
+
+    #[test]
+    fn same_digest_different_connectors_share_cache() {
+        let config = SupplyChainGateConfig {
+            policy: permissive_policy(),
+            ..SupplyChainGateConfig::default()
+        };
+        let gate = SupplyChainGate::with_config(config);
+        let digest = valid_digest();
+
+        let cid_a = ConnectorId::from_static("fcp.alpha:utility:1.0.0");
+        let cid_b = ConnectorId::from_static("fcp.beta:utility:1.0.0");
+
+        let first = gate
+            .verify_at(&cid_a, "1.0.0", &digest, None, None, test_time())
+            .unwrap();
+        assert!(!first.cached);
+
+        // Same digest, different connector: cache is keyed by digest so this is a hit.
+        let second = gate
+            .verify_at(&cid_b, "1.0.0", &digest, None, None, test_time())
+            .unwrap();
+        assert!(second.cached);
+        assert_eq!(gate.cache_size(), 1);
+
+        // But the outcome has the correct connector_id from the second call.
+        assert_eq!(second.connector_id, cid_b);
+        assert_eq!(second.audit_event.connector_id, cid_b);
+    }
+
+    // ── Convenience verify() Method ────────────────────────────
+
+    #[test]
+    fn verify_convenience_populates_all_fields() {
+        let gate = SupplyChainGate::new();
+        let digest = valid_digest();
+        let att = valid_attestation(&digest);
+        let sbom = valid_sbom();
+
+        let outcome = gate
+            .verify(&test_connector_id(), "1.0.0", &digest, Some(&att), Some(&sbom))
+            .unwrap();
+
+        assert!(outcome.allowed);
+        assert_eq!(outcome.connector_id, test_connector_id());
+        assert_eq!(outcome.version, "1.0.0");
+        assert!(!outcome.cached);
+        assert!(
+            outcome
+                .audit_event
+                .evidence_digest
+                .starts_with("blake3-256:")
+        );
+    }
+
+    #[test]
+    fn verify_convenience_denied_case() {
+        let gate = SupplyChainGate::new();
+
+        let outcome = gate
+            .verify(&test_connector_id(), "1.0.0", &valid_digest(), None, None)
+            .unwrap();
+
+        assert!(!outcome.allowed);
+        assert_eq!(outcome.evidence.decision, VerificationDecision::Deny);
+    }
+
+    // ── Policy Edge Cases ──────────────────────────────────────
+
+    #[test]
+    fn attestation_required_sbom_not_required_no_sbom_allows() {
+        let config = SupplyChainGateConfig {
+            policy: SupplyChainVerificationPolicy {
+                require_attestation: true,
+                require_sbom: false,
+                allow_unsigned: false,
+                require_digest_match: true,
+                min_slsa_level: 0,
+                trusted_builders: vec![],
+            },
+            ..SupplyChainGateConfig::default()
+        };
+        let gate = SupplyChainGate::with_config(config);
+        let digest = valid_digest();
+        let att = valid_attestation(&digest);
+
+        let outcome = gate
+            .verify_at(
+                &test_connector_id(),
+                "1.0.0",
+                &digest,
+                Some(&att),
+                None,
+                test_time(),
+            )
+            .unwrap();
+
+        assert!(outcome.allowed);
+    }
+
+    #[test]
+    fn sbom_required_attestation_not_required_no_attestation_allows() {
+        let config = SupplyChainGateConfig {
+            policy: SupplyChainVerificationPolicy {
+                require_attestation: false,
+                require_sbom: true,
+                allow_unsigned: false,
+                require_digest_match: false,
+                min_slsa_level: 0,
+                trusted_builders: vec![],
+            },
+            ..SupplyChainGateConfig::default()
+        };
+        let gate = SupplyChainGate::with_config(config);
+
+        let outcome = gate
+            .verify_at(
+                &test_connector_id(),
+                "1.0.0",
+                &valid_digest(),
+                None,
+                Some(&valid_sbom()),
+                test_time(),
+            )
+            .unwrap();
+
+        assert!(outcome.allowed);
+    }
+
+    #[test]
+    fn neither_required_allows_with_no_artifacts() {
+        let config = SupplyChainGateConfig {
+            policy: SupplyChainVerificationPolicy {
+                require_attestation: false,
+                require_sbom: false,
+                allow_unsigned: true,
+                require_digest_match: false,
+                min_slsa_level: 0,
+                trusted_builders: vec![],
+            },
+            ..SupplyChainGateConfig::default()
+        };
+        let gate = SupplyChainGate::with_config(config);
+
+        let outcome = gate
+            .verify_at(
+                &test_connector_id(),
+                "1.0.0",
+                &valid_digest(),
+                None,
+                None,
+                test_time(),
+            )
+            .unwrap();
+
+        assert!(outcome.allowed);
+        assert_eq!(
+            outcome.evidence.reason_code,
+            VerificationReasonCode::AllowedUnsigned
+        );
+    }
+
+    #[test]
+    fn both_required_both_present_matching_digest_allows() {
+        let config = SupplyChainGateConfig {
+            policy: SupplyChainVerificationPolicy {
+                require_attestation: true,
+                require_sbom: true,
+                allow_unsigned: false,
+                require_digest_match: true,
+                min_slsa_level: 0,
+                trusted_builders: vec![],
+            },
+            ..SupplyChainGateConfig::default()
+        };
+        let gate = SupplyChainGate::with_config(config);
+        let digest = valid_digest();
+        let att = valid_attestation(&digest);
+        let sbom = valid_sbom();
+
+        let outcome = gate
+            .verify_at(
+                &test_connector_id(),
+                "1.0.0",
+                &digest,
+                Some(&att),
+                Some(&sbom),
+                test_time(),
+            )
+            .unwrap();
+
+        assert!(outcome.allowed);
+        assert_eq!(
+            outcome.evidence.reason_code,
+            VerificationReasonCode::Verified
+        );
+    }
+
+    // ── Gate Debug Trait ────────────────────────────────────────
+
+    #[test]
+    fn gate_new_has_default_config() {
+        let gate = SupplyChainGate::new();
+        assert_eq!(gate.cache_size(), 0);
+        assert!(gate.policy().require_attestation);
+    }
+
+    #[test]
+    fn gate_outcome_debug_output() {
+        let gate = SupplyChainGate::new();
+        let digest = valid_digest();
+        let att = valid_attestation(&digest);
+        let sbom = valid_sbom();
+
+        let outcome = gate
+            .verify_at(
+                &test_connector_id(),
+                "1.0.0",
+                &digest,
+                Some(&att),
+                Some(&sbom),
+                test_time(),
+            )
+            .unwrap();
+
+        let dbg = format!("{outcome:?}");
+        assert!(dbg.contains("GateOutcome"));
+        assert!(dbg.contains("allowed"));
+    }
+
+    #[test]
+    fn audit_event_debug_output() {
+        let gate = SupplyChainGate::new();
+        let outcome = gate
+            .verify_at(
+                &test_connector_id(),
+                "1.0.0",
+                &valid_digest(),
+                None,
+                None,
+                test_time(),
+            )
+            .unwrap();
+
+        let dbg = format!("{:?}", outcome.audit_event);
+        assert!(dbg.contains("VerificationAuditEvent"));
+        assert!(dbg.contains("connector_id"));
+    }
+
+    // ── Evidence Steps in Cached Results ────────────────────────
+
+    #[test]
+    fn cached_result_has_same_steps() {
+        let gate = SupplyChainGate::new();
+        let digest = valid_digest();
+        let att = valid_attestation(&digest);
+        let sbom = valid_sbom();
+
+        let first = gate
+            .verify_at(
+                &test_connector_id(),
+                "1.0.0",
+                &digest,
+                Some(&att),
+                Some(&sbom),
+                test_time(),
+            )
+            .unwrap();
+
+        let second = gate
+            .verify_at(
+                &test_connector_id(),
+                "1.0.0",
+                &digest,
+                Some(&att),
+                Some(&sbom),
+                test_time(),
+            )
+            .unwrap();
+
+        assert_eq!(first.evidence.steps, second.evidence.steps);
+        assert_eq!(
+            first.audit_event.steps_executed,
+            second.audit_event.steps_executed
+        );
+        assert_eq!(
+            first.audit_event.steps_passed,
+            second.audit_event.steps_passed
+        );
+    }
+
+    // ── Clone of Cached Outcome ────────────────────────────────
+
+    #[test]
+    fn clone_of_cached_outcome_preserves_cached_flag() {
+        let gate = SupplyChainGate::new();
+        let cid = test_connector_id();
+        let digest = valid_digest();
+        let att = valid_attestation(&digest);
+        let sbom = valid_sbom();
+
+        gate.verify_at(&cid, "1.0.0", &digest, Some(&att), Some(&sbom), test_time())
+            .unwrap();
+
+        let cached = gate
+            .verify_at(&cid, "1.0.0", &digest, Some(&att), Some(&sbom), test_time())
+            .unwrap();
+        assert!(cached.cached);
+
+        let cloned = cached.clone();
+        assert!(cloned.cached);
+        assert_eq!(cloned.evidence, cached.evidence);
+        assert_eq!(cloned.audit_event, cached.audit_event);
+    }
+
+    // ── Multiple Connectors Eviction ───────────────────────────
+
+    #[test]
+    fn eviction_across_multiple_connector_ids() {
+        let config = SupplyChainGateConfig {
+            policy: permissive_policy(),
+            cache_capacity: 2,
+            ..SupplyChainGateConfig::default()
+        };
+        let gate = SupplyChainGate::with_config(config);
+
+        let cid_a = ConnectorId::from_static("fcp.alpha:utility:1.0.0");
+        let cid_b = ConnectorId::from_static("fcp.beta:utility:1.0.0");
+        let cid_c = ConnectorId::from_static("fcp.gamma:utility:1.0.0");
+
+        let d1 = format!("blake3-256:{}", "1".repeat(64));
+        let d2 = format!("blake3-256:{}", "2".repeat(64));
+        let d3 = format!("blake3-256:{}", "3".repeat(64));
+
+        let t1 = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2026, 1, 2, 0, 0, 0).unwrap();
+        let t3 = Utc.with_ymd_and_hms(2026, 1, 3, 0, 0, 0).unwrap();
+
+        gate.verify_at(&cid_a, "1.0.0", &d1, None, None, t1)
+            .unwrap();
+        gate.verify_at(&cid_b, "1.0.0", &d2, None, None, t2)
+            .unwrap();
+        assert_eq!(gate.cache_size(), 2);
+
+        // Evict d1 (oldest).
+        gate.verify_at(&cid_c, "1.0.0", &d3, None, None, t3)
+            .unwrap();
+        assert_eq!(gate.cache_size(), 2);
+
+        // d1 evicted.
+        let r1 = gate
+            .verify_at(&cid_a, "1.0.0", &d1, None, None, t3)
+            .unwrap();
+        assert!(!r1.cached);
+    }
+
+    // ── Outcome Digest Consistency After Clone ─────────────────
+
+    #[test]
+    fn outcome_digest_same_for_clone() {
+        let config = SupplyChainGateConfig {
+            policy: permissive_policy(),
+            ..SupplyChainGateConfig::default()
+        };
+        let gate = SupplyChainGate::with_config(config);
+
+        let outcome = gate
+            .verify_at(
+                &test_connector_id(),
+                "1.0.0",
+                &valid_digest(),
+                None,
+                None,
+                test_time(),
+            )
+            .unwrap();
+
+        let cloned = outcome.clone();
+        assert_eq!(outcome_digest(&outcome), outcome_digest(&cloned));
+    }
+
+    // ── Artifact Digest Edge Cases ─────────────────────────────
+
+    #[test]
+    fn whitespace_only_digest() {
+        let config = SupplyChainGateConfig {
+            policy: permissive_policy(),
+            ..SupplyChainGateConfig::default()
+        };
+        let gate = SupplyChainGate::with_config(config);
+
+        let outcome = gate
+            .verify_at(
+                &test_connector_id(),
+                "1.0.0",
+                "   ",
+                None,
+                None,
+                test_time(),
+            )
+            .unwrap();
+
+        assert!(outcome.allowed);
+        assert_eq!(outcome.audit_event.artifact_digest, "   ");
+    }
+
+    #[test]
+    fn special_characters_in_digest() {
+        let config = SupplyChainGateConfig {
+            policy: permissive_policy(),
+            ..SupplyChainGateConfig::default()
+        };
+        let gate = SupplyChainGate::with_config(config);
+
+        let digest = "sha256:abc!@#$%^&*()";
+        let outcome = gate
+            .verify_at(
+                &test_connector_id(),
+                "1.0.0",
+                digest,
+                None,
+                None,
+                test_time(),
+            )
+            .unwrap();
+
+        assert_eq!(outcome.audit_event.artifact_digest, digest);
+    }
+
+    #[test]
+    fn unicode_digest_string() {
+        let config = SupplyChainGateConfig {
+            policy: permissive_policy(),
+            ..SupplyChainGateConfig::default()
+        };
+        let gate = SupplyChainGate::with_config(config);
+
+        let digest = "blake3-256:\u{1F600}\u{1F601}\u{1F602}";
+        let outcome = gate
+            .verify_at(
+                &test_connector_id(),
+                "1.0.0",
+                digest,
+                None,
+                None,
+                test_time(),
+            )
+            .unwrap();
+
+        assert_eq!(outcome.evidence.artifact_digest, digest);
+    }
+
+    // ── Cache Key Boundary: Same Digest New Artifacts ──────────
+
+    #[test]
+    fn cache_hit_ignores_new_artifacts_on_same_digest() {
+        let gate = SupplyChainGate::new();
+        let cid = test_connector_id();
+        let digest = valid_digest();
+
+        // First verify without artifacts (denied).
+        let first = gate
+            .verify_at(&cid, "1.0.0", &digest, None, None, test_time())
+            .unwrap();
+        assert!(!first.allowed);
+
+        // Second verify with valid artifacts, but same digest -> cache hit, still denied.
+        let att = valid_attestation(&digest);
+        let sbom = valid_sbom();
+        let second = gate
+            .verify_at(&cid, "1.0.0", &digest, Some(&att), Some(&sbom), test_time())
+            .unwrap();
+        assert!(second.cached);
+        assert!(!second.allowed);
+    }
+
+    // ── Verify At Epoch Time ───────────────────────────────────
+
+    #[test]
+    fn verify_at_unix_epoch() {
+        let config = SupplyChainGateConfig {
+            policy: permissive_policy(),
+            ..SupplyChainGateConfig::default()
+        };
+        let gate = SupplyChainGate::with_config(config);
+        let epoch = Utc.with_ymd_and_hms(1970, 1, 1, 0, 0, 0).unwrap();
+
+        let outcome = gate
+            .verify_at(
+                &test_connector_id(),
+                "1.0.0",
+                &valid_digest(),
+                None,
+                None,
+                epoch,
+            )
+            .unwrap();
+
+        assert!(outcome.allowed);
+        assert_eq!(outcome.audit_event.verified_at, epoch);
+    }
+
+    #[test]
+    fn verify_at_far_future() {
+        let config = SupplyChainGateConfig {
+            policy: permissive_policy(),
+            ..SupplyChainGateConfig::default()
+        };
+        let gate = SupplyChainGate::with_config(config);
+        let far_future = Utc.with_ymd_and_hms(2099, 12, 31, 23, 59, 59).unwrap();
+
+        let outcome = gate
+            .verify_at(
+                &test_connector_id(),
+                "1.0.0",
+                &valid_digest(),
+                None,
+                None,
+                far_future,
+            )
+            .unwrap();
+
+        assert!(outcome.allowed);
+        assert_eq!(outcome.audit_event.verified_at, far_future);
+    }
+
+    // ── SupplyChainGateConfig Custom Variations ────────────────
+
+    #[test]
+    fn config_all_fields_customized() {
+        let config = SupplyChainGateConfig {
+            policy: SupplyChainVerificationPolicy {
+                require_attestation: false,
+                require_sbom: false,
+                allow_unsigned: true,
+                require_digest_match: false,
+                min_slsa_level: 1,
+                trusted_builders: vec!["b1".to_string(), "b2".to_string()],
+            },
+            cache_capacity: 500,
+            allow_dev_overrides: true,
+        };
+        assert_eq!(config.cache_capacity, 500);
+        assert!(config.allow_dev_overrides);
+        assert_eq!(config.policy.min_slsa_level, 1);
+        assert_eq!(config.policy.trusted_builders.len(), 2);
+    }
+
+    #[test]
+    fn config_debug_with_dev_overrides() {
+        let config = SupplyChainGateConfig {
+            allow_dev_overrides: true,
+            ..SupplyChainGateConfig::default()
+        };
+        let dbg = format!("{config:?}");
+        assert!(dbg.contains("allow_dev_overrides"));
+        assert!(dbg.contains("true"));
+    }
 }

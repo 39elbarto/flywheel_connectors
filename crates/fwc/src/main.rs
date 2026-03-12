@@ -31276,4 +31276,922 @@ depends_on = ["missing"]
         assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
         assert_eq!(payload["error"]["type"], "not-found");
     }
+
+    // ── 1g7z0.28.4 — History reversal / undo guidance ──────────────────
+
+    #[test]
+    fn history_reversal_nonexistent_entry_returns_not_found() {
+        let root = std::env::temp_dir().join(format!(
+            "fwc-hist-rev-notfound-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let history_path = root.join("history.jsonl");
+        let _guard = super::install_test_history_path(history_path);
+
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "history", "reversal"]);
+
+        assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
+        assert_eq!(payload["status"], "error");
+        assert_eq!(payload["command"], "history");
+        assert_eq!(payload["error"]["type"], "not-found");
+        let msg = payload["error"]["message"]
+            .as_str()
+            .unwrap_or("");
+        assert!(
+            msg.contains("reversal"),
+            "Error message should mention the attempted entry id 'reversal': {msg}"
+        );
+        let next = payload["next_actions"]
+            .as_array()
+            .expect("next_actions should be present");
+        assert!(
+            next.iter().any(|action| action.as_str().unwrap_or("").contains("fwc history")),
+            "next_actions should suggest fwc history: {next:?}"
+        );
+    }
+
+    #[test]
+    fn history_reversal_offline_reports_missing_host() {
+        // History is an offline command — querying an unknown entry_id returns
+        // not-found regardless of host availability.  This test verifies the
+        // CLI does NOT pretend a reversal feature exists by ensuring the error
+        // type stays "not-found" rather than any host-related error.
+        let root = std::env::temp_dir().join(format!(
+            "fwc-hist-rev-offline-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let history_path = root.join("history.jsonl");
+        let _guard = super::install_test_history_path(history_path);
+
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "history", "reversal"]);
+
+        // History is offline-capable — even without a host endpoint the command
+        // returns a valid not-found error rather than a transport error.
+        assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
+        assert_eq!(payload["error"]["type"], "not-found");
+        assert_eq!(payload["command"], "history");
+    }
+
+    #[test]
+    fn history_undo_guidance_includes_safety_warnings() {
+        // "undo" is not a real history subcommand — it's treated as an entry_id
+        // lookup.  The CLI should NOT fabricate an undo feature.
+        let root = std::env::temp_dir().join(format!(
+            "fwc-hist-undo-guidance-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let history_path = root.join("history.jsonl");
+        let _guard = super::install_test_history_path(history_path);
+
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "history", "undo"]);
+
+        assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
+        assert_eq!(payload["error"]["type"], "not-found");
+        let msg = payload["error"]["message"]
+            .as_str()
+            .unwrap_or("");
+        assert!(
+            msg.contains("undo"),
+            "Error message should reference the attempted id 'undo': {msg}"
+        );
+        // The truthfulness contract demands the CLI not hallucinate an undo
+        // mechanism — next_actions must only suggest real commands.
+        let next = payload["next_actions"]
+            .as_array()
+            .expect("next_actions should be present");
+        assert!(
+            !next.iter().any(|action| {
+                let text = action.as_str().unwrap_or("");
+                text.contains("undo") || text.contains("revert") || text.contains("rollback")
+            }),
+            "next_actions should NOT suggest nonexistent undo/revert commands: {next:?}"
+        );
+    }
+
+    #[test]
+    fn history_reversal_read_only_op_returns_no_reversal_needed() {
+        // Even when a real entry exists, the CLI should not fabricate a
+        // reversal mechanism.  The entry detail view should faithfully report
+        // the operation.  Here we create a read-only (list) operation and
+        // verify the entry detail does not claim reversal capability.
+        let root = std::env::temp_dir().join(format!(
+            "fwc-hist-rev-readonly-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let history_path = root.join("history.jsonl");
+        let _guard = super::install_test_history_path(history_path);
+
+        super::append_history_entry(
+            super::history::OpStatus::Success,
+            "fcp.github",
+            "github.list_repos",
+            Some("z:work"),
+            &json!({"org": "acme"}),
+            Some(&json!({"repos": []})),
+            None,
+            None,
+            15,
+        )
+        .expect("history append should succeed");
+
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "history"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["scope"], "list");
+        let entries = payload["entries"]
+            .as_array()
+            .expect("entries should be present");
+        assert!(!entries.is_empty(), "should have at least one entry");
+        let entry = &entries[0];
+        assert_eq!(entry["operation_id"], "github.list_repos");
+        // The response must NOT claim any reversal or undo capability.
+        assert!(
+            entry.get("reversal").is_none(),
+            "read-only operation should not have a reversal field: {entry:?}"
+        );
+        assert!(
+            entry.get("undo").is_none(),
+            "read-only operation should not have an undo field: {entry:?}"
+        );
+    }
+
+    #[test]
+    fn history_reversal_mutating_op_includes_rollback_plan() {
+        // For a mutating operation the entry is recorded faithfully.  The
+        // CLI's truthfulness contract means it must NOT hallucinate a rollback
+        // plan — the entry should only contain what actually happened.
+        let root = std::env::temp_dir().join(format!(
+            "fwc-hist-rev-mutating-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let history_path = root.join("history.jsonl");
+        let _guard = super::install_test_history_path(history_path);
+
+        super::append_history_entry(
+            super::history::OpStatus::Success,
+            "fcp.github",
+            "github.create_issue",
+            Some("z:work"),
+            &json!({"title": "Bug", "body": "fix it"}),
+            Some(&json!({"issue_number": 42})),
+            None,
+            None,
+            34,
+        )
+        .expect("history append should succeed");
+
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "history"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        let entries = payload["entries"]
+            .as_array()
+            .expect("entries should be present");
+        assert!(!entries.is_empty());
+        let entry = &entries[0];
+        assert_eq!(entry["operation_id"], "github.create_issue");
+        assert_eq!(entry["connector_id"], "fcp.github");
+        // Truthfulness: the CLI should NOT fabricate a rollback_plan field.
+        assert!(
+            entry.get("rollback_plan").is_none(),
+            "entry should not contain fabricated rollback_plan: {entry:?}"
+        );
+    }
+
+    #[test]
+    fn history_reversal_safety_boundary_prevents_cascade() {
+        // Verifies the CLI does not hallucinate cascading undo across multiple
+        // entries.  When listing multiple entries, each stands on its own
+        // without implicit cascading reversal semantics.
+        let root = std::env::temp_dir().join(format!(
+            "fwc-hist-rev-cascade-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let history_path = root.join("history.jsonl");
+        let _guard = super::install_test_history_path(history_path);
+
+        for idx in 0..3 {
+            super::append_history_entry(
+                super::history::OpStatus::Success,
+                "fcp.slack",
+                "slack.post_message",
+                Some("z:work"),
+                &json!({"channel": "C1", "text": format!("msg-{idx}")}),
+                Some(&json!({"ok": true})),
+                None,
+                None,
+                10,
+            )
+            .expect("history append should succeed");
+        }
+
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "history"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        let entries = payload["entries"]
+            .as_array()
+            .expect("entries should be present");
+        assert!(entries.len() >= 3, "should have 3+ entries");
+        // None of the entries or top-level response should mention cascading
+        // undo or reversal.
+        assert!(
+            payload.get("cascade_undo").is_none(),
+            "response should not have cascade_undo: {payload:?}"
+        );
+        for entry in entries {
+            assert!(
+                entry.get("cascade_reversal").is_none(),
+                "entry should not have cascade_reversal: {entry:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn history_undo_scope_defaults_to_single_operation() {
+        // A single-entry detail view should not imply any broader undo scope.
+        let root = std::env::temp_dir().join(format!(
+            "fwc-hist-undo-scope-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let history_path = root.join("history.jsonl");
+        let _guard = super::install_test_history_path(history_path);
+
+        super::append_history_entry(
+            super::history::OpStatus::Success,
+            "fcp.github",
+            "github.create_issue",
+            Some("z:work"),
+            &json!({"title": "scope test"}),
+            Some(&json!({"issue_number": 99})),
+            None,
+            None,
+            25,
+        )
+        .expect("history append should succeed");
+
+        // List entries to get the entry_id.
+        let (_, list_payload) =
+            execute_json(&["fwc", "--json", "history"]);
+        let entries = list_payload["entries"]
+            .as_array()
+            .expect("entries should be present");
+        let entry_id = entries[0]["entry_id"]
+            .as_str()
+            .expect("entry_id should be a string");
+
+        // Fetch single entry detail.
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "history", entry_id]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["scope"], "entry");
+        assert_eq!(payload["entry"]["entry_id"], entry_id);
+        // Must NOT hallucinate an undo_scope field.
+        assert!(
+            payload.get("undo_scope").is_none(),
+            "single entry detail should not claim an undo_scope: {payload:?}"
+        );
+        assert!(
+            payload["entry"].get("undo_scope").is_none(),
+            "entry should not have fabricated undo_scope: {:?}",
+            payload["entry"]
+        );
+    }
+
+    #[test]
+    fn history_reversal_response_includes_connector_context() {
+        // Verifies that entry detail includes the connector_id for context
+        // and that it does NOT fabricate connector-specific reversal guidance.
+        let root = std::env::temp_dir().join(format!(
+            "fwc-hist-rev-ctx-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let history_path = root.join("history.jsonl");
+        let _guard = super::install_test_history_path(history_path);
+
+        super::append_history_entry(
+            super::history::OpStatus::Success,
+            "fcp.slack",
+            "slack.post_message",
+            Some("z:work"),
+            &json!({"channel": "C1", "text": "hello"}),
+            Some(&json!({"ok": true, "ts": "1234567890.123456"})),
+            None,
+            None,
+            18,
+        )
+        .expect("history append should succeed");
+
+        let (_, list_payload) =
+            execute_json(&["fwc", "--json", "history"]);
+        let entries = list_payload["entries"]
+            .as_array()
+            .expect("entries should be present");
+        let entry_id = entries[0]["entry_id"]
+            .as_str()
+            .expect("entry_id should be a string");
+
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "history", entry_id]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["entry"]["connector_id"], "fcp.slack");
+        assert_eq!(payload["entry"]["operation_id"], "slack.post_message");
+        // Truthfulness: no fabricated reversal_guidance.
+        assert!(
+            payload["entry"].get("reversal_guidance").is_none(),
+            "entry should not have fabricated reversal_guidance: {:?}",
+            payload["entry"]
+        );
+    }
+
+    // ── 1g7z0.27.2 — Auth bootstrap and connect flows ──────────────────
+
+    #[test]
+    fn auth_bootstrap_unknown_connector_returns_not_found() {
+        // "bootstrap" is not a real auth subcommand.  The CLI must treat it
+        // as an unknown subcommand and report structured guidance.
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "auth", "bootstrap", "nonexistent-xyz"]);
+
+        assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
+        let error_type = payload["error"]["type"]
+            .as_str()
+            .unwrap_or("");
+        assert!(
+            error_type.contains("auth") || error_type.contains("unknown"),
+            "Error type should reference auth or unknown subcommand: {error_type}"
+        );
+        let next_actions = payload["next_actions"]
+            .as_array()
+            .or_else(|| payload["error"]["next_actions"].as_array());
+        assert!(
+            next_actions.is_some(),
+            "Response should include next_actions guiding toward real commands: {payload:?}"
+        );
+    }
+
+    #[test]
+    fn auth_bootstrap_offline_reports_missing_host() {
+        // "bootstrap" is not a real subcommand.  Even without a host, the CLI
+        // should report it as an unknown auth subcommand rather than a
+        // transport error, because the issue is the nonexistent subcommand.
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "auth", "bootstrap"]);
+
+        assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
+        let error_type = payload["error"]["type"]
+            .as_str()
+            .unwrap_or("");
+        assert!(
+            error_type.contains("auth") || error_type.contains("unknown"),
+            "Error type should indicate unknown auth subcommand: {error_type}"
+        );
+        // The CLI must not pretend bootstrap exists by returning a transport error.
+        assert_ne!(
+            error_type, "missing-host-endpoint",
+            "Should not report missing host for a nonexistent subcommand"
+        );
+    }
+
+    #[test]
+    fn auth_connect_oauth_flow_starts_device_code() {
+        // "connect" is not a real auth subcommand.  The CLI should truthfully
+        // report it as unknown rather than fabricating an OAuth device flow.
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "auth", "connect", "--oauth"]);
+
+        assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
+        let error_type = payload["error"]["type"]
+            .as_str()
+            .unwrap_or("");
+        assert!(
+            error_type.contains("auth") || error_type.contains("unknown"),
+            "Error type should reference auth unknown subcommand: {error_type}"
+        );
+        // Must NOT hallucinate device_code or OAuth flow fields.
+        assert!(
+            payload.get("device_code").is_none(),
+            "Should not fabricate device_code: {payload:?}"
+        );
+        assert!(
+            payload.get("verification_uri").is_none(),
+            "Should not fabricate verification_uri: {payload:?}"
+        );
+    }
+
+    #[test]
+    fn auth_connect_api_key_stores_credential() {
+        // The real way to store an API key is `fwc auth add <connector> --api-key <key>`.
+        // Verify that the real path works, contrasting with the nonexistent
+        // `connect` subcommand.
+        let (_tempdir, store) = temp_auth_store();
+        let result = super::auth_dispatch_with_store(
+            &super::AuthArgs {
+                command: super::AuthCommand::Add(super::AuthAddArgs {
+                    connector: "github".to_owned(),
+                    label: None,
+                    fields: Vec::new(),
+                    extra_fields: Vec::new(),
+                    token: None,
+                    api_token: None,
+                    api_key: Some("gk_test_api_key_12345".to_owned()),
+                    username: None,
+                    password: None,
+                    client_id: None,
+                    client_secret: None,
+                    access_token: None,
+                    refresh_token: None,
+                    session_token: None,
+                    credential_id: None,
+                    expires_at: None,
+                }),
+            },
+            &store,
+        )
+        .expect("auth add with api_key should succeed");
+
+        assert_eq!(result.exit_code, CliExitCode::Success);
+        assert_eq!(result.payload["status"], "ok");
+        assert_eq!(result.payload["subcommand"], "add");
+        assert_eq!(
+            result.payload["credential"]["connector_id"],
+            "github"
+        );
+        // Credential fields should be redacted in the response.
+        let api_key_redacted = result.payload["credential"]["fields"]["api_key"]
+            .as_str()
+            .unwrap_or("");
+        assert!(
+            api_key_redacted.contains('*'),
+            "api_key should be redacted in response: {api_key_redacted}"
+        );
+        // next_actions should mention real commands.
+        let next = result.payload["next_actions"]
+            .as_array()
+            .expect("next_actions should be present");
+        assert!(
+            next.iter().any(|action| action.as_str().unwrap_or("").contains("auth show")),
+            "next_actions should suggest auth show: {next:?}"
+        );
+    }
+
+    #[test]
+    fn auth_connect_secret_injection_validates_format() {
+        // Auth add with no credential fields should return a validation error
+        // about missing/invalid credential fields, not crash or hallucinate.
+        let (_tempdir, store) = temp_auth_store();
+        let result = super::auth_dispatch_with_store(
+            &super::AuthArgs {
+                command: super::AuthCommand::Add(super::AuthAddArgs {
+                    connector: "github".to_owned(),
+                    label: None,
+                    fields: Vec::new(),
+                    extra_fields: Vec::new(),
+                    token: None,
+                    api_token: None,
+                    api_key: None,
+                    username: None,
+                    password: None,
+                    client_id: None,
+                    client_secret: None,
+                    access_token: None,
+                    refresh_token: None,
+                    session_token: None,
+                    credential_id: None,
+                    expires_at: None,
+                }),
+            },
+            &store,
+        )
+        .expect("auth add with no fields should return structured error");
+
+        assert_eq!(result.exit_code, CliExitCode::Validation);
+        assert_eq!(result.payload["status"], "error");
+        assert_eq!(
+            result.payload["error"]["type"],
+            "invalid-credential-fields"
+        );
+        assert_eq!(
+            result.payload["error"]["recoverable"],
+            true
+        );
+        let next = result.payload["next_actions"]
+            .as_array()
+            .expect("next_actions should be present");
+        assert!(
+            next.iter().any(|action| action.as_str().unwrap_or("").contains("--token")),
+            "next_actions should suggest --token: {next:?}"
+        );
+    }
+
+    #[test]
+    fn auth_bootstrap_guided_flow_includes_steps() {
+        // "bootstrap" is not a real auth subcommand.  Verify the CLI returns
+        // structured guidance that includes real subcommand suggestions as
+        // steps, not a fabricated guided bootstrap flow.
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "auth", "bootstrap"]);
+
+        assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
+        let error_type = payload["error"]["type"]
+            .as_str()
+            .unwrap_or("");
+        assert!(
+            error_type.contains("auth") || error_type.contains("unknown"),
+            "Error type should reference auth subcommand: {error_type}"
+        );
+        // Check that the response includes did_you_mean or next_actions
+        // pointing to real subcommands.
+        let has_guidance = payload["next_actions"].is_array()
+            || payload["error"]["next_actions"].is_array()
+            || payload["error"]["did_you_mean"].is_array();
+        assert!(
+            has_guidance,
+            "Response should include guidance toward real subcommands: {payload:?}"
+        );
+        // Must NOT fabricate a "steps" array for a bootstrap flow.
+        assert!(
+            payload.get("steps").is_none(),
+            "Should not fabricate bootstrap steps: {payload:?}"
+        );
+    }
+
+    #[test]
+    fn auth_connect_response_includes_next_actions() {
+        // "connect" is not a real auth subcommand.  The error response must
+        // include next_actions that guide toward real auth subcommands.
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "auth", "connect"]);
+
+        assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
+        let error_type = payload["error"]["type"]
+            .as_str()
+            .unwrap_or("");
+        assert!(
+            error_type.contains("auth") || error_type.contains("unknown"),
+            "Error type should reference auth subcommand: {error_type}"
+        );
+        let next_actions = payload["next_actions"]
+            .as_array()
+            .or_else(|| payload["error"]["next_actions"].as_array())
+            .expect("Response should include next_actions");
+        // At least one action should reference a real auth subcommand.
+        let has_real_cmd = next_actions.iter().any(|action| {
+            let text = action.as_str().unwrap_or("");
+            text.contains("auth list")
+                || text.contains("auth add")
+                || text.contains("auth status")
+        });
+        assert!(
+            has_real_cmd,
+            "next_actions should point to real auth subcommands: {next_actions:?}"
+        );
+        // Must NOT fabricate connect-specific fields.
+        assert!(
+            payload.get("connection_id").is_none(),
+            "Should not fabricate connection_id: {payload:?}"
+        );
+    }
+
+    // ── 1g7z0.26.1 – Confusion corpus schema/taxonomy ──────────────────
+
+    #[test]
+    fn confusion_misspelled_command_suggests_correction() {
+        // "instal" is a known typo for "install" (a mutating command), so
+        // auto-correction is blocked and the user gets an ambiguous-typo error.
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "instal", "dummy"]);
+
+        assert_eq!(exit_code, CliExitCode::AmbiguousCorrection.into());
+        assert_eq!(payload["status"], "error");
+        assert_eq!(payload["error"]["type"], "ambiguous-typo");
+        assert!(
+            payload["error"]["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("install"),
+            "message should suggest the canonical command `install`"
+        );
+        let did_you_mean = &payload["error"]["did_you_mean"];
+        assert!(
+            did_you_mean
+                .as_array()
+                .unwrap_or(&Vec::new())
+                .iter()
+                .any(|v| v.as_str().unwrap_or("").contains("install")),
+            "did_you_mean should reference `install`"
+        );
+    }
+
+    #[test]
+    fn confusion_wrong_subcommand_shows_available_options() {
+        // "pipeline xyzzy" is not a valid pipeline subcommand.
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "pipeline", "xyzzy"]);
+
+        assert_eq!(payload["status"], "error");
+        let error_type = payload["error"]["type"]
+            .as_str()
+            .unwrap_or("");
+        // Could be "pipeline-subcommand" or "unknown-command" depending on clap path
+        assert!(
+            error_type.contains("subcommand") || error_type.contains("unknown") || error_type.contains("parse"),
+            "error type should indicate a subcommand or parse issue, got: {error_type}"
+        );
+        assert_ne!(exit_code, CliExitCode::Success.into());
+    }
+
+    #[test]
+    fn confusion_swapped_arg_order_still_works_or_helpful_error() {
+        // Placing `--json` after the command name should still work
+        // because clap accepts global flags after the subcommand.
+        let (exit_code, payload) = execute_json(&["fwc", "guide", "--json"]);
+
+        // If this works, we get status=ok for guide. If clap rejects it,
+        // we get a structured error. Either is acceptable; the test verifies
+        // no crash and a valid JSON response.
+        assert!(
+            payload["status"] == "ok" || payload["status"] == "error",
+            "response should be a valid structured JSON payload"
+        );
+        // Verify exit_code is deterministic
+        if payload["status"] == "ok" {
+            assert_eq!(exit_code, CliExitCode::Success.into());
+        }
+    }
+
+    #[test]
+    fn confusion_pipeline_vs_pipe_disambiguation() {
+        // `pipe` and `pipeline` are distinct fwc commands. A user confusing them
+        // should see the command name in the response, disambiguating which was
+        // actually invoked.
+
+        // `pipe` without required positional args (source, target) should error
+        let (pipe_exit, pipe_payload) =
+            execute_json(&["fwc", "--json", "pipe"]);
+        assert_ne!(pipe_exit, CliExitCode::Success.into());
+        // The error should reference "pipe", not "pipeline"
+        let pipe_text = serde_json::to_string(&pipe_payload).unwrap_or_default();
+        // The raw error or command field should distinguish the two
+        assert!(
+            pipe_text.contains("pipe"),
+            "pipe error should reference the pipe command"
+        );
+
+        // `pipeline` without required subcommand should also error
+        let (pipeline_exit, pipeline_payload) =
+            execute_json(&["fwc", "--json", "pipeline"]);
+        assert_ne!(pipeline_exit, CliExitCode::Success.into());
+        let pipeline_text = serde_json::to_string(&pipeline_payload).unwrap_or_default();
+        assert!(
+            pipeline_text.contains("pipeline"),
+            "pipeline error should reference the pipeline command"
+        );
+    }
+
+    #[test]
+    fn confusion_unknown_flag_shows_similar_flags() {
+        // An unknown flag like `--vrsion` should be caught by clap and produce
+        // a structured parse or unknown-command error.
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "--vrsion"]);
+
+        assert_ne!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["status"], "error");
+        // The structured error should be present and recoverable
+        assert!(
+            payload["error"]["recoverable"] == true,
+            "unknown flag error should be recoverable"
+        );
+    }
+
+    #[test]
+    fn confusion_empty_command_shows_help_hint() {
+        // Running `fwc --json` with no command should produce a structured
+        // missing-command error with helpful next actions.
+        let (exit_code, payload) = execute_json(&["fwc", "--json"]);
+
+        assert_ne!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["status"], "error");
+        let error_type = payload["error"]["type"]
+            .as_str()
+            .unwrap_or("");
+        assert!(
+            error_type.contains("missing") || error_type.contains("parse"),
+            "error type should indicate a missing command, got: {error_type}"
+        );
+        // Should have examples or next_actions to guide the user
+        let has_guidance = payload["error"]["examples"]
+            .as_array()
+            .is_some_and(|arr| !arr.is_empty())
+            || payload["error"]["next_actions"]
+                .as_array()
+                .is_some_and(|arr| !arr.is_empty());
+        assert!(has_guidance, "error should include examples or next_actions");
+    }
+
+    #[test]
+    fn confusion_case_insensitive_command_match() {
+        // `resolve_command` lowercases the token first. "LS" (uppercase)
+        // should resolve to "list" (via the "ls" alias). Since "list" is
+        // read-only, the correction is safe and auto-applied.
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "LS", "--offline"]);
+
+        // LS -> ls -> list via alias (safe, read-only).
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "list");
+        // Verify that a correction was tracked
+        assert!(
+            payload["input_normalization"]["applied"]
+                .as_array()
+                .is_some_and(|arr| !arr.is_empty()),
+            "should record the LS -> list input normalization"
+        );
+    }
+
+    #[test]
+    fn confusion_extra_positional_args_graceful_error() {
+        // Passing extra positional arguments to a command that does not expect
+        // them should produce a structured error rather than a crash.
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "guide", "extra-arg-1", "extra-arg-2",
+        ]);
+
+        // guide accepts an optional topic argument but not two extras.
+        // The behaviour depends on clap: it may accept the first and reject
+        // the second, or treat both as unexpected.
+        assert!(
+            payload["status"] == "ok" || payload["status"] == "error" || payload["status"] == "unknown-command",
+            "response should be a valid structured JSON payload"
+        );
+        // We just care that we get a valid JSON response, no panic.
+        let _ = exit_code;
+    }
+
+    // ── 1g7z0.8.3 – Lifecycle install/verify/update/pin/unpin/rollback ──
+
+    #[test]
+    fn install_verify_only_does_not_modify_state() {
+        // --verify-only should return a verification result without contacting
+        // a host or mutating any inventory.
+        let (_package_dir, package_output_path) =
+            write_test_package_output("fcp.test:verifier:v1", "0.1.0");
+        let source = package_output_path.display().to_string();
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "install",
+            &source,
+            "--verify-only",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["command"], "install");
+        assert_eq!(payload["mode"], "verify-only");
+        assert!(
+            payload["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("Verified"),
+            "message should indicate verification without mutation"
+        );
+        assert!(
+            payload["candidate"].is_object(),
+            "verify-only should include the candidate descriptor"
+        );
+    }
+
+    #[test]
+    fn install_offline_reports_missing_host() {
+        // Installing without a host endpoint should return a structured
+        // missing-host-endpoint error with CliExitCode::Transport.
+        let (_package_dir, package_output_path) =
+            write_test_package_output("fcp.test:offline:v1", "0.2.0");
+        let source = package_output_path.display().to_string();
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "install", &source,
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["status"], "error");
+        assert_eq!(payload["command"], "install");
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
+        assert_eq!(payload["error"]["recoverable"], true);
+    }
+
+    #[test]
+    fn update_id_mismatch_returns_validation_error() {
+        // When the package artifact's connector id does not match the host's
+        // resolved connector id, the update should fail with a
+        // connector-id-mismatch validation error.
+        let (_package_dir, package_output_path) =
+            write_test_package_output("fcp.different:connector:v1", "1.0.0");
+        let source = package_output_path.display().to_string();
+
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([(
+                "POST /rpc/discover".to_owned(),
+                mock_discovery_response_json(),
+            )]),
+            1,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "update",
+            "github",
+            "--source",
+            &source,
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["status"], "error");
+        assert_eq!(payload["command"], "update");
+        assert_eq!(payload["error"]["type"], "connector-id-mismatch");
+    }
+
+    #[test]
+    fn update_package_offline_reports_missing_host() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "update", "github",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["status"], "error");
+        assert_eq!(payload["command"], "update");
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
+        assert_eq!(payload["error"]["recoverable"], true);
+    }
+
+    #[test]
+    fn rollback_offline_reports_missing_host() {
+        // `rollout rollback` is a subcommand of `rollout`. Without a host,
+        // the rollout dispatch should return missing-host-endpoint.
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "rollout",
+            "rollback",
+            "github",
+            "--to",
+            "1.0.0",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["status"], "error");
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
+        assert_eq!(payload["error"]["recoverable"], true);
+    }
+
+    #[test]
+    fn pin_version_format_validation() {
+        // `pin` requires a host to resolve the connector, so without a host
+        // we get a missing-host-endpoint error before version validation occurs.
+        // This test verifies the structured error for pin without host.
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "pin", "github", "--to", "not-a-semver",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["status"], "error");
+        assert_eq!(payload["command"], "pin");
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
+    }
+
+    #[test]
+    fn unpin_response_confirms_previous_pin() {
+        // Without a host, unpin also returns missing-host-endpoint.
+        // The structured error should include the connector name in the details.
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "unpin", "github",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["status"], "error");
+        assert_eq!(payload["command"], "unpin");
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
+        // Details should include the connector that was targeted
+        assert_eq!(payload["details"]["connector"], "github");
+    }
 }

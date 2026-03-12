@@ -1,15 +1,15 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use clap::ValueEnum;
-use handlebars::{handlebars_helper, no_escape, Handlebars};
+use handlebars::{Handlebars, handlebars_helper, no_escape};
 use jaq_core::{
-    load::{Arena, File, Loader},
     Ctx, RcIter,
+    load::{Arena, File, Loader},
 };
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, ValueEnum)]
 pub enum OutputFormat {
@@ -235,7 +235,7 @@ fn render_tabular_value(
     format: OutputFormat,
     options: &RenderOptions,
 ) -> Result<String> {
-    use crate::format_table::{render_tabular, TabularFormat, TabularOptions};
+    use crate::format_table::{TabularFormat, TabularOptions, render_tabular};
 
     let tab_fmt = match format {
         OutputFormat::Table => TabularFormat::Table,
@@ -544,13 +544,13 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use chrono::{Duration, Utc};
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     use crate::error_taxonomy::{FcpErrorCode, StructuredError};
 
     use super::{
-        humanize_timestamp, relative_time_label, render, render_with_options, token_stats,
         ExtractRender, OutputFormat, RenderOptions, TemplateRender, TemplateSource,
+        humanize_timestamp, relative_time_label, render, render_with_options, token_stats,
     };
 
     // ── Basic format rendering ──────────────────────────────────────────

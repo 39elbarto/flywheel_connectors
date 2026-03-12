@@ -765,12 +765,8 @@ impl CommandTruthMode {
         match self {
             Self::LiveOnly => "Requires a live host connection.",
             Self::OfflineOnly => "Operates on local artifacts only.",
-            Self::Hybrid => {
-                "Supports both live and offline modes with explicit provenance."
-            }
-            Self::Passthrough => {
-                "Passes through to a separate binary at the process boundary."
-            }
+            Self::Hybrid => "Supports both live and offline modes with explicit provenance.",
+            Self::Passthrough => "Passes through to a separate binary at the process boundary.",
             Self::PlannedOnly => "Planned but not yet implemented.",
         }
     }
@@ -797,55 +793,194 @@ pub struct CommandFamilyEntry {
 /// this table is mechanically complete and that dispatch functions honor it.
 pub const COMMAND_FAMILY_CLASSIFICATION: &[CommandFamilyEntry] = &[
     // ── Live-only commands (require host, fail fast without it) ──
-    CommandFamilyEntry { name: "invoke", mode: CommandTruthMode::LiveOnly },
-    CommandFamilyEntry { name: "simulate", mode: CommandTruthMode::LiveOnly },
-    CommandFamilyEntry { name: "batch", mode: CommandTruthMode::LiveOnly },
-    CommandFamilyEntry { name: "batch-file", mode: CommandTruthMode::LiveOnly },
-    CommandFamilyEntry { name: "doctor", mode: CommandTruthMode::LiveOnly },
-    CommandFamilyEntry { name: "status", mode: CommandTruthMode::LiveOnly },
-    CommandFamilyEntry { name: "budget", mode: CommandTruthMode::LiveOnly },
-    CommandFamilyEntry { name: "pin", mode: CommandTruthMode::LiveOnly },
-    CommandFamilyEntry { name: "unpin", mode: CommandTruthMode::LiveOnly },
-    CommandFamilyEntry { name: "rollout", mode: CommandTruthMode::LiveOnly },
-    CommandFamilyEntry { name: "install", mode: CommandTruthMode::LiveOnly },
-    CommandFamilyEntry { name: "update", mode: CommandTruthMode::LiveOnly },
-    CommandFamilyEntry { name: "cancel", mode: CommandTruthMode::LiveOnly },
-    CommandFamilyEntry { name: "map", mode: CommandTruthMode::LiveOnly },
+    CommandFamilyEntry {
+        name: "invoke",
+        mode: CommandTruthMode::LiveOnly,
+    },
+    CommandFamilyEntry {
+        name: "simulate",
+        mode: CommandTruthMode::LiveOnly,
+    },
+    CommandFamilyEntry {
+        name: "batch",
+        mode: CommandTruthMode::LiveOnly,
+    },
+    CommandFamilyEntry {
+        name: "batch-file",
+        mode: CommandTruthMode::LiveOnly,
+    },
+    CommandFamilyEntry {
+        name: "doctor",
+        mode: CommandTruthMode::LiveOnly,
+    },
+    CommandFamilyEntry {
+        name: "status",
+        mode: CommandTruthMode::LiveOnly,
+    },
+    CommandFamilyEntry {
+        name: "budget",
+        mode: CommandTruthMode::LiveOnly,
+    },
+    CommandFamilyEntry {
+        name: "pin",
+        mode: CommandTruthMode::LiveOnly,
+    },
+    CommandFamilyEntry {
+        name: "unpin",
+        mode: CommandTruthMode::LiveOnly,
+    },
+    CommandFamilyEntry {
+        name: "rollout",
+        mode: CommandTruthMode::LiveOnly,
+    },
+    CommandFamilyEntry {
+        name: "install",
+        mode: CommandTruthMode::LiveOnly,
+    },
+    CommandFamilyEntry {
+        name: "update",
+        mode: CommandTruthMode::LiveOnly,
+    },
+    CommandFamilyEntry {
+        name: "cancel",
+        mode: CommandTruthMode::LiveOnly,
+    },
+    CommandFamilyEntry {
+        name: "map",
+        mode: CommandTruthMode::LiveOnly,
+    },
+    CommandFamilyEntry {
+        name: "capabilities",
+        mode: CommandTruthMode::LiveOnly,
+    },
     // ── Offline-only commands (operate on local state, never contact host) ──
-    CommandFamilyEntry { name: "context", mode: CommandTruthMode::OfflineOnly },
-    CommandFamilyEntry { name: "session", mode: CommandTruthMode::OfflineOnly },
-    CommandFamilyEntry { name: "agent", mode: CommandTruthMode::OfflineOnly },
-    CommandFamilyEntry { name: "task", mode: CommandTruthMode::OfflineOnly },
-    CommandFamilyEntry { name: "history", mode: CommandTruthMode::OfflineOnly },
-    CommandFamilyEntry { name: "pipe", mode: CommandTruthMode::OfflineOnly },
-    CommandFamilyEntry { name: "plan", mode: CommandTruthMode::OfflineOnly },
-    CommandFamilyEntry { name: "explain", mode: CommandTruthMode::OfflineOnly },
-    CommandFamilyEntry { name: "do", mode: CommandTruthMode::OfflineOnly },
-    CommandFamilyEntry { name: "guide", mode: CommandTruthMode::OfflineOnly },
-    CommandFamilyEntry { name: "config", mode: CommandTruthMode::OfflineOnly },
+    CommandFamilyEntry {
+        name: "context",
+        mode: CommandTruthMode::OfflineOnly,
+    },
+    CommandFamilyEntry {
+        name: "session",
+        mode: CommandTruthMode::OfflineOnly,
+    },
+    CommandFamilyEntry {
+        name: "agent",
+        mode: CommandTruthMode::OfflineOnly,
+    },
+    CommandFamilyEntry {
+        name: "task",
+        mode: CommandTruthMode::OfflineOnly,
+    },
+    CommandFamilyEntry {
+        name: "history",
+        mode: CommandTruthMode::OfflineOnly,
+    },
+    CommandFamilyEntry {
+        name: "pipe",
+        mode: CommandTruthMode::OfflineOnly,
+    },
+    CommandFamilyEntry {
+        name: "plan",
+        mode: CommandTruthMode::OfflineOnly,
+    },
+    CommandFamilyEntry {
+        name: "explain",
+        mode: CommandTruthMode::OfflineOnly,
+    },
+    CommandFamilyEntry {
+        name: "do",
+        mode: CommandTruthMode::OfflineOnly,
+    },
+    CommandFamilyEntry {
+        name: "guide",
+        mode: CommandTruthMode::OfflineOnly,
+    },
+    CommandFamilyEntry {
+        name: "config",
+        mode: CommandTruthMode::OfflineOnly,
+    },
     // ── Hybrid commands (live with --host, offline otherwise) ──
-    CommandFamilyEntry { name: "list", mode: CommandTruthMode::Hybrid },
-    CommandFamilyEntry { name: "show", mode: CommandTruthMode::Hybrid },
-    CommandFamilyEntry { name: "ops", mode: CommandTruthMode::Hybrid },
-    CommandFamilyEntry { name: "schema", mode: CommandTruthMode::Hybrid },
-    CommandFamilyEntry { name: "examples", mode: CommandTruthMode::Hybrid },
-    CommandFamilyEntry { name: "search", mode: CommandTruthMode::Hybrid },
-    CommandFamilyEntry { name: "suggest", mode: CommandTruthMode::Hybrid },
-    CommandFamilyEntry { name: "template", mode: CommandTruthMode::Hybrid },
-    CommandFamilyEntry { name: "validate", mode: CommandTruthMode::Hybrid },
-    CommandFamilyEntry { name: "export-tools", mode: CommandTruthMode::Hybrid },
-    CommandFamilyEntry { name: "recipe", mode: CommandTruthMode::Hybrid },
-    CommandFamilyEntry { name: "pipeline", mode: CommandTruthMode::Hybrid },
+    CommandFamilyEntry {
+        name: "list",
+        mode: CommandTruthMode::Hybrid,
+    },
+    CommandFamilyEntry {
+        name: "show",
+        mode: CommandTruthMode::Hybrid,
+    },
+    CommandFamilyEntry {
+        name: "ops",
+        mode: CommandTruthMode::Hybrid,
+    },
+    CommandFamilyEntry {
+        name: "schema",
+        mode: CommandTruthMode::Hybrid,
+    },
+    CommandFamilyEntry {
+        name: "examples",
+        mode: CommandTruthMode::Hybrid,
+    },
+    CommandFamilyEntry {
+        name: "search",
+        mode: CommandTruthMode::Hybrid,
+    },
+    CommandFamilyEntry {
+        name: "suggest",
+        mode: CommandTruthMode::Hybrid,
+    },
+    CommandFamilyEntry {
+        name: "template",
+        mode: CommandTruthMode::Hybrid,
+    },
+    CommandFamilyEntry {
+        name: "validate",
+        mode: CommandTruthMode::Hybrid,
+    },
+    CommandFamilyEntry {
+        name: "export-tools",
+        mode: CommandTruthMode::Hybrid,
+    },
+    CommandFamilyEntry {
+        name: "recipe",
+        mode: CommandTruthMode::Hybrid,
+    },
+    CommandFamilyEntry {
+        name: "pipeline",
+        mode: CommandTruthMode::Hybrid,
+    },
     // ── Passthrough commands (delegated to separate binaries) ──
-    CommandFamilyEntry { name: "supply-chain", mode: CommandTruthMode::Passthrough },
-    CommandFamilyEntry { name: "audit", mode: CommandTruthMode::Passthrough },
-    CommandFamilyEntry { name: "manifest", mode: CommandTruthMode::Passthrough },
-    CommandFamilyEntry { name: "net", mode: CommandTruthMode::Passthrough },
-    CommandFamilyEntry { name: "trace", mode: CommandTruthMode::Passthrough },
-    CommandFamilyEntry { name: "policy", mode: CommandTruthMode::Passthrough },
-    CommandFamilyEntry { name: "package", mode: CommandTruthMode::Passthrough },
+    CommandFamilyEntry {
+        name: "supply-chain",
+        mode: CommandTruthMode::Passthrough,
+    },
+    CommandFamilyEntry {
+        name: "audit",
+        mode: CommandTruthMode::Passthrough,
+    },
+    CommandFamilyEntry {
+        name: "manifest",
+        mode: CommandTruthMode::Passthrough,
+    },
+    CommandFamilyEntry {
+        name: "net",
+        mode: CommandTruthMode::Passthrough,
+    },
+    CommandFamilyEntry {
+        name: "trace",
+        mode: CommandTruthMode::Passthrough,
+    },
+    CommandFamilyEntry {
+        name: "policy",
+        mode: CommandTruthMode::Passthrough,
+    },
+    CommandFamilyEntry {
+        name: "package",
+        mode: CommandTruthMode::Passthrough,
+    },
     // ── Planned commands (not yet implemented, contract preview only) ──
-    CommandFamilyEntry { name: "serve-mcp", mode: CommandTruthMode::PlannedOnly },
+    CommandFamilyEntry {
+        name: "serve-mcp",
+        mode: CommandTruthMode::PlannedOnly,
+    },
 ];
 
 /// Look up the truth-boundary classification for a command name.
@@ -8925,5 +9060,1071 @@ output_schema = { type = "object" }
     fn classify_command_session_is_offline_only() {
         let entry = classify_command("session").unwrap();
         assert_eq!(entry.mode, CommandTruthMode::OfflineOnly);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Bead 29.9: Runtime truth boundary — comprehensive classification tests
+    // ═══════════════════════════════════════════════════════════════════
+
+    // ── CommandTruthMode property tests ─────────────────────────────
+
+    #[test]
+    fn truth_mode_live_only_tag_is_stable() {
+        assert_eq!(CommandTruthMode::LiveOnly.tag(), "live-only");
+    }
+
+    #[test]
+    fn truth_mode_offline_only_tag_is_stable() {
+        assert_eq!(CommandTruthMode::OfflineOnly.tag(), "offline-only");
+    }
+
+    #[test]
+    fn truth_mode_hybrid_tag_is_stable() {
+        assert_eq!(CommandTruthMode::Hybrid.tag(), "hybrid");
+    }
+
+    #[test]
+    fn truth_mode_passthrough_tag_is_stable() {
+        assert_eq!(CommandTruthMode::Passthrough.tag(), "passthrough");
+    }
+
+    #[test]
+    fn truth_mode_planned_only_tag_is_stable() {
+        assert_eq!(CommandTruthMode::PlannedOnly.tag(), "planned-only");
+    }
+
+    #[test]
+    fn truth_mode_descriptions_are_non_empty() {
+        let modes = [
+            CommandTruthMode::LiveOnly,
+            CommandTruthMode::OfflineOnly,
+            CommandTruthMode::Hybrid,
+            CommandTruthMode::Passthrough,
+            CommandTruthMode::PlannedOnly,
+        ];
+        for mode in &modes {
+            assert!(
+                !mode.description().is_empty(),
+                "{:?} has empty description",
+                mode
+            );
+        }
+    }
+
+    #[test]
+    fn truth_mode_live_only_is_authoritative() {
+        assert!(CommandTruthMode::LiveOnly.can_be_authoritative());
+    }
+
+    #[test]
+    fn truth_mode_hybrid_can_be_authoritative() {
+        assert!(CommandTruthMode::Hybrid.can_be_authoritative());
+    }
+
+    #[test]
+    fn truth_mode_offline_only_is_never_authoritative() {
+        assert!(!CommandTruthMode::OfflineOnly.can_be_authoritative());
+    }
+
+    #[test]
+    fn truth_mode_passthrough_is_never_authoritative() {
+        assert!(!CommandTruthMode::Passthrough.can_be_authoritative());
+    }
+
+    #[test]
+    fn truth_mode_planned_is_never_authoritative() {
+        assert!(!CommandTruthMode::PlannedOnly.can_be_authoritative());
+    }
+
+    // ── Classification table invariants ─────────────────────────────
+
+    #[test]
+    fn classification_table_has_no_duplicate_names() {
+        let mut seen = std::collections::HashSet::new();
+        for entry in COMMAND_FAMILY_CLASSIFICATION {
+            assert!(
+                seen.insert(entry.name),
+                "Duplicate command family name: '{}'",
+                entry.name,
+            );
+        }
+    }
+
+    #[test]
+    fn classification_table_names_are_non_empty() {
+        for entry in COMMAND_FAMILY_CLASSIFICATION {
+            assert!(!entry.name.is_empty(), "Empty command family name found");
+        }
+    }
+
+    #[test]
+    fn classification_table_names_are_lowercase_kebab() {
+        for entry in COMMAND_FAMILY_CLASSIFICATION {
+            for ch in entry.name.chars() {
+                assert!(
+                    ch.is_ascii_lowercase() || ch == '-',
+                    "Command name '{}' contains invalid char '{}'",
+                    entry.name,
+                    ch,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn classification_live_only_count() {
+        let count = COMMAND_FAMILY_CLASSIFICATION
+            .iter()
+            .filter(|e| e.mode == CommandTruthMode::LiveOnly)
+            .count();
+        assert_eq!(count, 15, "Expected 15 live-only commands, got {count}");
+    }
+
+    #[test]
+    fn classification_offline_only_count() {
+        let count = COMMAND_FAMILY_CLASSIFICATION
+            .iter()
+            .filter(|e| e.mode == CommandTruthMode::OfflineOnly)
+            .count();
+        assert_eq!(count, 11, "Expected 11 offline-only commands, got {count}");
+    }
+
+    #[test]
+    fn classification_hybrid_count() {
+        let count = COMMAND_FAMILY_CLASSIFICATION
+            .iter()
+            .filter(|e| e.mode == CommandTruthMode::Hybrid)
+            .count();
+        assert_eq!(count, 12, "Expected 12 hybrid commands, got {count}");
+    }
+
+    #[test]
+    fn classification_passthrough_count() {
+        let count = COMMAND_FAMILY_CLASSIFICATION
+            .iter()
+            .filter(|e| e.mode == CommandTruthMode::Passthrough)
+            .count();
+        assert_eq!(count, 7, "Expected 7 passthrough commands, got {count}");
+    }
+
+    #[test]
+    fn classification_planned_count() {
+        let count = COMMAND_FAMILY_CLASSIFICATION
+            .iter()
+            .filter(|e| e.mode == CommandTruthMode::PlannedOnly)
+            .count();
+        assert_eq!(count, 1, "Expected 1 planned-only command, got {count}");
+    }
+
+    // ── Exhaustive per-command classification ───────────────────────
+
+    #[test]
+    fn classify_invoke_is_live_only() {
+        assert_eq!(
+            classify_command("invoke").unwrap().mode,
+            CommandTruthMode::LiveOnly
+        );
+    }
+
+    #[test]
+    fn classify_simulate_is_live_only() {
+        assert_eq!(
+            classify_command("simulate").unwrap().mode,
+            CommandTruthMode::LiveOnly
+        );
+    }
+
+    #[test]
+    fn classify_batch_is_live_only() {
+        assert_eq!(
+            classify_command("batch").unwrap().mode,
+            CommandTruthMode::LiveOnly
+        );
+    }
+
+    #[test]
+    fn classify_doctor_is_live_only() {
+        assert_eq!(
+            classify_command("doctor").unwrap().mode,
+            CommandTruthMode::LiveOnly
+        );
+    }
+
+    #[test]
+    fn classify_status_is_live_only() {
+        assert_eq!(
+            classify_command("status").unwrap().mode,
+            CommandTruthMode::LiveOnly
+        );
+    }
+
+    #[test]
+    fn classify_budget_is_live_only() {
+        assert_eq!(
+            classify_command("budget").unwrap().mode,
+            CommandTruthMode::LiveOnly
+        );
+    }
+
+    #[test]
+    fn classify_pin_is_live_only() {
+        assert_eq!(
+            classify_command("pin").unwrap().mode,
+            CommandTruthMode::LiveOnly
+        );
+    }
+
+    #[test]
+    fn classify_unpin_is_live_only() {
+        assert_eq!(
+            classify_command("unpin").unwrap().mode,
+            CommandTruthMode::LiveOnly
+        );
+    }
+
+    #[test]
+    fn classify_rollout_is_live_only() {
+        assert_eq!(
+            classify_command("rollout").unwrap().mode,
+            CommandTruthMode::LiveOnly
+        );
+    }
+
+    #[test]
+    fn classify_install_is_live_only() {
+        assert_eq!(
+            classify_command("install").unwrap().mode,
+            CommandTruthMode::LiveOnly
+        );
+    }
+
+    #[test]
+    fn classify_update_is_live_only() {
+        assert_eq!(
+            classify_command("update").unwrap().mode,
+            CommandTruthMode::LiveOnly
+        );
+    }
+
+    #[test]
+    fn classify_cancel_is_live_only() {
+        assert_eq!(
+            classify_command("cancel").unwrap().mode,
+            CommandTruthMode::LiveOnly
+        );
+    }
+
+    #[test]
+    fn classify_map_is_live_only() {
+        assert_eq!(
+            classify_command("map").unwrap().mode,
+            CommandTruthMode::LiveOnly
+        );
+    }
+
+    #[test]
+    fn classify_capabilities_is_live_only() {
+        assert_eq!(
+            classify_command("capabilities").unwrap().mode,
+            CommandTruthMode::LiveOnly
+        );
+    }
+
+    #[test]
+    fn classify_context_is_offline_only() {
+        assert_eq!(
+            classify_command("context").unwrap().mode,
+            CommandTruthMode::OfflineOnly
+        );
+    }
+
+    #[test]
+    fn classify_agent_is_offline_only() {
+        assert_eq!(
+            classify_command("agent").unwrap().mode,
+            CommandTruthMode::OfflineOnly
+        );
+    }
+
+    #[test]
+    fn classify_task_is_offline_only() {
+        assert_eq!(
+            classify_command("task").unwrap().mode,
+            CommandTruthMode::OfflineOnly
+        );
+    }
+
+    #[test]
+    fn classify_history_is_offline_only() {
+        assert_eq!(
+            classify_command("history").unwrap().mode,
+            CommandTruthMode::OfflineOnly
+        );
+    }
+
+    #[test]
+    fn classify_pipe_is_offline_only() {
+        assert_eq!(
+            classify_command("pipe").unwrap().mode,
+            CommandTruthMode::OfflineOnly
+        );
+    }
+
+    #[test]
+    fn classify_plan_is_offline_only() {
+        assert_eq!(
+            classify_command("plan").unwrap().mode,
+            CommandTruthMode::OfflineOnly
+        );
+    }
+
+    #[test]
+    fn classify_explain_is_offline_only() {
+        assert_eq!(
+            classify_command("explain").unwrap().mode,
+            CommandTruthMode::OfflineOnly
+        );
+    }
+
+    #[test]
+    fn classify_do_is_offline_only() {
+        assert_eq!(
+            classify_command("do").unwrap().mode,
+            CommandTruthMode::OfflineOnly
+        );
+    }
+
+    #[test]
+    fn classify_guide_is_offline_only() {
+        assert_eq!(
+            classify_command("guide").unwrap().mode,
+            CommandTruthMode::OfflineOnly
+        );
+    }
+
+    #[test]
+    fn classify_config_is_offline_only() {
+        assert_eq!(
+            classify_command("config").unwrap().mode,
+            CommandTruthMode::OfflineOnly
+        );
+    }
+
+    #[test]
+    fn classify_list_is_hybrid() {
+        assert_eq!(
+            classify_command("list").unwrap().mode,
+            CommandTruthMode::Hybrid
+        );
+    }
+
+    #[test]
+    fn classify_show_is_hybrid() {
+        assert_eq!(
+            classify_command("show").unwrap().mode,
+            CommandTruthMode::Hybrid
+        );
+    }
+
+    #[test]
+    fn classify_ops_is_hybrid() {
+        assert_eq!(
+            classify_command("ops").unwrap().mode,
+            CommandTruthMode::Hybrid
+        );
+    }
+
+    #[test]
+    fn classify_schema_is_hybrid() {
+        assert_eq!(
+            classify_command("schema").unwrap().mode,
+            CommandTruthMode::Hybrid
+        );
+    }
+
+    #[test]
+    fn classify_examples_is_hybrid() {
+        assert_eq!(
+            classify_command("examples").unwrap().mode,
+            CommandTruthMode::Hybrid
+        );
+    }
+
+    #[test]
+    fn classify_search_is_hybrid() {
+        assert_eq!(
+            classify_command("search").unwrap().mode,
+            CommandTruthMode::Hybrid
+        );
+    }
+
+    #[test]
+    fn classify_suggest_is_hybrid() {
+        assert_eq!(
+            classify_command("suggest").unwrap().mode,
+            CommandTruthMode::Hybrid
+        );
+    }
+
+    #[test]
+    fn classify_validate_is_hybrid() {
+        assert_eq!(
+            classify_command("validate").unwrap().mode,
+            CommandTruthMode::Hybrid
+        );
+    }
+
+    #[test]
+    fn classify_export_tools_is_hybrid() {
+        assert_eq!(
+            classify_command("export-tools").unwrap().mode,
+            CommandTruthMode::Hybrid
+        );
+    }
+
+    #[test]
+    fn classify_recipe_is_hybrid() {
+        assert_eq!(
+            classify_command("recipe").unwrap().mode,
+            CommandTruthMode::Hybrid
+        );
+    }
+
+    #[test]
+    fn classify_pipeline_is_hybrid() {
+        assert_eq!(
+            classify_command("pipeline").unwrap().mode,
+            CommandTruthMode::Hybrid
+        );
+    }
+
+    #[test]
+    fn classify_supply_chain_is_passthrough() {
+        assert_eq!(
+            classify_command("supply-chain").unwrap().mode,
+            CommandTruthMode::Passthrough
+        );
+    }
+
+    #[test]
+    fn classify_manifest_is_passthrough() {
+        assert_eq!(
+            classify_command("manifest").unwrap().mode,
+            CommandTruthMode::Passthrough
+        );
+    }
+
+    #[test]
+    fn classify_net_is_passthrough() {
+        assert_eq!(
+            classify_command("net").unwrap().mode,
+            CommandTruthMode::Passthrough
+        );
+    }
+
+    #[test]
+    fn classify_trace_is_passthrough() {
+        assert_eq!(
+            classify_command("trace").unwrap().mode,
+            CommandTruthMode::Passthrough
+        );
+    }
+
+    #[test]
+    fn classify_policy_is_passthrough() {
+        assert_eq!(
+            classify_command("policy").unwrap().mode,
+            CommandTruthMode::Passthrough
+        );
+    }
+
+    #[test]
+    fn classify_package_is_passthrough() {
+        assert_eq!(
+            classify_command("package").unwrap().mode,
+            CommandTruthMode::Passthrough
+        );
+    }
+
+    #[test]
+    fn classify_serve_mcp_is_planned() {
+        assert_eq!(
+            classify_command("serve-mcp").unwrap().mode,
+            CommandTruthMode::PlannedOnly
+        );
+    }
+
+    #[test]
+    fn classify_unknown_command_returns_none() {
+        assert!(classify_command("nonexistent").is_none());
+        assert!(classify_command("").is_none());
+        assert!(classify_command("INVOKE").is_none()); // case-sensitive
+    }
+
+    // ── No-silent-fallback invariants ───────────────────────────────
+
+    #[test]
+    fn invariant_offline_commands_never_claim_authority() {
+        for entry in COMMAND_FAMILY_CLASSIFICATION {
+            if entry.mode == CommandTruthMode::OfflineOnly {
+                assert!(
+                    !entry.mode.can_be_authoritative(),
+                    "Offline-only command '{}' claims runtime authority",
+                    entry.name,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn invariant_passthrough_commands_never_claim_authority() {
+        for entry in COMMAND_FAMILY_CLASSIFICATION {
+            if entry.mode == CommandTruthMode::Passthrough {
+                assert!(
+                    !entry.mode.can_be_authoritative(),
+                    "Passthrough command '{}' claims runtime authority",
+                    entry.name,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn invariant_offline_envelope_never_authoritative() {
+        let offline_commands = COMMAND_FAMILY_CLASSIFICATION
+            .iter()
+            .filter(|e| e.mode == CommandTruthMode::OfflineOnly);
+        for entry in offline_commands {
+            let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, entry.name);
+            assert!(
+                !envelope.authoritative,
+                "Offline envelope for '{}' claims authoritative",
+                entry.name,
+            );
+        }
+    }
+
+    #[test]
+    fn invariant_planned_envelope_never_authoritative() {
+        let envelope = CommandEnvelope::new(CommandAvailability::Planned, "serve-mcp");
+        assert!(!envelope.authoritative);
+        assert!(
+            envelope.explanation.contains("planned")
+                || envelope.explanation.contains("Planned")
+                || envelope.explanation.contains("preview"),
+            "Planned envelope should mention planned/preview, got: {}",
+            envelope.explanation,
+        );
+    }
+
+    #[test]
+    fn invariant_hybrid_offline_envelope_has_host_guidance() {
+        let hybrid_commands = COMMAND_FAMILY_CLASSIFICATION
+            .iter()
+            .filter(|e| e.mode == CommandTruthMode::Hybrid);
+        for entry in hybrid_commands {
+            let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, entry.name);
+            assert!(
+                !envelope.authoritative,
+                "Hybrid command '{}' in offline mode claims authoritative",
+                entry.name,
+            );
+            let has_host_hint = envelope.next_actions.iter().any(|a| a.contains("--host"));
+            assert!(
+                has_host_hint,
+                "Hybrid command '{}' in offline mode should suggest --host, got: {:?}",
+                entry.name, envelope.next_actions,
+            );
+        }
+    }
+
+    #[test]
+    fn invariant_live_runtime_envelope_is_authoritative() {
+        let live_commands = COMMAND_FAMILY_CLASSIFICATION
+            .iter()
+            .filter(|e| e.mode == CommandTruthMode::LiveOnly);
+        for entry in live_commands {
+            let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, entry.name);
+            assert!(
+                envelope.authoritative,
+                "Live command '{}' with LiveRuntime is not authoritative",
+                entry.name,
+            );
+        }
+    }
+
+    #[test]
+    fn invariant_unavailable_commands_suggest_retry_or_offline() {
+        for entry in COMMAND_FAMILY_CLASSIFICATION {
+            let envelope = CommandEnvelope::new(CommandAvailability::Unavailable, entry.name);
+            assert!(
+                envelope.recoverable,
+                "Unavailable state should be recoverable for '{}'",
+                entry.name,
+            );
+            assert!(
+                !envelope.next_actions.is_empty(),
+                "Unavailable state for '{}' should have next actions",
+                entry.name,
+            );
+        }
+    }
+
+    #[test]
+    fn invariant_denied_commands_are_not_authoritative() {
+        for entry in COMMAND_FAMILY_CLASSIFICATION {
+            let envelope = CommandEnvelope::new(CommandAvailability::Denied, entry.name);
+            assert!(
+                !envelope.authoritative,
+                "Denied command '{}' should not be authoritative",
+                entry.name,
+            );
+        }
+    }
+
+    // ── Help text and rendering tests ───────────────────────────────
+
+    #[test]
+    fn help_text_live_only_mentions_host() {
+        let desc = CommandTruthMode::LiveOnly.description();
+        assert!(
+            desc.contains("host") || desc.contains("live"),
+            "LiveOnly description should mention host/live: {desc}",
+        );
+    }
+
+    #[test]
+    fn help_text_offline_mentions_local() {
+        let desc = CommandTruthMode::OfflineOnly.description();
+        assert!(
+            desc.contains("local") || desc.contains("artifact") || desc.contains("offline"),
+            "OfflineOnly description should mention local/artifact/offline: {desc}",
+        );
+    }
+
+    #[test]
+    fn help_text_hybrid_mentions_both_modes() {
+        let desc = CommandTruthMode::Hybrid.description();
+        assert!(
+            desc.contains("live") || desc.contains("offline") || desc.contains("both"),
+            "Hybrid description should mention both modes: {desc}",
+        );
+    }
+
+    #[test]
+    fn help_text_passthrough_mentions_binary_boundary() {
+        let desc = CommandTruthMode::Passthrough.description();
+        assert!(
+            desc.contains("binary") || desc.contains("process") || desc.contains("separate"),
+            "Passthrough description should mention binary boundary: {desc}",
+        );
+    }
+
+    #[test]
+    fn compact_line_includes_availability_and_explanation() {
+        let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "list");
+        let line = envelope.compact_line();
+        assert!(!line.is_empty());
+        assert!(
+            line.contains(CommandAvailability::LiveRuntime.compact_label()),
+            "Compact line should include label: {line}",
+        );
+    }
+
+    #[test]
+    fn compact_line_offline_does_not_claim_live() {
+        let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "show");
+        let line = envelope.compact_line();
+        assert!(
+            !line.to_lowercase().contains("live runtime"),
+            "Offline compact line should not claim 'live runtime': {line}",
+        );
+    }
+
+    #[test]
+    fn envelope_json_includes_availability_field() {
+        let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "invoke");
+        let mut payload = serde_json::json!({"result": "ok"});
+        envelope.inject_into(&mut payload);
+        assert!(payload.get("availability").is_some());
+        let avail = payload.get("availability").unwrap();
+        assert!(avail.is_object());
+    }
+
+    #[test]
+    fn envelope_json_carries_command_name() {
+        let envelope = CommandEnvelope::new(CommandAvailability::Denied, "install");
+        let mut payload = serde_json::json!({});
+        envelope.inject_into(&mut payload);
+        let avail = payload.get("availability").unwrap();
+        assert_eq!(
+            avail.get("command").and_then(|v| v.as_str()),
+            Some("install"),
+        );
+    }
+
+    // ── MetadataField truthfulness rendering ────────────────────────
+
+    #[test]
+    fn metadata_unknown_status_tag_is_unknown() {
+        let field: MetadataField<String> = MetadataField::Unknown;
+        assert_eq!(field.status_tag(), "unknown");
+    }
+
+    #[test]
+    fn metadata_unsupported_status_tag_is_unsupported() {
+        let field: MetadataField<String> = MetadataField::Unsupported;
+        assert_eq!(field.status_tag(), "unsupported");
+    }
+
+    #[test]
+    fn metadata_unavailable_status_tag_is_unavailable() {
+        let field: MetadataField<String> = MetadataField::Unavailable;
+        assert_eq!(field.status_tag(), "unavailable");
+    }
+
+    #[test]
+    fn metadata_not_applicable_status_tag() {
+        let field: MetadataField<String> = MetadataField::NotApplicable;
+        assert_eq!(field.status_tag(), "not-applicable");
+    }
+
+    #[test]
+    fn metadata_known_status_tag_is_known() {
+        let field = MetadataField::Known(42u64);
+        assert_eq!(field.status_tag(), "known");
+    }
+
+    #[test]
+    fn metadata_unknown_never_yields_value() {
+        let field: MetadataField<String> = MetadataField::Unknown;
+        assert!(field.as_known().is_none());
+        assert!(!field.is_known());
+    }
+
+    #[test]
+    fn metadata_map_preserves_non_known_state() {
+        let unknown: MetadataField<i32> = MetadataField::Unknown;
+        let mapped = unknown.map(|v| v.to_string());
+        assert_eq!(mapped.status_tag(), "unknown");
+
+        let unsupported: MetadataField<i32> = MetadataField::Unsupported;
+        let mapped2 = unsupported.map(|v| v.to_string());
+        assert_eq!(mapped2.status_tag(), "unsupported");
+
+        let unavailable: MetadataField<i32> = MetadataField::Unavailable;
+        let mapped3 = unavailable.map(|v| v.to_string());
+        assert_eq!(mapped3.status_tag(), "unavailable");
+
+        let na: MetadataField<i32> = MetadataField::NotApplicable;
+        let mapped4 = na.map(|v| v.to_string());
+        assert_eq!(mapped4.status_tag(), "not-applicable");
+    }
+
+    // ── Cross-cutting boundary enforcement ──────────────────────────
+
+    #[test]
+    fn every_classified_command_has_a_stable_truth_mode_tag() {
+        for entry in COMMAND_FAMILY_CLASSIFICATION {
+            let tag = entry.mode.tag();
+            assert!(
+                !tag.is_empty(),
+                "Command '{}' has empty truth mode tag",
+                entry.name,
+            );
+            for ch in tag.chars() {
+                assert!(
+                    ch.is_ascii_lowercase() || ch == '-',
+                    "Truth mode tag for '{}' contains invalid char '{}'",
+                    entry.name,
+                    ch,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn classification_covers_all_core_command_families() {
+        let expected = [
+            "invoke",
+            "simulate",
+            "batch",
+            "batch-file",
+            "doctor",
+            "status",
+            "budget",
+            "pin",
+            "unpin",
+            "rollout",
+            "install",
+            "update",
+            "cancel",
+            "map",
+            "capabilities",
+            "context",
+            "session",
+            "agent",
+            "task",
+            "history",
+            "pipe",
+            "plan",
+            "explain",
+            "do",
+            "guide",
+            "config",
+            "list",
+            "show",
+            "ops",
+            "schema",
+            "examples",
+            "search",
+            "suggest",
+            "template",
+            "validate",
+            "export-tools",
+            "recipe",
+            "pipeline",
+            "supply-chain",
+            "audit",
+            "manifest",
+            "net",
+            "trace",
+            "policy",
+            "package",
+            "serve-mcp",
+        ];
+        for cmd in &expected {
+            assert!(
+                classify_command(cmd).is_some(),
+                "Command '{}' is not in COMMAND_FAMILY_CLASSIFICATION",
+                cmd
+            );
+        }
+    }
+
+    #[test]
+    fn no_live_only_command_appears_in_offline_only() {
+        let live: std::collections::HashSet<&str> = COMMAND_FAMILY_CLASSIFICATION
+            .iter()
+            .filter(|e| e.mode == CommandTruthMode::LiveOnly)
+            .map(|e| e.name)
+            .collect();
+        let offline: std::collections::HashSet<&str> = COMMAND_FAMILY_CLASSIFICATION
+            .iter()
+            .filter(|e| e.mode == CommandTruthMode::OfflineOnly)
+            .map(|e| e.name)
+            .collect();
+        let overlap: Vec<&&str> = live.intersection(&offline).collect();
+        assert!(
+            overlap.is_empty(),
+            "Commands classified as both live-only and offline-only: {:?}",
+            overlap,
+        );
+    }
+
+    #[test]
+    fn transcript_entry_always_includes_state_field() {
+        for entry in COMMAND_FAMILY_CLASSIFICATION {
+            let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, entry.name);
+            let transcript = envelope.transcript_entry();
+            assert!(
+                transcript.get("state").is_some(),
+                "Transcript for '{}' missing 'state' field",
+                entry.name,
+            );
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Bead 29.7.3: Workflow truth — output semantics distinction tests
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn output_semantics_compact_lines_are_distinct_per_state() {
+        let cmd = "list";
+        let lines: Vec<String> = ALL_AVAILABILITY
+            .iter()
+            .map(|a| CommandEnvelope::new(a.clone(), cmd).compact_line())
+            .collect();
+        let unique: std::collections::HashSet<&str> = lines.iter().map(|s| s.as_str()).collect();
+        assert_eq!(
+            lines.len(),
+            unique.len(),
+            "Compact lines must be distinct per state, got duplicates: {lines:?}",
+        );
+    }
+
+    #[test]
+    fn output_semantics_help_texts_are_distinct_per_state() {
+        let cmd = "show";
+        let texts: Vec<String> = ALL_AVAILABILITY.iter().map(|a| a.help_text(cmd)).collect();
+        let unique: std::collections::HashSet<&str> = texts.iter().map(|s| s.as_str()).collect();
+        assert_eq!(
+            texts.len(),
+            unique.len(),
+            "Help texts must be distinct per state, got duplicates: {texts:?}",
+        );
+    }
+
+    #[test]
+    fn output_semantics_json_envelopes_carry_distinct_states() {
+        let cmd = "ops";
+        let mut states = Vec::new();
+        for avail in &ALL_AVAILABILITY {
+            let envelope = CommandEnvelope::new(avail.clone(), cmd);
+            let mut payload = serde_json::json!({"data": 1});
+            envelope.inject_into(&mut payload);
+            let state = payload["availability"]["availability"]
+                .as_str()
+                .unwrap_or("")
+                .to_owned();
+            states.push(state);
+        }
+        let unique: std::collections::HashSet<&str> = states.iter().map(|s| s.as_str()).collect();
+        assert_eq!(
+            states.len(),
+            unique.len(),
+            "JSON envelope states must be distinct: {states:?}",
+        );
+    }
+
+    #[test]
+    fn output_semantics_exit_codes_never_conflate_success_and_failure() {
+        // Success states get exit 0
+        assert_eq!(CommandAvailability::LiveRuntime.exit_code_u8(), 0);
+        assert_eq!(CommandAvailability::OfflineArtifact.exit_code_u8(), 0);
+        assert_eq!(CommandAvailability::Planned.exit_code_u8(), 0);
+        // Failure states get non-zero
+        assert_ne!(CommandAvailability::Unsupported.exit_code_u8(), 0);
+        assert_ne!(CommandAvailability::Unavailable.exit_code_u8(), 0);
+        assert_ne!(CommandAvailability::Denied.exit_code_u8(), 0);
+        assert_ne!(CommandAvailability::Unknown.exit_code_u8(), 0);
+    }
+
+    #[test]
+    fn output_semantics_denied_is_distinct_from_unsupported_exit_code() {
+        assert_ne!(
+            CommandAvailability::Denied.exit_code_u8(),
+            CommandAvailability::Unsupported.exit_code_u8(),
+        );
+    }
+
+    #[test]
+    fn output_semantics_unsupported_help_never_says_retry() {
+        let text = CommandAvailability::Unsupported.help_text("schema");
+        assert!(
+            !text.to_lowercase().contains("retry"),
+            "Unsupported should not suggest retry: {text}",
+        );
+    }
+
+    #[test]
+    fn output_semantics_unavailable_help_mentions_retry_or_offline() {
+        let text = CommandAvailability::Unavailable.help_text("invoke");
+        assert!(
+            text.to_lowercase().contains("retry") || text.to_lowercase().contains("offline"),
+            "Unavailable should mention retry or offline: {text}",
+        );
+    }
+
+    #[test]
+    fn output_semantics_denied_help_mentions_auth_or_policy() {
+        let text = CommandAvailability::Denied.help_text("install");
+        assert!(
+            text.to_lowercase().contains("auth")
+                || text.to_lowercase().contains("policy")
+                || text.to_lowercase().contains("denied"),
+            "Denied should mention auth/policy: {text}",
+        );
+    }
+
+    #[test]
+    fn output_semantics_planned_help_mentions_preview_or_contract() {
+        let text = CommandAvailability::Planned.help_text("serve-mcp");
+        assert!(
+            text.to_lowercase().contains("preview")
+                || text.to_lowercase().contains("contract")
+                || text.to_lowercase().contains("planned"),
+            "Planned should mention preview/contract: {text}",
+        );
+    }
+
+    #[test]
+    fn output_semantics_offline_help_mentions_host_upgrade_path() {
+        let text = CommandAvailability::OfflineArtifact.help_text("list");
+        assert!(
+            text.contains("--host") || text.contains("host"),
+            "Offline help should point to --host upgrade path: {text}",
+        );
+    }
+
+    #[test]
+    fn output_semantics_transcript_state_vocabulary_is_stable() {
+        let expected_tags = [
+            "live-runtime",
+            "offline-artifact",
+            "unsupported",
+            "planned",
+            "unavailable",
+            "denied",
+            "unknown",
+        ];
+        for (avail, tag) in ALL_AVAILABILITY.iter().zip(expected_tags.iter()) {
+            assert_eq!(avail.tag(), *tag, "{:?} tag should be '{}'", avail, tag,);
+        }
+    }
+
+    #[test]
+    fn output_semantics_envelope_recoverable_semantics() {
+        // Unavailable and Unknown are recoverable (transient)
+        assert!(CommandEnvelope::new(CommandAvailability::Unavailable, "t").recoverable);
+        assert!(CommandEnvelope::new(CommandAvailability::Unknown, "t").recoverable);
+        // Denied is recoverable (user can fix auth/policy)
+        assert!(CommandEnvelope::new(CommandAvailability::Denied, "t").recoverable);
+        // Unsupported is not recoverable (permanent)
+        assert!(!CommandEnvelope::new(CommandAvailability::Unsupported, "t").recoverable);
+        // Planned is not recoverable (not yet built)
+        assert!(!CommandEnvelope::new(CommandAvailability::Planned, "t").recoverable);
+    }
+
+    #[test]
+    fn output_semantics_authoritative_semantics() {
+        // Only LiveRuntime is authoritative
+        assert!(CommandEnvelope::new(CommandAvailability::LiveRuntime, "t").authoritative);
+        // All other states are not authoritative
+        assert!(!CommandEnvelope::new(CommandAvailability::OfflineArtifact, "t").authoritative);
+        assert!(!CommandEnvelope::new(CommandAvailability::Unsupported, "t").authoritative);
+        assert!(!CommandEnvelope::new(CommandAvailability::Planned, "t").authoritative);
+        assert!(!CommandEnvelope::new(CommandAvailability::Unavailable, "t").authoritative);
+        assert!(!CommandEnvelope::new(CommandAvailability::Denied, "t").authoritative);
+        assert!(!CommandEnvelope::new(CommandAvailability::Unknown, "t").authoritative);
+    }
+
+    #[test]
+    fn output_semantics_next_actions_non_empty_for_degraded_states() {
+        let degraded = [
+            CommandAvailability::Unsupported,
+            CommandAvailability::Unavailable,
+            CommandAvailability::Denied,
+            CommandAvailability::Unknown,
+            CommandAvailability::OfflineArtifact,
+        ];
+        for avail in &degraded {
+            let actions = avail.next_actions("test-cmd");
+            assert!(
+                !actions.is_empty(),
+                "{:?} should have non-empty next_actions",
+                avail,
+            );
+        }
+    }
+
+    #[test]
+    fn output_semantics_live_runtime_next_actions_are_empty() {
+        let actions = CommandAvailability::LiveRuntime.next_actions("invoke");
+        assert!(
+            actions.is_empty(),
+            "LiveRuntime should have no next_actions (no remediation needed), got: {actions:?}",
+        );
     }
 }

@@ -34,7 +34,7 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> Capability
         | "airtable.delete_webhook"
         | "airtable.list_webhook_payloads"
         | "airtable.refresh_webhook"
-        | "airtable.set_webhook_notifications" => "airtable.webhooks",
+        | "airtable.set_webhook_notifications" => "airtable.webhooks.manage",
         _ => "airtable.read",
     };
     let cose = CapabilityTokenBuilder::new()
@@ -69,8 +69,8 @@ async fn setup_handshake(
         | "airtable.delete_webhook"
         | "airtable.list_webhook_payloads"
         | "airtable.refresh_webhook"
-        | "airtable.set_webhook_notifications" => "airtable.webhooks",
-        "airtable.read" | "airtable.write" | "airtable.webhooks" | "airtable.delete" => op,
+        | "airtable.set_webhook_notifications" => "airtable.webhooks.manage",
+        "airtable.read" | "airtable.write" | "airtable.webhooks.manage" | "airtable.delete" => op,
         "airtable.nonexistent" => op,
         _ => "airtable.read",
     }).collect();

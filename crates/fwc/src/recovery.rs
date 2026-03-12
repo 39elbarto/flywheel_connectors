@@ -38,7 +38,8 @@ pub fn command_alias(token: &str) -> Option<&'static str> {
         "info" | "inspect" | "describe" | "detail" | "details" | "get" => Some("show"),
         "operations" | "operation" | "op" | "actions" | "methods" => Some("ops"),
         "spec" | "shape" | "type" | "types" | "interface" => Some("schema"),
-        "example" | "sample" | "samples" | "template" | "templates" => Some("examples"),
+        "example" | "sample" | "samples" => Some("examples"),
+        "template" | "templates" => Some("template"),
 
         // Lifecycle aliases
         "health" | "state" | "check" | "healthcheck" => Some("status"),
@@ -594,7 +595,7 @@ mod tests {
     #[test]
     fn alias_sample_resolves_to_examples() {
         assert_eq!(command_alias("sample"), Some("examples"));
-        assert_eq!(command_alias("template"), Some("examples"));
+        assert_eq!(command_alias("template"), Some("template"));
     }
 
     #[test]

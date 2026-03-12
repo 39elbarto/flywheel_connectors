@@ -17,8 +17,8 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use serde::{
-    de::{self, Visitor},
     Deserialize, Deserializer, Serialize, Serializer,
+    de::{self, Visitor},
 };
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -2495,15 +2495,19 @@ mod tests {
         assert!(instructions.steps[0].contains("/home/user"));
         assert!(instructions.steps.iter().any(|s| s.contains("abc123")));
         assert!(instructions.steps.iter().any(|s| s.contains("FWC_HOST")));
-        assert!(instructions
-            .steps
-            .iter()
-            .any(|s| s.contains("github.list_repos")));
+        assert!(
+            instructions
+                .steps
+                .iter()
+                .any(|s| s.contains("github.list_repos"))
+        );
         assert!(instructions.prerequisites.iter().any(|p| p.contains("git")));
-        assert!(instructions
-            .prerequisites
-            .iter()
-            .any(|p| p.contains("1.85.0")));
+        assert!(
+            instructions
+                .prerequisites
+                .iter()
+                .any(|p| p.contains("1.85.0"))
+        );
     }
 
     #[test]
@@ -2512,14 +2516,18 @@ mod tests {
         let tid = TraceId::from_string("t");
         let env = ReplayEnvelope::new(sid, tid, "cargo test", "/project");
         let instructions = ReplayInstructions::from_envelope(&env);
-        assert!(!instructions
-            .steps
-            .iter()
-            .any(|s| s.contains("git checkout")));
-        assert!(instructions
-            .steps
-            .iter()
-            .any(|s| s.contains("rch exec -- cargo test")));
+        assert!(
+            !instructions
+                .steps
+                .iter()
+                .any(|s| s.contains("git checkout"))
+        );
+        assert!(
+            instructions
+                .steps
+                .iter()
+                .any(|s| s.contains("rch exec -- cargo test"))
+        );
         assert!(instructions.prerequisites.iter().any(|p| p == "rch"));
     }
 
@@ -2545,18 +2553,24 @@ mod tests {
         let env = ReplayEnvelope::new(sid, tid, "cargo test -p fwc", "/repo")
             .with_truthfulness(truthfulness);
         let instructions = ReplayInstructions::from_envelope(&env);
-        assert!(instructions
-            .notes
-            .iter()
-            .any(|n| n.contains("Observed command modes")));
-        assert!(instructions
-            .notes
-            .iter()
-            .any(|n| n.contains("Provenance markers")));
-        assert!(instructions
-            .notes
-            .iter()
-            .any(|n| n.contains("Host request ids")));
+        assert!(
+            instructions
+                .notes
+                .iter()
+                .any(|n| n.contains("Observed command modes"))
+        );
+        assert!(
+            instructions
+                .notes
+                .iter()
+                .any(|n| n.contains("Provenance markers"))
+        );
+        assert!(
+            instructions
+                .notes
+                .iter()
+                .any(|n| n.contains("Host request ids"))
+        );
         assert!(instructions.notes.iter().any(|n| n.contains("Receipt ids")));
     }
 

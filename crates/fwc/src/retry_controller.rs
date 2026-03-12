@@ -1145,4 +1145,997 @@ mod tests {
         let p = RetryPolicy::default();
         assert!(!p.is_retryable(FcpErrorCode::FcpErrParseFailed));
     }
+
+    // ── RetryPolicy additional tests ────────────────────────────────
+
+    #[test]
+    fn default_policy_empty_extra_retryable() {
+        let p = RetryPolicy::default();
+        assert!(p.extra_retryable.is_empty());
+    }
+
+    #[test]
+    fn default_policy_empty_never_retry() {
+        let p = RetryPolicy::default();
+        assert!(p.never_retry.is_empty());
+    }
+
+    #[test]
+    fn no_retry_policy_zero_base_delay() {
+        let p = RetryPolicy::no_retry();
+        assert_eq!(p.base_delay_ms, 0);
+    }
+
+    #[test]
+    fn no_retry_policy_zero_max_delay() {
+        let p = RetryPolicy::no_retry();
+        assert_eq!(p.max_delay_ms, 0);
+    }
+
+    #[test]
+    fn no_retry_policy_zero_jitter() {
+        let p = RetryPolicy::no_retry();
+        assert!(p.jitter_factor.abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn builder_chain_all_fields() {
+        let p = RetryPolicy::default()
+            .with_max_retries(10)
+            .with_base_delay_ms(200)
+            .with_max_delay_ms(5_000)
+            .with_jitter_factor(0.5);
+        assert_eq!(p.max_retries, 10);
+        assert_eq!(p.base_delay_ms, 200);
+        assert_eq!(p.max_delay_ms, 5_000);
+        assert!((p.jitter_factor - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn builder_jitter_factor_clamps_negative_to_zero() {
+        let p = RetryPolicy::default().with_jitter_factor(-10.0);
+        assert!(p.jitter_factor.abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn builder_jitter_factor_clamps_large_positive_to_one() {
+        let p = RetryPolicy::default().with_jitter_factor(100.0);
+        assert!((p.jitter_factor - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn builder_jitter_factor_preserves_zero() {
+        let p = RetryPolicy::default().with_jitter_factor(0.0);
+        assert!(p.jitter_factor.abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn builder_jitter_factor_preserves_one() {
+        let p = RetryPolicy::default().with_jitter_factor(1.0);
+        assert!((p.jitter_factor - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn policy_clone_preserves_all_fields() {
+        let mut p = RetryPolicy::default().with_max_retries(7).with_base_delay_ms(500);
+        p.extra_retryable = vec!["auth".to_string()];
+        p.never_retry = vec!["parse".to_string()];
+        let cloned = p.clone();
+        assert_eq!(p.max_retries, cloned.max_retries);
+        assert_eq!(p.base_delay_ms, cloned.base_delay_ms);
+        assert_eq!(p.max_delay_ms, cloned.max_delay_ms);
+        assert_eq!(p.extra_retryable, cloned.extra_retryable);
+        assert_eq!(p.never_retry, cloned.never_retry);
+        assert_eq!(p.honor_retry_after, cloned.honor_retry_after);
+    }
+
+    #[test]
+    fn policy_debug_output_not_empty() {
+        let p = RetryPolicy::default();
+        let debug = format!("{:?}", p);
+        assert!(!debug.is_empty());
+        assert!(debug.contains("RetryPolicy"));
+    }
+
+    #[test]
+    fn default_trait_matches_default_policy() {
+        let from_trait = RetryPolicy::default();
+        let from_fn = RetryPolicy::default_policy();
+        assert_eq!(from_trait.max_retries, from_fn.max_retries);
+        assert_eq!(from_trait.base_delay_ms, from_fn.base_delay_ms);
+        assert_eq!(from_trait.max_delay_ms, from_fn.max_delay_ms);
+        assert_eq!(from_trait.honor_retry_after, from_fn.honor_retry_after);
+    }
+
+    #[test]
+    fn never_retry_overrides_transport_category() {
+        let mut p = RetryPolicy::default();
+        p.never_retry = vec!["transport".to_string()];
+        assert!(!p.is_retryable(FcpErrorCode::FcpErrTransportFailed));
+        assert!(!p.is_retryable(FcpErrorCode::FcpErrUpstreamTimeout));
+    }
+
+    #[test]
+    fn never_retry_overrides_connector_category() {
+        let mut p = RetryPolicy::default();
+        p.never_retry = vec!["connector".to_string()];
+        assert!(!p.is_retryable(FcpErrorCode::FcpErrCircuitOpen));
+        assert!(!p.is_retryable(FcpErrorCode::FcpErrConnectorUnavailable));
+    }
+
+    #[test]
+    fn extra_retryable_adds_validation_category() {
+        let mut p = RetryPolicy::default();
+        p.extra_retryable = vec!["validation".to_string()];
+        assert!(p.is_retryable(FcpErrorCode::FcpErrValidationFailed));
+        assert!(p.is_retryable(FcpErrorCode::FcpErrInvalidInput));
+    }
+
+    #[test]
+    fn extra_retryable_adds_policy_category() {
+        let mut p = RetryPolicy::default();
+        p.extra_retryable = vec!["policy".to_string()];
+        assert!(p.is_retryable(FcpErrorCode::FcpErrPolicyDenied));
+    }
+
+    #[test]
+    fn extra_retryable_adds_internal_category() {
+        let mut p = RetryPolicy::default();
+        p.extra_retryable = vec!["internal".to_string()];
+        assert!(p.is_retryable(FcpErrorCode::FcpErrInternal));
+    }
+
+    #[test]
+    fn budget_exceeded_is_retryable() {
+        let p = RetryPolicy::default();
+        assert!(p.is_retryable(FcpErrorCode::FcpErrBudgetExceeded));
+    }
+
+    #[test]
+    fn dependency_unavailable_is_retryable() {
+        let p = RetryPolicy::default();
+        assert!(p.is_retryable(FcpErrorCode::FcpErrDependencyUnavailable));
+    }
+
+    #[test]
+    fn external_service_is_retryable() {
+        let p = RetryPolicy::default();
+        // external category — check taxonomy
+        let code = FcpErrorCode::FcpErrExternalService;
+        assert_eq!(p.is_retryable(code), code.retryable());
+    }
+
+    #[test]
+    fn conflict_retryable_matches_taxonomy() {
+        let p = RetryPolicy::default();
+        let code = FcpErrorCode::FcpErrConflict;
+        assert_eq!(p.is_retryable(code), code.retryable());
+    }
+
+    #[test]
+    fn resource_not_found_is_not_retryable() {
+        let p = RetryPolicy::default();
+        assert!(!p.is_retryable(FcpErrorCode::FcpErrResourceNotFound));
+    }
+
+    #[test]
+    fn capability_denied_is_not_retryable() {
+        let p = RetryPolicy::default();
+        assert!(!p.is_retryable(FcpErrorCode::FcpErrCapabilityDenied));
+    }
+
+    #[test]
+    fn connector_not_configured_retryable_matches_taxonomy() {
+        let p = RetryPolicy::default();
+        let code = FcpErrorCode::FcpErrConnectorNotConfigured;
+        assert_eq!(p.is_retryable(code), code.retryable());
+    }
+
+    // ── compute_backoff additional tests ────────────────────────────
+
+    #[test]
+    fn backoff_with_jitter_factor_one_full_range() {
+        let p = RetryPolicy::default()
+            .with_jitter_factor(1.0)
+            .with_base_delay_ms(1_000)
+            .with_max_delay_ms(100_000);
+        for seed in 0..100 {
+            let delay = compute_backoff(&p, 1, seed);
+            // 1000 ± 100% = 0..2000, but min is 1
+            assert!(delay >= 1, "delay {} too low for seed {}", delay, seed);
+            assert!(delay <= 2_000, "delay {} too high for seed {}", delay, seed);
+        }
+    }
+
+    #[test]
+    fn backoff_with_very_small_base_delay() {
+        let p = RetryPolicy::default()
+            .with_jitter_factor(0.0)
+            .with_base_delay_ms(1)
+            .with_max_delay_ms(1_000);
+        assert_eq!(compute_backoff(&p, 1, 0), 1);
+        assert_eq!(compute_backoff(&p, 2, 0), 2);
+        assert_eq!(compute_backoff(&p, 3, 0), 4);
+        assert_eq!(compute_backoff(&p, 10, 0), 512);
+    }
+
+    #[test]
+    fn backoff_attempt_four_returns_8x_base() {
+        let p = RetryPolicy::default()
+            .with_jitter_factor(0.0)
+            .with_max_delay_ms(100_000);
+        assert_eq!(compute_backoff(&p, 4, 0), 8_000);
+    }
+
+    #[test]
+    fn backoff_attempt_five_returns_16x_base_capped() {
+        let p = RetryPolicy::default().with_jitter_factor(0.0);
+        // 16x base = 16_000, which equals the default max_delay_ms
+        assert_eq!(compute_backoff(&p, 5, 0), 16_000);
+    }
+
+    #[test]
+    fn backoff_max_delay_one_ms() {
+        let p = RetryPolicy::default()
+            .with_jitter_factor(0.0)
+            .with_max_delay_ms(1);
+        assert_eq!(compute_backoff(&p, 1, 0), 1);
+        assert_eq!(compute_backoff(&p, 5, 0), 1);
+    }
+
+    #[test]
+    fn backoff_jitter_seed_boundary_zero() {
+        let p = RetryPolicy::default().with_jitter_factor(0.25);
+        let delay = compute_backoff(&p, 1, 0);
+        // seed 0 => jitter_raw = (0 % 10001) / 5000 - 1.0 = -1.0
+        // jitter_offset = 1000 * 0.25 * (-1.0) = -250
+        // jittered = 1000 - 250 = 750
+        assert_eq!(delay, 750);
+    }
+
+    #[test]
+    fn backoff_jitter_seed_boundary_5000() {
+        let p = RetryPolicy::default().with_jitter_factor(0.25);
+        let delay = compute_backoff(&p, 1, 5_000);
+        // seed 5000 => jitter_raw = (5000 % 10001) / 5000 - 1.0 = 0.0
+        // jitter_offset = 1000 * 0.25 * 0.0 = 0
+        // jittered = 1000
+        assert_eq!(delay, 1_000);
+    }
+
+    #[test]
+    fn backoff_jitter_seed_boundary_10000() {
+        let p = RetryPolicy::default().with_jitter_factor(0.25);
+        let delay = compute_backoff(&p, 1, 10_000);
+        // seed 10000 => jitter_raw = (10000 % 10001) / 5000 - 1.0 = 1.0
+        // jitter_offset = 1000 * 0.25 * 1.0 = 250
+        // jittered = 1000 + 250 = 1250
+        assert_eq!(delay, 1_250);
+    }
+
+    #[test]
+    fn backoff_jitter_seed_wraps_at_10001() {
+        let p = RetryPolicy::default().with_jitter_factor(0.25);
+        let delay_0 = compute_backoff(&p, 1, 0);
+        let delay_10001 = compute_backoff(&p, 1, 10_001);
+        // 10001 % 10001 == 0, so same as seed 0
+        assert_eq!(delay_0, delay_10001);
+    }
+
+    #[test]
+    fn backoff_exponent_capped_at_20() {
+        let p = RetryPolicy::default()
+            .with_jitter_factor(0.0)
+            .with_base_delay_ms(1)
+            .with_max_delay_ms(u64::MAX);
+        // attempt 22 => exponent capped at 20 => 1 * 2^20 = 1_048_576
+        let delay_21 = compute_backoff(&p, 21, 0);
+        let delay_22 = compute_backoff(&p, 22, 0);
+        assert_eq!(delay_21, 1_048_576);
+        assert_eq!(delay_22, 1_048_576); // capped at same value
+    }
+
+    #[test]
+    fn backoff_never_returns_zero_with_jitter() {
+        // Even with maximum negative jitter, result is clamped to 1
+        let p = RetryPolicy::default()
+            .with_jitter_factor(1.0)
+            .with_base_delay_ms(1)
+            .with_max_delay_ms(1_000);
+        // seed 0 gives jitter_raw = -1.0 => offset = -1 => jittered = 0 => max(0,1) = 1
+        let delay = compute_backoff(&p, 1, 0);
+        assert!(delay >= 1);
+    }
+
+    // ── RetryAttempt additional tests ───────────────────────────────
+
+    #[test]
+    fn retry_attempt_clone() {
+        let attempt = RetryAttempt {
+            attempt: 3,
+            error_code: "FCP_ERR_RATE_LIMITED".to_string(),
+            error_category: "rate_limit".to_string(),
+            delay_ms: 4_000,
+            server_directed: false,
+        };
+        let cloned = attempt.clone();
+        assert_eq!(attempt.attempt, cloned.attempt);
+        assert_eq!(attempt.error_code, cloned.error_code);
+        assert_eq!(attempt.delay_ms, cloned.delay_ms);
+        assert_eq!(attempt.server_directed, cloned.server_directed);
+    }
+
+    #[test]
+    fn retry_attempt_debug_not_empty() {
+        let attempt = RetryAttempt {
+            attempt: 1,
+            error_code: "FCP_ERR_TRANSPORT_FAILED".to_string(),
+            error_category: "transport".to_string(),
+            delay_ms: 500,
+            server_directed: true,
+        };
+        let debug = format!("{:?}", attempt);
+        assert!(debug.contains("RetryAttempt"));
+        assert!(debug.contains("FCP_ERR_TRANSPORT_FAILED"));
+    }
+
+    #[test]
+    fn retry_attempt_serializes_server_directed_false() {
+        let attempt = RetryAttempt {
+            attempt: 2,
+            error_code: "FCP_ERR_UPSTREAM_TIMEOUT".to_string(),
+            error_category: "transport".to_string(),
+            delay_ms: 2_000,
+            server_directed: false,
+        };
+        let json = serde_json::to_value(&attempt).unwrap();
+        assert!(!json["server_directed"].as_bool().unwrap());
+        assert_eq!(json["error_category"], "transport");
+    }
+
+    // ── RetryDecision additional tests ──────────────────────────────
+
+    #[test]
+    fn retry_decision_clone() {
+        let d = RetryDecision::Retry {
+            delay_ms: 500,
+            attempt: 2,
+            server_directed: true,
+        };
+        let cloned = d.clone();
+        assert_eq!(d, cloned);
+    }
+
+    #[test]
+    fn retry_decision_eq_different_variants() {
+        let retry = RetryDecision::Retry {
+            delay_ms: 1_000,
+            attempt: 2,
+            server_directed: false,
+        };
+        let non_retryable = RetryDecision::NonRetryable {
+            code: "FCP_ERR_INTERNAL".to_string(),
+            reason: "Internal error".to_string(),
+        };
+        assert_ne!(retry, non_retryable);
+    }
+
+    #[test]
+    fn retry_decision_eq_same_retry_different_delay() {
+        let d1 = RetryDecision::Retry {
+            delay_ms: 1_000,
+            attempt: 2,
+            server_directed: false,
+        };
+        let d2 = RetryDecision::Retry {
+            delay_ms: 2_000,
+            attempt: 2,
+            server_directed: false,
+        };
+        assert_ne!(d1, d2);
+    }
+
+    #[test]
+    fn retry_decision_eq_same_retry_different_attempt() {
+        let d1 = RetryDecision::Retry {
+            delay_ms: 1_000,
+            attempt: 2,
+            server_directed: false,
+        };
+        let d2 = RetryDecision::Retry {
+            delay_ms: 1_000,
+            attempt: 3,
+            server_directed: false,
+        };
+        assert_ne!(d1, d2);
+    }
+
+    #[test]
+    fn retry_decision_eq_same_retry_different_server_directed() {
+        let d1 = RetryDecision::Retry {
+            delay_ms: 1_000,
+            attempt: 2,
+            server_directed: false,
+        };
+        let d2 = RetryDecision::Retry {
+            delay_ms: 1_000,
+            attempt: 2,
+            server_directed: true,
+        };
+        assert_ne!(d1, d2);
+    }
+
+    #[test]
+    fn retry_decision_debug_contains_variant() {
+        let d = RetryDecision::Exhausted {
+            attempts_made: 4,
+            max_retries: 3,
+        };
+        let debug = format!("{:?}", d);
+        assert!(debug.contains("Exhausted"));
+    }
+
+    #[test]
+    fn retry_decision_retry_should_retry_true() {
+        let d = RetryDecision::Retry {
+            delay_ms: 100,
+            attempt: 1,
+            server_directed: false,
+        };
+        assert!(d.should_retry());
+    }
+
+    #[test]
+    fn retry_decision_non_retryable_should_retry_false() {
+        let d = RetryDecision::NonRetryable {
+            code: "FCP_ERR_INTERNAL".to_string(),
+            reason: "fatal".to_string(),
+        };
+        assert!(!d.should_retry());
+    }
+
+    #[test]
+    fn retry_decision_exhausted_should_retry_false() {
+        let d = RetryDecision::Exhausted {
+            attempts_made: 5,
+            max_retries: 4,
+        };
+        assert!(!d.should_retry());
+    }
+
+    #[test]
+    fn retry_decision_serializes_server_directed_field() {
+        let d = RetryDecision::Retry {
+            delay_ms: 5_000,
+            attempt: 2,
+            server_directed: true,
+        };
+        let json = serde_json::to_value(&d).unwrap();
+        assert!(json["server_directed"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn non_retryable_decision_serializes_code_and_reason() {
+        let d = RetryDecision::NonRetryable {
+            code: "FCP_ERR_POLICY_DENIED".to_string(),
+            reason: "Policy blocks this".to_string(),
+        };
+        let json = serde_json::to_value(&d).unwrap();
+        assert_eq!(json["code"], "FCP_ERR_POLICY_DENIED");
+        assert_eq!(json["reason"], "Policy blocks this");
+    }
+
+    #[test]
+    fn exhausted_decision_serializes_max_retries() {
+        let d = RetryDecision::Exhausted {
+            attempts_made: 6,
+            max_retries: 5,
+        };
+        let json = serde_json::to_value(&d).unwrap();
+        assert_eq!(json["max_retries"], 5);
+        assert_eq!(json["attempts_made"], 6);
+    }
+
+    // ── RetryOutcome additional tests ───────────────────────────────
+
+    #[test]
+    fn retry_outcome_non_retryable_total_attempts() {
+        let o = RetryOutcome::NonRetryable {
+            error: make_non_retryable_error(),
+            total_attempts: 3,
+            retry_history: vec![],
+        };
+        assert_eq!(o.total_attempts(), 3);
+    }
+
+    #[test]
+    fn retry_outcome_exhausted_total_attempts() {
+        let o = RetryOutcome::Exhausted {
+            error: make_retryable_error(),
+            total_attempts: 5,
+            max_retries: 4,
+            retry_history: vec![],
+        };
+        assert_eq!(o.total_attempts(), 5);
+    }
+
+    #[test]
+    fn retry_outcome_success_retry_history_empty() {
+        let o = RetryOutcome::Success {
+            total_attempts: 1,
+            retry_history: vec![],
+        };
+        assert!(o.retry_history().is_empty());
+    }
+
+    #[test]
+    fn retry_outcome_non_retryable_retry_history() {
+        let attempt = RetryAttempt {
+            attempt: 1,
+            error_code: "FCP_ERR_TRANSPORT_FAILED".to_string(),
+            error_category: "transport".to_string(),
+            delay_ms: 1_000,
+            server_directed: false,
+        };
+        let o = RetryOutcome::NonRetryable {
+            error: make_non_retryable_error(),
+            total_attempts: 2,
+            retry_history: vec![attempt],
+        };
+        assert_eq!(o.retry_history().len(), 1);
+        assert_eq!(o.retry_history()[0].error_code, "FCP_ERR_TRANSPORT_FAILED");
+    }
+
+    #[test]
+    fn retry_outcome_exhausted_retry_history() {
+        let attempts: Vec<RetryAttempt> = (1..=3)
+            .map(|i| RetryAttempt {
+                attempt: i,
+                error_code: "FCP_ERR_RATE_LIMITED".to_string(),
+                error_category: "rate_limit".to_string(),
+                delay_ms: 1_000 * u64::from(i),
+                server_directed: false,
+            })
+            .collect();
+        let o = RetryOutcome::Exhausted {
+            error: make_retryable_error(),
+            total_attempts: 4,
+            max_retries: 3,
+            retry_history: attempts,
+        };
+        assert_eq!(o.retry_history().len(), 3);
+    }
+
+    #[test]
+    fn retry_outcome_clone() {
+        let o = RetryOutcome::Success {
+            total_attempts: 2,
+            retry_history: vec![RetryAttempt {
+                attempt: 1,
+                error_code: "FCP_ERR_RATE_LIMITED".to_string(),
+                error_category: "rate_limit".to_string(),
+                delay_ms: 1_000,
+                server_directed: false,
+            }],
+        };
+        let cloned = o.clone();
+        assert_eq!(o.total_attempts(), cloned.total_attempts());
+        assert_eq!(o.retry_history().len(), cloned.retry_history().len());
+    }
+
+    #[test]
+    fn retry_outcome_debug_contains_variant() {
+        let o = RetryOutcome::Exhausted {
+            error: make_retryable_error(),
+            total_attempts: 4,
+            max_retries: 3,
+            retry_history: vec![],
+        };
+        let debug = format!("{:?}", o);
+        assert!(debug.contains("Exhausted"));
+    }
+
+    #[test]
+    fn retry_outcome_non_retryable_serializes() {
+        let o = RetryOutcome::NonRetryable {
+            error: make_non_retryable_error(),
+            total_attempts: 1,
+            retry_history: vec![],
+        };
+        let json = serde_json::to_value(&o).unwrap();
+        assert_eq!(json["outcome"], "non_retryable");
+        assert_eq!(json["total_attempts"], 1);
+    }
+
+    #[test]
+    fn retry_outcome_success_serializes_empty_history() {
+        let o = RetryOutcome::Success {
+            total_attempts: 1,
+            retry_history: vec![],
+        };
+        let json = serde_json::to_value(&o).unwrap();
+        assert_eq!(json["outcome"], "success");
+        assert_eq!(json["retry_history"].as_array().unwrap().len(), 0);
+    }
+
+    // ── RetryController additional tests ────────────────────────────
+
+    #[test]
+    fn controller_clone() {
+        let mut ctrl = RetryController::new(RetryPolicy::default());
+        let err = make_retryable_error();
+        ctrl.record_failure(&err);
+        let cloned = ctrl.clone();
+        assert_eq!(ctrl.attempts_made(), cloned.attempts_made());
+        assert_eq!(ctrl.history().len(), cloned.history().len());
+    }
+
+    #[test]
+    fn controller_debug_not_empty() {
+        let ctrl = RetryController::new(RetryPolicy::default());
+        let debug = format!("{:?}", ctrl);
+        assert!(debug.contains("RetryController"));
+    }
+
+    #[test]
+    fn controller_with_jitter_seed_returns_self() {
+        let ctrl = RetryController::new(RetryPolicy::default()).with_jitter_seed(999);
+        // Verify it works by recording a failure and getting a deterministic result
+        let mut ctrl = ctrl;
+        let err = make_retryable_error();
+        let d = ctrl.record_failure(&err);
+        assert!(d.should_retry());
+    }
+
+    #[test]
+    fn controller_attempts_increment_on_success() {
+        let mut ctrl = RetryController::new(RetryPolicy::default());
+        assert_eq!(ctrl.attempts_made(), 0);
+        ctrl.record_success();
+        assert_eq!(ctrl.attempts_made(), 1);
+    }
+
+    #[test]
+    fn controller_attempts_increment_on_failure() {
+        let mut ctrl = RetryController::new(RetryPolicy::default());
+        let err = make_retryable_error();
+        assert_eq!(ctrl.attempts_made(), 0);
+        ctrl.record_failure(&err);
+        assert_eq!(ctrl.attempts_made(), 1);
+    }
+
+    #[test]
+    fn controller_history_empty_initially() {
+        let ctrl = RetryController::new(RetryPolicy::default());
+        assert!(ctrl.history().is_empty());
+    }
+
+    #[test]
+    fn controller_record_failure_timeout_is_retryable() {
+        let mut ctrl = RetryController::new(RetryPolicy::default());
+        let err = make_timeout_error();
+        let d = ctrl.record_failure(&err);
+        assert!(d.should_retry());
+    }
+
+    #[test]
+    fn controller_record_failure_transport_is_retryable() {
+        let mut ctrl = RetryController::new(RetryPolicy::default());
+        let err = make_transport_error();
+        let d = ctrl.record_failure(&err);
+        assert!(d.should_retry());
+    }
+
+    #[test]
+    fn controller_retry_after_zero_uses_zero_delay() {
+        let mut ctrl = RetryController::new(RetryPolicy::default());
+        let err = make_rate_limited_with_retry_after(0);
+        let decision = ctrl.record_failure(&err);
+        match decision {
+            RetryDecision::Retry {
+                delay_ms,
+                server_directed,
+                ..
+            } => {
+                assert_eq!(delay_ms, 0);
+                assert!(server_directed);
+            }
+            other => panic!("Expected Retry, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn controller_retry_after_non_numeric_ignored() {
+        let mut ctrl = RetryController::new(RetryPolicy::default());
+        let err = StructuredError::new(FcpErrorCode::FcpErrRateLimited, "Rate limited")
+            .with_details(serde_json::json!({ "retry_after_ms": "not_a_number" }));
+        let decision = ctrl.record_failure(&err);
+        match decision {
+            RetryDecision::Retry {
+                server_directed, ..
+            } => {
+                assert!(!server_directed);
+            }
+            other => panic!("Expected Retry, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn controller_retry_after_null_ignored() {
+        let mut ctrl = RetryController::new(RetryPolicy::default());
+        let err = StructuredError::new(FcpErrorCode::FcpErrRateLimited, "Rate limited")
+            .with_details(serde_json::json!({ "retry_after_ms": null }));
+        let decision = ctrl.record_failure(&err);
+        match decision {
+            RetryDecision::Retry {
+                server_directed, ..
+            } => {
+                assert!(!server_directed);
+            }
+            other => panic!("Expected Retry, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn controller_details_without_retry_after_key() {
+        let mut ctrl = RetryController::new(RetryPolicy::default());
+        let err = StructuredError::new(FcpErrorCode::FcpErrRateLimited, "Rate limited")
+            .with_details(serde_json::json!({ "other_key": 123 }));
+        let decision = ctrl.record_failure(&err);
+        match decision {
+            RetryDecision::Retry {
+                server_directed, ..
+            } => {
+                assert!(!server_directed);
+            }
+            other => panic!("Expected Retry, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn controller_no_details_uses_computed_backoff() {
+        let mut ctrl = RetryController::new(RetryPolicy::default());
+        let err = StructuredError::new(FcpErrorCode::FcpErrRateLimited, "Rate limited");
+        let decision = ctrl.record_failure(&err);
+        match decision {
+            RetryDecision::Retry {
+                server_directed, ..
+            } => {
+                assert!(!server_directed);
+            }
+            other => panic!("Expected Retry, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn controller_unknown_retryable_error_code() {
+        // StructuredError with unknown code string but retryable=true
+        let err = StructuredError {
+            code: "FCP_ERR_CUSTOM_UNKNOWN",
+            category: "custom",
+            message: "Custom error".to_string(),
+            retryable: true,
+            recoverable: false,
+            recovery: FcpErrorCode::FcpErrInternal.default_recovery(),
+            details: None,
+            exit_code: 1,
+        };
+        let mut ctrl = RetryController::new(RetryPolicy::default());
+        let d = ctrl.record_failure(&err);
+        // Unknown code with retryable=true should be retried
+        assert!(d.should_retry());
+    }
+
+    #[test]
+    fn controller_unknown_non_retryable_error_code() {
+        let err = StructuredError {
+            code: "FCP_ERR_CUSTOM_UNKNOWN",
+            category: "custom",
+            message: "Custom error".to_string(),
+            retryable: false,
+            recoverable: false,
+            recovery: FcpErrorCode::FcpErrInternal.default_recovery(),
+            details: None,
+            exit_code: 1,
+        };
+        let mut ctrl = RetryController::new(RetryPolicy::default());
+        let d = ctrl.record_failure(&err);
+        assert!(!d.should_retry());
+        match d {
+            RetryDecision::NonRetryable { reason, .. } => {
+                assert!(reason.contains("Unknown error code"));
+            }
+            other => panic!("Expected NonRetryable, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn controller_finalize_exhausted_with_no_history() {
+        let ctrl = RetryController::new(RetryPolicy::default());
+        let err = make_retryable_error();
+        let outcome = ctrl.finalize_exhausted(err);
+        assert!(!outcome.succeeded());
+        assert_eq!(outcome.total_attempts(), 0);
+        assert!(outcome.retry_history().is_empty());
+    }
+
+    #[test]
+    fn controller_finalize_non_retryable_with_no_history() {
+        let ctrl = RetryController::new(RetryPolicy::default());
+        let err = make_non_retryable_error();
+        let outcome = ctrl.finalize_non_retryable(err);
+        assert!(!outcome.succeeded());
+        assert_eq!(outcome.total_attempts(), 0);
+        assert!(outcome.retry_history().is_empty());
+    }
+
+    #[test]
+    fn controller_max_retries_five_full_loop() {
+        let policy = RetryPolicy::default().with_max_retries(5);
+        let mut ctrl = RetryController::new(policy);
+        let err = make_retryable_error();
+
+        for i in 1..=5 {
+            let d = ctrl.record_failure(&err);
+            assert!(d.should_retry(), "Attempt {} should allow retry", i);
+        }
+        // 6th failure = exhausted
+        let d = ctrl.record_failure(&err);
+        assert!(!d.should_retry());
+        assert!(matches!(d, RetryDecision::Exhausted { .. }));
+        assert_eq!(ctrl.attempts_made(), 6);
+    }
+
+    #[test]
+    fn controller_jitter_seed_advances_between_attempts() {
+        let policy = RetryPolicy::default().with_max_retries(5);
+        let mut ctrl = RetryController::new(policy).with_jitter_seed(42);
+        let err = make_retryable_error();
+
+        let mut delays = Vec::new();
+        for _ in 0..3 {
+            match ctrl.record_failure(&err) {
+                RetryDecision::Retry { delay_ms, .. } => delays.push(delay_ms),
+                other => panic!("Expected Retry, got {:?}", other),
+            }
+        }
+        // With advancing jitter seed and increasing backoff, all three should differ
+        assert_ne!(delays[0], delays[1]);
+        assert_ne!(delays[1], delays[2]);
+    }
+
+    #[test]
+    fn controller_history_records_correct_attempt_numbers() {
+        let policy = RetryPolicy::default().with_max_retries(5);
+        let mut ctrl = RetryController::new(policy);
+        let err = make_retryable_error();
+
+        for _ in 0..3 {
+            ctrl.record_failure(&err);
+        }
+
+        let history = ctrl.history();
+        assert_eq!(history.len(), 3);
+        assert_eq!(history[0].attempt, 1);
+        assert_eq!(history[1].attempt, 2);
+        assert_eq!(history[2].attempt, 3);
+    }
+
+    #[test]
+    fn controller_history_records_delay_ms() {
+        let policy = RetryPolicy::default()
+            .with_jitter_factor(0.0)
+            .with_max_retries(3);
+        let mut ctrl = RetryController::new(policy);
+        let err = make_retryable_error();
+
+        ctrl.record_failure(&err);
+        ctrl.record_failure(&err);
+
+        let history = ctrl.history();
+        assert_eq!(history[0].delay_ms, 1_000);
+        assert_eq!(history[1].delay_ms, 2_000);
+    }
+
+    #[test]
+    fn controller_history_records_server_directed() {
+        let policy = RetryPolicy::default().with_max_retries(3);
+        let mut ctrl = RetryController::new(policy);
+
+        let err_with_retry_after = make_rate_limited_with_retry_after(3_000);
+        ctrl.record_failure(&err_with_retry_after);
+
+        let err_without = make_retryable_error();
+        ctrl.record_failure(&err_without);
+
+        let history = ctrl.history();
+        assert!(history[0].server_directed);
+        assert!(!history[1].server_directed);
+    }
+
+    #[test]
+    fn controller_non_retryable_error_not_recorded_in_history() {
+        let mut ctrl = RetryController::new(RetryPolicy::default());
+        let err = make_non_retryable_error();
+        let d = ctrl.record_failure(&err);
+        assert!(!d.should_retry());
+        // Non-retryable errors are not added to the retry history
+        assert!(ctrl.history().is_empty());
+    }
+
+    #[test]
+    fn controller_exhausted_error_not_recorded_in_history() {
+        let mut ctrl = RetryController::new(RetryPolicy::default().with_max_retries(1));
+        let err = make_retryable_error();
+        ctrl.record_failure(&err); // retry 1 - recorded
+        ctrl.record_failure(&err); // exhausted - not recorded
+        assert_eq!(ctrl.history().len(), 1);
+    }
+
+    #[test]
+    fn controller_record_success_returns_correct_history() {
+        let mut ctrl = RetryController::new(RetryPolicy::default());
+        let err = make_timeout_error();
+
+        ctrl.record_failure(&err);
+        ctrl.record_failure(&err);
+        let outcome = ctrl.record_success();
+
+        assert!(outcome.succeeded());
+        assert_eq!(outcome.total_attempts(), 3);
+        let history = outcome.retry_history();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].error_code, "FCP_ERR_UPSTREAM_TIMEOUT");
+        assert_eq!(history[1].error_code, "FCP_ERR_UPSTREAM_TIMEOUT");
+    }
+
+    #[test]
+    fn controller_mixed_errors_in_history() {
+        let mut ctrl = RetryController::new(RetryPolicy::default().with_max_retries(5));
+
+        ctrl.record_failure(&make_retryable_error());
+        ctrl.record_failure(&make_timeout_error());
+        ctrl.record_failure(&make_transport_error());
+        let outcome = ctrl.record_success();
+
+        let history = outcome.retry_history();
+        assert_eq!(history.len(), 3);
+        assert_eq!(history[0].error_category, "rate_limit");
+        assert_eq!(history[1].error_category, "transport");
+        assert_eq!(history[2].error_category, "transport");
+    }
+
+    #[test]
+    fn controller_retry_decision_attempt_field() {
+        let mut ctrl = RetryController::new(RetryPolicy::default().with_max_retries(5));
+        let err = make_retryable_error();
+
+        // After first failure (attempts_made=1), next attempt should be 2
+        match ctrl.record_failure(&err) {
+            RetryDecision::Retry { attempt, .. } => assert_eq!(attempt, 2),
+            other => panic!("Expected Retry, got {:?}", other),
+        }
+
+        // After second failure (attempts_made=2), next attempt should be 3
+        match ctrl.record_failure(&err) {
+            RetryDecision::Retry { attempt, .. } => assert_eq!(attempt, 3),
+            other => panic!("Expected Retry, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn controller_with_large_max_delay() {
+        let policy = RetryPolicy::default()
+            .with_max_delay_ms(u64::MAX)
+            .with_jitter_factor(0.0);
+        let mut ctrl = RetryController::new(policy);
+        let err = make_retryable_error();
+        let d = ctrl.record_failure(&err);
+        match d {
+            RetryDecision::Retry { delay_ms, .. } => {
+                assert_eq!(delay_ms, 1_000); // base delay, not overflowed
+            }
+            other => panic!("Expected Retry, got {:?}", other),
+        }
+    }
 }

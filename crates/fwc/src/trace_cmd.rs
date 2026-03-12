@@ -1051,4 +1051,1087 @@ mod tests {
         assert!(summary.contains_key("matched_decisions"));
         assert!(summary.contains_key("mismatched_decisions"));
     }
+
+    // ── TraceReplayDiff equality and field edge cases ─────────────
+
+    #[test]
+    fn diff_ne_when_event_type_differs() {
+        let d1 = fcp_mesh::TraceReplayDiff {
+            index: 0,
+            event_type: "routing".to_string(),
+            expected_decision: None,
+            actual_decision: None,
+            detail: "same".to_string(),
+        };
+        let mut d2 = d1.clone();
+        d2.event_type = "admission".to_string();
+        assert_ne!(d1, d2);
+    }
+
+    #[test]
+    fn diff_ne_when_expected_decision_differs() {
+        let d1 = fcp_mesh::TraceReplayDiff {
+            index: 0,
+            event_type: "routing".to_string(),
+            expected_decision: Some("allow".to_string()),
+            actual_decision: None,
+            detail: "x".to_string(),
+        };
+        let mut d2 = d1.clone();
+        d2.expected_decision = Some("deny".to_string());
+        assert_ne!(d1, d2);
+    }
+
+    #[test]
+    fn diff_ne_when_actual_decision_differs() {
+        let d1 = fcp_mesh::TraceReplayDiff {
+            index: 0,
+            event_type: "routing".to_string(),
+            expected_decision: None,
+            actual_decision: Some("allow".to_string()),
+            detail: "x".to_string(),
+        };
+        let mut d2 = d1.clone();
+        d2.actual_decision = Some("deny".to_string());
+        assert_ne!(d1, d2);
+    }
+
+    #[test]
+    fn diff_ne_when_detail_differs() {
+        let d1 = fcp_mesh::TraceReplayDiff {
+            index: 0,
+            event_type: "routing".to_string(),
+            expected_decision: None,
+            actual_decision: None,
+            detail: "reason-a".to_string(),
+        };
+        let mut d2 = d1.clone();
+        d2.detail = "reason-b".to_string();
+        assert_ne!(d1, d2);
+    }
+
+    #[test]
+    fn diff_eq_when_all_fields_match() {
+        let d1 = fcp_mesh::TraceReplayDiff {
+            index: 42,
+            event_type: "lifecycle".to_string(),
+            expected_decision: Some("proceed".to_string()),
+            actual_decision: Some("proceed".to_string()),
+            detail: "ok".to_string(),
+        };
+        let d2 = d1.clone();
+        assert_eq!(d1, d2);
+    }
+
+    #[test]
+    fn diff_none_vs_some_expected_decision_not_equal() {
+        let d1 = fcp_mesh::TraceReplayDiff {
+            index: 0,
+            event_type: "routing".to_string(),
+            expected_decision: None,
+            actual_decision: None,
+            detail: String::new(),
+        };
+        let mut d2 = d1.clone();
+        d2.expected_decision = Some(String::new());
+        assert_ne!(d1, d2);
+    }
+
+    #[test]
+    fn diff_none_vs_some_actual_decision_not_equal() {
+        let d1 = fcp_mesh::TraceReplayDiff {
+            index: 0,
+            event_type: "routing".to_string(),
+            expected_decision: None,
+            actual_decision: None,
+            detail: String::new(),
+        };
+        let mut d2 = d1.clone();
+        d2.actual_decision = Some(String::new());
+        assert_ne!(d1, d2);
+    }
+
+    #[test]
+    fn diff_large_index_value() {
+        let diff = fcp_mesh::TraceReplayDiff {
+            index: usize::MAX,
+            event_type: "routing".to_string(),
+            expected_decision: None,
+            actual_decision: None,
+            detail: "max index".to_string(),
+        };
+        let cloned = diff.clone();
+        assert_eq!(diff.index, usize::MAX);
+        assert_eq!(diff, cloned);
+    }
+
+    #[test]
+    fn diff_debug_contains_index() {
+        let diff = fcp_mesh::TraceReplayDiff {
+            index: 12345,
+            event_type: "audit".to_string(),
+            expected_decision: None,
+            actual_decision: None,
+            detail: "check".to_string(),
+        };
+        let debug = format!("{diff:?}");
+        assert!(debug.contains("12345"));
+        assert!(debug.contains("audit"));
+        assert!(debug.contains("check"));
+    }
+
+    #[test]
+    fn diff_with_long_detail_string() {
+        let long_detail = "x".repeat(10_000);
+        let diff = fcp_mesh::TraceReplayDiff {
+            index: 0,
+            event_type: "routing".to_string(),
+            expected_decision: None,
+            actual_decision: None,
+            detail: long_detail.clone(),
+        };
+        assert_eq!(diff.detail.len(), 10_000);
+        let json = serde_json::to_string(&diff).unwrap();
+        let parsed: fcp_mesh::TraceReplayDiff = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.detail, long_detail);
+    }
+
+    #[test]
+    fn diff_with_special_chars_in_event_type() {
+        let diff = fcp_mesh::TraceReplayDiff {
+            index: 0,
+            event_type: "routing/admission:v2".to_string(),
+            expected_decision: Some("allow\"deny".to_string()),
+            actual_decision: Some("tab\there".to_string()),
+            detail: "newline\nhere".to_string(),
+        };
+        let json = serde_json::to_string(&diff).unwrap();
+        let parsed: fcp_mesh::TraceReplayDiff = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.event_type, "routing/admission:v2");
+        assert_eq!(parsed.expected_decision.as_deref(), Some("allow\"deny"));
+    }
+
+    // ── TraceReplaySummary edge cases ────────────────────────────
+
+    #[test]
+    fn summary_ne_when_total_events_differ() {
+        let r1 = make_report(0, 0, vec![]);
+        let mut r2 = make_report(0, 0, vec![]);
+        r2.summary.total_events = 999;
+        assert_ne!(r1.summary, r2.summary);
+    }
+
+    #[test]
+    fn summary_ne_when_matched_events_differ() {
+        let r1 = make_report(0, 0, vec![]);
+        let mut r2 = make_report(0, 0, vec![]);
+        r2.summary.matched_events = 5;
+        assert_ne!(r1.summary, r2.summary);
+    }
+
+    #[test]
+    fn summary_ne_when_event_type_counts_differ() {
+        let r1 = make_report(0, 0, vec![]);
+        let mut r2 = make_report(0, 0, vec![]);
+        r2.summary.event_type_counts.insert("new_type".to_string(), 1);
+        assert_ne!(r1.summary, r2.summary);
+    }
+
+    #[test]
+    fn summary_ne_when_expected_decision_counts_differ() {
+        let r1 = make_report(0, 0, vec![]);
+        let mut r2 = make_report(0, 0, vec![]);
+        r2.summary.expected_decision_counts.insert("allow".to_string(), 1);
+        assert_ne!(r1.summary, r2.summary);
+    }
+
+    #[test]
+    fn summary_ne_when_actual_decision_counts_differ() {
+        let r1 = make_report(0, 0, vec![]);
+        let mut r2 = make_report(0, 0, vec![]);
+        r2.summary.actual_decision_counts.insert("deny".to_string(), 1);
+        assert_ne!(r1.summary, r2.summary);
+    }
+
+    #[test]
+    fn summary_zero_counters() {
+        use std::collections::BTreeMap;
+        let summary = fcp_mesh::TraceReplaySummary {
+            total_events: 0,
+            event_type_counts: BTreeMap::new(),
+            expected_decision_counts: BTreeMap::new(),
+            actual_decision_counts: BTreeMap::new(),
+            matched_events: 0,
+            mismatched_events: 0,
+            matched_decisions: 0,
+            mismatched_decisions: 0,
+        };
+        let cloned = summary.clone();
+        assert_eq!(summary, cloned);
+        assert_eq!(summary.total_events, 0);
+    }
+
+    #[test]
+    fn summary_large_event_type_counts() {
+        use std::collections::BTreeMap;
+        let mut event_types = BTreeMap::new();
+        for i in 0..100 {
+            event_types.insert(format!("type_{i:03}"), i as u64);
+        }
+        let summary = fcp_mesh::TraceReplaySummary {
+            total_events: 4950,
+            event_type_counts: event_types,
+            expected_decision_counts: BTreeMap::new(),
+            actual_decision_counts: BTreeMap::new(),
+            matched_events: 4950,
+            mismatched_events: 0,
+            matched_decisions: 4950,
+            mismatched_decisions: 0,
+        };
+        assert_eq!(summary.event_type_counts.len(), 100);
+        let keys: Vec<_> = summary.event_type_counts.keys().collect();
+        assert_eq!(keys[0], "type_000");
+        assert_eq!(keys[99], "type_099");
+    }
+
+    #[test]
+    fn summary_json_roundtrip() {
+        let report = make_report(3, 2, vec![]);
+        let json = serde_json::to_string(&report.summary).unwrap();
+        let parsed: fcp_mesh::TraceReplaySummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, report.summary);
+    }
+
+    #[test]
+    fn summary_debug_contains_event_type_keys() {
+        let report = make_report(0, 0, vec![]);
+        let debug = format!("{:?}", report.summary);
+        assert!(debug.contains("routing"));
+        assert!(debug.contains("admission"));
+    }
+
+    // ── TraceReplayReport additional edge cases ──────────────────
+
+    #[test]
+    fn report_ne_when_input_events_differ() {
+        let r1 = make_report(0, 0, vec![]);
+        let mut r2 = make_report(0, 0, vec![]);
+        r2.input_events = 999;
+        assert_ne!(r1, r2);
+    }
+
+    #[test]
+    fn report_ne_when_replayed_events_differ() {
+        let r1 = make_report(0, 0, vec![]);
+        let mut r2 = make_report(0, 0, vec![]);
+        r2.replayed_events = 5;
+        assert_ne!(r1, r2);
+    }
+
+    #[test]
+    fn report_ne_when_capturing_node_differs() {
+        let r1 = make_report(0, 0, vec![]);
+        let mut r2 = make_report(0, 0, vec![]);
+        r2.source_capturing_node = Some("different-node".to_string());
+        assert_ne!(r1, r2);
+    }
+
+    #[test]
+    fn report_ne_when_capturing_node_none_vs_some() {
+        let r1 = make_report(0, 0, vec![]);
+        let mut r2 = make_report(0, 0, vec![]);
+        r2.source_capturing_node = None;
+        assert_ne!(r1, r2);
+    }
+
+    #[test]
+    fn report_ne_when_summary_differs() {
+        let r1 = make_report(0, 0, vec![]);
+        let mut r2 = make_report(0, 0, vec![]);
+        r2.summary.total_events = 50;
+        assert_ne!(r1, r2);
+    }
+
+    #[test]
+    fn report_with_empty_trace_id() {
+        use std::collections::BTreeMap;
+        let report = TraceReplayReport {
+            source_trace_id: String::new(),
+            source_capturing_node: None,
+            input_events: 0,
+            replayed_events: 0,
+            summary: fcp_mesh::TraceReplaySummary {
+                total_events: 0,
+                event_type_counts: BTreeMap::new(),
+                expected_decision_counts: BTreeMap::new(),
+                actual_decision_counts: BTreeMap::new(),
+                matched_events: 0,
+                mismatched_events: 0,
+                matched_decisions: 0,
+                mismatched_decisions: 0,
+            },
+            diffs: vec![],
+        };
+        assert!(report.source_trace_id.is_empty());
+        print_human_readable(&report);
+    }
+
+    #[test]
+    fn report_with_max_usize_events() {
+        use std::collections::BTreeMap;
+        let report = TraceReplayReport {
+            source_trace_id: "max-events".to_string(),
+            source_capturing_node: None,
+            input_events: usize::MAX,
+            replayed_events: usize::MAX,
+            summary: fcp_mesh::TraceReplaySummary {
+                total_events: usize::MAX,
+                event_type_counts: BTreeMap::new(),
+                expected_decision_counts: BTreeMap::new(),
+                actual_decision_counts: BTreeMap::new(),
+                matched_events: usize::MAX,
+                mismatched_events: 0,
+                matched_decisions: usize::MAX,
+                mismatched_decisions: 0,
+            },
+            diffs: vec![],
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        let parsed: TraceReplayReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.input_events, usize::MAX);
+    }
+
+    #[test]
+    fn report_debug_contains_all_key_fields() {
+        let report = make_report(2, 1, vec![]);
+        let debug = format!("{report:?}");
+        assert!(debug.contains("source_trace_id"));
+        assert!(debug.contains("source_capturing_node"));
+        assert!(debug.contains("input_events"));
+        assert!(debug.contains("replayed_events"));
+        assert!(debug.contains("summary"));
+        assert!(debug.contains("diffs"));
+    }
+
+    // ── TraceReplayArgs additional construction variants ─────────
+
+    #[test]
+    fn trace_replay_args_with_auto_format_and_json_true() {
+        let args = TraceReplayArgs {
+            file: "trace.bin".to_string(),
+            format: TraceFormatArg::Auto,
+            json: true,
+        };
+        assert!(args.json);
+        assert!(matches!(args.format, TraceFormatArg::Auto));
+    }
+
+    #[test]
+    fn trace_replay_args_with_cbor_format_and_json_true() {
+        let args = TraceReplayArgs {
+            file: "data.cbor".to_string(),
+            format: TraceFormatArg::Cbor,
+            json: true,
+        };
+        assert!(args.json);
+        assert!(matches!(args.format, TraceFormatArg::Cbor));
+    }
+
+    #[test]
+    fn trace_replay_args_file_with_spaces() {
+        let args = TraceReplayArgs {
+            file: "path with spaces/trace file.json".to_string(),
+            format: TraceFormatArg::Json,
+            json: false,
+        };
+        assert!(args.file.contains(' '));
+    }
+
+    #[test]
+    fn trace_replay_args_file_with_unicode() {
+        let args = TraceReplayArgs {
+            file: "/tmp/\u{00E9}l\u{00E8}ve/trace.json".to_string(),
+            format: TraceFormatArg::Json,
+            json: false,
+        };
+        assert!(args.file.contains('\u{00E9}'));
+    }
+
+    #[test]
+    fn trace_replay_args_absolute_path() {
+        let args = TraceReplayArgs {
+            file: "/var/log/fcp/traces/2026-03-12/trace-001.json".to_string(),
+            format: TraceFormatArg::Json,
+            json: false,
+        };
+        assert!(args.file.starts_with('/'));
+    }
+
+    #[test]
+    fn trace_replay_args_relative_path() {
+        let args = TraceReplayArgs {
+            file: "../traces/trace.cbor".to_string(),
+            format: TraceFormatArg::Cbor,
+            json: false,
+        };
+        assert!(args.file.starts_with(".."));
+    }
+
+    #[test]
+    fn trace_replay_args_clone_independence() {
+        let args = TraceReplayArgs {
+            file: "original.json".to_string(),
+            format: TraceFormatArg::Json,
+            json: false,
+        };
+        let mut cloned = args.clone();
+        cloned.file = "modified.json".to_string();
+        cloned.json = true;
+        assert_eq!(args.file, "original.json");
+        assert!(!args.json);
+        assert_eq!(cloned.file, "modified.json");
+        assert!(cloned.json);
+    }
+
+    #[test]
+    fn trace_replay_args_debug_format_includes_struct_name() {
+        let args = TraceReplayArgs {
+            file: "f.json".to_string(),
+            format: TraceFormatArg::Auto,
+            json: false,
+        };
+        let debug = format!("{args:?}");
+        assert!(debug.contains("TraceReplayArgs"));
+    }
+
+    // ── TraceFormatArg additional tests ──────────────────────────
+
+    #[test]
+    fn trace_format_arg_auto_into_replay_input_format() {
+        let f: TraceReplayInputFormat = TraceFormatArg::Auto.into();
+        assert_eq!(f, TraceReplayInputFormat::Auto);
+    }
+
+    #[test]
+    fn trace_format_arg_json_into_replay_input_format() {
+        let f: TraceReplayInputFormat = TraceFormatArg::Json.into();
+        assert_eq!(f, TraceReplayInputFormat::Json);
+    }
+
+    #[test]
+    fn trace_format_arg_cbor_into_replay_input_format() {
+        let f: TraceReplayInputFormat = TraceFormatArg::Cbor.into();
+        assert_eq!(f, TraceReplayInputFormat::Cbor);
+    }
+
+    #[test]
+    fn trace_format_arg_from_conversion_auto() {
+        let f = TraceReplayInputFormat::from(TraceFormatArg::Auto);
+        assert_eq!(f, TraceReplayInputFormat::Auto);
+    }
+
+    #[test]
+    fn trace_format_arg_from_conversion_json() {
+        let f = TraceReplayInputFormat::from(TraceFormatArg::Json);
+        assert_eq!(f, TraceReplayInputFormat::Json);
+    }
+
+    #[test]
+    fn trace_format_arg_from_conversion_cbor() {
+        let f = TraceReplayInputFormat::from(TraceFormatArg::Cbor);
+        assert_eq!(f, TraceReplayInputFormat::Cbor);
+    }
+
+    // ── JSON serialization edge cases ────────────────────────────
+
+    #[test]
+    fn diff_json_roundtrip_with_both_decisions_some() {
+        let diff = fcp_mesh::TraceReplayDiff {
+            index: 7,
+            event_type: "routing".to_string(),
+            expected_decision: Some("allow".to_string()),
+            actual_decision: Some("deny".to_string()),
+            detail: "policy changed".to_string(),
+        };
+        let json = serde_json::to_string(&diff).unwrap();
+        let parsed: fcp_mesh::TraceReplayDiff = serde_json::from_str(&json).unwrap();
+        assert_eq!(diff, parsed);
+    }
+
+    #[test]
+    fn diff_json_roundtrip_with_both_decisions_none() {
+        let diff = fcp_mesh::TraceReplayDiff {
+            index: 0,
+            event_type: "audit".to_string(),
+            expected_decision: None,
+            actual_decision: None,
+            detail: "info event".to_string(),
+        };
+        let json = serde_json::to_string(&diff).unwrap();
+        let parsed: fcp_mesh::TraceReplayDiff = serde_json::from_str(&json).unwrap();
+        assert_eq!(diff, parsed);
+    }
+
+    #[test]
+    fn diff_json_roundtrip_expected_some_actual_none() {
+        let diff = fcp_mesh::TraceReplayDiff {
+            index: 3,
+            event_type: "routing".to_string(),
+            expected_decision: Some("allow".to_string()),
+            actual_decision: None,
+            detail: "dropped".to_string(),
+        };
+        let json = serde_json::to_string(&diff).unwrap();
+        let parsed: fcp_mesh::TraceReplayDiff = serde_json::from_str(&json).unwrap();
+        assert_eq!(diff, parsed);
+    }
+
+    #[test]
+    fn diff_json_roundtrip_expected_none_actual_some() {
+        let diff = fcp_mesh::TraceReplayDiff {
+            index: 3,
+            event_type: "admission".to_string(),
+            expected_decision: None,
+            actual_decision: Some("reject".to_string()),
+            detail: "unexpected".to_string(),
+        };
+        let json = serde_json::to_string(&diff).unwrap();
+        let parsed: fcp_mesh::TraceReplayDiff = serde_json::from_str(&json).unwrap();
+        assert_eq!(diff, parsed);
+    }
+
+    #[test]
+    fn report_json_diffs_array_is_ordered() {
+        let diffs: Vec<_> = (0..5)
+            .map(|i| fcp_mesh::TraceReplayDiff {
+                index: i,
+                event_type: "routing".to_string(),
+                expected_decision: Some(format!("d{i}")),
+                actual_decision: Some(format!("a{i}")),
+                detail: format!("diff-{i}"),
+            })
+            .collect();
+        let report = make_report(0, 5, diffs);
+        let json = serde_json::to_string(&report).unwrap();
+        let parsed: TraceReplayReport = serde_json::from_str(&json).unwrap();
+        for (i, diff) in parsed.diffs.iter().enumerate() {
+            assert_eq!(diff.index, i);
+            assert_eq!(diff.detail, format!("diff-{i}"));
+        }
+    }
+
+    #[test]
+    fn report_json_event_type_counts_serialized_as_object() {
+        let report = make_report(0, 0, vec![]);
+        let val: serde_json::Value = serde_json::to_value(&report).unwrap();
+        let summary = val.get("summary").unwrap();
+        let etc = summary.get("event_type_counts").unwrap();
+        assert!(etc.is_object());
+        assert_eq!(etc.get("routing").unwrap().as_u64(), Some(5));
+        assert_eq!(etc.get("admission").unwrap().as_u64(), Some(3));
+    }
+
+    #[test]
+    fn report_json_decision_counts_serialized_as_object() {
+        use std::collections::BTreeMap;
+        let mut expected = BTreeMap::new();
+        expected.insert("allow".to_string(), 10_u64);
+        let mut actual = BTreeMap::new();
+        actual.insert("deny".to_string(), 10_u64);
+
+        let report = TraceReplayReport {
+            source_trace_id: "dc-obj".to_string(),
+            source_capturing_node: None,
+            input_events: 10,
+            replayed_events: 10,
+            summary: fcp_mesh::TraceReplaySummary {
+                total_events: 10,
+                event_type_counts: BTreeMap::new(),
+                expected_decision_counts: expected,
+                actual_decision_counts: actual,
+                matched_events: 0,
+                mismatched_events: 10,
+                matched_decisions: 0,
+                mismatched_decisions: 10,
+            },
+            diffs: vec![],
+        };
+        let val: serde_json::Value = serde_json::to_value(&report).unwrap();
+        let summary = val.get("summary").unwrap();
+        let edc = summary.get("expected_decision_counts").unwrap();
+        assert!(edc.is_object());
+        assert_eq!(edc.get("allow").unwrap().as_u64(), Some(10));
+        let adc = summary.get("actual_decision_counts").unwrap();
+        assert!(adc.is_object());
+        assert_eq!(adc.get("deny").unwrap().as_u64(), Some(10));
+    }
+
+    #[test]
+    fn report_json_input_and_replayed_events_as_numbers() {
+        let report = make_report(0, 0, vec![]);
+        let val: serde_json::Value = serde_json::to_value(&report).unwrap();
+        assert!(val.get("input_events").unwrap().is_number());
+        assert!(val.get("replayed_events").unwrap().is_number());
+    }
+
+    #[test]
+    fn report_json_source_trace_id_is_string() {
+        let report = make_report(0, 0, vec![]);
+        let val: serde_json::Value = serde_json::to_value(&report).unwrap();
+        assert!(val.get("source_trace_id").unwrap().is_string());
+    }
+
+    #[test]
+    fn report_json_source_capturing_node_is_string_or_null() {
+        let report = make_report(0, 0, vec![]);
+        let val: serde_json::Value = serde_json::to_value(&report).unwrap();
+        let node = val.get("source_capturing_node").unwrap();
+        assert!(node.is_string() || node.is_null());
+    }
+
+    #[test]
+    fn report_json_diffs_is_array() {
+        let report = make_report(0, 0, vec![]);
+        let val: serde_json::Value = serde_json::to_value(&report).unwrap();
+        assert!(val.get("diffs").unwrap().is_array());
+    }
+
+    // ── print_human_readable additional scenarios ────────────────
+
+    #[test]
+    fn print_human_readable_only_expected_decision_counts() {
+        use std::collections::BTreeMap;
+        let mut expected = BTreeMap::new();
+        expected.insert("allow".to_string(), 5);
+        expected.insert("deny".to_string(), 5);
+
+        let report = TraceReplayReport {
+            source_trace_id: "only-expected".to_string(),
+            source_capturing_node: Some("node".to_string()),
+            input_events: 10,
+            replayed_events: 10,
+            summary: fcp_mesh::TraceReplaySummary {
+                total_events: 10,
+                event_type_counts: BTreeMap::new(),
+                expected_decision_counts: expected,
+                actual_decision_counts: BTreeMap::new(),
+                matched_events: 10,
+                mismatched_events: 0,
+                matched_decisions: 10,
+                mismatched_decisions: 0,
+            },
+            diffs: vec![],
+        };
+        // Actual is empty, expected is not — should not panic
+        print_human_readable(&report);
+    }
+
+    #[test]
+    fn print_human_readable_only_actual_decision_counts() {
+        use std::collections::BTreeMap;
+        let mut actual = BTreeMap::new();
+        actual.insert("allow".to_string(), 5);
+
+        let report = TraceReplayReport {
+            source_trace_id: "only-actual".to_string(),
+            source_capturing_node: Some("node".to_string()),
+            input_events: 10,
+            replayed_events: 10,
+            summary: fcp_mesh::TraceReplaySummary {
+                total_events: 10,
+                event_type_counts: BTreeMap::new(),
+                expected_decision_counts: BTreeMap::new(),
+                actual_decision_counts: actual,
+                matched_events: 10,
+                mismatched_events: 0,
+                matched_decisions: 10,
+                mismatched_decisions: 0,
+            },
+            diffs: vec![],
+        };
+        // Expected is empty, actual is not — should not panic
+        print_human_readable(&report);
+    }
+
+    #[test]
+    fn print_human_readable_zero_input_events() {
+        use std::collections::BTreeMap;
+        let report = TraceReplayReport {
+            source_trace_id: "zero-events".to_string(),
+            source_capturing_node: Some("node".to_string()),
+            input_events: 0,
+            replayed_events: 0,
+            summary: fcp_mesh::TraceReplaySummary {
+                total_events: 0,
+                event_type_counts: BTreeMap::new(),
+                expected_decision_counts: BTreeMap::new(),
+                actual_decision_counts: BTreeMap::new(),
+                matched_events: 0,
+                mismatched_events: 0,
+                matched_decisions: 0,
+                mismatched_decisions: 0,
+            },
+            diffs: vec![],
+        };
+        print_human_readable(&report);
+    }
+
+    #[test]
+    fn print_human_readable_mismatched_input_vs_replayed() {
+        use std::collections::BTreeMap;
+        let report = TraceReplayReport {
+            source_trace_id: "mismatch-counts".to_string(),
+            source_capturing_node: Some("node".to_string()),
+            input_events: 100,
+            replayed_events: 95,
+            summary: fcp_mesh::TraceReplaySummary {
+                total_events: 100,
+                event_type_counts: BTreeMap::new(),
+                expected_decision_counts: BTreeMap::new(),
+                actual_decision_counts: BTreeMap::new(),
+                matched_events: 95,
+                mismatched_events: 5,
+                matched_decisions: 90,
+                mismatched_decisions: 10,
+            },
+            diffs: vec![],
+        };
+        print_human_readable(&report);
+    }
+
+    #[test]
+    fn print_human_readable_single_event_type() {
+        use std::collections::BTreeMap;
+        let mut event_types = BTreeMap::new();
+        event_types.insert("routing".to_string(), 1);
+
+        let report = TraceReplayReport {
+            source_trace_id: "single-type".to_string(),
+            source_capturing_node: Some("node".to_string()),
+            input_events: 1,
+            replayed_events: 1,
+            summary: fcp_mesh::TraceReplaySummary {
+                total_events: 1,
+                event_type_counts: event_types,
+                expected_decision_counts: BTreeMap::new(),
+                actual_decision_counts: BTreeMap::new(),
+                matched_events: 1,
+                mismatched_events: 0,
+                matched_decisions: 1,
+                mismatched_decisions: 0,
+            },
+            diffs: vec![],
+        };
+        print_human_readable(&report);
+    }
+
+    #[test]
+    fn print_human_readable_many_diffs() {
+        use std::collections::BTreeMap;
+        let diffs: Vec<_> = (0..50)
+            .map(|i| fcp_mesh::TraceReplayDiff {
+                index: i,
+                event_type: if i % 2 == 0 { "routing" } else { "admission" }.to_string(),
+                expected_decision: Some("allow".to_string()),
+                actual_decision: Some("deny".to_string()),
+                detail: format!("diff at index {i}"),
+            })
+            .collect();
+        let report = TraceReplayReport {
+            source_trace_id: "many-diffs".to_string(),
+            source_capturing_node: Some("node".to_string()),
+            input_events: 100,
+            replayed_events: 100,
+            summary: fcp_mesh::TraceReplaySummary {
+                total_events: 100,
+                event_type_counts: BTreeMap::new(),
+                expected_decision_counts: BTreeMap::new(),
+                actual_decision_counts: BTreeMap::new(),
+                matched_events: 50,
+                mismatched_events: 50,
+                matched_decisions: 50,
+                mismatched_decisions: 50,
+            },
+            diffs,
+        };
+        // Should handle 50 diffs without panicking
+        print_human_readable(&report);
+    }
+
+    #[test]
+    fn print_human_readable_long_trace_id() {
+        use std::collections::BTreeMap;
+        let long_id = "t".repeat(1000);
+        let report = TraceReplayReport {
+            source_trace_id: long_id.clone(),
+            source_capturing_node: Some("node".to_string()),
+            input_events: 0,
+            replayed_events: 0,
+            summary: fcp_mesh::TraceReplaySummary {
+                total_events: 0,
+                event_type_counts: BTreeMap::new(),
+                expected_decision_counts: BTreeMap::new(),
+                actual_decision_counts: BTreeMap::new(),
+                matched_events: 0,
+                mismatched_events: 0,
+                matched_decisions: 0,
+                mismatched_decisions: 0,
+            },
+            diffs: vec![],
+        };
+        print_human_readable(&report);
+    }
+
+    #[test]
+    fn print_human_readable_long_node_name() {
+        use std::collections::BTreeMap;
+        let long_node = "n".repeat(500);
+        let report = TraceReplayReport {
+            source_trace_id: "t".to_string(),
+            source_capturing_node: Some(long_node),
+            input_events: 0,
+            replayed_events: 0,
+            summary: fcp_mesh::TraceReplaySummary {
+                total_events: 0,
+                event_type_counts: BTreeMap::new(),
+                expected_decision_counts: BTreeMap::new(),
+                actual_decision_counts: BTreeMap::new(),
+                matched_events: 0,
+                mismatched_events: 0,
+                matched_decisions: 0,
+                mismatched_decisions: 0,
+            },
+            diffs: vec![],
+        };
+        print_human_readable(&report);
+    }
+
+    // ── make_report helper additional invariant checks ───────────
+
+    #[test]
+    fn make_report_total_events_always_ten() {
+        let report = make_report(5, 3, vec![]);
+        assert_eq!(report.summary.total_events, 10);
+    }
+
+    #[test]
+    fn make_report_diffs_empty_when_no_diffs_passed() {
+        let report = make_report(0, 0, vec![]);
+        assert!(report.diffs.is_empty());
+    }
+
+    #[test]
+    fn make_report_multiple_diffs_preserved_in_order() {
+        let diffs: Vec<_> = (0..5)
+            .map(|i| fcp_mesh::TraceReplayDiff {
+                index: i,
+                event_type: format!("t{i}"),
+                expected_decision: None,
+                actual_decision: None,
+                detail: format!("d{i}"),
+            })
+            .collect();
+        let report = make_report(0, 0, diffs);
+        assert_eq!(report.diffs.len(), 5);
+        for (i, diff) in report.diffs.iter().enumerate() {
+            assert_eq!(diff.index, i);
+            assert_eq!(diff.event_type, format!("t{i}"));
+        }
+    }
+
+    #[test]
+    fn make_report_capturing_node_always_some() {
+        let report = make_report(0, 0, vec![]);
+        assert!(report.source_capturing_node.is_some());
+    }
+
+    // ── TraceReplayInputFormat serde ─────────────────────────────
+
+    #[test]
+    fn trace_replay_input_format_json_roundtrip_auto() {
+        let format = TraceReplayInputFormat::Auto;
+        let json = serde_json::to_string(&format).unwrap();
+        let parsed: TraceReplayInputFormat = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, TraceReplayInputFormat::Auto);
+    }
+
+    #[test]
+    fn trace_replay_input_format_json_roundtrip_json() {
+        let format = TraceReplayInputFormat::Json;
+        let json = serde_json::to_string(&format).unwrap();
+        let parsed: TraceReplayInputFormat = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, TraceReplayInputFormat::Json);
+    }
+
+    #[test]
+    fn trace_replay_input_format_json_roundtrip_cbor() {
+        let format = TraceReplayInputFormat::Cbor;
+        let json = serde_json::to_string(&format).unwrap();
+        let parsed: TraceReplayInputFormat = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, TraceReplayInputFormat::Cbor);
+    }
+
+    #[test]
+    fn trace_replay_input_format_serializes_snake_case() {
+        let auto_json = serde_json::to_string(&TraceReplayInputFormat::Auto).unwrap();
+        let json_json = serde_json::to_string(&TraceReplayInputFormat::Json).unwrap();
+        let cbor_json = serde_json::to_string(&TraceReplayInputFormat::Cbor).unwrap();
+        assert_eq!(auto_json, "\"auto\"");
+        assert_eq!(json_json, "\"json\"");
+        assert_eq!(cbor_json, "\"cbor\"");
+    }
+
+    #[test]
+    fn trace_replay_input_format_debug_distinct() {
+        let auto = format!("{:?}", TraceReplayInputFormat::Auto);
+        let json = format!("{:?}", TraceReplayInputFormat::Json);
+        let cbor = format!("{:?}", TraceReplayInputFormat::Cbor);
+        assert_ne!(auto, json);
+        assert_ne!(json, cbor);
+        assert_ne!(auto, cbor);
+    }
+
+    #[test]
+    fn trace_replay_input_format_clone_eq() {
+        let a = TraceReplayInputFormat::Json;
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    // ── Cross-type interaction tests ─────────────────────────────
+
+    #[test]
+    fn report_with_single_diff_json_structure() {
+        let diffs = vec![fcp_mesh::TraceReplayDiff {
+            index: 0,
+            event_type: "routing".to_string(),
+            expected_decision: Some("allow".to_string()),
+            actual_decision: Some("deny".to_string()),
+            detail: "test".to_string(),
+        }];
+        let report = make_report(0, 1, diffs);
+        let val: serde_json::Value = serde_json::to_value(&report).unwrap();
+        let diffs_arr = val.get("diffs").unwrap().as_array().unwrap();
+        assert_eq!(diffs_arr.len(), 1);
+        let diff_obj = diffs_arr[0].as_object().unwrap();
+        assert_eq!(diff_obj.get("index").unwrap().as_u64(), Some(0));
+        assert_eq!(
+            diff_obj.get("event_type").unwrap().as_str(),
+            Some("routing")
+        );
+        assert_eq!(
+            diff_obj.get("expected_decision").unwrap().as_str(),
+            Some("allow")
+        );
+        assert_eq!(
+            diff_obj.get("actual_decision").unwrap().as_str(),
+            Some("deny")
+        );
+        assert_eq!(diff_obj.get("detail").unwrap().as_str(), Some("test"));
+    }
+
+    #[test]
+    fn format_arg_conversion_roundtrip_through_all_variants() {
+        let variants = [
+            (TraceFormatArg::Auto, TraceReplayInputFormat::Auto),
+            (TraceFormatArg::Json, TraceReplayInputFormat::Json),
+            (TraceFormatArg::Cbor, TraceReplayInputFormat::Cbor),
+        ];
+        for (arg, expected) in variants {
+            let converted: TraceReplayInputFormat = arg.into();
+            assert_eq!(converted, expected);
+        }
+    }
+
+    #[test]
+    fn report_symmetric_equality() {
+        let r1 = make_report(1, 1, vec![]);
+        let r2 = make_report(1, 1, vec![]);
+        assert_eq!(r1, r2);
+        assert_eq!(r2, r1);
+    }
+
+    #[test]
+    fn report_transitive_equality() {
+        let r1 = make_report(0, 0, vec![]);
+        let r2 = make_report(0, 0, vec![]);
+        let r3 = make_report(0, 0, vec![]);
+        assert_eq!(r1, r2);
+        assert_eq!(r2, r3);
+        assert_eq!(r1, r3);
+    }
+
+    #[test]
+    fn summary_symmetric_equality() {
+        let s1 = make_report(0, 0, vec![]).summary;
+        let s2 = make_report(0, 0, vec![]).summary;
+        assert_eq!(s1, s2);
+        assert_eq!(s2, s1);
+    }
+
+    #[test]
+    fn diff_symmetric_equality() {
+        let d1 = fcp_mesh::TraceReplayDiff {
+            index: 1,
+            event_type: "routing".to_string(),
+            expected_decision: Some("a".to_string()),
+            actual_decision: Some("b".to_string()),
+            detail: "c".to_string(),
+        };
+        let d2 = d1.clone();
+        assert_eq!(d1, d2);
+        assert_eq!(d2, d1);
+    }
+
+    // ── Serialization size/structure sanity ──────────────────────
+
+    #[test]
+    fn empty_report_json_size_is_bounded() {
+        use std::collections::BTreeMap;
+        let report = TraceReplayReport {
+            source_trace_id: String::new(),
+            source_capturing_node: None,
+            input_events: 0,
+            replayed_events: 0,
+            summary: fcp_mesh::TraceReplaySummary {
+                total_events: 0,
+                event_type_counts: BTreeMap::new(),
+                expected_decision_counts: BTreeMap::new(),
+                actual_decision_counts: BTreeMap::new(),
+                matched_events: 0,
+                mismatched_events: 0,
+                matched_decisions: 0,
+                mismatched_decisions: 0,
+            },
+            diffs: vec![],
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        // Compact empty report should be under 500 bytes
+        assert!(json.len() < 500);
+    }
+
+    #[test]
+    fn report_with_100_diffs_json_is_valid() {
+        let diffs: Vec<_> = (0..100)
+            .map(|i| fcp_mesh::TraceReplayDiff {
+                index: i,
+                event_type: "routing".to_string(),
+                expected_decision: Some("a".to_string()),
+                actual_decision: Some("b".to_string()),
+                detail: format!("diff {i}"),
+            })
+            .collect();
+        let report = make_report(0, 8, diffs);
+        let json = serde_json::to_string(&report).unwrap();
+        let parsed: TraceReplayReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.diffs.len(), 100);
+    }
+
+    #[test]
+    fn report_pretty_json_contains_indentation() {
+        let report = make_report(0, 0, vec![]);
+        let pretty = serde_json::to_string_pretty(&report).unwrap();
+        // Pretty print uses 2-space indentation by default
+        assert!(pretty.contains("  "));
+    }
 }

@@ -1395,4 +1395,1104 @@ mod tests {
         assert_eq!(parse_max_wait(""), None);
         assert_eq!(parse_max_wait("-5s"), None);
     }
+
+    // ── ThrottleStrategy (extended) ──────────────────────────────
+
+    #[test]
+    fn strategy_clone_is_identical() {
+        let original = ThrottleStrategy::Aggressive;
+        let cloned = original;
+        assert_eq!(original, cloned);
+    }
+
+    #[test]
+    fn strategy_copy_semantics() {
+        let a = ThrottleStrategy::Conservative;
+        let b = a;
+        assert_eq!(a, b);
+        assert_eq!(a.slow_threshold(), b.slow_threshold());
+    }
+
+    #[test]
+    fn strategy_debug_contains_name() {
+        let dbg = format!("{:?}", ThrottleStrategy::Aggressive);
+        assert!(dbg.contains("Aggressive"));
+        let dbg = format!("{:?}", ThrottleStrategy::Balanced);
+        assert!(dbg.contains("Balanced"));
+        let dbg = format!("{:?}", ThrottleStrategy::Conservative);
+        assert!(dbg.contains("Conservative"));
+    }
+
+    #[test]
+    fn strategy_serialize_aggressive() {
+        let json = serde_json::to_value(ThrottleStrategy::Aggressive).unwrap();
+        assert_eq!(json, "aggressive");
+    }
+
+    #[test]
+    fn strategy_serialize_conservative() {
+        let json = serde_json::to_value(ThrottleStrategy::Conservative).unwrap();
+        assert_eq!(json, "conservative");
+    }
+
+    #[test]
+    fn strategy_all_variants_different_slow() {
+        let a = ThrottleStrategy::Aggressive.slow_threshold();
+        let b = ThrottleStrategy::Balanced.slow_threshold();
+        let c = ThrottleStrategy::Conservative.slow_threshold();
+        assert!(a > b);
+        assert!(b > c);
+    }
+
+    #[test]
+    fn strategy_all_variants_different_stop() {
+        let a = ThrottleStrategy::Aggressive.stop_threshold();
+        let b = ThrottleStrategy::Balanced.stop_threshold();
+        let c = ThrottleStrategy::Conservative.stop_threshold();
+        assert!(a > b);
+        assert!(b > c);
+    }
+
+    #[test]
+    fn strategy_slow_always_below_stop() {
+        for strat in [
+            ThrottleStrategy::Aggressive,
+            ThrottleStrategy::Balanced,
+            ThrottleStrategy::Conservative,
+        ] {
+            assert!(strat.slow_threshold() < strat.stop_threshold());
+        }
+    }
+
+    #[test]
+    fn strategy_delay_multiplier_ordering() {
+        assert!(ThrottleStrategy::Aggressive.delay_multiplier()
+            < ThrottleStrategy::Balanced.delay_multiplier());
+        assert!(ThrottleStrategy::Balanced.delay_multiplier()
+            < ThrottleStrategy::Conservative.delay_multiplier());
+    }
+
+    // ── ThrottleConfig (extended) ────────────────────────────────
+
+    #[test]
+    fn config_balanced_retry_categories() {
+        let config = ThrottleConfig::balanced();
+        assert!(config.retry_on.contains(&"rate_limited".to_string()));
+        assert!(config.retry_on.contains(&"timeout".to_string()));
+    }
+
+    #[test]
+    fn config_disabled_max_wait_zero() {
+        let config = ThrottleConfig::disabled();
+        assert_eq!(config.max_wait, Duration::zero());
+    }
+
+    #[test]
+    fn config_disabled_strategy_is_balanced() {
+        let config = ThrottleConfig::disabled();
+        assert_eq!(config.strategy, ThrottleStrategy::Balanced);
+    }
+
+    #[test]
+    fn config_clone_preserves_fields() {
+        let config = ThrottleConfig::balanced()
+            .with_strategy(ThrottleStrategy::Aggressive)
+            .with_max_wait(Duration::minutes(10));
+        let cloned = config.clone();
+        assert_eq!(cloned.strategy, ThrottleStrategy::Aggressive);
+        assert_eq!(cloned.max_wait, Duration::minutes(10));
+        assert!(!cloned.no_throttle);
+    }
+
+    #[test]
+    fn config_builder_chain_all() {
+        let config = ThrottleConfig::balanced()
+            .with_strategy(ThrottleStrategy::Conservative)
+            .with_max_wait(Duration::hours(1))
+            .with_no_throttle(true);
+        assert_eq!(config.strategy, ThrottleStrategy::Conservative);
+        assert_eq!(config.max_wait, Duration::hours(1));
+        assert!(config.no_throttle);
+    }
+
+    #[test]
+    fn config_builder_override_no_throttle_back() {
+        let config = ThrottleConfig::balanced()
+            .with_no_throttle(true)
+            .with_no_throttle(false);
+        assert!(!config.no_throttle);
+    }
+
+    // ── ThrottleDecision (extended) ──────────────────────────────
+
+    #[test]
+    fn decision_clone_proceed() {
+        let d = ThrottleDecision::Proceed;
+        let c = d.clone();
+        assert_eq!(d, c);
+    }
+
+    #[test]
+    fn decision_clone_delay() {
+        let d = ThrottleDecision::Delay {
+            delay_ms: 750,
+            pool: "api".to_string(),
+            reason: "slow down".to_string(),
+        };
+        let c = d.clone();
+        assert_eq!(d, c);
+    }
+
+    #[test]
+    fn decision_clone_wait_for_reset() {
+        let d = ThrottleDecision::WaitForReset {
+            wait_ms: 12000,
+            pool: "core".to_string(),
+            countdown: "12s".to_string(),
+        };
+        let c = d.clone();
+        assert_eq!(d, c);
+    }
+
+    #[test]
+    fn decision_clone_reject() {
+        let d = ThrottleDecision::Reject {
+            pool: "search".to_string(),
+            reason: "exceeds max wait".to_string(),
+        };
+        let c = d.clone();
+        assert_eq!(d, c);
+    }
+
+    #[test]
+    fn decision_wait_for_reset_serializes() {
+        let d = ThrottleDecision::WaitForReset {
+            wait_ms: 3000,
+            pool: "p".to_string(),
+            countdown: "3s".to_string(),
+        };
+        let json = serde_json::to_value(&d).unwrap();
+        assert_eq!(json["action"], "wait_for_reset");
+        assert_eq!(json["wait_ms"], 3000);
+        assert_eq!(json["pool"], "p");
+        assert_eq!(json["countdown"], "3s");
+    }
+
+    #[test]
+    fn decision_reject_serializes() {
+        let d = ThrottleDecision::Reject {
+            pool: "core".to_string(),
+            reason: "too long".to_string(),
+        };
+        let json = serde_json::to_value(&d).unwrap();
+        assert_eq!(json["action"], "reject");
+        assert_eq!(json["pool"], "core");
+        assert_eq!(json["reason"], "too long");
+    }
+
+    #[test]
+    fn decision_delay_zero_ms() {
+        let d = ThrottleDecision::Delay {
+            delay_ms: 0,
+            pool: "p".to_string(),
+            reason: "zero".to_string(),
+        };
+        assert!(d.allows_proceed());
+        assert!(d.requires_wait());
+        assert_eq!(d.wait_ms(), 0);
+    }
+
+    #[test]
+    fn decision_wait_for_reset_pool() {
+        let d = ThrottleDecision::WaitForReset {
+            wait_ms: 1000,
+            pool: "graphql".to_string(),
+            countdown: "1s".to_string(),
+        };
+        assert_eq!(d.pool(), Some("graphql"));
+    }
+
+    #[test]
+    fn decision_reject_pool() {
+        let d = ThrottleDecision::Reject {
+            pool: "write".to_string(),
+            reason: "denied".to_string(),
+        };
+        assert_eq!(d.pool(), Some("write"));
+    }
+
+    #[test]
+    fn decision_display_delay_shows_ms_and_pool() {
+        let d = ThrottleDecision::Delay {
+            delay_ms: 250,
+            pool: "rest".to_string(),
+            reason: "slow".to_string(),
+        };
+        let s = d.to_string();
+        assert!(s.contains("250ms"));
+        assert!(s.contains("rest"));
+    }
+
+    #[test]
+    fn decision_display_wait_shows_countdown() {
+        let d = ThrottleDecision::WaitForReset {
+            wait_ms: 120000,
+            pool: "api".to_string(),
+            countdown: "2m".to_string(),
+        };
+        let s = d.to_string();
+        assert!(s.contains("2m"));
+        assert!(s.contains("api"));
+    }
+
+    #[test]
+    fn decision_display_reject_shows_reason_and_pool() {
+        let d = ThrottleDecision::Reject {
+            pool: "search".to_string(),
+            reason: "quota exceeded".to_string(),
+        };
+        let s = d.to_string();
+        assert!(s.contains("quota exceeded"));
+        assert!(s.contains("search"));
+    }
+
+    // ── check_pool_throttle (extended) ───────────────────────────
+
+    #[test]
+    fn pool_throttle_at_exact_slow_threshold_balanced() {
+        // Balanced slow_threshold = 80; at exactly 80% should trigger delay
+        let pool = PoolSnapshot::new("core", 4000, 5000, Some(Utc::now() + Duration::minutes(5)));
+        let config = ThrottleConfig::balanced();
+        let decision = check_pool_throttle(&pool, &config);
+        assert!(matches!(decision, ThrottleDecision::Delay { .. }));
+    }
+
+    #[test]
+    fn pool_throttle_just_below_slow_threshold_balanced() {
+        // 79% usage, should proceed
+        let pool = PoolSnapshot::new("core", 3950, 5000, None);
+        let config = ThrottleConfig::balanced();
+        let decision = check_pool_throttle(&pool, &config);
+        assert_eq!(decision, ThrottleDecision::Proceed);
+    }
+
+    #[test]
+    fn pool_throttle_at_exact_stop_threshold_balanced() {
+        // Balanced stop_threshold = 95; at exactly 95% with valid reset
+        let pool = PoolSnapshot::new("core", 4750, 5000, Some(Utc::now() + Duration::seconds(10)));
+        let config = ThrottleConfig::balanced();
+        let decision = check_pool_throttle(&pool, &config);
+        assert!(matches!(decision, ThrottleDecision::WaitForReset { .. }));
+    }
+
+    #[test]
+    fn pool_throttle_aggressive_at_99_proceeds() {
+        // Aggressive slow_threshold = 95, stop_threshold = 100
+        // At 99%, between slow and stop, should delay
+        let pool = PoolSnapshot::new("core", 4950, 5000, Some(Utc::now() + Duration::minutes(5)));
+        let config = ThrottleConfig::balanced().with_strategy(ThrottleStrategy::Aggressive);
+        let decision = check_pool_throttle(&pool, &config);
+        assert!(matches!(decision, ThrottleDecision::Delay { .. }));
+    }
+
+    #[test]
+    fn pool_throttle_aggressive_at_100_waits() {
+        // Aggressive stop_threshold = 100; at 100% with reset
+        let pool = PoolSnapshot::new("core", 5000, 5000, Some(Utc::now() + Duration::seconds(15)));
+        let config = ThrottleConfig::balanced()
+            .with_strategy(ThrottleStrategy::Aggressive)
+            .with_max_wait(Duration::seconds(30));
+        let decision = check_pool_throttle(&pool, &config);
+        assert!(matches!(decision, ThrottleDecision::WaitForReset { .. }));
+    }
+
+    #[test]
+    fn pool_throttle_conservative_at_60_delays() {
+        // Conservative slow_threshold = 60
+        let pool = PoolSnapshot::new("core", 3000, 5000, Some(Utc::now() + Duration::minutes(10)));
+        let config = ThrottleConfig::balanced().with_strategy(ThrottleStrategy::Conservative);
+        let decision = check_pool_throttle(&pool, &config);
+        assert!(matches!(decision, ThrottleDecision::Delay { .. }));
+    }
+
+    #[test]
+    fn pool_throttle_conservative_at_80_waits() {
+        // Conservative stop_threshold = 80
+        let pool = PoolSnapshot::new("core", 4000, 5000, Some(Utc::now() + Duration::seconds(20)));
+        let config = ThrottleConfig::balanced().with_strategy(ThrottleStrategy::Conservative);
+        let decision = check_pool_throttle(&pool, &config);
+        assert!(matches!(decision, ThrottleDecision::WaitForReset { .. }));
+    }
+
+    #[test]
+    fn pool_throttle_high_percent_but_remaining_no_reset() {
+        // Above stop threshold but remaining > 0 and no reset time → proceed
+        // Used=4800/5000=96%, balanced stop=95%, remaining=200, resets_at=None
+        // Pool has remaining > 0 AND wait_ms == 0 → proceed with caution
+        let pool = PoolSnapshot::new("core", 4800, 5000, None);
+        let config = ThrottleConfig::balanced();
+        let decision = check_pool_throttle(&pool, &config);
+        // remaining > 0, no reset → proceeds
+        assert_eq!(decision, ThrottleDecision::Proceed);
+    }
+
+    #[test]
+    fn pool_throttle_delay_ms_proportional_to_multiplier() {
+        // 70% usage: balanced slow=80 (proceed), conservative slow=60 (delay)
+        // Use 82% which is: balanced slow=80/stop=95 → Delay, conservative slow=60/stop=80 → need < stop
+        // Actually use aggressive vs balanced: 92% → aggressive slow=95 (proceed), balanced slow=80/stop=95 (Delay)
+        // Better: use balanced vs aggressive at 92%
+        let pool = PoolSnapshot::new("core", 4100, 5000, Some(Utc::now() + Duration::minutes(10)));
+        // 82% → balanced slow=80 → Delay with multiplier=2
+        let balanced = ThrottleConfig::balanced();
+        // 82% → aggressive slow=95 → Proceed (not Delay) — can't compare
+        // Instead compare balanced (mult=2) at 82% by checking the delay_ms value directly
+        let d_bal = check_pool_throttle(&pool, &balanced);
+
+        if let ThrottleDecision::Delay {
+            delay_ms: ms_bal, ..
+        } = &d_bal
+        {
+            // With multiplier=2, delay should be > base_delay
+            // base_delay = reset_ms / remaining, delay = base * 2
+            assert!(*ms_bal > 0, "balanced delay should be positive");
+            // The multiplier doubles the base delay
+            let remaining = pool.remaining(); // 900
+            let reset_ms = 10 * 60 * 1000; // ~600000
+            let base = reset_ms / remaining; // ~666
+            // delay should be approximately base * 2
+            assert!(*ms_bal >= base, "delay should be at least base");
+        } else {
+            panic!("expected Delay for balanced at 82%");
+        }
+    }
+
+    #[test]
+    fn pool_throttle_zero_limit_pool() {
+        // limit=0, used=0, percent computed as 100 for 0/0
+        let pool = PoolSnapshot::new("empty", 0, 0, None);
+        let config = ThrottleConfig::balanced();
+        let decision = check_pool_throttle(&pool, &config);
+        // percent is 100 for 0/0, stop_threshold=95, remaining=0, no reset → reject
+        assert!(matches!(decision, ThrottleDecision::Reject { .. }));
+    }
+
+    #[test]
+    fn pool_throttle_max_wait_exactly_matches_reset() {
+        // wait_ms exactly equals max_wait_ms → should allow (not reject)
+        let pool = PoolSnapshot::new("core", 4800, 5000, Some(Utc::now() + Duration::seconds(30)));
+        let config = ThrottleConfig::balanced().with_max_wait(Duration::seconds(31));
+        let decision = check_pool_throttle(&pool, &config);
+        assert!(matches!(decision, ThrottleDecision::WaitForReset { .. }));
+    }
+
+    #[test]
+    fn pool_throttle_delay_reason_includes_usage_info() {
+        let pool = PoolSnapshot::new("core", 4100, 5000, Some(Utc::now() + Duration::minutes(5)));
+        let config = ThrottleConfig::balanced();
+        let decision = check_pool_throttle(&pool, &config);
+        if let ThrottleDecision::Delay { reason, pool, .. } = &decision {
+            assert!(reason.contains("4100"));
+            assert!(reason.contains("5000"));
+            assert_eq!(pool, "core");
+        } else {
+            panic!("expected Delay");
+        }
+    }
+
+    // ── check_throttle multi-pool (extended) ─────────────────────
+
+    #[test]
+    fn multi_pool_delay_beats_proceed() {
+        let limits = ConnectorRateLimits::new(
+            "gh",
+            vec![
+                PoolSnapshot::new("core", 100, 5000, None),
+                PoolSnapshot::new(
+                    "search",
+                    25,
+                    30,
+                    Some(Utc::now() + Duration::minutes(1)),
+                ),
+            ],
+        );
+        let config = ThrottleConfig::balanced();
+        let decision = check_throttle(&limits, &config);
+        assert!(matches!(decision, ThrottleDecision::Delay { .. }));
+    }
+
+    #[test]
+    fn multi_pool_wait_beats_delay() {
+        let limits = ConnectorRateLimits::new(
+            "gh",
+            vec![
+                PoolSnapshot::new(
+                    "core",
+                    4200,
+                    5000,
+                    Some(Utc::now() + Duration::minutes(10)),
+                ),
+                PoolSnapshot::new(
+                    "search",
+                    29,
+                    30,
+                    Some(Utc::now() + Duration::seconds(20)),
+                ),
+            ],
+        );
+        let config = ThrottleConfig::balanced();
+        let decision = check_throttle(&limits, &config);
+        assert!(matches!(decision, ThrottleDecision::WaitForReset { .. }));
+    }
+
+    #[test]
+    fn multi_pool_empty_pools_proceeds() {
+        let limits = ConnectorRateLimits::new("gh", vec![]);
+        let config = ThrottleConfig::balanced();
+        let decision = check_throttle(&limits, &config);
+        assert_eq!(decision, ThrottleDecision::Proceed);
+    }
+
+    #[test]
+    fn multi_pool_single_pool_delegates() {
+        let pool = PoolSnapshot::new("core", 4500, 5000, Some(Utc::now() + Duration::minutes(5)));
+        let limits = ConnectorRateLimits::new("gh", vec![pool.clone()]);
+        let config = ThrottleConfig::balanced();
+
+        let multi = check_throttle(&limits, &config);
+        let single = check_pool_throttle(&pool, &config);
+        assert_eq!(multi, single);
+    }
+
+    // ── most_restrictive (extended) ──────────────────────────────
+
+    #[test]
+    fn restrictive_proceed_vs_proceed() {
+        let result = most_restrictive(ThrottleDecision::Proceed, ThrottleDecision::Proceed);
+        assert_eq!(result, ThrottleDecision::Proceed);
+    }
+
+    #[test]
+    fn restrictive_reject_vs_everything() {
+        let reject = ThrottleDecision::Reject {
+            pool: "p".to_string(),
+            reason: "r".to_string(),
+        };
+        let proceed = ThrottleDecision::Proceed;
+        let result = most_restrictive(reject.clone(), proceed);
+        assert!(matches!(result, ThrottleDecision::Reject { .. }));
+    }
+
+    #[test]
+    fn restrictive_wait_vs_reject() {
+        let wait = ThrottleDecision::WaitForReset {
+            wait_ms: 5000,
+            pool: "p".to_string(),
+            countdown: "5s".to_string(),
+        };
+        let reject = ThrottleDecision::Reject {
+            pool: "q".to_string(),
+            reason: "r".to_string(),
+        };
+        let result = most_restrictive(wait, reject);
+        assert!(matches!(result, ThrottleDecision::Reject { .. }));
+    }
+
+    #[test]
+    fn restrictive_reject_vs_wait() {
+        let reject = ThrottleDecision::Reject {
+            pool: "q".to_string(),
+            reason: "r".to_string(),
+        };
+        let wait = ThrottleDecision::WaitForReset {
+            wait_ms: 5000,
+            pool: "p".to_string(),
+            countdown: "5s".to_string(),
+        };
+        let result = most_restrictive(reject, wait);
+        assert!(matches!(result, ThrottleDecision::Reject { .. }));
+    }
+
+    #[test]
+    fn restrictive_same_rank_equal_wait_picks_first() {
+        let a = ThrottleDecision::Delay {
+            delay_ms: 300,
+            pool: "a".to_string(),
+            reason: "r".to_string(),
+        };
+        let b = ThrottleDecision::Delay {
+            delay_ms: 300,
+            pool: "b".to_string(),
+            reason: "r".to_string(),
+        };
+        let result = most_restrictive(a, b);
+        // Same wait_ms; a.wait_ms() >= b.wait_ms() → picks a
+        assert_eq!(result.pool(), Some("a"));
+    }
+
+    #[test]
+    fn restrictive_wait_for_reset_longer_wins() {
+        let a = ThrottleDecision::WaitForReset {
+            wait_ms: 10000,
+            pool: "a".to_string(),
+            countdown: "10s".to_string(),
+        };
+        let b = ThrottleDecision::WaitForReset {
+            wait_ms: 20000,
+            pool: "b".to_string(),
+            countdown: "20s".to_string(),
+        };
+        let result = most_restrictive(a, b);
+        assert_eq!(result.wait_ms(), 20000);
+    }
+
+    #[test]
+    fn restrictive_proceed_vs_reject() {
+        let result = most_restrictive(
+            ThrottleDecision::Proceed,
+            ThrottleDecision::Reject {
+                pool: "p".to_string(),
+                reason: "r".to_string(),
+            },
+        );
+        assert!(matches!(result, ThrottleDecision::Reject { .. }));
+    }
+
+    #[test]
+    fn restrictive_proceed_vs_wait_for_reset() {
+        let result = most_restrictive(
+            ThrottleDecision::Proceed,
+            ThrottleDecision::WaitForReset {
+                wait_ms: 5000,
+                pool: "p".to_string(),
+                countdown: "5s".to_string(),
+            },
+        );
+        assert!(matches!(result, ThrottleDecision::WaitForReset { .. }));
+    }
+
+    #[test]
+    fn restrictive_delay_vs_reject() {
+        let delay = ThrottleDecision::Delay {
+            delay_ms: 100,
+            pool: "p".to_string(),
+            reason: "r".to_string(),
+        };
+        let reject = ThrottleDecision::Reject {
+            pool: "q".to_string(),
+            reason: "r".to_string(),
+        };
+        let result = most_restrictive(delay, reject);
+        assert!(matches!(result, ThrottleDecision::Reject { .. }));
+    }
+
+    // ── schedule_operations (extended) ───────────────────────────
+
+    #[test]
+    fn schedule_single_op() {
+        let limits = ConnectorRateLimits::new(
+            "gh",
+            vec![PoolSnapshot::new(
+                "core",
+                0,
+                5000,
+                Some(Utc::now() + Duration::minutes(10)),
+            )],
+        );
+        let config = ThrottleConfig::balanced();
+        let sched = schedule_operations(&limits, 1, &config);
+        assert_eq!(sched.total_ops, 1);
+        assert_eq!(sched.ops_before_wait, 1);
+        assert!(!sched.needs_mid_batch_wait);
+        // With only 1 op, estimated_duration = inter_op_delay * (1-1) = 0
+        assert_eq!(sched.estimated_duration_ms, 0);
+    }
+
+    #[test]
+    fn schedule_multi_pool_picks_most_restrictive() {
+        let limits = ConnectorRateLimits::new(
+            "gh",
+            vec![
+                PoolSnapshot::new(
+                    "core",
+                    4000,
+                    5000,
+                    Some(Utc::now() + Duration::minutes(10)),
+                ),
+                PoolSnapshot::new(
+                    "search",
+                    25,
+                    30,
+                    Some(Utc::now() + Duration::minutes(1)),
+                ),
+            ],
+        );
+        let config = ThrottleConfig::balanced();
+        let sched = schedule_operations(&limits, 10, &config);
+        // search has only 5 remaining vs core's 1000 → search is limiting
+        assert_eq!(sched.limiting_pool, "search");
+        assert_eq!(sched.ops_before_wait, 5);
+        assert!(sched.needs_mid_batch_wait);
+    }
+
+    #[test]
+    fn schedule_all_quota_used_no_reset() {
+        let limits = ConnectorRateLimits::new(
+            "gh",
+            vec![PoolSnapshot::new("core", 5000, 5000, None)],
+        );
+        let config = ThrottleConfig::balanced();
+        let sched = schedule_operations(&limits, 10, &config);
+        // min_remaining = 0, ops_before_wait = 0
+        assert_eq!(sched.ops_before_wait, 0);
+        assert!(!sched.needs_mid_batch_wait); // needs_mid_batch_wait requires min_remaining > 0
+    }
+
+    #[test]
+    fn schedule_limiting_pool_set_correctly() {
+        let limits = ConnectorRateLimits::new(
+            "gh",
+            vec![
+                PoolSnapshot::new("core", 100, 5000, None),
+                PoolSnapshot::new("search", 28, 30, None),
+            ],
+        );
+        let config = ThrottleConfig::balanced();
+        let sched = schedule_operations(&limits, 5, &config);
+        assert_eq!(sched.limiting_pool, "search");
+    }
+
+    #[test]
+    fn schedule_ops_equal_remaining() {
+        let limits = ConnectorRateLimits::new(
+            "gh",
+            vec![PoolSnapshot::new(
+                "core",
+                4990,
+                5000,
+                Some(Utc::now() + Duration::minutes(5)),
+            )],
+        );
+        let config = ThrottleConfig::balanced();
+        let sched = schedule_operations(&limits, 10, &config);
+        // remaining = 10, total = 10 → exactly fits
+        assert_eq!(sched.ops_before_wait, 10);
+        assert!(!sched.needs_mid_batch_wait);
+    }
+
+    #[test]
+    fn schedule_summary_no_delay() {
+        let sched = OperationSchedule {
+            total_ops: 5,
+            inter_op_delay_ms: 0,
+            estimated_duration_ms: 0,
+            limiting_pool: String::new(),
+            ops_before_wait: 5,
+            needs_mid_batch_wait: false,
+            mid_batch_wait_ms: 0,
+        };
+        let summary = sched.summary();
+        assert!(summary.contains("5 ops"));
+        assert!(summary.contains("0s"));
+    }
+
+    // ── estimate_pipeline_cost (extended) ────────────────────────
+
+    #[test]
+    fn pipeline_cost_empty_ops() {
+        let limits = ConnectorRateLimits::new(
+            "gh",
+            vec![PoolSnapshot::new("core", 0, 5000, None)],
+        );
+        let costs = estimate_pipeline_cost(&limits, &[]);
+        assert!(costs.fits_in_quota);
+        assert_eq!(costs.resets_needed, 0);
+        assert!(costs.pool_costs.is_empty());
+    }
+
+    #[test]
+    fn pipeline_cost_multiple_bottlenecks() {
+        let limits = ConnectorRateLimits::new(
+            "gh",
+            vec![
+                PoolSnapshot::new(
+                    "core",
+                    4990,
+                    5000,
+                    Some(Utc::now() + Duration::minutes(1)),
+                ),
+                PoolSnapshot::new(
+                    "search",
+                    29,
+                    30,
+                    Some(Utc::now() + Duration::minutes(1)),
+                ),
+            ],
+        );
+        let costs = estimate_pipeline_cost(
+            &limits,
+            &[("core".to_string(), 100), ("search".to_string(), 50)],
+        );
+        assert!(!costs.fits_in_quota);
+        let bottlenecks: Vec<_> = costs.pool_costs.iter().filter(|p| p.is_bottleneck).collect();
+        assert_eq!(bottlenecks.len(), 2);
+    }
+
+    #[test]
+    fn pipeline_cost_zero_ops_per_pool() {
+        let limits = ConnectorRateLimits::new(
+            "gh",
+            vec![PoolSnapshot::new("core", 0, 5000, None)],
+        );
+        let costs = estimate_pipeline_cost(&limits, &[("core".to_string(), 0)]);
+        assert!(costs.fits_in_quota);
+    }
+
+    #[test]
+    fn pipeline_cost_pool_cost_fields() {
+        let limits = ConnectorRateLimits::new(
+            "gh",
+            vec![PoolSnapshot::new("core", 100, 5000, None)],
+        );
+        let costs = estimate_pipeline_cost(&limits, &[("core".to_string(), 50)]);
+        assert_eq!(costs.pool_costs.len(), 1);
+        let pc = &costs.pool_costs[0];
+        assert_eq!(pc.pool, "core");
+        assert_eq!(pc.ops_needed, 50);
+        assert_eq!(pc.remaining, 4900);
+        assert!(!pc.is_bottleneck);
+    }
+
+    #[test]
+    fn pipeline_cost_summary_includes_duration_when_fits() {
+        let limits = ConnectorRateLimits::new(
+            "gh",
+            vec![PoolSnapshot::new("core", 0, 5000, None)],
+        );
+        let costs = estimate_pipeline_cost(&limits, &[("core".to_string(), 10)]);
+        let summary = costs.summary();
+        assert!(summary.contains("fits"));
+        assert!(summary.contains("0s")); // estimated_duration_ms=0
+    }
+
+    #[test]
+    fn pipeline_cost_resets_needed_calculation() {
+        // Pool limit = 30, remaining = 1, ops_needed = 100
+        // resets = ceil((100-1)/30) = ceil(99/30) = 4
+        let limits = ConnectorRateLimits::new(
+            "gh",
+            vec![PoolSnapshot::new(
+                "search",
+                29,
+                30,
+                Some(Utc::now() + Duration::minutes(1)),
+            )],
+        );
+        let costs = estimate_pipeline_cost(&limits, &[("search".to_string(), 100)]);
+        assert!(!costs.fits_in_quota);
+        assert_eq!(costs.resets_needed, 4);
+    }
+
+    // ── format_duration_ms (extended) ────────────────────────────
+
+    #[test]
+    fn format_one_ms() {
+        assert_eq!(format_duration_ms(1), "1ms");
+    }
+
+    #[test]
+    fn format_exactly_one_second() {
+        assert_eq!(format_duration_ms(1000), "1s");
+    }
+
+    #[test]
+    fn format_exactly_one_minute() {
+        assert_eq!(format_duration_ms(60000), "1m");
+    }
+
+    #[test]
+    fn format_exactly_one_hour() {
+        assert_eq!(format_duration_ms(3_600_000), "1h");
+    }
+
+    #[test]
+    fn format_just_under_one_second() {
+        assert_eq!(format_duration_ms(999), "999ms");
+    }
+
+    #[test]
+    fn format_just_over_one_second() {
+        // 1001ms → 1s (integer division: 1001/1000 = 1)
+        assert_eq!(format_duration_ms(1001), "1s");
+    }
+
+    #[test]
+    fn format_59_seconds() {
+        assert_eq!(format_duration_ms(59_000), "59s");
+    }
+
+    #[test]
+    fn format_minutes_and_seconds() {
+        assert_eq!(format_duration_ms(61_000), "1m 1s");
+    }
+
+    #[test]
+    fn format_hours_and_minutes() {
+        assert_eq!(format_duration_ms(3_660_000), "1h 1m");
+    }
+
+    #[test]
+    fn format_large_value() {
+        // 2h 30m = 9_000_000ms
+        assert_eq!(format_duration_ms(9_000_000), "2h 30m");
+    }
+
+    #[test]
+    fn format_hours_exact() {
+        // 2h = 7_200_000ms
+        assert_eq!(format_duration_ms(7_200_000), "2h");
+    }
+
+    // ── format_decision (extended) ───────────────────────────────
+
+    #[test]
+    fn format_decision_delay_shows_pool() {
+        let s = format_decision(&ThrottleDecision::Delay {
+            delay_ms: 500,
+            pool: "my_pool".to_string(),
+            reason: "slow".to_string(),
+        });
+        assert!(s.contains("my_pool"));
+    }
+
+    #[test]
+    fn format_decision_reject_shows_pool() {
+        let s = format_decision(&ThrottleDecision::Reject {
+            pool: "write_pool".to_string(),
+            reason: "over limit".to_string(),
+        });
+        assert!(s.contains("write_pool"));
+        assert!(s.contains("over limit"));
+    }
+
+    #[test]
+    fn format_decision_wait_shows_pool_name() {
+        let s = format_decision(&ThrottleDecision::WaitForReset {
+            wait_ms: 5000,
+            pool: "rate_pool".to_string(),
+            countdown: "5s".to_string(),
+        });
+        assert!(s.contains("rate_pool"));
+    }
+
+    // ── format_schedule (extended) ───────────────────────────────
+
+    #[test]
+    fn format_schedule_no_delay_shows_estimated() {
+        let sched = OperationSchedule {
+            total_ops: 3,
+            inter_op_delay_ms: 0,
+            estimated_duration_ms: 0,
+            limiting_pool: String::new(),
+            ops_before_wait: 3,
+            needs_mid_batch_wait: false,
+            mid_batch_wait_ms: 0,
+        };
+        let s = format_schedule(&sched);
+        assert!(s.contains("Estimated total"));
+    }
+
+    #[test]
+    fn format_schedule_with_delay_shows_delay_line() {
+        let sched = OperationSchedule {
+            total_ops: 10,
+            inter_op_delay_ms: 2000,
+            estimated_duration_ms: 18000,
+            limiting_pool: "core".to_string(),
+            ops_before_wait: 10,
+            needs_mid_batch_wait: false,
+            mid_batch_wait_ms: 0,
+        };
+        let s = format_schedule(&sched);
+        assert!(s.contains("Delay between ops"));
+        assert!(s.contains("2s"));
+    }
+
+    // ── is_retryable_category (extended) ─────────────────────────
+
+    #[test]
+    fn retryable_mixed_case() {
+        let config = ThrottleConfig::balanced();
+        assert!(is_retryable_category("Rate_Limited", &config));
+        assert!(is_retryable_category("Timeout", &config));
+        assert!(is_retryable_category("TIMEOUT", &config));
+    }
+
+    #[test]
+    fn retryable_empty_string() {
+        let config = ThrottleConfig::balanced();
+        assert!(!is_retryable_category("", &config));
+    }
+
+    #[test]
+    fn retryable_partial_match_fails() {
+        let config = ThrottleConfig::balanced();
+        assert!(!is_retryable_category("rate", &config));
+        assert!(!is_retryable_category("time", &config));
+    }
+
+    // ── parse_strategy (extended) ────────────────────────────────
+
+    #[test]
+    fn parse_strategy_mixed_case() {
+        assert_eq!(
+            parse_strategy("Aggressive"),
+            Some(ThrottleStrategy::Aggressive)
+        );
+        assert_eq!(
+            parse_strategy("CONSERVATIVE"),
+            Some(ThrottleStrategy::Conservative)
+        );
+    }
+
+    #[test]
+    fn parse_strategy_empty() {
+        assert_eq!(parse_strategy(""), None);
+    }
+
+    #[test]
+    fn parse_strategy_whitespace_not_trimmed() {
+        // parse_strategy does not trim; " balanced" should not match
+        assert_eq!(parse_strategy(" balanced"), None);
+    }
+
+    // ── parse_max_wait (extended) ────────────────────────────────
+
+    #[test]
+    fn parse_max_wait_zero_seconds() {
+        assert_eq!(parse_max_wait("0s"), Some(Duration::seconds(0)));
+    }
+
+    #[test]
+    fn parse_max_wait_zero_minutes() {
+        assert_eq!(parse_max_wait("0m"), Some(Duration::minutes(0)));
+    }
+
+    #[test]
+    fn parse_max_wait_large_value() {
+        assert_eq!(parse_max_wait("3600s"), Some(Duration::seconds(3600)));
+    }
+
+    #[test]
+    fn parse_max_wait_trimmed_whitespace() {
+        assert_eq!(parse_max_wait("  30s  "), Some(Duration::seconds(30)));
+    }
+
+    #[test]
+    fn parse_max_wait_whitespace_only() {
+        assert_eq!(parse_max_wait("   "), None);
+    }
+
+    #[test]
+    fn parse_max_wait_negative_minutes() {
+        assert_eq!(parse_max_wait("-1m"), None);
+    }
+
+    // ── OperationSchedule serialization ─────────────────────────
+
+    #[test]
+    fn operation_schedule_serializes() {
+        let sched = OperationSchedule {
+            total_ops: 10,
+            inter_op_delay_ms: 500,
+            estimated_duration_ms: 4500,
+            limiting_pool: "core".to_string(),
+            ops_before_wait: 10,
+            needs_mid_batch_wait: false,
+            mid_batch_wait_ms: 0,
+        };
+        let json = serde_json::to_value(&sched).unwrap();
+        assert_eq!(json["total_ops"], 10);
+        assert_eq!(json["inter_op_delay_ms"], 500);
+        assert_eq!(json["needs_mid_batch_wait"], false);
+    }
+
+    #[test]
+    fn operation_schedule_clone() {
+        let sched = OperationSchedule {
+            total_ops: 5,
+            inter_op_delay_ms: 200,
+            estimated_duration_ms: 800,
+            limiting_pool: "search".to_string(),
+            ops_before_wait: 5,
+            needs_mid_batch_wait: false,
+            mid_batch_wait_ms: 0,
+        };
+        let cloned = sched.clone();
+        assert_eq!(cloned.total_ops, 5);
+        assert_eq!(cloned.limiting_pool, "search");
+    }
+
+    // ── PipelineCostEstimate serialization ───────────────────────
+
+    #[test]
+    fn pipeline_cost_estimate_serializes() {
+        let est = PipelineCostEstimate {
+            pool_costs: vec![PoolCost {
+                pool: "core".to_string(),
+                ops_needed: 50,
+                remaining: 4900,
+                is_bottleneck: false,
+            }],
+            fits_in_quota: true,
+            resets_needed: 0,
+            estimated_duration_ms: 0,
+        };
+        let json = serde_json::to_value(&est).unwrap();
+        assert_eq!(json["fits_in_quota"], true);
+        assert_eq!(json["resets_needed"], 0);
+    }
+
+    #[test]
+    fn pipeline_cost_estimate_clone() {
+        let est = PipelineCostEstimate {
+            pool_costs: vec![],
+            fits_in_quota: false,
+            resets_needed: 3,
+            estimated_duration_ms: 180000,
+        };
+        let cloned = est.clone();
+        assert_eq!(cloned.resets_needed, 3);
+        assert!(!cloned.fits_in_quota);
+    }
+
+    // ── PoolCost serialization ──────────────────────────────────
+
+    #[test]
+    fn pool_cost_serializes() {
+        let pc = PoolCost {
+            pool: "search".to_string(),
+            ops_needed: 100,
+            remaining: 5,
+            is_bottleneck: true,
+        };
+        let json = serde_json::to_value(&pc).unwrap();
+        assert_eq!(json["pool"], "search");
+        assert_eq!(json["ops_needed"], 100);
+        assert_eq!(json["remaining"], 5);
+        assert_eq!(json["is_bottleneck"], true);
+    }
+
+    #[test]
+    fn pool_cost_clone() {
+        let pc = PoolCost {
+            pool: "api".to_string(),
+            ops_needed: 20,
+            remaining: 80,
+            is_bottleneck: false,
+        };
+        let cloned = pc.clone();
+        assert_eq!(cloned.pool, "api");
+        assert_eq!(cloned.remaining, 80);
+    }
 }

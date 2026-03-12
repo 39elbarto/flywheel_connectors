@@ -1316,9 +1316,12 @@ mod tests {
     // ── Object with array of non-objects ─────────────────────────────
 
     #[test]
-    fn object_with_scalar_array_returns_error() {
+    fn object_with_scalar_array_renders_empty() {
+        // Well-known field "items" contains scalars, not objects.
+        // extract_rows succeeds but auto_detect_columns returns empty → "(no rows)".
         let data = json!({"items": [1, 2, 3]});
-        assert!(render_tabular(&data, TabularFormat::Table, &default_opts()).is_err());
+        let result = render_tabular(&data, TabularFormat::Table, &default_opts()).unwrap();
+        assert!(result.contains("no rows"));
     }
 
     #[test]

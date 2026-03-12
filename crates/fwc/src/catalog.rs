@@ -9942,4 +9942,648 @@ mod tests {
             );
         }
     }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Bead 29.8.4: Truthfulness snapshot and invariant expansion
+    // ═══════════════════════════════════════════════════════════════════
+
+    // ── DiscoveryDataSource invariants ────────────────────────────────
+
+    #[test]
+    fn snapshot_discovery_data_source_tags_are_unique() {
+        let all = [
+            DiscoveryDataSource::LiveHostInventory,
+            DiscoveryDataSource::LiveHostIntrospection,
+            DiscoveryDataSource::WorkspaceManifest,
+            DiscoveryDataSource::LocalCatalogCache,
+            DiscoveryDataSource::StaticSchema,
+        ];
+        let tags: std::collections::HashSet<&str> = all.iter().map(|s| s.tag()).collect();
+        assert_eq!(tags.len(), all.len(), "Duplicate DiscoveryDataSource tags found");
+    }
+
+    #[test]
+    fn invariant_discovery_authoritative_iff_live() {
+        let all = [
+            DiscoveryDataSource::LiveHostInventory,
+            DiscoveryDataSource::LiveHostIntrospection,
+            DiscoveryDataSource::WorkspaceManifest,
+            DiscoveryDataSource::LocalCatalogCache,
+            DiscoveryDataSource::StaticSchema,
+        ];
+        for src in &all {
+            if src.is_authoritative() {
+                assert!(
+                    !src.is_offline(),
+                    "{:?} is authoritative but also offline",
+                    src,
+                );
+            }
+            if src.is_offline() {
+                assert!(
+                    !src.is_authoritative(),
+                    "{:?} is offline but also authoritative",
+                    src,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn invariant_discovery_every_source_has_distinct_freshness_caveat() {
+        let all = [
+            DiscoveryDataSource::LiveHostInventory,
+            DiscoveryDataSource::LiveHostIntrospection,
+            DiscoveryDataSource::WorkspaceManifest,
+            DiscoveryDataSource::LocalCatalogCache,
+            DiscoveryDataSource::StaticSchema,
+        ];
+        let caveats: std::collections::HashSet<&str> =
+            all.iter().map(|s| s.freshness_caveat()).collect();
+        // At minimum, live vs offline caveats should differ
+        assert!(caveats.len() >= 2, "All freshness caveats are identical");
+        for src in &all {
+            assert!(
+                !src.freshness_caveat().is_empty(),
+                "{:?} has empty freshness caveat",
+                src,
+            );
+        }
+    }
+
+    // ── DiscoveryProvenance invariants ────────────────────────────────
+
+    #[test]
+    fn invariant_discovery_provenance_authoritative_matches_source() {
+        let sources = [
+            DiscoveryDataSource::LiveHostInventory,
+            DiscoveryDataSource::LiveHostIntrospection,
+            DiscoveryDataSource::WorkspaceManifest,
+            DiscoveryDataSource::LocalCatalogCache,
+            DiscoveryDataSource::StaticSchema,
+        ];
+        for src in sources {
+            let auth = src.is_authoritative();
+            let prov = discovery_provenance("list", src);
+            assert_eq!(
+                prov.authoritative,
+                auth,
+                "Provenance authoritative mismatch",
+            );
+        }
+    }
+
+    #[test]
+    fn invariant_discovery_provenance_caveat_matches_source_freshness() {
+        let sources = [
+            DiscoveryDataSource::LiveHostInventory,
+            DiscoveryDataSource::WorkspaceManifest,
+            DiscoveryDataSource::StaticSchema,
+        ];
+        for src in sources {
+            let caveat = src.freshness_caveat();
+            let prov = discovery_provenance("show", src);
+            assert_eq!(
+                prov.caveat,
+                caveat,
+                "Provenance caveat doesn't match source freshness",
+            );
+        }
+    }
+
+    #[test]
+    fn invariant_discovery_provenance_preserves_command_name() {
+        let prov = discovery_provenance("schema", DiscoveryDataSource::LiveHostIntrospection);
+        assert_eq!(prov.command, "schema");
+    }
+
+    #[test]
+    fn snapshot_discovery_provenance_serializes_all_fields() {
+        let prov = discovery_provenance("list", DiscoveryDataSource::LiveHostInventory);
+        let v = serde_json::to_value(&prov).unwrap();
+        assert!(v.get("command").is_some(), "Missing 'command' field");
+        assert!(v.get("source").is_some(), "Missing 'source' field");
+        assert!(v.get("authoritative").is_some(), "Missing 'authoritative' field");
+        assert!(v.get("caveat").is_some(), "Missing 'caveat' field");
+    }
+
+    // ── RuntimeMode mutual exclusivity invariants ────────────────────
+
+    #[test]
+    fn invariant_runtime_mode_exactly_one_state_true() {
+        let modes = [
+            RuntimeMode::Live,
+            RuntimeMode::ExplicitOffline,
+            RuntimeMode::DegradedOffline,
+            RuntimeMode::Refused,
+        ];
+        for mode in &modes {
+            let sum = (mode.is_authoritative() as u8)
+                + (mode.is_offline() as u8)
+                + (mode.is_refused() as u8);
+            assert_eq!(
+                sum, 1,
+                "RuntimeMode::{:?} violates mutual exclusivity: auth={} offline={} refused={}",
+                mode,
+                mode.is_authoritative(),
+                mode.is_offline(),
+                mode.is_refused(),
+            );
+        }
+    }
+
+    #[test]
+    fn invariant_runtime_mode_tags_are_unique() {
+        let modes = [
+            RuntimeMode::Live,
+            RuntimeMode::ExplicitOffline,
+            RuntimeMode::DegradedOffline,
+            RuntimeMode::Refused,
+        ];
+        let tags: std::collections::HashSet<&str> = modes.iter().map(|m| m.tag()).collect();
+        assert_eq!(tags.len(), modes.len(), "Duplicate RuntimeMode tags");
+    }
+
+    #[test]
+    fn invariant_runtime_mode_provenance_marker_implies_offline() {
+        let modes = [
+            RuntimeMode::Live,
+            RuntimeMode::ExplicitOffline,
+            RuntimeMode::DegradedOffline,
+            RuntimeMode::Refused,
+        ];
+        for mode in &modes {
+            if mode.needs_provenance_marker() {
+                assert!(
+                    mode.is_offline(),
+                    "{:?} needs provenance marker but is not offline",
+                    mode,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn invariant_runtime_mode_degradation_warning_only_for_degraded() {
+        assert!(!RuntimeMode::Live.needs_degradation_warning());
+        assert!(!RuntimeMode::ExplicitOffline.needs_degradation_warning());
+        assert!(RuntimeMode::DegradedOffline.needs_degradation_warning());
+        assert!(!RuntimeMode::Refused.needs_degradation_warning());
+    }
+
+    // ── CommandTruthSource invariants ─────────────────────────────────
+
+    #[test]
+    fn snapshot_command_truth_source_serde_tags_are_distinct() {
+        let sources = [
+            CommandTruthSource::LiveHost,
+            CommandTruthSource::OfflineArtifact,
+            CommandTruthSource::Hybrid,
+            CommandTruthSource::Passthrough,
+        ];
+        let tags: std::collections::HashSet<String> = sources
+            .iter()
+            .map(|s| serde_json::to_string(s).unwrap())
+            .collect();
+        assert_eq!(tags.len(), sources.len(), "Duplicate CommandTruthSource serde tags");
+    }
+
+    #[test]
+    fn invariant_every_truth_source_variant_appears_in_classifications() {
+        let has_live = COMMAND_CLASSIFICATIONS
+            .iter()
+            .any(|c| matches!(c.truth_source, CommandTruthSource::LiveHost));
+        let has_offline = COMMAND_CLASSIFICATIONS
+            .iter()
+            .any(|c| matches!(c.truth_source, CommandTruthSource::OfflineArtifact));
+        let has_hybrid = COMMAND_CLASSIFICATIONS
+            .iter()
+            .any(|c| matches!(c.truth_source, CommandTruthSource::Hybrid));
+        let has_passthrough = COMMAND_CLASSIFICATIONS
+            .iter()
+            .any(|c| matches!(c.truth_source, CommandTruthSource::Passthrough));
+        assert!(has_live, "No LiveHost command in COMMAND_CLASSIFICATIONS");
+        assert!(has_offline, "No OfflineArtifact command in COMMAND_CLASSIFICATIONS");
+        assert!(has_hybrid, "No Hybrid command in COMMAND_CLASSIFICATIONS");
+        assert!(has_passthrough, "No Passthrough command in COMMAND_CLASSIFICATIONS");
+    }
+
+    // ── CommandExecutionMode invariants ───────────────────────────────
+
+    #[test]
+    fn snapshot_command_execution_mode_serde_tags_are_distinct() {
+        let modes = [
+            CommandExecutionMode::ReadOnly,
+            CommandExecutionMode::Mutating,
+            CommandExecutionMode::Simulate,
+            CommandExecutionMode::Interactive,
+            CommandExecutionMode::LocalOnly,
+        ];
+        let tags: std::collections::HashSet<String> = modes
+            .iter()
+            .map(|m| serde_json::to_string(m).unwrap())
+            .collect();
+        assert_eq!(tags.len(), modes.len(), "Duplicate CommandExecutionMode serde tags");
+    }
+
+    #[test]
+    fn invariant_every_execution_mode_appears_in_classifications() {
+        let has_readonly = COMMAND_CLASSIFICATIONS
+            .iter()
+            .any(|c| matches!(c.execution_mode, CommandExecutionMode::ReadOnly));
+        let has_mutating = COMMAND_CLASSIFICATIONS
+            .iter()
+            .any(|c| matches!(c.execution_mode, CommandExecutionMode::Mutating));
+        let has_local = COMMAND_CLASSIFICATIONS
+            .iter()
+            .any(|c| matches!(c.execution_mode, CommandExecutionMode::LocalOnly));
+        assert!(has_readonly, "No ReadOnly command in COMMAND_CLASSIFICATIONS");
+        assert!(has_mutating, "No Mutating command in COMMAND_CLASSIFICATIONS");
+        assert!(has_local, "No LocalOnly command in COMMAND_CLASSIFICATIONS");
+    }
+
+    // ── CommandClassification cross-invariants ────────────────────────
+
+    #[test]
+    fn invariant_offline_artifact_commands_are_unaffected_by_host() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            if matches!(cls.truth_source, CommandTruthSource::OfflineArtifact) {
+                assert!(
+                    matches!(cls.host_absent, HostAbsentBehavior::Unaffected),
+                    "Offline command '{}' has non-Unaffected host_absent: {:?}",
+                    cls.command,
+                    cls.host_absent,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn invariant_offline_artifact_commands_never_require_tokens() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            if matches!(cls.truth_source, CommandTruthSource::OfflineArtifact) {
+                assert!(
+                    !cls.requires_capability_token,
+                    "Offline command '{}' requires capability token",
+                    cls.command,
+                );
+                assert!(
+                    !cls.may_need_approval,
+                    "Offline command '{}' may need approval",
+                    cls.command,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn invariant_local_only_mode_host_behavior_is_benign() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            if matches!(cls.execution_mode, CommandExecutionMode::LocalOnly) {
+                // LocalOnly commands should not fail-fast on host absence
+                assert!(
+                    !matches!(cls.host_absent, HostAbsentBehavior::FailFast),
+                    "LocalOnly command '{}' has FailFast host_absent, but shouldn't need host",
+                    cls.command,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn invariant_all_classified_commands_have_nonempty_name() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            assert!(
+                !cls.command.is_empty(),
+                "Empty command name in COMMAND_CLASSIFICATIONS"
+            );
+        }
+    }
+
+    #[test]
+    fn invariant_every_commands_entry_has_classification() {
+        for cmd in COMMANDS {
+            let found = classify_command(cmd);
+            assert!(
+                found.is_some(),
+                "Command '{}' from COMMANDS has no classification",
+                cmd,
+            );
+        }
+    }
+
+    // ── expected_discovery_source cross-invariants ────────────────────
+
+    #[test]
+    fn invariant_expected_discovery_source_live_returns_some_for_all_discovery_commands() {
+        for cmd in DISCOVERY_COMMANDS {
+            let result = expected_discovery_source(cmd, RuntimeMode::Live);
+            assert!(
+                result.is_some(),
+                "expected_discovery_source('{}', Live) returned None",
+                cmd,
+            );
+        }
+    }
+
+    #[test]
+    fn invariant_expected_discovery_source_refused_always_none() {
+        for cmd in DISCOVERY_COMMANDS {
+            let result = expected_discovery_source(cmd, RuntimeMode::Refused);
+            assert!(
+                result.is_none(),
+                "expected_discovery_source('{}', Refused) should be None",
+                cmd,
+            );
+        }
+    }
+
+    #[test]
+    fn invariant_expected_discovery_source_offline_returns_offline_source() {
+        for cmd in DISCOVERY_COMMANDS {
+            if let Some(src) = expected_discovery_source(cmd, RuntimeMode::ExplicitOffline) {
+                assert!(
+                    src.is_offline(),
+                    "Discovery source for '{}' in ExplicitOffline is not offline: {:?}",
+                    cmd,
+                    src,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn invariant_expected_discovery_source_live_returns_authoritative_source() {
+        for cmd in DISCOVERY_COMMANDS {
+            if let Some(src) = expected_discovery_source(cmd, RuntimeMode::Live) {
+                assert!(
+                    src.is_authoritative(),
+                    "Discovery source for '{}' in Live is not authoritative: {:?}",
+                    cmd,
+                    src,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn snapshot_only_list_returns_inventory_in_live_mode() {
+        for cmd in DISCOVERY_COMMANDS {
+            if let Some(src) = expected_discovery_source(cmd, RuntimeMode::Live) {
+                if *cmd == "list" {
+                    assert!(
+                        matches!(src, DiscoveryDataSource::LiveHostInventory),
+                        "'list' should use LiveHostInventory, got {:?}",
+                        src,
+                    );
+                } else {
+                    assert!(
+                        !matches!(src, DiscoveryDataSource::LiveHostInventory),
+                        "'{}' should NOT use LiveHostInventory",
+                        cmd,
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn invariant_expected_discovery_source_non_discovery_always_none() {
+        let non_discovery = ["invoke", "batch", "doctor", "status", "guide"];
+        for cmd in &non_discovery {
+            assert!(
+                expected_discovery_source(cmd, RuntimeMode::Live).is_none(),
+                "Non-discovery command '{}' returned Some from expected_discovery_source",
+                cmd,
+            );
+        }
+    }
+
+    // ── WorkflowKind invariants ──────────────────────────────────────
+
+    #[test]
+    fn snapshot_workflow_kind_tags_are_unique() {
+        let kinds = [
+            WorkflowKind::LocalTransform,
+            WorkflowKind::OrchestratedExecution,
+        ];
+        let tags: std::collections::HashSet<String> = kinds
+            .iter()
+            .map(|k| serde_json::to_string(k).unwrap())
+            .collect();
+        assert_eq!(tags.len(), kinds.len(), "Duplicate WorkflowKind serde tags");
+    }
+
+    // ── SimulateCapability invariants ─────────────────────────────────
+
+    #[test]
+    fn snapshot_simulate_capability_tags_are_unique() {
+        let caps = [
+            SimulateCapability::FullDryRun,
+            SimulateCapability::PreflightOnly,
+            SimulateCapability::Unknown,
+            SimulateCapability::Unsupported,
+        ];
+        let tags: std::collections::HashSet<String> = caps
+            .iter()
+            .map(|c| serde_json::to_string(c).unwrap())
+            .collect();
+        assert_eq!(tags.len(), caps.len(), "Duplicate SimulateCapability serde tags");
+    }
+
+    // ── HostAbsentBehavior invariants ─────────────────────────────────
+
+    #[test]
+    fn snapshot_host_absent_behavior_tags_are_unique() {
+        let behaviors = [
+            HostAbsentBehavior::FailFast,
+            HostAbsentBehavior::DegradedWithWarning,
+            HostAbsentBehavior::Unaffected,
+            HostAbsentBehavior::PassthroughDependent,
+        ];
+        let tags: std::collections::HashSet<String> = behaviors
+            .iter()
+            .map(|b| serde_json::to_string(b).unwrap())
+            .collect();
+        assert_eq!(
+            tags.len(),
+            behaviors.len(),
+            "Duplicate HostAbsentBehavior serde tags"
+        );
+    }
+
+    // ── Auth-truth cross-invariants ──────────────────────────────────
+
+    #[test]
+    fn invariant_commands_requiring_capability_are_live_host() {
+        for cls in COMMAND_CLASSIFICATIONS {
+            if cls.requires_capability_token {
+                assert!(
+                    matches!(cls.truth_source, CommandTruthSource::LiveHost),
+                    "Command '{}' requires capability token but truth_source is {:?}",
+                    cls.command,
+                    cls.truth_source,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn invariant_commands_needing_approval_are_not_offline_only() {
+        // Commands that need approval must involve some runtime interaction
+        for cls in COMMAND_CLASSIFICATIONS {
+            if cls.may_need_approval {
+                assert!(
+                    !matches!(cls.truth_source, CommandTruthSource::OfflineArtifact),
+                    "Command '{}' may need approval but is OfflineArtifact",
+                    cls.command,
+                );
+            }
+        }
+    }
+
+    // ── Transcript/evidence invariants ────────────────────────────────
+
+    #[test]
+    fn snapshot_transcript_entry_has_stable_schema() {
+        let entry = transcript_entry(
+            "invoke",
+            TranscriptPhase::Execution,
+            "live",
+            "live-host-inventory",
+            true,
+            "executed invoke against live host",
+        );
+        assert_eq!(entry.command, "invoke");
+        assert!(matches!(entry.phase, TranscriptPhase::Execution));
+        assert!(entry.authoritative);
+        assert!(!entry.correlation_id.is_empty());
+        assert!(!entry.detail.is_empty());
+    }
+
+    #[test]
+    fn snapshot_transcript_entry_all_phases_covered() {
+        let phases = [
+            TranscriptPhase::Discovery,
+            TranscriptPhase::Preflight,
+            TranscriptPhase::Execution,
+            TranscriptPhase::PostExecution,
+            TranscriptPhase::Cancellation,
+            TranscriptPhase::Reconnect,
+        ];
+        for phase in phases {
+            let entry = transcript_entry("test", phase, "live", "test-source", true, "detail");
+            assert_eq!(entry.command, "test");
+        }
+    }
+
+    #[test]
+    fn invariant_replay_artifact_tracks_evidence_types() {
+        let live_entry = transcript_entry(
+            "invoke",
+            TranscriptPhase::Execution,
+            "live",
+            "live-host",
+            true,
+            "live execution",
+        );
+        let offline_entry = transcript_entry(
+            "list",
+            TranscriptPhase::Discovery,
+            "explicit-offline",
+            "workspace-manifest",
+            false,
+            "offline listing",
+        );
+        let artifact = build_replay_artifact("test-scenario", vec![live_entry, offline_entry]);
+        assert!(artifact.live_evidence, "Should detect live evidence");
+        assert!(artifact.offline_evidence, "Should detect offline evidence");
+        assert_eq!(artifact.entries.len(), 2);
+        assert_eq!(artifact.scenario_id, "test-scenario");
+    }
+
+    #[test]
+    fn invariant_evidence_bundle_metadata_counts_correctly() {
+        let live_entry = transcript_entry(
+            "invoke",
+            TranscriptPhase::Execution,
+            "live",
+            "live-host",
+            true,
+            "live invocation",
+        );
+        let artifact = build_replay_artifact("test", vec![live_entry]);
+        let meta = evidence_bundle_metadata(&artifact, true);
+        assert_eq!(meta.live_count, 1);
+        assert_eq!(meta.offline_count, 0);
+        assert!(meta.redaction_safe);
+        assert_eq!(meta.command_count, 1);
+    }
+
+    // ── Intent action invariants ─────────────────────────────────────
+
+    #[test]
+    fn invariant_intent_actions_are_nonempty_and_unique() {
+        assert!(!INTENT_ACTIONS.is_empty(), "INTENT_ACTIONS should not be empty");
+        let names: std::collections::HashSet<&&str> =
+            INTENT_ACTIONS.iter().collect();
+        assert_eq!(names.len(), INTENT_ACTIONS.len(), "Duplicate intent action names");
+        for action in INTENT_ACTIONS {
+            assert!(!action.is_empty(), "Empty intent action name");
+        }
+    }
+
+    #[test]
+    fn invariant_intent_actions_core_commands_have_classifications() {
+        // Core runtime intent actions should have classifications
+        let core_actions = ["invoke", "simulate", "install", "update", "config"];
+        for action in &core_actions {
+            let found = classify_command(action);
+            assert!(
+                found.is_some(),
+                "Core intent action '{}' has no classification",
+                action,
+            );
+        }
+    }
+
+    // ── Validate/export invariants ───────────────────────────────────
+
+    #[test]
+    fn invariant_export_commands_are_in_commands() {
+        for cmd in EXPORT_COMMANDS {
+            assert!(
+                COMMANDS.contains(cmd),
+                "EXPORT_COMMANDS has '{}' which is not in COMMANDS",
+                cmd,
+            );
+        }
+    }
+
+    #[test]
+    fn invariant_admin_commands_are_nonempty_and_unique() {
+        assert!(!ADMIN_COMMANDS.is_empty(), "ADMIN_COMMANDS should not be empty");
+        let names: std::collections::HashSet<&&str> =
+            ADMIN_COMMANDS.iter().collect();
+        assert_eq!(names.len(), ADMIN_COMMANDS.len(), "Duplicate admin commands");
+        for cmd in ADMIN_COMMANDS {
+            assert!(!cmd.is_empty(), "Empty admin command name");
+        }
+    }
+
+    #[test]
+    fn snapshot_tool_availability_tags_are_unique() {
+        let avails = [
+            ToolAvailability::Live,
+            ToolAvailability::Unavailable,
+            ToolAvailability::Unsupported,
+            ToolAvailability::Withheld,
+            ToolAvailability::Unknown,
+        ];
+        let tags: std::collections::HashSet<String> = avails
+            .iter()
+            .map(|a| serde_json::to_string(a).unwrap())
+            .collect();
+        assert_eq!(tags.len(), avails.len(), "Duplicate ToolAvailability serde tags");
+    }
 }

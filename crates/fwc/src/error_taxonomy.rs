@@ -1233,4 +1233,375 @@ mod tests {
             );
         }
     }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Expanded coverage: category mapping, recovery guidance, envelopes
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn all_error_codes_start_with_fcp_err() {
+        let codes = ALL_CODES;
+        for code in codes {
+            assert!(
+                code.as_str().starts_with("FCP_ERR_"),
+                "{:?} as_str() = '{}' doesn't start with FCP_ERR_",
+                code,
+                code.as_str(),
+            );
+        }
+    }
+
+    #[test]
+    fn all_error_codes_have_unique_strings() {
+        let codes = ALL_CODES;
+        let strings: Vec<&str> = codes.iter().map(|c| c.as_str()).collect();
+        let unique: std::collections::HashSet<&str> = strings.iter().copied().collect();
+        assert_eq!(
+            strings.len(),
+            unique.len(),
+            "Duplicate error code strings found"
+        );
+    }
+
+    #[test]
+    fn all_error_codes_map_to_a_category() {
+        let codes = ALL_CODES;
+        for code in codes {
+            let cat = code.category();
+            assert!(
+                !cat.tag().is_empty(),
+                "{:?} maps to empty category tag",
+                code,
+            );
+        }
+    }
+
+    #[test]
+    fn all_categories_have_at_least_one_code() {
+        let categories = [
+            FwcErrorCategory::Parse,
+            FwcErrorCategory::Validation,
+            FwcErrorCategory::Auth,
+            FwcErrorCategory::RateLimit,
+            FwcErrorCategory::Policy,
+            FwcErrorCategory::Connector,
+            FwcErrorCategory::Transport,
+            FwcErrorCategory::External,
+            FwcErrorCategory::Resource,
+            FwcErrorCategory::Internal,
+        ];
+        for cat in &categories {
+            let count = ALL_CODES
+                .iter()
+                .filter(|c| std::mem::discriminant(&c.category()) == std::mem::discriminant(cat))
+                .count();
+            assert!(count > 0, "Category {:?} has no error codes", cat,);
+        }
+    }
+
+    #[test]
+    fn expanded_exit_codes_are_in_valid_range() {
+        for code in ALL_CODES {
+            let exit = code.exit_code();
+            assert!(exit <= 128, "{:?} has exit code {} > 128", code, exit,);
+        }
+    }
+
+    #[test]
+    fn recovery_actions_are_non_empty() {
+        for code in ALL_CODES {
+            let recovery = code.default_recovery();
+            assert!(
+                !recovery.action.is_empty(),
+                "{:?} has empty recovery action",
+                code,
+            );
+        }
+    }
+
+    #[test]
+    fn recovery_commands_contain_fwc_when_present() {
+        for code in ALL_CODES {
+            let recovery = code.default_recovery();
+            if !recovery.command.is_empty() {
+                assert!(
+                    recovery.command.starts_with("fwc ") || recovery.command.contains("fwc"),
+                    "{:?} recovery command doesn't mention fwc: {}",
+                    code,
+                    recovery.command,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn retryable_codes_have_retryable_categories() {
+        // Rate-limit and transport codes should be retryable
+        for code in ALL_CODES {
+            if matches!(
+                code.category(),
+                FwcErrorCategory::RateLimit | FwcErrorCategory::Transport
+            ) {
+                assert!(
+                    code.retryable(),
+                    "{:?} in retryable category but not retryable",
+                    code,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn non_retryable_validation_codes() {
+        for code in ALL_CODES {
+            if matches!(
+                code.category(),
+                FwcErrorCategory::Validation | FwcErrorCategory::Parse
+            ) {
+                assert!(
+                    !code.retryable(),
+                    "{:?} in validation/parse category should not be retryable",
+                    code,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn structured_error_has_all_required_fields() {
+        let err = fcp_core::FcpError::RateLimited {
+            retry_after_ms: 5000,
+            violation: None,
+        };
+        let se = structured_from_fcp_error(&err);
+        assert!(!se.code.is_empty());
+        assert!(!se.category.is_empty());
+        assert!(!se.message.is_empty());
+        assert!(se.exit_code > 0 || se.exit_code == 0); // valid u8
+        assert!(!se.recovery.action.is_empty());
+    }
+
+    #[test]
+    fn structured_error_json_has_stable_keys() {
+        let err = fcp_core::FcpError::Unauthorized {
+            code: 2001,
+            message: "bad token".to_owned(),
+        };
+        let se = structured_from_fcp_error(&err);
+        let v = se.to_value();
+        assert!(v.get("code").is_some());
+        assert!(v.get("category").is_some());
+        assert!(v.get("message").is_some());
+        assert!(v.get("exit_code").is_some());
+        assert!(v.get("retryable").is_some());
+        assert!(v.get("recovery").is_some());
+    }
+
+    #[test]
+    fn structured_error_round_trip_via_json_value() {
+        let err = fcp_core::FcpError::ConnectorUnavailable {
+            code: 5001,
+            message: "down".to_owned(),
+        };
+        let se = structured_from_fcp_error(&err);
+        let json = serde_json::to_string(&se).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["code"].as_str().unwrap(), se.code);
+        assert_eq!(parsed["category"].as_str().unwrap(), se.category);
+        assert_eq!(parsed["retryable"].as_bool().unwrap(), se.retryable);
+        assert_eq!(
+            parsed["exit_code"].as_u64().unwrap(),
+            u64::from(se.exit_code)
+        );
+    }
+
+    #[test]
+    fn classify_connector_not_configured() {
+        let err = fcp_core::FcpError::NotConfigured;
+        assert_eq!(
+            classify_fcp_error(&err),
+            FcpErrorCode::FcpErrConnectorNotConfigured
+        );
+    }
+
+    #[test]
+    fn classify_connector_not_handshaken() {
+        let err = fcp_core::FcpError::NotHandshaken;
+        assert_eq!(
+            classify_fcp_error(&err),
+            FcpErrorCode::FcpErrConnectorNotConfigured
+        );
+    }
+
+    #[test]
+    fn classify_health_check_failed() {
+        let err = fcp_core::FcpError::HealthCheckFailed {
+            reason: "timeout".to_owned(),
+        };
+        assert_eq!(
+            classify_fcp_error(&err),
+            FcpErrorCode::FcpErrHealthCheckFailed
+        );
+    }
+
+    #[test]
+    fn classify_streaming_not_supported() {
+        let err = fcp_core::FcpError::StreamingNotSupported;
+        assert_eq!(
+            classify_fcp_error(&err),
+            FcpErrorCode::FcpErrStreamingNotSupported
+        );
+    }
+
+    #[test]
+    fn classify_resource_not_found() {
+        let err = fcp_core::FcpError::ResourceNotFound {
+            resource: "issue-123".to_owned(),
+        };
+        assert_eq!(
+            classify_fcp_error(&err),
+            FcpErrorCode::FcpErrResourceNotFound
+        );
+    }
+
+    #[test]
+    fn classify_resource_exhausted() {
+        let err = fcp_core::FcpError::ResourceExhausted {
+            resource: "memory".to_owned(),
+        };
+        assert_eq!(
+            classify_fcp_error(&err),
+            FcpErrorCode::FcpErrResourceExhausted
+        );
+    }
+
+    #[test]
+    fn classify_conflict() {
+        let err = fcp_core::FcpError::Conflict {
+            message: "duplicate".to_owned(),
+        };
+        assert_eq!(classify_fcp_error(&err), FcpErrorCode::FcpErrConflict);
+    }
+
+    #[test]
+    fn classify_external_retryable() {
+        let err = fcp_core::FcpError::External {
+            service: "github".to_owned(),
+            message: "500".to_owned(),
+            status_code: Some(500),
+            retryable: true,
+            retry_after: None,
+        };
+        let se = structured_from_fcp_error(&err);
+        assert!(se.retryable);
+        assert!(se.details.as_ref().unwrap()["service"] == "github");
+    }
+
+    #[test]
+    fn classify_external_carries_code_level_retryable() {
+        // FcpErrExternalService is retryable at the error-code level,
+        // even when the original External error has retryable=false.
+        // The taxonomy classifies by code, not by the original field.
+        let err = fcp_core::FcpError::External {
+            service: "stripe".to_owned(),
+            message: "400".to_owned(),
+            status_code: Some(400),
+            retryable: false,
+            retry_after: None,
+        };
+        let se = structured_from_fcp_error(&err);
+        // External code is in the retryable set at the taxonomy level
+        assert!(se.retryable);
+    }
+
+    #[test]
+    fn category_tag_format() {
+        let categories = [
+            (FwcErrorCategory::Parse, "parse"),
+            (FwcErrorCategory::Validation, "validation"),
+            (FwcErrorCategory::Auth, "auth"),
+            (FwcErrorCategory::RateLimit, "rate_limit"),
+            (FwcErrorCategory::Policy, "policy"),
+            (FwcErrorCategory::Connector, "connector"),
+            (FwcErrorCategory::Transport, "transport"),
+            (FwcErrorCategory::External, "external"),
+            (FwcErrorCategory::Resource, "resource"),
+            (FwcErrorCategory::Internal, "internal"),
+        ];
+        for (cat, expected) in &categories {
+            assert_eq!(cat.tag(), *expected);
+        }
+    }
+
+    #[test]
+    fn error_code_count() {
+        assert_eq!(ALL_CODES.len(), ERROR_CODE_COUNT);
+    }
+
+    #[test]
+    fn connector_codes_exit_7() {
+        let connector_codes = [
+            FcpErrorCode::FcpErrConnectorUnavailable,
+            FcpErrorCode::FcpErrConnectorNotConfigured,
+            FcpErrorCode::FcpErrHealthCheckFailed,
+            FcpErrorCode::FcpErrStreamingNotSupported,
+            FcpErrorCode::FcpErrCircuitOpen,
+        ];
+        for code in &connector_codes {
+            assert_eq!(
+                code.exit_code(),
+                7,
+                "Connector code {:?} should exit 7",
+                code,
+            );
+        }
+    }
+
+    #[test]
+    fn transport_codes_exit_8() {
+        let transport_codes = [
+            FcpErrorCode::FcpErrTransportFailed,
+            FcpErrorCode::FcpErrUpstreamTimeout,
+            FcpErrorCode::FcpErrDependencyUnavailable,
+        ];
+        for code in &transport_codes {
+            assert_eq!(
+                code.exit_code(),
+                8,
+                "Transport code {:?} should exit 8",
+                code,
+            );
+        }
+    }
+
+    #[test]
+    fn resource_codes_exit_7_same_as_connector() {
+        let resource_codes = [
+            FcpErrorCode::FcpErrResourceNotFound,
+            FcpErrorCode::FcpErrResourceExhausted,
+            FcpErrorCode::FcpErrConflict,
+        ];
+        for code in &resource_codes {
+            assert_eq!(
+                code.exit_code(),
+                7,
+                "Resource code {:?} should exit 7",
+                code,
+            );
+        }
+    }
+
+    #[test]
+    fn internal_exit_1() {
+        assert_eq!(FcpErrorCode::FcpErrInternal.exit_code(), 1);
+    }
+
+    #[test]
+    fn structured_error_without_details_has_none() {
+        let se = StructuredError::new(FcpErrorCode::FcpErrParseFailed, "bad input");
+        assert!(se.details.is_none());
+        let v = se.to_value();
+        // details is skip_serializing_if = None, so it should be absent
+        assert!(v.get("details").is_none() || v["details"].is_null());
+    }
 }

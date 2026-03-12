@@ -984,9 +984,5 @@ fn owner_keypair_debug_redacted() {
 fn recovery_phrase_debug_redacted() {
     let phrase = RecoveryPhrase::generate().unwrap();
     let debug = format!("{phrase:?}");
-    // Should not leak the actual mnemonic words
-    let words = phrase.words();
-    for word in &words {
-        assert!(!debug.contains(word), "Debug output leaked word: {word}");
-    }
+    assert_eq!(debug, "RecoveryPhrase { word_count: 24, .. }");
 }

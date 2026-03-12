@@ -364,9 +364,6 @@ impl FcpsFrame {
     /// # Errors
     /// Returns `FrameError` if the frame is malformed or exceeds MTU.
     pub fn decode(bytes: &[u8], max_datagram_bytes: usize) -> Result<Self, FrameError> {
-        // Minimum: 2 (source_id_len) + 1 (min source_id) + 8 (timestamp) + 64 (sig) + 114 (min frame)
-        const MIN_LEN: usize = 2 + 1 + 8 + 64 + FCPS_HEADER_LEN;
-
         if bytes.len() > max_datagram_bytes {
             return Err(FrameError::ExceedsMtu {
                 len: bytes.len(),
@@ -374,10 +371,10 @@ impl FcpsFrame {
             });
         }
 
-        if bytes.len() < MIN_LEN {
+        if bytes.len() < FCPS_HEADER_LEN {
             return Err(FrameError::TooShort {
                 len: bytes.len(),
-                min: MIN_LEN,
+                min: FCPS_HEADER_LEN,
             });
         }
 

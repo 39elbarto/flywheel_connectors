@@ -214,9 +214,9 @@ impl StripeWebhook {
     /// Validate timestamp is within tolerance.
     fn validate_timestamp(&self, timestamp: i64) -> WebhookResult<()> {
         let now = Utc::now().timestamp();
-        let tolerance = i64::try_from(self.timestamp_tolerance.as_secs()).unwrap_or(i64::MAX);
+        let tolerance = u64::try_from(self.timestamp_tolerance.as_secs()).unwrap_or(u64::MAX);
 
-        if (now - timestamp).abs() > tolerance {
+        if now.abs_diff(timestamp) > tolerance {
             return Err(WebhookError::TimestampValidation {
                 reason: "Timestamp outside tolerance window".into(),
                 timestamp: Some(timestamp),
@@ -273,8 +273,8 @@ impl SlackWebhook {
 
         // Validate timestamp
         let now = Utc::now().timestamp();
-        let tolerance = i64::try_from(self.timestamp_tolerance.as_secs()).unwrap_or(i64::MAX);
-        if (now - timestamp).abs() > tolerance {
+        let tolerance = u64::try_from(self.timestamp_tolerance.as_secs()).unwrap_or(u64::MAX);
+        if now.abs_diff(timestamp) > tolerance {
             return Err(WebhookError::TimestampValidation {
                 reason: "Timestamp outside tolerance".into(),
                 timestamp: Some(timestamp),

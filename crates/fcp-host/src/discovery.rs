@@ -4871,4 +4871,1004 @@ mod tests {
         assert_eq!(parsed.policy_engine, PolicyEngineStatus::Active);
         assert_eq!(parsed.connector_counts.failed, 1);
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: HostPreflightRequest::budget_request tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn host_preflight_request_budget_request_copies_all_fields() {
+        let req = HostPreflightRequest {
+            request_id: RequestId::random(),
+            connector_id: ConnectorId::new("test", "budget", "v1").unwrap(),
+            operation: "write".into(),
+            params: Some(serde_json::json!({"key": "value"})),
+            principal: Some("user:bob".into()),
+            zone_id: Some(ZoneId::work()),
+            capability_token: None,
+            approval_tokens: vec![],
+        };
+        let budget = req.budget_request();
+        assert_eq!(budget.connector_id, req.connector_id);
+        assert_eq!(budget.operation, "write");
+        assert_eq!(budget.params, req.params);
+        assert_eq!(budget.principal.as_deref(), Some("user:bob"));
+        assert!(budget.zone_id.is_some());
+    }
+
+    #[test]
+    fn host_preflight_request_budget_request_with_none_fields() {
+        let req = HostPreflightRequest {
+            request_id: RequestId::random(),
+            connector_id: ConnectorId::new("test", "minimal", "v1").unwrap(),
+            operation: "read".into(),
+            params: None,
+            principal: None,
+            zone_id: None,
+            capability_token: None,
+            approval_tokens: vec![],
+        };
+        let budget = req.budget_request();
+        assert!(budget.params.is_none());
+        assert!(budget.principal.is_none());
+        assert!(budget.zone_id.is_none());
+    }
+
+    #[test]
+    fn host_preflight_request_serialization_roundtrip() {
+        let req = HostPreflightRequest {
+            request_id: RequestId::random(),
+            connector_id: ConnectorId::new("test", "serde", "v1").unwrap(),
+            operation: "delete".into(),
+            params: Some(serde_json::json!({"id": 42})),
+            principal: Some("agent:alpha".into()),
+            zone_id: None,
+            capability_token: None,
+            approval_tokens: vec![],
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: HostPreflightRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.operation, "delete");
+        assert_eq!(parsed.principal.as_deref(), Some("agent:alpha"));
+    }
+
+    #[test]
+    fn host_preflight_request_debug() {
+        let req = HostPreflightRequest {
+            request_id: RequestId::random(),
+            connector_id: ConnectorId::new("test", "dbg", "v1").unwrap(),
+            operation: "invoke".into(),
+            params: None,
+            principal: None,
+            zone_id: None,
+            capability_token: None,
+            approval_tokens: vec![],
+        };
+        let dbg = format!("{req:?}");
+        assert!(dbg.contains("HostPreflightRequest"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: CacheMetadata::strong determinism
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn cache_metadata_strong_produces_deterministic_etag() {
+        let now = Utc::now();
+        let payload = serde_json::json!({"foo": "bar"});
+        let a = CacheMetadata::strong(&payload, now, 60, Some(30));
+        let b = CacheMetadata::strong(&payload, now, 60, Some(30));
+        assert_eq!(a.etag, b.etag);
+        assert!(a.etag.starts_with('"'));
+        assert!(a.etag.ends_with('"'));
+    }
+
+    #[test]
+    fn cache_metadata_strong_different_payload_different_etag() {
+        let now = Utc::now();
+        let a = CacheMetadata::strong(&serde_json::json!({"a": 1}), now, 60, None);
+        let b = CacheMetadata::strong(&serde_json::json!({"b": 2}), now, 60, None);
+        assert_ne!(a.etag, b.etag);
+    }
+
+    #[test]
+    fn cache_metadata_strong_stores_max_age_and_stale() {
+        let now = Utc::now();
+        let meta = CacheMetadata::strong(&"payload", now, 120, Some(45));
+        assert_eq!(meta.max_age_seconds, 120);
+        assert_eq!(meta.stale_while_revalidate_seconds, Some(45));
+        assert_eq!(meta.last_modified, now);
+    }
+
+    #[test]
+    fn cache_metadata_strong_no_stale() {
+        let now = Utc::now();
+        let meta = CacheMetadata::strong(&"payload", now, 30, None);
+        assert!(meta.stale_while_revalidate_seconds.is_none());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: CacheValidator boundary: equal timestamp
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn cache_validator_if_modified_since_equal_is_not_modified() {
+        let now = Utc::now();
+        let meta = CacheMetadata {
+            etag: "\"x\"".to_string(),
+            last_modified: now,
+            max_age_seconds: 30,
+            stale_while_revalidate_seconds: None,
+        };
+        let v = CacheValidator {
+            if_none_match: None,
+            if_modified_since: Some(now),
+        };
+        // Equal timestamp means cache.last_modified <= timestamp, so not modified
+        assert!(v.is_not_modified(&meta));
+    }
+
+    #[test]
+    fn cache_validator_etag_takes_priority_over_if_modified_since() {
+        let now = Utc::now();
+        let meta = CacheMetadata {
+            etag: "\"match\"".to_string(),
+            last_modified: now,
+            max_age_seconds: 30,
+            stale_while_revalidate_seconds: None,
+        };
+        // etag matches, even if if_modified_since is in the past
+        let v = CacheValidator {
+            if_none_match: Some("\"match\"".to_string()),
+            if_modified_since: Some(now - chrono::Duration::seconds(3600)),
+        };
+        assert!(v.is_not_modified(&meta));
+    }
+
+    #[test]
+    fn cache_validator_etag_mismatch_ignores_if_modified_since() {
+        let now = Utc::now();
+        let meta = CacheMetadata {
+            etag: "\"a\"".to_string(),
+            last_modified: now,
+            max_age_seconds: 30,
+            stale_while_revalidate_seconds: None,
+        };
+        // etag mismatch returns early as modified, even if timestamp says not modified
+        let v = CacheValidator {
+            if_none_match: Some("\"b\"".to_string()),
+            if_modified_since: Some(now + chrono::Duration::seconds(3600)),
+        };
+        assert!(!v.is_not_modified(&meta));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: DiscoveryEndpoint::connector() tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn connector_endpoint_returns_summary() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let summary = make_summary(
+            "conn",
+            "test",
+            "v1",
+            vec!["messaging"],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        let registry = CountingRegistry::new(vec![summary.clone()], Arc::clone(&calls));
+        let endpoint = DiscoveryEndpoint::new(Arc::new(registry), Arc::new(AllowPolicy));
+
+        let resp = endpoint.connector(&summary.id).await.unwrap();
+        assert_eq!(resp.connector.id, summary.id);
+        assert_eq!(resp.registry_version, 1);
+        assert!(resp.cache.is_some());
+        assert!(resp.meta.is_none());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn connector_endpoint_missing_returns_error() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let registry = CountingRegistry::new(vec![], Arc::clone(&calls));
+        let endpoint = DiscoveryEndpoint::new(Arc::new(registry), Arc::new(AllowPolicy));
+        let missing = ConnectorId::new("missing", "conn", "v1").unwrap();
+
+        let err = endpoint.connector(&missing).await.unwrap_err();
+        assert!(matches!(err, HostError::ConnectorNotFound(_)));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn connector_with_cache_returns_not_modified_for_matching_etag() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let summary = make_summary(
+            "conn-cache",
+            "test",
+            "v1",
+            vec!["storage"],
+            SafetyTier::Risky,
+            ConnectorHealth::healthy(),
+        );
+        let registry = CountingRegistry::new(vec![summary.clone()], Arc::clone(&calls));
+        let endpoint = DiscoveryEndpoint::new(Arc::new(registry), Arc::new(AllowPolicy));
+
+        let first = endpoint.connector(&summary.id).await.unwrap();
+        let etag = first.cache.as_ref().unwrap().etag.clone();
+
+        let second = endpoint
+            .connector_with_cache(
+                &summary.id,
+                Some(CacheValidator {
+                    if_none_match: Some(etag),
+                    if_modified_since: None,
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(second.meta.as_ref().map(|m| m.status), Some(304));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn connector_with_cache_returns_fresh_for_stale_etag() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let summary = make_summary(
+            "conn-stale",
+            "test",
+            "v1",
+            vec!["ai"],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        let registry = CountingRegistry::new(vec![summary.clone()], Arc::clone(&calls));
+        let endpoint = DiscoveryEndpoint::new(Arc::new(registry), Arc::new(AllowPolicy));
+
+        let resp = endpoint
+            .connector_with_cache(
+                &summary.id,
+                Some(CacheValidator {
+                    if_none_match: Some("\"old-etag\"".to_string()),
+                    if_modified_since: None,
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert!(resp.meta.is_none()); // Fresh response, no 304
+        assert!(resp.cache.is_some());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn connector_with_cache_missing_connector_returns_error() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let registry = CountingRegistry::new(vec![], Arc::clone(&calls));
+        let endpoint = DiscoveryEndpoint::new(Arc::new(registry), Arc::new(AllowPolicy));
+        let missing = ConnectorId::new("gone", "conn", "v1").unwrap();
+
+        let err = endpoint
+            .connector_with_cache(
+                &missing,
+                Some(CacheValidator {
+                    if_none_match: Some("\"any\"".to_string()),
+                    if_modified_since: None,
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, HostError::ConnectorNotFound(_)));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: ConnectorInventoryResponse tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn connector_inventory_response_not_modified_has_304() {
+        let summary = make_summary(
+            "inv",
+            "nm",
+            "v1",
+            vec![],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        let now = Utc::now();
+        let cache = CacheMetadata {
+            etag: "\"e\"".to_string(),
+            last_modified: now,
+            max_age_seconds: 30,
+            stale_while_revalidate_seconds: None,
+        };
+        let resp = ConnectorInventoryResponse::not_modified(summary, 7, cache);
+        assert_eq!(resp.registry_version, 7);
+        assert!(resp.cache.is_some());
+        assert_eq!(resp.meta.as_ref().unwrap().status, 304);
+        assert_eq!(
+            resp.meta.as_ref().unwrap().message.as_deref(),
+            Some("Not Modified")
+        );
+    }
+
+    #[test]
+    fn connector_inventory_response_serialization_roundtrip() {
+        let summary = make_summary(
+            "inv",
+            "serde",
+            "v1",
+            vec!["storage"],
+            SafetyTier::Risky,
+            ConnectorHealth::degraded("slow"),
+        );
+        let resp = ConnectorInventoryResponse {
+            connector: summary,
+            registry_version: 42,
+            cache: None,
+            meta: None,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: ConnectorInventoryResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.registry_version, 42);
+        assert!(parsed.cache.is_none());
+        assert!(parsed.meta.is_none());
+    }
+
+    #[test]
+    fn connector_inventory_response_debug() {
+        let summary = make_summary(
+            "inv",
+            "dbg",
+            "v1",
+            vec![],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        let resp = ConnectorInventoryResponse {
+            connector: summary,
+            registry_version: 1,
+            cache: None,
+            meta: None,
+        };
+        let dbg = format!("{resp:?}");
+        assert!(dbg.contains("ConnectorInventoryResponse"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: ToolDescriptor::from edge cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn tool_descriptor_from_operation_rate_limit_no_pool_no_scope() {
+        use fcp_core::RateLimit;
+        let mut op = make_operation("op_empty_rl", None);
+        op.rate_limit = Some(RateLimit {
+            max: 50,
+            per_ms: 5000,
+            burst: Some(10),
+            scope: None,
+            pool_name: None,
+        });
+        let tool = ToolDescriptor::from(&op);
+        // Neither pool_name nor scope => empty rate_limits
+        assert!(tool.rate_limits.is_empty());
+    }
+
+    #[test]
+    fn tool_descriptor_from_operation_multiple_examples() {
+        let mut op = make_operation("multi_ex", None);
+        op.ai_hints.examples = vec![
+            r#"{"a":1}"#.into(),
+            r#"{"b":2}"#.into(),
+            r#"{"c":3}"#.into(),
+        ];
+        let tool = ToolDescriptor::from(&op);
+        assert_eq!(tool.examples.len(), 3);
+        assert_eq!(tool.examples[0].input, serde_json::json!({"a": 1}));
+        assert_eq!(tool.examples[1].input, serde_json::json!({"b": 2}));
+        assert_eq!(tool.examples[2].input, serde_json::json!({"c": 3}));
+    }
+
+    #[test]
+    fn tool_descriptor_from_operation_ai_hints_only_when_to_use() {
+        let mut op = make_operation("hints_partial", None);
+        op.ai_hints = AgentHint {
+            when_to_use: "Use when X".to_string(),
+            common_mistakes: vec![],
+            examples: vec![],
+            related: vec![],
+        };
+        let tool = ToolDescriptor::from(&op);
+        // Has when_to_use so ai_hints should be Some
+        assert!(tool.ai_hints.is_some());
+        assert_eq!(tool.ai_hints.as_ref().unwrap().when_to_use, "Use when X");
+    }
+
+    #[test]
+    fn tool_descriptor_from_operation_ai_hints_only_common_mistakes() {
+        let mut op = make_operation("hints_mistakes", None);
+        op.ai_hints = AgentHint {
+            when_to_use: String::new(),
+            common_mistakes: vec!["mistake".into()],
+            examples: vec![],
+            related: vec![],
+        };
+        let tool = ToolDescriptor::from(&op);
+        assert!(tool.ai_hints.is_some());
+    }
+
+    #[test]
+    fn tool_descriptor_from_operation_ai_hints_only_related() {
+        let mut op = make_operation("hints_related", None);
+        op.ai_hints = AgentHint {
+            when_to_use: String::new(),
+            common_mistakes: vec![],
+            examples: vec![],
+            related: vec![CapabilityId::new("cap.other").unwrap()],
+        };
+        let tool = ToolDescriptor::from(&op);
+        assert!(tool.ai_hints.is_some());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: ConnectorStateCounts edge cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn connector_state_counts_with_starting_not_healthy() {
+        let counts = ConnectorStateCounts {
+            running: 5,
+            starting: 1,
+            ..Default::default()
+        };
+        assert!(!counts.all_healthy());
+    }
+
+    #[test]
+    fn connector_state_counts_only_disabled_is_healthy() {
+        let counts = ConnectorStateCounts {
+            disabled: 10,
+            ..Default::default()
+        };
+        assert!(counts.all_healthy());
+        assert_eq!(counts.total(), 10);
+    }
+
+    #[test]
+    fn connector_state_counts_eq() {
+        let a = ConnectorStateCounts {
+            running: 1,
+            starting: 2,
+            stopped: 3,
+            failed: 4,
+            disabled: 5,
+        };
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn connector_state_counts_debug() {
+        let counts = ConnectorStateCounts {
+            running: 3,
+            ..Default::default()
+        };
+        let dbg = format!("{counts:?}");
+        assert!(dbg.contains("ConnectorStateCounts"));
+        assert!(dbg.contains('3'));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: HostDiagnostics aggregate_status priority tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn diagnostics_unhealthy_overrides_policy_error() {
+        // Even if policy is Error, Unhealthy host status takes precedence
+        let diag = make_diagnostics(
+            HostHealthStatus::Unhealthy,
+            MeshStatus::Connected,
+            PolicyEngineStatus::Error,
+            0,
+        );
+        assert_eq!(diag.aggregate_status(), HostHealthStatus::Unhealthy);
+    }
+
+    #[test]
+    fn diagnostics_degraded_host_with_failed_connectors_stays_degraded() {
+        let diag = make_diagnostics(
+            HostHealthStatus::Degraded,
+            MeshStatus::Connected,
+            PolicyEngineStatus::Active,
+            3,
+        );
+        // health.status is Degraded, policy can decide, mesh connected,
+        // failed > 0 => Degraded
+        assert_eq!(diag.aggregate_status(), HostHealthStatus::Degraded);
+    }
+
+    #[test]
+    fn diagnostics_mesh_unreachable_with_failed_connectors() {
+        let diag = make_diagnostics(
+            HostHealthStatus::Healthy,
+            MeshStatus::Unreachable,
+            PolicyEngineStatus::Active,
+            5,
+        );
+        // Mesh unreachable checked before failed connectors
+        assert_eq!(diag.aggregate_status(), HostHealthStatus::Degraded);
+    }
+
+    #[test]
+    fn diagnostics_pending_config_reload_does_not_affect_status() {
+        let mut diag = make_diagnostics(
+            HostHealthStatus::Healthy,
+            MeshStatus::Connected,
+            PolicyEngineStatus::Active,
+            0,
+        );
+        diag.pending_config_reload = true;
+        assert_eq!(diag.aggregate_status(), HostHealthStatus::Healthy);
+    }
+
+    #[test]
+    fn diagnostics_debug() {
+        let diag = make_diagnostics(
+            HostHealthStatus::Healthy,
+            MeshStatus::Connected,
+            PolicyEngineStatus::Active,
+            0,
+        );
+        let dbg = format!("{diag:?}");
+        assert!(dbg.contains("HostDiagnostics"));
+    }
+
+    #[test]
+    fn diagnostics_clone() {
+        let diag = make_diagnostics(
+            HostHealthStatus::Degraded,
+            MeshStatus::Degraded,
+            PolicyEngineStatus::PartiallyLoaded,
+            1,
+        );
+        let cloned = diag.clone();
+        assert_eq!(diag.aggregate_status(), cloned.aggregate_status());
+        assert_eq!(diag.mesh_status, cloned.mesh_status);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: DiscoveryFilter serialization edge cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn discovery_filter_partial_fields_serialization() {
+        let filter = DiscoveryFilter {
+            category: None,
+            max_risk: Some(SafetyTier::Dangerous),
+            health: None,
+        };
+        let json = serde_json::to_string(&filter).unwrap();
+        assert!(!json.contains("category"));
+        assert!(json.contains("max_risk"));
+        assert!(!json.contains("health"));
+        let parsed: DiscoveryFilter = serde_json::from_str(&json).unwrap();
+        assert!(parsed.category.is_none());
+        assert_eq!(parsed.max_risk, Some(SafetyTier::Dangerous));
+    }
+
+    #[test]
+    fn discovery_filter_only_health_field() {
+        let filter = DiscoveryFilter {
+            category: None,
+            max_risk: None,
+            health: Some(HealthFilter::Degraded),
+        };
+        let json = serde_json::to_string(&filter).unwrap();
+        assert!(!json.contains("category"));
+        assert!(!json.contains("max_risk"));
+        assert!(json.contains("health"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: MeshStatus and PolicyEngineStatus extra coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn mesh_status_debug() {
+        for status in [
+            MeshStatus::Connected,
+            MeshStatus::Degraded,
+            MeshStatus::Unreachable,
+            MeshStatus::NotConfigured,
+        ] {
+            let dbg = format!("{status:?}");
+            assert!(!dbg.is_empty());
+        }
+    }
+
+    #[test]
+    fn mesh_status_copy() {
+        let a = MeshStatus::Connected;
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn policy_engine_status_debug() {
+        for status in [
+            PolicyEngineStatus::Active,
+            PolicyEngineStatus::PartiallyLoaded,
+            PolicyEngineStatus::NotInitialized,
+            PolicyEngineStatus::Error,
+        ] {
+            let dbg = format!("{status:?}");
+            assert!(!dbg.is_empty());
+        }
+    }
+
+    #[test]
+    fn policy_engine_status_copy() {
+        let a = PolicyEngineStatus::Active;
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn policy_engine_status_snake_case_serialization() {
+        assert_eq!(
+            serde_json::to_string(&PolicyEngineStatus::PartiallyLoaded).unwrap(),
+            "\"partially_loaded\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PolicyEngineStatus::NotInitialized).unwrap(),
+            "\"not_initialized\""
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: ResponseMeta edge cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn response_meta_no_message() {
+        let meta = ResponseMeta {
+            status: 200,
+            message: None,
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        assert!(!json.contains("message"));
+        let parsed: ResponseMeta = serde_json::from_str(&json).unwrap();
+        assert!(parsed.message.is_none());
+    }
+
+    #[test]
+    fn response_meta_clone_preserves_fields() {
+        let meta = ResponseMeta {
+            status: 500,
+            message: Some("Internal Error".into()),
+        };
+        let cloned = meta.clone();
+        assert_eq!(meta.status, cloned.status);
+        assert_eq!(meta.message, cloned.message);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: DiscoveryResponse builder chain
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn discovery_response_with_cache_metadata_chain() {
+        let now = Utc::now();
+        let cache = CacheMetadata {
+            etag: "\"chain\"".to_string(),
+            last_modified: now,
+            max_age_seconds: 60,
+            stale_while_revalidate_seconds: Some(10),
+        };
+        let resp = DiscoveryResponse::new(vec![], 5).with_cache_metadata(cache);
+        assert!(resp.cache.is_some());
+        assert_eq!(resp.cache.as_ref().unwrap().etag, "\"chain\"");
+        assert!(resp.meta.is_none());
+    }
+
+    #[test]
+    fn discovery_response_with_response_meta_chain() {
+        let meta = ResponseMeta {
+            status: 200,
+            message: Some("OK".into()),
+        };
+        let resp = DiscoveryResponse::new(vec![], 1).with_response_meta(meta);
+        assert!(resp.meta.is_some());
+        assert_eq!(resp.meta.as_ref().unwrap().status, 200);
+    }
+
+    #[test]
+    fn discovery_response_chained_cache_and_meta() {
+        let now = Utc::now();
+        let cache = CacheMetadata {
+            etag: "\"both\"".to_string(),
+            last_modified: now,
+            max_age_seconds: 30,
+            stale_while_revalidate_seconds: None,
+        };
+        let meta = ResponseMeta {
+            status: 304,
+            message: Some("Not Modified".into()),
+        };
+        let resp = DiscoveryResponse::new(vec![], 1)
+            .with_cache_metadata(cache)
+            .with_response_meta(meta);
+        assert!(resp.cache.is_some());
+        assert!(resp.meta.is_some());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: IntrospectionResponse::not_modified preserves archetype
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn introspection_response_not_modified_preserves_all_archetypes() {
+        let summary = make_summary(
+            "test",
+            "arch",
+            "v1",
+            vec![],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        let now = Utc::now();
+        for archetype in [
+            ConnectorArchetype::Unknown,
+            ConnectorArchetype::RequestResponse,
+            ConnectorArchetype::Streaming,
+            ConnectorArchetype::Bidirectional,
+            ConnectorArchetype::Polling,
+            ConnectorArchetype::Webhook,
+        ] {
+            let cache = CacheMetadata {
+                etag: "\"e\"".to_string(),
+                last_modified: now,
+                max_age_seconds: 30,
+                stale_while_revalidate_seconds: None,
+            };
+            let resp = IntrospectionResponse::not_modified(summary.clone(), archetype, cache);
+            assert_eq!(resp.archetype, archetype);
+            assert!(resp.tools.is_empty());
+            assert!(resp.introspection.operations.is_empty());
+            assert!(resp.rate_limits.is_none());
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: DiscoveryEndpoint::introspect_with_cache if_modified_since
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn introspect_with_cache_returns_not_modified_for_future_timestamp() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let summary = make_summary(
+            "introspect-ts",
+            "test",
+            "v1",
+            vec!["test"],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        let registry = CountingRegistry::new(vec![summary.clone()], Arc::clone(&calls));
+        let endpoint = DiscoveryEndpoint::new(Arc::new(registry), Arc::new(AllowPolicy));
+
+        // Populate cache
+        let _ = endpoint.introspect(&summary.id).await.unwrap();
+
+        let far_future = Utc::now() + chrono::Duration::seconds(86400);
+        let resp = endpoint
+            .introspect_with_cache(
+                &summary.id,
+                Some(CacheValidator {
+                    if_none_match: None,
+                    if_modified_since: Some(far_future),
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.meta.as_ref().map(|m| m.status), Some(304));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn introspect_with_cache_returns_fresh_for_past_timestamp() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let summary = make_summary(
+            "introspect-past",
+            "test",
+            "v1",
+            vec!["test"],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        let registry = CountingRegistry::new(vec![summary.clone()], Arc::clone(&calls));
+        let endpoint = DiscoveryEndpoint::new(Arc::new(registry), Arc::new(AllowPolicy));
+
+        let far_past = Utc::now() - chrono::Duration::seconds(86400);
+        let resp = endpoint
+            .introspect_with_cache(
+                &summary.id,
+                Some(CacheValidator {
+                    if_none_match: None,
+                    if_modified_since: Some(far_past),
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert!(resp.meta.is_none()); // Fresh, no 304
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: DiscoveryQuery with filter + validator combined
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn discover_query_with_filter_and_validator_not_modified() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let s1 = make_summary(
+            "a",
+            "msg",
+            "v1",
+            vec!["messaging"],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        let s2 = make_summary(
+            "b",
+            "stor",
+            "v1",
+            vec!["storage"],
+            SafetyTier::Risky,
+            ConnectorHealth::healthy(),
+        );
+        let registry = CountingRegistry::new(vec![s1, s2], Arc::clone(&calls));
+        let endpoint = DiscoveryEndpoint::new(Arc::new(registry), Arc::new(AllowPolicy));
+
+        // Get etag for filtered (messaging only) result
+        let filter = DiscoveryFilter {
+            category: Some("messaging".to_string()),
+            ..Default::default()
+        };
+        let first = endpoint
+            .discover_query(Some(filter.clone()), None)
+            .await;
+        assert_eq!(first.response.connectors.len(), 1);
+        let etag = first
+            .response
+            .cache
+            .as_ref()
+            .unwrap()
+            .etag
+            .clone();
+
+        // Same filter + matching etag => 304
+        let second = endpoint
+            .discover_query(
+                Some(filter),
+                Some(CacheValidator {
+                    if_none_match: Some(etag),
+                    if_modified_since: None,
+                }),
+            )
+            .await;
+        assert_eq!(
+            second.response.meta.as_ref().map(|m| m.status),
+            Some(304)
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: DiscoveryCache with very large TTL
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn discovery_cache_large_ttl() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let summary = make_summary(
+            "large-ttl",
+            "test",
+            "v1",
+            vec![],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        let registry = CountingRegistry::new(vec![summary], Arc::clone(&calls));
+        let cache = DiscoveryCache::new(Duration::from_secs(u64::from(u32::MAX)));
+
+        let first = cache.get_or_refresh(&registry).await;
+        let second = cache.get_or_refresh(&registry).await;
+        assert!(!first.cache_hit);
+        assert!(second.cache_hit);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: HostPreflightRequest with approval tokens
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn host_preflight_request_clone() {
+        let req = HostPreflightRequest {
+            request_id: RequestId::random(),
+            connector_id: ConnectorId::new("test", "clone", "v1").unwrap(),
+            operation: "op".into(),
+            params: None,
+            principal: None,
+            zone_id: None,
+            capability_token: None,
+            approval_tokens: vec![],
+        };
+        let cloned = req.clone();
+        assert_eq!(req.connector_id, cloned.connector_id);
+        assert_eq!(req.operation, cloned.operation);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: HealthFilter serialization names
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn health_filter_lowercase_names() {
+        assert_eq!(
+            serde_json::to_string(&HealthFilter::Healthy).unwrap(),
+            "\"healthy\""
+        );
+        assert_eq!(
+            serde_json::to_string(&HealthFilter::Degraded).unwrap(),
+            "\"degraded\""
+        );
+        assert_eq!(
+            serde_json::to_string(&HealthFilter::Available).unwrap(),
+            "\"available\""
+        );
+        assert_eq!(
+            serde_json::to_string(&HealthFilter::All).unwrap(),
+            "\"all\""
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: SelfCheckResponse serde
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn self_check_response_fields_preserved() {
+        let now = Utc::now();
+        let resp = SelfCheckResponse {
+            connector_id: ConnectorId::new("test", "fields", "v1").unwrap(),
+            report: SelfCheckReport::ok(),
+            checked_at: now,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: SelfCheckResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.checked_at, now);
+        assert_eq!(parsed.report.status, SelfCheckStatus::Ok);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: DiscoveryCache::cache_metadata TTL mapping
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn discovery_cache_metadata_ttl_seconds_from_duration() {
+        let cache = DiscoveryCache::new(Duration::from_secs(120));
+        let now = Utc::now();
+        let meta = cache.cache_metadata(&"test-payload", now);
+        assert_eq!(meta.max_age_seconds, 120);
+        assert_eq!(meta.stale_while_revalidate_seconds, Some(120));
+        assert_eq!(meta.last_modified, now);
+    }
+
+    #[test]
+    fn discovery_cache_metadata_zero_ttl() {
+        let cache = DiscoveryCache::new(Duration::from_millis(0));
+        let now = Utc::now();
+        let meta = cache.cache_metadata(&"payload", now);
+        assert_eq!(meta.max_age_seconds, 0);
+        assert_eq!(meta.stale_while_revalidate_seconds, Some(0));
+    }
 }

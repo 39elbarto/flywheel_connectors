@@ -2553,4 +2553,915 @@ mod tests {
         assert_eq!(result.error.as_ref().unwrap().code, "DEP_FAILED");
         assert_eq!(result.error.as_ref().unwrap().message, "dependency failed");
     }
+
+    // ── New tests: batch_status edge cases ──
+
+    #[test]
+    fn batch_status_aborted_no_failures_is_success() {
+        // aborted=true but failed=0 should produce Success (no failed ops)
+        let status = batch_status(true, 5, 0);
+        assert_eq!(status, BatchStatus::Success);
+    }
+
+    #[test]
+    fn batch_status_not_aborted_all_failed() {
+        let status = batch_status(false, 0, 3);
+        assert_eq!(status, BatchStatus::AllFailed);
+    }
+
+    #[test]
+    fn batch_status_not_aborted_partial() {
+        let status = batch_status(false, 2, 1);
+        assert_eq!(status, BatchStatus::PartialSuccess);
+    }
+
+    #[test]
+    fn batch_status_not_aborted_all_succeeded() {
+        let status = batch_status(false, 5, 0);
+        assert_eq!(status, BatchStatus::Success);
+    }
+
+    #[test]
+    fn batch_status_aborted_with_failures() {
+        let status = batch_status(true, 0, 3);
+        assert_eq!(status, BatchStatus::Aborted);
+    }
+
+    #[test]
+    fn batch_status_aborted_mixed_completed_and_failed() {
+        let status = batch_status(true, 2, 1);
+        assert_eq!(status, BatchStatus::Aborted);
+    }
+
+    #[test]
+    fn batch_status_zero_completed_zero_failed() {
+        // No completed, no failed (e.g., all skipped) => Success because failed==0
+        let status = batch_status(false, 0, 0);
+        assert_eq!(status, BatchStatus::Success);
+    }
+
+    // ── New tests: batch_timeout_error helper ──
+
+    #[test]
+    fn batch_timeout_error_fields() {
+        let err = batch_timeout_error();
+        assert_eq!(err.code, "BATCH_TIMEOUT");
+        assert_eq!(err.message, "batch timeout exceeded");
+        assert!(err.retry_after_ms.is_none());
+    }
+
+    // ── New tests: dependency_failed_error helper ──
+
+    #[test]
+    fn dependency_failed_error_fields() {
+        let err = dependency_failed_error();
+        assert_eq!(err.code, "DEP_FAILED");
+        assert_eq!(err.message, "dependency failed");
+        assert!(err.retry_after_ms.is_none());
+    }
+
+    // ── New tests: serde deserialization from JSON strings ──
+
+    #[test]
+    fn batch_status_deserialize_all_variants() {
+        let success: BatchStatus = serde_json::from_str("\"success\"").unwrap();
+        assert_eq!(success, BatchStatus::Success);
+        let partial: BatchStatus = serde_json::from_str("\"partial_success\"").unwrap();
+        assert_eq!(partial, BatchStatus::PartialSuccess);
+        let all_failed: BatchStatus = serde_json::from_str("\"all_failed\"").unwrap();
+        assert_eq!(all_failed, BatchStatus::AllFailed);
+        let aborted: BatchStatus = serde_json::from_str("\"aborted\"").unwrap();
+        assert_eq!(aborted, BatchStatus::Aborted);
+    }
+
+    #[test]
+    fn operation_result_status_deserialize_all_variants() {
+        let success: OperationResultStatus = serde_json::from_str("\"success\"").unwrap();
+        assert_eq!(success, OperationResultStatus::Success);
+        let error: OperationResultStatus = serde_json::from_str("\"error\"").unwrap();
+        assert_eq!(error, OperationResultStatus::Error);
+        let skipped: OperationResultStatus = serde_json::from_str("\"skipped\"").unwrap();
+        assert_eq!(skipped, OperationResultStatus::Skipped);
+    }
+
+    #[test]
+    fn batch_status_invalid_variant_rejected() {
+        let result = serde_json::from_str::<BatchStatus>("\"unknown_status\"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn operation_result_status_invalid_variant_rejected() {
+        let result = serde_json::from_str::<OperationResultStatus>("\"pending\"");
+        assert!(result.is_err());
+    }
+
+    // ── New tests: BatchOptions serde edge cases ──
+
+    #[test]
+    fn batch_options_deserialize_empty_object_uses_all_defaults() {
+        let opts: BatchOptions = serde_json::from_str("{}").unwrap();
+        assert_eq!(opts.max_parallelism, 8);
+        assert!(!opts.stop_on_first_error);
+        assert_eq!(opts.timeout_ms, 30_000);
+    }
+
+    #[test]
+    fn batch_options_deserialize_only_stop_on_first_error() {
+        let json = r#"{"stop_on_first_error": true}"#;
+        let opts: BatchOptions = serde_json::from_str(json).unwrap();
+        assert_eq!(opts.max_parallelism, 8);
+        assert!(opts.stop_on_first_error);
+        assert_eq!(opts.timeout_ms, 30_000);
+    }
+
+    #[test]
+    fn batch_options_deserialize_only_timeout() {
+        let json = r#"{"timeout_ms": 60000}"#;
+        let opts: BatchOptions = serde_json::from_str(json).unwrap();
+        assert_eq!(opts.max_parallelism, 8);
+        assert!(!opts.stop_on_first_error);
+        assert_eq!(opts.timeout_ms, 60_000);
+    }
+
+    #[test]
+    fn batch_options_large_parallelism_value() {
+        let opts = BatchOptions {
+            max_parallelism: u32::MAX,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&opts).unwrap();
+        let parsed: BatchOptions = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.max_parallelism, u32::MAX);
+    }
+
+    // ── New tests: BatchOperation serde edge cases ──
+
+    #[test]
+    fn batch_operation_deserialize_without_depends_on_defaults_empty() {
+        let json = r#"{"id":"x","tool":"t","input":{}}"#;
+        let op: BatchOperation = serde_json::from_str(json).unwrap();
+        assert!(op.depends_on.is_empty());
+        assert!(op.zone.is_none());
+    }
+
+    #[test]
+    fn batch_operation_with_zone_serializes_zone() {
+        let mut operation = op("a", "tool", &[]);
+        operation.zone = Some("z:private".to_string());
+        let json = serde_json::to_string(&operation).unwrap();
+        assert!(json.contains("\"zone\":\"z:private\""));
+    }
+
+    #[test]
+    fn batch_operation_clone_preserves_all_fields() {
+        let mut original = op("a", "fcp.tool", &["b", "c"]);
+        original.zone = Some("z:work".to_string());
+        original.input = serde_json::json!({"key": "val"});
+        let cloned = original.clone();
+        assert_eq!(cloned.id, original.id);
+        assert_eq!(cloned.tool, original.tool);
+        assert_eq!(cloned.depends_on, original.depends_on);
+        assert_eq!(cloned.zone, original.zone);
+        assert_eq!(cloned.input, original.input);
+    }
+
+    // ── New tests: zone_accessible exhaustive pairs ──
+
+    #[test]
+    fn zone_public_to_public_accessible() {
+        assert!(zone_accessible(&ZoneId::public(), &ZoneId::public()));
+    }
+
+    #[test]
+    fn zone_community_to_community_accessible() {
+        assert!(zone_accessible(&ZoneId::community(), &ZoneId::community()));
+    }
+
+    #[test]
+    fn zone_owner_to_owner_accessible() {
+        assert!(zone_accessible(&ZoneId::owner(), &ZoneId::owner()));
+    }
+
+    #[test]
+    fn zone_private_to_private_accessible() {
+        assert!(zone_accessible(&ZoneId::private(), &ZoneId::private()));
+    }
+
+    #[test]
+    fn zone_community_accesses_public() {
+        assert!(zone_accessible(&ZoneId::community(), &ZoneId::public()));
+    }
+
+    #[test]
+    fn zone_public_cannot_access_owner() {
+        assert!(!zone_accessible(&ZoneId::public(), &ZoneId::owner()));
+    }
+
+    #[test]
+    fn zone_public_cannot_access_work() {
+        assert!(!zone_accessible(&ZoneId::public(), &ZoneId::work()));
+    }
+
+    #[test]
+    fn zone_community_cannot_access_private() {
+        assert!(!zone_accessible(&ZoneId::community(), &ZoneId::private()));
+    }
+
+    #[test]
+    fn zone_community_cannot_access_owner() {
+        assert!(!zone_accessible(&ZoneId::community(), &ZoneId::owner()));
+    }
+
+    #[test]
+    fn zone_owner_accesses_community() {
+        assert!(zone_accessible(&ZoneId::owner(), &ZoneId::community()));
+    }
+
+    #[test]
+    fn zone_project_same_project_accessible() {
+        let proj = "z:project:alpha".parse::<ZoneId>().unwrap();
+        assert!(zone_accessible(&proj, &proj));
+    }
+
+    #[test]
+    fn zone_public_cannot_access_project() {
+        let proj = "z:project:test".parse::<ZoneId>().unwrap();
+        assert!(!zone_accessible(&ZoneId::public(), &proj));
+    }
+
+    // ── New tests: ZoneRegistry edge cases ──
+
+    #[test]
+    fn zone_registry_default_is_empty() {
+        let reg = ZoneRegistry::default();
+        assert!(reg.get_zone("anything").is_none());
+    }
+
+    #[test]
+    fn zone_registry_empty_tool_name() {
+        let mut reg = ZoneRegistry::new();
+        reg.register("", ZoneId::public());
+        assert_eq!(reg.get_zone("").unwrap().as_str(), "z:public");
+    }
+
+    #[test]
+    fn zone_registry_clone() {
+        let mut reg = ZoneRegistry::new();
+        reg.register("t", ZoneId::work());
+        let cloned = reg.clone();
+        assert_eq!(cloned.get_zone("t").unwrap().as_str(), "z:work");
+    }
+
+    // ── New tests: group_by_zone edge cases ──
+
+    #[test]
+    fn zone_group_by_zone_empty_operations() {
+        let reg = ZoneRegistry::new();
+        let validator = BatchZoneValidator::new(ZoneId::work(), reg);
+        let groups = validator.group_by_zone(&[]);
+        assert!(groups.is_empty());
+    }
+
+    #[test]
+    fn zone_group_by_zone_all_unknown_tools_uses_agent_zone() {
+        let reg = ZoneRegistry::new();
+        let validator = BatchZoneValidator::new(ZoneId::private(), reg);
+        let ops = vec![op("a", "x", &[]), op("b", "y", &[])];
+        let groups = validator.group_by_zone(&ops);
+        assert_eq!(groups.len(), 1);
+        assert!(groups.contains_key("z:private"));
+        assert_eq!(groups["z:private"].len(), 2);
+    }
+
+    #[test]
+    fn zone_group_by_zone_single_tool_single_group() {
+        let mut reg = ZoneRegistry::new();
+        reg.register("tool", ZoneId::community());
+        let validator = BatchZoneValidator::new(ZoneId::work(), reg);
+        let ops = vec![op("a", "tool", &[])];
+        let groups = validator.group_by_zone(&ops);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups["z:community"], vec!["a"]);
+    }
+
+    // ── New tests: validator on empty ops ──
+
+    #[test]
+    fn zone_validator_empty_operations_passes() {
+        let reg = ZoneRegistry::new();
+        let validator = BatchZoneValidator::new(ZoneId::work(), reg);
+        assert!(validator.validate(&[]).is_ok());
+    }
+
+    // ── New tests: has_cycle edge cases ──
+
+    #[test]
+    fn no_cycle_two_independent_nodes() {
+        assert!(!has_cycle(&[op("a", "t", &[]), op("b", "t", &[])]));
+    }
+
+    #[test]
+    fn no_cycle_single_dependency() {
+        assert!(!has_cycle(&[op("a", "t", &[]), op("b", "t", &["a"])]));
+    }
+
+    #[test]
+    fn cycle_in_subgraph_with_independent_node() {
+        // a (independent), b→c→b (cycle)
+        assert!(has_cycle(&[
+            op("a", "t", &[]),
+            op("b", "t", &["c"]),
+            op("c", "t", &["b"]),
+        ]));
+    }
+
+    #[test]
+    fn no_cycle_wide_fan_out() {
+        let mut ops = vec![op("root", "t", &[])];
+        for i in 0..10 {
+            ops.push(op(&format!("child{i}"), "t", &["root"]));
+        }
+        assert!(!has_cycle(&ops));
+    }
+
+    #[test]
+    fn no_cycle_wide_fan_in() {
+        let mut ops: Vec<BatchOperation> = (0..10)
+            .map(|i| op(&format!("src{i}"), "t", &[]))
+            .collect();
+        let deps: Vec<String> = (0..10).map(|i| format!("src{i}")).collect();
+        let dep_refs: Vec<&str> = deps.iter().map(String::as_str).collect();
+        ops.push(op("sink", "t", &dep_refs));
+        assert!(!has_cycle(&ops));
+    }
+
+    // ── New tests: topological_tiers edge cases ──
+
+    #[test]
+    fn topological_tiers_single_node() {
+        let tiers = topological_tiers(&[op("a", "t", &[])]).unwrap();
+        assert_eq!(tiers.len(), 1);
+        assert_eq!(tiers[0].operation_ids, vec!["a"]);
+    }
+
+    #[test]
+    fn topological_tiers_sorted_within_tier() {
+        let tiers = topological_tiers(&[
+            op("z", "t", &[]),
+            op("a", "t", &[]),
+            op("m", "t", &[]),
+        ])
+        .unwrap();
+        assert_eq!(tiers[0].operation_ids, vec!["a", "m", "z"]);
+    }
+
+    #[test]
+    fn topological_tiers_cycle_returns_error() {
+        let result = topological_tiers(&[op("a", "t", &["b"]), op("b", "t", &["a"])]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("cycle"));
+    }
+
+    // ── New tests: ExecutionPlan and ExecutionTier ──
+
+    #[test]
+    fn execution_tier_clone() {
+        let tier = ExecutionTier {
+            operation_ids: vec!["a".into(), "b".into()],
+        };
+        let cloned = tier.clone();
+        assert_eq!(cloned.operation_ids, tier.operation_ids);
+    }
+
+    #[test]
+    fn execution_plan_clone() {
+        let plan = ExecutionPlan {
+            tiers: vec![ExecutionTier {
+                operation_ids: vec!["x".into()],
+            }],
+            total_operations: 1,
+        };
+        let cloned = plan.clone();
+        assert_eq!(cloned.depth(), plan.depth());
+        assert_eq!(cloned.total_operations, plan.total_operations);
+    }
+
+    #[test]
+    fn execution_plan_max_width_single_element_tiers() {
+        let plan = ExecutionPlan {
+            tiers: vec![
+                ExecutionTier {
+                    operation_ids: vec!["a".into()],
+                },
+                ExecutionTier {
+                    operation_ids: vec!["b".into()],
+                },
+                ExecutionTier {
+                    operation_ids: vec!["c".into()],
+                },
+            ],
+            total_operations: 3,
+        };
+        assert_eq!(plan.max_width(), 1);
+        assert_eq!(plan.depth(), 3);
+    }
+
+    // ── New tests: BatchExecutor default ──
+
+    #[test]
+    fn executor_new_is_same_as_default() {
+        let e1 = BatchExecutor::new();
+        let e2 = BatchExecutor::default();
+        // Both have no zone validator
+        assert!(e1.zone_validator.is_none());
+        assert!(e2.zone_validator.is_none());
+    }
+
+    // ── New tests: validate edge cases ──
+
+    #[test]
+    fn validate_duplicate_deps_in_single_op_passes() {
+        let executor = BatchExecutor::new();
+        // An op can list the same dependency twice — no validation against that
+        let req = simple_request(vec![
+            op("a", "t", &[]),
+            op("b", "t", &["a", "a"]),
+        ]);
+        assert!(executor.validate(&req).is_ok());
+    }
+
+    #[test]
+    fn validate_many_ops_no_deps_passes() {
+        let executor = BatchExecutor::new();
+        let ops: Vec<BatchOperation> = (0..200)
+            .map(|i| op(&format!("op{i:04}"), "t", &[]))
+            .collect();
+        let req = simple_request(ops);
+        assert!(executor.validate(&req).is_ok());
+    }
+
+    #[test]
+    fn validate_max_u32_parallelism_passes() {
+        let executor = BatchExecutor::new();
+        let req = BatchInvokeRequest {
+            operations: vec![op("a", "t", &[])],
+            options: BatchOptions {
+                max_parallelism: u32::MAX,
+                ..Default::default()
+            },
+        };
+        assert!(executor.validate(&req).is_ok());
+    }
+
+    #[test]
+    fn validate_zero_timeout_passes() {
+        // Zero timeout is valid at the validation layer; execution handles it
+        let executor = BatchExecutor::new();
+        let req = BatchInvokeRequest {
+            operations: vec![op("a", "t", &[])],
+            options: BatchOptions {
+                timeout_ms: 0,
+                ..Default::default()
+            },
+        };
+        assert!(executor.validate(&req).is_ok());
+    }
+
+    // ── New tests: BatchInvokeRequest serde ──
+
+    #[test]
+    fn batch_invoke_request_deserialize_minimal_json() {
+        let json = r#"{
+            "operations": [{"id":"a","tool":"t","input":{}}],
+            "options": {}
+        }"#;
+        let req: BatchInvokeRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.operations.len(), 1);
+        assert_eq!(req.options.max_parallelism, 8);
+    }
+
+    #[test]
+    fn batch_invoke_request_clone() {
+        let req = simple_request(vec![op("a", "t", &[]), op("b", "t", &["a"])]);
+        let cloned = req.clone();
+        assert_eq!(cloned.operations.len(), 2);
+        assert_eq!(cloned.operations[1].depends_on, vec!["a"]);
+    }
+
+    // ── New tests: BatchInvokeResponse serde ──
+
+    #[test]
+    fn batch_invoke_response_empty_results() {
+        let resp = BatchInvokeResponse {
+            status: BatchStatus::Success,
+            completed: 0,
+            failed: 0,
+            skipped: 0,
+            results: vec![],
+            total_duration_ms: 0,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: BatchInvokeResponse = serde_json::from_str(&json).unwrap();
+        assert!(parsed.results.is_empty());
+        assert_eq!(parsed.total_duration_ms, 0);
+    }
+
+    #[test]
+    fn batch_invoke_response_clone() {
+        let resp = BatchInvokeResponse {
+            status: BatchStatus::AllFailed,
+            completed: 0,
+            failed: 3,
+            skipped: 0,
+            results: vec![OperationResult {
+                id: "x".into(),
+                status: OperationResultStatus::Error,
+                output: None,
+                error: None,
+                duration_ms: 5,
+            }],
+            total_duration_ms: 10,
+        };
+        let cloned = resp.clone();
+        assert_eq!(cloned.status, BatchStatus::AllFailed);
+        assert_eq!(cloned.failed, 3);
+        assert_eq!(cloned.results[0].id, "x");
+    }
+
+    // ── New tests: OperationResult serde skip_serializing_if ──
+
+    #[test]
+    fn operation_result_output_omitted_when_none() {
+        let result = OperationResult {
+            id: "a".into(),
+            status: OperationResultStatus::Error,
+            output: None,
+            error: None,
+            duration_ms: 0,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(!json.contains("output"));
+    }
+
+    #[test]
+    fn operation_result_error_omitted_when_none() {
+        let result = OperationResult {
+            id: "a".into(),
+            status: OperationResultStatus::Success,
+            output: Some(serde_json::json!(42)),
+            error: None,
+            duration_ms: 0,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(!json.contains("error"));
+    }
+
+    #[test]
+    fn operation_result_clone() {
+        let result = OperationResult {
+            id: "z".into(),
+            status: OperationResultStatus::Success,
+            output: Some(serde_json::json!({"nested": [1, 2]})),
+            error: None,
+            duration_ms: 99,
+        };
+        let cloned = result.clone();
+        assert_eq!(cloned.id, "z");
+        assert_eq!(cloned.duration_ms, 99);
+        assert_eq!(cloned.output, result.output);
+    }
+
+    // ── New tests: BatchOperationError serde + clone ──
+
+    #[test]
+    fn batch_operation_error_clone() {
+        let err = BatchOperationError {
+            code: "X".into(),
+            message: "msg".into(),
+            retry_after_ms: Some(100),
+        };
+        let cloned = err.clone();
+        assert_eq!(cloned.code, "X");
+        assert_eq!(cloned.retry_after_ms, Some(100));
+    }
+
+    #[test]
+    fn batch_operation_error_deserialize_without_retry() {
+        let json = r#"{"code":"ERR","message":"oops"}"#;
+        let err: BatchOperationError = serde_json::from_str(json).unwrap();
+        assert_eq!(err.code, "ERR");
+        assert!(err.retry_after_ms.is_none());
+    }
+
+    // ── New tests: execute with zone validator ──
+
+    #[test]
+    fn execute_with_zone_validator_succeeds_on_allowed_zones() {
+        let mut reg = ZoneRegistry::new();
+        reg.register("pub.tool", ZoneId::public());
+        let validator = BatchZoneValidator::new(ZoneId::work(), reg);
+        let executor = BatchExecutor::with_zone_validator(validator);
+        let req = simple_request(vec![op("a", "pub.tool", &[])]);
+        let resp = executor
+            .execute_sync(&req, |_| Ok(serde_json::json!({"ok": true})))
+            .unwrap();
+        assert_eq!(resp.status, BatchStatus::Success);
+        assert_eq!(resp.completed, 1);
+    }
+
+    #[test]
+    fn execute_with_zone_validator_fails_on_violation() {
+        let mut reg = ZoneRegistry::new();
+        reg.register("secret", ZoneId::owner());
+        let validator = BatchZoneValidator::new(ZoneId::public(), reg);
+        let executor = BatchExecutor::with_zone_validator(validator);
+        let req = simple_request(vec![op("a", "secret", &[])]);
+        let err = executor
+            .execute_sync(&req, |_| Ok(serde_json::json!({})))
+            .unwrap_err();
+        assert!(err.to_string().contains("zone boundary"));
+    }
+
+    // ── New tests: executed_result helper ──
+
+    #[test]
+    fn executed_result_success_captures_output() {
+        let started = Instant::now();
+        let result = executed_result("op1", Ok(serde_json::json!({"v": 1})), started);
+        assert_eq!(result.id, "op1");
+        assert_eq!(result.status, OperationResultStatus::Success);
+        assert!(result.output.is_some());
+        assert!(result.error.is_none());
+    }
+
+    #[test]
+    fn executed_result_error_captures_error() {
+        let started = Instant::now();
+        let err = BatchOperationError {
+            code: "FAIL".into(),
+            message: "nope".into(),
+            retry_after_ms: Some(500),
+        };
+        let result = executed_result("op2", Err(err), started);
+        assert_eq!(result.id, "op2");
+        assert_eq!(result.status, OperationResultStatus::Error);
+        assert!(result.output.is_none());
+        assert_eq!(result.error.as_ref().unwrap().code, "FAIL");
+        assert_eq!(result.error.as_ref().unwrap().retry_after_ms, Some(500));
+    }
+
+    // ── New tests: dependency_failed helper ──
+
+    #[test]
+    fn dependency_failed_returns_false_when_all_deps_succeeded() {
+        let operation = op("b", "t", &["a"]);
+        let mut results_map = HashMap::new();
+        results_map.insert(
+            "a".to_string(),
+            OperationResult {
+                id: "a".into(),
+                status: OperationResultStatus::Success,
+                output: None,
+                error: None,
+                duration_ms: 0,
+            },
+        );
+        assert!(!dependency_failed(&operation, &results_map));
+    }
+
+    #[test]
+    fn dependency_failed_returns_true_when_dep_errored() {
+        let operation = op("b", "t", &["a"]);
+        let mut results_map = HashMap::new();
+        results_map.insert(
+            "a".to_string(),
+            OperationResult {
+                id: "a".into(),
+                status: OperationResultStatus::Error,
+                output: None,
+                error: None,
+                duration_ms: 0,
+            },
+        );
+        assert!(dependency_failed(&operation, &results_map));
+    }
+
+    #[test]
+    fn dependency_failed_returns_true_when_dep_skipped() {
+        let operation = op("c", "t", &["b"]);
+        let mut results_map = HashMap::new();
+        results_map.insert(
+            "b".to_string(),
+            OperationResult {
+                id: "b".into(),
+                status: OperationResultStatus::Skipped,
+                output: None,
+                error: None,
+                duration_ms: 0,
+            },
+        );
+        assert!(dependency_failed(&operation, &results_map));
+    }
+
+    #[test]
+    fn dependency_failed_returns_false_when_dep_not_in_map() {
+        let operation = op("b", "t", &["a"]);
+        let results_map = HashMap::new();
+        // Dependency not yet processed => not considered failed
+        assert!(!dependency_failed(&operation, &results_map));
+    }
+
+    #[test]
+    fn dependency_failed_returns_false_when_no_deps() {
+        let operation = op("a", "t", &[]);
+        let results_map = HashMap::new();
+        assert!(!dependency_failed(&operation, &results_map));
+    }
+
+    #[test]
+    fn dependency_failed_mixed_deps_one_failed() {
+        let operation = op("d", "t", &["a", "b", "c"]);
+        let mut results_map = HashMap::new();
+        results_map.insert(
+            "a".to_string(),
+            OperationResult {
+                id: "a".into(),
+                status: OperationResultStatus::Success,
+                output: None,
+                error: None,
+                duration_ms: 0,
+            },
+        );
+        results_map.insert(
+            "b".to_string(),
+            OperationResult {
+                id: "b".into(),
+                status: OperationResultStatus::Error,
+                output: None,
+                error: None,
+                duration_ms: 0,
+            },
+        );
+        results_map.insert(
+            "c".to_string(),
+            OperationResult {
+                id: "c".into(),
+                status: OperationResultStatus::Success,
+                output: None,
+                error: None,
+                duration_ms: 0,
+            },
+        );
+        assert!(dependency_failed(&operation, &results_map));
+    }
+
+    // ── New tests: record_skipped_operations ──
+
+    #[test]
+    fn record_skipped_operations_empty_list_is_noop() {
+        let mut results_map = HashMap::new();
+        record_skipped_operations(&mut results_map, &[], None);
+        assert!(results_map.is_empty());
+    }
+
+    #[test]
+    fn record_skipped_operations_multiple_with_error() {
+        let mut results_map = HashMap::new();
+        let ids = vec!["x".to_string(), "y".to_string(), "z".to_string()];
+        let err = batch_timeout_error();
+        record_skipped_operations(&mut results_map, &ids, Some(&err));
+        assert_eq!(results_map.len(), 3);
+        for id in &ids {
+            let r = &results_map[id];
+            assert_eq!(r.status, OperationResultStatus::Skipped);
+            assert_eq!(r.error.as_ref().unwrap().code, "BATCH_TIMEOUT");
+        }
+    }
+
+    #[test]
+    fn record_skipped_operations_multiple_without_error() {
+        let mut results_map = HashMap::new();
+        let ids = vec!["a".to_string(), "b".to_string()];
+        record_skipped_operations(&mut results_map, &ids, None);
+        for id in &ids {
+            let r = &results_map[id];
+            assert_eq!(r.status, OperationResultStatus::Skipped);
+            assert!(r.error.is_none());
+        }
+    }
+
+    // ── New tests: BatchStatus Copy + Eq ──
+
+    #[test]
+    fn batch_status_copy_and_eq() {
+        let s1 = BatchStatus::Success;
+        let s2 = s1; // Copy
+        assert_eq!(s1, s2);
+        assert_ne!(s1, BatchStatus::Aborted);
+    }
+
+    #[test]
+    fn operation_result_status_copy_and_eq() {
+        let s1 = OperationResultStatus::Skipped;
+        let s2 = s1; // Copy
+        assert_eq!(s1, s2);
+        assert_ne!(s1, OperationResultStatus::Success);
+    }
+
+    // ── New tests: BatchStatus serialize all variants ──
+
+    #[test]
+    fn batch_status_serialize_success() {
+        assert_eq!(
+            serde_json::to_string(&BatchStatus::Success).unwrap(),
+            "\"success\""
+        );
+    }
+
+    #[test]
+    fn batch_status_serialize_aborted() {
+        assert_eq!(
+            serde_json::to_string(&BatchStatus::Aborted).unwrap(),
+            "\"aborted\""
+        );
+    }
+
+    #[test]
+    fn operation_result_status_serialize_error() {
+        assert_eq!(
+            serde_json::to_string(&OperationResultStatus::Error).unwrap(),
+            "\"error\""
+        );
+    }
+
+    // ── New tests: execution with various handler behaviors ──
+
+    #[test]
+    fn execute_handler_can_use_input_payload() {
+        let executor = BatchExecutor::new();
+        let mut custom_op = op("a", "t", &[]);
+        custom_op.input = serde_json::json!({"multiply": 7});
+        let req = simple_request(vec![custom_op]);
+        let resp = executor
+            .execute_sync(&req, |o| {
+                let factor = o.input["multiply"].as_u64().unwrap_or(1);
+                Ok(serde_json::json!({"result": factor * 6}))
+            })
+            .unwrap();
+        assert_eq!(resp.results[0].output.as_ref().unwrap()["result"], 42);
+    }
+
+    #[test]
+    fn execute_handler_returning_null_output() {
+        let executor = BatchExecutor::new();
+        let req = simple_request(vec![op("a", "t", &[])]);
+        let resp = executor
+            .execute_sync(&req, |_| Ok(serde_json::Value::Null))
+            .unwrap();
+        assert_eq!(resp.status, BatchStatus::Success);
+        assert_eq!(resp.results[0].output, Some(serde_json::Value::Null));
+    }
+
+    #[test]
+    fn execute_handler_returning_string_output() {
+        let executor = BatchExecutor::new();
+        let req = simple_request(vec![op("a", "t", &[])]);
+        let resp = executor
+            .execute_sync(&req, |_| Ok(serde_json::json!("just a string")))
+            .unwrap();
+        assert_eq!(
+            resp.results[0].output.as_ref().unwrap(),
+            &serde_json::json!("just a string")
+        );
+    }
+
+    #[test]
+    fn execute_handler_returning_array_output() {
+        let executor = BatchExecutor::new();
+        let req = simple_request(vec![op("a", "t", &[])]);
+        let resp = executor
+            .execute_sync(&req, |_| Ok(serde_json::json!([1, 2, 3])))
+            .unwrap();
+        let arr = resp.results[0]
+            .output
+            .as_ref()
+            .unwrap()
+            .as_array()
+            .unwrap();
+        assert_eq!(arr.len(), 3);
+    }
+
+    // ── New tests: const fn helpers ──
+
+    #[test]
+    fn default_max_parallelism_value() {
+        assert_eq!(default_max_parallelism(), 8);
+    }
+
+    #[test]
+    fn default_timeout_ms_value() {
+        assert_eq!(default_timeout_ms(), 30_000);
+    }
 }

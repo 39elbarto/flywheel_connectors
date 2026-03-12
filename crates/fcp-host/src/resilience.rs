@@ -3350,4 +3350,725 @@ mod tests {
     fn ratio_per_mille_two_of_three() {
         assert_eq!(ratio_per_mille(2, 3), 666);
     }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // 25. FailurePredicate additional edge cases
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn failure_predicate_slow_responses_does_not_match_timed_out() {
+        let pred = FailurePredicate::SlowResponses {
+            threshold: Duration::from_millis(100),
+        };
+        // SlowResponses only cares about Success outcomes above threshold
+        assert!(!pred.matches(OutcomeKind::TimedOut, Duration::from_millis(200)));
+    }
+
+    #[test]
+    fn failure_predicate_timeouts_only_does_not_match_success() {
+        assert!(!FailurePredicate::TimeoutsOnly.matches(
+            OutcomeKind::Success,
+            Duration::from_secs(100)
+        ));
+    }
+
+    #[test]
+    fn failure_predicate_slow_responses_zero_threshold() {
+        let pred = FailurePredicate::SlowResponses {
+            threshold: Duration::ZERO,
+        };
+        // Any non-zero latency success should match
+        assert!(pred.matches(OutcomeKind::Success, Duration::from_nanos(1)));
+        // Zero latency at zero threshold should NOT match (not strictly above)
+        assert!(!pred.matches(OutcomeKind::Success, Duration::ZERO));
+    }
+
+    #[test]
+    fn failure_predicate_error_or_slow_zero_latency_failure() {
+        let pred = FailurePredicate::ErrorOrSlowResponses {
+            threshold: Duration::from_secs(10),
+        };
+        // Failure with zero latency still matches (errors always match)
+        assert!(pred.matches(OutcomeKind::Failure, Duration::ZERO));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // 26. CircuitBreaker window expiry and edge cases
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn circuit_breaker_window_expiry_resets_failure_count() {
+        let cb = CircuitBreaker::new(CircuitBreakerConfig {
+            failure_threshold: 3,
+            window_duration: Duration::ZERO, // window expires immediately
+            ..CircuitBreakerConfig::default()
+        });
+        // First failure - will be counted then window expires on next call
+        cb.record_failure();
+        cb.record_failure();
+        // With zero window, each record_failure resets the counter first
+        // So we never accumulate 3 failures → stays closed
+        assert_eq!(cb.state(), CircuitState::Closed);
+    }
+
+    #[test]
+    fn circuit_breaker_record_success_in_open_is_noop() {
+        let cb = CircuitBreaker::new(CircuitBreakerConfig {
+            failure_threshold: 1,
+            open_duration: Duration::from_mins(10),
+            ..CircuitBreakerConfig::default()
+        });
+        cb.record_failure(); // opens
+        assert_eq!(cb.state(), CircuitState::Open);
+        cb.record_success(); // should be noop in Open state
+        assert_eq!(cb.state(), CircuitState::Open);
+    }
+
+    #[test]
+    fn circuit_breaker_half_open_failure_resets_successes() {
+        let cb = CircuitBreaker::new(CircuitBreakerConfig {
+            failure_threshold: 1,
+            success_threshold: 3,
+            open_duration: Duration::ZERO,
+            ..CircuitBreakerConfig::default()
+        });
+        cb.record_failure(); // open
+        let _ = cb.before_call(); // half-open
+        cb.record_success(); // 1 success
+        assert_eq!(cb.state(), CircuitState::HalfOpen);
+        // Now fail - should reopen and reset success count
+        let opened = cb.record_failure();
+        assert!(opened);
+        assert_eq!(cb.state(), CircuitState::Open);
+        // Transition back to half-open
+        let _ = cb.before_call();
+        // Need all 3 successes again, not just 2
+        cb.record_success();
+        assert_eq!(cb.state(), CircuitState::HalfOpen);
+        cb.record_success();
+        assert_eq!(cb.state(), CircuitState::HalfOpen);
+        cb.record_success();
+        assert_eq!(cb.state(), CircuitState::Closed);
+    }
+
+    #[test]
+    fn circuit_breaker_success_threshold_one() {
+        let cb = CircuitBreaker::new(CircuitBreakerConfig {
+            failure_threshold: 1,
+            success_threshold: 1,
+            open_duration: Duration::ZERO,
+            ..CircuitBreakerConfig::default()
+        });
+        cb.record_failure();
+        let _ = cb.before_call(); // half-open
+        cb.record_success();
+        assert_eq!(cb.state(), CircuitState::Closed);
+    }
+
+    #[test]
+    fn circuit_breaker_cancel_probe_in_open_is_noop() {
+        let cb = CircuitBreaker::new(CircuitBreakerConfig {
+            failure_threshold: 1,
+            open_duration: Duration::from_mins(10),
+            ..CircuitBreakerConfig::default()
+        });
+        cb.record_failure();
+        assert_eq!(cb.state(), CircuitState::Open);
+        cb.cancel_inflight_probe(); // noop since state is Open, not HalfOpen
+        assert_eq!(cb.state(), CircuitState::Open);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // 27. Bulkhead pressure edge cases
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn bulkhead_pressure_with_zero_max_queued() {
+        let bh = Bulkhead::new(BulkheadConfig {
+            max_concurrent: 4,
+            max_queued: 0,
+            queue_timeout: Duration::from_millis(10),
+        });
+        // max_queued is 0, so queue_pressure denominator uses max(0,1)=1
+        assert_eq!(bh.pressure_per_mille(), 0);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn bulkhead_full_concurrent_shows_max_pressure() {
+        let bh = Bulkhead::new(BulkheadConfig {
+            max_concurrent: 2,
+            max_queued: 10,
+            queue_timeout: Duration::from_secs(1),
+        });
+        let _p1 = bh.acquire().await.unwrap();
+        let _p2 = bh.acquire().await.unwrap();
+        assert_eq!(bh.pressure_per_mille(), 1_000);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn bulkhead_permit_release_reduces_pressure() {
+        let bh = Bulkhead::new(BulkheadConfig {
+            max_concurrent: 2,
+            max_queued: 10,
+            queue_timeout: Duration::from_secs(1),
+        });
+        let p1 = bh.acquire().await.unwrap();
+        let _p2 = bh.acquire().await.unwrap();
+        assert_eq!(bh.pressure_per_mille(), 1_000);
+        drop(p1);
+        assert_eq!(bh.pressure_per_mille(), 500);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // 28. LoadShedder edge cases
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn load_shedder_equal_shed_and_full_threshold() {
+        // When shed_threshold == full_shed_threshold, full_threshold is clamped
+        // to shed_threshold + 1
+        let shedder = LoadShedder::new(LoadShedConfig {
+            shed_threshold_per_mille: 500,
+            full_shed_threshold_per_mille: 500,
+            sheddable_priorities: vec![RequestPriority::Low],
+        });
+        // At load=500 (equal to shed threshold), should start shedding
+        // full_threshold = max(500, 501) = 501
+        // base_prob = (500-500)*1000 / (501-500) = 0
+        assert!(!shedder.should_shed(RequestPriority::Low, 500));
+        // At load=501 (at adjusted full threshold)
+        // base_prob = (501-500)*1000 / 1 = 1000
+        assert!(shedder.should_shed(RequestPriority::Low, 501));
+    }
+
+    #[test]
+    fn load_shedder_empty_sheddable_priorities() {
+        let shedder = LoadShedder::new(LoadShedConfig {
+            shed_threshold_per_mille: 0,
+            full_shed_threshold_per_mille: 1,
+            sheddable_priorities: vec![],
+        });
+        // No priority is in the sheddable list
+        assert!(!shedder.should_shed(RequestPriority::Low, 1_000));
+        assert!(!shedder.should_shed(RequestPriority::Normal, 1_000));
+        assert!(!shedder.should_shed(RequestPriority::High, 1_000));
+        assert!(!shedder.should_shed(RequestPriority::Critical, 1_000));
+    }
+
+    #[test]
+    fn load_shedder_high_priority_partial_shedding() {
+        let shedder = LoadShedder::new(LoadShedConfig {
+            shed_threshold_per_mille: 0,
+            full_shed_threshold_per_mille: 1_000,
+            sheddable_priorities: vec![RequestPriority::High, RequestPriority::Low],
+        });
+        // At full load, High has shed_factor 300/1000
+        // final_probability = 1000 * 300 / 1000 = 300
+        let mut shed_count = 0;
+        for _ in 0..1_000 {
+            if shedder.should_shed(RequestPriority::High, 1_000) {
+                shed_count += 1;
+            }
+        }
+        assert!(
+            (250..=350).contains(&shed_count),
+            "expected ~300 sheds for High, got {shed_count}"
+        );
+    }
+
+    #[test]
+    fn load_shedder_base_zero_pressure_zero_no_shed() {
+        let shedder = LoadShedder::new(LoadShedConfig::default());
+        // base=0, pressure=0 → effective load = 0, below shed threshold
+        assert_eq!(shedder.effective_load_per_mille(0), 0);
+        assert!(!shedder.should_shed(RequestPriority::Low, 0));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // 29. ErrorWindow edge cases
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn error_window_single_success() {
+        let mut window = ErrorWindow::new(Duration::from_secs(30));
+        window.record_success();
+        assert_eq!(window.error_rate_per_mille(), 0);
+    }
+
+    #[test]
+    fn error_window_single_failure() {
+        let mut window = ErrorWindow::new(Duration::from_secs(30));
+        window.record_failure();
+        assert_eq!(window.error_rate_per_mille(), 1_000);
+    }
+
+    #[test]
+    fn error_window_half_error_rate() {
+        let mut window = ErrorWindow::new(Duration::from_secs(30));
+        window.record_success();
+        window.record_failure();
+        assert_eq!(window.error_rate_per_mille(), 500);
+    }
+
+    #[test]
+    fn error_window_one_of_four_failure_rate() {
+        let mut window = ErrorWindow::new(Duration::from_secs(30));
+        for _ in 0..3 {
+            window.record_success();
+        }
+        window.record_failure();
+        assert_eq!(window.error_rate_per_mille(), 250);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // 30. LatencyEwma edge cases
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn latency_ewma_alpha_above_1000_clamped() {
+        let mut ewma = LatencyEwma::new(2000); // alpha > MAX_PER_MILLE
+        ewma.record(Duration::from_millis(100));
+        ewma.record(Duration::from_millis(500));
+        // alpha clamped to 1000, retained=0
+        // new = (100 * 0 + 500 * 1000) / 1000 = 500
+        assert_eq!(ewma.value(), Some(Duration::from_millis(500)));
+    }
+
+    #[test]
+    fn latency_ewma_multiple_samples_converge() {
+        let mut ewma = LatencyEwma::new(500); // alpha = 0.5
+        // Record many samples of same value → should converge to that value
+        for _ in 0..20 {
+            ewma.record(Duration::from_millis(200));
+        }
+        assert_eq!(ewma.value(), Some(Duration::from_millis(200)));
+    }
+
+    #[test]
+    fn latency_ewma_zero_latency() {
+        let mut ewma = LatencyEwma::new(500);
+        ewma.record(Duration::ZERO);
+        assert_eq!(ewma.value(), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn latency_ewma_very_large_latency() {
+        let mut ewma = LatencyEwma::new(500);
+        ewma.record(Duration::from_secs(3600)); // 1 hour
+        assert_eq!(ewma.value(), Some(Duration::from_secs(3600)));
+    }
+
+    #[test]
+    fn latency_ewma_alternating_high_low() {
+        let mut ewma = LatencyEwma::new(500); // alpha = 0.5
+        ewma.record(Duration::from_millis(100));
+        ewma.record(Duration::from_millis(300));
+        // new = (100 * 500 + 300 * 500) / 1000 = 200
+        assert_eq!(ewma.value(), Some(Duration::from_millis(200)));
+        ewma.record(Duration::from_millis(100));
+        // new = (200 * 500 + 100 * 500) / 1000 = 150
+        assert_eq!(ewma.value(), Some(Duration::from_millis(150)));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // 31. merge_connector_health edge cases
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn merge_connector_health_degraded_plus_healthy_picks_degraded() {
+        let merged =
+            merge_connector_health(ConnectorHealth::degraded("slow"), ConnectorHealth::Healthy);
+        assert!(matches!(merged, ConnectorHealth::Degraded { .. }));
+    }
+
+    #[test]
+    fn merge_connector_health_unavailable_plus_unavailable_uses_earlier_since() {
+        let t1 = Utc::now() - chrono::Duration::hours(5);
+        let t2 = Utc::now() - chrono::Duration::hours(1);
+        let merged = merge_connector_health(
+            ConnectorHealth::Unavailable {
+                reason: "err1".into(),
+                since: t1,
+            },
+            ConnectorHealth::Unavailable {
+                reason: "err2".into(),
+                since: t2,
+            },
+        );
+        if let ConnectorHealth::Unavailable { since, .. } = merged {
+            assert_eq!(since, t1);
+        } else {
+            panic!("expected Unavailable");
+        }
+    }
+
+    #[test]
+    fn merge_connector_health_same_degraded_reason_deduplicates() {
+        let merged = merge_connector_health(
+            ConnectorHealth::degraded("slow"),
+            ConnectorHealth::degraded("slow"),
+        );
+        if let ConnectorHealth::Degraded { reason } = &merged {
+            // combine_reason_strings with same strings returns one copy
+            assert_eq!(reason, "slow");
+        } else {
+            panic!("expected Degraded");
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // 32. HealthRouter deeper scenarios
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn health_router_unknown_connector_is_healthy() {
+        let router = HealthRouter::new(HealthRouterConfig::default());
+        let cid = ConnectorId::from_static("fcp.host:unknown:v1");
+        assert!(matches!(router.health(&cid), ConnectorHealth::Healthy));
+    }
+
+    #[test]
+    fn health_router_full_recovery_cycle() {
+        let router = HealthRouter::new(HealthRouterConfig {
+            unhealthy_threshold: 2,
+            recovery_success_threshold: 2,
+            probe_interval: Duration::ZERO,
+            latency_degraded_threshold: Duration::from_mins(1),
+            error_rate_degraded_threshold_per_mille: 999,
+            ..HealthRouterConfig::default()
+        });
+        let cid = test_connector_id();
+
+        // Start healthy
+        assert!(matches!(router.health(&cid), ConnectorHealth::Healthy));
+
+        // Two failures → unavailable
+        router.record_failure(&cid, "down");
+        router.record_failure(&cid, "down");
+        assert!(matches!(
+            router.health(&cid),
+            ConnectorHealth::Unavailable { .. }
+        ));
+
+        // First success → still recovering
+        router.record_success(&cid, Duration::from_millis(1));
+        assert!(matches!(
+            router.health(&cid),
+            ConnectorHealth::Unavailable { .. }
+        ));
+
+        // Second success → fully recovered
+        router.record_success(&cid, Duration::from_millis(1));
+        let health = router.health(&cid);
+        assert!(
+            !matches!(health, ConnectorHealth::Unavailable { .. }),
+            "expected healthy or degraded after recovery, got {health:?}"
+        );
+    }
+
+    #[test]
+    fn health_router_timeout_uses_max_of_timeout_and_latency() {
+        let router = HealthRouter::new(HealthRouterConfig {
+            unhealthy_threshold: 100,
+            latency_degraded_threshold: Duration::from_millis(100),
+            ..HealthRouterConfig::default()
+        });
+        let cid = test_connector_id();
+        // Record timeout where timeout > latency → uses timeout value
+        router.record_timeout(&cid, Duration::from_millis(500), Duration::from_millis(200));
+        let health = router.health(&cid);
+        assert!(matches!(health, ConnectorHealth::Degraded { .. }));
+    }
+
+    #[test]
+    fn health_router_many_successes_stay_healthy() {
+        let router = HealthRouter::new(HealthRouterConfig {
+            latency_degraded_threshold: Duration::from_secs(10),
+            ..HealthRouterConfig::default()
+        });
+        let cid = test_connector_id();
+        for _ in 0..20 {
+            router.record_success(&cid, Duration::from_millis(5));
+        }
+        assert!(matches!(router.health(&cid), ConnectorHealth::Healthy));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // 33. ResilienceLayer additional integration tests
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn ensure_connector_is_idempotent() {
+        let layer = ResilienceLayer::default();
+        let cid = test_connector_id();
+        layer.ensure_connector(&cid);
+        layer.ensure_connector(&cid);
+        // Should not panic or create duplicate state
+        assert_eq!(layer.circuit_state(&cid), CircuitState::Closed);
+    }
+
+    #[test]
+    fn set_base_load_updates_shedder() {
+        let layer = ResilienceLayer::default();
+        layer.set_base_load_per_mille(750);
+        // Verify via the load shedder's effective load
+        let effective = layer.load_shedder.effective_load_per_mille(0);
+        assert_eq!(effective, 750);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn execute_returns_inner_value_on_success() {
+        let layer = ResilienceLayer::default();
+        let cid = test_connector_id();
+        let result = layer
+            .execute(&cid, RequestPriority::Normal, "op", async {
+                Ok::<_, &str>("hello")
+            })
+            .await;
+        assert_eq!(result.unwrap(), "hello");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn execute_with_timeout_succeeds_within_limit() {
+        let layer = ResilienceLayer::new(ResilienceConfig {
+            operation_timeout: Some(Duration::from_secs(5)),
+            ..ResilienceConfig::default()
+        });
+        let cid = test_connector_id();
+        let result = layer
+            .execute(&cid, RequestPriority::Normal, "op", async {
+                Ok::<_, &str>(42)
+            })
+            .await;
+        assert_eq!(result.unwrap(), 42);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn execute_timeout_records_metric() {
+        let layer = ResilienceLayer::new(ResilienceConfig {
+            operation_timeout: Some(Duration::from_millis(10)),
+            circuit_breaker: CircuitBreakerConfig {
+                failure_threshold: 100, // High to avoid circuit tripping
+                ..CircuitBreakerConfig::default()
+            },
+            ..ResilienceConfig::default()
+        });
+        let cid = test_connector_id();
+        let result = layer
+            .execute(&cid, RequestPriority::Normal, "op", async {
+                time::sleep(Duration::from_millis(50)).await;
+                Ok::<_, &str>(())
+            })
+            .await;
+        assert!(matches!(result, Err(ResilienceError::TimedOut { .. })));
+        assert_eq!(layer.metrics(&cid).timeouts, 1);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // 34. ratio_per_mille additional edge cases
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn ratio_per_mille_large_values() {
+        // Large numerator and denominator that could overflow u32
+        let result = ratio_per_mille(usize::MAX, usize::MAX);
+        assert_eq!(result, 1_000);
+    }
+
+    #[test]
+    fn ratio_per_mille_numerator_zero_denominator_large() {
+        assert_eq!(ratio_per_mille(0, usize::MAX), 0);
+    }
+
+    #[test]
+    fn ratio_per_mille_small_fraction() {
+        // 1/1000 = 1 per mille
+        assert_eq!(ratio_per_mille(1, 1_000), 1);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // 35. to_u16 additional edge cases
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn to_u16_one() {
+        assert_eq!(to_u16(1), 1);
+    }
+
+    #[test]
+    fn to_u16_just_below_max() {
+        assert_eq!(to_u16(65534), 65534);
+    }
+
+    #[test]
+    fn to_u16_u32_max() {
+        assert_eq!(to_u16(u32::MAX), u16::MAX);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // 36. ResilienceError additional trait tests
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn resilience_error_is_std_error() {
+        // Verify the std::error::Error impl compiles and works
+        let err: ResilienceError<std::io::Error> = ResilienceError::BulkheadFull;
+        let _as_error: &dyn std::error::Error = &err;
+    }
+
+    #[test]
+    fn resilience_error_display_all_variants_nonempty() {
+        let variants: Vec<ResilienceError<&str>> = vec![
+            ResilienceError::LoadShed {
+                load_per_mille: 0,
+            },
+            ResilienceError::Unhealthy {
+                reason: String::new(),
+            },
+            ResilienceError::CircuitOpen {
+                retry_after: Duration::ZERO,
+            },
+            ResilienceError::HalfOpenLimited,
+            ResilienceError::BulkheadFull,
+            ResilienceError::QueueTimeout {
+                timeout: Duration::ZERO,
+            },
+            ResilienceError::TimedOut {
+                timeout: Duration::ZERO,
+            },
+            ResilienceError::Inner(""),
+        ];
+        for err in &variants {
+            let msg = format!("{err}");
+            assert!(!msg.is_empty(), "Display should produce non-empty string");
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // 37. combine_reason_strings edge cases
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn combine_reason_strings_long_strings() {
+        let left = "a".repeat(100);
+        let right = "b".repeat(100);
+        let result = combine_reason_strings(&left, &right);
+        assert!(result.contains(&left));
+        assert!(result.contains(&right));
+        assert!(result.contains("; "));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // 38. earlier_since with equal dates
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn earlier_since_equal_dates_returns_either() {
+        let t = Utc::now();
+        let result = earlier_since(Some(t), Some(t));
+        assert_eq!(result, Some(t));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // 39. HealthSeverity edge cases
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn health_severity_clone() {
+        let a = HealthSeverity::Degraded;
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn health_severity_debug() {
+        let dbg = format!("{:?}", HealthSeverity::Unavailable);
+        assert!(dbg.contains("Unavailable"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // 40. ResilienceLayer connector_state creates on demand
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn connector_state_created_on_demand_for_unknown_connector() {
+        let layer = ResilienceLayer::default();
+        let cid = ConnectorId::from_static("fcp.host:brandnew:v1");
+        // Accessing metrics for a connector that was never registered should
+        // create the state on demand
+        let metrics = layer.metrics(&cid);
+        assert_eq!(metrics.requests, 0);
+        assert_eq!(layer.circuit_state(&cid), CircuitState::Closed);
+    }
+
+    #[test]
+    fn multiple_connectors_independent_circuit_state() {
+        let layer = ResilienceLayer::new(ResilienceConfig {
+            circuit_breaker: CircuitBreakerConfig {
+                failure_threshold: 1,
+                ..CircuitBreakerConfig::default()
+            },
+            ..ResilienceConfig::default()
+        });
+        let cid1 = ConnectorId::from_static("fcp.host:c1:v1");
+        let cid2 = ConnectorId::from_static("fcp.host:c2:v1");
+
+        // Trip circuit for cid1
+        let state1 = layer.connector_state(&cid1);
+        state1.circuit.record_failure();
+        assert_eq!(layer.circuit_state(&cid1), CircuitState::Open);
+
+        // cid2 should still be closed
+        assert_eq!(layer.circuit_state(&cid2), CircuitState::Closed);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // 41. ConnectorMetrics snapshot isolation
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn connector_metrics_default_snapshot_all_zeros() {
+        let metrics = ConnectorMetrics::default();
+        let snap = metrics.snapshot();
+        assert_eq!(snap, ResilienceMetricsSnapshot::default());
+    }
+
+    #[test]
+    fn connector_metrics_snapshot_reflects_increments() {
+        let metrics = ConnectorMetrics::default();
+        metrics.requests.fetch_add(5, Ordering::Relaxed);
+        metrics.successes.fetch_add(3, Ordering::Relaxed);
+        metrics.failures.fetch_add(1, Ordering::Relaxed);
+        metrics.timeouts.fetch_add(1, Ordering::Relaxed);
+        let snap = metrics.snapshot();
+        assert_eq!(snap.requests, 5);
+        assert_eq!(snap.successes, 3);
+        assert_eq!(snap.failures, 1);
+        assert_eq!(snap.timeouts, 1);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // 42. OutcomeKind coverage
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn outcome_kind_eq() {
+        assert_eq!(OutcomeKind::Success, OutcomeKind::Success);
+        assert_eq!(OutcomeKind::Failure, OutcomeKind::Failure);
+        assert_eq!(OutcomeKind::TimedOut, OutcomeKind::TimedOut);
+        assert_ne!(OutcomeKind::Success, OutcomeKind::Failure);
+        assert_ne!(OutcomeKind::Failure, OutcomeKind::TimedOut);
+    }
+
+    #[test]
+    fn outcome_kind_debug() {
+        for kind in [
+            OutcomeKind::Success,
+            OutcomeKind::Failure,
+            OutcomeKind::TimedOut,
+        ] {
+            let dbg = format!("{kind:?}");
+            assert!(!dbg.is_empty());
+        }
+    }
 }

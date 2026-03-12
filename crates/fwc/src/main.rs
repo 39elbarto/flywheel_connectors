@@ -146,10 +146,14 @@ use fcp_host::{
     ConnectorInventoryMutationResponse as HostConnectorInventoryMutationResponse,
     ConnectorInventoryResponse as HostConnectorInventoryResponse,
     DiscoveryFilter as HostDiscoveryFilter, DiscoveryResponse as HostDiscoveryResponse,
-    DoctorReport as HostDoctorReport, DoctorRequest as HostDoctorRequest, HostHealthResponse,
-    HostPreflightRequest, IntrospectionResponse as HostIntrospectionResponse,
-    LifecycleTransitionRequest, LifecycleTransitionResponse, ManagedConnectorConfig,
-    PreflightResponse as HostPreflightResponse, ToolDescriptor as HostToolDescriptor,
+    DoctorReport as HostDoctorReport, DoctorRequest as HostDoctorRequest,
+    EventAcknowledgeRequest, EventAcknowledgeResponse, EventQueryRequest, EventQueryResponse,
+    HostHealthResponse, HostPreflightRequest,
+    IntrospectionResponse as HostIntrospectionResponse, JournalQueryRequest, JournalQueryResponse,
+    LifecycleTransitionRequest, LifecycleTransitionResponse, LogQueryRequest, LogQueryResponse,
+    ManagedConnectorConfig, PreflightResponse as HostPreflightResponse,
+    ReceiptQueryRequest, ReceiptQueryResponse, SimulateReceiptQueryRequest,
+    SimulateReceiptQueryResponse, ToolDescriptor as HostToolDescriptor,
 };
 use fcp_manifest::ConnectorManifest;
 use fcp_telemetry::{
@@ -492,6 +496,19 @@ enum Commands {
     /// tests. Use `--check` to validate an existing connector instead.
     #[command(visible_alias = "scaffold")]
     New(new_cmd::NewArgs),
+
+    /// Query host admin logs.
+    Logs(LogsArgs),
+
+    /// Query host admin journal (operation audit trail).
+    Journal(JournalArgs),
+
+    /// Query operation receipts from the host.
+    #[command(visible_alias = "receipt")]
+    Receipts(ReceiptsArgs),
+
+    /// Query and acknowledge host control-plane events.
+    Events(EventsArgs),
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -1891,6 +1908,91 @@ struct BatchFileArgs {
     auth: LiveAuthArgs,
 }
 
+#[derive(Args, Debug, Serialize)]
+struct LogsArgs {
+    /// Filter by connector id.
+    #[arg(long)]
+    connector: Option<String>,
+
+    /// Minimum severity level (debug, info, warn, error).
+    #[arg(long)]
+    severity: Option<String>,
+
+    /// Only return entries after this sequence number.
+    #[arg(long, default_value_t = 0)]
+    after: u64,
+
+    /// Maximum number of log entries.
+    #[arg(long, default_value_t = 100)]
+    limit: usize,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct JournalArgs {
+    /// Filter by connector id.
+    #[arg(long)]
+    connector: Option<String>,
+
+    /// Only return entries after this sequence number.
+    #[arg(long, default_value_t = 0)]
+    after: u64,
+
+    /// Maximum number of journal entries.
+    #[arg(long, default_value_t = 100)]
+    limit: usize,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct ReceiptsArgs {
+    /// Connector id (required).
+    connector: String,
+
+    /// Filter by operation name.
+    #[arg(long)]
+    operation: Option<String>,
+
+    /// Maximum number of receipts.
+    #[arg(long, default_value_t = 100)]
+    limit: usize,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct EventsArgs {
+    #[command(subcommand)]
+    command: EventsCommand,
+}
+
+#[derive(Subcommand, Debug, Serialize)]
+#[serde(tag = "subcommand", content = "args", rename_all = "kebab-case")]
+enum EventsCommand {
+    /// List host control-plane events.
+    List(EventsListArgs),
+
+    /// Acknowledge one or more events by ID.
+    Ack(EventsAckArgs),
+}
+
+#[derive(Args, Debug, Serialize)]
+struct EventsListArgs {
+    /// Filter by connector id.
+    #[arg(long)]
+    connector: Option<String>,
+
+    /// Only show unacknowledged events.
+    #[arg(long)]
+    unacknowledged: bool,
+
+    /// Maximum number of events.
+    #[arg(long, default_value_t = 100)]
+    limit: usize,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct EventsAckArgs {
+    /// Event IDs to acknowledge.
+    event_ids: Vec<String>,
+}
+
 fn main() -> ExitCode {
     let raw_args = std::env::args().collect::<Vec<_>>();
     let fallback_format = infer_output_format(&raw_args);
@@ -2689,6 +2791,10 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         Commands::BatchFile(args) => batch_file_dispatch(args, cli.host.as_deref())?,
         Commands::Bench(_) => passthrough_only_dispatch("bench"),
         Commands::New(_) => passthrough_only_dispatch("new"),
+        Commands::Logs(args) => logs_dispatch(&args, cli.host.as_deref())?,
+        Commands::Journal(args) => journal_dispatch(&args, cli.host.as_deref())?,
+        Commands::Receipts(args) => receipts_dispatch(&args, cli.host.as_deref())?,
+        Commands::Events(args) => events_dispatch(&args, cli.host.as_deref())?,
     };
 
     Ok(outcome)
@@ -3150,6 +3256,36 @@ impl HostAdminClient {
                 "to_version": to_version,
             }),
         )
+    }
+
+    fn journal(&self, request: &JournalQueryRequest) -> Result<JournalQueryResponse> {
+        self.post_json("/rpc/admin/journal", request)
+    }
+
+    fn logs(&self, request: &LogQueryRequest) -> Result<LogQueryResponse> {
+        self.post_json("/rpc/admin/logs", request)
+    }
+
+    fn receipts(&self, request: &ReceiptQueryRequest) -> Result<ReceiptQueryResponse> {
+        self.post_json("/rpc/admin/receipts", request)
+    }
+
+    fn simulate_receipts(
+        &self,
+        request: &SimulateReceiptQueryRequest,
+    ) -> Result<SimulateReceiptQueryResponse> {
+        self.post_json("/rpc/admin/simulate-receipts", request)
+    }
+
+    fn events(&self, request: &EventQueryRequest) -> Result<EventQueryResponse> {
+        self.post_json("/rpc/admin/events", request)
+    }
+
+    fn acknowledge_events(
+        &self,
+        request: &EventAcknowledgeRequest,
+    ) -> Result<EventAcknowledgeResponse> {
+        self.post_json("/rpc/admin/events/acknowledge", request)
     }
 
     fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
@@ -8823,6 +8959,197 @@ fn config_dispatch(args: &ConfigArgs, explicit_host: Option<&str>) -> Result<Dis
                     format!("fwc config get {} --host {}", connector.slug, host.endpoint),
                     format!("fwc config revisions {} --host {}", connector.slug, host.endpoint),
                 ],
+            });
+            envelope.inject_into(&mut payload);
+            Ok(DispatchOutcome {
+                payload,
+                exit_code: CliExitCode::Success,
+            })
+        }
+    }
+}
+
+// ── Logs dispatch ─────────────────────────────────────────────────────────
+
+fn logs_dispatch(args: &LogsArgs, explicit_host: Option<&str>) -> Result<DispatchOutcome> {
+    let Some(host) = resolve_host_config(explicit_host)? else {
+        return Ok(missing_host_dispatch(
+            "logs",
+            serde_json::to_value(args)?,
+            vec![
+                "fwc logs --host <endpoint>".to_owned(),
+                "Set `FWC_HOST` or `FCP_HOST_ENDPOINT`, or configure an active FCP context."
+                    .to_owned(),
+            ],
+        ));
+    };
+    let client = HostAdminClient::new(&host.endpoint)?;
+    let min_severity = args.severity.as_deref().map(|s| match s {
+        "debug" => fcp_host::LogSeverity::Debug,
+        "info" => fcp_host::LogSeverity::Info,
+        "warn" => fcp_host::LogSeverity::Warn,
+        "error" => fcp_host::LogSeverity::Error,
+        _ => fcp_host::LogSeverity::Info,
+    });
+    let response = client.logs(&LogQueryRequest {
+        connector_id: args.connector.clone(),
+        min_severity,
+        after_sequence: args.after,
+        limit: args.limit,
+    })?;
+    let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "logs");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "logs",
+        "source": "host-admin-api",
+        "message": format!("Returned {} log entries.", response.entries.len()),
+        "entries": response.entries,
+        "latest_sequence": response.latest_sequence,
+    });
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Success,
+    })
+}
+
+// ── Journal dispatch ──────────────────────────────────────────────────────
+
+fn journal_dispatch(args: &JournalArgs, explicit_host: Option<&str>) -> Result<DispatchOutcome> {
+    let Some(host) = resolve_host_config(explicit_host)? else {
+        return Ok(missing_host_dispatch(
+            "journal",
+            serde_json::to_value(args)?,
+            vec![
+                "fwc journal --host <endpoint>".to_owned(),
+                "Set `FWC_HOST` or `FCP_HOST_ENDPOINT`, or configure an active FCP context."
+                    .to_owned(),
+            ],
+        ));
+    };
+    let client = HostAdminClient::new(&host.endpoint)?;
+    let response = client.journal(&JournalQueryRequest {
+        connector_id: args.connector.clone(),
+        after_sequence: args.after,
+        limit: args.limit,
+    })?;
+    let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "journal");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "journal",
+        "source": "host-admin-api",
+        "message": format!(
+            "Returned {} journal entries (total: {}).",
+            response.entries.len(),
+            response.total_entries,
+        ),
+        "entries": response.entries,
+        "total_entries": response.total_entries,
+        "latest_sequence": response.latest_sequence,
+    });
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Success,
+    })
+}
+
+// ── Receipts dispatch ─────────────────────────────────────────────────────
+
+fn receipts_dispatch(args: &ReceiptsArgs, explicit_host: Option<&str>) -> Result<DispatchOutcome> {
+    let Some(host) = resolve_host_config(explicit_host)? else {
+        return Ok(missing_host_dispatch(
+            "receipts",
+            serde_json::to_value(args)?,
+            vec![
+                "fwc receipts <connector> --host <endpoint>".to_owned(),
+                "Set `FWC_HOST` or `FCP_HOST_ENDPOINT`, or configure an active FCP context."
+                    .to_owned(),
+            ],
+        ));
+    };
+    let client = HostAdminClient::new(&host.endpoint)?;
+    let response = client.receipts(&ReceiptQueryRequest {
+        connector_id: args.connector.clone(),
+        operation: args.operation.clone(),
+        after: None,
+        limit: args.limit,
+    })?;
+    let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "receipts");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "receipts",
+        "source": "host-admin-api",
+        "message": format!("Returned {} receipt(s) for `{}`.", response.receipts.len(), args.connector),
+        "connector": &args.connector,
+        "receipts": response.receipts,
+    });
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Success,
+    })
+}
+
+// ── Events dispatch ───────────────────────────────────────────────────────
+
+fn events_dispatch(args: &EventsArgs, explicit_host: Option<&str>) -> Result<DispatchOutcome> {
+    let Some(host) = resolve_host_config(explicit_host)? else {
+        return Ok(missing_host_dispatch(
+            "events",
+            serde_json::to_value(args)?,
+            vec![
+                "fwc events list --host <endpoint>".to_owned(),
+                "Set `FWC_HOST` or `FCP_HOST_ENDPOINT`, or configure an active FCP context."
+                    .to_owned(),
+            ],
+        ));
+    };
+    let client = HostAdminClient::new(&host.endpoint)?;
+    match &args.command {
+        EventsCommand::List(list_args) => {
+            let response = client.events(&EventQueryRequest {
+                connector_id: list_args.connector.clone(),
+                kind: None,
+                unacknowledged_only: list_args.unacknowledged,
+                limit: list_args.limit,
+            })?;
+            let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "events");
+            let mut payload = json!({
+                "status": "ok",
+                "command": "events",
+                "subcommand": "list",
+                "source": "host-admin-api",
+                "message": format!(
+                    "Returned {} event(s) ({} unacknowledged).",
+                    response.events.len(),
+                    response.unacknowledged_count,
+                ),
+                "events": response.events,
+                "unacknowledged_count": response.unacknowledged_count,
+            });
+            envelope.inject_into(&mut payload);
+            Ok(DispatchOutcome {
+                payload,
+                exit_code: CliExitCode::Success,
+            })
+        }
+        EventsCommand::Ack(ack_args) => {
+            let response = client.acknowledge_events(&EventAcknowledgeRequest {
+                event_ids: ack_args.event_ids.clone(),
+            })?;
+            let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "events");
+            let mut payload = json!({
+                "status": "ok",
+                "command": "events",
+                "subcommand": "ack",
+                "source": "host-admin-api",
+                "message": format!(
+                    "Acknowledged {} event(s).",
+                    response.acknowledged_count,
+                ),
+                "acknowledged_count": response.acknowledged_count,
+                "not_found": response.not_found,
             });
             envelope.inject_into(&mut payload);
             Ok(DispatchOutcome {
@@ -23249,6 +23576,237 @@ deny_ptrace = true
                 assert_eq!(revision, 42);
             }
             command => panic!("expected config rollback command, got {command:?}"),
+        }
+    }
+
+    // ── Logs/journal/receipts/events ────────────────────────────────────
+
+    #[test]
+    fn execute_logs_no_host_returns_missing_host() {
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "logs"]);
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "logs");
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
+    }
+
+    #[test]
+    fn execute_logs_returns_entries() {
+        let (host, server) = spawn_mock_host_sequence(vec![(
+            "POST /rpc/admin/logs".to_owned(),
+            json!({
+                "entries": [
+                    {
+                        "sequence": 1,
+                        "severity": "info",
+                        "message": "connector started",
+                        "timestamp": "2026-03-12T00:00:00Z"
+                    }
+                ],
+                "latest_sequence": 1
+            }),
+        )]);
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "logs", "--host", &host]);
+        server.join().expect("mock host");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "logs");
+        assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["entries"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn execute_journal_no_host_returns_missing_host() {
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "journal"]);
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "journal");
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
+    }
+
+    #[test]
+    fn execute_journal_returns_entries() {
+        let (host, server) = spawn_mock_host_sequence(vec![(
+            "POST /rpc/admin/journal".to_owned(),
+            json!({
+                "entries": [],
+                "total_entries": 0,
+                "latest_sequence": 0
+            }),
+        )]);
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "journal", "--host", &host]);
+        server.join().expect("mock host");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "journal");
+        assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["total_entries"], 0);
+    }
+
+    #[test]
+    fn execute_receipts_no_host_returns_missing_host() {
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "receipts", "github"]);
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "receipts");
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
+    }
+
+    #[test]
+    fn execute_receipts_returns_entries() {
+        let (host, server) = spawn_mock_host_sequence(vec![(
+            "POST /rpc/admin/receipts".to_owned(),
+            json!({
+                "receipts": [],
+                "total_receipts": 0
+            }),
+        )]);
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "receipts",
+            "github",
+            "--host",
+            &host,
+        ]);
+        server.join().expect("mock host");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "receipts");
+        assert_eq!(payload["status"], "ok");
+    }
+
+    #[test]
+    fn execute_events_list_no_host_returns_missing_host() {
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "events", "list"]);
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "events");
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
+    }
+
+    #[test]
+    fn execute_events_list_returns_entries() {
+        let (host, server) = spawn_mock_host_sequence(vec![(
+            "POST /rpc/admin/events".to_owned(),
+            json!({
+                "events": [],
+                "unacknowledged_count": 0
+            }),
+        )]);
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "events",
+            "list",
+            "--host",
+            &host,
+        ]);
+        server.join().expect("mock host");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "events");
+        assert_eq!(payload["subcommand"], "list");
+        assert_eq!(payload["status"], "ok");
+    }
+
+    #[test]
+    fn execute_events_ack_returns_result() {
+        let (host, server) = spawn_mock_host_sequence(vec![(
+            "POST /rpc/admin/events/acknowledge".to_owned(),
+            json!({
+                "acknowledged_count": 2,
+                "not_found": []
+            }),
+        )]);
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "events",
+            "ack",
+            "evt-1",
+            "evt-2",
+            "--host",
+            &host,
+        ]);
+        server.join().expect("mock host");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "events");
+        assert_eq!(payload["subcommand"], "ack");
+        assert_eq!(payload["acknowledged_count"], 2);
+    }
+
+    #[test]
+    fn execute_logs_parses_correctly() {
+        let prepared = prepare_cli(&[
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "logs".to_owned(),
+            "--connector".to_owned(),
+            "github".to_owned(),
+        ])
+        .expect("logs should parse");
+        match prepared.cli.command {
+            Commands::Logs(super::LogsArgs { connector, .. }) => {
+                assert_eq!(connector.unwrap(), "github");
+            }
+            command => panic!("expected logs command, got {command:?}"),
+        }
+    }
+
+    #[test]
+    fn execute_journal_parses_correctly() {
+        let prepared = prepare_cli(&[
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "journal".to_owned(),
+            "--after".to_owned(),
+            "5".to_owned(),
+        ])
+        .expect("journal should parse");
+        match prepared.cli.command {
+            Commands::Journal(super::JournalArgs { after, .. }) => {
+                assert_eq!(after, 5);
+            }
+            command => panic!("expected journal command, got {command:?}"),
+        }
+    }
+
+    #[test]
+    fn execute_receipts_parses_correctly() {
+        let prepared = prepare_cli(&[
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "receipts".to_owned(),
+            "github".to_owned(),
+            "--operation".to_owned(),
+            "list_repos".to_owned(),
+        ])
+        .expect("receipts should parse");
+        match prepared.cli.command {
+            Commands::Receipts(super::ReceiptsArgs {
+                connector,
+                operation,
+                ..
+            }) => {
+                assert_eq!(connector, "github");
+                assert_eq!(operation.unwrap(), "list_repos");
+            }
+            command => panic!("expected receipts command, got {command:?}"),
+        }
+    }
+
+    #[test]
+    fn execute_events_list_parses_correctly() {
+        let prepared = prepare_cli(&[
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "events".to_owned(),
+            "list".to_owned(),
+            "--unacknowledged".to_owned(),
+        ])
+        .expect("events list should parse");
+        match prepared.cli.command {
+            Commands::Events(super::EventsArgs {
+                command: super::EventsCommand::List(super::EventsListArgs { unacknowledged, .. }),
+            }) => assert!(unacknowledged),
+            command => panic!("expected events list command, got {command:?}"),
         }
     }
 

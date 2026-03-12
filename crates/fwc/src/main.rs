@@ -20392,7 +20392,7 @@ depends_on = ["missing"]
     }
 
     #[test]
-    fn execute_recipe_export_returns_raw_toml() {
+    fn execute_recipe_export_wraps_toml_in_command_envelope() {
         let (exit_code, payload) = execute_json(&[
             "fwc",
             "--json",
@@ -20401,10 +20401,13 @@ depends_on = ["missing"]
             "github-pr-review-notify",
         ]);
 
-        let export = payload
-            .as_str()
-            .expect("recipe export should serialize as a JSON string");
         assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "recipe");
+        assert_eq!(payload["subcommand"], "export");
+        assert_eq!(payload["mode"], "offline-artifact");
+        let export = payload["content"]
+            .as_str()
+            .expect("recipe export should include TOML content");
         assert!(export.starts_with("[pipeline]"));
         assert!(export.contains("name = \"github-pr-review-notify\""));
         assert!(export.contains("operation = \"github.get_pull_request\""));

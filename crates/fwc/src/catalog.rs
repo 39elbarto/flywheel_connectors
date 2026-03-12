@@ -9959,7 +9959,11 @@ mod tests {
             DiscoveryDataSource::StaticSchema,
         ];
         let tags: std::collections::HashSet<&str> = all.iter().map(|s| s.tag()).collect();
-        assert_eq!(tags.len(), all.len(), "Duplicate DiscoveryDataSource tags found");
+        assert_eq!(
+            tags.len(),
+            all.len(),
+            "Duplicate DiscoveryDataSource tags found"
+        );
     }
 
     #[test]
@@ -10026,8 +10030,7 @@ mod tests {
             let auth = src.is_authoritative();
             let prov = discovery_provenance("list", src);
             assert_eq!(
-                prov.authoritative,
-                auth,
+                prov.authoritative, auth,
                 "Provenance authoritative mismatch",
             );
         }
@@ -10044,8 +10047,7 @@ mod tests {
             let caveat = src.freshness_caveat();
             let prov = discovery_provenance("show", src);
             assert_eq!(
-                prov.caveat,
-                caveat,
+                prov.caveat, caveat,
                 "Provenance caveat doesn't match source freshness",
             );
         }
@@ -10063,7 +10065,10 @@ mod tests {
         let v = serde_json::to_value(&prov).unwrap();
         assert!(v.get("command").is_some(), "Missing 'command' field");
         assert!(v.get("source").is_some(), "Missing 'source' field");
-        assert!(v.get("authoritative").is_some(), "Missing 'authoritative' field");
+        assert!(
+            v.get("authoritative").is_some(),
+            "Missing 'authoritative' field"
+        );
         assert!(v.get("caveat").is_some(), "Missing 'caveat' field");
     }
 
@@ -10082,7 +10087,8 @@ mod tests {
                 + (mode.is_offline() as u8)
                 + (mode.is_refused() as u8);
             assert_eq!(
-                sum, 1,
+                sum,
+                1,
                 "RuntimeMode::{:?} violates mutual exclusivity: auth={} offline={} refused={}",
                 mode,
                 mode.is_authoritative(),
@@ -10145,7 +10151,11 @@ mod tests {
             .iter()
             .map(|s| serde_json::to_string(s).unwrap())
             .collect();
-        assert_eq!(tags.len(), sources.len(), "Duplicate CommandTruthSource serde tags");
+        assert_eq!(
+            tags.len(),
+            sources.len(),
+            "Duplicate CommandTruthSource serde tags"
+        );
     }
 
     #[test]
@@ -10163,9 +10173,15 @@ mod tests {
             .iter()
             .any(|c| matches!(c.truth_source, CommandTruthSource::Passthrough));
         assert!(has_live, "No LiveHost command in COMMAND_CLASSIFICATIONS");
-        assert!(has_offline, "No OfflineArtifact command in COMMAND_CLASSIFICATIONS");
+        assert!(
+            has_offline,
+            "No OfflineArtifact command in COMMAND_CLASSIFICATIONS"
+        );
         assert!(has_hybrid, "No Hybrid command in COMMAND_CLASSIFICATIONS");
-        assert!(has_passthrough, "No Passthrough command in COMMAND_CLASSIFICATIONS");
+        assert!(
+            has_passthrough,
+            "No Passthrough command in COMMAND_CLASSIFICATIONS"
+        );
     }
 
     // ── CommandExecutionMode invariants ───────────────────────────────
@@ -10183,7 +10199,11 @@ mod tests {
             .iter()
             .map(|m| serde_json::to_string(m).unwrap())
             .collect();
-        assert_eq!(tags.len(), modes.len(), "Duplicate CommandExecutionMode serde tags");
+        assert_eq!(
+            tags.len(),
+            modes.len(),
+            "Duplicate CommandExecutionMode serde tags"
+        );
     }
 
     #[test]
@@ -10197,8 +10217,14 @@ mod tests {
         let has_local = COMMAND_CLASSIFICATIONS
             .iter()
             .any(|c| matches!(c.execution_mode, CommandExecutionMode::LocalOnly));
-        assert!(has_readonly, "No ReadOnly command in COMMAND_CLASSIFICATIONS");
-        assert!(has_mutating, "No Mutating command in COMMAND_CLASSIFICATIONS");
+        assert!(
+            has_readonly,
+            "No ReadOnly command in COMMAND_CLASSIFICATIONS"
+        );
+        assert!(
+            has_mutating,
+            "No Mutating command in COMMAND_CLASSIFICATIONS"
+        );
         assert!(has_local, "No LocalOnly command in COMMAND_CLASSIFICATIONS");
     }
 
@@ -10388,7 +10414,11 @@ mod tests {
             .iter()
             .map(|c| serde_json::to_string(c).unwrap())
             .collect();
-        assert_eq!(tags.len(), caps.len(), "Duplicate SimulateCapability serde tags");
+        assert_eq!(
+            tags.len(),
+            caps.len(),
+            "Duplicate SimulateCapability serde tags"
+        );
     }
 
     // ── HostAbsentBehavior invariants ─────────────────────────────────
@@ -10524,10 +10554,16 @@ mod tests {
 
     #[test]
     fn invariant_intent_actions_are_nonempty_and_unique() {
-        assert!(!INTENT_ACTIONS.is_empty(), "INTENT_ACTIONS should not be empty");
-        let names: std::collections::HashSet<&&str> =
-            INTENT_ACTIONS.iter().collect();
-        assert_eq!(names.len(), INTENT_ACTIONS.len(), "Duplicate intent action names");
+        assert!(
+            !INTENT_ACTIONS.is_empty(),
+            "INTENT_ACTIONS should not be empty"
+        );
+        let names: std::collections::HashSet<&&str> = INTENT_ACTIONS.iter().collect();
+        assert_eq!(
+            names.len(),
+            INTENT_ACTIONS.len(),
+            "Duplicate intent action names"
+        );
         for action in INTENT_ACTIONS {
             assert!(!action.is_empty(), "Empty intent action name");
         }
@@ -10562,10 +10598,16 @@ mod tests {
 
     #[test]
     fn invariant_admin_commands_are_nonempty_and_unique() {
-        assert!(!ADMIN_COMMANDS.is_empty(), "ADMIN_COMMANDS should not be empty");
-        let names: std::collections::HashSet<&&str> =
-            ADMIN_COMMANDS.iter().collect();
-        assert_eq!(names.len(), ADMIN_COMMANDS.len(), "Duplicate admin commands");
+        assert!(
+            !ADMIN_COMMANDS.is_empty(),
+            "ADMIN_COMMANDS should not be empty"
+        );
+        let names: std::collections::HashSet<&&str> = ADMIN_COMMANDS.iter().collect();
+        assert_eq!(
+            names.len(),
+            ADMIN_COMMANDS.len(),
+            "Duplicate admin commands"
+        );
         for cmd in ADMIN_COMMANDS {
             assert!(!cmd.is_empty(), "Empty admin command name");
         }
@@ -10584,6 +10626,10 @@ mod tests {
             .iter()
             .map(|a| serde_json::to_string(a).unwrap())
             .collect();
-        assert_eq!(tags.len(), avails.len(), "Duplicate ToolAvailability serde tags");
+        assert_eq!(
+            tags.len(),
+            avails.len(),
+            "Duplicate ToolAvailability serde tags"
+        );
     }
 }

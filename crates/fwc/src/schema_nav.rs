@@ -80,10 +80,9 @@ pub fn scaffold_template(schema: &Value) -> Value {
 
 /// Filter fields to show only those matching a specific path prefix.
 pub fn filter_by_field(fields: &[SchemaField], field_name: &str) -> Vec<SchemaField> {
-    let prefix = format!("{field_name}.");
     fields
         .iter()
-        .filter(|f| f.path == field_name || f.path.starts_with(&prefix))
+        .filter(|f| schema_path_matches(&f.path, field_name))
         .cloned()
         .collect()
 }
@@ -142,14 +141,26 @@ pub fn schema_summary(fields: &[SchemaField]) -> Value {
 /// path → value bindings, and replaces placeholder values with the provided
 /// values. Paths use dot notation for nested fields.
 pub fn fill_template(template: &Value, bindings: &Map<String, Value>) -> Value {
+    fill_template_at_path(template, bindings, None)
+}
+
+fn fill_template_at_path(
+    template: &Value,
+    bindings: &Map<String, Value>,
+    current_path: Option<&str>,
+) -> Value {
     match template {
         Value::Object(obj) => {
             let mut result = Map::new();
             for (key, val) in obj {
-                if let Some(bound) = bindings.get(key) {
+                let path = join_path(current_path, key);
+                if let Some(bound) = bindings.get(&path) {
                     result.insert(key.clone(), bound.clone());
                 } else {
-                    result.insert(key.clone(), fill_template(val, bindings));
+                    result.insert(
+                        key.clone(),
+                        fill_template_at_path(val, bindings, Some(path.as_str())),
+                    );
                 }
             }
             Value::Object(result)
@@ -182,8 +193,24 @@ pub struct ValidationError {
 pub fn validate_input(schema: &Value, input: &Value) -> Vec<ValidationError> {
     let normalized = normalize_schema(schema);
     let mut errors = Vec::new();
-    validate_object(&normalized, input, "", &mut errors);
+    validate_value(&normalized, input, "", &mut errors);
     errors
+}
+
+fn validate_value(schema: &Value, input: &Value, path: &str, errors: &mut Vec<ValidationError>) {
+    validate_type(schema, input, path, errors);
+
+    if input.is_object() && schema.get("properties").is_some() {
+        validate_object(schema, input, path, errors);
+    }
+
+    if let (Some(items_schema), Some(items)) = (schema.get("items"), input.as_array()) {
+        let normalized_items = normalize_schema(items_schema);
+        for (index, item) in items.iter().enumerate() {
+            let item_path = join_array_index_path(path, index);
+            validate_value(&normalized_items, item, &item_path, errors);
+        }
+    }
 }
 
 fn validate_object(schema: &Value, input: &Value, prefix: &str, errors: &mut Vec<ValidationError>) {
@@ -227,12 +254,7 @@ fn validate_object(schema: &Value, input: &Value, prefix: &str, errors: &mut Vec
 
                 if let Some(prop_schema) = properties.get(key) {
                     let prop_normalized = normalize_schema(prop_schema);
-                    validate_type(&prop_normalized, val, &path, errors);
-
-                    // Recurse into nested objects
-                    if val.is_object() && prop_normalized.get("properties").is_some() {
-                        validate_object(&prop_normalized, val, &path, errors);
-                    }
+                    validate_value(&prop_normalized, val, &path, errors);
                 }
             }
         }
@@ -262,7 +284,12 @@ fn validate_type(schema: &Value, value: &Value, path: &str, errors: &mut Vec<Val
     if let Some(expected) = expected_type {
         let type_matches = match expected {
             "string" => value.is_string(),
-            "number" | "integer" => value.is_number(),
+            "number" => value.is_number(),
+            "integer" => {
+                value.as_i64().is_some()
+                    || value.as_u64().is_some()
+                    || value.as_f64().is_some_and(|number| number.fract() == 0.0)
+            }
             "boolean" => value.is_boolean(),
             "array" => value.is_array(),
             "object" => value.is_object(),
@@ -353,6 +380,9 @@ fn walk_property(
     let default = normalized.get("default").cloned();
     let variants = summarize_variants(&normalized);
     let constraints = merged_constraints(inherited_constraints, constraint_notes(&normalized));
+    let inherited_child_constraints = constraints
+        .clone()
+        .unwrap_or_else(|| inherited_constraints.to_vec());
 
     fields.push(SchemaField {
         path: path.to_owned(),
@@ -371,7 +401,8 @@ fn walk_property(
 
     for property in collect_child_properties(&normalized) {
         let nested_path = format!("{path}.{}", property.name);
-        let nested_constraints = property.notes.into_iter().collect::<Vec<_>>();
+        let nested_constraints =
+            merge_constraint_lists(&inherited_child_constraints, property.notes.into_iter());
         walk_property(
             &nested_path,
             &property.schema,
@@ -387,7 +418,8 @@ fn walk_property(
         let item_path = format!("{path}[]");
         for property in collect_child_properties(items) {
             let nested_path = format!("{item_path}.{}", property.name);
-            let nested_constraints = property.notes.into_iter().collect::<Vec<_>>();
+            let nested_constraints =
+                merge_constraint_lists(&inherited_child_constraints, property.notes.into_iter());
             walk_property(
                 &nested_path,
                 &property.schema,
@@ -506,14 +538,38 @@ fn extract_example_values(examples: &[String]) -> Value {
     let mut map = serde_json::Map::new();
     for example in examples {
         if let Ok(parsed) = serde_json::from_str::<Value>(example) {
-            if let Some(obj) = parsed.as_object() {
-                for (key, value) in obj {
-                    map.insert(key.clone(), value.clone());
-                }
-            }
+            collect_example_values(&mut map, None, &parsed);
         }
     }
     Value::Object(map)
+}
+
+fn collect_example_values(map: &mut Map<String, Value>, current_path: Option<&str>, value: &Value) {
+    match value {
+        Value::Object(obj) => {
+            if let Some(path) = current_path {
+                map.insert(path.to_owned(), value.clone());
+            }
+            for (key, nested_value) in obj {
+                let path = join_path(current_path, key);
+                collect_example_values(map, Some(path.as_str()), nested_value);
+            }
+        }
+        Value::Array(items) => {
+            if let Some(path) = current_path {
+                map.insert(path.to_owned(), value.clone());
+                if let Some(first_item) = items.first() {
+                    let item_path = format!("{path}[]");
+                    collect_example_values(map, Some(item_path.as_str()), first_item);
+                }
+            }
+        }
+        _ => {
+            if let Some(path) = current_path {
+                map.insert(path.to_owned(), value.clone());
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -621,6 +677,38 @@ fn merged_constraints(
         None
     } else {
         Some(merged.into_iter().collect())
+    }
+}
+
+fn merge_constraint_lists(
+    inherited_constraints: &[String],
+    own_constraints: impl IntoIterator<Item = String>,
+) -> Vec<String> {
+    let mut merged = BTreeSet::new();
+    merged.extend(inherited_constraints.iter().cloned());
+    merged.extend(own_constraints);
+    merged.into_iter().collect()
+}
+
+fn schema_path_matches(path: &str, field_name: &str) -> bool {
+    path == field_name
+        || path
+            .strip_prefix(field_name)
+            .is_some_and(|suffix| suffix.starts_with('.') || suffix.starts_with("[]"))
+}
+
+fn join_path(prefix: Option<&str>, segment: &str) -> String {
+    match prefix {
+        Some(prefix) if !prefix.is_empty() => format!("{prefix}.{segment}"),
+        _ => segment.to_owned(),
+    }
+}
+
+fn join_array_index_path(prefix: &str, index: usize) -> String {
+    if prefix.is_empty() {
+        format!("[{index}]")
+    } else {
+        format!("{prefix}[{index}]")
     }
 }
 
@@ -1055,6 +1143,39 @@ mod tests {
     }
 
     #[test]
+    fn walk_schema_extracts_nested_examples_from_objects_and_arrays() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "spec": {
+                    "type": "object",
+                    "properties": {
+                        "replicas": { "type": "integer" }
+                    }
+                },
+                "containers": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": { "type": "string" }
+                        }
+                    }
+                }
+            }
+        });
+        let examples = vec![r#"{"spec":{"replicas":3},"containers":[{"name":"api"}]}"#.to_owned()];
+        let fields = walk_schema(&schema, &examples);
+        let replicas = fields.iter().find(|f| f.path == "spec.replicas").unwrap();
+        let container_name = fields
+            .iter()
+            .find(|f| f.path == "containers[].name")
+            .unwrap();
+        assert_eq!(replicas.example, Some(json!(3)));
+        assert_eq!(container_name.example, Some(json!("api")));
+    }
+
+    #[test]
     fn walk_schema_empty_properties() {
         let schema = json!({"type": "object"});
         let fields = walk_schema(&schema, &[]);
@@ -1245,6 +1366,58 @@ mod tests {
             child_constraints
                 .iter()
                 .any(|constraint| constraint == "required when kind=user")
+        );
+    }
+
+    #[test]
+    fn walk_schema_propagates_conditional_constraints_to_grandchildren() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "target": {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "required": ["kind", "config"],
+                            "properties": {
+                                "kind": { "const": "http" },
+                                "config": {
+                                    "type": "object",
+                                    "required": ["port"],
+                                    "properties": {
+                                        "port": { "type": "integer" }
+                                    }
+                                }
+                            }
+                        },
+                        {
+                            "type": "string"
+                        }
+                    ],
+                    "discriminator": { "propertyName": "kind" }
+                }
+            }
+        });
+        let fields = walk_schema(&schema, &[]);
+        let port = fields
+            .iter()
+            .find(|f| f.path == "target.config.port")
+            .unwrap();
+        let constraints = port.constraints.as_ref().unwrap();
+        assert!(
+            constraints
+                .iter()
+                .any(|constraint| constraint == "discriminator: kind")
+        );
+        assert!(
+            constraints
+                .iter()
+                .any(|constraint| constraint == "available when kind=http")
+        );
+        assert!(
+            constraints
+                .iter()
+                .any(|constraint| constraint == "required when kind=http")
         );
     }
 
@@ -1525,6 +1698,38 @@ mod tests {
         let fields = walk_schema(&schema, &[]);
         let filtered = filter_by_field(&fields, "nonexistent");
         assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn filter_by_field_matches_array_children() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "containers": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": { "type": "string" },
+                            "image": { "type": "string" }
+                        }
+                    }
+                }
+            }
+        });
+        let fields = walk_schema(&schema, &[]);
+        let filtered = filter_by_field(&fields, "containers");
+        assert!(filtered.iter().any(|field| field.path == "containers"));
+        assert!(
+            filtered
+                .iter()
+                .any(|field| field.path == "containers[].name")
+        );
+        assert!(
+            filtered
+                .iter()
+                .any(|field| field.path == "containers[].image")
+        );
     }
 
     // ── Type inference tests ────────────────────────────────────────
@@ -2397,6 +2602,31 @@ mod tests {
     }
 
     #[test]
+    fn fill_template_replaces_nested_dot_path_values() {
+        let schema = json!({
+            "type": "object",
+            "required": ["spec"],
+            "properties": {
+                "spec": {
+                    "type": "object",
+                    "required": ["replicas", "image"],
+                    "properties": {
+                        "replicas": { "type": "integer" },
+                        "image": { "type": "string" }
+                    }
+                }
+            }
+        });
+        let template = scaffold_template(&schema);
+        let mut bindings = Map::new();
+        bindings.insert("spec.replicas".into(), json!(3));
+        bindings.insert("spec.image".into(), json!("nginx:latest"));
+        let filled = fill_template(&template, &bindings);
+        assert_eq!(filled["spec"]["replicas"], 3);
+        assert_eq!(filled["spec"]["image"], "nginx:latest");
+    }
+
+    #[test]
     fn fill_template_preserves_unfilled_placeholders() {
         let template = json!({
             "name": "<string>",
@@ -2470,6 +2700,21 @@ mod tests {
         assert_eq!(errors[0].path, "count");
         assert!(errors[0].expected.contains("integer"));
         assert!(errors[0].actual.contains("string"));
+    }
+
+    #[test]
+    fn validate_input_integer_rejects_fractional_numbers() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "count": { "type": "integer" }
+            }
+        });
+        let input = json!({ "count": 1.5 });
+        let errors = validate_input(&schema, &input);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].path, "count");
+        assert!(errors[0].expected.contains("integer"));
     }
 
     #[test]
@@ -2567,6 +2812,44 @@ mod tests {
         let errors = validate_input(&schema, &input);
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].path, "address.city");
+    }
+
+    #[test]
+    fn validate_input_recurses_into_array_items() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "containers": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["name"],
+                        "properties": {
+                            "name": { "type": "string" },
+                            "port": { "type": "integer" }
+                        }
+                    }
+                }
+            }
+        });
+        let input = json!({
+            "containers": [
+                { "port": "8080" }
+            ]
+        });
+        let errors = validate_input(&schema, &input);
+        assert_eq!(errors.len(), 2);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.path == "containers[0].name" && error.actual == "missing")
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.path == "containers[0].port"
+                    && error.expected.contains("integer"))
+        );
     }
 
     #[test]

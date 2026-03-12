@@ -4764,6 +4764,7 @@ serde = "1"
     #[test]
     fn generate_connector_rs_queue_has_enforce_limits() {
         let output = generate_connector_rs("fcp.test", "test", ConnectorArchetype::Queue);
+        assert!(output.contains("use crate::limits;"));
         assert!(output.contains("MAX_MESSAGE_BYTES"));
         assert!(output.contains("enforce_limits"));
     }
@@ -4771,13 +4772,44 @@ serde = "1"
     #[test]
     fn generate_connector_rs_file_has_filename_check() {
         let output = generate_connector_rs("fcp.test", "test", ConnectorArchetype::File);
+        assert!(output.contains("use crate::limits;"));
         assert!(output.contains("MAX_FILENAME_CHARS"));
     }
 
     #[test]
     fn generate_connector_rs_database_enforce_limits() {
         let output = generate_connector_rs("fcp.test", "test", ConnectorArchetype::Database);
+        assert!(output.contains("use crate::limits;"));
         assert!(output.contains("MAX_PAYLOAD_BYTES"));
+    }
+
+    #[test]
+    fn generate_connector_rs_generic_archetypes_use_limits_in_validation() {
+        for archetype in [
+            ConnectorArchetype::RequestResponse,
+            ConnectorArchetype::Streaming,
+            ConnectorArchetype::Bidirectional,
+            ConnectorArchetype::Cli,
+            ConnectorArchetype::Browser,
+        ] {
+            let output = generate_connector_rs("fcp.test", "test", archetype);
+            assert!(output.contains("use crate::limits;"));
+            assert!(output.contains("limits::MAX_MESSAGE_CHARS"));
+            assert!(output.contains("limits::MAX_PAYLOAD_BYTES"));
+        }
+    }
+
+    #[test]
+    fn generate_connector_rs_payload_archetypes_use_named_payload_limits() {
+        for archetype in [
+            ConnectorArchetype::Webhook,
+            ConnectorArchetype::Polling,
+            ConnectorArchetype::Database,
+        ] {
+            let output = generate_connector_rs("fcp.test", "test", archetype);
+            assert!(output.contains("use crate::limits;"));
+            assert!(output.contains("limits::MAX_PAYLOAD_BYTES"));
+        }
     }
 
     #[test]

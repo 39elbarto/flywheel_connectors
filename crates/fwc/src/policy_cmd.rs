@@ -1190,7 +1190,7 @@ fn diff_zone_policy(
 ) -> Result<PolicyDiffOutput> {
     let (added, removed) = diff_policy_lists(before, after);
     let changed = diff_policy_changed(before, after)?;
-    let risk_flags = compute_risk_flags(&added, &changed);
+    let risk_flags = compute_risk_flags(&added, &removed, &changed);
 
     let output = PolicyDiffOutput {
         policy_type: "zone_policy".to_string(),
@@ -1309,7 +1309,11 @@ fn diff_policy_changed(
     Ok(changed)
 }
 
-fn compute_risk_flags(added: &PolicyListDiff, changed: &PolicyChangedFields) -> Vec<String> {
+fn compute_risk_flags(
+    added: &PolicyListDiff,
+    removed: &PolicyListDiff,
+    changed: &PolicyChangedFields,
+) -> Vec<String> {
     let mut flags = Vec::new();
 
     if !added.principal_allow.is_empty() {
@@ -1320,6 +1324,12 @@ fn compute_risk_flags(added: &PolicyListDiff, changed: &PolicyChangedFields) -> 
     }
     if !added.capability_allow.is_empty() {
         flags.push("capability_allow_expanded".to_string());
+    }
+    if !added.capability_ceiling.is_empty() {
+        flags.push("capability_ceiling_expanded".to_string());
+    }
+    if !removed.capability_deny.is_empty() {
+        flags.push("capability_deny_reduced".to_string());
     }
 
     if let Some(ref transport) = changed.transport_policy {
@@ -1811,7 +1821,7 @@ mod tests {
     fn risk_flags_empty_when_no_changes() {
         let added = PolicyListDiff::default();
         let changed = PolicyChangedFields::default();
-        let flags = compute_risk_flags(&added, &changed);
+        let flags = compute_risk_flags(&added, &PolicyListDiff::default(), &changed);
         assert!(flags.is_empty());
     }
 
@@ -1822,7 +1832,7 @@ mod tests {
             ..Default::default()
         };
         let changed = PolicyChangedFields::default();
-        let flags = compute_risk_flags(&added, &changed);
+        let flags = compute_risk_flags(&added, &PolicyListDiff::default(), &changed);
         assert!(flags.contains(&"principal_allow_expanded".to_string()));
     }
 
@@ -1833,7 +1843,7 @@ mod tests {
             ..Default::default()
         };
         let changed = PolicyChangedFields::default();
-        let flags = compute_risk_flags(&added, &changed);
+        let flags = compute_risk_flags(&added, &PolicyListDiff::default(), &changed);
         assert!(flags.contains(&"connector_allow_expanded".to_string()));
     }
 
@@ -1844,8 +1854,30 @@ mod tests {
             ..Default::default()
         };
         let changed = PolicyChangedFields::default();
-        let flags = compute_risk_flags(&added, &changed);
+        let flags = compute_risk_flags(&added, &PolicyListDiff::default(), &changed);
         assert!(flags.contains(&"capability_allow_expanded".to_string()));
+    }
+
+    #[test]
+    fn risk_flags_capability_ceiling_expanded() {
+        let added = PolicyListDiff {
+            capability_ceiling: vec!["cap.admin".to_string()],
+            ..Default::default()
+        };
+        let changed = PolicyChangedFields::default();
+        let flags = compute_risk_flags(&added, &PolicyListDiff::default(), &changed);
+        assert!(flags.contains(&"capability_ceiling_expanded".to_string()));
+    }
+
+    #[test]
+    fn risk_flags_capability_deny_reduced() {
+        let removed = PolicyListDiff {
+            capability_deny: vec!["cap.dangerous".to_string()],
+            ..Default::default()
+        };
+        let changed = PolicyChangedFields::default();
+        let flags = compute_risk_flags(&PolicyListDiff::default(), &removed, &changed);
+        assert!(flags.contains(&"capability_deny_reduced".to_string()));
     }
 
     #[test]
@@ -1864,7 +1896,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let flags = compute_risk_flags(&added, &changed);
+        let flags = compute_risk_flags(&added, &PolicyListDiff::default(), &changed);
         assert!(flags.contains(&"transport_derp_enabled".to_string()));
     }
 
@@ -1884,7 +1916,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let flags = compute_risk_flags(&added, &changed);
+        let flags = compute_risk_flags(&added, &PolicyListDiff::default(), &changed);
         assert!(flags.contains(&"transport_funnel_enabled".to_string()));
     }
 
@@ -1896,7 +1928,7 @@ mod tests {
             ..Default::default()
         };
         let changed = PolicyChangedFields::default();
-        let flags = compute_risk_flags(&added, &changed);
+        let flags = compute_risk_flags(&added, &PolicyListDiff::default(), &changed);
         assert_eq!(flags.len(), 2);
     }
 
@@ -3229,7 +3261,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let flags = compute_risk_flags(&added, &changed);
+        let flags = compute_risk_flags(&added, &PolicyListDiff::default(), &changed);
         assert!(flags.contains(&"transport_lan_enabled".to_string()));
     }
 
@@ -3251,7 +3283,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let flags = compute_risk_flags(&added, &changed);
+        let flags = compute_risk_flags(&added, &PolicyListDiff::default(), &changed);
         assert!(!flags.contains(&"transport_derp_enabled".to_string()));
     }
 
@@ -3348,7 +3380,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let flags = compute_risk_flags(&added, &changed);
+        let flags = compute_risk_flags(&added, &PolicyListDiff::default(), &changed);
         assert!(flags.contains(&"transport_lan_enabled".to_string()));
         assert!(flags.contains(&"transport_derp_enabled".to_string()));
         assert!(flags.contains(&"transport_funnel_enabled".to_string()));
@@ -3372,7 +3404,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let flags = compute_risk_flags(&added, &changed);
+        let flags = compute_risk_flags(&added, &PolicyListDiff::default(), &changed);
         assert!(!flags.contains(&"transport_lan_enabled".to_string()));
         assert!(!flags.contains(&"transport_derp_enabled".to_string()));
         assert!(!flags.contains(&"transport_funnel_enabled".to_string()));
@@ -3389,7 +3421,7 @@ mod tests {
             ..Default::default()
         };
         let changed = PolicyChangedFields::default();
-        let flags = compute_risk_flags(&added, &changed);
+        let flags = compute_risk_flags(&added, &PolicyListDiff::default(), &changed);
         assert!(flags.contains(&"principal_allow_expanded".to_string()));
         assert!(flags.contains(&"connector_allow_expanded".to_string()));
         assert!(flags.contains(&"capability_allow_expanded".to_string()));
@@ -3405,8 +3437,11 @@ mod tests {
             ..Default::default()
         };
         let changed = PolicyChangedFields::default();
-        let flags = compute_risk_flags(&added, &changed);
-        assert!(flags.is_empty(), "deny-list expansions should not raise risk flags");
+        let flags = compute_risk_flags(&added, &PolicyListDiff::default(), &changed);
+        assert!(
+            flags.is_empty(),
+            "deny-list expansions should not raise risk flags"
+        );
     }
 
     // ── diff_json_objects — nested and complex scenarios ─────────────
@@ -3477,10 +3512,8 @@ mod tests {
             "cap.write".parse().unwrap(),
             "cap.admin".parse().unwrap(),
         ];
-        let after: Vec<fcp_core::CapabilityId> = vec![
-            "cap.read".parse().unwrap(),
-            "cap.exec".parse().unwrap(),
-        ];
+        let after: Vec<fcp_core::CapabilityId> =
+            vec!["cap.read".parse().unwrap(), "cap.exec".parse().unwrap()];
         let (added, removed) = diff_capability_ids(&before, &after);
         assert!(added.contains(&"cap.exec".to_string()));
         assert!(removed.contains(&"cap.write".to_string()));

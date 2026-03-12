@@ -409,9 +409,13 @@ impl CancellationEvent {
 /// replay and auditing.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TruthContext {
-    /// Machine-readable command mode aligned with `CommandAvailability`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub command_mode: Option<CommandAvailability>,
+    /// Machine-readable availability verdict for the command output.
+    #[serde(
+        default,
+        alias = "command_mode",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub command_availability: Option<CommandAvailability>,
     /// One or more provenance/source markers (for example
     /// `live-host-introspection` or `workspace-manifest`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -438,11 +442,11 @@ pub struct TruthContext {
 }
 
 impl TruthContext {
-    /// Create a new truth context anchored to a command mode.
+    /// Create a new truth context anchored to a command availability verdict.
     #[must_use]
-    pub fn new(command_mode: CommandAvailability) -> Self {
+    pub fn new(command_availability: CommandAvailability) -> Self {
         Self {
-            command_mode: Some(command_mode),
+            command_availability: Some(command_availability),
             ..Self::default()
         }
     }
@@ -587,8 +591,13 @@ pub struct TraceLogSummary {
 /// Aggregated truthfulness evidence extracted from a trace log.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TruthfulnessSummary {
-    /// Count of entries by command mode / availability tag.
-    pub command_modes: BTreeMap<String, usize>,
+    /// Count of entries by availability tag.
+    #[serde(
+        default,
+        alias = "command_modes",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub command_availabilities: BTreeMap<String, usize>,
     /// Distinct provenance/source markers emitted during the run.
     pub provenance_markers: Vec<String>,
     /// Distinct phase markers emitted during the run.
@@ -627,12 +636,12 @@ impl TruthfulnessSummary {
                 continue;
             };
 
-            if let Some(mode) = truth.command_mode {
+            if let Some(availability) = truth.command_availability {
                 *summary
-                    .command_modes
-                    .entry(mode.tag().to_owned())
+                    .command_availabilities
+                    .entry(availability.tag().to_owned())
                     .or_insert(0) += 1;
-                match mode {
+                match availability {
                     CommandAvailability::LiveRuntime => summary.live_entry_count += 1,
                     CommandAvailability::OfflineArtifact => summary.offline_entry_count += 1,
                     CommandAvailability::Unsupported
@@ -1275,31 +1284,29 @@ impl ReplayInstructions {
         let mut notes = Vec::new();
 
         // Step 1: cd
-        steps.push(format!("cd {}", envelope.working_directory));
+        steps.push(format!(
+            "cd -- {}",
+            shell_quote(&envelope.working_directory)
+        ));
 
         // Step 2: git checkout if SHA available
         if let Some(sha) = &envelope.git_sha {
-            steps.push(format!("git checkout {sha}"));
+            steps.push(format!("git checkout {}", shell_quote(sha)));
             prerequisites.push("git".to_string());
         }
 
-        // Step 3: set environment
-        for (k, v) in &envelope.environment {
-            steps.push(format!("export {k}={v}"));
-        }
-
-        // Step 4: run command
-        let command = if let Some(runner) = &envelope.command_runner {
-            format!("{runner} {}", envelope.command_line)
-        } else {
-            envelope.command_line.clone()
-        };
+        // Step 3: run command under the captured environment.
+        let command = render_replay_command(
+            &envelope.command_line,
+            envelope.command_runner.as_deref(),
+            &envelope.environment,
+        );
         steps.push(command);
 
         if let Some(rv) = &envelope.rust_version {
             prerequisites.push(format!("rustc {rv}"));
         }
-        if envelope.command_runner.is_some() {
+        if envelope.command_runner.as_deref() == Some("rch exec --") {
             prerequisites.push("rch".to_string());
         }
 
@@ -1310,12 +1317,12 @@ impl ReplayInstructions {
                 "Cargo-backed replay remains offloaded through `rch exec -- ...`.".to_owned(),
             );
         }
-        if !envelope.truthfulness.command_modes.is_empty() {
+        if !envelope.truthfulness.command_availabilities.is_empty() {
             notes.push(format!(
-                "Observed command modes: {}",
+                "Observed availability states: {}",
                 envelope
                     .truthfulness
-                    .command_modes
+                    .command_availabilities
                     .keys()
                     .cloned()
                     .collect::<Vec<_>>()
@@ -1382,6 +1389,104 @@ impl ReplayInstructions {
 
         script
     }
+}
+
+fn render_replay_command(
+    command_line: &str,
+    command_runner: Option<&str>,
+    environment: &BTreeMap<String, String>,
+) -> String {
+    let mut parts = Vec::new();
+
+    if !environment.is_empty() {
+        parts.push("env --".to_owned());
+        for (key, value) in environment {
+            parts.push(shell_quote(&format!("{key}={value}")));
+        }
+    }
+
+    if let Some(runner) = command_runner {
+        parts.extend(shell_split_prefix(runner));
+    }
+
+    parts.push("bash".to_owned());
+    parts.push("-lc".to_owned());
+    parts.push(shell_quote(command_line));
+    parts.join(" ")
+}
+
+fn shell_split_prefix(prefix: &str) -> Vec<String> {
+    let trimmed = prefix.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut chars = trimmed.chars();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+
+    while let Some(ch) = chars.next() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+
+        if in_single {
+            if ch == '\'' {
+                in_single = false;
+            } else {
+                current.push(ch);
+            }
+            continue;
+        }
+
+        if in_double {
+            match ch {
+                '"' => in_double = false,
+                '\\' => {
+                    if let Some(next) = chars.next() {
+                        current.push(next);
+                    } else {
+                        escaped = true;
+                    }
+                }
+                _ => current.push(ch),
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' => in_single = true,
+            '"' => in_double = true,
+            '\\' => escaped = true,
+            ch if ch.is_whitespace() => {
+                if !current.is_empty() {
+                    parts.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    if escaped || in_single || in_double {
+        return vec![trimmed.to_owned()];
+    }
+    if !current.is_empty() {
+        parts.push(current);
+    }
+
+    parts.into_iter().map(|part| shell_quote(&part)).collect()
+}
+
+fn shell_quote(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_owned();
+    }
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 // ── 6. Test Helpers ─────────────────────────────────────────────────────────
@@ -1736,7 +1841,10 @@ mod tests {
             .with_reconnect_event(ReconnectEvent::Succeeded)
             .with_cancellation_event(CancellationEvent::Acknowledged);
 
-        assert_eq!(truth.command_mode, Some(CommandAvailability::LiveRuntime));
+        assert_eq!(
+            truth.command_availability,
+            Some(CommandAvailability::LiveRuntime)
+        );
         assert_eq!(truth.provenance_markers, vec!["live-host-introspection"]);
         assert_eq!(truth.phase, Some(TruthPhase::Invoke));
         assert_eq!(truth.host_request_id.as_deref(), Some("req-1"));
@@ -2171,7 +2279,7 @@ mod tests {
         assert_eq!(m.total_bytes, 1024);
         assert!(m.outcome.is_pass());
         assert_eq!(m.log_summary.total_entries, 0);
-        assert!(m.truthfulness.command_modes.is_empty());
+        assert!(m.truthfulness.command_availabilities.is_empty());
     }
 
     #[test]
@@ -2436,7 +2544,7 @@ mod tests {
         let sid = ScenarioId::new(ScenarioLayer::E2E, "s", "c");
         let tid = TraceId::from_string("t");
         let truthfulness = TruthfulnessSummary {
-            command_modes: BTreeMap::from([("offline-artifact".to_string(), 1)]),
+            command_availabilities: BTreeMap::from([("offline-artifact".to_string(), 1)]),
             provenance_markers: vec!["workspace-manifest".to_string()],
             phases: vec!["offline-artifact".to_string()],
             host_request_ids: Vec::new(),
@@ -2526,9 +2634,41 @@ mod tests {
             instructions
                 .steps
                 .iter()
-                .any(|s| s.contains("rch exec -- cargo test"))
+                .any(|s| s.contains("'rch' 'exec' '--' bash -lc 'cargo test'"))
         );
         assert!(instructions.prerequisites.iter().any(|p| p == "rch"));
+    }
+
+    #[test]
+    fn replay_instructions_custom_runner_does_not_claim_rch_prerequisite() {
+        let sid = ScenarioId::new(ScenarioLayer::Unit, "runner", "custom");
+        let tid = TraceId::from_string("trace-custom");
+        let env = ReplayEnvelope::new(sid, tid, "cargo test", "/project")
+            .with_command_runner("custom-runner --");
+        let instructions = ReplayInstructions::from_envelope(&env);
+        assert!(!instructions.prerequisites.iter().any(|p| p == "rch"));
+        assert!(
+            instructions
+                .steps
+                .iter()
+                .any(|s| s.contains("'custom-runner' '--' bash -lc 'cargo test'"))
+        );
+    }
+
+    #[test]
+    fn replay_instructions_quoted_runner_path_preserves_grouping() {
+        let sid = ScenarioId::new(ScenarioLayer::Unit, "runner", "quoted-path");
+        let tid = TraceId::from_string("trace-quoted-runner");
+        let env = ReplayEnvelope::new(sid, tid, "cargo test", "/project")
+            .with_command_runner("\"/opt/custom tools/bin/run\" --flag");
+        let instructions = ReplayInstructions::from_envelope(&env);
+
+        assert!(
+            instructions
+                .steps
+                .iter()
+                .any(|s| s.contains("'/opt/custom tools/bin/run' '--flag' bash -lc 'cargo test'"))
+        );
     }
 
     #[test]
@@ -2536,7 +2676,7 @@ mod tests {
         let sid = ScenarioId::new(ScenarioLayer::E2E, "truth", "notes");
         let tid = TraceId::from_string("trace-99");
         let truthfulness = TruthfulnessSummary {
-            command_modes: BTreeMap::from([
+            command_availabilities: BTreeMap::from([
                 ("live-runtime".to_string(), 1),
                 ("offline-artifact".to_string(), 1),
             ]),
@@ -2557,7 +2697,7 @@ mod tests {
             instructions
                 .notes
                 .iter()
-                .any(|n| n.contains("Observed command modes"))
+                .any(|n| n.contains("Observed availability states"))
         );
         assert!(
             instructions
@@ -2586,8 +2726,30 @@ mod tests {
         let script = instructions.to_shell_script();
         assert!(script.starts_with("#!/usr/bin/env bash"));
         assert!(script.contains("set -euo pipefail"));
-        assert!(script.contains("cd /home"));
-        assert!(script.contains("fwc status"));
+        assert!(script.contains("cd -- '/home'"));
+        assert!(script.contains("bash -lc 'fwc status'"));
+    }
+
+    #[test]
+    fn replay_instructions_shell_quote_dangerous_values() {
+        let sid = ScenarioId::new(ScenarioLayer::E2E, "danger", "quote");
+        let tid = TraceId::from_string("trace-danger");
+        let env = ReplayEnvelope::new(
+            sid,
+            tid,
+            "printf '%s' \"$HOME\"; touch /tmp/should-not-inline",
+            "/tmp/replay dir",
+        )
+        .with_env("FWC_TOKEN", "abc $(rm -rf /)");
+
+        let instructions = ReplayInstructions::from_envelope(&env);
+
+        assert_eq!(instructions.steps[0], "cd -- '/tmp/replay dir'");
+        assert!(instructions.steps[1].contains("env -- 'FWC_TOKEN=abc $(rm -rf /)' bash -lc"));
+        assert!(
+            instructions.steps[1]
+                .contains("'printf '\"'\"'%s'\"'\"' \"$HOME\"; touch /tmp/should-not-inline'")
+        );
     }
 
     #[test]
@@ -2614,7 +2776,7 @@ mod tests {
         assert!(manifest.outcome.is_pass());
         assert_eq!(manifest.file_count, 4);
         assert_eq!(manifest.log_summary.total_entries, 0);
-        assert!(manifest.truthfulness.command_modes.is_empty());
+        assert!(manifest.truthfulness.command_availabilities.is_empty());
     }
 
     #[test]
@@ -2714,8 +2876,8 @@ mod tests {
         );
 
         let summary = log.truthfulness_summary();
-        assert_eq!(summary.command_modes["live-runtime"], 1);
-        assert_eq!(summary.command_modes["offline-artifact"], 1);
+        assert_eq!(summary.command_availabilities["live-runtime"], 1);
+        assert_eq!(summary.command_availabilities["offline-artifact"], 1);
         assert_eq!(summary.live_entry_count, 1);
         assert_eq!(summary.offline_entry_count, 1);
         assert_eq!(
@@ -2800,7 +2962,10 @@ mod tests {
         assert_eq!(summary.total_entries, 3);
         assert_eq!(summary.redacted_count, 1);
         assert_eq!(summary.info_count, 3);
-        assert_eq!(manifest.truthfulness.command_modes["live-runtime"], 1);
+        assert_eq!(
+            manifest.truthfulness.command_availabilities["live-runtime"],
+            1
+        );
         assert_eq!(
             manifest.truthfulness.provenance_markers,
             vec!["live-host-inventory".to_string()]
@@ -3092,7 +3257,7 @@ mod tests {
     #[test]
     fn truth_context_default_is_empty() {
         let tc = TruthContext::default();
-        assert!(tc.command_mode.is_none());
+        assert!(tc.command_availability.is_none());
         assert!(tc.provenance_markers.is_empty());
         assert!(tc.phase.is_none());
         assert!(tc.host_request_id.is_none());
@@ -3124,7 +3289,10 @@ mod tests {
 
         let json = serde_json::to_string(&tc).unwrap();
         let back: TruthContext = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.command_mode, Some(CommandAvailability::Planned));
+        assert_eq!(
+            back.command_availability,
+            Some(CommandAvailability::Planned)
+        );
         assert_eq!(back.provenance_markers, vec!["marker-1"]);
         assert_eq!(back.phase, Some(TruthPhase::Preflight));
         assert_eq!(back.host_request_id.as_deref(), Some("req-123"));
@@ -3138,9 +3306,39 @@ mod tests {
         let tc = TruthContext::default();
         let json = serde_json::to_string(&tc).unwrap();
         // All optional/Vec fields should be skipped when absent
-        assert!(!json.contains("command_mode"));
+        assert!(!json.contains("command_availability"));
         assert!(!json.contains("phase"));
         assert!(!json.contains("host_request_id"));
+    }
+
+    #[test]
+    fn truth_context_deserializes_legacy_command_mode_field() {
+        let json = r#"{"command_mode":"planned","phase":"preflight"}"#;
+        let back: TruthContext = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            back.command_availability,
+            Some(CommandAvailability::Planned)
+        );
+        assert_eq!(back.phase, Some(TruthPhase::Preflight));
+    }
+
+    #[test]
+    fn truthfulness_summary_deserializes_legacy_command_modes_field() {
+        let json = r#"{
+            "command_modes":{"offline-artifact":2},
+            "provenance_markers":["workspace-manifest"],
+            "phases":["offline-artifact"],
+            "host_request_ids":[],
+            "host_response_ids":[],
+            "receipt_ids":[],
+            "reconnect_events":[],
+            "cancellation_events":[],
+            "live_entry_count":0,
+            "offline_entry_count":2
+        }"#;
+        let back: TruthfulnessSummary = serde_json::from_str(json).unwrap();
+        assert_eq!(back.command_availabilities["offline-artifact"], 2);
+        assert_eq!(back.offline_entry_count, 2);
     }
 
     // ── TraceEntry additional coverage ───────────────────────────────────
@@ -3220,7 +3418,13 @@ mod tests {
         let mut log = new_trace_log();
         emit_entry(&mut log, &ctx, TraceLevel::Info, TraceCategory::Setup, "a");
         emit_entry(&mut log, &ctx, TraceLevel::Info, TraceCategory::Setup, "b");
-        emit_entry(&mut log, &ctx, TraceLevel::Error, TraceCategory::Assertion, "c");
+        emit_entry(
+            &mut log,
+            &ctx,
+            TraceLevel::Error,
+            TraceCategory::Assertion,
+            "c",
+        );
         let s = log.summary();
         assert_eq!(s.categories["setup"], 2);
         assert_eq!(s.categories["assertion"], 1);
@@ -3230,8 +3434,20 @@ mod tests {
     fn trace_log_to_jsonl_each_line_has_message() {
         let ctx = scenario_context(ScenarioLayer::Unit, "s", "c");
         let mut log = new_trace_log();
-        emit_entry(&mut log, &ctx, TraceLevel::Info, TraceCategory::Setup, "msg-1");
-        emit_entry(&mut log, &ctx, TraceLevel::Debug, TraceCategory::CliStep, "msg-2");
+        emit_entry(
+            &mut log,
+            &ctx,
+            TraceLevel::Info,
+            TraceCategory::Setup,
+            "msg-1",
+        );
+        emit_entry(
+            &mut log,
+            &ctx,
+            TraceLevel::Debug,
+            TraceCategory::CliStep,
+            "msg-2",
+        );
 
         let jsonl = log.to_jsonl().unwrap();
         let lines: Vec<&str> = jsonl.trim_end_matches('\n').split('\n').collect();
@@ -3244,7 +3460,7 @@ mod tests {
     fn trace_log_truthfulness_summary_empty_log() {
         let log = new_trace_log();
         let ts = log.truthfulness_summary();
-        assert!(ts.command_modes.is_empty());
+        assert!(ts.command_availabilities.is_empty());
         assert!(ts.provenance_markers.is_empty());
         assert!(ts.phases.is_empty());
         assert_eq!(ts.live_entry_count, 0);
@@ -3255,15 +3471,27 @@ mod tests {
     fn trace_log_truthfulness_summary_no_truth_entries_yields_empty() {
         let ctx = scenario_context(ScenarioLayer::Unit, "s", "c");
         let mut log = new_trace_log();
-        emit_entry(&mut log, &ctx, TraceLevel::Info, TraceCategory::Setup, "no-truth");
-        emit_entry(&mut log, &ctx, TraceLevel::Debug, TraceCategory::CliStep, "no-truth-2");
+        emit_entry(
+            &mut log,
+            &ctx,
+            TraceLevel::Info,
+            TraceCategory::Setup,
+            "no-truth",
+        );
+        emit_entry(
+            &mut log,
+            &ctx,
+            TraceLevel::Debug,
+            TraceCategory::CliStep,
+            "no-truth-2",
+        );
         let ts = log.truthfulness_summary();
-        assert!(ts.command_modes.is_empty());
+        assert!(ts.command_availabilities.is_empty());
         assert_eq!(ts.live_entry_count, 0);
     }
 
     #[test]
-    fn trace_log_truthfulness_multiple_same_mode_accumulates() {
+    fn trace_log_truthfulness_multiple_same_availability_accumulates() {
         let ctx = scenario_context(ScenarioLayer::E2E, "t", "m");
         let mut log = new_trace_log();
         for _ in 0..5 {
@@ -3280,8 +3508,30 @@ mod tests {
             );
         }
         let ts = log.truthfulness_summary();
-        assert_eq!(ts.command_modes["live-runtime"], 5);
+        assert_eq!(ts.command_availabilities["live-runtime"], 5);
         assert_eq!(ts.live_entry_count, 5);
+    }
+
+    #[test]
+    fn trace_log_truthfulness_unavailable_counts_without_live_or_offline_bucket() {
+        let ctx = scenario_context(ScenarioLayer::E2E, "t", "u");
+        let mut log = new_trace_log();
+        let truth = TruthContext::new(CommandAvailability::Unavailable);
+        log.append(
+            TraceEntry::new(
+                &ctx.trace_id,
+                &ctx.scenario_id,
+                TraceLevel::Warn,
+                TraceCategory::CliStep,
+                "unavailable",
+            )
+            .with_truth_context(truth),
+        );
+
+        let ts = log.truthfulness_summary();
+        assert_eq!(ts.command_availabilities["unavailable"], 1);
+        assert_eq!(ts.live_entry_count, 0);
+        assert_eq!(ts.offline_entry_count, 0);
     }
 
     #[test]
@@ -3410,7 +3660,13 @@ mod tests {
         let ctx = scenario_context(ScenarioLayer::Unit, "s", "c");
         let mut log = new_trace_log();
         emit_entry(&mut log, &ctx, TraceLevel::Info, TraceCategory::Setup, "a");
-        emit_entry(&mut log, &ctx, TraceLevel::Error, TraceCategory::Assertion, "b");
+        emit_entry(
+            &mut log,
+            &ctx,
+            TraceLevel::Error,
+            TraceCategory::Assertion,
+            "b",
+        );
 
         let sid = ctx.scenario_id.clone();
         let tid = ctx.trace_id.clone();
@@ -3533,7 +3789,13 @@ mod tests {
         let engine = RedactionEngine::default_rules();
         let tid = TraceId::from_string("t");
         let sid = ScenarioId::new(ScenarioLayer::Unit, "s", "c");
-        let entry = TraceEntry::new(&tid, &sid, TraceLevel::Info, TraceCategory::CliStep, "simple");
+        let entry = TraceEntry::new(
+            &tid,
+            &sid,
+            TraceLevel::Info,
+            TraceCategory::CliStep,
+            "simple",
+        );
         let redacted = engine.redact_entry(&entry);
         assert!(!redacted.redacted);
         assert_eq!(redacted.message, "simple");
@@ -3575,7 +3837,13 @@ mod tests {
         let ctx = scenario_context(ScenarioLayer::Unit, "s", "c");
         let mut log = new_trace_log();
         // First entry: clean
-        emit_entry(&mut log, &ctx, TraceLevel::Info, TraceCategory::Setup, "clean");
+        emit_entry(
+            &mut log,
+            &ctx,
+            TraceLevel::Info,
+            TraceCategory::Setup,
+            "clean",
+        );
         // Second entry: sensitive
         log.append(
             TraceEntry::new(
@@ -3585,10 +3853,19 @@ mod tests {
                 TraceCategory::HostRequest,
                 "calling",
             )
-            .with_field("authorization", serde_json::json!("Bearer super-secret-token")),
+            .with_field(
+                "authorization",
+                serde_json::json!("Bearer super-secret-token"),
+            ),
         );
         // Third entry: clean
-        emit_entry(&mut log, &ctx, TraceLevel::Info, TraceCategory::Teardown, "done");
+        emit_entry(
+            &mut log,
+            &ctx,
+            TraceLevel::Info,
+            TraceCategory::Teardown,
+            "done",
+        );
 
         let redacted = engine.redact_log(&log);
         assert_eq!(redacted.len(), 3);
@@ -3601,12 +3878,30 @@ mod tests {
     fn redaction_engine_default_covers_all_expected_patterns() {
         let engine = RedactionEngine::default_rules();
         // Field-based patterns
-        for field in ["my_token", "api_secret", "password", "my_api_key", "my_credential", "authorization_header"] {
-            assert!(engine.should_redact_field(field), "expected {field} to be redacted");
+        for field in [
+            "my_token",
+            "api_secret",
+            "password",
+            "my_api_key",
+            "my_credential",
+            "authorization_header",
+        ] {
+            assert!(
+                engine.should_redact_field(field),
+                "expected {field} to be redacted"
+            );
         }
         // Value-based patterns
-        for value in ["Bearer token123", "sk-live-key", "ghp_abc123", "xoxb-slack-token"] {
-            assert!(engine.redact_value(value).is_some(), "expected {value} to be redacted");
+        for value in [
+            "Bearer token123",
+            "sk-live-key",
+            "ghp_abc123",
+            "xoxb-slack-token",
+        ] {
+            assert!(
+                engine.redact_value(value).is_some(),
+                "expected {value} to be redacted"
+            );
         }
     }
 
@@ -3718,11 +4013,22 @@ mod tests {
 
         let mut log = new_trace_log();
         emit_entry(&mut log, &ctx, TraceLevel::Info, TraceCategory::Setup, "a");
-        emit_entry(&mut log, &ctx, TraceLevel::Error, TraceCategory::Assertion, "b");
-        emit_entry(&mut log, &ctx, TraceLevel::Warn, TraceCategory::Teardown, "c");
+        emit_entry(
+            &mut log,
+            &ctx,
+            TraceLevel::Error,
+            TraceCategory::Assertion,
+            "b",
+        );
+        emit_entry(
+            &mut log,
+            &ctx,
+            TraceLevel::Warn,
+            TraceCategory::Teardown,
+            "c",
+        );
 
-        let (_bundle, manifest) =
-            create_bundle(&base, &ctx, &log, BundleOutcome::Pass);
+        let (_bundle, manifest) = create_bundle(&base, &ctx, &log, BundleOutcome::Pass);
         assert_eq!(manifest.log_summary.total_entries, 3);
         assert_eq!(manifest.log_summary.info_count, 1);
         assert_eq!(manifest.log_summary.error_count, 1);

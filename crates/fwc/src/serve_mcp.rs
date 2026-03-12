@@ -748,6 +748,56 @@ fn tool_matches_server_filters(tool: &McpToolDefinition, config: &McpServerConfi
     connector_ok && zone_ok
 }
 
+fn filtered_tools<'a>(
+    state: &'a McpServerState,
+) -> impl Iterator<Item = &'a McpToolDefinition> + 'a {
+    state
+        .tools
+        .iter()
+        .filter(|tool| tool_matches_server_filters(tool, &state.config))
+}
+
+fn filtered_tools_for_connector<'a>(
+    state: &'a McpServerState,
+    connector_id: &str,
+) -> Vec<&'a McpToolDefinition> {
+    filtered_tools(state)
+        .filter(|tool| tool.connector_id() == connector_id)
+        .collect()
+}
+
+fn resource_matches_server_filters(state: &McpServerState, resource: &McpResourceEntry) -> bool {
+    match mcp_resources::parse_uri(resource.uri()) {
+        ParsedUri::GlobalStatus => true,
+        ParsedUri::ConnectorResource { connector_id, .. } => {
+            !filtered_tools_for_connector(state, &connector_id).is_empty()
+        }
+        ParsedUri::ConnectorPrompt { .. } | ParsedUri::Unknown(_) => true,
+    }
+}
+
+fn prompt_matches_server_filters(state: &McpServerState, prompt: &McpPromptEntry) -> bool {
+    match mcp_resources::parse_uri(prompt.name()) {
+        ParsedUri::ConnectorPrompt {
+            connector_id,
+            operation,
+            ..
+        } => {
+            let connector_tools = filtered_tools_for_connector(state, &connector_id);
+            if let Some(operation_id) = operation {
+                connector_tools
+                    .iter()
+                    .any(|tool| tool.operation_id() == operation_id)
+            } else {
+                !connector_tools.is_empty()
+            }
+        }
+        ParsedUri::ConnectorResource { .. } | ParsedUri::GlobalStatus | ParsedUri::Unknown(_) => {
+            true
+        }
+    }
+}
+
 fn capability_token_from_params(params: &Value) -> Result<Option<CapabilityToken>, JsonRpcError> {
     let meta = params.get("meta").and_then(Value::as_object);
     let candidates = [
@@ -945,16 +995,83 @@ pub fn handle_request(state: &McpServerState, request: &JsonRpcRequest) -> JsonR
     }
 }
 
+fn parse_jsonrpc_request(raw: &str) -> Result<JsonRpcRequest, JsonRpcResponse> {
+    let value: Value = match serde_json::from_str(raw) {
+        Ok(value) => value,
+        Err(error) => {
+            return Err(JsonRpcResponse::error(
+                Value::Null,
+                JsonRpcError::parse_error(format!("Failed to parse request: {error}")),
+            ));
+        }
+    };
+
+    let id = value
+        .get("id")
+        .filter(|request_id| {
+            request_id.is_null() || request_id.is_string() || request_id.is_number()
+        })
+        .cloned()
+        .unwrap_or(Value::Null);
+    let Some(object) = value.as_object() else {
+        return Err(JsonRpcResponse::error(
+            id,
+            JsonRpcError::invalid_request("JSON-RPC request must be an object."),
+        ));
+    };
+
+    let jsonrpc = object.get("jsonrpc").and_then(Value::as_str);
+    if jsonrpc != Some("2.0") {
+        return Err(JsonRpcResponse::error(
+            id,
+            JsonRpcError::invalid_request("`jsonrpc` must be the string \"2.0\"."),
+        ));
+    }
+
+    if let Some(request_id) = object.get("id")
+        && !(request_id.is_null() || request_id.is_string() || request_id.is_number())
+    {
+        return Err(JsonRpcResponse::error(
+            id,
+            JsonRpcError::invalid_request("`id` must be null, a string, or a number."),
+        ));
+    }
+
+    let method = object.get("method").and_then(Value::as_str);
+    if method.is_none_or(str::is_empty) {
+        return Err(JsonRpcResponse::error(
+            id,
+            JsonRpcError::invalid_request(
+                "JSON-RPC request is missing a non-empty string `method`.",
+            ),
+        ));
+    }
+
+    if let Some(params) = object.get("params")
+        && !params.is_object()
+        && !params.is_array()
+    {
+        return Err(JsonRpcResponse::error(
+            id,
+            JsonRpcError::invalid_request("`params` must be an object or array if present."),
+        ));
+    }
+
+    serde_json::from_value(value).map_err(|error| {
+        JsonRpcResponse::error(
+            id,
+            JsonRpcError::invalid_request(format!("Invalid JSON-RPC request object: {error}")),
+        )
+    })
+}
+
 /// Parse a raw JSON string into a request and route it.
 ///
 /// Returns a response even if parsing fails (as a parse error).
 pub fn handle_raw(state: &McpServerState, raw: &str) -> JsonRpcResponse {
-    match serde_json::from_str::<JsonRpcRequest>(raw) {
+    match parse_jsonrpc_request(raw) {
         Ok(request) => handle_request(state, &request),
-        Err(e) => JsonRpcResponse::error(
-            Value::Null,
-            JsonRpcError::parse_error(format!("Failed to parse request: {e}")),
-        ),
+        Err(response) => response,
     }
 }
 
@@ -983,10 +1100,12 @@ where
             continue;
         }
 
-        let response = match serde_json::from_str::<JsonRpcRequest>(raw) {
+        let response = match parse_jsonrpc_request(raw) {
             Ok(request) => {
-                if request.id.is_none() && request.method.starts_with("notifications/") {
-                    let _ = handle_request(state, &request);
+                if request.id.is_none() {
+                    if request.method.starts_with("notifications/") {
+                        let _ = handle_request(state, &request);
+                    }
                     continue;
                 }
                 if request.method == "tools/call" {
@@ -995,10 +1114,7 @@ where
                     handle_request(state, &request)
                 }
             }
-            Err(error) => JsonRpcResponse::error(
-                Value::Null,
-                JsonRpcError::parse_error(format!("Failed to parse request: {error}")),
-            ),
+            Err(response) => response,
         };
 
         let encoded = serde_json::to_string(&response)?;
@@ -1086,10 +1202,7 @@ fn handle_initialized_notification(id: Value) -> JsonRpcResponse {
 }
 
 fn handle_tools_list(state: &McpServerState, id: Value) -> JsonRpcResponse {
-    let tools: Vec<Value> = state
-        .tools
-        .iter()
-        .filter(|tool| tool_matches_server_filters(tool, &state.config))
+    let tools: Vec<Value> = filtered_tools(state)
         .map(|t| {
             let mut payload = json!({
                 "name": t.name,
@@ -1176,6 +1289,7 @@ fn handle_resources_list(state: &McpServerState, id: Value) -> JsonRpcResponse {
     let resources: Vec<Value> = state
         .resources
         .iter()
+        .filter(|resource| resource_matches_server_filters(state, resource))
         .map(|r| {
             json!({
                 "uri": r.uri,
@@ -1220,7 +1334,10 @@ fn handle_resources_read(
         );
     }
 
-    let Some(resource) = state.find_resource(uri) else {
+    let Some(resource) = state
+        .find_resource(uri)
+        .filter(|resource| resource_matches_server_filters(state, resource))
+    else {
         return JsonRpcResponse::error(
             id,
             JsonRpcError::invalid_params(format!("Resource not found: {uri}")),
@@ -1259,6 +1376,7 @@ fn handle_prompts_list(state: &McpServerState, id: Value) -> JsonRpcResponse {
     let prompts: Vec<Value> = state
         .prompts
         .iter()
+        .filter(|prompt| prompt_matches_server_filters(state, prompt))
         .map(|p| {
             let args: Vec<Value> = p
                 .arguments
@@ -1313,7 +1431,10 @@ fn handle_prompts_get(
         );
     }
 
-    let Some(prompt) = state.find_prompt(name) else {
+    let Some(prompt) = state
+        .find_prompt(name)
+        .filter(|prompt| prompt_matches_server_filters(state, prompt))
+    else {
         return JsonRpcResponse::error(
             id,
             JsonRpcError::invalid_params(format!("Prompt not found: {name}")),
@@ -1399,7 +1520,7 @@ fn resolve_resource_content(
             connector_id,
             resource_type,
         } => {
-            let connector_tools = state.tools_for_connector(&connector_id);
+            let connector_tools = filtered_tools_for_connector(state, &connector_id);
             if connector_tools.is_empty() {
                 return None;
             }
@@ -1439,7 +1560,7 @@ fn resolve_prompt_content(
             prompt_type,
             operation,
         } => {
-            let connector_tools = state.tools_for_connector(&connector_id);
+            let connector_tools = filtered_tools_for_connector(state, &connector_id);
             if connector_tools.is_empty() {
                 return None;
             }
@@ -1587,16 +1708,14 @@ fn connector_history_content(uri: &str, connector_id: &str) -> mcp_resources::Re
 }
 
 fn global_status_content(state: &McpServerState) -> mcp_resources::ResourceContent {
-    let connectors = state
-        .tools
-        .iter()
+    let connectors = filtered_tools(state)
         .fold(BTreeMap::<String, usize>::new(), |mut counts, tool| {
             *counts.entry(tool.connector_id.clone()).or_insert(0) += 1;
             counts
         })
         .into_iter()
         .map(|(connector_id, operation_count)| {
-            let connector_tools = state.tools_for_connector(&connector_id);
+            let connector_tools = filtered_tools_for_connector(state, &connector_id);
             let inventory = inventory_truth_summary(&connector_tools);
             json!({
                 "connector_id": connector_id,
@@ -2827,6 +2946,25 @@ mod tests {
     }
 
     #[test]
+    fn handle_resources_list_respects_zone_filter_for_derived_state() {
+        let state = state_from_tools(
+            [sample_tool(), sample_private_tool()],
+            McpServerConfig::new().with_zone_filter("z:work"),
+        );
+        let req = make_request("resources/list", None);
+        let resp = handle_request(&state, &req);
+        let resources = resp.result().unwrap()["resources"].as_array().unwrap();
+        let uris = resources
+            .iter()
+            .filter_map(|resource| resource["uri"].as_str())
+            .collect::<Vec<_>>();
+
+        assert!(uris.contains(&"resource://connector/github/health"));
+        assert!(uris.contains(&"resource://connectors/status"));
+        assert!(uris.iter().all(|uri| !uri.contains("/vault/")));
+    }
+
+    #[test]
     fn handle_resources_list_empty_when_disabled() {
         let config = McpServerConfig::new().without_resources();
         let state = McpServerState::builder()
@@ -2952,6 +3090,47 @@ mod tests {
     }
 
     #[test]
+    fn handle_resources_read_honors_active_filters() {
+        let state = state_from_tools(
+            [sample_tool(), sample_private_tool()],
+            McpServerConfig::new().with_zone_filter("z:work"),
+        );
+        let req = make_request(
+            "resources/read",
+            Some(json!({"uri": "resource://connector/vault/health"})),
+        );
+        let resp = handle_request(&state, &req);
+        assert!(resp.is_error());
+        assert!(
+            resp.error
+                .as_ref()
+                .unwrap()
+                .message()
+                .contains("Resource not found")
+        );
+    }
+
+    #[test]
+    fn handle_resources_read_global_status_respects_connector_filter() {
+        let state = state_from_tools(
+            [sample_tool(), sample_private_tool()],
+            McpServerConfig::new().with_connector_filter("github"),
+        );
+        let req = make_request(
+            "resources/read",
+            Some(json!({"uri": "resource://connectors/status"})),
+        );
+        let resp = handle_request(&state, &req);
+        let text = resp.result().unwrap()["contents"][0]["text"]
+            .as_str()
+            .expect("resource text should exist");
+        let payload: Value = serde_json::from_str(text).expect("status payload should be valid");
+
+        assert_eq!(payload["connector_count"], 1);
+        assert_eq!(payload["connectors"][0]["connector_id"], "github");
+    }
+
+    #[test]
     fn handle_resources_read_disabled() {
         let config = McpServerConfig::new().without_resources();
         let state = McpServerState::builder()
@@ -2993,6 +3172,24 @@ mod tests {
         assert!(args[0]["required"].as_bool().unwrap());
         assert_eq!(args[1]["name"], "style");
         assert!(!args[1]["required"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn handle_prompts_list_respects_connector_filter_for_derived_state() {
+        let state = state_from_tools(
+            [sample_tool(), sample_private_tool()],
+            McpServerConfig::new().with_connector_filter("github"),
+        );
+        let req = make_request("prompts/list", None);
+        let resp = handle_request(&state, &req);
+        let prompts = resp.result().unwrap()["prompts"].as_array().unwrap();
+        let names = prompts
+            .iter()
+            .filter_map(|prompt| prompt["name"].as_str())
+            .collect::<Vec<_>>();
+
+        assert!(names.contains(&"prompt://connector/github/how-to-use"));
+        assert!(names.iter().all(|name| !name.contains("/vault/")));
     }
 
     #[test]
@@ -3104,6 +3301,27 @@ mod tests {
     }
 
     #[test]
+    fn handle_prompts_get_honors_active_filters() {
+        let state = state_from_tools(
+            [sample_tool(), sample_private_tool()],
+            McpServerConfig::new().with_zone_filter("z:work"),
+        );
+        let req = make_request(
+            "prompts/get",
+            Some(json!({"name": "prompt://connector/vault/how-to-use"})),
+        );
+        let resp = handle_request(&state, &req);
+        assert!(resp.is_error());
+        assert!(
+            resp.error
+                .as_ref()
+                .unwrap()
+                .message()
+                .contains("Prompt not found")
+        );
+    }
+
+    #[test]
     fn handle_prompts_get_disabled() {
         let config = McpServerConfig::new().without_prompts();
         let state = McpServerState::builder()
@@ -3162,7 +3380,35 @@ mod tests {
         let raw = r#"{"jsonrpc":"2.0","id":1}"#;
         let resp = handle_raw(&state, raw);
         assert!(resp.is_error());
-        assert_eq!(resp.error.as_ref().unwrap().code(), PARSE_ERROR);
+        assert_eq!(resp.error.as_ref().unwrap().code(), INVALID_REQUEST);
+    }
+
+    #[test]
+    fn handle_raw_invalid_jsonrpc_version() {
+        let state = sample_state();
+        let raw = r#"{"jsonrpc":"1.0","id":1,"method":"tools/list"}"#;
+        let resp = handle_raw(&state, raw);
+        assert!(resp.is_error());
+        assert_eq!(resp.error.as_ref().unwrap().code(), INVALID_REQUEST);
+    }
+
+    #[test]
+    fn handle_raw_rejects_structured_id() {
+        let state = sample_state();
+        let raw = r#"{"jsonrpc":"2.0","id":{"nested":true},"method":"tools/list"}"#;
+        let resp = handle_raw(&state, raw);
+        assert!(resp.is_error());
+        assert_eq!(resp.id(), &Value::Null);
+        assert_eq!(resp.error.as_ref().unwrap().code(), INVALID_REQUEST);
+    }
+
+    #[test]
+    fn handle_raw_rejects_scalar_params() {
+        let state = sample_state();
+        let raw = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":"bad"}"#;
+        let resp = handle_raw(&state, raw);
+        assert!(resp.is_error());
+        assert_eq!(resp.error.as_ref().unwrap().code(), INVALID_REQUEST);
     }
 
     // ── Request ID propagation ──────────────────────────────────────
@@ -3297,7 +3543,7 @@ mod tests {
         assert_eq!(data["arguments"]["owner"], "x");
     }
 
-    #[fcp_async_core::runtime::test]
+    #[tokio::test]
     async fn stdio_transport_handles_initialize() {
         let output = drive_stdio_transport(
             sample_state(),
@@ -3325,7 +3571,7 @@ mod tests {
         );
     }
 
-    #[fcp_async_core::runtime::test]
+    #[tokio::test]
     async fn stdio_transport_initialize_advertises_resources_and_prompts() {
         let output = drive_stdio_transport(
             derived_connector_state(),
@@ -3353,7 +3599,7 @@ mod tests {
         assert!(capabilities.get("prompts").is_some());
     }
 
-    #[fcp_async_core::runtime::test]
+    #[tokio::test]
     async fn stdio_transport_handles_tools_list() {
         let output = drive_stdio_transport(
             sample_state(),
@@ -3380,7 +3626,7 @@ mod tests {
         assert!(tools[0]["inputSchema"].is_object());
     }
 
-    #[fcp_async_core::runtime::test]
+    #[tokio::test]
     async fn stdio_transport_handles_resources_list_from_derived_state() {
         let output = drive_stdio_transport(
             derived_connector_state(),
@@ -3415,7 +3661,7 @@ mod tests {
         assert!(uris.contains(&"resource://connectors/status"));
     }
 
-    #[fcp_async_core::runtime::test]
+    #[tokio::test]
     async fn stdio_transport_handles_resources_read_from_derived_state() {
         let output = drive_stdio_transport(
             derived_connector_state(),
@@ -3464,7 +3710,7 @@ mod tests {
         );
     }
 
-    #[fcp_async_core::runtime::test]
+    #[tokio::test]
     async fn stdio_transport_handles_prompts_list_from_derived_state() {
         let output = drive_stdio_transport(
             derived_connector_state(),
@@ -3498,7 +3744,7 @@ mod tests {
         assert!(names.contains(&"prompt://connector/github/op/create_issue/example"));
     }
 
-    #[fcp_async_core::runtime::test]
+    #[tokio::test]
     async fn stdio_transport_handles_prompts_get_from_derived_state() {
         let output = drive_stdio_transport(
             derived_connector_state(),
@@ -3532,7 +3778,7 @@ mod tests {
         assert!(assistant.contains("\"title\": \"<string>\""));
     }
 
-    #[fcp_async_core::runtime::test]
+    #[tokio::test]
     async fn stdio_transport_routes_tools_call_through_callback() {
         let output = drive_stdio_transport(
             sample_state(),
@@ -3562,7 +3808,62 @@ mod tests {
         );
     }
 
-    #[fcp_async_core::runtime::test]
+    #[tokio::test]
+    async fn stdio_transport_ignores_idless_non_notification_requests() {
+        let output = drive_stdio_transport(
+            sample_state(),
+            "{\"jsonrpc\":\"2.0\",\"method\":\"tools/list\"}\n",
+            |tool, id, _arguments| {
+                JsonRpcResponse::success(
+                    id,
+                    json!({
+                        "content": [{
+                            "type": "text",
+                            "text": format!("unexpected tool call: {}", tool.name()),
+                        }],
+                        "isError": true,
+                    }),
+                )
+            },
+        )
+        .await;
+
+        assert!(output.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stdio_transport_does_not_invoke_tools_for_idless_calls() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen_calls = Arc::clone(&calls);
+        let output = drive_stdio_transport(
+            sample_state(),
+            "{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"github.list_issues\",\"arguments\":{\"owner\":\"openai\",\"repo\":\"gpt\"}}}\n",
+            move |_tool, id, _arguments| {
+                seen_calls.fetch_add(1, Ordering::SeqCst);
+                JsonRpcResponse::success(
+                    id,
+                    json!({
+                        "content": [{
+                            "type": "text",
+                            "text": "unexpected tool execution",
+                        }],
+                        "isError": false,
+                    }),
+                )
+            },
+        )
+        .await;
+
+        assert!(output.is_empty());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
     async fn stdio_transport_rejects_zone_scoped_call_without_capability_token() {
         let output = drive_stdio_transport(
             McpServerState::builder()
@@ -3594,7 +3895,7 @@ mod tests {
         assert_eq!(data["zone_id"], "z:work");
     }
 
-    #[fcp_async_core::runtime::test]
+    #[tokio::test]
     async fn stdio_transport_allows_zone_scoped_call_with_valid_capability_token() {
         let output = drive_stdio_transport(
             McpServerState::builder()
@@ -3630,7 +3931,7 @@ mod tests {
         );
     }
 
-    #[fcp_async_core::runtime::test]
+    #[tokio::test]
     async fn stdio_transport_returns_parse_errors() {
         let output = drive_stdio_transport(sample_state(), "not valid json\n", |tool, id, _| {
             JsonRpcResponse::success(
@@ -3652,7 +3953,7 @@ mod tests {
         assert!(error.message().contains("Failed to parse request"));
     }
 
-    #[fcp_async_core::runtime::test]
+    #[tokio::test]
     async fn stdio_transport_exits_cleanly_on_eof() {
         let output = drive_stdio_transport(sample_state(), "", |tool, id, _| {
             JsonRpcResponse::success(

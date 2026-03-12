@@ -141,6 +141,9 @@ pub fn schema_summary(fields: &[SchemaField]) -> Value {
 /// path → value bindings, and replaces placeholder values with the provided
 /// values. Paths use dot notation for nested fields.
 pub fn fill_template(template: &Value, bindings: &Map<String, Value>) -> Value {
+    if let Some(bound) = root_fill_binding(bindings) {
+        return bound.clone();
+    }
     fill_template_at_path(template, bindings, None)
 }
 
@@ -165,7 +168,34 @@ fn fill_template_at_path(
             }
             Value::Object(result)
         }
+        Value::Array(items) => {
+            if let Some(path) = current_path
+                && let Some(bound) = bindings.get(path)
+            {
+                return bound.clone();
+            }
+            let item_path = array_item_fill_path(current_path);
+            Value::Array(
+                items
+                    .iter()
+                    .map(|item| fill_template_at_path(item, bindings, item_path.as_deref()))
+                    .collect(),
+            )
+        }
         other => other.clone(),
+    }
+}
+
+fn root_fill_binding(bindings: &Map<String, Value>) -> Option<&Value> {
+    ["$", ".", ""]
+        .into_iter()
+        .find_map(|path| bindings.get(path))
+}
+
+fn array_item_fill_path(current_path: Option<&str>) -> Option<String> {
+    match current_path {
+        Some(path) if !path.is_empty() => Some(format!("{path}[]")),
+        Some(_) | None => Some("[]".to_owned()),
     }
 }
 
@@ -279,25 +309,24 @@ fn validate_type(schema: &Value, value: &Value, path: &str, errors: &mut Vec<Val
         return;
     }
 
-    // Check type constraint
-    let expected_type = schema.get("type").and_then(Value::as_str);
-    if let Some(expected) = expected_type {
-        let type_matches = match expected {
-            "string" => value.is_string(),
-            "number" => value.is_number(),
-            "integer" => {
-                value.as_i64().is_some()
-                    || value.as_u64().is_some()
-                    || value.as_f64().is_some_and(|number| number.fract() == 0.0)
+    // Check type constraint — use the full variant list so nullable unions
+    // like `["string", "null"]` allow `null` values through.
+    let all_types = schema_type_variants(schema);
+    if !all_types.is_empty() {
+        let mut saw_known_type = false;
+        let mut type_matches = false;
+        for expected in &all_types {
+            let Some(matches) = value_matches_schema_type(value, expected) else {
+                continue;
+            };
+            saw_known_type = true;
+            if matches {
+                type_matches = true;
+                break;
             }
-            "boolean" => value.is_boolean(),
-            "array" => value.is_array(),
-            "object" => value.is_object(),
-            "null" => value.is_null(),
-            _ => true,
-        };
+        }
 
-        if !type_matches {
+        if saw_known_type && !type_matches {
             let actual_type = match value {
                 Value::Null => "null",
                 Value::Bool(_) => "boolean",
@@ -306,6 +335,10 @@ fn validate_type(schema: &Value, value: &Value, path: &str, errors: &mut Vec<Val
                 Value::Array(_) => "array",
                 Value::Object(_) => "object",
             };
+            // Use preferred_schema_types for error display (omits "null" for
+            // cleaner messages) while still accepting null above.
+            let display_types = preferred_schema_types(schema);
+            let expected = display_types.join(" | ");
             errors.push(ValidationError {
                 path: path.to_owned(),
                 expected: format!("type '{expected}'"),
@@ -474,6 +507,7 @@ fn infer_type(schema: &Value) -> String {
 
 fn scaffold_value(schema: &Value) -> Value {
     let normalized = normalize_schema(schema);
+    let preferred_types = preferred_schema_types(&normalized);
     if let Some(default) = normalized.get("default") {
         return default.clone();
     }
@@ -493,9 +527,12 @@ fn scaffold_value(schema: &Value) -> Value {
     if let Some(variant) = select_preferred_variant(&normalized) {
         return scaffold_value(variant);
     }
-    let type_str = normalized
-        .get("type")
-        .and_then(Value::as_str)
+    if preferred_types.len() > 1 {
+        return Value::String(format!("<{}>", preferred_types.join("|")));
+    }
+    let type_str = preferred_types
+        .first()
+        .map(String::as_str)
         .unwrap_or_else(|| {
             if normalized.get("properties").is_some() {
                 "object"
@@ -800,6 +837,50 @@ fn describe_schema_inline(schema: &Value) -> String {
     "any".to_owned()
 }
 
+fn preferred_schema_types(schema: &Value) -> Vec<String> {
+    let mut types = schema_type_variants(schema);
+    if types.len() > 1 {
+        types.retain(|type_name| type_name != "null");
+        if types.is_empty() {
+            types.push("null".to_owned());
+        }
+    }
+    types
+}
+
+fn schema_type_variants(schema: &Value) -> Vec<String> {
+    let mut variants = Vec::new();
+    match schema.get("type") {
+        Some(Value::String(type_name)) => variants.push(type_name.clone()),
+        Some(Value::Array(type_names)) => {
+            for type_name in type_names.iter().filter_map(Value::as_str) {
+                if !variants.iter().any(|existing| existing == type_name) {
+                    variants.push(type_name.to_owned());
+                }
+            }
+        }
+        _ => {}
+    }
+    variants
+}
+
+fn value_matches_schema_type(value: &Value, expected: &str) -> Option<bool> {
+    match expected {
+        "string" => Some(value.is_string()),
+        "number" => Some(value.is_number()),
+        "integer" => Some(
+            value.as_i64().is_some()
+                || value.as_u64().is_some()
+                || value.as_f64().is_some_and(|number| number.fract() == 0.0),
+        ),
+        "boolean" => Some(value.is_boolean()),
+        "array" => Some(value.is_array()),
+        "object" => Some(value.is_object()),
+        "null" => Some(value.is_null()),
+        _ => None,
+    }
+}
+
 fn describe_object_shape(schema: &Value) -> String {
     let Some(props) = schema.get("properties").and_then(Value::as_object) else {
         return "object".to_owned();
@@ -833,7 +914,11 @@ fn summarize_object_member(schema: &Value) -> String {
             return format!("enum {{{}}}", summarize_enum_values(enum_values));
         }
     }
-    if let Some(type_str) = normalized.get("type").and_then(Value::as_str) {
+    let preferred_types = preferred_schema_types(&normalized);
+    if preferred_types.len() > 1 {
+        return preferred_types.join(" | ");
+    }
+    if let Some(type_str) = preferred_types.first().map(String::as_str) {
         return match type_str {
             "array" => normalized
                 .get("items")
@@ -1015,9 +1100,7 @@ fn merge_schema_values(base: &Value, overlay: &Value) -> Value {
                 merged.insert(key.clone(), combined);
             }
             _ => {
-                merged
-                    .entry(key.clone())
-                    .or_insert_with(|| overlay_value.clone());
+                merged.insert(key.clone(), overlay_value.clone());
             }
         }
     }
@@ -1659,6 +1742,36 @@ mod tests {
         assert_eq!(template["kind"], "user");
         assert_eq!(template["id"], 0);
         assert!(template.get("name").is_none());
+    }
+
+    #[test]
+    fn scaffold_template_nullable_union_prefers_concrete_type() {
+        let schema = json!({
+            "type": "object",
+            "required": ["chat_id"],
+            "properties": {
+                "chat_id": {
+                    "type": ["string", "null"]
+                }
+            }
+        });
+        let template = scaffold_template(&schema);
+        assert_eq!(template["chat_id"], "<string>");
+    }
+
+    #[test]
+    fn scaffold_template_multi_type_union_emits_union_placeholder() {
+        let schema = json!({
+            "type": "object",
+            "required": ["chat_id"],
+            "properties": {
+                "chat_id": {
+                    "type": ["string", "integer"]
+                }
+            }
+        });
+        let template = scaffold_template(&schema);
+        assert_eq!(template["chat_id"], "<string|integer>");
     }
 
     #[test]
@@ -2987,6 +3100,42 @@ mod tests {
     }
 
     #[test]
+    fn validate_input_union_type_accepts_any_declared_variant() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "chat_id": { "type": ["string", "integer"] }
+            }
+        });
+
+        assert!(validate_input(&schema, &json!({ "chat_id": "abc" })).is_empty());
+        assert!(validate_input(&schema, &json!({ "chat_id": 42 })).is_empty());
+
+        let errors = validate_input(&schema, &json!({ "chat_id": true }));
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].path, "chat_id");
+        assert!(errors[0].expected.contains("string | integer"));
+    }
+
+    #[test]
+    fn validate_input_nullable_union_accepts_null_and_concrete_value() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "chat_id": { "type": ["string", "null"] }
+            }
+        });
+
+        assert!(validate_input(&schema, &json!({ "chat_id": null })).is_empty());
+        assert!(validate_input(&schema, &json!({ "chat_id": "abc" })).is_empty());
+
+        let errors = validate_input(&schema, &json!({ "chat_id": 7 }));
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].path, "chat_id");
+        assert!(errors[0].expected.contains("string"));
+    }
+
+    #[test]
     fn validate_input_integer_whole_float_accepted() {
         // 3.0 has fract() == 0 so it is treated as integer
         let schema = json!({
@@ -3186,7 +3335,12 @@ mod tests {
     #[test]
     fn validate_type_string_ok() {
         let mut errors = Vec::new();
-        validate_type(&json!({"type": "string"}), &json!("hello"), "f", &mut errors);
+        validate_type(
+            &json!({"type": "string"}),
+            &json!("hello"),
+            "f",
+            &mut errors,
+        );
         assert!(errors.is_empty());
     }
 
@@ -3209,7 +3363,12 @@ mod tests {
     #[test]
     fn validate_type_boolean_fail() {
         let mut errors = Vec::new();
-        validate_type(&json!({"type": "boolean"}), &json!("true"), "f", &mut errors);
+        validate_type(
+            &json!({"type": "boolean"}),
+            &json!("true"),
+            "f",
+            &mut errors,
+        );
         assert_eq!(errors.len(), 1);
         assert!(errors[0].expected.contains("boolean"));
     }
@@ -3259,7 +3418,12 @@ mod tests {
     fn validate_type_unknown_type_string_accepted() {
         // Any unrecognized type keyword -> accepted (no error)
         let mut errors = Vec::new();
-        validate_type(&json!({"type": "custom_type"}), &json!("value"), "f", &mut errors);
+        validate_type(
+            &json!({"type": "custom_type"}),
+            &json!("value"),
+            "f",
+            &mut errors,
+        );
         assert!(errors.is_empty());
     }
 
@@ -3267,7 +3431,12 @@ mod tests {
     fn validate_type_enum_takes_precedence_over_type() {
         // When enum is present, type is not checked separately
         let mut errors = Vec::new();
-        validate_type(&json!({"type": "string", "enum": ["a", "b"]}), &json!("c"), "f", &mut errors);
+        validate_type(
+            &json!({"type": "string", "enum": ["a", "b"]}),
+            &json!("c"),
+            "f",
+            &mut errors,
+        );
         assert_eq!(errors.len(), 1);
         assert!(errors[0].expected.contains("a"));
         assert!(errors[0].expected.contains("b"));
@@ -3276,14 +3445,24 @@ mod tests {
     #[test]
     fn validate_type_enum_ok() {
         let mut errors = Vec::new();
-        validate_type(&json!({"type": "string", "enum": ["a", "b"]}), &json!("a"), "f", &mut errors);
+        validate_type(
+            &json!({"type": "string", "enum": ["a", "b"]}),
+            &json!("a"),
+            "f",
+            &mut errors,
+        );
         assert!(errors.is_empty());
     }
 
     #[test]
     fn validate_type_minimum_only_violated() {
         let mut errors = Vec::new();
-        validate_type(&json!({"type": "number", "minimum": 5.0}), &json!(4.9), "f", &mut errors);
+        validate_type(
+            &json!({"type": "number", "minimum": 5.0}),
+            &json!(4.9),
+            "f",
+            &mut errors,
+        );
         assert_eq!(errors.len(), 1);
         assert!(errors[0].expected.contains(">= 5"));
     }
@@ -3291,7 +3470,12 @@ mod tests {
     #[test]
     fn validate_type_maximum_only_violated() {
         let mut errors = Vec::new();
-        validate_type(&json!({"type": "number", "maximum": 10.0}), &json!(10.1), "f", &mut errors);
+        validate_type(
+            &json!({"type": "number", "maximum": 10.0}),
+            &json!(10.1),
+            "f",
+            &mut errors,
+        );
         assert_eq!(errors.len(), 1);
         assert!(errors[0].expected.contains("<= 10"));
     }
@@ -3299,7 +3483,12 @@ mod tests {
     #[test]
     fn validate_type_fix_mentions_path() {
         let mut errors = Vec::new();
-        validate_type(&json!({"type": "string"}), &json!(99), "my.field", &mut errors);
+        validate_type(
+            &json!({"type": "string"}),
+            &json!(99),
+            "my.field",
+            &mut errors,
+        );
         assert_eq!(errors.len(), 1);
         assert!(errors[0].fix.contains("my.field"));
     }
@@ -3679,6 +3868,31 @@ mod tests {
     }
 
     #[test]
+    fn fill_template_replaces_array_item_object_values() {
+        let template = json!({
+            "containers": [{
+                "name": "<string>",
+                "image": "<string>"
+            }]
+        });
+        let mut bindings = Map::new();
+        bindings.insert("containers[].name".into(), json!("api"));
+        bindings.insert("containers[].image".into(), json!("ghcr.io/org/api:latest"));
+        let filled = fill_template(&template, &bindings);
+        assert_eq!(filled["containers"][0]["name"], "api");
+        assert_eq!(filled["containers"][0]["image"], "ghcr.io/org/api:latest");
+    }
+
+    #[test]
+    fn fill_template_root_marker_replaces_top_level_value() {
+        let template = json!("<string>");
+        let mut bindings = Map::new();
+        bindings.insert("$".into(), json!("root"));
+        let filled = fill_template(&template, &bindings);
+        assert_eq!(filled, "root");
+    }
+
+    #[test]
     fn fill_template_number_value_replaced() {
         let template = json!({ "count": 0 });
         let mut bindings = Map::new();
@@ -3733,11 +3947,7 @@ mod tests {
             ]
         });
         let normalized = normalize_schema(&schema);
-        let required = normalized
-            .get("required")
-            .unwrap()
-            .as_array()
-            .unwrap();
+        let required = normalized.get("required").unwrap().as_array().unwrap();
         let req_strs: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
         assert!(req_strs.contains(&"x"));
         assert!(req_strs.contains(&"y"));
@@ -3749,12 +3959,11 @@ mod tests {
     // ── merge_schema_values edge cases ───────────────────────────────────
 
     #[test]
-    fn merge_schema_values_base_wins_for_existing_scalar_keys() {
+    fn merge_schema_values_overlay_wins_for_existing_scalar_keys() {
         let base = json!({"type": "string", "description": "base desc"});
         let overlay = json!({"description": "overlay desc"});
         let merged = merge_schema_values(&base, &overlay);
-        // overlay doesn't overwrite existing keys
-        assert_eq!(merged["description"], "base desc");
+        assert_eq!(merged["description"], "overlay desc");
     }
 
     #[test]
@@ -3866,6 +4075,23 @@ mod tests {
         let schema = json!({"type": "array"});
         let result = describe_schema_inline(&schema);
         assert_eq!(result, "[any]");
+    }
+
+    #[test]
+    fn summarize_object_member_nullable_array_prefers_concrete_shape() {
+        let schema = json!({
+            "type": ["array", "null"],
+            "items": {"type": "string"}
+        });
+        let result = summarize_object_member(&schema);
+        assert_eq!(result, "[string]");
+    }
+
+    #[test]
+    fn summarize_object_member_multi_type_union_lists_variants() {
+        let schema = json!({"type": ["string", "integer"]});
+        let result = summarize_object_member(&schema);
+        assert_eq!(result, "string | integer");
     }
 
     #[test]

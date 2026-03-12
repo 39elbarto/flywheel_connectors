@@ -178,7 +178,9 @@ impl BenchmarkResult {
     /// Set target thresholds and determine pass/fail.
     #[must_use]
     pub fn with_targets(mut self, targets: Targets) -> Self {
-        if let Some(ref p) = self.percentiles {
+        if self.sample_count > 0
+            && let Some(ref p) = self.percentiles
+        {
             self.passed =
                 Some(p.p50_ms <= targets.p50_target_ms && p.p99_ms <= targets.p99_target_ms);
         }
@@ -852,6 +854,10 @@ enum PrimitiveTarget {
 /// Run the benchmark command.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn run(args: &BenchArgs) -> anyhow::Result<()> {
+    if args.iterations == 0 {
+        bail!("--iterations must be greater than 0");
+    }
+
     let env = collect_environment();
 
     let results = match &args.command {
@@ -1570,6 +1576,35 @@ mod tests {
         // Placeholder has no percentiles, so passed stays None
         assert!(result.passed.is_none());
         assert!(result.targets.is_some());
+    }
+
+    #[test]
+    fn with_targets_zero_sample_result_stays_unrated() {
+        let result =
+            BenchmarkResult::new("test", "desc", 0, 0, test_percentiles()).with_targets(Targets {
+                p50_target_ms: 5.0,
+                p99_target_ms: 10.0,
+            });
+        assert!(result.passed.is_none());
+        assert!(result.targets.is_some());
+    }
+
+    #[test]
+    fn run_rejects_zero_iterations() {
+        let args = BenchArgs {
+            command: BenchCommand::Cbor {
+                target: CborTarget::SchemaHash,
+            },
+            format: OutputFormat::Json,
+            iterations: 0,
+            warmup: 0,
+        };
+        let error = run(&args).expect_err("zero iterations should be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("--iterations must be greater than 0")
+        );
     }
 
     // ── BenchmarkReport::new ────────────────────────────────────────────
@@ -2651,8 +2686,10 @@ mod tests {
 
     #[test]
     fn benchmark_result_targets_stored_correctly() {
-        let r = BenchmarkResult::new("x", "y", 1, 0, test_percentiles())
-            .with_targets(Targets { p50_target_ms: 3.5, p99_target_ms: 7.25 });
+        let r = BenchmarkResult::new("x", "y", 1, 0, test_percentiles()).with_targets(Targets {
+            p50_target_ms: 3.5,
+            p99_target_ms: 7.25,
+        });
         let targets = r.targets.unwrap();
         assert!((targets.p50_target_ms - 3.5).abs() < f64::EPSILON);
         assert!((targets.p99_target_ms - 7.25).abs() < f64::EPSILON);
@@ -2953,7 +2990,10 @@ mod tests {
     #[test]
     fn primitive_target_all_variants_not_equal() {
         assert_ne!(PrimitiveTarget::ObjectId, PrimitiveTarget::CapabilityVerify);
-        assert_ne!(PrimitiveTarget::CapabilityVerify, PrimitiveTarget::SessionMac);
+        assert_ne!(
+            PrimitiveTarget::CapabilityVerify,
+            PrimitiveTarget::SessionMac
+        );
         assert_ne!(PrimitiveTarget::SessionMac, PrimitiveTarget::FcpsFrame);
         assert_ne!(PrimitiveTarget::FcpsFrame, PrimitiveTarget::All);
     }
@@ -3005,7 +3045,11 @@ mod tests {
     fn run_primitives_all_have_percentiles() {
         let results = run_primitives(PrimitiveTarget::All, 3, 1);
         for r in &results {
-            assert!(r.percentiles.is_some(), "missing percentiles for {}", r.name);
+            assert!(
+                r.percentiles.is_some(),
+                "missing percentiles for {}",
+                r.name
+            );
         }
     }
 
@@ -3133,14 +3177,20 @@ mod tests {
 
     #[test]
     fn targets_clone() {
-        let t = Targets { p50_target_ms: 1.0, p99_target_ms: 5.0 };
+        let t = Targets {
+            p50_target_ms: 1.0,
+            p99_target_ms: 5.0,
+        };
         let cloned = t.clone();
         assert!((cloned.p50_target_ms - 1.0).abs() < f64::EPSILON);
     }
 
     #[test]
     fn targets_debug() {
-        let t = Targets { p50_target_ms: 1.0, p99_target_ms: 5.0 };
+        let t = Targets {
+            p50_target_ms: 1.0,
+            p99_target_ms: 5.0,
+        };
         let dbg = format!("{t:?}");
         assert!(dbg.contains("Targets"));
         assert!(dbg.contains("p50_target_ms"));

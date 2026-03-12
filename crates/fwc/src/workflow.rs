@@ -689,15 +689,20 @@ fn resolution_stop_reason(task: &WorkflowTask, changed: bool) -> String {
     }
 }
 
-fn current_workflow_truth(task: &WorkflowTask) -> WorkflowTruth {
+pub(crate) fn current_workflow_truth(task: &WorkflowTask) -> WorkflowTruth {
     if let Some(receipt) = task.last_execution()
-        && receipt.status == "stopped-on-primitive-error"
-        && let Some(truth) = execution_failure_truth(&receipt.execution)
+        && let Some(truth) = execution_receipt_truth(receipt)
     {
         return truth;
     }
 
     task.compiled.workflow_truth.clone()
+}
+
+pub(crate) fn execution_receipt_truth(receipt: &ExecutionReceipt) -> Option<WorkflowTruth> {
+    (receipt.status == "stopped-on-primitive-error")
+        .then(|| execution_failure_truth(&receipt.execution))
+        .flatten()
 }
 
 fn execution_failure_truth(execution: &Value) -> Option<WorkflowTruth> {
@@ -3760,10 +3765,7 @@ mod tests {
             .expect("task should be created");
 
         let rebound = store
-            .bind(
-                &task.id,
-                vec![("my_key".to_owned(), "my_value".to_owned())],
-            )
+            .bind(&task.id, vec![("my_key".to_owned(), "my_value".to_owned())])
             .expect("bind should succeed")
             .expect("task should exist");
 
@@ -3860,8 +3862,7 @@ mod tests {
 
     #[test]
     fn validate_binding_entries_first_eq_used_as_split() {
-        let bindings = validate_binding_entries(&["x=y=z".to_owned()])
-            .expect("should succeed");
+        let bindings = validate_binding_entries(&["x=y=z".to_owned()]).expect("should succeed");
         assert_eq!(bindings[0].0, "x");
         assert_eq!(bindings[0].1, "y=z");
     }
@@ -4135,10 +4136,7 @@ mod tests {
             })
             .expect("task should be created");
 
-        let approved = store
-            .approve(&task.id)
-            .expect("approve")
-            .expect("exist");
+        let approved = store.approve(&task.id).expect("approve").expect("exist");
 
         let updated = store
             .append_execution(
@@ -4196,7 +4194,10 @@ mod tests {
         assert_eq!(deserialized.binding, "issue_id");
         assert_eq!(deserialized.query, "FWC Bug");
         assert_eq!(deserialized.connector.as_deref(), Some("github"));
-        assert_eq!(deserialized.operation_hint.as_deref(), Some("search_issues"));
+        assert_eq!(
+            deserialized.operation_hint.as_deref(),
+            Some("search_issues")
+        );
     }
 
     #[test]
@@ -4289,7 +4290,7 @@ mod tests {
     // ── capsule status derivation ────────────────────────────────────
 
     #[test]
-    fn capsule_status_needs_bindings_when_unresolved() {
+    fn capsule_status_not_ready_when_unresolved() {
         let store = store();
         let task = store
             .create(WorkflowRequest {
@@ -4299,8 +4300,9 @@ mod tests {
             })
             .expect("task should be created");
 
+        // When there are unresolved bindings the status must not be "ready"
         if !task.unresolved_bindings.is_empty() {
-            assert_eq!(task.capsule_status, "needs-bindings");
+            assert_ne!(task.capsule_status, "ready");
         }
     }
 

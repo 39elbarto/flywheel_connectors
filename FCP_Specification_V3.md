@@ -2721,6 +2721,37 @@ Normative rules:
 4. Competing writes with stale or conflicting lease sequence values MUST be treated as safety incidents.
 5. CRDT connectors MUST define merge semantics that are deterministic under canonical serialization.
 
+#### Durable State Ownership Classes
+
+Durable connector state is split across four ownership classes:
+
+| Class | Owner | Typical contents | Durability rule |
+|-------|-------|------------------|-----------------|
+| `ConnectorCanonical` | connector runtime + SDK state helpers | cursors, resume tokens, dedupe windows, remote identifier repairs, provider-issued idempotency handles, phase markers | MUST be durable before losing it could change correctness |
+| `HostObserved` | host/operator surfaces | health summaries, last-seen checkpoint pointers, placement observations, replay diagnostics | MAY be rebuilt from durable truth; MUST NOT be sole authority for resume |
+| `EvidenceLineage` | evidence/audit model | operation intents, operation receipts, checkpoint lineage, duplicate classifications, resume causes | MUST explain attach/retry/deny decisions after the fact |
+| `EphemeralCache` | process-local connector logic | connection pools, derived indexes, prefetch buffers, transient render caches | MAY be discarded only when regeneration cannot change externally visible behavior |
+
+Normative rules:
+
+1. `ConnectorCanonical` state MUST include any cursor, offset, resume token, dedupe window, remote identity remap, provider-issued idempotency handle, or partial-phase marker whose loss can change attach, retry, deny, or reconcile behavior.
+2. `HostObserved` state MAY guide repair or diagnosis, but it MUST be derivable from durable objects or explicit probes and MUST NOT override checkpoint or receipt lineage.
+3. `EvidenceLineage` MUST let a future executor determine whether work is absent, committed, ambiguous, or conflicting; if that question cannot be answered from durable artifacts, the design is non-conformant.
+4. `EphemeralCache` MAY exist for performance, but its loss MUST NOT cause skipped work, duplicate work, stale policy assumptions, or remote identity drift.
+5. If a field changes whether the next safe action is attach, retry, deny, or reconcile, it belongs in durable state rather than best-effort process-local memory.
+
+#### Checkpoint Cadence and Atomicity
+
+Checkpointing is a correctness boundary, not a background backup habit.
+
+Normative rules:
+
+1. Request-response connectors MAY remain effectively stateless only when every externally visible effect is either proved by receipts alone or fully replay-safe under strict idempotency.
+2. Polling, queue, webhook, and replayable streaming connectors MUST durably advance cursor and dedupe state before acknowledging or committing remote progress past the last replay-safe point.
+3. Long-running background work MUST checkpoint before planned drain, before lease handoff, and before any phase whose replay could duplicate or skip an external effect.
+4. When cursor, checkpoint, and receipt-head updates jointly define replay position, they MUST be published atomically or through an explicit two-phase transition that never exposes a newer acknowledgement with an older receipt frontier.
+5. Snapshot cadence SHOULD be bounded by replay cost, not only wall-clock time; implementations MUST define the maximum recovery work they are willing to replay after crash or failover.
+
 ### 8.4.1 Operation Intent and Receipt Objects
 
 Operations with strong idempotency or externally visible risky effects SHOULD externalize intent before
@@ -4030,7 +4061,52 @@ Resume safety requires:
 If a prior `OperationReceipt` exists with a committed disposition and matching strong idempotency key,
 resume MUST attach to that committed result rather than replay the external side effect.
 
-### 11.4.1 Migration Protocol
+### 11.4.1 Resume Validation Inputs
+
+Resume and failover decisions MUST be based on durable bindings, not heuristics or log scraping:
+
+```rust
+pub struct ResumeBoundary {
+    pub subject_id: ObjectId,
+    pub checkpoint_object_id: ObjectId,
+    pub checkpoint_seq: u64,
+    pub state_object_id: Option<ObjectId>,
+    pub receipt_head: Option<ObjectId>,
+    pub lease_object_id: ObjectId,
+    pub lease_fencing_token: u64,
+    pub capability_token_jti: [u8; 16],
+}
+```
+
+Normative rules:
+
+1. `checkpoint_object_id` MUST hash to the canonical checkpoint bytes and bind the same zone, subject, holder, and lease lineage expected by the current migration context or lease handoff.
+2. Any `state_object_id`, cursor object, or other durable state named by the checkpoint MUST be available before resume or the host MUST repair or refetch it first.
+3. `receipt_head` MUST cover every externally visible phase the checkpoint claims complete; a checkpoint that advances business progress without matching evidence lineage is inconsistent.
+4. Resumed execution MUST run under a fresh execution context that preserves or narrows prior authority; it MUST NOT silently widen capabilities, budget, or zone.
+5. Resume evidence MUST record the prior holder, resumed holder, resume cause, checkpoint id/seq, lease id/fencing token, and whether the execution attached to prior work or retried.
+
+### 11.4.2 Receipt Consistency and Duplicate Delivery Classification
+
+Resume and failover logic MUST classify prior work before reissuing any side effect:
+
+| Classification | Meaning | Required behavior |
+|----------------|---------|-------------------|
+| `fresh` | no prior effect or replay-sensitive progress observed | MAY execute new work |
+| `duplicate_committed` | a receipt or upstream idempotency handle proves the prior effect committed | MUST attach to the committed result rather than replay |
+| `replay_safe_retry` | prior work did not commit, and checkpoint plus remote protocol prove retry is safe | MAY retry after renewing lease and budget |
+| `ambiguous_external` | intent exists without definitive receipt, or remote progress advanced beyond durable proof | MUST fail closed or reconcile; MUST NOT blindly replay |
+| `evidence_conflict` | checkpoint, cursor, lease, or receipt lineage disagree | MUST halt resume and surface an operator-visible incident |
+
+Normative rules:
+
+1. `duplicate_committed` MUST be the default whenever a strong idempotency key or provider handle proves the prior side effect already exists.
+2. `ambiguous_external` MUST fail closed for risky and dangerous operations; best-effort retry is only permissible for safe operations with explicit policy.
+3. `evidence_conflict` MUST emit durable evidence identifying the conflicting checkpoint, receipt, intent, cursor, or lease objects.
+4. Automatic replay is permitted only for `fresh` and `replay_safe_retry`.
+5. Every classification outcome MUST be logged and included in evidence bundles and replay transcripts.
+
+### 11.4.3 Migration Protocol
 
 Migration of resumable computation SHOULD proceed as:
 
@@ -4040,6 +4116,14 @@ Migration of resumable computation SHOULD proceed as:
 4. verify receipt consistency and replay boundaries,
 5. resume under a fresh but compatible execution context,
 6. emit audit and evidence artifacts linking old and new execution sites.
+
+Planned handoff, crash recovery, and operator-forced repair MUST all preserve the same durable
+lineage:
+
+- prior checkpoint id and sequence,
+- prior and resumed lease ids plus fencing tokens,
+- duplicate-delivery classification,
+- chosen resume disposition (`attach`, `retry`, `deny`, or `reconcile`).
 
 ### 11.5 Offline and Repair Behavior
 
@@ -5147,8 +5231,12 @@ pub struct EvidenceBundle {
     pub trace: TraceContext,
     pub decision_receipt: Option<ObjectId>,
     pub operation_receipt: Option<ObjectId>,
+    pub receipt_lineage: Vec<ObjectId>,
     pub audit_events: Vec<ObjectId>,
     pub checkpoint: Option<ObjectId>,
+    pub checkpoint_lineage: Vec<ObjectId>,
+    pub resume_cause: Option<String>,
+    pub duplicate_delivery_class: Option<String>,
     pub transcript_objects: Vec<ObjectId>,
 }
 ```
@@ -5162,6 +5250,8 @@ Evidence bundles SHOULD preserve enough material to:
 - reconstruct why a decision was made,
 - prove which connector artifact and policy heads were in force,
 - replay transport transcripts where policy allows,
+- determine whether resumed work attached to a prior committed effect, safely retried, or failed closed due to ambiguity,
+- trace checkpoint and receipt lineage across planned drain, crash recovery, and failover,
 - compare pre- and post-failover behavior,
 - satisfy conformance review for difficult bug classes.
 
@@ -5410,11 +5500,14 @@ Every reference implementation MUST include:
    - quiescence,
    - restart policy,
    - deadline and cost exhaustion,
+   - intent-without-receipt recovery,
+   - duplicate-delivery classification across fresh, committed, ambiguous, and conflicting cases,
    - checkpoint/resume correctness.
 5. **Replayable end-to-end scripts** for:
    - provision -> configure -> invoke,
    - stream -> credit -> cancel -> drain,
    - checkpoint -> failover -> resume,
+   - intent -> crash -> recovery without duplicate side effects,
    - explain -> doctor -> repair,
    - operator journey from first provision through diagnosis and recovery,
    - revoke -> reject -> revalidate,
@@ -5452,6 +5545,8 @@ Conformance e2e and adversarial tests MUST emit detailed structured logs with:
 - stable reason codes,
 - placement decision context,
 - drain and restart phases,
+- checkpoint and receipt lineage,
+- resume cause and duplicate-delivery classification,
 - evidence object identifiers,
 - any retained transcript object identifiers.
 

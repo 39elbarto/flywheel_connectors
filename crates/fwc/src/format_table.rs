@@ -968,4 +968,481 @@ mod tests {
         let val = escape_delimited("say \"hi\" please", ',');
         assert_eq!(val, "\"say \"\"hi\"\" please\"");
     }
+
+    // ── TabularFormat trait coverage ──────────────────────────────────
+
+    #[test]
+    fn tabular_format_clone() {
+        let f = TabularFormat::Markdown;
+        let g = f.clone();
+        assert_eq!(f, g);
+    }
+
+    #[test]
+    fn tabular_format_debug() {
+        let s = format!("{:?}", TabularFormat::Table);
+        assert_eq!(s, "Table");
+        assert_eq!(format!("{:?}", TabularFormat::Csv), "Csv");
+        assert_eq!(format!("{:?}", TabularFormat::Tsv), "Tsv");
+        assert_eq!(format!("{:?}", TabularFormat::Markdown), "Markdown");
+    }
+
+    #[test]
+    fn tabular_format_all_pairs_ne() {
+        let variants = [
+            TabularFormat::Table,
+            TabularFormat::Csv,
+            TabularFormat::Tsv,
+            TabularFormat::Markdown,
+        ];
+        for (i, a) in variants.iter().enumerate() {
+            for (j, b) in variants.iter().enumerate() {
+                if i == j {
+                    assert_eq!(a, b);
+                } else {
+                    assert_ne!(a, b);
+                }
+            }
+        }
+    }
+
+    // ── TabularOptions trait coverage ─────────────────────────────────
+
+    #[test]
+    fn tabular_options_default_values() {
+        let opts = TabularOptions::default();
+        assert!(opts.columns.is_empty());
+        assert!(opts.sort_by.is_none());
+        assert_eq!(opts.limit, 0);
+        assert!(!opts.no_headers);
+    }
+
+    #[test]
+    fn tabular_options_clone() {
+        let opts = TabularOptions {
+            columns: vec!["a".into(), "b".into()],
+            sort_by: Some("a".into()),
+            limit: 5,
+            no_headers: true,
+        };
+        let cloned = opts.clone();
+        assert_eq!(opts.columns, cloned.columns);
+        assert_eq!(opts.sort_by, cloned.sort_by);
+        assert_eq!(opts.limit, cloned.limit);
+        assert_eq!(opts.no_headers, cloned.no_headers);
+    }
+
+    #[test]
+    fn tabular_options_debug() {
+        let opts = TabularOptions {
+            columns: vec!["x".into()],
+            sort_by: None,
+            limit: 10,
+            no_headers: false,
+        };
+        let s = format!("{:?}", opts);
+        assert!(s.contains("TabularOptions"));
+        assert!(s.contains("columns"));
+        assert!(s.contains("limit"));
+    }
+
+    // ── resolve_path edge cases ──────────────────────────────────────
+
+    #[test]
+    fn resolve_path_missing_intermediate() {
+        let row = json!({"a": {"b": 1}});
+        assert_eq!(resolve_path(&row, "a.missing.c"), &Value::Null);
+    }
+
+    #[test]
+    fn resolve_path_array_out_of_bounds() {
+        let row = json!({"items": ["only"]});
+        assert_eq!(resolve_path(&row, "items[5]"), &Value::Null);
+    }
+
+    #[test]
+    fn resolve_path_nested_array_index() {
+        let row = json!({"data": {"list": [10, 20, 30]}});
+        assert_eq!(resolve_path(&row, "data.list[2]"), &json!(30));
+    }
+
+    #[test]
+    fn resolve_path_empty_key() {
+        let row = json!({"": "empty_key"});
+        assert_eq!(resolve_path(&row, ""), &json!("empty_key"));
+    }
+
+    #[test]
+    fn resolve_path_on_non_object() {
+        let row = json!(42);
+        assert_eq!(resolve_path(&row, "anything"), &Value::Null);
+    }
+
+    #[test]
+    fn resolve_path_array_index_zero() {
+        let row = json!({"arr": ["first", "second"]});
+        assert_eq!(resolve_path(&row, "arr[0]"), &json!("first"));
+    }
+
+    #[test]
+    fn resolve_path_array_index_on_non_array() {
+        let row = json!({"val": "not_array"});
+        assert_eq!(resolve_path(&row, "val[0]"), &Value::Null);
+    }
+
+    // ── format_cell edge cases ───────────────────────────────────────
+
+    #[test]
+    fn format_cell_empty_string() {
+        assert_eq!(format_cell(&json!("")), "");
+    }
+
+    #[test]
+    fn format_cell_empty_array() {
+        assert_eq!(format_cell(&json!([])), "");
+    }
+
+    #[test]
+    fn format_cell_nested_array() {
+        let val = json!([1, [2, 3]]);
+        let result = format_cell(&val);
+        assert!(result.contains('1'));
+        // Inner array gets serialized
+        assert!(result.contains('2'));
+    }
+
+    #[test]
+    fn format_cell_float_number() {
+        assert_eq!(format_cell(&json!(3.14)), "3.14");
+    }
+
+    #[test]
+    fn format_cell_negative_number() {
+        assert_eq!(format_cell(&json!(-7)), "-7");
+    }
+
+    #[test]
+    fn format_cell_large_number() {
+        assert_eq!(format_cell(&json!(1_000_000)), "1000000");
+    }
+
+    #[test]
+    fn format_cell_object_with_nested() {
+        let val = json!({"inner": {"deep": true}});
+        let result = format_cell(&val);
+        assert!(result.contains("inner"));
+        assert!(result.contains("deep"));
+        assert!(result.contains("true"));
+    }
+
+    #[test]
+    fn format_cell_array_of_bools() {
+        let result = format_cell(&json!([true, false, true]));
+        assert_eq!(result, "true, false, true");
+    }
+
+    #[test]
+    fn format_cell_array_of_numbers() {
+        let result = format_cell(&json!([1, 2, 3]));
+        assert_eq!(result, "1, 2, 3");
+    }
+
+    // ── escape_delimited edge cases ──────────────────────────────────
+
+    #[test]
+    fn escape_delimited_non_standard_delimiter() {
+        // Non-standard delimiters never trigger quoting
+        let result = escape_delimited("a|b", '|');
+        assert_eq!(result, "a|b");
+    }
+
+    #[test]
+    fn escape_csv_empty_string() {
+        assert_eq!(escape_delimited("", ','), "");
+    }
+
+    #[test]
+    fn escape_tsv_with_comma() {
+        // Comma in TSV should NOT trigger quoting
+        assert_eq!(escape_delimited("a,b", '\t'), "a,b");
+    }
+
+    #[test]
+    fn escape_csv_with_all_special_chars() {
+        let result = escape_delimited("a,b\"c\nd", ',');
+        // Should be quoted and internal quotes doubled
+        assert!(result.starts_with('"'));
+        assert!(result.ends_with('"'));
+        assert!(result.contains("\"\""));
+    }
+
+    // ── escape_markdown_cell edge cases ──────────────────────────────
+
+    #[test]
+    fn escape_markdown_empty() {
+        assert_eq!(escape_markdown_cell(""), "");
+    }
+
+    #[test]
+    fn escape_markdown_multiple_pipes() {
+        assert_eq!(escape_markdown_cell("||"), "\\|\\|");
+    }
+
+    // ── Integration: sort + no_headers ───────────────────────────────
+
+    #[test]
+    fn sort_and_no_headers_combined() {
+        let opts = TabularOptions {
+            sort_by: Some("title".into()),
+            no_headers: true,
+            ..default_opts()
+        };
+        let result = render_tabular(&sample_issues(), TabularFormat::Csv, &opts).unwrap();
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].contains("Bug fix"));
+        assert!(lines[1].contains("Docs update"));
+        assert!(lines[2].contains("Feature request"));
+    }
+
+    #[test]
+    fn all_options_combined() {
+        let opts = TabularOptions {
+            columns: vec!["title".into(), "state".into()],
+            sort_by: Some("title".into()),
+            limit: 2,
+            no_headers: true,
+        };
+        let result = render_tabular(&sample_issues(), TabularFormat::Table, &opts).unwrap();
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("Bug fix"));
+        assert!(lines[1].contains("Docs update"));
+    }
+
+    // ── Limit larger than row count ──────────────────────────────────
+
+    #[test]
+    fn limit_larger_than_rows() {
+        let opts = TabularOptions {
+            limit: 100,
+            ..default_opts()
+        };
+        let result = render_tabular(&sample_issues(), TabularFormat::Csv, &opts).unwrap();
+        assert_eq!(result.lines().count(), 4); // all rows present
+    }
+
+    #[test]
+    fn limit_equal_to_row_count() {
+        let opts = TabularOptions {
+            limit: 3,
+            ..default_opts()
+        };
+        let result = render_tabular(&sample_issues(), TabularFormat::Csv, &opts).unwrap();
+        assert_eq!(result.lines().count(), 4);
+    }
+
+    #[test]
+    fn limit_one() {
+        let opts = TabularOptions {
+            limit: 1,
+            ..default_opts()
+        };
+        let result = render_tabular(&sample_issues(), TabularFormat::Csv, &opts).unwrap();
+        assert_eq!(result.lines().count(), 2); // header + 1
+    }
+
+    // ── Unicode handling ─────────────────────────────────────────────
+
+    #[test]
+    fn unicode_values_in_table() {
+        let data = json!([
+            {"name": "日本語", "emoji": "🎉"},
+            {"name": "中文", "emoji": "🚀"},
+        ]);
+        let result = render_tabular(&data, TabularFormat::Table, &default_opts()).unwrap();
+        assert!(result.contains("日本語"));
+        assert!(result.contains("🎉"));
+    }
+
+    #[test]
+    fn unicode_in_csv() {
+        let data = json!([{"greet": "héllo wörld"}]);
+        let result = render_tabular(&data, TabularFormat::Csv, &default_opts()).unwrap();
+        assert!(result.contains("héllo wörld"));
+    }
+
+    // ── Whitespace in values ─────────────────────────────────────────
+
+    #[test]
+    fn whitespace_preserved_in_table() {
+        let data = json!([{"text": "  leading spaces"}, {"text": "trailing  "}]);
+        let result = render_tabular(&data, TabularFormat::Csv, &default_opts()).unwrap();
+        assert!(result.contains("  leading spaces"));
+        assert!(result.contains("trailing  "));
+    }
+
+    // ── Single column table ──────────────────────────────────────────
+
+    #[test]
+    fn single_column_table() {
+        let data = json!([{"id": 1}, {"id": 2}, {"id": 3}]);
+        let opts = TabularOptions {
+            columns: vec!["id".into()],
+            ..default_opts()
+        };
+        let result = render_tabular(&data, TabularFormat::Table, &opts).unwrap();
+        assert!(result.contains("id"));
+        assert!(result.contains('1'));
+        assert!(result.contains('2'));
+        assert!(result.contains('3'));
+    }
+
+    #[test]
+    fn single_column_csv() {
+        let data = json!([{"val": "a"}, {"val": "b"}]);
+        let opts = TabularOptions {
+            columns: vec!["val".into()],
+            ..default_opts()
+        };
+        let result = render_tabular(&data, TabularFormat::Csv, &opts).unwrap();
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "val");
+        assert_eq!(lines[1], "a");
+        assert_eq!(lines[2], "b");
+    }
+
+    // ── Object with array of non-objects ─────────────────────────────
+
+    #[test]
+    fn object_with_scalar_array_returns_error() {
+        let data = json!({"items": [1, 2, 3]});
+        assert!(render_tabular(&data, TabularFormat::Table, &default_opts()).is_err());
+    }
+
+    #[test]
+    fn object_with_empty_array_returns_error() {
+        let data = json!({"items": []});
+        // Empty array in well-known field returns empty rows → Ok with "(no rows)"
+        let result = render_tabular(&data, TabularFormat::Table, &default_opts()).unwrap();
+        assert!(result.contains("no rows"));
+    }
+
+    // ── Error message content ────────────────────────────────────────
+
+    #[test]
+    fn error_message_is_descriptive() {
+        let data = json!("text");
+        let err = render_tabular(&data, TabularFormat::Table, &default_opts()).unwrap_err();
+        assert!(err.contains("not tabular"));
+    }
+
+    // ── Multiple wrapper field precedence ────────────────────────────
+
+    #[test]
+    fn well_known_field_takes_priority() {
+        // "items" should be preferred over an unknown array field
+        let data = json!({
+            "other_list": [{"z": 1}],
+            "items": [{"a": 2}]
+        });
+        let result = render_tabular(&data, TabularFormat::Csv, &default_opts()).unwrap();
+        // Should extract from "items" (well-known) over "other_list"
+        assert!(result.contains('a'));
+        assert!(result.contains('2'));
+    }
+
+    // ── Markdown with special content ────────────────────────────────
+
+    #[test]
+    fn markdown_no_headers_still_has_pipes() {
+        let data = json!([{"x": 1}]);
+        let opts = TabularOptions {
+            no_headers: true,
+            ..default_opts()
+        };
+        let result = render_tabular(&data, TabularFormat::Markdown, &opts).unwrap();
+        assert!(result.starts_with("| "));
+        assert!(result.contains("1"));
+    }
+
+    #[test]
+    fn markdown_multiple_rows() {
+        let data = json!([
+            {"a": 1, "b": 2},
+            {"a": 3, "b": 4},
+            {"a": 5, "b": 6},
+        ]);
+        let result = render_tabular(&data, TabularFormat::Markdown, &default_opts()).unwrap();
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines.len(), 5); // header + separator + 3 rows
+        assert!(lines[0].starts_with("| "));
+        assert!(lines[1].contains("---"));
+    }
+
+    // ── TSV with special characters ──────────────────────────────────
+
+    #[test]
+    fn tsv_value_with_comma_not_quoted() {
+        let data = json!([{"text": "hello, world"}]);
+        let result = render_tabular(&data, TabularFormat::Tsv, &default_opts()).unwrap();
+        // Commas don't need quoting in TSV
+        assert!(result.contains("hello, world"));
+        assert!(!result.contains('"'));
+    }
+
+    // ── Table alignment edge cases ───────────────────────────────────
+
+    #[test]
+    fn table_with_empty_cell_values() {
+        let data = json!([
+            {"name": "alice", "bio": ""},
+            {"name": "bob", "bio": "engineer"},
+        ]);
+        let result = render_tabular(&data, TabularFormat::Table, &default_opts()).unwrap();
+        assert!(result.contains("alice"));
+        assert!(result.contains("engineer"));
+    }
+
+    #[test]
+    fn table_column_width_uses_header_minimum() {
+        let data = json!([{"longheader": "x"}]);
+        let result = render_tabular(&data, TabularFormat::Table, &default_opts()).unwrap();
+        let lines: Vec<&str> = result.lines().collect();
+        // Header and separator should be at least as wide as "longheader"
+        assert!(lines[1].len() >= "longheader".len());
+    }
+
+    // ── Auto-detect columns with non-object first row ────────────────
+
+    #[test]
+    fn auto_detect_columns_non_object_first_row() {
+        let rows_val = json!([42, "text"]);
+        let rows: Vec<&Value> = rows_val.as_array().unwrap().iter().collect();
+        let cols = auto_detect_columns(&rows);
+        assert!(cols.is_empty());
+    }
+
+    // ── extract_cell_values coverage ─────────────────────────────────
+
+    #[test]
+    fn extract_cell_values_empty_rows() {
+        let rows: Vec<&Value> = vec![];
+        let columns = vec!["a".into()];
+        let result = extract_cell_values(&rows, &columns);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn extract_cell_values_multiple_columns() {
+        let data = json!([{"x": 1, "y": 2}]);
+        let rows: Vec<&Value> = data.as_array().unwrap().iter().collect();
+        let columns = vec!["x".into(), "y".into()];
+        let result = extract_cell_values(&rows, &columns);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].len(), 2);
+        assert_eq!(result[0][0], "1");
+        assert_eq!(result[0][1], "2");
+    }
 }

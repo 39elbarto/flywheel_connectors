@@ -19,6 +19,7 @@ path = "src/main.rs"
 anyhow.workspace = true
 chrono.workspace = true
 clap = { workspace = true, features = ["derive", "env"] }
+fcp-async-core.workspace = true
 fcp-core.workspace = true
 fcp-cbor.workspace = true
 fcp-crypto.workspace = true

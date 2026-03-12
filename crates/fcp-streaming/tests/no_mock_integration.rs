@@ -18,7 +18,7 @@ use fcp_streaming::{
     with_retry,
 };
 
-/// Helper: run an async block inside a real Tokio runtime (needed for wiremock).
+/// Helper: run an async block inside the shared reactor-enabled test runtime.
 fn block_on<F: std::future::Future>(f: F) -> F::Output {
     fcp_async_core::runtime::Builder::new_current_thread()
         .enable_all()

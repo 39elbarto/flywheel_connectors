@@ -590,7 +590,7 @@ mod tests {
     use wiremock::matchers::{body_string_contains, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    fn run_with_tokio_reactor<F, T>(future: F) -> T
+    fn run_with_test_runtime<F, T>(future: F) -> T
     where
         F: std::future::Future<Output = T>,
     {
@@ -812,7 +812,7 @@ mod tests {
 
     #[test]
     fn test_exchange_code_with_mock_server() {
-        run_with_tokio_reactor(async {
+        run_with_test_runtime(async {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
                 .and(path("/token"))
@@ -850,7 +850,7 @@ mod tests {
 
     #[test]
     fn test_exchange_code_with_pkce_sends_verifier() {
-        run_with_tokio_reactor(async {
+        run_with_test_runtime(async {
             let server = MockServer::start().await;
             let pkce = Pkce::with_method(PkceMethod::S256);
             let expected_verifier = pkce.verifier().to_string();
@@ -890,7 +890,7 @@ mod tests {
 
     #[test]
     fn test_refresh_tokens_with_mock_server() {
-        run_with_tokio_reactor(async {
+        run_with_test_runtime(async {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
                 .and(path("/token"))
@@ -922,7 +922,7 @@ mod tests {
 
     #[test]
     fn test_authorization_code_pkce_full_lifecycle_with_mock_server() {
-        run_with_tokio_reactor(async {
+        run_with_test_runtime(async {
             let server = MockServer::start().await;
             let config = OAuth2Config::public_client(
                 "public-client",
@@ -999,7 +999,7 @@ mod tests {
 
     #[test]
     fn test_exchange_code_maps_error_response() {
-        run_with_tokio_reactor(async {
+        run_with_test_runtime(async {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
                 .and(path("/token"))
@@ -1429,7 +1429,7 @@ mod tests {
 
     #[test]
     fn test_client_credentials_requires_secret() {
-        run_with_tokio_reactor(async {
+        run_with_test_runtime(async {
             let config = OAuth2Config::public_client(
                 "public",
                 "https://auth.example.com/authorize",
@@ -1443,7 +1443,7 @@ mod tests {
 
     #[test]
     fn test_client_credentials_with_mock_server() {
-        run_with_tokio_reactor(async {
+        run_with_test_runtime(async {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
                 .and(path("/token"))
@@ -1476,7 +1476,7 @@ mod tests {
 
     #[test]
     fn test_client_credentials_with_default_scopes() {
-        run_with_tokio_reactor(async {
+        run_with_test_runtime(async {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
                 .and(path("/token"))
@@ -1505,7 +1505,7 @@ mod tests {
 
     #[test]
     fn test_exchange_code_error_non_json_body() {
-        run_with_tokio_reactor(async {
+        run_with_test_runtime(async {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
                 .and(path("/token"))
@@ -1528,7 +1528,7 @@ mod tests {
 
     #[test]
     fn test_exchange_code_with_extra_token_params() {
-        run_with_tokio_reactor(async {
+        run_with_test_runtime(async {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
                 .and(path("/token"))
@@ -1558,7 +1558,7 @@ mod tests {
 
     #[test]
     fn test_refresh_with_extra_token_params() {
-        run_with_tokio_reactor(async {
+        run_with_test_runtime(async {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
                 .and(path("/token"))
@@ -1589,7 +1589,7 @@ mod tests {
 
     #[test]
     fn test_token_response_without_refresh_token() {
-        run_with_tokio_reactor(async {
+        run_with_test_runtime(async {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
                 .and(path("/token"))
@@ -1615,7 +1615,7 @@ mod tests {
 
     #[test]
     fn test_token_response_with_scopes_parsed() {
-        run_with_tokio_reactor(async {
+        run_with_test_runtime(async {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
                 .and(path("/token"))
@@ -1642,7 +1642,7 @@ mod tests {
 
     #[test]
     fn test_basic_auth_style_sends_authorization_header() {
-        run_with_tokio_reactor(async {
+        run_with_test_runtime(async {
             let server = MockServer::start().await;
             // With Basic auth, client_id/secret should be in Authorization header, not body
             Mock::given(method("POST"))

@@ -1155,7 +1155,7 @@ mod tests {
             .expect("build test client")
     }
 
-    fn run_with_tokio_reactor<F, T>(future: F) -> T
+    fn run_with_test_runtime<F, T>(future: F) -> T
     where
         F: std::future::Future<Output = T>,
     {
@@ -1480,7 +1480,7 @@ mod tests {
 
     #[test]
     fn fetch_snapshot_uses_standard_endpoint_when_available() {
-        run_with_tokio_reactor(async {
+        run_with_test_runtime(async {
             let server = MockServer::start().await;
             let service = DiscoveryServiceId::new("gmail", "v1").expect("valid");
             let standard_base = format!("{}/discovery/v1/apis", server.uri());
@@ -1533,7 +1533,7 @@ mod tests {
 
     #[test]
     fn fetch_snapshot_falls_back_to_alternate_endpoint() {
-        run_with_tokio_reactor(async {
+        run_with_test_runtime(async {
             let server = MockServer::start().await;
             let service = DiscoveryServiceId::new("gmail", "v1").expect("valid");
             let standard_base = format!("{}/discovery/v1/apis", server.uri());
@@ -1576,7 +1576,7 @@ mod tests {
 
     #[test]
     fn fetch_snapshot_returns_both_endpoint_errors_when_all_fail() {
-        run_with_tokio_reactor(async {
+        run_with_test_runtime(async {
             let server = MockServer::start().await;
             let service = DiscoveryServiceId::new("gmail", "v1").expect("valid");
             let standard_base = format!("{}/discovery/v1/apis", server.uri());
@@ -2834,7 +2834,7 @@ mod tests {
 
     #[test]
     fn fetch_snapshot_malformed_json_response() {
-        run_with_tokio_reactor(async {
+        run_with_test_runtime(async {
             let server = MockServer::start().await;
             let service = DiscoveryServiceId::new("test", "v1").expect("valid");
             let standard_base = format!("{}/discovery/v1/apis", server.uri());
@@ -2873,7 +2873,7 @@ mod tests {
 
     #[test]
     fn fetch_snapshot_empty_json_body() {
-        run_with_tokio_reactor(async {
+        run_with_test_runtime(async {
             let server = MockServer::start().await;
             let service = DiscoveryServiceId::new("test", "v1").expect("valid");
             let standard_base = format!("{}/discovery/v1/apis", server.uri());

@@ -37,6 +37,7 @@ mod config;
 mod connector;
 mod error;
 mod gateway;
+mod limits;
 mod types;
 
 use connector::DiscordConnector;

@@ -34,6 +34,10 @@ use crate::{
     api::DiscordApiClient,
     config::DiscordConfig,
     gateway::{DISCORD_GATEWAY_STATE_FILE, GatewayConnection, GatewayEvent, GatewayEventFrame},
+    limits::{
+        EMBED_DESCRIPTION_MAX_CHARS, EMBED_TITLE_MAX_CHARS, EMBED_TOTAL_MAX_CHARS,
+        EMBEDS_MAX_COUNT, MESSAGE_CONTENT_MAX_CHARS, THREAD_NAME_MAX_CHARS,
+    },
     types::Embed,
 };
 
@@ -998,10 +1002,6 @@ impl DiscordConnector {
     /// This is an optimization to avoid wasting resources on capability verification
     /// for requests that will fail validation anyway.
     fn validate_input_early(operation: &str, input: &serde_json::Value) -> FcpResult<()> {
-        const MAX_CONTENT_LENGTH: usize = 2000;
-        const MAX_EMBEDS: usize = 10;
-        const MAX_EMBED_TOTAL_CHARS: usize = 6000;
-
         if let Some(schema) = Self::input_schema_for(operation) {
             validate_input_with_limits(&schema, input, &Limits::default())?;
         }
@@ -1020,12 +1020,12 @@ impl DiscordConnector {
                 }
 
                 if let Some(content) = content
-                    && content.len() > MAX_CONTENT_LENGTH
+                    && content.len() > MESSAGE_CONTENT_MAX_CHARS
                 {
                     return Err(FcpError::InvalidRequest {
                         code: 1004,
                         message: format!(
-                            "Content exceeds {MAX_CONTENT_LENGTH} character limit (got {} characters)",
+                            "Content exceeds {MESSAGE_CONTENT_MAX_CHARS} character limit (got {} characters)",
                             content.len()
                         ),
                     });
@@ -1033,11 +1033,11 @@ impl DiscordConnector {
 
                 // Validate embed limits
                 if let Some(embeds) = embeds {
-                    if embeds.len() > MAX_EMBEDS {
+                    if embeds.len() > EMBEDS_MAX_COUNT {
                         return Err(FcpError::InvalidRequest {
                             code: 1004,
                             message: format!(
-                                "Too many embeds: {} exceeds limit of {MAX_EMBEDS}",
+                                "Too many embeds: {} exceeds limit of {EMBEDS_MAX_COUNT}",
                                 embeds.len()
                             ),
                         });
@@ -1092,11 +1092,11 @@ impl DiscordConnector {
                         })
                         .sum();
 
-                    if total_chars > MAX_EMBED_TOTAL_CHARS {
+                    if total_chars > EMBED_TOTAL_MAX_CHARS {
                         return Err(FcpError::InvalidRequest {
                             code: 1004,
                             message: format!(
-                                "Total embed character count {total_chars} exceeds limit of {MAX_EMBED_TOTAL_CHARS}"
+                                "Total embed character count {total_chars} exceeds limit of {EMBED_TOTAL_MAX_CHARS}"
                             ),
                         });
                     }
@@ -1157,9 +1157,13 @@ impl DiscordConnector {
             message: "Invalid operation ID format".into(),
         })?;
         let intro = self.handle_introspect().await?;
-        let cap_str = intro.get("operations")
+        let cap_str = intro
+            .get("operations")
             .and_then(|ops| ops.as_array())
-            .and_then(|ops| ops.iter().find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation)))
+            .and_then(|ops| {
+                ops.iter()
+                    .find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation))
+            })
             .and_then(|op| op.get("capability"))
             .and_then(|cap| cap.as_str())
             .ok_or_else(|| FcpError::OperationNotGranted {
@@ -1227,16 +1231,11 @@ impl DiscordConnector {
 
         // Validate embed limits
         if let Some(ref embeds) = embeds {
-            const MAX_EMBEDS: usize = 10;
-            const MAX_EMBED_TOTAL_CHARS: usize = 6000;
-            const MAX_EMBED_TITLE: usize = 256;
-            const MAX_EMBED_DESCRIPTION: usize = 4096;
-
-            if embeds.len() > MAX_EMBEDS {
+            if embeds.len() > EMBEDS_MAX_COUNT {
                 return Err(FcpError::InvalidRequest {
                     code: 1004,
                     message: format!(
-                        "Too many embeds: {MAX_EMBEDS} maximum, got {}",
+                        "Too many embeds: {EMBEDS_MAX_COUNT} maximum, got {}",
                         embeds.len()
                     ),
                 });
@@ -1245,11 +1244,11 @@ impl DiscordConnector {
             let mut total_chars = 0;
             for (i, embed) in embeds.iter().enumerate() {
                 if let Some(ref title) = embed.title {
-                    if title.chars().count() > MAX_EMBED_TITLE {
+                    if title.chars().count() > EMBED_TITLE_MAX_CHARS {
                         return Err(FcpError::InvalidRequest {
                             code: 1004,
                             message: format!(
-                                "Embed {} title exceeds {MAX_EMBED_TITLE} character limit",
+                                "Embed {} title exceeds {EMBED_TITLE_MAX_CHARS} character limit",
                                 i + 1
                             ),
                         });
@@ -1257,11 +1256,11 @@ impl DiscordConnector {
                     total_chars += title.chars().count();
                 }
                 if let Some(ref desc) = embed.description {
-                    if desc.chars().count() > MAX_EMBED_DESCRIPTION {
+                    if desc.chars().count() > EMBED_DESCRIPTION_MAX_CHARS {
                         return Err(FcpError::InvalidRequest {
                             code: 1004,
                             message: format!(
-                                "Embed {} description exceeds {MAX_EMBED_DESCRIPTION} character limit",
+                                "Embed {} description exceeds {EMBED_DESCRIPTION_MAX_CHARS} character limit",
                                 i + 1
                             ),
                         });
@@ -1279,11 +1278,11 @@ impl DiscordConnector {
                 }
             }
 
-            if total_chars > MAX_EMBED_TOTAL_CHARS {
+            if total_chars > EMBED_TOTAL_MAX_CHARS {
                 return Err(FcpError::InvalidRequest {
                     code: 1004,
                     message: format!(
-                        "Total embed content exceeds {MAX_EMBED_TOTAL_CHARS} character limit (got {total_chars} characters)",
+                        "Total embed content exceeds {EMBED_TOTAL_MAX_CHARS} character limit (got {total_chars} characters)",
                     ),
                 });
             }
@@ -1333,16 +1332,11 @@ impl DiscordConnector {
 
         // Validate embed limits
         if let Some(ref embeds) = embeds {
-            const MAX_EMBEDS: usize = 10;
-            const MAX_EMBED_TOTAL_CHARS: usize = 6000;
-            const MAX_EMBED_TITLE: usize = 256;
-            const MAX_EMBED_DESCRIPTION: usize = 4096;
-
-            if embeds.len() > MAX_EMBEDS {
+            if embeds.len() > EMBEDS_MAX_COUNT {
                 return Err(FcpError::InvalidRequest {
                     code: 1004,
                     message: format!(
-                        "Too many embeds: {MAX_EMBEDS} maximum, got {}",
+                        "Too many embeds: {EMBEDS_MAX_COUNT} maximum, got {}",
                         embeds.len()
                     ),
                 });
@@ -1351,11 +1345,11 @@ impl DiscordConnector {
             let mut total_chars = 0;
             for (i, embed) in embeds.iter().enumerate() {
                 if let Some(ref title) = embed.title {
-                    if title.chars().count() > MAX_EMBED_TITLE {
+                    if title.chars().count() > EMBED_TITLE_MAX_CHARS {
                         return Err(FcpError::InvalidRequest {
                             code: 1004,
                             message: format!(
-                                "Embed {} title exceeds {MAX_EMBED_TITLE} character limit",
+                                "Embed {} title exceeds {EMBED_TITLE_MAX_CHARS} character limit",
                                 i + 1
                             ),
                         });
@@ -1363,11 +1357,11 @@ impl DiscordConnector {
                     total_chars += title.chars().count();
                 }
                 if let Some(ref desc) = embed.description {
-                    if desc.chars().count() > MAX_EMBED_DESCRIPTION {
+                    if desc.chars().count() > EMBED_DESCRIPTION_MAX_CHARS {
                         return Err(FcpError::InvalidRequest {
                             code: 1004,
                             message: format!(
-                                "Embed {} description exceeds {MAX_EMBED_DESCRIPTION} character limit",
+                                "Embed {} description exceeds {EMBED_DESCRIPTION_MAX_CHARS} character limit",
                                 i + 1
                             ),
                         });
@@ -1385,11 +1379,11 @@ impl DiscordConnector {
                 }
             }
 
-            if total_chars > MAX_EMBED_TOTAL_CHARS {
+            if total_chars > EMBED_TOTAL_MAX_CHARS {
                 return Err(FcpError::InvalidRequest {
                     code: 1004,
                     message: format!(
-                        "Total embed content exceeds {MAX_EMBED_TOTAL_CHARS} character limit (got {total_chars} characters)",
+                        "Total embed content exceeds {EMBED_TOTAL_MAX_CHARS} character limit (got {total_chars} characters)",
                     ),
                 });
             }
@@ -1616,10 +1610,10 @@ impl DiscordConnector {
                     message: "Missing thread name".into(),
                 })?;
 
-        if name.is_empty() || name.len() > 100 {
+        if name.is_empty() || name.len() > THREAD_NAME_MAX_CHARS {
             return Err(FcpError::InvalidRequest {
                 code: 1003,
-                message: "Thread name must be 1-100 characters".into(),
+                message: format!("Thread name must be 1-{THREAD_NAME_MAX_CHARS} characters"),
             });
         }
 
@@ -2354,8 +2348,7 @@ mod tests {
     async fn test_send_message_content_too_long() {
         let connector = DiscordConnector::new();
 
-        // Create a message that exceeds 2000 characters
-        let long_content = "x".repeat(2001);
+        let long_content = "x".repeat(MESSAGE_CONTENT_MAX_CHARS + 1);
         let input = serde_json::json!({
             "channel_id": "123456789",
             "content": long_content
@@ -2412,23 +2405,24 @@ mod tests {
     #[test]
     fn test_message_length_constants() {
         // Verify our constants match Discord's documented limits
-        assert_eq!(2000, 2000); // MAX_CONTENT_LENGTH
-        assert_eq!(10, 10); // MAX_EMBEDS
-        assert_eq!(6000, 6000); // MAX_EMBED_TOTAL_CHARS
-        assert_eq!(256, 256); // MAX_EMBED_TITLE
-        assert_eq!(4096, 4096); // MAX_EMBED_DESCRIPTION
+        assert_eq!(MESSAGE_CONTENT_MAX_CHARS, 2000);
+        assert_eq!(EMBEDS_MAX_COUNT, 10);
+        assert_eq!(EMBED_TOTAL_MAX_CHARS, 6000);
+        assert_eq!(EMBED_TITLE_MAX_CHARS, 256);
+        assert_eq!(EMBED_DESCRIPTION_MAX_CHARS, 4096);
+        assert_eq!(THREAD_NAME_MAX_CHARS, 100);
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_embed_total_limit_exceeded() {
         let connector = DiscordConnector::new();
 
-        // Create an embed with fields that exceed 6000 chars total
+        // Create embeds that exceed the documented total embed character budget.
         let mut fields = Vec::new();
-        for i in 0..10 {
+        for i in 0..EMBEDS_MAX_COUNT {
             fields.push(json!({
                 "name": format!("Field {}", i),
-                "value": "x".repeat(600) // 10 * 600 = 6000 + names > 6000
+                "value": "x".repeat(EMBED_TOTAL_MAX_CHARS / EMBEDS_MAX_COUNT)
             }));
         }
 
@@ -2777,8 +2771,7 @@ mod tests {
     async fn test_create_thread_name_boundary_100_chars() {
         let connector = DiscordConnector::new();
 
-        // Exactly 100 characters should pass validation (but fail at config check)
-        let name_100 = "a".repeat(100);
+        let name_100 = "a".repeat(THREAD_NAME_MAX_CHARS);
         let result = connector
             .handle_invoke(json!({
                 "operation": "discord.create_thread",
@@ -2803,7 +2796,7 @@ mod tests {
     async fn test_create_thread_name_101_chars_rejected() {
         let connector = DiscordConnector::new();
 
-        let name_101 = "a".repeat(101);
+        let name_101 = "a".repeat(THREAD_NAME_MAX_CHARS + 1);
         let result = connector
             .handle_invoke(json!({
                 "operation": "discord.create_thread",

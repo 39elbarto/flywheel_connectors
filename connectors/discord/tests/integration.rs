@@ -21,7 +21,7 @@ use wiremock::{
     matchers::{header, method, path},
 };
 
-use fcp_discord::DiscordConnector;
+use fcp_discord::{DiscordConnector, limits as discord_limits};
 
 // ============================================================================
 // Constants
@@ -237,7 +237,7 @@ async fn send_message_content_too_long() {
     let signing_key = setup_full(&mut connector, &mock_server, &["discord.send"]).await;
 
     let token = generate_valid_token(&signing_key, "discord.send_message");
-    let long_content = "a".repeat(2001);
+    let long_content = "a".repeat(discord_limits::MESSAGE_CONTENT_MAX_CHARS + 1);
 
     let result = connector
         .handle_invoke(json!({
@@ -582,7 +582,7 @@ async fn create_thread_name_too_long() {
     let signing_key = setup_full(&mut connector, &mock_server, &["discord.threads"]).await;
 
     let token = generate_valid_token(&signing_key, "discord.create_thread");
-    let long_name = "a".repeat(101);
+    let long_name = "a".repeat(discord_limits::THREAD_NAME_MAX_CHARS + 1);
     let result = connector
         .handle_invoke(json!({
             "operation": "discord.create_thread",
@@ -595,7 +595,11 @@ async fn create_thread_name_too_long() {
         }))
         .await;
 
-    assert!(result.is_err(), "should reject thread name > 100 chars");
+    assert!(
+        result.is_err(),
+        "should reject thread name > {} chars",
+        discord_limits::THREAD_NAME_MAX_CHARS
+    );
 }
 
 #[fcp_async_core::runtime::test]
@@ -944,7 +948,7 @@ async fn send_message_exactly_2000_chars_accepted() {
     let mut connector = DiscordConnector::new();
     let signing_key = setup_full(&mut connector, &mock_server, &["discord.send"]).await;
 
-    let content_2000 = "a".repeat(2000);
+    let content_2000 = "a".repeat(discord_limits::MESSAGE_CONTENT_MAX_CHARS);
 
     Mock::given(method("POST"))
         .and(path("/channels/111/messages"))
@@ -969,7 +973,11 @@ async fn send_message_exactly_2000_chars_accepted() {
         }))
         .await;
 
-    assert!(result.is_ok(), "exactly 2000 chars should be accepted");
+    assert!(
+        result.is_ok(),
+        "exactly {} chars should be accepted",
+        discord_limits::MESSAGE_CONTENT_MAX_CHARS
+    );
     assert_eq!(result.unwrap()["id"], "msg_boundary");
 }
 
@@ -979,7 +987,7 @@ async fn send_message_2001_chars_rejected() {
     let mut connector = DiscordConnector::new();
     let signing_key = setup_full(&mut connector, &mock_server, &["discord.send"]).await;
 
-    let content_2001 = "a".repeat(2001);
+    let content_2001 = "a".repeat(discord_limits::MESSAGE_CONTENT_MAX_CHARS + 1);
     let token = generate_valid_token(&signing_key, "discord.send_message");
     let result = connector
         .handle_invoke(json!({
@@ -992,7 +1000,11 @@ async fn send_message_2001_chars_rejected() {
         }))
         .await;
 
-    assert!(result.is_err(), "2001 chars should be rejected");
+    assert!(
+        result.is_err(),
+        "{} chars should be rejected",
+        discord_limits::MESSAGE_CONTENT_MAX_CHARS + 1
+    );
 }
 
 #[fcp_async_core::runtime::test]
@@ -1001,7 +1013,7 @@ async fn send_message_exactly_10_embeds_accepted() {
     let mut connector = DiscordConnector::new();
     let signing_key = setup_full(&mut connector, &mock_server, &["discord.send"]).await;
 
-    let embeds: Vec<serde_json::Value> = (0..10)
+    let embeds: Vec<serde_json::Value> = (0..discord_limits::EMBEDS_MAX_COUNT)
         .map(|i| json!({"title": format!("Embed {i}"), "description": "Short"}))
         .collect();
 
@@ -1028,7 +1040,11 @@ async fn send_message_exactly_10_embeds_accepted() {
         }))
         .await;
 
-    assert!(result.is_ok(), "exactly 10 embeds should be accepted");
+    assert!(
+        result.is_ok(),
+        "exactly {} embeds should be accepted",
+        discord_limits::EMBEDS_MAX_COUNT
+    );
 }
 
 #[fcp_async_core::runtime::test]
@@ -1037,7 +1053,7 @@ async fn send_message_11_embeds_rejected() {
     let mut connector = DiscordConnector::new();
     let signing_key = setup_full(&mut connector, &mock_server, &["discord.send"]).await;
 
-    let embeds: Vec<serde_json::Value> = (0..11)
+    let embeds: Vec<serde_json::Value> = (0..=discord_limits::EMBEDS_MAX_COUNT)
         .map(|i| json!({"title": format!("Embed {i}"), "description": "Short"}))
         .collect();
 
@@ -1053,7 +1069,11 @@ async fn send_message_11_embeds_rejected() {
         }))
         .await;
 
-    assert!(result.is_err(), "11 embeds should be rejected");
+    assert!(
+        result.is_err(),
+        "{} embeds should be rejected",
+        discord_limits::EMBEDS_MAX_COUNT + 1
+    );
 }
 
 #[fcp_async_core::runtime::test]
@@ -1062,8 +1082,7 @@ async fn send_message_embed_near_4096_description_accepted() {
     let mut connector = DiscordConnector::new();
     let signing_key = setup_full(&mut connector, &mock_server, &["discord.send"]).await;
 
-    // 4096 chars description is the per-embed limit
-    let desc = "x".repeat(4096);
+    let desc = "x".repeat(discord_limits::EMBED_DESCRIPTION_MAX_CHARS);
 
     Mock::given(method("POST"))
         .and(path("/channels/111/messages"))
@@ -1090,7 +1109,8 @@ async fn send_message_embed_near_4096_description_accepted() {
 
     assert!(
         result.is_ok(),
-        "embed with 4096-char description should be accepted"
+        "embed with {}-char description should be accepted",
+        discord_limits::EMBED_DESCRIPTION_MAX_CHARS
     );
 }
 
@@ -1100,7 +1120,7 @@ async fn send_message_embed_over_4096_description_rejected() {
     let mut connector = DiscordConnector::new();
     let signing_key = setup_full(&mut connector, &mock_server, &["discord.send"]).await;
 
-    let desc = "x".repeat(4097);
+    let desc = "x".repeat(discord_limits::EMBED_DESCRIPTION_MAX_CHARS + 1);
     let token = generate_valid_token(&signing_key, "discord.send_message");
     let result = connector
         .handle_invoke(json!({
@@ -1115,7 +1135,8 @@ async fn send_message_embed_over_4096_description_rejected() {
 
     assert!(
         result.is_err(),
-        "embed with 4097-char description should be rejected"
+        "embed with {}-char description should be rejected",
+        discord_limits::EMBED_DESCRIPTION_MAX_CHARS + 1
     );
 }
 
@@ -1125,10 +1146,10 @@ async fn send_message_total_embed_chars_at_6000_accepted() {
     let mut connector = DiscordConnector::new();
     let signing_key = setup_full(&mut connector, &mock_server, &["discord.send"]).await;
 
-    // 3 embeds each with 2000-char description = exactly 6000 total
-    let desc_2000 = "y".repeat(2000);
-    let embeds: Vec<serde_json::Value> =
-        (0..3).map(|_| json!({"description": desc_2000})).collect();
+    let desc_at_boundary = "y".repeat(discord_limits::EMBED_TOTAL_MAX_CHARS / 3);
+    let embeds: Vec<serde_json::Value> = (0..3)
+        .map(|_| json!({"description": desc_at_boundary}))
+        .collect();
 
     Mock::given(method("POST"))
         .and(path("/channels/111/messages"))
@@ -1155,7 +1176,8 @@ async fn send_message_total_embed_chars_at_6000_accepted() {
 
     assert!(
         result.is_ok(),
-        "total embed chars exactly 6000 should be accepted"
+        "total embed chars exactly {} should be accepted",
+        discord_limits::EMBED_TOTAL_MAX_CHARS
     );
 }
 
@@ -1165,10 +1187,10 @@ async fn send_message_total_embed_chars_over_6000_rejected() {
     let mut connector = DiscordConnector::new();
     let signing_key = setup_full(&mut connector, &mock_server, &["discord.send"]).await;
 
-    // 3 embeds each with 2001-char description = 6003 total
-    let desc_2001 = "y".repeat(2001);
-    let embeds: Vec<serde_json::Value> =
-        (0..3).map(|_| json!({"description": desc_2001})).collect();
+    let desc_over_boundary = "y".repeat((discord_limits::EMBED_TOTAL_MAX_CHARS / 3) + 1);
+    let embeds: Vec<serde_json::Value> = (0..3)
+        .map(|_| json!({"description": desc_over_boundary}))
+        .collect();
 
     let token = generate_valid_token(&signing_key, "discord.send_message");
     let result = connector
@@ -1184,7 +1206,8 @@ async fn send_message_total_embed_chars_over_6000_rejected() {
 
     assert!(
         result.is_err(),
-        "total embed chars over 6000 should be rejected"
+        "total embed chars over {} should be rejected",
+        discord_limits::EMBED_TOTAL_MAX_CHARS
     );
 }
 
@@ -1194,7 +1217,7 @@ async fn create_thread_name_exactly_100_chars_accepted() {
     let mut connector = DiscordConnector::new();
     let signing_key = setup_full(&mut connector, &mock_server, &["discord.threads"]).await;
 
-    let name_100 = "t".repeat(100);
+    let name_100 = "t".repeat(discord_limits::THREAD_NAME_MAX_CHARS);
 
     Mock::given(method("POST"))
         .and(path("/channels/111/messages/msg_001/threads"))
@@ -1222,7 +1245,8 @@ async fn create_thread_name_exactly_100_chars_accepted() {
 
     assert!(
         result.is_ok(),
-        "thread name of exactly 100 chars should be accepted"
+        "thread name of exactly {} chars should be accepted",
+        discord_limits::THREAD_NAME_MAX_CHARS
     );
     assert_eq!(result.unwrap()["id"], "thread_100");
 }

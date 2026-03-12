@@ -23,6 +23,7 @@ use serde_json::json;
 use tracing::{info, warn};
 
 use crate::client::{SendMediaOptions, SendMessageOptions, TelegramClient, TelegramError};
+use crate::limits::{MEDIA_CAPTION_MAX_CHARS, MESSAGE_TEXT_MAX_CHARS};
 use crate::types::{GetUpdatesRequest, Message, Update, UpdateKind};
 
 const DEFAULT_TELEGRAM_BASE_URL: &str = "https://api.telegram.org";
@@ -1240,8 +1241,6 @@ impl TelegramConnector {
 
     /// Validate input structure and limits before capability token verification.
     fn validate_input_early(operation: &str, input: &serde_json::Value) -> FcpResult<()> {
-        const MAX_TEXT_LENGTH: usize = 4096;
-
         if let Some(schema) = Self::input_schema_for(operation) {
             validate_input_with_limits(&schema, input, &Limits::default())?;
         }
@@ -1250,13 +1249,13 @@ impl TelegramConnector {
             "telegram.send_message" => {
                 let text = input.get("text").and_then(|v| v.as_str());
                 if let Some(text) = text {
-                    // Telegram limit is 4096 characters, not bytes.
+                    // Telegram limit is character-based, not byte-based.
                     // Using chars().count() correctly handles multi-byte characters (e.g. emojis).
-                    if text.chars().count() > MAX_TEXT_LENGTH {
+                    if text.chars().count() > MESSAGE_TEXT_MAX_CHARS {
                         return Err(FcpError::InvalidRequest {
                             code: 1004,
                             message: format!(
-                                "Message text exceeds {MAX_TEXT_LENGTH} character limit (got {} characters)",
+                                "Message text exceeds {MESSAGE_TEXT_MAX_CHARS} character limit (got {} characters)",
                                 text.chars().count()
                             ),
                         });
@@ -1264,13 +1263,12 @@ impl TelegramConnector {
                 }
             }
             "telegram.send_media" => {
-                const MAX_CAPTION_LENGTH: usize = 1024;
                 if let Some(caption) = input.get("caption").and_then(|v| v.as_str()) {
-                    if caption.chars().count() > MAX_CAPTION_LENGTH {
+                    if caption.chars().count() > MEDIA_CAPTION_MAX_CHARS {
                         return Err(FcpError::InvalidRequest {
                             code: 1004,
                             message: format!(
-                                "Caption exceeds {MAX_CAPTION_LENGTH} character limit (got {} characters)",
+                                "Caption exceeds {MEDIA_CAPTION_MAX_CHARS} character limit (got {} characters)",
                                 caption.chars().count()
                             ),
                         });
@@ -1320,9 +1318,13 @@ impl TelegramConnector {
             message: "Invalid operation ID format".into(),
         })?;
         let intro = self.handle_introspect().await?;
-        let cap_str = intro.get("operations")
+        let cap_str = intro
+            .get("operations")
             .and_then(|ops| ops.as_array())
-            .and_then(|ops| ops.iter().find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation)))
+            .and_then(|ops| {
+                ops.iter()
+                    .find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation))
+            })
             .and_then(|op| op.get("capability"))
             .and_then(|cap| cap.as_str())
             .ok_or_else(|| FcpError::OperationNotGranted {
@@ -1947,11 +1949,11 @@ mod tests {
 
     #[test]
     fn test_validate_input_early_unicode_length() {
-        // Create a string that is < 4096 chars but > 4096 bytes.
+        // Create a string that is below the message limit in characters but above it in bytes.
         // '€' is 3 bytes. 2000 chars * 3 = 6000 bytes.
         let text = "€".repeat(2000);
-        assert!(text.len() > 4096);
-        assert!(text.chars().count() < 4096);
+        assert!(text.len() > MESSAGE_TEXT_MAX_CHARS);
+        assert!(text.chars().count() < MESSAGE_TEXT_MAX_CHARS);
 
         let input = json!({
             "chat_id": "123",
@@ -1966,7 +1968,7 @@ mod tests {
         );
 
         // Test actual overflow
-        let long_text = "a".repeat(4097);
+        let long_text = "a".repeat(MESSAGE_TEXT_MAX_CHARS + 1);
         let input_long = json!({
             "chat_id": "123",
             "text": long_text
@@ -1975,7 +1977,7 @@ mod tests {
             TelegramConnector::validate_input_early("telegram.send_message", &input_long);
         assert!(
             result_long.is_err(),
-            "Validation should fail for > 4096 chars"
+            "Validation should fail for > {MESSAGE_TEXT_MAX_CHARS} chars"
         );
     }
 
@@ -2684,8 +2686,7 @@ mod tests {
     async fn test_send_message_text_too_long() {
         let (connector, token, _server) = setup_connector_with_token("telegram.send_message").await;
 
-        // Create a message that exceeds 4096 characters
-        let long_text = "x".repeat(4097);
+        let long_text = "x".repeat(MESSAGE_TEXT_MAX_CHARS + 1);
         let input = serde_json::json!({
             "chat_id": "123456789",
             "text": long_text
@@ -2704,7 +2705,7 @@ mod tests {
         assert!(matches!(err, FcpError::InvalidRequest { .. }));
         if let FcpError::InvalidRequest { code, message } = err {
             assert_eq!(code, 1004);
-            assert!(message.contains("4096"));
+            assert!(message.contains(&MESSAGE_TEXT_MAX_CHARS.to_string()));
             assert!(message.contains("character limit"));
         }
     }
@@ -2713,7 +2714,7 @@ mod tests {
     async fn test_send_message_text_at_limit() {
         let (connector, token, _server) = setup_connector_with_token("telegram.send_message").await;
 
-        // Create a message exactly at 4096 characters - should pass validation
+        // Create a message exactly at the platform limit - should pass validation
         // but fail on NotConfigured -> Wait, we configured it with a mock!
         // But invoke_send_message calls client.send_message.
         // We haven't mocked sendMessage!
@@ -2726,7 +2727,7 @@ mod tests {
         // If we want to test that validation passed, we can check that it didn't fail with InvalidRequest.
         // If the mock returns 404, that means it TRIED to send, so validation passed.
 
-        let exact_text = "x".repeat(4096);
+        let exact_text = "x".repeat(MESSAGE_TEXT_MAX_CHARS);
         let input = serde_json::json!({
             "chat_id": "123456789",
             "text": exact_text
@@ -2863,12 +2864,13 @@ mod tests {
     #[test]
     fn test_telegram_message_length_constant() {
         // Verify our constant matches Telegram's documented limit
-        assert_eq!(4096, 4096); // MAX_TEXT_LENGTH
+        assert_eq!(MESSAGE_TEXT_MAX_CHARS, 4096);
+        assert_eq!(MEDIA_CAPTION_MAX_CHARS, 1024);
     }
 
     #[test]
     fn test_send_media_caption_too_long() {
-        let caption = "x".repeat(1025);
+        let caption = "x".repeat(MEDIA_CAPTION_MAX_CHARS + 1);
         let input = json!({
             "chat_id": "123",
             "media_type": "photo",
@@ -2878,13 +2880,13 @@ mod tests {
         let result = TelegramConnector::validate_input_early("telegram.send_media", &input);
         assert!(result.is_err());
         if let Err(FcpError::InvalidRequest { message, .. }) = result {
-            assert!(message.contains("1024"));
+            assert!(message.contains(&MEDIA_CAPTION_MAX_CHARS.to_string()));
         }
     }
 
     #[test]
     fn test_send_media_caption_at_limit() {
-        let caption = "x".repeat(1024);
+        let caption = "x".repeat(MEDIA_CAPTION_MAX_CHARS);
         let input = json!({
             "chat_id": "123",
             "media_type": "photo",

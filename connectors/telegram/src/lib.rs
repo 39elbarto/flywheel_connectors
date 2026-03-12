@@ -35,4 +35,5 @@
 
 pub mod client;
 pub mod connector;
+pub mod limits;
 pub mod types;

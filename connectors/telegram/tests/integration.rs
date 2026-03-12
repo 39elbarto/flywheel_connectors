@@ -23,7 +23,7 @@ use wiremock::{
     matchers::{method, path},
 };
 
-use fcp_telegram::connector::TelegramConnector;
+use fcp_telegram::{connector::TelegramConnector, limits as telegram_limits};
 
 // ============================================================================
 // Constants
@@ -1201,8 +1201,7 @@ async fn send_message_text_exceeds_limit_fails() {
     let (_mock_server, signing_key) = full_setup(&mut connector, &["telegram.send_message"]).await;
     let token = generate_valid_token(&signing_key, "telegram.send_message");
 
-    // 4096 is the limit; send 4097 characters
-    let long_text = "a".repeat(4097);
+    let long_text = "a".repeat(telegram_limits::MESSAGE_TEXT_MAX_CHARS + 1);
     let result = connector
         .handle_invoke(json!({
             "operation": "telegram.send_message",
@@ -1215,7 +1214,8 @@ async fn send_message_text_exceeds_limit_fails() {
     match result.unwrap_err() {
         fcp_core::FcpError::InvalidRequest { message, .. } => {
             assert!(
-                message.contains("4096") || message.contains("character limit"),
+                message.contains(&telegram_limits::MESSAGE_TEXT_MAX_CHARS.to_string())
+                    || message.contains("character limit"),
                 "Error should mention character limit, got: {message}"
             );
         }
@@ -1230,8 +1230,7 @@ async fn send_media_caption_exceeds_limit_fails() {
     let (_mock_server, signing_key) = full_setup(&mut connector, &["telegram.send_media"]).await;
     let token = generate_valid_token(&signing_key, "telegram.send_media");
 
-    // 1024 is the caption limit; send 1025 characters
-    let long_caption = "b".repeat(1025);
+    let long_caption = "b".repeat(telegram_limits::MEDIA_CAPTION_MAX_CHARS + 1);
     let result = connector
         .handle_invoke(json!({
             "operation": "telegram.send_media",
@@ -1249,7 +1248,8 @@ async fn send_media_caption_exceeds_limit_fails() {
     match result.unwrap_err() {
         fcp_core::FcpError::InvalidRequest { message, .. } => {
             assert!(
-                message.contains("1024") || message.contains("caption"),
+                message.contains(&telegram_limits::MEDIA_CAPTION_MAX_CHARS.to_string())
+                    || message.contains("caption"),
                 "Error should mention caption limit, got: {message}"
             );
         }

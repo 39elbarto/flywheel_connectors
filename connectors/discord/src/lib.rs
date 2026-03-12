@@ -41,6 +41,7 @@ mod config;
 mod connector;
 mod error;
 mod gateway;
+pub mod limits;
 mod types;
 
 pub use config::DiscordConfig;

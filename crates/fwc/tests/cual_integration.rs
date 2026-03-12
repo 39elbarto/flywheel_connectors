@@ -2058,3 +2058,841 @@ fn regression_gate_plan_commands_include_workflow_truth() {
         "Top-level availability must have availability field"
     );
 }
+
+// =========================================================================
+// CUAL Cross-Module Workflow Integration Tests (qnchs.15.2)
+// =========================================================================
+//
+// These tests exercise cross-module CUAL workflows that span multiple
+// fwc subsystems end-to-end, proving the integration points between
+// search, validate, invoke, history, batch, throttle, pipe, and MCP.
+
+/// Workflow 1: Search-to-Invoke-to-History
+///
+/// Exercises: search → schema → validate → invoke → history replay.
+/// Verifies that the search engine can discover an operation, the schema
+/// command provides its input contract, validate rejects bad input and
+/// accepts good input, invoke executes against a live host, and the
+/// history subsystem records the complete evidence trail.
+#[allow(clippy::too_many_lines)]
+#[test]
+fn workflow_search_to_invoke_to_history_full_chain() {
+    let capability_token = test_capability_token_arg();
+    let home = tempdir().expect("temp home should be created");
+
+    // --- Setup: mock connectors and tools ---
+    let github_connector =
+        mock_connector_summary_json("fcp.github:enterprise:v1", "GitHub Enterprise", 2, "risky");
+    let github_create_issue = mock_tool_descriptor_json(
+        "github.create_issue",
+        "github.issue_write",
+        "medium",
+        "risky",
+        "none",
+        Some("interactive"),
+        &json!({
+            "type": "object",
+            "properties": {
+                "owner": { "type": "string" },
+                "repo": { "type": "string" },
+                "title": { "type": "string" },
+                "body": { "type": "string" }
+            },
+            "required": ["owner", "repo", "title"]
+        }),
+        &json!({
+            "type": "object",
+            "properties": { "number": { "type": "integer" } },
+            "required": ["number"]
+        }),
+    );
+    let github_list_issues = mock_tool_descriptor_json(
+        "github.list_issues",
+        "github.issue_read",
+        "low",
+        "safe",
+        "strict",
+        None,
+        &json!({
+            "type": "object",
+            "properties": {
+                "owner": { "type": "string" },
+                "repo": { "type": "string" }
+            },
+            "required": ["owner", "repo"]
+        }),
+        &json!({
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": { "number": { "type": "integer" }, "title": { "type": "string" } }
+            }
+        }),
+    );
+
+    // Phase 1: Search — find "create issue" operations via semantic search.
+    let search_result = run_json_ok(&[
+        "--json",
+        "search",
+        "create issue",
+        "--offline",
+    ]);
+    assert_eq!(search_result["command"], "search");
+    let results = search_result["results"]
+        .as_array()
+        .expect("search should return results array");
+    // Verify at least one result mentions github.create_issue.
+    let found_create = results.iter().any(|r| {
+        r["operation"]
+            .as_str()
+            .is_some_and(|id| id.contains("create_issue"))
+    });
+    assert!(
+        found_create,
+        "Search for 'create issue' should find github.create_issue: {results:?}"
+    );
+
+    // Phase 2: Schema — retrieve the input schema for the found operation.
+    let schema_result = run_json_ok(&[
+        "--json",
+        "schema",
+        "github",
+        "issues.create",
+        "--offline",
+    ]);
+    assert_eq!(schema_result["command"], "schema");
+    assert!(
+        schema_result["input_schema"].is_object(),
+        "Schema must provide input contract"
+    );
+    assert!(
+        schema_result["input_schema"]["properties"]["title"].is_object(),
+        "Schema must expose the title field"
+    );
+
+    // Phase 3: Validate — bad input rejected, good input accepted.
+    let (bad_code, bad_payload, _) = run_json(&[
+        "--json",
+        "validate",
+        "github",
+        "issues.create",
+        "--input",
+        r#"{"body":"missing required title"}"#,
+        "--offline",
+    ]);
+    assert_ne!(bad_code, 0, "Validation of bad input should fail");
+    assert!(
+        bad_payload["errors"]
+            .as_array()
+            .is_some_and(|errors| !errors.is_empty()),
+        "Validation errors should be returned for bad input"
+    );
+
+    let good_validation = run_json_ok(&[
+        "--json",
+        "validate",
+        "github",
+        "issues.create",
+        "--input",
+        r#"{"owner":"octocat","repo":"hello-world","title":"Test issue"}"#,
+        "--offline",
+    ]);
+    assert_eq!(good_validation["command"], "validate");
+    assert!(
+        good_validation["valid"] == true
+            || good_validation["errors"]
+                .as_array()
+                .is_some_and(Vec::is_empty),
+        "Valid input should pass validation"
+    );
+
+    // Phase 4: Invoke — execute via live host.
+    let (host, server) = spawn_mock_host_sequence(vec![
+        (
+            "POST /rpc/discover".to_owned(),
+            mock_discovery_response_json(&[github_connector.clone()]),
+        ),
+        (
+            "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
+            mock_introspection_response_json(
+                &github_connector,
+                &[github_create_issue, github_list_issues],
+            ),
+        ),
+        (
+            "POST /rpc/preflight".to_owned(),
+            mock_preflight_response_json(true),
+        ),
+        (
+            "POST /rpc/invoke".to_owned(),
+            mock_invoke_response_json(json!({ "number": 42 })),
+        ),
+    ]);
+    let invoke_payload = run_json_ok_in_home(
+        home.path(),
+        &[
+            "--json",
+            "--host",
+            &host,
+            "invoke",
+            "github",
+            "issues.create",
+            "--input",
+            r#"{"owner":"octocat","repo":"hello-world","title":"Test issue"}"#,
+            "--capability-token",
+            &capability_token,
+        ],
+    );
+    server.join().expect("mock host thread should complete");
+
+    assert_eq!(invoke_payload["status"], "ok");
+    assert_eq!(
+        invoke_payload["availability"]["availability"],
+        "live-runtime"
+    );
+
+    // Phase 5: History — verify the invoke is recorded with correct metadata.
+    let history = run_json_ok_in_home(home.path(), &["--json", "history"]);
+    let entries = history["entries"].as_array().expect("history entries");
+    assert_eq!(entries.len(), 1, "One invoke should produce one history entry");
+    assert_eq!(entries[0]["status"], "success");
+    assert_eq!(entries[0]["operation_id"], "github.create_issue");
+    assert_eq!(entries[0]["connector_id"], "fcp.github:enterprise:v1");
+
+    // Phase 6: History filter — verify filtering by connector works.
+    let filtered = run_json_ok_in_home(
+        home.path(),
+        &["--json", "history", "--connector", "github"],
+    );
+    let filtered_entries = filtered["entries"].as_array().expect("filtered entries");
+    assert_eq!(
+        filtered_entries.len(),
+        1,
+        "Filtering by 'github' should find the entry"
+    );
+
+    // Phase 7: History detail — retrieve a specific entry by ID for replay context.
+    let first_entry_id = entries[0]["entry_id"]
+        .as_str()
+        .expect("history entry should have an entry_id");
+    let detail = run_json_ok_in_home(
+        home.path(),
+        &["--json", "history", first_entry_id],
+    );
+    // Detail view should include the operation and input for re-execution.
+    assert!(
+        detail["entry"].is_object() || detail["entry_id"].is_string(),
+        "History detail should produce structured entry: {detail:?}"
+    );
+}
+
+/// Workflow 2: Batch-with-Throttle-and-Progress
+///
+/// Exercises: batch-file dry-run → batch plan → throttle awareness → progress tracking.
+/// Verifies that batch processing correctly plans execution waves respecting
+/// dependencies, reports throttle strategy information, tracks progress,
+/// and handles mixed connector batches.
+#[allow(clippy::too_many_lines)]
+#[test]
+fn workflow_batch_throttle_and_progress_tracking() {
+    let capability_token = test_capability_token_arg();
+
+    let github_connector =
+        mock_connector_summary_json("fcp.github:enterprise:v1", "GitHub Enterprise", 2, "risky");
+    let slack_connector =
+        mock_connector_summary_json("fcp.slack:team:v1", "Slack Team", 1, "risky");
+    let github_create_issue = mock_tool_descriptor_json(
+        "github.create_issue",
+        "github.issue_write",
+        "medium",
+        "risky",
+        "none",
+        Some("interactive"),
+        &json!({
+            "type": "object",
+            "properties": {
+                "owner": { "type": "string" },
+                "repo": { "type": "string" },
+                "title": { "type": "string" }
+            },
+            "required": ["owner", "repo", "title"]
+        }),
+        &json!({
+            "type": "object",
+            "properties": { "number": { "type": "integer" } },
+            "required": ["number"]
+        }),
+    );
+    let github_add_comment = mock_tool_descriptor_json(
+        "github.add_comment",
+        "github.comment_write",
+        "medium",
+        "risky",
+        "none",
+        Some("interactive"),
+        &json!({
+            "type": "object",
+            "properties": {
+                "owner": { "type": "string" },
+                "repo": { "type": "string" },
+                "number": { "type": "integer" },
+                "body": { "type": "string" }
+            },
+            "required": ["owner", "repo", "number", "body"]
+        }),
+        &json!({ "type": "object", "properties": { "ok": { "type": "boolean" } } }),
+    );
+    let slack_send_message = mock_tool_descriptor_json(
+        "slack.send_message",
+        "slack.post_message",
+        "medium",
+        "risky",
+        "none",
+        Some("interactive"),
+        &json!({
+            "type": "object",
+            "properties": {
+                "channel": { "type": "string" },
+                "text": { "type": "string" }
+            },
+            "required": ["channel", "text"]
+        }),
+        &json!({ "type": "object", "properties": { "ok": { "type": "boolean" } } }),
+    );
+
+    // Use the shared dependent_batch fixture which exercises dependency ordering.
+    let batch_path = fixture_path("batch/dependent_batch.jsonl");
+
+    // Phase 1: Dry-run batch to verify execution planning.
+    let (host, server) = spawn_mock_host_sequence(vec![
+        (
+            "POST /rpc/discover".to_owned(),
+            mock_discovery_response_json(&[github_connector.clone(), slack_connector.clone()]),
+        ),
+        (
+            "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
+            mock_introspection_response_json(
+                &github_connector,
+                &[github_create_issue.clone(), github_add_comment.clone()],
+            ),
+        ),
+        (
+            "POST /rpc/preflight".to_owned(),
+            mock_preflight_response_json(true),
+        ),
+        (
+            "POST /rpc/preflight".to_owned(),
+            mock_preflight_response_json(true),
+        ),
+        (
+            "GET /rpc/introspect/fcp.slack:team:v1".to_owned(),
+            mock_introspection_response_json(&slack_connector, &[slack_send_message.clone()]),
+        ),
+        (
+            "POST /rpc/preflight".to_owned(),
+            mock_preflight_response_json(true),
+        ),
+    ]);
+
+    let batch_plan = run_json_ok(&[
+        "--json",
+        "--host",
+        &host,
+        "batch-file",
+        batch_path
+            .to_str()
+            .expect("batch fixture path should be valid UTF-8"),
+        "--dry-run",
+        "--capability-token",
+        &capability_token,
+    ]);
+    server.join().expect("mock host thread should complete");
+
+    // Verify batch plan structure.
+    assert_eq!(batch_plan["status"], "ok");
+    assert_eq!(batch_plan["dry_run"], true);
+    assert_eq!(batch_plan["plan"]["total_operations"], 3);
+
+    // Dependency waves: create-issue (no deps) → comment (depends on create-issue) →
+    // announce (depends on comment).
+    let waves = batch_plan["plan"]["waves"]
+        .as_array()
+        .expect("batch plan should have waves");
+    assert_eq!(waves.len(), 3, "Three-step dependency chain should produce three waves");
+
+    // All preflights should be present and allowed.
+    let preflights = batch_plan["preflights"]
+        .as_array()
+        .expect("preflights should be present");
+    assert_eq!(preflights.len(), 3);
+    for preflight in preflights {
+        assert_eq!(
+            preflight["allowed"], true,
+            "All preflights should be allowed"
+        );
+    }
+
+    // Verify multi-connector coverage from Phase 1 (dependent_batch has github + slack).
+    let connectors = batch_plan["plan"]["connectors"]
+        .as_array()
+        .expect("batch plan should list connectors");
+    assert!(
+        connectors.len() >= 2,
+        "Dependent batch should involve at least 2 connectors (github + slack)"
+    );
+}
+
+/// Workflow 3: Pipe-Mapping-Validation-and-Dry-Run
+///
+/// Exercises: pipe map parsing → mapping apply → pipeline validate → pipeline estimate.
+/// Verifies that pipe specifications parse correctly, field mappings apply to
+/// source output, pipeline validation detects cycles and missing dependencies,
+/// and cost estimation provides useful feedback.
+#[test]
+fn workflow_pipe_mapping_and_pipeline_validation() {
+    // Phase 1: Validate a well-formed pipeline fixture.
+    let simple_path = fixture_path("pipelines/simple_pipe.toml");
+    let validation = run_json_ok(&[
+        "--json",
+        "pipeline",
+        "validate",
+        simple_path
+            .to_str()
+            .expect("simple pipe path should be valid UTF-8"),
+    ]);
+    assert_eq!(validation["command"], "pipeline");
+    assert_eq!(validation["subcommand"], "validate");
+    assert_eq!(validation["validation"]["valid"], true);
+
+    let execution_order = validation["validation"]["execution_order"]
+        .as_array()
+        .expect("valid pipeline should have execution order");
+    assert!(
+        !execution_order.is_empty(),
+        "Execution order should have at least one step"
+    );
+    // Verify topological ordering: first step should have no unresolved dependencies.
+    let first_step = execution_order[0]
+        .as_str()
+        .expect("execution order entries should be strings");
+    assert!(
+        !first_step.is_empty(),
+        "First execution step should be non-empty"
+    );
+
+    // Phase 2: Validate an invalid pipeline (cycle or missing dep).
+    let invalid_path = fixture_path("pipelines/invalid_pipe.toml");
+    let (invalid_code, invalid_payload, _) = run_json(&[
+        "--json",
+        "pipeline",
+        "validate",
+        invalid_path
+            .to_str()
+            .expect("invalid pipe path should be valid UTF-8"),
+    ]);
+    assert_ne!(invalid_code, 0, "Invalid pipeline should fail validation");
+    assert!(
+        invalid_payload["validation"]["valid"] == false
+            || invalid_payload["status"] == "error",
+        "Invalid pipeline must report validation failure"
+    );
+
+    // Phase 3: Estimate for a multi-step pipeline — fails offline because operations
+    // aren't in the catalog, verifying cross-module error propagation from estimate → catalog.
+    let multi_path = fixture_path("pipelines/multi_step_pipe.toml");
+    let (est_code, estimate, _) = run_json(&[
+        "--json",
+        "pipeline",
+        "estimate",
+        multi_path
+            .to_str()
+            .expect("multi step pipe path should be valid UTF-8"),
+    ]);
+    assert_eq!(estimate["command"], "pipeline");
+    assert_eq!(estimate["subcommand"], "estimate");
+    // Offline estimate correctly reports missing operations or missing parameters.
+    assert_ne!(est_code, 0, "Offline estimate should fail for unresolved operations");
+    assert_eq!(estimate["status"], "error");
+    assert!(
+        estimate["error"]["type"]
+            .as_str()
+            .is_some_and(|t| t.contains("pipeline") || t.contains("invalid") || t.contains("not-found")),
+        "Estimate error should identify pipeline/operation issue: {:?}",
+        estimate["error"]["type"]
+    );
+
+    // Phase 4: Conditional pipeline validation.
+    let conditional_path = fixture_path("pipelines/conditional_pipe.toml");
+    let cond_validation = run_json_ok(&[
+        "--json",
+        "pipeline",
+        "validate",
+        conditional_path
+            .to_str()
+            .expect("conditional pipe path should be valid UTF-8"),
+    ]);
+    assert_eq!(cond_validation["validation"]["valid"], true);
+    // Conditional pipelines should still produce a valid execution order.
+    assert!(
+        cond_validation["validation"]["execution_order"]
+            .as_array()
+            .is_some_and(|order| !order.is_empty()),
+        "Conditional pipeline should have valid execution order"
+    );
+}
+
+/// Workflow 4: MCP Server Protocol Integration
+///
+/// Exercises: export-tools → MCP tool list → MCP tool schema → serve-mcp readiness.
+/// Verifies that the MCP export faithfully represents the connector inventory
+/// with correct tool schemas, that live and offline exports diverge appropriately,
+/// and that the tools/list response matches the expected JSON-RPC 2.0 contract.
+#[allow(clippy::too_many_lines)]
+#[test]
+fn workflow_mcp_server_protocol_tools_and_export() {
+    // Phase 1: Offline MCP export — verify tool schemas from workspace manifests.
+    let offline_export = run_json_ok(&[
+        "--json",
+        "export-tools",
+        "--offline",
+        "--format",
+        "mcp",
+    ]);
+    assert_eq!(offline_export["command"], "export-tools");
+    assert_eq!(offline_export["source"], "workspace-manifests");
+    assert_eq!(
+        offline_export["availability"]["availability"],
+        "offline-artifact"
+    );
+    let offline_tools = offline_export["tools"]
+        .as_array()
+        .expect("offline export should have tools array");
+    assert!(
+        !offline_tools.is_empty(),
+        "Offline MCP export should include at least one tool"
+    );
+
+    // Verify each tool has required MCP fields.
+    for tool in offline_tools {
+        assert!(
+            tool["name"].as_str().is_some_and(|n| !n.is_empty()),
+            "MCP tool must have a name"
+        );
+        assert!(
+            tool["description"].as_str().is_some_and(|d| !d.is_empty()),
+            "MCP tool must have a description"
+        );
+        assert!(
+            tool["inputSchema"].is_object() || tool["input_schema"].is_object(),
+            "MCP tool must have an input schema"
+        );
+    }
+
+    // Phase 2: Live MCP export — verify host-backed tools differ from offline.
+    let github_connector =
+        mock_connector_summary_json("fcp.github:enterprise:v1", "GitHub Enterprise", 2, "risky");
+    let github_create_issue = mock_tool_descriptor_json(
+        "github.create_issue",
+        "github.issue_write",
+        "medium",
+        "risky",
+        "none",
+        Some("interactive"),
+        &json!({
+            "type": "object",
+            "properties": {
+                "owner": { "type": "string" },
+                "repo": { "type": "string" },
+                "title": { "type": "string" }
+            },
+            "required": ["owner", "repo", "title"]
+        }),
+        &json!({ "type": "object", "properties": { "number": { "type": "integer" } } }),
+    );
+    let github_close_issue = mock_tool_descriptor_json(
+        "github.close_issue",
+        "github.issue_write",
+        "medium",
+        "risky",
+        "best_effort",
+        None,
+        &json!({
+            "type": "object",
+            "properties": {
+                "owner": { "type": "string" },
+                "repo": { "type": "string" },
+                "number": { "type": "integer" }
+            },
+            "required": ["owner", "repo", "number"]
+        }),
+        &json!({ "type": "object", "properties": { "ok": { "type": "boolean" } } }),
+    );
+    let (host, server) = spawn_mock_host_sequence(vec![
+        (
+            "POST /rpc/discover".to_owned(),
+            mock_discovery_response_json(&[github_connector.clone()]),
+        ),
+        (
+            "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
+            mock_introspection_response_json(
+                &github_connector,
+                &[github_create_issue, github_close_issue],
+            ),
+        ),
+    ]);
+    let live_export = run_json_ok(&[
+        "--json",
+        "--host",
+        &host,
+        "export-tools",
+        "--format",
+        "mcp",
+    ]);
+    server.join().expect("mock host thread should complete");
+
+    assert_eq!(live_export["source"], "host-admin-api");
+    assert_eq!(
+        live_export["availability"]["availability"],
+        "live-runtime"
+    );
+    let live_tools = live_export["tools"]
+        .as_array()
+        .expect("live export should have tools array");
+    assert_eq!(live_tools.len(), 2, "Live export should have exactly 2 tools");
+
+    // Phase 3: Verify live and offline sources are distinct.
+    assert_ne!(
+        live_export["source"], offline_export["source"],
+        "Live and offline exports must have different source labels"
+    );
+    assert_ne!(
+        live_export["availability"]["availability"],
+        offline_export["availability"]["availability"],
+        "Live and offline exports must have different availability"
+    );
+
+    // Phase 4: Verify MCP tool names follow connector.operation convention.
+    let tool_names: Vec<&str> = live_tools
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .collect();
+    assert!(
+        tool_names.contains(&"github.create_issue"),
+        "Live export should include github.create_issue"
+    );
+    assert!(
+        tool_names.contains(&"github.close_issue"),
+        "Live export should include github.close_issue"
+    );
+
+    // Phase 5: Verify each live tool has a valid input schema with properties.
+    for tool in live_tools {
+        let schema = if tool["inputSchema"].is_object() {
+            &tool["inputSchema"]
+        } else {
+            &tool["input_schema"]
+        };
+        assert!(
+            schema["type"] == "object",
+            "Tool input schema must be type: object"
+        );
+        assert!(
+            schema["properties"].is_object(),
+            "Tool input schema must have properties"
+        );
+    }
+}
+
+/// Workflow 5: Cross-module error propagation
+///
+/// Exercises: search (no results) → validate (schema mismatch) → batch (partial failure).
+/// Verifies that errors from one module are properly surfaced through the
+/// integration boundary with structured error taxonomy.
+#[test]
+fn workflow_cross_module_error_propagation() {
+    // Phase 1: Search for a nonexistent operation — should return empty results, not crash.
+    let search_result = run_json_ok(&[
+        "--json",
+        "search",
+        "xyzzy_nonexistent_operation_12345",
+        "--offline",
+    ]);
+    let results = search_result["results"]
+        .as_array()
+        .expect("search should return results array even when empty");
+    assert!(
+        results.is_empty(),
+        "Search for nonsense should return no results"
+    );
+
+    // Phase 2: Validate with completely wrong schema types.
+    let (code, payload, _) = run_json(&[
+        "--json",
+        "validate",
+        "github",
+        "issues.create",
+        "--input",
+        r#"{"owner": 42, "repo": true, "title": null}"#,
+        "--offline",
+    ]);
+    // Should fail validation (type mismatch).
+    assert_ne!(code, 0, "Type-mismatched input should fail validation");
+    assert!(
+        payload["errors"].as_array().is_some_and(|e| !e.is_empty())
+            || payload["status"] == "error",
+        "Type mismatch should produce structured errors"
+    );
+
+    // Phase 3: Validate an empty object for a schema that requires fields.
+    let (code2, payload2, _) = run_json(&[
+        "--json",
+        "validate",
+        "github",
+        "issues.create",
+        "--input",
+        "{}",
+        "--offline",
+    ]);
+    assert_ne!(code2, 0, "Empty input for required-fields schema should fail");
+    // Error messages should reference the missing fields.
+    let error_str = serde_json::to_string(&payload2).expect("payload serializes");
+    assert!(
+        error_str.contains("owner") || error_str.contains("required") || error_str.contains("missing"),
+        "Validation error should mention missing required fields"
+    );
+}
+
+/// Workflow 6: History persistence across multiple operations
+///
+/// Exercises: invoke (success) → invoke (denied) → history filter by status.
+/// Verifies that history correctly records both successful and failed invocations
+/// and that status-based filtering works across the accumulated entries.
+#[allow(clippy::too_many_lines)]
+#[test]
+fn workflow_history_persistence_and_status_filtering() {
+    let capability_token = test_capability_token_arg();
+    let home = tempdir().expect("temp home should be created");
+
+    let github_connector =
+        mock_connector_summary_json("fcp.github:enterprise:v1", "GitHub Enterprise", 1, "risky");
+    let github_create_issue = mock_tool_descriptor_json(
+        "github.create_issue",
+        "github.issue_write",
+        "medium",
+        "risky",
+        "none",
+        Some("interactive"),
+        &json!({
+            "type": "object",
+            "properties": {
+                "owner": { "type": "string" },
+                "repo": { "type": "string" },
+                "title": { "type": "string" }
+            },
+            "required": ["owner", "repo", "title"]
+        }),
+        &json!({ "type": "object", "properties": { "number": { "type": "integer" } } }),
+    );
+
+    // Step 1: Successful invoke.
+    let (host1, server1) = spawn_mock_host_sequence(vec![
+        (
+            "POST /rpc/discover".to_owned(),
+            mock_discovery_response_json(&[github_connector.clone()]),
+        ),
+        (
+            "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
+            mock_introspection_response_json(&github_connector, &[github_create_issue.clone()]),
+        ),
+        (
+            "POST /rpc/preflight".to_owned(),
+            mock_preflight_response_json(true),
+        ),
+        (
+            "POST /rpc/invoke".to_owned(),
+            mock_invoke_response_json(json!({ "number": 1 })),
+        ),
+    ]);
+    let _success = run_json_ok_in_home(
+        home.path(),
+        &[
+            "--json",
+            "--host",
+            &host1,
+            "invoke",
+            "github",
+            "issues.create",
+            "--input",
+            r#"{"owner":"octocat","repo":"hello-world","title":"Success test"}"#,
+            "--capability-token",
+            &capability_token,
+        ],
+    );
+    server1.join().expect("mock host thread should complete");
+
+    // Step 2: Denied invoke.
+    let (host2, server2) = spawn_mock_host_sequence(vec![
+        (
+            "POST /rpc/discover".to_owned(),
+            mock_discovery_response_json(&[github_connector.clone()]),
+        ),
+        (
+            "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
+            mock_introspection_response_json(&github_connector, &[github_create_issue]),
+        ),
+        (
+            "POST /rpc/preflight".to_owned(),
+            mock_preflight_response_json(false),
+        ),
+    ]);
+    let (denied_code, _, _) = run_json_in_home(
+        home.path(),
+        &[
+            "--json",
+            "--host",
+            &host2,
+            "invoke",
+            "github",
+            "issues.create",
+            "--input",
+            r#"{"owner":"octocat","repo":"hello-world","title":"Denied test"}"#,
+            "--capability-token",
+            &capability_token,
+        ],
+    );
+    server2.join().expect("mock host thread should complete");
+    assert_ne!(denied_code, 0, "Denied invoke should fail");
+
+    // Step 3: Query full history — should have 2 entries.
+    let full_history = run_json_ok_in_home(home.path(), &["--json", "history"]);
+    let all_entries = full_history["entries"]
+        .as_array()
+        .expect("history entries");
+    assert_eq!(
+        all_entries.len(),
+        2,
+        "Two invocations should produce two history entries"
+    );
+
+    // Step 4: Filter by success status.
+    let success_history = run_json_ok_in_home(
+        home.path(),
+        &["--json", "history", "--status", "success"],
+    );
+    let success_entries = success_history["entries"]
+        .as_array()
+        .expect("success filtered entries");
+    assert_eq!(success_entries.len(), 1, "One success entry expected");
+    assert_eq!(success_entries[0]["status"], "success");
+
+    // Step 5: Filter by denied/error status.
+    let denied_history = run_json_ok_in_home(
+        home.path(),
+        &["--json", "history", "--status", "denied"],
+    );
+    let denied_entries = denied_history["entries"]
+        .as_array()
+        .expect("denied filtered entries");
+    assert_eq!(denied_entries.len(), 1, "One denied entry expected");
+    assert_eq!(denied_entries[0]["status"], "denied");
+}

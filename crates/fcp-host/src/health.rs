@@ -44,19 +44,19 @@ pub enum HealthState {
 impl HealthState {
     /// Whether the host is healthy.
     #[must_use]
-    pub fn is_healthy(&self) -> bool {
+    pub const fn is_healthy(&self) -> bool {
         matches!(self, Self::Healthy)
     }
 
     /// Whether the host is degraded (but not unhealthy).
     #[must_use]
-    pub fn is_degraded(&self) -> bool {
+    pub const fn is_degraded(&self) -> bool {
         matches!(self, Self::Degraded { .. })
     }
 
     /// Whether the host is unhealthy.
     #[must_use]
-    pub fn is_unhealthy(&self) -> bool {
+    pub const fn is_unhealthy(&self) -> bool {
         matches!(self, Self::Unhealthy { .. })
     }
 
@@ -301,7 +301,7 @@ pub struct MeshHealth {
 impl MeshHealth {
     /// Fully connected mesh.
     #[must_use]
-    pub fn connected(peer_count: u32) -> Self {
+    pub const fn connected(peer_count: u32) -> Self {
         Self {
             connected: true,
             checkpoint_fresh: true,
@@ -313,7 +313,7 @@ impl MeshHealth {
 
     /// Disconnected mesh.
     #[must_use]
-    pub fn disconnected() -> Self {
+    pub const fn disconnected() -> Self {
         Self {
             connected: false,
             checkpoint_fresh: false,
@@ -483,13 +483,13 @@ pub struct HealthStatus {
 impl HealthStatus {
     /// Whether the host is healthy.
     #[must_use]
-    pub fn is_healthy(&self) -> bool {
+    pub const fn is_healthy(&self) -> bool {
         self.status.is_healthy()
     }
 
     /// Whether the host is suitable for serving requests (healthy or degraded).
     #[must_use]
-    pub fn is_ready(&self) -> bool {
+    pub const fn is_ready(&self) -> bool {
         !self.status.is_unhealthy()
     }
 
@@ -655,23 +655,27 @@ impl HealthAggregator {
     }
 
     /// Report mesh health.
+    #[allow(clippy::missing_const_for_fn)]
     pub fn report_mesh(&mut self, mesh: MeshHealth) {
         self.mesh = Some(mesh);
     }
 
     /// Report resource health.
+    #[allow(clippy::missing_const_for_fn)]
     pub fn report_resources(&mut self, resources: ResourceHealth) {
         self.resources = Some(resources);
     }
 
     /// Number of tracked components.
     #[must_use]
+    #[allow(clippy::missing_const_for_fn)]
     pub fn component_count(&self) -> usize {
         self.components.len()
     }
 
     /// Number of tracked connectors.
     #[must_use]
+    #[allow(clippy::missing_const_for_fn)]
     pub fn connector_count(&self) -> usize {
         self.connectors.len()
     }
@@ -1090,7 +1094,7 @@ mod tests {
     #[test]
     fn resource_fd_utilisation_zero_max() {
         let r = ResourceHealth::new(0, 0.0, 100, 0);
-        assert_eq!(r.fd_utilisation(), 0.0);
+        assert!(r.fd_utilisation().abs() < f64::EPSILON);
     }
 
     #[test]
@@ -1125,8 +1129,8 @@ mod tests {
     #[test]
     fn config_durations() {
         let c = HealthConfig::default();
-        assert_eq!(c.check_interval(), Duration::from_millis(30_000));
-        assert_eq!(c.check_timeout(), Duration::from_millis(5_000));
+        assert_eq!(c.check_interval(), Duration::from_secs(30));
+        assert_eq!(c.check_timeout(), Duration::from_secs(5));
     }
 
     // ────────── HealthAggregator ──────────

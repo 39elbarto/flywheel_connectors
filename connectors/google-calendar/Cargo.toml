@@ -44,4 +44,3 @@ futures-util.workspace = true
 fcp-crypto = { path = "../../crates/fcp-crypto" }
 fcp-manifest = { path = "../../crates/fcp-manifest" }
 fcp-testkit = { path = "../../crates/fcp-testkit" }
-tokio = { version = "1.49", features = ["macros", "rt"] }

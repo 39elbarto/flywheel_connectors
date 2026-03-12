@@ -1035,7 +1035,7 @@ impl WasiRuntime {
                 ))
             })?;
 
-        tokio::time::timeout(self.config.wall_clock_timeout, async {
+        fcp_async_core::time::timeout(self.config.wall_clock_timeout, async {
             func.call_async(&mut store, ()).await.map_err(|e| {
                 WasiError::Execution(format!("component export `{export_name}` failed: {e}"))
             })?;
@@ -2003,7 +2003,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[tokio::test(flavor = "current_thread")]
+    #[fcp_async_core::runtime::test]
     async fn test_wasi_runtime_invoke_component_export() {
         let config = WasiConfig {
             max_fuel: 10_000,
@@ -2020,7 +2020,7 @@ mod tests {
         assert!(result.fuel_consumed.is_some());
     }
 
-    #[tokio::test(flavor = "current_thread")]
+    #[fcp_async_core::runtime::test]
     async fn test_wasi_runtime_invoke_missing_export() {
         let runtime = WasiRuntime::new(WasiConfig::default()).unwrap();
         let component = runtime.load_component(minimal_command_component()).unwrap();
@@ -2708,11 +2708,7 @@ mod tests {
                 .validate_tcp_access("api.stripe.com", 80, false)
                 .is_err()
         );
-        assert!(
-            runner
-                .validate_tcp_access("evil.com", 443, true)
-                .is_err()
-        );
+        assert!(runner.validate_tcp_access("evil.com", 443, true).is_err());
     }
 
     #[test]
@@ -2767,7 +2763,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[tokio::test(flavor = "current_thread")]
+    #[fcp_async_core::runtime::test]
     async fn test_connector_runner_execute() {
         let config = WasiConfig {
             max_fuel: 10_000,

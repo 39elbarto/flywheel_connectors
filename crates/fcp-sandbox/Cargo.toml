@@ -19,6 +19,7 @@ nursery = "warn"
 
 [dependencies]
 anyhow.workspace = true
+fcp-async-core.workspace = true
 fcp-core.workspace = true
 fcp-manifest.workspace = true
 idna = "1.0"
@@ -30,7 +31,6 @@ thiserror.workspace = true
 tracing.workspace = true
 url.workspace = true
 rand.workspace = true
-tokio = { version = "1.49", features = ["macros", "rt", "time"] }
 
 # WASI runtime
 wasmtime.workspace = true

@@ -115,7 +115,7 @@ fn slack_channel(id: &str, name: &str) -> serde_json::Value {
 // Happy-path operation tests
 // ============================================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn post_message_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("slack.post_message.happy_path");
     let mock_server = MockServer::start().await;
@@ -149,7 +149,7 @@ async fn post_message_happy_path() {
     assert_eq!(result["message"]["ts"], "1234567890.123456");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn reply_thread_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("slack.reply_thread.happy_path");
     let mock_server = MockServer::start().await;
@@ -193,7 +193,7 @@ async fn reply_thread_happy_path() {
     assert_eq!(result["message"]["thread_ts"], "1234567890.123456");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn get_channel_history_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("slack.channel_history.happy_path");
     let mock_server = MockServer::start().await;
@@ -231,7 +231,7 @@ async fn get_channel_history_happy_path() {
     assert_eq!(messages[1]["text"], "Second message");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn search_messages_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("slack.search_messages.happy_path");
     let mock_server = MockServer::start().await;
@@ -265,7 +265,7 @@ async fn search_messages_happy_path() {
     assert_eq!(result["total"], 1);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn list_channels_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("slack.list_channels.happy_path");
     let mock_server = MockServer::start().await;
@@ -302,7 +302,7 @@ async fn list_channels_happy_path() {
     assert_eq!(channels[1]["name"], "random");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn get_user_info_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("slack.get_user_info.happy_path");
     let mock_server = MockServer::start().await;
@@ -345,7 +345,7 @@ async fn get_user_info_happy_path() {
     assert_eq!(result["user"]["id"], "U01234567");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn upload_file_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("slack.upload_file.happy_path");
     let mock_server = MockServer::start().await;
@@ -398,7 +398,7 @@ async fn upload_file_happy_path() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn download_file_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("slack.download_file.happy_path");
     let mock_server = MockServer::start().await;
@@ -446,7 +446,7 @@ async fn download_file_happy_path() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn add_reaction_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("slack.add_reaction.happy_path");
     let mock_server = MockServer::start().await;
@@ -480,7 +480,7 @@ async fn add_reaction_happy_path() {
     assert_eq!(result["ok"], true);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn set_channel_topic_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("slack.set_channel_topic.happy_path");
     let mock_server = MockServer::start().await;
@@ -518,7 +518,7 @@ async fn set_channel_topic_happy_path() {
 // Receipt verification (side-effecting operations)
 // ============================================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn post_message_emits_receipt() {
     let _ctx = AsyncTestContext::for_scenario("slack.receipt.post_message");
     let mock_server = MockServer::start().await;
@@ -555,7 +555,7 @@ async fn post_message_emits_receipt() {
     assert_eq!(receipt["timestamp"], "1234567890.123456");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn reply_thread_emits_receipt() {
     let _ctx = AsyncTestContext::for_scenario("slack.receipt.reply_thread");
     let mock_server = MockServer::start().await;
@@ -601,7 +601,7 @@ async fn reply_thread_emits_receipt() {
     assert!(receipt["resource"].as_str().unwrap().contains("thread:"));
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn upload_file_emits_receipt() {
     let _ctx = AsyncTestContext::for_scenario("slack.receipt.upload_file");
     let mock_server = MockServer::start().await;
@@ -652,7 +652,7 @@ async fn upload_file_emits_receipt() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn add_reaction_emits_receipt() {
     let _ctx = AsyncTestContext::for_scenario("slack.receipt.add_reaction");
     let mock_server = MockServer::start().await;
@@ -687,7 +687,7 @@ async fn add_reaction_emits_receipt() {
     assert!(receipt["resource"].as_str().unwrap().contains("message:"));
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn set_channel_topic_emits_receipt() {
     let _ctx = AsyncTestContext::for_scenario("slack.receipt.set_channel_topic");
     let mock_server = MockServer::start().await;
@@ -725,7 +725,7 @@ async fn set_channel_topic_emits_receipt() {
 // Read operations should NOT emit receipts
 // ============================================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn read_operations_have_no_receipt() {
     let _ctx = AsyncTestContext::for_scenario("slack.receipt.read_no_receipt");
     let mock_server = MockServer::start().await;
@@ -760,7 +760,7 @@ async fn read_operations_have_no_receipt() {
 // Error taxonomy tests (Slack API errors come as 200 OK with ok:false)
 // ============================================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_not_authed_maps_to_unauthorized() {
     let _ctx = AsyncTestContext::for_scenario("slack.error.not_authed");
     let mock_server = MockServer::start().await;
@@ -788,7 +788,7 @@ async fn error_not_authed_maps_to_unauthorized() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_invalid_auth_maps_to_unauthorized() {
     let _ctx = AsyncTestContext::for_scenario("slack.error.invalid_auth");
     let mock_server = MockServer::start().await;
@@ -816,7 +816,7 @@ async fn error_invalid_auth_maps_to_unauthorized() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_token_revoked_maps_to_unauthorized() {
     let _ctx = AsyncTestContext::for_scenario("slack.error.token_revoked");
     let mock_server = MockServer::start().await;
@@ -844,7 +844,7 @@ async fn error_token_revoked_maps_to_unauthorized() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_channel_not_found_maps_to_resource_not_found() {
     let _ctx = AsyncTestContext::for_scenario("slack.error.channel_not_found");
     let mock_server = MockServer::start().await;
@@ -872,7 +872,7 @@ async fn error_channel_not_found_maps_to_resource_not_found() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_user_not_found_maps_to_resource_not_found() {
     let _ctx = AsyncTestContext::for_scenario("slack.error.user_not_found");
     let mock_server = MockServer::start().await;
@@ -900,7 +900,7 @@ async fn error_user_not_found_maps_to_resource_not_found() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_ratelimited_api_maps_to_rate_limited() {
     let _ctx = AsyncTestContext::for_scenario("slack.error.ratelimited_api");
     let mock_server = MockServer::start().await;
@@ -929,7 +929,7 @@ async fn error_ratelimited_api_maps_to_rate_limited() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_http_429_maps_to_rate_limited() {
     let _ctx = AsyncTestContext::for_scenario("slack.error.http_429");
     let mock_server = MockServer::start().await;
@@ -959,7 +959,7 @@ async fn error_http_429_maps_to_rate_limited() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_missing_scope_maps_to_capability_denied() {
     let _ctx = AsyncTestContext::for_scenario("slack.error.missing_scope");
     let mock_server = MockServer::start().await;
@@ -987,7 +987,7 @@ async fn error_missing_scope_maps_to_capability_denied() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_not_in_channel_maps_to_capability_denied() {
     let _ctx = AsyncTestContext::for_scenario("slack.error.not_in_channel");
     let mock_server = MockServer::start().await;
@@ -1015,7 +1015,7 @@ async fn error_not_in_channel_maps_to_capability_denied() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_retryable_classification() {
     use fcp_slack::error::SlackError;
 
@@ -1067,7 +1067,7 @@ async fn error_retryable_classification() {
 // Invoke-level error tests (401/403/429 through handle_invoke)
 // ============================================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_401_not_authed() {
     let _ctx = AsyncTestContext::for_scenario("slack.invoke_error.401_not_authed");
     let mock_server = MockServer::start().await;
@@ -1101,7 +1101,7 @@ async fn invoke_401_not_authed() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_401_invalid_auth() {
     let _ctx = AsyncTestContext::for_scenario("slack.invoke_error.401_invalid_auth");
     let mock_server = MockServer::start().await;
@@ -1135,7 +1135,7 @@ async fn invoke_401_invalid_auth() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_403_missing_scope() {
     let _ctx = AsyncTestContext::for_scenario("slack.invoke_error.403_missing_scope");
     let mock_server = MockServer::start().await;
@@ -1172,7 +1172,7 @@ async fn invoke_403_missing_scope() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_403_not_in_channel() {
     let _ctx = AsyncTestContext::for_scenario("slack.invoke_error.403_not_in_channel");
     let mock_server = MockServer::start().await;
@@ -1209,7 +1209,7 @@ async fn invoke_403_not_in_channel() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_403_restricted_action() {
     let _ctx = AsyncTestContext::for_scenario("slack.invoke_error.403_restricted_action");
     let mock_server = MockServer::start().await;
@@ -1246,7 +1246,7 @@ async fn invoke_403_restricted_action() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_429_rate_limited_api() {
     let _ctx = AsyncTestContext::for_scenario("slack.invoke_error.429_api");
     let mock_server = MockServer::start().await;
@@ -1280,7 +1280,7 @@ async fn invoke_429_rate_limited_api() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_resource_not_found() {
     let _ctx = AsyncTestContext::for_scenario("slack.invoke_error.resource_not_found");
     let mock_server = MockServer::start().await;
@@ -1321,7 +1321,7 @@ async fn invoke_resource_not_found() {
 // FCP2 default-deny + capability verification
 // ============================================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn fcp2_invoke_requires_handshake() {
     let _ctx = AsyncTestContext::for_scenario("slack.capability.no_handshake");
     let mock_server = MockServer::start().await;
@@ -1339,7 +1339,7 @@ async fn fcp2_invoke_requires_handshake() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn fcp2_invoke_requires_capability_token() {
     let _ctx = AsyncTestContext::for_scenario("slack.capability.missing_token");
     let mock_server = MockServer::start().await;
@@ -1362,7 +1362,7 @@ async fn fcp2_invoke_requires_capability_token() {
     }
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn fcp2_wrong_capability_denied() {
     let _ctx = AsyncTestContext::for_scenario("slack.capability.wrong_cap");
     let mock_server = MockServer::start().await;
@@ -1383,7 +1383,7 @@ async fn fcp2_wrong_capability_denied() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn fcp2_unknown_operation_rejected() {
     let _ctx = AsyncTestContext::for_scenario("slack.capability.unknown_op");
     let mock_server = MockServer::start().await;
@@ -1409,7 +1409,7 @@ async fn fcp2_unknown_operation_rejected() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn fcp2_missing_operation_field() {
     let _ctx = AsyncTestContext::for_scenario("slack.capability.missing_op");
     let mock_server = MockServer::start().await;
@@ -1436,7 +1436,7 @@ async fn fcp2_missing_operation_field() {
 // Lifecycle tests
 // ============================================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_health_before_configure() {
     let _ctx = AsyncTestContext::for_scenario("slack.lifecycle.health_before");
     let connector = SlackConnector::new();
@@ -1444,7 +1444,7 @@ async fn lifecycle_health_before_configure() {
     assert_eq!(result["status"], "not_configured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_health_after_configure() {
     let _ctx = AsyncTestContext::for_scenario("slack.lifecycle.health_after");
     let mock_server = MockServer::start().await;
@@ -1455,7 +1455,7 @@ async fn lifecycle_health_after_configure() {
     assert_eq!(result["status"], "healthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_handshake_returns_accepted() {
     let _ctx = AsyncTestContext::for_scenario("slack.lifecycle.handshake");
     let mut connector = SlackConnector::new();
@@ -1477,7 +1477,7 @@ async fn lifecycle_handshake_returns_accepted() {
     assert_eq!(grants.len(), 2);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_introspect_lists_all_operations() {
     let _ctx = AsyncTestContext::for_scenario("slack.lifecycle.introspect");
     let connector = SlackConnector::new();
@@ -1503,7 +1503,7 @@ async fn lifecycle_introspect_lists_all_operations() {
     }
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_shutdown() {
     let _ctx = AsyncTestContext::for_scenario("slack.lifecycle.shutdown");
     let mut connector = SlackConnector::new();
@@ -1515,7 +1515,7 @@ async fn lifecycle_shutdown() {
 // Socket Mode streaming tests
 // ============================================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn socket_mode_subscribe_emits_event_envelope_and_ack() {
     let _ctx = AsyncTestContext::for_scenario("slack.socket_mode.event_and_ack");
     let mock_server = MockServer::start().await;
@@ -1533,7 +1533,7 @@ async fn socket_mode_subscribe_emits_event_envelope_and_ack() {
     );
 
     let (ack_tx, ack_rx) = oneshot::channel::<Option<String>>();
-    let ws_task = tokio::spawn(async move {
+    let ws_task = fcp_async_core::task::spawn(async move {
         let (tcp_stream, _) = listener.accept().await.expect("accept websocket client");
         let mut ws_stream = accept_async(TokioIo::new(tcp_stream))
             .await
@@ -1642,7 +1642,7 @@ async fn socket_mode_subscribe_emits_event_envelope_and_ack() {
         .expect("ws task join");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn socket_mode_subscribe_reuses_single_connection() {
     let _ctx = AsyncTestContext::for_scenario("slack.socket_mode.singleton_connection");
     let mock_server = MockServer::start().await;
@@ -1661,8 +1661,8 @@ async fn socket_mode_subscribe_reuses_single_connection() {
 
     let (stop_ws_tx, mut stop_ws_rx) = fcp_async_core::channel::watch::channel(false);
     let (connected_tx, connected_rx) = oneshot::channel::<()>();
-    let ws_task = tokio::spawn(async move {
-        let accepted = tokio::select! {
+    let ws_task = fcp_async_core::task::spawn(async move {
+        let accepted = fcp_async_core::select! {
             accept_result = listener.accept() => Some(accept_result.expect("accept websocket client")),
             _ = stop_ws_rx.changed() => None,
         };
@@ -1681,7 +1681,7 @@ async fn socket_mode_subscribe_reuses_single_connection() {
             .await
             .expect("send hello frame");
 
-        tokio::select! {
+        fcp_async_core::select! {
             _ = stop_ws_rx.changed() => {},
             () = async {
                 while let Some(frame) = ws_stream.next().await {
@@ -1755,7 +1755,7 @@ async fn socket_mode_subscribe_reuses_single_connection() {
 // Input validation edge cases
 // ============================================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn validate_post_message_missing_channel() {
     let _ctx = AsyncTestContext::for_scenario("slack.validation.missing_channel");
     let mock_server = MockServer::start().await;
@@ -1780,7 +1780,7 @@ async fn validate_post_message_missing_channel() {
     }
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn validate_post_message_missing_text() {
     let _ctx = AsyncTestContext::for_scenario("slack.validation.missing_text");
     let mock_server = MockServer::start().await;
@@ -1805,7 +1805,7 @@ async fn validate_post_message_missing_text() {
     }
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn validate_reply_thread_missing_thread_ts() {
     let _ctx = AsyncTestContext::for_scenario("slack.validation.missing_thread_ts");
     let mock_server = MockServer::start().await;
@@ -1830,7 +1830,7 @@ async fn validate_reply_thread_missing_thread_ts() {
     }
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn validate_add_reaction_missing_name() {
     let _ctx = AsyncTestContext::for_scenario("slack.validation.missing_name");
     let mock_server = MockServer::start().await;
@@ -1855,7 +1855,7 @@ async fn validate_add_reaction_missing_name() {
     }
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn validate_configure_missing_token() {
     let _ctx = AsyncTestContext::for_scenario("slack.validation.missing_token");
     let mut connector = SlackConnector::new();
@@ -1869,7 +1869,7 @@ async fn validate_configure_missing_token() {
     }
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn validate_upload_file_missing_channels() {
     let _ctx = AsyncTestContext::for_scenario("slack.validation.missing_channels");
     let mock_server = MockServer::start().await;

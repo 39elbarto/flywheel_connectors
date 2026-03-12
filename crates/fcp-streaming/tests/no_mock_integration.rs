@@ -20,10 +20,10 @@ use fcp_streaming::{
 
 /// Helper: run an async block inside a real Tokio runtime (needed for wiremock).
 fn block_on<F: std::future::Future>(f: F) -> F::Output {
-    tokio::runtime::Builder::new_current_thread()
+    fcp_async_core::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .expect("failed to build tokio runtime")
+        .expect("failed to build test runtime")
         .block_on(f)
 }
 

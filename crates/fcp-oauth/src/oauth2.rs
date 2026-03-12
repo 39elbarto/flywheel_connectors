@@ -594,10 +594,10 @@ mod tests {
     where
         F: std::future::Future<Output = T>,
     {
-        tokio::runtime::Builder::new_current_thread()
+        fcp_async_core::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .expect("build tokio test runtime")
+            .expect("build test runtime")
             .block_on(future)
     }
 

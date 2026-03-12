@@ -263,15 +263,19 @@ impl QuarantineStore {
     /// * `schema_valid` - Whether schema validation passed (caller must verify)
     ///
     /// # Errors
+    /// Returns `NotFound` if object is not in quarantine.
     /// Returns `PromotionDenied` if promotion rules are not satisfied.
     /// Returns `SchemaValidationFailed` if schema validation is required but failed.
-    /// Returns `NotFound` if object is not in quarantine.
     pub fn promote(
         &self,
         object_id: &ObjectId,
         reason: &PromotionReason,
         schema_valid: bool,
     ) -> Result<QuarantinedObject, QuarantineError> {
+        if !self.contains(object_id) {
+            return Err(QuarantineError::NotFound(*object_id));
+        }
+
         // Validate promotion reason
         self.validate_promotion_reason(object_id, reason)?;
 
@@ -664,6 +668,43 @@ mod tests {
                 ..StoreLogData::default()
             }
         });
+    }
+
+    #[test]
+    fn eviction_prefers_lower_reputation_before_larger_object_when_age_ties() {
+        run_store_test(
+            "eviction_prefers_lower_reputation_before_larger_object_when_age_ties",
+            "verify",
+            "quarantine",
+            3,
+            || {
+                let policy = ObjectAdmissionPolicy {
+                    max_quarantine_objects_per_zone: 2,
+                    max_quarantine_bytes_per_zone: 1024 * 1024,
+                    ..Default::default()
+                };
+                let store = QuarantineStore::new(policy);
+
+                let mut smaller_low_rep = test_object(1, 100, 1000);
+                smaller_low_rep.peer_reputation = 0;
+
+                let mut larger_better_rep = test_object(2, 250, 1000);
+                larger_better_rep.peer_reputation = 50;
+
+                store.quarantine(smaller_low_rep).unwrap();
+                store.quarantine(larger_better_rep).unwrap();
+                store.quarantine(test_object(3, 100, 2000)).unwrap();
+
+                assert!(!store.contains(&ObjectId::from_bytes([1; 32])));
+                assert!(store.contains(&ObjectId::from_bytes([2; 32])));
+                assert!(store.contains(&ObjectId::from_bytes([3; 32])));
+
+                StoreLogData {
+                    details: Some(json!({"evicted": "lowest_reputation_on_age_tie"})),
+                    ..StoreLogData::default()
+                }
+            },
+        );
     }
 
     #[test]
@@ -1220,6 +1261,64 @@ mod tests {
                     details: Some(json!({
                         "attack": "promote_non_existent",
                         "rejected": true
+                    })),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn adversarial_promotion_invalid_reason_still_reports_not_found_for_missing_object() {
+        run_store_test(
+            "adversarial_promotion_invalid_reason_missing_object",
+            "adversarial",
+            "promotion",
+            1,
+            || {
+                let store = QuarantineStore::new(ObjectAdmissionPolicy::default());
+                let fake_id = ObjectId::from_bytes([98; 32]);
+                let reason = PromotionReason::ReachableFromCheckpoint {
+                    checkpoint_id: fake_id,
+                };
+
+                let result = store.promote(&fake_id, &reason, true);
+                assert!(matches!(result, Err(QuarantineError::NotFound(id)) if id == fake_id));
+
+                StoreLogData {
+                    object_id: Some(fake_id),
+                    details: Some(json!({
+                        "attack": "promote_missing_invalid_reason",
+                        "rejected_as": "not_found"
+                    })),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn adversarial_promotion_missing_object_reports_not_found_before_schema_failure() {
+        run_store_test(
+            "adversarial_promotion_missing_object_schema_precedence",
+            "adversarial",
+            "promotion",
+            1,
+            || {
+                let store = QuarantineStore::new(ObjectAdmissionPolicy::default());
+                let fake_id = ObjectId::from_bytes([97; 32]);
+                let reason = PromotionReason::LocalPin {
+                    reason: "operator requested object".into(),
+                };
+
+                let result = store.promote(&fake_id, &reason, false);
+                assert!(matches!(result, Err(QuarantineError::NotFound(id)) if id == fake_id));
+
+                StoreLogData {
+                    object_id: Some(fake_id),
+                    details: Some(json!({
+                        "attack": "promote_missing_schema_invalid",
+                        "rejected_as": "not_found"
                     })),
                     ..StoreLogData::default()
                 }
@@ -2033,5 +2132,437 @@ mod tests {
             max_objects: 1000,
         };
         assert!(stats.is_near_capacity(90));
+    }
+
+    // =========================================================================
+    // Eviction edge cases
+    // =========================================================================
+
+    #[test]
+    fn eviction_identical_age_and_reputation_uses_size_tiebreak() {
+        run_store_test(
+            "eviction_identical_age_reputation_size_tiebreak",
+            "verify",
+            "quarantine",
+            3,
+            || {
+                let policy = ObjectAdmissionPolicy {
+                    max_quarantine_objects_per_zone: 2,
+                    max_quarantine_bytes_per_zone: 1024 * 1024,
+                    ..Default::default()
+                };
+                let store = QuarantineStore::new(policy);
+
+                // All same age (1000) and same reputation (50)
+                let mut obj1 = test_object(1, 50, 1000); // smaller
+                obj1.peer_reputation = 50;
+
+                let mut obj2 = test_object(2, 200, 1000); // larger → evicted first on tie
+                obj2.peer_reputation = 50;
+
+                store.quarantine(obj1).unwrap();
+                store.quarantine(obj2).unwrap();
+
+                // Third object triggers eviction
+                store.quarantine(test_object(3, 100, 2000)).unwrap();
+
+                // Largest object (obj2) should be evicted when age+rep tie
+                assert!(store.contains(&ObjectId::from_bytes([1; 32])));
+                assert!(!store.contains(&ObjectId::from_bytes([2; 32])));
+                assert!(store.contains(&ObjectId::from_bytes([3; 32])));
+
+                StoreLogData {
+                    details: Some(json!({
+                        "tiebreak": "size",
+                        "largest_evicted": true
+                    })),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn eviction_with_max_objects_one_always_replaces() {
+        run_store_test(
+            "eviction_max_objects_one",
+            "verify",
+            "quarantine",
+            3,
+            || {
+                let policy = ObjectAdmissionPolicy {
+                    max_quarantine_objects_per_zone: 1,
+                    max_quarantine_bytes_per_zone: 1024 * 1024,
+                    ..Default::default()
+                };
+                let store = QuarantineStore::new(policy);
+
+                store.quarantine(test_object(1, 100, 1000)).unwrap();
+                assert!(store.contains(&ObjectId::from_bytes([1; 32])));
+
+                store.quarantine(test_object(2, 100, 2000)).unwrap();
+                assert!(!store.contains(&ObjectId::from_bytes([1; 32])));
+                assert!(store.contains(&ObjectId::from_bytes([2; 32])));
+
+                store.quarantine(test_object(3, 100, 3000)).unwrap();
+                assert!(!store.contains(&ObjectId::from_bytes([2; 32])));
+                assert!(store.contains(&ObjectId::from_bytes([3; 32])));
+
+                StoreLogData {
+                    details: Some(json!({
+                        "max_objects": 1,
+                        "always_replaces": true
+                    })),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn eviction_with_zero_byte_quota_rejects_all() {
+        run_store_test(
+            "eviction_zero_byte_quota",
+            "adversarial",
+            "quarantine",
+            1,
+            || {
+                let policy = ObjectAdmissionPolicy {
+                    max_quarantine_objects_per_zone: 100,
+                    max_quarantine_bytes_per_zone: 0,
+                    ..Default::default()
+                };
+                let store = QuarantineStore::new(policy);
+
+                // Zero-byte quota means nothing can ever fit (data > 0 bytes)
+                let result = store.quarantine(test_object(1, 100, 1000));
+                assert!(matches!(
+                    result,
+                    Err(QuarantineError::QuotaExceeded { .. })
+                ));
+
+                StoreLogData {
+                    details: Some(json!({
+                        "quota": 0,
+                        "rejected": true
+                    })),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    // =========================================================================
+    // Zone isolation tests
+    // =========================================================================
+
+    #[test]
+    fn quarantine_objects_in_different_zones_independent() {
+        run_store_test(
+            "quarantine_zone_isolation",
+            "verify",
+            "quarantine",
+            4,
+            || {
+                let policy = ObjectAdmissionPolicy {
+                    max_quarantine_objects_per_zone: 2,
+                    max_quarantine_bytes_per_zone: 1024 * 1024,
+                    ..Default::default()
+                };
+                let store = QuarantineStore::new(policy);
+
+                let zone_a: ZoneId = "z:project:alpha".parse().unwrap();
+                let zone_b: ZoneId = "z:project:beta".parse().unwrap();
+
+                // 2 objects in zone A (at max)
+                let mut obj1 = test_object(1, 100, 1000);
+                obj1.zone_id = zone_a.clone();
+                store.quarantine(obj1).unwrap();
+
+                let mut obj2 = test_object(2, 100, 2000);
+                obj2.zone_id = zone_a.clone();
+                store.quarantine(obj2).unwrap();
+
+                // 2 objects in zone B (independent quota)
+                let mut obj3 = test_object(3, 100, 1000);
+                obj3.zone_id = zone_b.clone();
+                store.quarantine(obj3).unwrap();
+
+                let mut obj4 = test_object(4, 100, 2000);
+                obj4.zone_id = zone_b.clone();
+                store.quarantine(obj4).unwrap();
+
+                // All 4 objects should exist — zones have independent quotas
+                assert!(store.contains(&ObjectId::from_bytes([1; 32])));
+                assert!(store.contains(&ObjectId::from_bytes([2; 32])));
+                assert!(store.contains(&ObjectId::from_bytes([3; 32])));
+                assert!(store.contains(&ObjectId::from_bytes([4; 32])));
+
+                StoreLogData {
+                    details: Some(json!({
+                        "zone_a_count": 2,
+                        "zone_b_count": 2,
+                        "independent": true
+                    })),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn quarantine_zone_quota_does_not_spill_across_zones() {
+        run_store_test(
+            "quarantine_no_quota_spillover",
+            "verify",
+            "quarantine",
+            3,
+            || {
+                let policy = ObjectAdmissionPolicy {
+                    max_quarantine_objects_per_zone: 1,
+                    max_quarantine_bytes_per_zone: 1024 * 1024,
+                    ..Default::default()
+                };
+                let store = QuarantineStore::new(policy);
+
+                let zone_a: ZoneId = "z:project:alpha".parse().unwrap();
+                let zone_b: ZoneId = "z:project:beta".parse().unwrap();
+
+                // Fill zone A to capacity
+                let mut obj1 = test_object(1, 100, 1000);
+                obj1.zone_id = zone_a.clone();
+                store.quarantine(obj1).unwrap();
+
+                // Zone B should still accept objects (independent)
+                let mut obj2 = test_object(2, 100, 2000);
+                obj2.zone_id = zone_b.clone();
+                store.quarantine(obj2).unwrap();
+
+                assert!(store.contains(&ObjectId::from_bytes([1; 32])));
+                assert!(store.contains(&ObjectId::from_bytes([2; 32])));
+
+                // Adding to zone A should evict from zone A only
+                let mut obj3 = test_object(3, 100, 3000);
+                obj3.zone_id = zone_a.clone();
+                store.quarantine(obj3).unwrap();
+
+                assert!(!store.contains(&ObjectId::from_bytes([1; 32]))); // evicted from A
+                assert!(store.contains(&ObjectId::from_bytes([2; 32]))); // zone B unaffected
+                assert!(store.contains(&ObjectId::from_bytes([3; 32])));
+
+                StoreLogData {
+                    details: Some(json!({
+                        "zone_a_evicted": true,
+                        "zone_b_unaffected": true
+                    })),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    // =========================================================================
+    // Promotion edge cases
+    // =========================================================================
+
+    #[test]
+    fn promote_without_schema_validation_succeeds_when_policy_disabled() {
+        run_store_test(
+            "promote_schema_disabled",
+            "verify",
+            "promotion",
+            2,
+            || {
+                let policy = ObjectAdmissionPolicy {
+                    require_schema_validation: false,
+                    ..Default::default()
+                };
+                let store = QuarantineStore::new(policy);
+
+                let obj = test_object(1, 100, 1000);
+                let id = obj.object_id;
+                store.quarantine(obj).unwrap();
+
+                // schema_valid=false but policy doesn't require it
+                let reason = PromotionReason::LocalPin {
+                    reason: "operator override".into(),
+                };
+                let promoted = store.promote(&id, &reason, false).unwrap();
+                assert_eq!(promoted.object_id, id);
+                assert!(!store.contains(&id));
+
+                StoreLogData {
+                    object_id: Some(id),
+                    details: Some(json!({
+                        "schema_disabled": true,
+                        "promoted": true
+                    })),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn promote_fails_schema_when_policy_requires_it() {
+        run_store_test(
+            "promote_schema_required_fails",
+            "verify",
+            "promotion",
+            2,
+            || {
+                let policy = ObjectAdmissionPolicy {
+                    require_schema_validation: true,
+                    ..Default::default()
+                };
+                let store = QuarantineStore::new(policy);
+
+                let obj = test_object(1, 100, 1000);
+                let id = obj.object_id;
+                store.quarantine(obj).unwrap();
+
+                let reason = PromotionReason::LocalPin {
+                    reason: "operator override".into(),
+                };
+                let result = store.promote(&id, &reason, false);
+                assert!(matches!(
+                    result,
+                    Err(QuarantineError::SchemaValidationFailed { .. })
+                ));
+                assert!(store.contains(&id)); // still quarantined
+
+                StoreLogData {
+                    object_id: Some(id),
+                    details: Some(json!({
+                        "schema_required": true,
+                        "denied": true
+                    })),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn remove_updates_zone_byte_count_correctly() {
+        run_store_test(
+            "remove_updates_bytes",
+            "verify",
+            "quarantine",
+            3,
+            || {
+                let store = QuarantineStore::new(ObjectAdmissionPolicy::default());
+
+                store.quarantine(test_object(1, 100, 1000)).unwrap();
+                store.quarantine(test_object(2, 200, 2000)).unwrap();
+
+                let stats_before = store.zone_stats(&test_zone());
+                assert_eq!(stats_before.used_bytes, 300);
+
+                store.remove(&ObjectId::from_bytes([1; 32])).unwrap();
+
+                let stats_after = store.zone_stats(&test_zone());
+                assert_eq!(stats_after.used_bytes, 200);
+                assert_eq!(stats_after.object_count, 1);
+
+                StoreLogData {
+                    details: Some(json!({
+                        "bytes_before": 300,
+                        "bytes_after": 200,
+                        "correctly_decremented": true
+                    })),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn duplicate_quarantine_is_idempotent() {
+        run_store_test(
+            "duplicate_quarantine_idempotent",
+            "verify",
+            "quarantine",
+            3,
+            || {
+                let store = QuarantineStore::new(ObjectAdmissionPolicy::default());
+
+                let obj = test_object(1, 100, 1000);
+                store.quarantine(obj.clone()).unwrap();
+                store.quarantine(obj).unwrap(); // duplicate
+
+                let stats = store.zone_stats(&test_zone());
+                assert_eq!(stats.object_count, 1); // not double-counted
+                assert_eq!(stats.used_bytes, 100); // not double-counted
+
+                StoreLogData {
+                    details: Some(json!({
+                        "duplicate_handled": true,
+                        "idempotent": true
+                    })),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn evict_expired_returns_zero_when_all_fresh() {
+        run_store_test(
+            "evict_expired_all_fresh",
+            "verify",
+            "quarantine",
+            2,
+            || {
+                let policy = ObjectAdmissionPolicy {
+                    quarantine_ttl_secs: 100,
+                    ..Default::default()
+                };
+                let store = QuarantineStore::new(policy);
+
+                store.quarantine(test_object(1, 100, 1000)).unwrap();
+                store.quarantine(test_object(2, 100, 1050)).unwrap();
+
+                // Check at time 1099 — both are within TTL
+                let evicted = store.evict_expired(1099);
+                assert_eq!(evicted, 0);
+
+                let stats = store.zone_stats(&test_zone());
+                assert_eq!(stats.object_count, 2);
+
+                StoreLogData {
+                    details: Some(json!({
+                        "all_fresh": true,
+                        "evicted": 0
+                    })),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn list_zone_returns_empty_for_unknown_zone() {
+        run_store_test(
+            "list_zone_unknown",
+            "verify",
+            "quarantine",
+            1,
+            || {
+                let store = QuarantineStore::new(ObjectAdmissionPolicy::default());
+
+                let unknown_zone: ZoneId = "z:project:nonexistent".parse().unwrap();
+                let ids = store.list_zone(&unknown_zone);
+                assert!(ids.is_empty());
+
+                StoreLogData {
+                    details: Some(json!({
+                        "unknown_zone": true,
+                        "empty_list": true
+                    })),
+                    ..StoreLogData::default()
+                }
+            },
+        );
     }
 }

@@ -1330,4 +1330,222 @@ mod tests {
             },
         );
     }
+
+    // =========================================================================
+    // Lease-to-lease retention update
+    // =========================================================================
+
+    #[test]
+    fn set_retention_lease_to_lease_updates_expiry() {
+        run_store_test(
+            "retention_lease_update_expiry",
+            "verify",
+            "retention",
+            2,
+            || async {
+                let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+                let mut obj = test_stored_object(1, b"data");
+                obj.storage.retention = RetentionClass::Lease { expires_at: 1000 };
+                let id = obj.object_id;
+                store.put(obj).await.unwrap();
+
+                store
+                    .set_retention(&id, RetentionClass::Lease { expires_at: 5000 })
+                    .await
+                    .unwrap();
+
+                let meta = store.get_storage_meta(&id).await.unwrap();
+                assert!(
+                    matches!(meta.retention, RetentionClass::Lease { expires_at } if expires_at == 5000)
+                );
+
+                StoreLogData {
+                    object_id: Some(id),
+                    details: Some(json!({"transition": "lease_1000_to_lease_5000"})),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    // =========================================================================
+    // Quota freed after delete allows new put
+    // =========================================================================
+
+    #[test]
+    fn quota_freed_after_delete_allows_new_put() {
+        run_store_test(
+            "quota_freed_after_delete",
+            "verify",
+            "accounting",
+            2,
+            || async {
+                let config = MemoryObjectStoreConfig { max_bytes: 1000 };
+                let store = MemoryObjectStore::new(config);
+
+                let obj1 = test_stored_object(1, &vec![0_u8; 488]);
+                let id1 = obj1.object_id;
+                store.put(obj1).await.unwrap();
+
+                // Quota full — can't add another
+                let obj2 = test_stored_object(2, &vec![0_u8; 488]);
+                assert!(store.put(obj2).await.is_err());
+
+                // Delete first, now second can fit
+                store.delete(&id1).await.unwrap();
+                let obj2b = test_stored_object(2, &vec![0_u8; 488]);
+                store.put(obj2b).await.unwrap();
+                assert!(store.exists(&ObjectId::from_bytes([2; 32])).await);
+
+                StoreLogData {
+                    details: Some(json!({"freed_and_reused": true})),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    // =========================================================================
+    // Accumulation with mixed sizes
+    // =========================================================================
+
+    #[test]
+    fn storage_used_accumulates_mixed_sizes() {
+        run_store_test(
+            "storage_accumulates_mixed",
+            "verify",
+            "accounting",
+            2,
+            || async {
+                let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+
+                store.put(test_stored_object(1, b"aaaa")).await.unwrap(); // 4 + 512
+                store.put(test_stored_object(2, b"bb")).await.unwrap(); // 2 + 512
+
+                let used = store.storage_used().await;
+                assert_eq!(used, (4 + 512) + (2 + 512));
+
+                StoreLogData {
+                    details: Some(json!({"total_used": used})),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    // =========================================================================
+    // Storage meta with initial pinned retention
+    // =========================================================================
+
+    #[test]
+    fn get_storage_meta_returns_initial_pinned_retention() {
+        run_store_test(
+            "get_storage_meta_initial_pinned",
+            "verify",
+            "read",
+            2,
+            || async {
+                let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+                let mut obj = test_stored_object(1, b"data");
+                obj.storage.retention = RetentionClass::Pinned;
+                let id = obj.object_id;
+                store.put(obj).await.unwrap();
+
+                let meta = store.get_storage_meta(&id).await.unwrap();
+                assert!(matches!(meta.retention, RetentionClass::Pinned));
+
+                StoreLogData {
+                    object_id: Some(id),
+                    details: Some(json!({"retention": "pinned"})),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    // =========================================================================
+    // Header with refs
+    // =========================================================================
+
+    #[test]
+    fn get_header_preserves_refs() {
+        run_store_test("get_header_preserves_refs", "verify", "read", 2, || async {
+            let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+
+            let ref_id = ObjectId::from_bytes([2; 32]);
+            let mut obj = test_stored_object(1, b"data");
+            obj.header.refs = vec![ref_id];
+            let id = obj.object_id;
+            store.put(obj).await.unwrap();
+
+            let header = store.get_header(&id).await.unwrap();
+            assert_eq!(header.refs.len(), 1);
+            assert_eq!(header.refs[0], ref_id);
+
+            StoreLogData {
+                object_id: Some(id),
+                details: Some(json!({"refs_count": 1})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    // =========================================================================
+    // Quota matches config
+    // =========================================================================
+
+    #[test]
+    fn storage_quota_matches_custom_config() {
+        run_store_test(
+            "storage_quota_matches_custom",
+            "verify",
+            "accounting",
+            1,
+            || async {
+                let config = MemoryObjectStoreConfig { max_bytes: 12345 };
+                let store = MemoryObjectStore::new(config);
+                assert_eq!(store.storage_quota().await, 12345);
+
+                StoreLogData {
+                    details: Some(json!({"quota": 12345})),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    // =========================================================================
+    // Delete all returns zero storage
+    // =========================================================================
+
+    #[test]
+    fn storage_zero_after_deleting_all_objects() {
+        run_store_test(
+            "storage_zero_after_delete_all",
+            "verify",
+            "accounting",
+            1,
+            || async {
+                let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+                store.put(test_stored_object(1, b"aaa")).await.unwrap();
+                store.put(test_stored_object(2, b"bbb")).await.unwrap();
+
+                store
+                    .delete(&ObjectId::from_bytes([1; 32]))
+                    .await
+                    .unwrap();
+                store
+                    .delete(&ObjectId::from_bytes([2; 32]))
+                    .await
+                    .unwrap();
+
+                assert_eq!(store.storage_used().await, 0);
+
+                StoreLogData {
+                    details: Some(json!({"all_deleted": true})),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
 }

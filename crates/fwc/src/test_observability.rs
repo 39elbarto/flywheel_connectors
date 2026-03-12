@@ -2889,4 +2889,879 @@ mod tests {
         assert!(!engine.should_redact_field("secret"));
         assert!(engine.redact_value("Bearer abc").is_none());
     }
+
+    // ── ScenarioLayer additional coverage ───────────────────────────────
+
+    #[test]
+    fn scenario_layer_parse_label_all_valid() {
+        let cases = [
+            ("unit", ScenarioLayer::Unit),
+            ("integration", ScenarioLayer::Integration),
+            ("e2e", ScenarioLayer::E2E),
+            ("snapshot", ScenarioLayer::Snapshot),
+            ("benchmark", ScenarioLayer::Benchmark),
+        ];
+        for (label, expected) in cases {
+            assert_eq!(ScenarioLayer::parse_label(label), Some(expected));
+        }
+    }
+
+    #[test]
+    fn scenario_layer_parse_label_invalid_returns_none() {
+        assert!(ScenarioLayer::parse_label("unknown").is_none());
+        assert!(ScenarioLayer::parse_label("").is_none());
+        assert!(ScenarioLayer::parse_label("Unit").is_none()); // case sensitive
+        assert!(ScenarioLayer::parse_label("E2E").is_none()); // case sensitive
+    }
+
+    #[test]
+    fn scenario_layer_display_matches_as_str() {
+        for layer in [
+            ScenarioLayer::Unit,
+            ScenarioLayer::Integration,
+            ScenarioLayer::E2E,
+            ScenarioLayer::Snapshot,
+            ScenarioLayer::Benchmark,
+        ] {
+            assert_eq!(layer.to_string(), layer.as_str());
+        }
+    }
+
+    #[test]
+    fn scenario_layer_deserialize_unknown_variant_errors() {
+        let result = serde_json::from_str::<ScenarioLayer>("\"not_a_layer\"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn scenario_layer_copy_semantics() {
+        let a = ScenarioLayer::E2E;
+        let b = a; // Copy, not move
+        assert_eq!(a, b);
+    }
+
+    // ── ScenarioId additional coverage ──────────────────────────────────
+
+    #[test]
+    fn scenario_id_parse_with_colons_in_suite_not_supported() {
+        // splitn(3, ':') gives [layer, suite, case] so suite cannot contain colons;
+        // a string with 4 parts uses the third colon as part of 'case'.
+        let parsed = ScenarioId::parse("unit:suite:case").unwrap();
+        assert_eq!(parsed.suite, "suite");
+        assert_eq!(parsed.case, "case");
+    }
+
+    #[test]
+    fn scenario_id_parse_empty_suite_and_case() {
+        // Empty suite and case are technically valid parse-wise
+        let parsed = ScenarioId::parse("unit::").unwrap();
+        assert_eq!(parsed.suite, "");
+        assert_eq!(parsed.case, "");
+    }
+
+    #[test]
+    fn scenario_id_clone() {
+        let id = ScenarioId::new(ScenarioLayer::Integration, "auth", "token_refresh");
+        let cloned = id.clone();
+        assert_eq!(id, cloned);
+    }
+
+    #[test]
+    fn scenario_id_hash_in_btreemap() {
+        let mut map = std::collections::BTreeMap::new();
+        let id = ScenarioId::new(ScenarioLayer::Unit, "s", "c");
+        map.insert(id.to_string_id(), 42usize);
+        assert_eq!(map["unit:s:c"], 42);
+    }
+
+    // ── TraceId additional coverage ──────────────────────────────────────
+
+    #[test]
+    fn trace_id_generate_is_uuid_format() {
+        let id = TraceId::generate();
+        // UUID v4 format: 8-4-4-4-12 hex chars separated by dashes
+        let s = id.as_str();
+        assert_eq!(s.len(), 36, "UUID should be 36 chars");
+        let parts: Vec<&str> = s.split('-').collect();
+        assert_eq!(parts.len(), 5);
+    }
+
+    #[test]
+    fn trace_id_clone() {
+        let id = TraceId::from_string("t-abc");
+        let cloned = id.clone();
+        assert_eq!(id, cloned);
+    }
+
+    #[test]
+    fn trace_id_display_matches_as_str() {
+        let id = TraceId::from_string("trace-xyz");
+        assert_eq!(id.to_string(), id.as_str());
+    }
+
+    // ── ScenarioContext additional coverage ──────────────────────────────
+
+    #[test]
+    fn scenario_context_multiple_env_entries() {
+        let ctx = scenario_context(ScenarioLayer::Unit, "s", "c")
+            .with_env("A", "1")
+            .with_env("B", "2")
+            .with_env("C", "3");
+        assert_eq!(ctx.environment.len(), 3);
+        assert_eq!(ctx.environment["A"], "1");
+        assert_eq!(ctx.environment["C"], "3");
+    }
+
+    #[test]
+    fn scenario_context_multiple_tags() {
+        let ctx = scenario_context(ScenarioLayer::E2E, "s", "c")
+            .with_tag("fast")
+            .with_tag("smoke")
+            .with_tag("ci");
+        assert_eq!(ctx.tags.len(), 3);
+        assert_eq!(ctx.tags[2], "ci");
+    }
+
+    #[test]
+    fn scenario_context_layer_matches_scenario_id() {
+        let ctx = scenario_context(ScenarioLayer::Benchmark, "perf", "throughput");
+        assert_eq!(ctx.layer, ScenarioLayer::Benchmark);
+        assert_eq!(ctx.scenario_id.layer, ScenarioLayer::Benchmark);
+    }
+
+    // ── TruthPhase display / serde ────────────────────────────────────────
+
+    #[test]
+    fn truth_phase_display_matches_as_str() {
+        for phase in [
+            TruthPhase::Setup,
+            TruthPhase::OfflineArtifact,
+            TruthPhase::HostDiscovery,
+            TruthPhase::Preflight,
+            TruthPhase::Simulate,
+            TruthPhase::Invoke,
+            TruthPhase::HostReceipt,
+            TruthPhase::Reconnect,
+            TruthPhase::Cancellation,
+            TruthPhase::Teardown,
+        ] {
+            assert_eq!(phase.to_string(), phase.as_str());
+        }
+    }
+
+    #[test]
+    fn truth_phase_kebab_case_serialization() {
+        let phase = TruthPhase::OfflineArtifact;
+        let json = serde_json::to_string(&phase).unwrap();
+        assert_eq!(json, r#""offline-artifact""#);
+    }
+
+    #[test]
+    fn reconnect_event_as_str_and_serde() {
+        let cases = [
+            (ReconnectEvent::Attempted, "attempted"),
+            (ReconnectEvent::Succeeded, "succeeded"),
+            (ReconnectEvent::Failed, "failed"),
+        ];
+        for (event, expected) in cases {
+            assert_eq!(event.as_str(), expected);
+            let json = serde_json::to_string(&event).unwrap();
+            let back: ReconnectEvent = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, event);
+        }
+    }
+
+    #[test]
+    fn cancellation_event_as_str_and_serde() {
+        let cases = [
+            (CancellationEvent::Requested, "requested"),
+            (CancellationEvent::Acknowledged, "acknowledged"),
+            (CancellationEvent::Completed, "completed"),
+            (CancellationEvent::Rejected, "rejected"),
+        ];
+        for (event, expected) in cases {
+            assert_eq!(event.as_str(), expected);
+            let json = serde_json::to_string(&event).unwrap();
+            let back: CancellationEvent = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, event);
+        }
+    }
+
+    // ── TruthContext additional coverage ─────────────────────────────────
+
+    #[test]
+    fn truth_context_default_is_empty() {
+        let tc = TruthContext::default();
+        assert!(tc.command_mode.is_none());
+        assert!(tc.provenance_markers.is_empty());
+        assert!(tc.phase.is_none());
+        assert!(tc.host_request_id.is_none());
+        assert!(tc.host_response_id.is_none());
+        assert!(tc.receipt_id.is_none());
+        assert!(tc.reconnect_event.is_none());
+        assert!(tc.cancellation_event.is_none());
+    }
+
+    #[test]
+    fn truth_context_multiple_provenance_markers() {
+        let tc = TruthContext::default()
+            .with_provenance_marker("live-host-introspection")
+            .with_provenance_marker("workspace-manifest")
+            .with_provenance_marker("external-registry");
+        assert_eq!(tc.provenance_markers.len(), 3);
+    }
+
+    #[test]
+    fn truth_context_serde_roundtrip_full() {
+        let tc = TruthContext::new(CommandAvailability::Planned)
+            .with_provenance_marker("marker-1")
+            .with_phase(TruthPhase::Preflight)
+            .with_host_request_id("req-123")
+            .with_host_response_id("resp-456")
+            .with_receipt_id("rec-789")
+            .with_reconnect_event(ReconnectEvent::Failed)
+            .with_cancellation_event(CancellationEvent::Completed);
+
+        let json = serde_json::to_string(&tc).unwrap();
+        let back: TruthContext = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.command_mode, Some(CommandAvailability::Planned));
+        assert_eq!(back.provenance_markers, vec!["marker-1"]);
+        assert_eq!(back.phase, Some(TruthPhase::Preflight));
+        assert_eq!(back.host_request_id.as_deref(), Some("req-123"));
+        assert_eq!(back.receipt_id.as_deref(), Some("rec-789"));
+        assert_eq!(back.reconnect_event, Some(ReconnectEvent::Failed));
+        assert_eq!(back.cancellation_event, Some(CancellationEvent::Completed));
+    }
+
+    #[test]
+    fn truth_context_serde_skips_none_fields() {
+        let tc = TruthContext::default();
+        let json = serde_json::to_string(&tc).unwrap();
+        // All optional/Vec fields should be skipped when absent
+        assert!(!json.contains("command_mode"));
+        assert!(!json.contains("phase"));
+        assert!(!json.contains("host_request_id"));
+    }
+
+    // ── TraceEntry additional coverage ───────────────────────────────────
+
+    #[test]
+    fn trace_entry_multiple_fields() {
+        let tid = TraceId::from_string("t");
+        let sid = ScenarioId::new(ScenarioLayer::Unit, "s", "c");
+        let entry = TraceEntry::new(&tid, &sid, TraceLevel::Debug, TraceCategory::Setup, "msg")
+            .with_field("a", serde_json::json!(1))
+            .with_field("b", serde_json::json!("hello"))
+            .with_field("c", serde_json::json!(true));
+        assert_eq!(entry.fields.len(), 3);
+        assert_eq!(entry.fields["a"], serde_json::json!(1));
+        assert_eq!(entry.fields["b"], serde_json::json!("hello"));
+        assert_eq!(entry.fields["c"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn trace_entry_with_zero_duration() {
+        let tid = TraceId::from_string("t");
+        let sid = ScenarioId::new(ScenarioLayer::Unit, "s", "c");
+        let entry = TraceEntry::new(&tid, &sid, TraceLevel::Info, TraceCategory::CliStep, "fast")
+            .with_duration_ms(0);
+        assert_eq!(entry.duration_ms, Some(0));
+    }
+
+    #[test]
+    fn trace_entry_clone() {
+        let tid = TraceId::from_string("t");
+        let sid = ScenarioId::new(ScenarioLayer::Unit, "s", "c");
+        let entry = TraceEntry::new(&tid, &sid, TraceLevel::Info, TraceCategory::CliStep, "msg")
+            .with_field("key", serde_json::json!("val"));
+        let cloned = entry.clone();
+        assert_eq!(cloned.message, entry.message);
+        assert_eq!(cloned.fields, entry.fields);
+    }
+
+    #[test]
+    fn trace_entry_with_null_json_field() {
+        let tid = TraceId::from_string("t");
+        let sid = ScenarioId::new(ScenarioLayer::Unit, "s", "c");
+        let entry = TraceEntry::new(&tid, &sid, TraceLevel::Info, TraceCategory::CliStep, "msg")
+            .with_field("nullable", serde_json::Value::Null);
+        assert_eq!(entry.fields["nullable"], serde_json::Value::Null);
+    }
+
+    // ── TraceLog additional coverage ──────────────────────────────────────
+
+    #[test]
+    fn trace_log_filter_all_categories() {
+        let ctx = scenario_context(ScenarioLayer::Unit, "s", "c");
+        let mut log = new_trace_log();
+        let categories = [
+            TraceCategory::CliStep,
+            TraceCategory::HostRequest,
+            TraceCategory::HostReceipt,
+            TraceCategory::Approval,
+            TraceCategory::TokenCount,
+            TraceCategory::Replay,
+            TraceCategory::Assertion,
+            TraceCategory::Setup,
+            TraceCategory::Teardown,
+        ];
+        for cat in categories {
+            emit_entry(&mut log, &ctx, TraceLevel::Info, cat, "x");
+        }
+        for cat in categories {
+            assert_eq!(log.filter_by_category(cat).len(), 1);
+        }
+        assert_eq!(log.len(), 9);
+    }
+
+    #[test]
+    fn trace_log_summary_counts_all_categories() {
+        let ctx = scenario_context(ScenarioLayer::Unit, "s", "c");
+        let mut log = new_trace_log();
+        emit_entry(&mut log, &ctx, TraceLevel::Info, TraceCategory::Setup, "a");
+        emit_entry(&mut log, &ctx, TraceLevel::Info, TraceCategory::Setup, "b");
+        emit_entry(&mut log, &ctx, TraceLevel::Error, TraceCategory::Assertion, "c");
+        let s = log.summary();
+        assert_eq!(s.categories["setup"], 2);
+        assert_eq!(s.categories["assertion"], 1);
+    }
+
+    #[test]
+    fn trace_log_to_jsonl_each_line_has_message() {
+        let ctx = scenario_context(ScenarioLayer::Unit, "s", "c");
+        let mut log = new_trace_log();
+        emit_entry(&mut log, &ctx, TraceLevel::Info, TraceCategory::Setup, "msg-1");
+        emit_entry(&mut log, &ctx, TraceLevel::Debug, TraceCategory::CliStep, "msg-2");
+
+        let jsonl = log.to_jsonl().unwrap();
+        let lines: Vec<&str> = jsonl.trim_end_matches('\n').split('\n').collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("msg-1"));
+        assert!(lines[1].contains("msg-2"));
+    }
+
+    #[test]
+    fn trace_log_truthfulness_summary_empty_log() {
+        let log = new_trace_log();
+        let ts = log.truthfulness_summary();
+        assert!(ts.command_modes.is_empty());
+        assert!(ts.provenance_markers.is_empty());
+        assert!(ts.phases.is_empty());
+        assert_eq!(ts.live_entry_count, 0);
+        assert_eq!(ts.offline_entry_count, 0);
+    }
+
+    #[test]
+    fn trace_log_truthfulness_summary_no_truth_entries_yields_empty() {
+        let ctx = scenario_context(ScenarioLayer::Unit, "s", "c");
+        let mut log = new_trace_log();
+        emit_entry(&mut log, &ctx, TraceLevel::Info, TraceCategory::Setup, "no-truth");
+        emit_entry(&mut log, &ctx, TraceLevel::Debug, TraceCategory::CliStep, "no-truth-2");
+        let ts = log.truthfulness_summary();
+        assert!(ts.command_modes.is_empty());
+        assert_eq!(ts.live_entry_count, 0);
+    }
+
+    #[test]
+    fn trace_log_truthfulness_multiple_same_mode_accumulates() {
+        let ctx = scenario_context(ScenarioLayer::E2E, "t", "m");
+        let mut log = new_trace_log();
+        for _ in 0..5 {
+            let truth = TruthContext::new(CommandAvailability::LiveRuntime);
+            log.append(
+                TraceEntry::new(
+                    &ctx.trace_id,
+                    &ctx.scenario_id,
+                    TraceLevel::Info,
+                    TraceCategory::HostRequest,
+                    "live",
+                )
+                .with_truth_context(truth),
+            );
+        }
+        let ts = log.truthfulness_summary();
+        assert_eq!(ts.command_modes["live-runtime"], 5);
+        assert_eq!(ts.live_entry_count, 5);
+    }
+
+    #[test]
+    fn trace_log_truthfulness_deduplicates_markers_and_ids() {
+        let ctx = scenario_context(ScenarioLayer::E2E, "t", "d");
+        let mut log = new_trace_log();
+        // Same provenance marker emitted from two entries — should appear once in summary
+        for _ in 0..3 {
+            let truth = TruthContext::new(CommandAvailability::LiveRuntime)
+                .with_provenance_marker("live-host")
+                .with_phase(TruthPhase::Invoke)
+                .with_host_request_id("req-same");
+            log.append(
+                TraceEntry::new(
+                    &ctx.trace_id,
+                    &ctx.scenario_id,
+                    TraceLevel::Info,
+                    TraceCategory::HostRequest,
+                    "invoke",
+                )
+                .with_truth_context(truth),
+            );
+        }
+        let ts = log.truthfulness_summary();
+        assert_eq!(ts.provenance_markers, vec!["live-host"]);
+        assert_eq!(ts.host_request_ids, vec!["req-same"]);
+        assert_eq!(ts.phases, vec!["invoke"]);
+    }
+
+    // ── BundleOutcome additional coverage ────────────────────────────────
+
+    #[test]
+    fn bundle_outcome_is_fail_skip_error() {
+        let skip = BundleOutcome::Skip {
+            reason: "skipped".to_string(),
+        };
+        let error = BundleOutcome::Error {
+            reason: "timeout".to_string(),
+        };
+        assert!(!skip.is_pass());
+        assert!(!skip.is_fail());
+        assert!(!error.is_pass());
+        assert!(!error.is_fail());
+    }
+
+    #[test]
+    fn bundle_outcome_display_skip_contains_reason() {
+        let o = BundleOutcome::Skip {
+            reason: "needs fixture".to_string(),
+        };
+        assert!(o.to_string().contains("needs fixture"));
+    }
+
+    #[test]
+    fn bundle_outcome_display_error_contains_reason() {
+        let o = BundleOutcome::Error {
+            reason: "network timeout".to_string(),
+        };
+        assert!(o.to_string().contains("network timeout"));
+    }
+
+    // ── ArtifactBundle additional coverage ───────────────────────────────
+
+    #[test]
+    fn artifact_bundle_bundle_id_contains_layer_suite_case() {
+        let base = PathBuf::from("/tmp/ab");
+        let sid = ScenarioId::new(ScenarioLayer::Integration, "auth", "refresh");
+        let tid = TraceId::from_string("t");
+        let bundle = ArtifactBundle::new(&base, &sid, &tid);
+        assert!(bundle.bundle_id.starts_with("integration:auth:refresh@"));
+    }
+
+    #[test]
+    fn artifact_bundle_root_contains_layer_path() {
+        let base = PathBuf::from("/artifacts-root");
+        let sid = ScenarioId::new(ScenarioLayer::Benchmark, "perf", "speed");
+        let tid = TraceId::from_string("t");
+        let bundle = ArtifactBundle::new(&base, &sid, &tid);
+        let root = bundle.root.to_string_lossy();
+        assert!(root.contains("benchmark"));
+        assert!(root.contains("perf"));
+        assert!(root.contains("speed"));
+    }
+
+    #[test]
+    fn artifact_bundle_expected_files_all_have_correct_extensions() {
+        let base = PathBuf::from("/tmp/ef");
+        let sid = ScenarioId::new(ScenarioLayer::Unit, "s", "c");
+        let tid = TraceId::from_string("t");
+        let bundle = ArtifactBundle::new(&base, &sid, &tid);
+        let files = bundle.expected_files();
+        let names: Vec<String> = files
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert!(names.contains(&"trace.jsonl".to_string()));
+        assert!(names.contains(&"summary.json".to_string()));
+        assert!(names.contains(&"environment.json".to_string()));
+        assert!(names.contains(&"replay.sh".to_string()));
+    }
+
+    #[test]
+    fn artifact_bundle_golden_snapshot_not_in_expected_files() {
+        let base = PathBuf::from("/tmp/gs");
+        let sid = ScenarioId::new(ScenarioLayer::Snapshot, "snap", "gold");
+        let tid = TraceId::from_string("t");
+        let bundle = ArtifactBundle::new(&base, &sid, &tid);
+        // golden_snapshot is NOT in expected_files() — it's optional
+        let expected = bundle.expected_files();
+        assert!(!expected.contains(&bundle.golden_snapshot_path()));
+    }
+
+    #[test]
+    fn artifact_bundle_trace_id_preserved() {
+        let base = PathBuf::from("/tmp/ti");
+        let sid = ScenarioId::new(ScenarioLayer::Unit, "s", "c");
+        let tid = TraceId::from_string("specific-trace-id");
+        let bundle = ArtifactBundle::new(&base, &sid, &tid);
+        assert_eq!(bundle.trace_id.as_str(), "specific-trace-id");
+    }
+
+    // ── ArtifactManifest additional coverage ──────────────────────────────
+
+    #[test]
+    fn artifact_manifest_with_trace_log_populates_log_summary() {
+        let ctx = scenario_context(ScenarioLayer::Unit, "s", "c");
+        let mut log = new_trace_log();
+        emit_entry(&mut log, &ctx, TraceLevel::Info, TraceCategory::Setup, "a");
+        emit_entry(&mut log, &ctx, TraceLevel::Error, TraceCategory::Assertion, "b");
+
+        let sid = ctx.scenario_id.clone();
+        let tid = ctx.trace_id.clone();
+        let m = ArtifactManifest::new(sid, tid, 4, 512, BundleOutcome::Pass).with_trace_log(&log);
+        assert_eq!(m.log_summary.total_entries, 2);
+        assert_eq!(m.log_summary.info_count, 1);
+        assert_eq!(m.log_summary.error_count, 1);
+    }
+
+    #[test]
+    fn artifact_manifest_with_trace_log_populates_truthfulness() {
+        let ctx = scenario_context(ScenarioLayer::E2E, "truth", "manifest");
+        let mut log = new_trace_log();
+        let truth = TruthContext::new(CommandAvailability::OfflineArtifact)
+            .with_phase(TruthPhase::OfflineArtifact);
+        log.append(
+            TraceEntry::new(
+                &ctx.trace_id,
+                &ctx.scenario_id,
+                TraceLevel::Info,
+                TraceCategory::CliStep,
+                "offline",
+            )
+            .with_truth_context(truth),
+        );
+
+        let m = ArtifactManifest::new(
+            ctx.scenario_id.clone(),
+            ctx.trace_id.clone(),
+            4,
+            0,
+            BundleOutcome::Pass,
+        )
+        .with_trace_log(&log);
+        assert_eq!(m.truthfulness.offline_entry_count, 1);
+        assert_eq!(m.truthfulness.phases, vec!["offline-artifact"]);
+    }
+
+    // ── RedactionRule additional coverage ─────────────────────────────────
+
+    #[test]
+    fn redaction_rule_empty_field_patterns_no_match() {
+        let rule = RedactionRule {
+            name: "empty_fields".to_string(),
+            field_patterns: Vec::new(),
+            value_patterns: vec!["Bearer ".to_string()],
+        };
+        assert!(!rule.matches_field("token"));
+        assert!(!rule.matches_field("secret"));
+    }
+
+    #[test]
+    fn redaction_rule_empty_value_patterns_no_match() {
+        let rule = RedactionRule {
+            name: "empty_values".to_string(),
+            field_patterns: vec!["token".to_string()],
+            value_patterns: Vec::new(),
+        };
+        assert!(!rule.matches_value("Bearer abc"));
+        assert!(!rule.matches_value("token-value"));
+    }
+
+    #[test]
+    fn redaction_rule_field_match_case_insensitive() {
+        let rule = RedactionRule::field_based("test", vec!["password".to_string()]);
+        assert!(rule.matches_field("PASSWORD"));
+        assert!(rule.matches_field("MyPassword"));
+        assert!(rule.matches_field("password_hash"));
+    }
+
+    #[test]
+    fn redaction_rule_value_match_case_sensitive_prefix() {
+        let rule = RedactionRule::value_based("test", vec!["sk-".to_string()]);
+        // value matching is prefix-based and case-sensitive
+        assert!(rule.matches_value("sk-live-abc"));
+        assert!(!rule.matches_value("SK-live-abc")); // uppercase prefix won't match
+    }
+
+    // ── RedactedValue additional coverage ─────────────────────────────────
+
+    #[test]
+    fn redacted_value_short_digest_is_8_chars() {
+        let rv = RedactedValue::from_original("any-secret");
+        assert_eq!(rv.short_digest().len(), 8);
+    }
+
+    #[test]
+    fn redacted_value_full_digest_is_64_chars() {
+        let rv = RedactedValue::from_original("any-secret");
+        assert_eq!(rv.full_digest().len(), 64);
+    }
+
+    #[test]
+    fn redacted_value_placeholder_format() {
+        let rv = RedactedValue::from_original("test-secret");
+        assert!(rv.placeholder.starts_with("[REDACTED:sha256:"));
+        assert!(rv.placeholder.ends_with(']'));
+        // Short digest is embedded in placeholder
+        assert!(rv.placeholder.contains(rv.short_digest()));
+    }
+
+    #[test]
+    fn redacted_value_empty_string() {
+        let rv = RedactedValue::from_original("");
+        assert_eq!(rv.full_digest().len(), 64);
+        assert!(rv.placeholder.starts_with("[REDACTED:sha256:"));
+    }
+
+    #[test]
+    fn redacted_value_unicode_input() {
+        let rv = RedactedValue::from_original("sécret-clé-123");
+        assert_eq!(rv.full_digest().len(), 64);
+        assert!(rv.placeholder.starts_with("[REDACTED:sha256:"));
+    }
+
+    // ── RedactionEngine additional coverage ──────────────────────────────
+
+    #[test]
+    fn redaction_engine_redact_entry_no_fields_no_trigger() {
+        let engine = RedactionEngine::default_rules();
+        let tid = TraceId::from_string("t");
+        let sid = ScenarioId::new(ScenarioLayer::Unit, "s", "c");
+        let entry = TraceEntry::new(&tid, &sid, TraceLevel::Info, TraceCategory::CliStep, "simple");
+        let redacted = engine.redact_entry(&entry);
+        assert!(!redacted.redacted);
+        assert_eq!(redacted.message, "simple");
+    }
+
+    #[test]
+    fn redaction_engine_redact_entry_non_string_field_unchanged() {
+        let engine = RedactionEngine::default_rules();
+        let tid = TraceId::from_string("t");
+        let sid = ScenarioId::new(ScenarioLayer::Unit, "s", "c");
+        // A non-string field named "count" shouldn't be redacted
+        let entry = TraceEntry::new(&tid, &sid, TraceLevel::Info, TraceCategory::CliStep, "ok")
+            .with_field("count", serde_json::json!(42))
+            .with_field("enabled", serde_json::json!(false));
+        let redacted = engine.redact_entry(&entry);
+        assert!(!redacted.redacted);
+        assert_eq!(redacted.fields["count"], serde_json::json!(42));
+        assert_eq!(redacted.fields["enabled"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn redaction_engine_redact_entry_secret_field_non_string_value_redacted() {
+        let engine = RedactionEngine::default_rules();
+        let tid = TraceId::from_string("t");
+        let sid = ScenarioId::new(ScenarioLayer::Unit, "s", "c");
+        // Field named "secret" (matches field rule) with numeric value
+        let entry = TraceEntry::new(&tid, &sid, TraceLevel::Info, TraceCategory::CliStep, "ok")
+            .with_field("secret_count", serde_json::json!(999));
+        let redacted = engine.redact_entry(&entry);
+        // The field matches "secret" pattern, so it WILL be redacted
+        assert!(redacted.redacted);
+        let val = redacted.fields["secret_count"].as_str().unwrap();
+        assert!(val.starts_with("[REDACTED:sha256:"));
+    }
+
+    #[test]
+    fn redaction_engine_redact_log_preserves_non_sensitive_entries() {
+        let engine = RedactionEngine::default_rules();
+        let ctx = scenario_context(ScenarioLayer::Unit, "s", "c");
+        let mut log = new_trace_log();
+        // First entry: clean
+        emit_entry(&mut log, &ctx, TraceLevel::Info, TraceCategory::Setup, "clean");
+        // Second entry: sensitive
+        log.append(
+            TraceEntry::new(
+                &ctx.trace_id,
+                &ctx.scenario_id,
+                TraceLevel::Info,
+                TraceCategory::HostRequest,
+                "calling",
+            )
+            .with_field("authorization", serde_json::json!("Bearer super-secret-token")),
+        );
+        // Third entry: clean
+        emit_entry(&mut log, &ctx, TraceLevel::Info, TraceCategory::Teardown, "done");
+
+        let redacted = engine.redact_log(&log);
+        assert_eq!(redacted.len(), 3);
+        assert!(!redacted.entries()[0].redacted);
+        assert!(redacted.entries()[1].redacted);
+        assert!(!redacted.entries()[2].redacted);
+    }
+
+    #[test]
+    fn redaction_engine_default_covers_all_expected_patterns() {
+        let engine = RedactionEngine::default_rules();
+        // Field-based patterns
+        for field in ["my_token", "api_secret", "password", "my_api_key", "my_credential", "authorization_header"] {
+            assert!(engine.should_redact_field(field), "expected {field} to be redacted");
+        }
+        // Value-based patterns
+        for value in ["Bearer token123", "sk-live-key", "ghp_abc123", "xoxb-slack-token"] {
+            assert!(engine.redact_value(value).is_some(), "expected {value} to be redacted");
+        }
+    }
+
+    // ── ReplayEnvelope additional coverage ───────────────────────────────
+
+    #[test]
+    fn replay_envelope_non_cargo_cmd_no_runner() {
+        let sid = ScenarioId::new(ScenarioLayer::E2E, "s", "c");
+        let tid = TraceId::from_string("t");
+        let env = ReplayEnvelope::new(sid, tid, "fwc invoke github.list", "/project");
+        assert!(env.command_runner.is_none());
+    }
+
+    #[test]
+    fn replay_envelope_cargo_cmd_gets_rch_runner() {
+        let sid = ScenarioId::new(ScenarioLayer::E2E, "s", "c");
+        let tid = TraceId::from_string("t");
+        let env = ReplayEnvelope::new(sid, tid, "cargo test -p fwc", "/project");
+        assert_eq!(env.command_runner.as_deref(), Some("rch exec --"));
+    }
+
+    #[test]
+    fn replay_envelope_with_command_runner_overrides_default() {
+        let sid = ScenarioId::new(ScenarioLayer::E2E, "s", "c");
+        let tid = TraceId::from_string("t");
+        let env = ReplayEnvelope::new(sid, tid, "cargo test", "/project")
+            .with_command_runner("my-runner --");
+        assert_eq!(env.command_runner.as_deref(), Some("my-runner --"));
+    }
+
+    #[test]
+    fn replay_envelope_multiple_env_vars() {
+        let sid = ScenarioId::new(ScenarioLayer::E2E, "s", "c");
+        let tid = TraceId::from_string("t");
+        let env = ReplayEnvelope::new(sid, tid, "cmd", "/dir")
+            .with_env("A", "1")
+            .with_env("B", "2")
+            .with_env("C", "3");
+        assert_eq!(env.environment.len(), 3);
+        assert_eq!(env.environment["B"], "2");
+    }
+
+    // ── ReplayInstructions additional coverage ────────────────────────────
+
+    #[test]
+    fn replay_instructions_to_shell_script_starts_with_shebang() {
+        let instr = ReplayInstructions {
+            steps: vec!["echo hello".to_string()],
+            prerequisites: Vec::new(),
+            notes: Vec::new(),
+        };
+        let script = instr.to_shell_script();
+        assert!(script.starts_with("#!/usr/bin/env bash"));
+    }
+
+    #[test]
+    fn replay_instructions_no_prerequisites_no_prereq_section() {
+        let instr = ReplayInstructions {
+            steps: vec!["cd /tmp".to_string()],
+            prerequisites: Vec::new(),
+            notes: Vec::new(),
+        };
+        let script = instr.to_shell_script();
+        assert!(!script.contains("Prerequisites"));
+    }
+
+    #[test]
+    fn replay_instructions_no_notes_no_notes_section() {
+        let instr = ReplayInstructions {
+            steps: vec!["echo test".to_string()],
+            prerequisites: Vec::new(),
+            notes: Vec::new(),
+        };
+        let script = instr.to_shell_script();
+        assert!(!script.contains("Notes"));
+    }
+
+    #[test]
+    fn replay_instructions_prerequisites_appear_as_comments() {
+        let instr = ReplayInstructions {
+            steps: vec!["cargo test".to_string()],
+            prerequisites: vec!["cargo".to_string(), "rch".to_string()],
+            notes: Vec::new(),
+        };
+        let script = instr.to_shell_script();
+        assert!(script.contains("# Prerequisites:"));
+        assert!(script.contains("#   - cargo"));
+        assert!(script.contains("#   - rch"));
+    }
+
+    #[test]
+    fn replay_instructions_notes_appear_as_comments() {
+        let instr = ReplayInstructions {
+            steps: vec!["fwc status".to_string()],
+            prerequisites: Vec::new(),
+            notes: vec!["trace id: abc-123".to_string()],
+        };
+        let script = instr.to_shell_script();
+        assert!(script.contains("# Notes:"));
+        assert!(script.contains("#   trace id: abc-123"));
+    }
+
+    // ── create_bundle helper ──────────────────────────────────────────────
+
+    #[test]
+    fn create_bundle_with_trace_log_sets_summary() {
+        let ctx = scenario_context(ScenarioLayer::E2E, "s", "c");
+        let base = PathBuf::from("/tmp/bundle-test");
+
+        let mut log = new_trace_log();
+        emit_entry(&mut log, &ctx, TraceLevel::Info, TraceCategory::Setup, "a");
+        emit_entry(&mut log, &ctx, TraceLevel::Error, TraceCategory::Assertion, "b");
+        emit_entry(&mut log, &ctx, TraceLevel::Warn, TraceCategory::Teardown, "c");
+
+        let (_bundle, manifest) =
+            create_bundle(&base, &ctx, &log, BundleOutcome::Pass);
+        assert_eq!(manifest.log_summary.total_entries, 3);
+        assert_eq!(manifest.log_summary.info_count, 1);
+        assert_eq!(manifest.log_summary.error_count, 1);
+        assert_eq!(manifest.log_summary.warn_count, 1);
+        assert!(manifest.outcome.is_pass());
+    }
+
+    #[test]
+    fn create_bundle_skip_outcome() {
+        let ctx = scenario_context(ScenarioLayer::Unit, "s", "c");
+        let base = PathBuf::from("/tmp/bundle-skip");
+        let (_bundle, manifest) = create_bundle(
+            &base,
+            &ctx,
+            &new_trace_log(),
+            BundleOutcome::Skip {
+                reason: "env not configured".to_string(),
+            },
+        );
+        assert!(!manifest.outcome.is_pass());
+        assert!(!manifest.outcome.is_fail());
+    }
+
+    // ── default_command_runner ────────────────────────────────────────────
+
+    #[test]
+    fn default_command_runner_cargo_prefix() {
+        // We can indirectly verify via ReplayEnvelope
+        let sid = ScenarioId::new(ScenarioLayer::Unit, "s", "c");
+        let tid = TraceId::from_string("t");
+        let env = ReplayEnvelope::new(sid.clone(), tid.clone(), "  cargo build", "/dir");
+        assert_eq!(env.command_runner.as_deref(), Some("rch exec --"));
+    }
+
+    #[test]
+    fn default_command_runner_non_cargo() {
+        let sid = ScenarioId::new(ScenarioLayer::Unit, "s", "c");
+        let tid = TraceId::from_string("t");
+        let env = ReplayEnvelope::new(sid, tid, "echo hello", "/dir");
+        assert!(env.command_runner.is_none());
+    }
 }

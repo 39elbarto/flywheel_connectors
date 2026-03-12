@@ -3077,7 +3077,8 @@ pub struct ConnectorEntry {
 ///
 /// **Typed** connectors (82): Use `OperationInfo` structs with `AgentHint`
 /// objects providing `when_to_use`, `common_mistakes`, `examples`, and
-/// `related` fields. These are fully fwc-ready.
+/// `related` fields. Connectors with manifests are fully fwc-ready; the few
+/// legacy crates still missing `manifest.toml` keep identity/config gaps.
 ///
 /// **JSON** connectors (0): All connectors have been migrated to typed metadata.
 /// They have `input_schema`, `output_schema`, `risk_level`, `safety_tier`,
@@ -3744,10 +3745,11 @@ pub static CONNECTOR_INVENTORY: &[ConnectorEntry] = &[
 
 /// Generate readiness verdicts for all connectors in the inventory.
 ///
-/// Typed connectors are assessed as **Ready** (all metadata present).
+/// Typed connectors with manifests are assessed as **Ready**.
 /// JSON connectors are assessed as **Ready** (schemas present) but with
 /// cosmetic `AgentHints` gaps since they lack typed `when_to_use` fields.
-/// Connectors missing `manifest.toml` receive an additional `Identity` gap.
+/// Connectors missing `manifest.toml` stay **NotReady** because critical
+/// identity/config metadata is unavailable.
 #[allow(clippy::too_many_lines)]
 pub fn audit_all_connectors() -> Vec<ReadinessVerdict> {
     CONNECTOR_INVENTORY
@@ -3755,8 +3757,9 @@ pub fn audit_all_connectors() -> Vec<ReadinessVerdict> {
         .map(|entry| {
             let mut gaps = Vec::new();
 
-            // All connectors have schemas in their operations_info(), so they
-            // pass the Degraded threshold. The only remaining gaps are Cosmetic.
+            // All connectors have schemas in their operations_info(), so the
+            // remaining readiness gaps are about metadata truthfulness rather
+            // than operation shape.
 
             if !entry.has_agent_hints {
                 gaps.push(ReadinessGap {
@@ -3774,7 +3777,7 @@ pub fn audit_all_connectors() -> Vec<ReadinessVerdict> {
                 gaps.push(ReadinessGap {
                     category: GapCategory::Identity,
                     description: "Missing manifest.toml — network constraints, categories, and archetype metadata unavailable".to_owned(),
-                    severity: GapSeverity::Cosmetic,
+                    severity: GapSeverity::Blocking,
                     remediation: format!(
                         "Create connectors/{}/manifest.toml with connector metadata",
                         entry.name
@@ -3816,7 +3819,7 @@ pub fn audit_all_connectors() -> Vec<ReadinessVerdict> {
                         all_have_safety_tier: true,
                         all_have_idempotency: true,
                         all_have_ai_hints: entry.has_agent_hints,
-                        approval_declared_where_needed: false,
+                        approval_declared_where_needed: true,
                         operations_with_examples: if entry.has_agent_hints {
                             entry.operation_count
                         } else {
@@ -7036,9 +7039,11 @@ mod tests {
         let typed_ready: Vec<_> = results
             .iter()
             .filter(|v| {
-                CONNECTOR_INVENTORY
-                    .iter()
-                    .any(|e| e.name == v.connector_id && e.metadata_tier == MetadataTier::Typed)
+                CONNECTOR_INVENTORY.iter().any(|e| {
+                    e.name == v.connector_id
+                        && e.metadata_tier == MetadataTier::Typed
+                        && e.has_manifest
+                })
             })
             .collect();
 
@@ -7047,6 +7052,40 @@ mod tests {
                 verdict.level,
                 ReadinessLevel::Ready,
                 "{} should be ready",
+                verdict.connector_id
+            );
+        }
+    }
+
+    #[test]
+    fn audit_missing_manifest_connectors_are_not_ready() {
+        let results = audit_all_connectors();
+
+        for verdict in results.iter().filter(|verdict| {
+            CONNECTOR_INVENTORY
+                .iter()
+                .any(|entry| entry.name == verdict.connector_id && !entry.has_manifest)
+        }) {
+            assert_eq!(
+                verdict.level,
+                ReadinessLevel::NotReady,
+                "{} should stay not-ready until manifest metadata exists",
+                verdict.connector_id
+            );
+            assert!(verdict.gaps.iter().any(|gap| {
+                gap.category == GapCategory::Identity && gap.severity == GapSeverity::Blocking
+            }));
+        }
+    }
+
+    #[test]
+    fn audit_inventory_does_not_blanket_fail_approval_readiness() {
+        let results = audit_all_connectors();
+
+        for verdict in &results {
+            assert!(
+                verdict.areas.operations.approval_declared_where_needed,
+                "{} should not report a synthetic approval metadata failure",
                 verdict.connector_id
             );
         }

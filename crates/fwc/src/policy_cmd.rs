@@ -3303,4 +3303,502 @@ mod tests {
         };
         assert!(transport_policy_changed(&before, &after));
     }
+
+    // ── transport_policy_changed — all same-field toggles ────────────
+
+    #[test]
+    fn transport_policy_only_lan_unchanged_others_change() {
+        let before = fcp_core::ZoneTransportPolicy {
+            allow_lan: true,
+            allow_derp: false,
+            allow_funnel: false,
+        };
+        let mut after = before.clone();
+        after.allow_derp = true;
+        assert!(transport_policy_changed(&before, &after));
+    }
+
+    #[test]
+    fn transport_policy_funnel_disabled_no_change() {
+        let policy = fcp_core::ZoneTransportPolicy {
+            allow_lan: true,
+            allow_derp: true,
+            allow_funnel: false,
+        };
+        assert!(!transport_policy_changed(&policy, &policy));
+    }
+
+    // ── compute_risk_flags — all transport flags ──────────────────────
+
+    #[test]
+    fn risk_flags_all_three_transport_enabled() {
+        let added = PolicyListDiff::default();
+        let changed = PolicyChangedFields {
+            transport_policy: Some(TransportPolicyChange {
+                before: fcp_core::ZoneTransportPolicy {
+                    allow_lan: false,
+                    allow_derp: false,
+                    allow_funnel: false,
+                },
+                after: fcp_core::ZoneTransportPolicy {
+                    allow_lan: true,
+                    allow_derp: true,
+                    allow_funnel: true,
+                },
+            }),
+            ..Default::default()
+        };
+        let flags = compute_risk_flags(&added, &changed);
+        assert!(flags.contains(&"transport_lan_enabled".to_string()));
+        assert!(flags.contains(&"transport_derp_enabled".to_string()));
+        assert!(flags.contains(&"transport_funnel_enabled".to_string()));
+    }
+
+    #[test]
+    fn risk_flags_no_transport_flags_when_disabling_all() {
+        let added = PolicyListDiff::default();
+        let changed = PolicyChangedFields {
+            transport_policy: Some(TransportPolicyChange {
+                before: fcp_core::ZoneTransportPolicy {
+                    allow_lan: true,
+                    allow_derp: true,
+                    allow_funnel: true,
+                },
+                after: fcp_core::ZoneTransportPolicy {
+                    allow_lan: false,
+                    allow_derp: false,
+                    allow_funnel: false,
+                },
+            }),
+            ..Default::default()
+        };
+        let flags = compute_risk_flags(&added, &changed);
+        assert!(!flags.contains(&"transport_lan_enabled".to_string()));
+        assert!(!flags.contains(&"transport_derp_enabled".to_string()));
+        assert!(!flags.contains(&"transport_funnel_enabled".to_string()));
+    }
+
+    // ── compute_risk_flags — combined list + transport ────────────────
+
+    #[test]
+    fn risk_flags_all_list_types_expanded() {
+        let added = PolicyListDiff {
+            principal_allow: vec!["user:*".to_string()],
+            connector_allow: vec!["c:*".to_string()],
+            capability_allow: vec!["cap:all".to_string()],
+            ..Default::default()
+        };
+        let changed = PolicyChangedFields::default();
+        let flags = compute_risk_flags(&added, &changed);
+        assert!(flags.contains(&"principal_allow_expanded".to_string()));
+        assert!(flags.contains(&"connector_allow_expanded".to_string()));
+        assert!(flags.contains(&"capability_allow_expanded".to_string()));
+        assert_eq!(flags.len(), 3);
+    }
+
+    #[test]
+    fn risk_flags_deny_list_no_risk() {
+        let added = PolicyListDiff {
+            principal_deny: vec!["user:bad".to_string()],
+            connector_deny: vec!["c:bad".to_string()],
+            capability_deny: vec!["cap:dangerous".to_string()],
+            ..Default::default()
+        };
+        let changed = PolicyChangedFields::default();
+        let flags = compute_risk_flags(&added, &changed);
+        assert!(flags.is_empty(), "deny-list expansions should not raise risk flags");
+    }
+
+    // ── diff_json_objects — nested and complex scenarios ─────────────
+
+    #[test]
+    fn diff_json_objects_nested_value_change() {
+        let before = serde_json::json!({"config": {"level": 1}});
+        let after = serde_json::json!({"config": {"level": 2}});
+        let diff = diff_json_objects(&before, &after).unwrap();
+        assert!(diff.changed.contains_key("config"));
+        assert!(diff.added.is_empty());
+        assert!(diff.removed.is_empty());
+    }
+
+    #[test]
+    fn diff_json_objects_null_value_tracked() {
+        let before = serde_json::json!({"x": null});
+        let after = serde_json::json!({"x": 1});
+        let diff = diff_json_objects(&before, &after).unwrap();
+        assert!(diff.changed.contains_key("x"));
+    }
+
+    #[test]
+    fn diff_json_objects_string_change() {
+        let before = serde_json::json!({"name": "alpha"});
+        let after = serde_json::json!({"name": "beta"});
+        let diff = diff_json_objects(&before, &after).unwrap();
+        assert!(diff.changed.contains_key("name"));
+    }
+
+    #[test]
+    fn diff_json_objects_all_three_at_once() {
+        let before = serde_json::json!({"a": 1, "b": 2});
+        let after = serde_json::json!({"b": 99, "c": 3});
+        let diff = diff_json_objects(&before, &after).unwrap();
+        assert!(diff.removed.contains_key("a"));
+        assert!(diff.added.contains_key("c"));
+        assert!(diff.changed.contains_key("b"));
+    }
+
+    // ── diff_patterns — multi-element scenarios ───────────────────────
+
+    #[test]
+    fn diff_patterns_large_sets_overlap() {
+        let before: Vec<_> = (0..5)
+            .map(|i| fcp_core::PolicyPattern {
+                pattern: format!("pattern-{i}"),
+            })
+            .collect();
+        let after: Vec<_> = (3..8)
+            .map(|i| fcp_core::PolicyPattern {
+                pattern: format!("pattern-{i}"),
+            })
+            .collect();
+        let (added, removed) = diff_patterns(&before, &after);
+        // 5,6,7 are new
+        assert_eq!(added.len(), 3);
+        // 0,1,2 are removed
+        assert_eq!(removed.len(), 3);
+    }
+
+    // ── diff_capability_ids — more coverage ──────────────────────────
+
+    #[test]
+    fn diff_capability_ids_multiple_added_and_removed() {
+        let before: Vec<fcp_core::CapabilityId> = vec![
+            "cap.read".parse().unwrap(),
+            "cap.write".parse().unwrap(),
+            "cap.admin".parse().unwrap(),
+        ];
+        let after: Vec<fcp_core::CapabilityId> = vec![
+            "cap.read".parse().unwrap(),
+            "cap.exec".parse().unwrap(),
+        ];
+        let (added, removed) = diff_capability_ids(&before, &after);
+        assert!(added.contains(&"cap.exec".to_string()));
+        assert!(removed.contains(&"cap.write".to_string()));
+        assert!(removed.contains(&"cap.admin".to_string()));
+        assert!(!added.contains(&"cap.read".to_string()));
+        assert!(!removed.contains(&"cap.read".to_string()));
+    }
+
+    // ── parse_simulation_input — InvokeRequest shape ─────────────────
+
+    #[test]
+    fn parse_simulation_input_valid_invoke_request() {
+        let invoke = InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: fcp_core::RequestId::new("req-sim"),
+            connector_id: "fcp.test:base:v1".parse().unwrap(),
+            operation: "op".parse().unwrap(),
+            zone_id: fcp_core::ZoneId::work(),
+            input: serde_json::json!({"key": "val"}),
+            capability_token: fcp_core::CapabilityToken::test_token(),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        };
+        let raw = serde_json::to_string(&invoke).unwrap();
+        let input = parse_simulation_input(&raw).unwrap();
+        assert_eq!(input.invoke_request.id, fcp_core::RequestId::new("req-sim"));
+    }
+
+    // ── PolicyBundleState — zone mismatch in audit events ────────────
+
+    #[test]
+    fn policy_bundle_state_validate_wrong_zone_in_audit_event_detail() {
+        let bundle = test_bundle("bnd-z", ZoneId::work(), 1, None);
+        let now = Utc::now();
+        let mut state = PolicyBundleState::new(bundle, now);
+        let event = build_bundle_audit_event(
+            POLICY_BUNDLE_EVENT_APPLIED,
+            &ZoneId::work(),
+            "bnd-z",
+            None,
+            1,
+            now,
+        )
+        .unwrap();
+        let mut bad_event = event;
+        bad_event.zone_id = "z:unknown".to_string();
+        state.audit_events.push(bad_event);
+        let err = state.validate().unwrap_err();
+        assert!(err.to_string().contains("audit event zone"));
+    }
+
+    // ── write_bundle_state + load_bundle_state roundtrip ─────────────
+
+    #[test]
+    fn write_and_load_bundle_state_roundtrip() {
+        let temp_dir = TempDir::new().unwrap();
+        let bundle = test_bundle("bnd-rt", ZoneId::work(), 1, None);
+        let state = PolicyBundleState::new(bundle, Utc::now());
+        let path = temp_dir.path().join("rt-state.json");
+
+        write_bundle_state(&path, &state).unwrap();
+        let loaded = load_bundle_state_optional(&path).unwrap().unwrap();
+        assert_eq!(loaded.current.bundle.bundle_id, "bnd-rt");
+        assert_eq!(loaded.format, POLICY_BUNDLE_STATE_FORMAT);
+        assert_eq!(loaded.schema_version, POLICY_BUNDLE_STATE_SCHEMA_VERSION);
+    }
+
+    // ── PolicyBundleStateSnapshot — clone and debug ───────────────────
+
+    #[test]
+    fn snapshot_clone_and_debug() {
+        let bundle = test_bundle("bnd-snap-dbg", ZoneId::work(), 1, None);
+        let snap = PolicyBundleStateSnapshot {
+            bundle,
+            applied_at: Utc::now(),
+        };
+        let cloned = snap.clone();
+        assert_eq!(snap.bundle.bundle_id, cloned.bundle.bundle_id);
+        let debug_str = format!("{:?}", snap);
+        assert!(debug_str.contains("PolicyBundleStateSnapshot"));
+    }
+
+    // ── validate_apply_transition — bundle with explicit None previous ─
+
+    #[test]
+    fn validate_apply_transition_bundle_claims_previous_matches_current() {
+        let bundle_a = test_bundle("bnd-prev", ZoneId::work(), 1, None);
+        let state = PolicyBundleState::new(bundle_a, Utc::now());
+        // bundle declares correct previous
+        let bundle_b = test_bundle("bnd-cur", ZoneId::work(), 2, Some("bnd-prev"));
+        assert!(validate_apply_transition(Some(&state), &bundle_b).is_ok());
+    }
+
+    // ── validate_rollback_transition — multiple hops ──────────────────
+
+    #[test]
+    fn validate_rollback_transition_multi_hop_chain() {
+        // State is at bundle-c, which claims previous=bundle-b
+        // Rolling back to bundle-b should succeed
+        let bundle_b = test_bundle("bnd-b", ZoneId::work(), 2, None);
+        let bundle_c = test_bundle("bnd-c", ZoneId::work(), 3, Some("bnd-b"));
+        let state = PolicyBundleState::new(bundle_c, Utc::now());
+        assert!(validate_rollback_transition(&state, &bundle_b).is_ok());
+    }
+
+    // ── parse_created_at — various edge cases ────────────────────────
+
+    #[test]
+    fn parse_created_at_leap_year_date() {
+        let dt = parse_created_at(Some("2024-02-29T00:00:00Z"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(dt.timestamp(), 1_709_164_800);
+    }
+
+    #[test]
+    fn parse_created_at_far_future() {
+        let dt = parse_created_at(Some("2099-12-31T23:59:59Z"))
+            .unwrap()
+            .unwrap();
+        assert!(dt.timestamp() > 0);
+    }
+
+    #[test]
+    fn parse_created_at_negative_offset() {
+        let dt = parse_created_at(Some("2026-03-01T06:00:00-06:00"))
+            .unwrap()
+            .unwrap();
+        // -06:00 means UTC is 12:00:00
+        assert!(dt.to_rfc3339().contains("12:00:00"));
+    }
+
+    // ── PolicyBundleState next_audit_seq multiple events ─────────────
+
+    #[test]
+    fn policy_bundle_state_next_audit_seq_increments_from_last() {
+        let bundle = test_bundle("bnd-seq", ZoneId::work(), 1, None);
+        let now = Utc::now();
+        let mut state = PolicyBundleState::new(bundle, now);
+
+        for i in 1_u64..=4 {
+            let event = build_bundle_audit_event(
+                POLICY_BUNDLE_EVENT_APPLIED,
+                &ZoneId::work(),
+                "bnd-seq",
+                None,
+                i,
+                now,
+            )
+            .unwrap();
+            state.audit_events.push(event);
+        }
+
+        assert_eq!(state.next_audit_seq(), 5);
+    }
+
+    // ── bundle_apply sequential — prev pointer preserved ─────────────
+
+    #[test]
+    fn bundle_apply_sequential_two_bundles_previous_pointer_set() {
+        let temp_dir = TempDir::new().unwrap();
+        let bundle_a = test_bundle("bnd-seq-a", ZoneId::work(), 1, None);
+        let bundle_b = test_bundle("bnd-seq-b", ZoneId::work(), 2, Some("bnd-seq-a"));
+        let path_a = write_bundle_file(&temp_dir, "bnd-seq-a.json", &bundle_a);
+        let path_b = write_bundle_file(&temp_dir, "bnd-seq-b.json", &bundle_b);
+        let state_path = temp_dir.path().join("state-seq.json");
+
+        run_bundle_apply(&BundleApplyArgs {
+            bundle: path_a,
+            state: state_path.clone(),
+            plan: false,
+            json: true,
+        })
+        .unwrap();
+        run_bundle_apply(&BundleApplyArgs {
+            bundle: path_b,
+            state: state_path.clone(),
+            plan: false,
+            json: true,
+        })
+        .unwrap();
+
+        let state = load_bundle_state_optional(&state_path).unwrap().unwrap();
+        assert_eq!(state.current.bundle.bundle_id, "bnd-seq-b");
+        assert_eq!(
+            state.previous.as_ref().map(|s| s.bundle.bundle_id.as_str()),
+            Some("bnd-seq-a")
+        );
+        assert_eq!(state.audit_events.len(), 2);
+    }
+
+    // ── build_bundle_audit_event — event fields ───────────────────────
+
+    #[test]
+    fn audit_event_has_nonzero_occurred_at_for_recent_ts() {
+        let event = build_bundle_audit_event(
+            POLICY_BUNDLE_EVENT_APPLIED,
+            &ZoneId::work(),
+            "bnd-ts",
+            None,
+            1,
+            Utc::now(),
+        )
+        .unwrap();
+        assert!(event.occurred_at > 0);
+    }
+
+    #[test]
+    fn audit_event_zone_matches_input() {
+        let event = build_bundle_audit_event(
+            POLICY_BUNDLE_EVENT_ROLLED_BACK,
+            &ZoneId::work(),
+            "bnd-zone",
+            None,
+            1,
+            Utc::now(),
+        )
+        .unwrap();
+        assert_eq!(event.zone_id, "z:work");
+    }
+
+    #[test]
+    fn audit_event_event_type_matches_input() {
+        let event = build_bundle_audit_event(
+            "custom.event.type",
+            &ZoneId::work(),
+            "bnd-etype",
+            None,
+            1,
+            Utc::now(),
+        )
+        .unwrap();
+        assert_eq!(event.event_type, "custom.event.type");
+    }
+
+    #[test]
+    fn audit_event_occurred_at_iso_matches_utc() {
+        let ts = DateTime::parse_from_rfc3339("2026-04-15T08:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let event = build_bundle_audit_event(
+            POLICY_BUNDLE_EVENT_APPLIED,
+            &ZoneId::work(),
+            "bnd-iso2",
+            None,
+            1,
+            ts,
+        )
+        .unwrap();
+        assert_eq!(event.occurred_at_iso, "2026-04-15T08:30:00Z");
+    }
+
+    // ── PolicyDocument zone_id accessor ──────────────────────────────
+
+    #[test]
+    fn policy_document_zone_policy_zone_id_accessor() {
+        let zone = fcp_core::ZoneId::work();
+        let doc = PolicyDocument::ZonePolicy(base_policy(zone.clone()));
+        assert_eq!(*doc.zone_id(), zone);
+    }
+
+    // ── bundle_apply after successful rollback ────────────────────────
+
+    #[test]
+    fn bundle_apply_after_rollback_advances_chain() {
+        let temp_dir = TempDir::new().unwrap();
+        let bnd_a = test_bundle("bnd-chain-a", ZoneId::work(), 1, None);
+        let bnd_b = test_bundle("bnd-chain-b", ZoneId::work(), 2, Some("bnd-chain-a"));
+        let bnd_c = test_bundle("bnd-chain-c", ZoneId::work(), 3, Some("bnd-chain-b"));
+        let pa = write_bundle_file(&temp_dir, "bnd-chain-a.json", &bnd_a);
+        let pb = write_bundle_file(&temp_dir, "bnd-chain-b.json", &bnd_b);
+        let pc = write_bundle_file(&temp_dir, "bnd-chain-c.json", &bnd_c);
+        let state_path = temp_dir.path().join("chain-state.json");
+
+        // Apply a, b
+        run_bundle_apply(&BundleApplyArgs {
+            bundle: pa.clone(),
+            state: state_path.clone(),
+            plan: false,
+            json: true,
+        })
+        .unwrap();
+        run_bundle_apply(&BundleApplyArgs {
+            bundle: pb,
+            state: state_path.clone(),
+            plan: false,
+            json: true,
+        })
+        .unwrap();
+
+        // Rollback to a
+        run_bundle_rollback(&BundleRollbackArgs {
+            to: pa,
+            state: state_path.clone(),
+            plan: false,
+            json: true,
+        })
+        .unwrap();
+
+        // Now re-apply b and then c
+        let bnd_b2 = test_bundle("bnd-chain-b2", ZoneId::work(), 4, Some("bnd-chain-a"));
+        let pb2 = write_bundle_file(&temp_dir, "bnd-chain-b2.json", &bnd_b2);
+        run_bundle_apply(&BundleApplyArgs {
+            bundle: pb2,
+            state: state_path.clone(),
+            plan: false,
+            json: true,
+        })
+        .unwrap();
+
+        let _ = pc; // bundle_c no longer needed — just confirm state is valid
+        let state = load_bundle_state_optional(&state_path).unwrap().unwrap();
+        assert_eq!(state.current.bundle.bundle_id, "bnd-chain-b2");
+    }
 }

@@ -13,10 +13,17 @@ pub fn generate_template(
     required_only: bool,
     fill: &BTreeMap<String, String>,
 ) -> Value {
-    match schema.get("type").and_then(Value::as_str) {
-        Some("object") => generate_object(schema, required_only, fill, &[]),
-        Some("array") => generate_array(schema, required_only, fill, &[]),
+    let resolved = resolve_schema(schema);
+    match resolved.get("type").and_then(Value::as_str) {
+        Some("object") => generate_object(&resolved, required_only, fill, &[]),
+        Some("array") => generate_array(&resolved, required_only, fill, &[]),
         Some(type_name) => placeholder_for_type(type_name, false),
+        None if resolved.get("properties").is_some() => {
+            generate_object(&resolved, required_only, fill, &[])
+        }
+        None if resolved.get("items").is_some() => {
+            generate_array(&resolved, required_only, fill, &[])
+        }
         None => json!("<unknown>"),
     }
 }
@@ -84,18 +91,20 @@ fn generate_property(
     fill: &BTreeMap<String, String>,
     path: &[String],
 ) -> Value {
+    let resolved = resolve_schema(schema);
+
     // If there's a default value, use it.
-    if let Some(default) = schema.get("default") {
+    if let Some(default) = resolved.get("default") {
         return default.clone();
     }
 
     // If there's an example value, use it.
-    if let Some(example) = schema.get("example") {
+    if let Some(example) = resolved.get("example") {
         return example.clone();
     }
 
     // If there's an enum, show the first value.
-    if let Some(enum_values) = schema.get("enum").and_then(Value::as_array) {
+    if let Some(enum_values) = resolved.get("enum").and_then(Value::as_array) {
         if let Some(first) = enum_values.first() {
             let suffix = if enum_values.len() > 1 {
                 format!(
@@ -117,15 +126,17 @@ fn generate_property(
         }
     }
 
-    let type_name = schema
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or("string");
-
-    match type_name {
-        "object" => generate_object(schema, required_only, fill, path),
-        "array" => generate_array(schema, required_only, fill, path),
-        _ => placeholder_for_type(type_name, is_required),
+    match resolved.get("type").and_then(Value::as_str) {
+        Some("object") => generate_object(&resolved, required_only, fill, path),
+        Some("array") => generate_array(&resolved, required_only, fill, path),
+        Some(type_name) => placeholder_for_type(type_name, is_required),
+        None if resolved.get("properties").is_some() => {
+            generate_object(&resolved, required_only, fill, path)
+        }
+        None if resolved.get("items").is_some() => {
+            generate_array(&resolved, required_only, fill, path)
+        }
+        None => placeholder_for_type("string", is_required),
     }
 }
 
@@ -135,12 +146,131 @@ fn generate_array(
     fill: &BTreeMap<String, String>,
     path: &[String],
 ) -> Value {
-    let item_schema = schema
+    let resolved = resolve_schema(schema);
+    let item_schema = resolved
         .get("items")
         .cloned()
         .unwrap_or(json!({"type": "string"}));
     let item = generate_property(&item_schema, false, required_only, fill, path);
     json!([item])
+}
+
+fn resolve_schema(schema: &Value) -> Value {
+    let mut resolved = if let Some(all_of) = schema.get("allOf").and_then(Value::as_array) {
+        let mut base = schema.clone();
+        if let Some(map) = base.as_object_mut() {
+            map.remove("allOf");
+        }
+        all_of.iter().fold(base, |acc, variant| {
+            merge_schema_values(&acc, &resolve_schema(variant))
+        })
+    } else if let Some(variant) = select_preferred_variant(schema) {
+        let mut base = schema.clone();
+        if let Some(map) = base.as_object_mut() {
+            map.remove("oneOf");
+            map.remove("anyOf");
+        }
+        merge_schema_values(&base, &resolve_schema(variant))
+    } else {
+        schema.clone()
+    };
+    resolve_nested_schema(&mut resolved);
+    resolved
+}
+
+fn resolve_nested_schema(schema: &mut Value) {
+    let Some(map) = schema.as_object_mut() else {
+        return;
+    };
+
+    if let Some(props) = map.get_mut("properties").and_then(Value::as_object_mut) {
+        for property in props.values_mut() {
+            *property = resolve_schema(property);
+        }
+    }
+
+    if let Some(items) = map.get_mut("items") {
+        *items = resolve_schema(items);
+    }
+}
+
+fn merge_schema_values(base: &Value, overlay: &Value) -> Value {
+    let (Some(base_map), Some(overlay_map)) = (base.as_object(), overlay.as_object()) else {
+        return if base.is_null() {
+            overlay.clone()
+        } else {
+            base.clone()
+        };
+    };
+
+    let mut merged = base_map.clone();
+    for (key, overlay_value) in overlay_map {
+        match key.as_str() {
+            "allOf" => {}
+            "properties" => {
+                let combined = match (
+                    merged.get("properties").and_then(Value::as_object),
+                    overlay_value.as_object(),
+                ) {
+                    (Some(existing), Some(additional)) => {
+                        let mut props = existing.clone();
+                        for (name, prop_schema) in additional {
+                            let merged_prop = props
+                                .get(name)
+                                .map(|existing_prop| {
+                                    merge_schema_values(existing_prop, prop_schema)
+                                })
+                                .unwrap_or_else(|| prop_schema.clone());
+                            props.insert(name.clone(), merged_prop);
+                        }
+                        Value::Object(props)
+                    }
+                    (None, Some(additional)) => Value::Object(additional.clone()),
+                    _ => overlay_value.clone(),
+                };
+                merged.insert(key.clone(), combined);
+            }
+            "required" => {
+                let mut required = std::collections::BTreeSet::new();
+                if let Some(existing) = merged.get("required").and_then(Value::as_array) {
+                    required.extend(existing.iter().filter_map(Value::as_str).map(str::to_owned));
+                }
+                if let Some(additional) = overlay_value.as_array() {
+                    required.extend(
+                        additional
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned),
+                    );
+                }
+                merged.insert(
+                    key.clone(),
+                    Value::Array(required.into_iter().map(Value::String).collect()),
+                );
+            }
+            "items" => {
+                let combined = merged
+                    .get("items")
+                    .map(|existing| merge_schema_values(existing, overlay_value))
+                    .unwrap_or_else(|| overlay_value.clone());
+                merged.insert(key.clone(), combined);
+            }
+            _ => {
+                merged
+                    .entry(key.clone())
+                    .or_insert_with(|| overlay_value.clone());
+            }
+        }
+    }
+
+    Value::Object(merged)
+}
+
+fn select_preferred_variant(schema: &Value) -> Option<&Value> {
+    ["oneOf", "anyOf"]
+        .into_iter()
+        .find_map(|key| schema.get(key).and_then(Value::as_array))
+        .and_then(|variants| variants.first())
 }
 
 fn placeholder_for_type(type_name: &str, is_required: bool) -> Value {
@@ -528,6 +658,86 @@ mod tests {
         let schema = json!({});
         let result = generate_template(&schema, false, &BTreeMap::new());
         assert_eq!(result, "<unknown>");
+    }
+
+    #[test]
+    fn all_of_schema_merges_required_properties() {
+        let schema = json!({
+            "allOf": [
+                {
+                    "type": "object",
+                    "required": ["owner"],
+                    "properties": {
+                        "owner": { "type": "string" }
+                    }
+                },
+                {
+                    "type": "object",
+                    "required": ["repo"],
+                    "properties": {
+                        "repo": { "type": "string" }
+                    }
+                }
+            ]
+        });
+        let result = generate_template(&schema, false, &BTreeMap::new());
+        assert_eq!(result["owner"], "<string:required>");
+        assert_eq!(result["repo"], "<string:required>");
+    }
+
+    #[test]
+    fn one_of_schema_uses_first_variant_template() {
+        let schema = json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "required": ["kind", "id"],
+                    "properties": {
+                        "kind": { "type": "string", "enum": ["user", "service"] },
+                        "id": { "type": "integer" }
+                    }
+                },
+                {
+                    "type": "object",
+                    "required": ["name"],
+                    "properties": {
+                        "name": { "type": "string" }
+                    }
+                }
+            ]
+        });
+        let result = generate_template(&schema, false, &BTreeMap::new());
+        assert_eq!(result["kind"], "user|service");
+        assert_eq!(result["id"], "<integer:required>");
+        assert!(result.get("name").is_none());
+    }
+
+    #[test]
+    fn nested_composed_property_generates_object_template() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "auth": {
+                    "allOf": [
+                        {
+                            "type": "object",
+                            "required": ["token"],
+                            "properties": {
+                                "token": { "type": "string" }
+                            }
+                        },
+                        {
+                            "properties": {
+                                "region": { "type": "string" }
+                            }
+                        }
+                    ]
+                }
+            }
+        });
+        let result = generate_template(&schema, false, &BTreeMap::new());
+        assert_eq!(result["auth"]["token"], "<string:required>");
+        assert_eq!(result["auth"]["region"], "<string:optional>");
     }
 
     #[test]

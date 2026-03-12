@@ -1874,4 +1874,882 @@ mod tests {
         assert_eq!(parse_window("abc"), None);
         assert_eq!(parse_window(""), None);
     }
+
+    // ── Additional parse_window tests ────────────────────────────
+
+    #[test]
+    fn parse_window_negative_returns_none() {
+        assert_eq!(parse_window("-5m"), None);
+        assert_eq!(parse_window("-1h"), None);
+    }
+
+    #[test]
+    fn parse_window_zero() {
+        assert_eq!(parse_window("0s"), Some(Duration::seconds(0)));
+        assert_eq!(parse_window("0m"), Some(Duration::minutes(0)));
+    }
+
+    #[test]
+    fn parse_window_large_value() {
+        assert_eq!(parse_window("365d"), Some(Duration::days(365)));
+        assert_eq!(parse_window("9999s"), Some(Duration::seconds(9999)));
+    }
+
+    #[test]
+    fn parse_window_whitespace_trimmed() {
+        assert_eq!(parse_window("  10m  "), Some(Duration::minutes(10)));
+    }
+
+    #[test]
+    fn parse_window_bare_number_treated_as_seconds() {
+        // No suffix => the parser strips 's' suffix first, then falls through
+        // A bare number has no recognized suffix so unit defaults to 's'
+        assert_eq!(parse_window("60"), Some(Duration::seconds(60)));
+    }
+
+    // ── Additional EventTrigger tests ────────────────────────────
+
+    #[test]
+    fn trigger_clone_is_independent() {
+        let t = EventTrigger::new("slack", "message.new").with_match("data.text~bug");
+        let t2 = t.clone();
+        assert_eq!(t.connector, t2.connector);
+        assert_eq!(t.event_type, t2.event_type);
+        assert_eq!(t.match_expr, t2.match_expr);
+    }
+
+    #[test]
+    fn trigger_serde_round_trip() {
+        let t = EventTrigger::new("jira", "issue.created").with_match("data.priority~high");
+        let json = serde_json::to_string(&t).unwrap();
+        let t2: EventTrigger = serde_json::from_str(&json).unwrap();
+        assert_eq!(t2.connector, "jira");
+        assert_eq!(t2.event_type, "issue.created");
+        assert_eq!(t2.match_expr.as_deref(), Some("data.priority~high"));
+    }
+
+    #[test]
+    fn trigger_serde_no_match_field() {
+        let t = EventTrigger::new("slack", "message.new");
+        let json = serde_json::to_value(&t).unwrap();
+        // match_expr is None, should serialize as null
+        assert!(json.get("match").unwrap().is_null());
+    }
+
+    // ── Additional RuleAction tests ──────────────────────────────
+
+    #[test]
+    fn action_clone_preserves_inputs() {
+        let a = sample_action();
+        let a2 = a.clone();
+        assert_eq!(a.input, a2.input);
+    }
+
+    #[test]
+    fn action_serde_round_trip() {
+        let a = RuleAction::new("github", "create_issue")
+            .with_input("title", "Test")
+            .with_input("labels", "bug,urgent");
+        let json = serde_json::to_string(&a).unwrap();
+        let a2: RuleAction = serde_json::from_str(&json).unwrap();
+        assert_eq!(a2.connector, "github");
+        assert_eq!(a2.operation, "create_issue");
+        assert_eq!(a2.input.len(), 2);
+        assert_eq!(a2.input["labels"], "bug,urgent");
+    }
+
+    #[test]
+    fn action_empty_input_map() {
+        let a = RuleAction::new("slack", "send_message");
+        let json = serde_json::to_value(&a).unwrap();
+        assert!(json["input"].as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn action_with_input_overwrites_existing_key() {
+        let a = RuleAction::new("github", "create_issue")
+            .with_input("title", "first")
+            .with_input("title", "second");
+        assert_eq!(a.input["title"], "second");
+    }
+
+    // ── Additional RuleThrottle tests ────────────────────────────
+
+    #[test]
+    fn throttle_serde_round_trip() {
+        let t = RuleThrottle::new(20, "30m");
+        let json = serde_json::to_string(&t).unwrap();
+        let t2: RuleThrottle = serde_json::from_str(&json).unwrap();
+        assert_eq!(t2.max, 20);
+        assert_eq!(t2.window, "30m");
+    }
+
+    #[test]
+    fn throttle_window_seconds_duration() {
+        let t = RuleThrottle::new(100, "120s");
+        assert_eq!(t.window_duration(), Some(Duration::seconds(120)));
+    }
+
+    // ── Additional Rule tests ────────────────────────────────────
+
+    #[test]
+    fn rule_clone_is_independent() {
+        let r = sample_rule().with_description("desc").with_enabled(false);
+        let r2 = r.clone();
+        assert_eq!(r.name, r2.name);
+        assert_eq!(r.description, r2.description);
+        assert_eq!(r.enabled, r2.enabled);
+    }
+
+    #[test]
+    fn rule_serde_round_trip_json() {
+        let r = sample_rule()
+            .with_description("Triage bugs")
+            .with_throttle(RuleThrottle::new(3, "10m"));
+        let json = serde_json::to_string(&r).unwrap();
+        let r2: Rule = serde_json::from_str(&json).unwrap();
+        assert_eq!(r2.name, "bug-to-issue");
+        assert_eq!(r2.description, "Triage bugs");
+        assert_eq!(r2.throttle.max, 3);
+        assert!(r2.enabled);
+    }
+
+    #[test]
+    fn rule_default_throttle_is_10_per_hour() {
+        let r = sample_rule();
+        assert_eq!(r.throttle.max, 10);
+        assert_eq!(r.throttle.window, "1h");
+    }
+
+    #[test]
+    fn rule_enabled_by_default() {
+        let r = Rule::new(
+            "test",
+            EventTrigger::new("a", "b"),
+            RuleAction::new("c", "d"),
+        );
+        assert!(r.enabled);
+    }
+
+    // ── Additional IncomingEvent tests ───────────────────────────
+
+    #[test]
+    fn event_serializes_to_json() {
+        let e = sample_event();
+        let json = serde_json::to_value(&e).unwrap();
+        assert_eq!(json["connector"], "slack");
+        assert_eq!(json["event_type"], "message.new");
+        assert_eq!(json["data"]["text"], "Found a bug in login");
+    }
+
+    #[test]
+    fn event_without_event_id_omits_field_in_json() {
+        let e = sample_event();
+        let json = serde_json::to_value(&e).unwrap();
+        assert!(json.get("event_id").is_none());
+    }
+
+    #[test]
+    fn event_with_event_id_includes_field_in_json() {
+        let e = sample_event().with_event_id("evt-42");
+        let json = serde_json::to_value(&e).unwrap();
+        assert_eq!(json["event_id"], "evt-42");
+    }
+
+    #[test]
+    fn event_empty_data() {
+        let e = IncomingEvent::new("slack", "ping");
+        assert!(e.data.is_empty());
+        assert_eq!(e.get_field("anything"), None);
+    }
+
+    #[test]
+    fn event_dedup_identity_empty_event_id_uses_hash() {
+        let e = IncomingEvent::new("slack", "message.new").with_event_id("");
+        let id = e.dedup_identity();
+        assert!(id.starts_with("hash:"), "empty event_id should use hash fallback");
+    }
+
+    #[test]
+    fn event_dedup_identity_different_data_different_hash() {
+        let e1 = IncomingEvent::new("slack", "message.new").with_data("text", "hello");
+        let e2 = IncomingEvent::new("slack", "message.new").with_data("text", "goodbye");
+        assert_ne!(e1.dedup_identity(), e2.dedup_identity());
+    }
+
+    #[test]
+    fn event_dedup_identity_different_connector_different_hash() {
+        let e1 = IncomingEvent::new("slack", "message.new").with_data("text", "hello");
+        let e2 = IncomingEvent::new("discord", "message.new").with_data("text", "hello");
+        assert_ne!(e1.dedup_identity(), e2.dedup_identity());
+    }
+
+    #[test]
+    fn event_dedup_identity_different_type_different_hash() {
+        let e1 = IncomingEvent::new("slack", "message.new").with_data("x", "y");
+        let e2 = IncomingEvent::new("slack", "message.deleted").with_data("x", "y");
+        assert_ne!(e1.dedup_identity(), e2.dedup_identity());
+    }
+
+    #[test]
+    fn event_get_field_with_data_prefix() {
+        let e = sample_event();
+        // Both "data.text" and "text" should resolve to the same value
+        assert_eq!(e.get_field("data.text"), e.get_field("text"));
+    }
+
+    // ── Additional MatchResult tests ─────────────────────────────
+
+    #[test]
+    fn match_result_serializes() {
+        let mr = MatchResult {
+            rule_name: "r1".to_string(),
+            matched: true,
+            reason: "ok".to_string(),
+            rendered_inputs: Some(BTreeMap::from([("k".to_string(), "v".to_string())])),
+        };
+        let json = serde_json::to_value(&mr).unwrap();
+        assert_eq!(json["rule_name"], "r1");
+        assert!(json["matched"].as_bool().unwrap());
+        assert_eq!(json["rendered_inputs"]["k"], "v");
+    }
+
+    #[test]
+    fn match_result_without_inputs_serializes_null() {
+        let mr = MatchResult {
+            rule_name: "r1".to_string(),
+            matched: false,
+            reason: "no match".to_string(),
+            rendered_inputs: None,
+        };
+        let json = serde_json::to_value(&mr).unwrap();
+        assert!(json["rendered_inputs"].is_null());
+    }
+
+    // ── Additional ExecutionOutcome tests ─────────────────────────
+
+    #[test]
+    fn outcome_all_variants_serde() {
+        let variants = [
+            ExecutionOutcome::Executed,
+            ExecutionOutcome::Throttled,
+            ExecutionOutcome::CircuitBroken,
+            ExecutionOutcome::DryRun,
+            ExecutionOutcome::Duplicate,
+            ExecutionOutcome::NoMatch,
+            ExecutionOutcome::Disabled,
+        ];
+        for v in &variants {
+            let json = serde_json::to_value(v).unwrap();
+            assert!(json.is_string());
+        }
+    }
+
+    #[test]
+    fn outcome_equality() {
+        assert_eq!(ExecutionOutcome::Executed, ExecutionOutcome::Executed);
+        assert_ne!(ExecutionOutcome::Executed, ExecutionOutcome::Throttled);
+    }
+
+    #[test]
+    fn outcome_clone() {
+        let o = ExecutionOutcome::DryRun;
+        let o2 = o.clone();
+        assert_eq!(o, o2);
+    }
+
+    // ── Additional CircuitBreaker tests ──────────────────────────
+
+    #[test]
+    fn circuit_half_open_failure_reopens() {
+        let mut cb = CircuitBreaker::new(2, Duration::seconds(0));
+        cb.record_failure();
+        cb.record_failure();
+        assert_eq!(cb.state, CircuitState::Open);
+        cb.try_half_open();
+        assert_eq!(cb.state, CircuitState::HalfOpen);
+        // Failure in half-open should re-open
+        cb.record_failure();
+        cb.record_failure();
+        assert_eq!(cb.state, CircuitState::Open);
+    }
+
+    #[test]
+    fn circuit_try_half_open_when_closed_returns_false() {
+        let mut cb = CircuitBreaker::default();
+        assert!(!cb.try_half_open());
+        assert_eq!(cb.state, CircuitState::Closed);
+    }
+
+    #[test]
+    fn circuit_total_counters() {
+        let mut cb = CircuitBreaker::new(10, Duration::minutes(5));
+        cb.record_success();
+        cb.record_success();
+        cb.record_failure();
+        assert_eq!(cb.total_executions, 3);
+        assert_eq!(cb.total_errors, 1);
+    }
+
+    #[test]
+    fn circuit_error_rate_all_failures() {
+        let mut cb = CircuitBreaker::new(100, Duration::minutes(5));
+        for _ in 0..10 {
+            cb.record_failure();
+        }
+        assert_eq!(cb.error_rate(), 100);
+    }
+
+    #[test]
+    fn circuit_error_rate_50_percent() {
+        let mut cb = CircuitBreaker::new(100, Duration::minutes(5));
+        for _ in 0..5 {
+            cb.record_success();
+        }
+        for _ in 0..5 {
+            cb.record_failure();
+        }
+        assert_eq!(cb.error_rate(), 50);
+    }
+
+    #[test]
+    fn circuit_allows_execution_after_timeout() {
+        let mut cb = CircuitBreaker::new(1, Duration::seconds(0));
+        cb.record_failure();
+        assert_eq!(cb.state, CircuitState::Open);
+        // With 0s timeout, allows_execution should return true immediately
+        assert!(cb.allows_execution());
+    }
+
+    #[test]
+    fn circuit_state_serializes() {
+        let json = serde_json::to_value(CircuitState::HalfOpen).unwrap();
+        assert_eq!(json, "half_open");
+    }
+
+    #[test]
+    fn circuit_default_threshold_is_five() {
+        let cb = CircuitBreaker::default();
+        assert_eq!(cb.error_threshold, 5);
+        assert_eq!(cb.reset_timeout, Duration::minutes(5));
+    }
+
+    // ── Additional ThrottleState tests ───────────────────────────
+
+    #[test]
+    fn throttle_state_is_throttled_boundary() {
+        let mut state = ThrottleState::new("rule1");
+        let throttle = RuleThrottle::new(3, "1h");
+        state.record_trigger();
+        state.record_trigger();
+        assert!(!state.is_throttled(&throttle));
+        state.record_trigger();
+        assert!(state.is_throttled(&throttle));
+    }
+
+    #[test]
+    fn throttle_state_prune_removes_all_old() {
+        let mut state = ThrottleState::new("rule1");
+        state.record_trigger_at(Utc::now() - Duration::hours(5));
+        state.record_trigger_at(Utc::now() - Duration::hours(4));
+        state.record_trigger_at(Utc::now() - Duration::hours(3));
+        state.prune(Duration::hours(1));
+        assert!(state.triggers.is_empty());
+    }
+
+    #[test]
+    fn throttle_state_is_throttled_with_invalid_window_uses_default() {
+        let mut state = ThrottleState::new("rule1");
+        for _ in 0..10 {
+            state.record_trigger();
+        }
+        let throttle = RuleThrottle::new(10, "xyz");
+        // Invalid window falls back to 1h, all 10 triggers are within 1h
+        assert!(state.is_throttled(&throttle));
+    }
+
+    #[test]
+    fn throttle_state_record_trigger_at_specific_time() {
+        let mut state = ThrottleState::new("rule1");
+        let specific = Utc::now() - Duration::minutes(30);
+        state.record_trigger_at(specific);
+        assert_eq!(state.triggers.len(), 1);
+        assert_eq!(state.triggers[0], specific);
+    }
+
+    // ── Additional RuleDedupCache tests ──────────────────────────
+
+    #[test]
+    fn dedup_cache_different_rules_same_event_not_suppressed() {
+        let rule_a = Rule::new(
+            "rule-a",
+            EventTrigger::new("slack", "message.new"),
+            RuleAction::new("github", "create_issue"),
+        );
+        let rule_b = Rule::new(
+            "rule-b",
+            EventTrigger::new("slack", "message.new"),
+            RuleAction::new("jira", "create_ticket"),
+        );
+        let event = sample_event().with_event_id("evt-shared");
+        let mut cache = RuleDedupCache::new();
+        let now = Utc::now();
+
+        assert!(!cache.check_and_record_at(&rule_a, &event, now));
+        // Different rule, same event — should NOT be suppressed
+        assert!(!cache.check_and_record_at(&rule_b, &event, now));
+    }
+
+    #[test]
+    fn dedup_cache_same_rule_different_events_not_suppressed() {
+        let rule = sample_rule();
+        let e1 = sample_event().with_event_id("evt-1");
+        let e2 = sample_event().with_event_id("evt-2");
+        let mut cache = RuleDedupCache::new();
+        let now = Utc::now();
+
+        assert!(!cache.check_and_record_at(&rule, &e1, now));
+        assert!(!cache.check_and_record_at(&rule, &e2, now));
+    }
+
+    #[test]
+    fn dedup_cache_len_tracks_entries() {
+        let rule = sample_rule();
+        let e1 = sample_event().with_event_id("evt-a");
+        let e2 = sample_event().with_event_id("evt-b");
+        let mut cache = RuleDedupCache::new();
+        let now = Utc::now();
+
+        assert_eq!(cache.len(), 0);
+        assert!(cache.is_empty());
+
+        cache.check_and_record_at(&rule, &e1, now);
+        assert_eq!(cache.len(), 1);
+
+        cache.check_and_record_at(&rule, &e2, now);
+        assert_eq!(cache.len(), 2);
+        assert!(!cache.is_empty());
+    }
+
+    #[test]
+    fn dedup_cache_serde_round_trip() {
+        let rule = sample_rule();
+        let event = sample_event().with_event_id("evt-serde");
+        let mut cache = RuleDedupCache::new();
+        let now = Utc::now();
+        cache.check_and_record_at(&rule, &event, now);
+
+        let json = serde_json::to_string(&cache).unwrap();
+        let cache2: RuleDedupCache = serde_json::from_str(&json).unwrap();
+        assert_eq!(cache2.len(), cache.len());
+    }
+
+    #[test]
+    fn dedup_cache_new_is_empty() {
+        let cache = RuleDedupCache::new();
+        assert!(cache.is_empty());
+        assert_eq!(cache.len(), 0);
+    }
+
+    // ── Additional matches_trigger tests ─────────────────────────
+
+    #[test]
+    fn trigger_matches_with_multiple_patterns_second_matches() {
+        let event = sample_event(); // data.text = "Found a bug in login"
+        let trigger =
+            EventTrigger::new("slack", "message.new").with_match("data.text~CRITICAL|bug");
+        assert!(matches_trigger(&event, &trigger));
+    }
+
+    #[test]
+    fn trigger_match_expr_whitespace_in_patterns() {
+        let event = sample_event();
+        let trigger =
+            EventTrigger::new("slack", "message.new").with_match("data.text~ bug | Bug ");
+        assert!(matches_trigger(&event, &trigger));
+    }
+
+    #[test]
+    fn trigger_match_expr_empty_pattern_matches_any() {
+        let event = sample_event();
+        // An empty pattern in "|" split means contains("") which is always true
+        let trigger = EventTrigger::new("slack", "message.new").with_match("data.text~");
+        assert!(matches_trigger(&event, &trigger));
+    }
+
+    // ── Additional render_template tests ─────────────────────────
+
+    #[test]
+    fn template_missing_field_replaced_with_empty() {
+        let event = sample_event();
+        let result = render_template("Value: {{event.data.missing}}", &event);
+        assert_eq!(result, "Value: ");
+    }
+
+    #[test]
+    fn template_truncate_exact_length() {
+        let event =
+            IncomingEvent::new("slack", "message.new").with_data("text", "12345");
+        let result = render_template("{{event.data.text | truncate(5)}}", &event);
+        assert_eq!(result, "12345");
+    }
+
+    #[test]
+    fn template_truncate_zero() {
+        let event = sample_event();
+        let result = render_template("{{event.data.text | truncate(0)}}", &event);
+        assert_eq!(result, "...");
+    }
+
+    #[test]
+    fn template_mixed_static_and_dynamic() {
+        let event = sample_event();
+        let result = render_template(
+            "Alert from {{event.connector}}: [{{event.event_type}}] {{event.data.text}}",
+            &event,
+        );
+        assert_eq!(
+            result,
+            "Alert from slack: [message.new] Found a bug in login"
+        );
+    }
+
+    #[test]
+    fn template_empty_template() {
+        let event = sample_event();
+        let result = render_template("", &event);
+        assert_eq!(result, "");
+    }
+
+    // ── Additional render_action_inputs tests ────────────────────
+
+    #[test]
+    fn render_inputs_empty_action() {
+        let event = sample_event();
+        let action = RuleAction::new("github", "create_issue");
+        let rendered = render_action_inputs(&action, &event);
+        assert!(rendered.is_empty());
+    }
+
+    #[test]
+    fn render_inputs_preserves_keys() {
+        let event = sample_event();
+        let action = RuleAction::new("github", "create_issue")
+            .with_input("alpha", "{{event.data.user}}")
+            .with_input("beta", "{{event.data.channel}}");
+        let rendered = render_action_inputs(&action, &event);
+        assert_eq!(rendered.len(), 2);
+        assert_eq!(rendered["alpha"], "alice");
+        assert_eq!(rendered["beta"], "general");
+    }
+
+    // ── Additional evaluate_rule tests ───────────────────────────
+
+    #[test]
+    fn eval_rule_disabled_takes_precedence_over_match() {
+        // Even if the event matches, disabled should win
+        let rule = sample_rule().with_enabled(false);
+        let event = sample_event();
+        let state = ThrottleState::new("bug-to-issue");
+        let cb = CircuitBreaker::default();
+        let (outcome, result) = evaluate_rule(&rule, &event, &state, &cb, false);
+        assert_eq!(outcome, ExecutionOutcome::Disabled);
+        assert!(!result.matched);
+    }
+
+    #[test]
+    fn eval_rule_executed_has_rendered_content() {
+        let rule = sample_rule();
+        let event = sample_event();
+        let state = ThrottleState::new("bug-to-issue");
+        let cb = CircuitBreaker::default();
+        let (outcome, result) = evaluate_rule(&rule, &event, &state, &cb, false);
+        assert_eq!(outcome, ExecutionOutcome::Executed);
+        let inputs = result.rendered_inputs.unwrap();
+        assert_eq!(inputs["title"], "Bug: Found a bug in login");
+        assert_eq!(inputs["body"], "From alice");
+    }
+
+    #[test]
+    fn eval_rule_throttled_still_renders_inputs() {
+        let rule = sample_rule().with_throttle(RuleThrottle::new(1, "1h"));
+        let event = sample_event();
+        let mut state = ThrottleState::new("bug-to-issue");
+        state.record_trigger();
+        let cb = CircuitBreaker::default();
+        let (outcome, result) = evaluate_rule(&rule, &event, &state, &cb, false);
+        assert_eq!(outcome, ExecutionOutcome::Throttled);
+        assert!(result.rendered_inputs.is_some());
+    }
+
+    #[test]
+    fn eval_rule_circuit_broken_still_renders_inputs() {
+        let rule = sample_rule();
+        let event = sample_event();
+        let state = ThrottleState::new("bug-to-issue");
+        let mut cb = CircuitBreaker::new(1, Duration::hours(1));
+        cb.record_failure();
+        let (outcome, result) = evaluate_rule(&rule, &event, &state, &cb, false);
+        assert_eq!(outcome, ExecutionOutcome::CircuitBroken);
+        assert!(result.rendered_inputs.is_some());
+    }
+
+    #[test]
+    fn eval_rule_no_match_has_no_rendered_inputs() {
+        let rule = sample_rule();
+        let event = IncomingEvent::new("discord", "message.new");
+        let state = ThrottleState::new("bug-to-issue");
+        let cb = CircuitBreaker::default();
+        let (outcome, result) = evaluate_rule(&rule, &event, &state, &cb, false);
+        assert_eq!(outcome, ExecutionOutcome::NoMatch);
+        assert!(result.rendered_inputs.is_none());
+    }
+
+    #[test]
+    fn eval_rule_with_match_expr_executes() {
+        let trigger =
+            EventTrigger::new("slack", "message.new").with_match("data.text~bug|Bug");
+        let action = RuleAction::new("github", "create_issue");
+        let rule = Rule::new("expr-rule", trigger, action);
+        let event = sample_event();
+        let state = ThrottleState::new("expr-rule");
+        let cb = CircuitBreaker::default();
+        let (outcome, _) = evaluate_rule(&rule, &event, &state, &cb, false);
+        assert_eq!(outcome, ExecutionOutcome::Executed);
+    }
+
+    #[test]
+    fn eval_rule_with_match_expr_no_match() {
+        let trigger =
+            EventTrigger::new("slack", "message.new").with_match("data.text~CRITICAL");
+        let action = RuleAction::new("github", "create_issue");
+        let rule = Rule::new("expr-rule", trigger, action);
+        let event = sample_event();
+        let state = ThrottleState::new("expr-rule");
+        let cb = CircuitBreaker::default();
+        let (outcome, _) = evaluate_rule(&rule, &event, &state, &cb, false);
+        assert_eq!(outcome, ExecutionOutcome::NoMatch);
+    }
+
+    #[test]
+    fn eval_rule_dedup_without_event_id_uses_hash() {
+        let rule = sample_rule();
+        let event = sample_event(); // no event_id
+        let state = ThrottleState::new("bug-to-issue");
+        let cb = CircuitBreaker::default();
+        let mut dedup = RuleDedupCache::new();
+
+        let (first, _) =
+            evaluate_rule_with_dedup(&rule, &event, &state, &cb, &mut dedup, false);
+        assert_eq!(first, ExecutionOutcome::Executed);
+
+        // Same event content => same hash => duplicate
+        let event2 = IncomingEvent::new("slack", "message.new")
+            .with_data("text", "Found a bug in login")
+            .with_data("user", "alice")
+            .with_data("channel", "general");
+        let (second, _) =
+            evaluate_rule_with_dedup(&rule, &event2, &state, &cb, &mut dedup, false);
+        assert_eq!(second, ExecutionOutcome::Duplicate);
+    }
+
+    // ── Additional RuleSet tests ─────────────────────────────────
+
+    #[test]
+    fn ruleset_default_is_empty() {
+        let rs = RuleSet::default();
+        assert!(rs.is_empty());
+    }
+
+    #[test]
+    fn ruleset_multiple_matching_rules() {
+        let mut rs = RuleSet::new();
+        rs.add(Rule::new(
+            "rule-a",
+            EventTrigger::new("slack", "message.new"),
+            RuleAction::new("github", "create_issue"),
+        ));
+        rs.add(Rule::new(
+            "rule-b",
+            EventTrigger::new("slack", "message.new"),
+            RuleAction::new("jira", "create_ticket"),
+        ));
+        let event = sample_event();
+        let matched = rs.matching_rules(&event);
+        assert_eq!(matched.len(), 2);
+    }
+
+    #[test]
+    fn ruleset_remove_nonexistent_returns_false() {
+        let mut rs = RuleSet::new();
+        assert!(!rs.remove("does-not-exist"));
+    }
+
+    #[test]
+    fn ruleset_get_mut_modifies_in_place() {
+        let mut rs = RuleSet::new();
+        rs.add(sample_rule());
+        rs.get_mut("bug-to-issue").unwrap().description = "Modified".to_string();
+        assert_eq!(rs.get("bug-to-issue").unwrap().description, "Modified");
+    }
+
+    #[test]
+    fn ruleset_active_count_all_disabled() {
+        let mut rs = RuleSet::new();
+        rs.add(sample_rule().with_enabled(false));
+        rs.add(Rule::new(
+            "another",
+            EventTrigger::new("a", "b"),
+            RuleAction::new("c", "d"),
+        ).with_enabled(false));
+        assert_eq!(rs.active_count(), 0);
+    }
+
+    // ── Additional RuleSetStore tests ────────────────────────────
+
+    #[test]
+    fn ruleset_store_path_returns_configured_path() {
+        let store = RuleSetStore::new("/tmp/test/rules.toml");
+        assert_eq!(store.path(), Path::new("/tmp/test/rules.toml"));
+    }
+
+    #[test]
+    fn ruleset_store_save_load_multiple_rules() {
+        let dir = tempdir().unwrap();
+        let store = RuleSetStore::new(dir.path().join("rules.toml"));
+        let mut rules = RuleSet::new();
+        rules.add(sample_rule());
+        rules.add(Rule::new(
+            "alert-rule",
+            EventTrigger::new("pagerduty", "incident.triggered"),
+            RuleAction::new("slack", "send_message")
+                .with_input("channel", "#alerts")
+                .with_input("text", "Incident: {{event.data.title}}"),
+        ));
+
+        store.save(&rules).unwrap();
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert!(loaded.get("bug-to-issue").is_some());
+        assert!(loaded.get("alert-rule").is_some());
+    }
+
+    #[test]
+    fn ruleset_store_overwrite_existing() {
+        let dir = tempdir().unwrap();
+        let store = RuleSetStore::new(dir.path().join("rules.toml"));
+
+        let mut rules1 = RuleSet::new();
+        rules1.add(sample_rule());
+        store.save(&rules1).unwrap();
+
+        let mut rules2 = RuleSet::new();
+        rules2.add(Rule::new(
+            "new-rule",
+            EventTrigger::new("a", "b"),
+            RuleAction::new("c", "d"),
+        ));
+        store.save(&rules2).unwrap();
+
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded.get("new-rule").is_some());
+        assert!(loaded.get("bug-to-issue").is_none());
+    }
+
+    #[test]
+    fn default_rules_path_fallback_without_home() {
+        let path = default_rules_path_from(None);
+        assert_eq!(path, PathBuf::from("./.fwc/rules.toml"));
+    }
+
+    // ── Additional validate_rule tests ───────────────────────────
+
+    #[test]
+    fn validate_multiple_errors_at_once() {
+        let r = Rule {
+            name: String::new(),
+            description: String::new(),
+            trigger: EventTrigger {
+                connector: String::new(),
+                event_type: String::new(),
+                match_expr: None,
+            },
+            action: RuleAction {
+                connector: String::new(),
+                operation: String::new(),
+                input: BTreeMap::new(),
+            },
+            throttle: RuleThrottle::new(0, "xyz"),
+            enabled: true,
+        };
+        let errors = validate_rule(&r);
+        // Should have: name required, trigger connector, trigger event type,
+        // action connector, action operation, throttle max, invalid window
+        assert!(errors.len() >= 7);
+    }
+
+    #[test]
+    fn validate_empty_trigger_event_type() {
+        let t = EventTrigger::new("slack", "");
+        let r = Rule::new("rule", t, sample_action());
+        let errors = validate_rule(&r);
+        assert!(errors.iter().any(|e| e.contains("trigger event type")));
+    }
+
+    #[test]
+    fn validate_empty_action_connector() {
+        let a = RuleAction::new("", "create_issue");
+        let r = Rule::new("rule", sample_trigger(), a);
+        let errors = validate_rule(&r);
+        assert!(errors.iter().any(|e| e.contains("action connector")));
+    }
+
+    #[test]
+    fn validate_name_exactly_128_chars_is_ok() {
+        let name = "x".repeat(128);
+        let r = Rule::new(name, sample_trigger(), sample_action());
+        let errors = validate_rule(&r);
+        assert!(!errors.iter().any(|e| e.contains("128")));
+    }
+
+    // ── Additional format_helpers tests ──────────────────────────
+
+    #[test]
+    fn format_rule_summary_no_description() {
+        let r = sample_rule();
+        let s = format_rule_summary(&r);
+        assert!(s.contains("bug-to-issue"));
+        assert!(s.contains("enabled"));
+        // No " — " suffix for empty description
+        assert!(!s.contains(" — "));
+    }
+
+    #[test]
+    fn format_match_result_empty_inputs() {
+        let result = MatchResult {
+            rule_name: "test".to_string(),
+            matched: true,
+            reason: "matched".to_string(),
+            rendered_inputs: Some(BTreeMap::new()),
+        };
+        let s = format_match_result(&result);
+        assert!(!s.contains("Inputs:"));
+    }
+
+    #[test]
+    fn format_match_result_multiple_inputs() {
+        let mut inputs = BTreeMap::new();
+        inputs.insert("alpha".to_string(), "one".to_string());
+        inputs.insert("beta".to_string(), "two".to_string());
+        let result = MatchResult {
+            rule_name: "test".to_string(),
+            matched: true,
+            reason: "ok".to_string(),
+            rendered_inputs: Some(inputs),
+        };
+        let s = format_match_result(&result);
+        assert!(s.contains("alpha: one"));
+        assert!(s.contains("beta: two"));
+    }
 }

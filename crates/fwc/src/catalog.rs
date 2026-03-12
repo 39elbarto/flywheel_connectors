@@ -109,6 +109,15 @@ pub const COMMAND_CLASSIFICATIONS: &[CommandClassification] = &[
         transport_note: "Local agent session state persisted under ~/.fwc/sessions",
     },
     CommandClassification {
+        command: "auth",
+        truth_source: CommandTruthSource::OfflineArtifact,
+        execution_mode: CommandExecutionMode::LocalOnly,
+        host_absent: HostAbsentBehavior::Unaffected,
+        requires_capability_token: false,
+        may_need_approval: false,
+        transport_note: "Local credential store management with redacted inspection and structural validation",
+    },
+    CommandClassification {
         command: "plan",
         truth_source: CommandTruthSource::OfflineArtifact,
         execution_mode: CommandExecutionMode::LocalOnly,
@@ -2880,6 +2889,7 @@ pub const COMMANDS: &[&str] = &[
     "guide",
     "task",
     "session",
+    "auth",
     "plan",
     "explain",
     "do",
@@ -3028,6 +3038,10 @@ pub fn guide_payload(command: Option<&str>) -> Value {
                         "commands": ["capabilities"],
                     },
                     {
+                        "name": "auth",
+                        "commands": ["auth"],
+                    },
+                    {
                         "name": "config",
                         "commands": ["config"],
                     },
@@ -3114,6 +3128,17 @@ fn command_contract(command: &str) -> Option<Value> {
             "Track the current agent session and persist resumable context.",
             "A local session ledger over agent identity, goal, zone binding, active locks, and operation counts so context survives agent rotations.",
         )),
+        "auth" => Some(json!({
+            "family": "auth",
+            "summary": "Manage locally stored connector credentials with redacted inspection and structural validation.",
+            "intended_shape": "Offline-first auth workflows that never fabricate live OAuth handshakes or echo raw secrets in normal output.",
+            "next_beads": ["flywheel_connectors-qnchs.16.1"],
+            "workflow_handoff": [
+                "Use `fwc auth add <connector> ...` to store credentials locally.",
+                "Use `fwc auth test <connector>` to verify structural completeness and expiry metadata before live use.",
+                "Use `fwc auth status` to review expiry warnings and rotation guidance across stored credentials."
+            ],
+        })),
         "plan" => Some(intent_contract(
             "Compile a natural-language goal into explicit primitive `fwc` steps.",
             "Transparent workflow plan with connector inference, operation hints, ambiguities, missing information, and exact next commands.",
@@ -3697,10 +3722,10 @@ mod tests {
     }
 
     #[test]
-    fn full_guide_has_eight_families() {
+    fn full_guide_has_nine_families() {
         let g = guide_payload(None);
         let families = g["families"].as_array().expect("families should be array");
-        assert_eq!(families.len(), 8);
+        assert_eq!(families.len(), 9);
     }
 
     #[test]

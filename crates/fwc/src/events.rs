@@ -1440,4 +1440,998 @@ mod tests {
         let drained = buf.drain();
         assert_eq!(drained[0].connector_id, "c");
     }
+
+    // ── Additional EventType tests ─────────────────────────────────
+
+    #[test]
+    fn event_type_deeply_nested_four_parts() {
+        let et = EventType::new("a.b.c.d");
+        assert_eq!(et.parts().len(), 4);
+        assert_eq!(et.parts()[0], "a");
+        assert_eq!(et.parts()[3], "d");
+        assert_eq!(et.as_str(), "a.b.c.d");
+    }
+
+    #[test]
+    fn event_type_clone_equality() {
+        let et = EventType::new("message.new");
+        let cloned = et.clone();
+        assert_eq!(et, cloned);
+        assert_eq!(et.as_str(), cloned.as_str());
+        assert_eq!(et.parts(), cloned.parts());
+    }
+
+    #[test]
+    fn event_type_not_equal_different_raw() {
+        let a = EventType::new("message.new");
+        let b = EventType::new("message.old");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn event_type_serde_roundtrip() {
+        let et = EventType::new("project.issue.created");
+        let json_str = serde_json::to_string(&et).expect("serialize");
+        let back: EventType = serde_json::from_str(&json_str).expect("deserialize");
+        assert_eq!(et, back);
+    }
+
+    #[test]
+    fn event_type_prefix_glob_multi_level_no_match_at_boundary() {
+        // "a.b" should not match "a.b.*" because there's no sub-part beyond a.b
+        let et = EventType::new("a.b");
+        assert!(!et.matches_pattern("a.b.*"));
+    }
+
+    #[test]
+    fn event_type_prefix_glob_deep_matches() {
+        let et = EventType::new("a.b.c.d.e");
+        assert!(et.matches_pattern("a.*"));
+        assert!(et.matches_pattern("a.b.*"));
+        assert!(et.matches_pattern("a.b.c.*"));
+        assert!(et.matches_pattern("a.b.c.d.*"));
+    }
+
+    #[test]
+    fn event_type_suffix_glob_multi_segment_suffix() {
+        let et = EventType::new("x.y.z.error.fatal");
+        assert!(et.matches_pattern("*.fatal"));
+        assert!(et.matches_pattern("*.error.fatal"));
+    }
+
+    #[test]
+    fn event_type_suffix_glob_exact_boundary() {
+        // "a.error" has 2 parts; "*.error" suffix is 1 part.
+        // Need parts.len() > suffix_parts.len(), so 2 > 1 => true.
+        let et = EventType::new("a.error");
+        assert!(et.matches_pattern("*.error"));
+    }
+
+    #[test]
+    fn event_type_exact_match_single_segment() {
+        let et = EventType::new("heartbeat");
+        assert!(et.matches_pattern("heartbeat"));
+        assert!(!et.matches_pattern("heartbeats"));
+    }
+
+    #[test]
+    fn event_type_with_underscores() {
+        let et = EventType::new("user_event.account_created");
+        assert!(et.matches_pattern("user_event.*"));
+        assert!(et.matches_pattern("user_event.account_created"));
+    }
+
+    #[test]
+    fn event_type_with_numbers_in_parts() {
+        let et = EventType::new("v2.message.new");
+        assert!(et.matches_pattern("v2.*"));
+        assert!(et.matches_pattern("v2.message.*"));
+    }
+
+    #[test]
+    fn event_type_display_matches_as_str() {
+        let et = EventType::new("a.b.c");
+        assert_eq!(format!("{et}"), et.as_str());
+    }
+
+    #[test]
+    fn event_type_prefix_glob_wrong_prefix() {
+        let et = EventType::new("messages.new");
+        // "message.*" should NOT match "messages.new" — different prefix.
+        assert!(!et.matches_pattern("message.*"));
+    }
+
+    #[test]
+    fn event_type_suffix_glob_wrong_suffix() {
+        let et = EventType::new("network.errors");
+        assert!(!et.matches_pattern("*.error"));
+    }
+
+    // ── Additional ConnectorEvent tests ────────────────────────────
+
+    #[test]
+    fn connector_event_with_all_builders() {
+        use chrono::TimeZone;
+        let ts = Utc.with_ymd_and_hms(2026, 6, 1, 12, 0, 0).unwrap();
+        let e = ConnectorEvent::new("jira", "issue.created", 100)
+            .with_channel("eng-board")
+            .with_summary("New ticket FCP-999")
+            .with_data(json!({"priority": "P1", "labels": ["urgent"]}))
+            .with_timestamp(ts);
+        assert_eq!(e.connector_id, "jira");
+        assert_eq!(e.event_type.as_str(), "issue.created");
+        assert_eq!(e.sequence, 100);
+        assert_eq!(e.channel.as_deref(), Some("eng-board"));
+        assert_eq!(e.summary.as_deref(), Some("New ticket FCP-999"));
+        assert_eq!(e.data["priority"], "P1");
+        assert_eq!(e.timestamp, ts);
+    }
+
+    #[test]
+    fn connector_event_clone_preserves_all_fields() {
+        let e = ConnectorEvent::new("slack", "message.new", 7)
+            .with_channel("#dev")
+            .with_summary("Hello")
+            .with_data(json!({"text": "world"}));
+        let cloned = e.clone();
+        assert_eq!(e.connector_id, cloned.connector_id);
+        assert_eq!(e.event_type, cloned.event_type);
+        assert_eq!(e.sequence, cloned.sequence);
+        assert_eq!(e.channel, cloned.channel);
+        assert_eq!(e.summary, cloned.summary);
+        assert_eq!(e.data, cloned.data);
+        assert_eq!(e.timestamp, cloned.timestamp);
+    }
+
+    #[test]
+    fn connector_event_data_null_by_default() {
+        let e = ConnectorEvent::new("test", "ping", 0);
+        assert!(e.data.is_null());
+    }
+
+    #[test]
+    fn connector_event_sequence_zero() {
+        let e = ConnectorEvent::new("test", "start", 0);
+        assert_eq!(e.sequence, 0);
+    }
+
+    #[test]
+    fn connector_event_large_sequence() {
+        let e = ConnectorEvent::new("test", "x", u64::MAX);
+        assert_eq!(e.sequence, u64::MAX);
+    }
+
+    #[test]
+    fn connector_event_empty_connector_id() {
+        let e = ConnectorEvent::new("", "x", 1);
+        assert_eq!(e.connector_id, "");
+    }
+
+    #[test]
+    fn connector_event_complex_data_payload() {
+        let data = json!({
+            "nested": {
+                "array": [1, 2, 3],
+                "map": {"key": "value"},
+                "null_field": null,
+                "bool_field": true
+            }
+        });
+        let e = ConnectorEvent::new("test", "x", 1).with_data(data.clone());
+        assert_eq!(e.data, data);
+    }
+
+    #[test]
+    fn connector_event_overwrite_data() {
+        let e = ConnectorEvent::new("test", "x", 1)
+            .with_data(json!({"first": 1}))
+            .with_data(json!({"second": 2}));
+        assert!(e.data.get("first").is_none());
+        assert_eq!(e.data["second"], 2);
+    }
+
+    #[test]
+    fn connector_event_serialization_with_all_fields() {
+        use chrono::TimeZone;
+        let ts = Utc.with_ymd_and_hms(2026, 1, 15, 8, 30, 0).unwrap();
+        let e = ConnectorEvent::new("github", "pr.merged", 42)
+            .with_timestamp(ts)
+            .with_channel("fcp-core")
+            .with_summary("PR #100 merged")
+            .with_data(json!({"author": "alice"}));
+        let json_str = serde_json::to_string(&e).expect("serialize");
+        let back: ConnectorEvent = serde_json::from_str(&json_str).expect("deserialize");
+        assert_eq!(back.connector_id, "github");
+        assert_eq!(back.channel.as_deref(), Some("fcp-core"));
+        assert_eq!(back.summary.as_deref(), Some("PR #100 merged"));
+        assert_eq!(back.data["author"], "alice");
+        assert_eq!(back.timestamp, ts);
+    }
+
+    // ── Additional EventSource tests ───────────────────────────────
+
+    #[test]
+    fn event_source_clone() {
+        let mut src = EventSource::new("slack", "s1");
+        src.record_event();
+        src.record_event();
+        let cloned = src.clone();
+        assert_eq!(cloned.connector_id, "slack");
+        assert_eq!(cloned.stream_id, "s1");
+        assert_eq!(cloned.event_count, 2);
+        assert_eq!(cloned.started_at, src.started_at);
+    }
+
+    #[test]
+    fn event_source_serde_roundtrip() {
+        let mut src = EventSource::new("github", "events");
+        src.record_event();
+        let json_str = serde_json::to_string(&src).expect("serialize");
+        let back: EventSource = serde_json::from_str(&json_str).expect("deserialize");
+        assert_eq!(back.connector_id, "github");
+        assert_eq!(back.stream_id, "events");
+        assert_eq!(back.event_count, 1);
+    }
+
+    #[test]
+    fn event_source_many_events() {
+        let mut src = EventSource::new("test", "stream");
+        for _ in 0..1000 {
+            src.record_event();
+        }
+        assert_eq!(src.event_count, 1000);
+    }
+
+    #[test]
+    fn event_source_empty_ids() {
+        let src = EventSource::new("", "");
+        assert_eq!(src.connector_id, "");
+        assert_eq!(src.stream_id, "");
+    }
+
+    // ── Additional EventBuffer tests ───────────────────────────────
+
+    #[test]
+    fn buffer_multiple_drain_cycles() {
+        let mut buf = EventBuffer::new(3);
+        // First cycle
+        buf.push(event("a", "x", 1));
+        buf.push(event("b", "x", 2));
+        let d1 = buf.drain();
+        assert_eq!(d1.len(), 2);
+
+        // Second cycle
+        buf.push(event("c", "x", 3));
+        buf.push(event("d", "x", 4));
+        buf.push(event("e", "x", 5));
+        let d2 = buf.drain();
+        assert_eq!(d2.len(), 3);
+        assert_eq!(d2[0].connector_id, "c");
+    }
+
+    #[test]
+    fn buffer_drain_empty_returns_empty() {
+        let mut buf = EventBuffer::new(5);
+        let d = buf.drain();
+        assert!(d.is_empty());
+    }
+
+    #[test]
+    fn buffer_push_exactly_to_capacity() {
+        let mut buf = EventBuffer::new(3);
+        for i in 0..3 {
+            assert!(buf.push(event("x", "y", i)).is_none());
+        }
+        assert!(buf.is_full());
+        assert_eq!(buf.len(), 3);
+        assert_eq!(buf.dropped_count(), 0);
+    }
+
+    #[test]
+    fn buffer_eviction_preserves_newer_events() {
+        let mut buf = EventBuffer::new(3);
+        for i in 0..10 {
+            buf.push(event("x", "y", i));
+        }
+        assert_eq!(buf.dropped_count(), 7);
+        let drained = buf.drain();
+        assert_eq!(drained.len(), 3);
+        assert_eq!(drained[0].sequence, 7);
+        assert_eq!(drained[1].sequence, 8);
+        assert_eq!(drained[2].sequence, 9);
+    }
+
+    #[test]
+    fn buffer_mixed_connectors_preserved_order() {
+        let mut buf = EventBuffer::new(4);
+        buf.push(event("slack", "msg", 1));
+        buf.push(event("github", "push", 2));
+        buf.push(event("linear", "issue", 3));
+        buf.push(event("jira", "ticket", 4));
+        let drained = buf.drain();
+        assert_eq!(drained[0].connector_id, "slack");
+        assert_eq!(drained[1].connector_id, "github");
+        assert_eq!(drained[2].connector_id, "linear");
+        assert_eq!(drained[3].connector_id, "jira");
+    }
+
+    #[test]
+    fn buffer_is_full_after_eviction() {
+        let mut buf = EventBuffer::new(2);
+        buf.push(event("a", "x", 1));
+        buf.push(event("b", "x", 2));
+        buf.push(event("c", "x", 3)); // evicts a
+        assert!(buf.is_full());
+        assert_eq!(buf.len(), 2);
+    }
+
+    #[test]
+    fn buffer_capacity_accessor_unchanged() {
+        let mut buf = EventBuffer::new(5);
+        assert_eq!(buf.capacity(), 5);
+        for i in 0..10 {
+            buf.push(event("x", "y", i));
+        }
+        assert_eq!(buf.capacity(), 5); // capacity doesn't change
+    }
+
+    #[test]
+    fn buffer_drain_then_fill_again_to_capacity() {
+        let mut buf = EventBuffer::new(2);
+        buf.push(event("a", "x", 1));
+        buf.push(event("b", "x", 2));
+        buf.drain();
+        buf.push(event("c", "x", 3));
+        buf.push(event("d", "x", 4));
+        assert!(buf.is_full());
+        let d = buf.drain();
+        assert_eq!(d[0].connector_id, "c");
+        assert_eq!(d[1].connector_id, "d");
+    }
+
+    #[test]
+    fn buffer_dropped_count_persists_across_drains() {
+        let mut buf = EventBuffer::new(1);
+        buf.push(event("a", "x", 1));
+        buf.push(event("b", "x", 2)); // drops a
+        buf.drain();
+        buf.push(event("c", "x", 3));
+        buf.push(event("d", "x", 4)); // drops c
+        assert_eq!(buf.dropped_count(), 2);
+    }
+
+    // ── Additional EventOutputFormat tests ─────────────────────────
+
+    #[test]
+    fn event_output_format_default_is_toon() {
+        let fmt = EventOutputFormat::default();
+        assert_eq!(fmt, EventOutputFormat::Toon);
+    }
+
+    #[test]
+    fn event_output_format_equality() {
+        assert_eq!(EventOutputFormat::Json, EventOutputFormat::Json);
+        assert_ne!(EventOutputFormat::Json, EventOutputFormat::Ndjson);
+        assert_ne!(EventOutputFormat::Toon, EventOutputFormat::Json);
+    }
+
+    #[test]
+    fn event_output_format_clone() {
+        let fmt = EventOutputFormat::Ndjson;
+        let cloned = fmt;
+        assert_eq!(fmt, cloned);
+    }
+
+    #[test]
+    fn event_output_format_debug() {
+        let fmt = EventOutputFormat::Json;
+        let dbg = format!("{fmt:?}");
+        assert!(dbg.contains("Json"));
+    }
+
+    // ── Additional format_toon tests ───────────────────────────────
+
+    #[test]
+    fn format_toon_summary_only_no_channel() {
+        use chrono::TimeZone;
+        let ts = Utc.with_ymd_and_hms(2026, 3, 9, 9, 0, 0).unwrap();
+        let e = ConnectorEvent::new("github", "push", 1)
+            .with_timestamp(ts)
+            .with_summary("3 commits to main");
+        let line = format_toon(&e);
+        assert_eq!(line, "[09:00:00] github  push  3 commits to main");
+    }
+
+    #[test]
+    fn format_toon_empty_connector_id() {
+        use chrono::TimeZone;
+        let ts = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let e = ConnectorEvent::new("", "event", 1).with_timestamp(ts);
+        let line = format_toon(&e);
+        assert_eq!(line, "[00:00:00]   event");
+    }
+
+    #[test]
+    fn format_toon_long_event_type() {
+        use chrono::TimeZone;
+        let ts = Utc.with_ymd_and_hms(2026, 12, 31, 23, 59, 59).unwrap();
+        let e = ConnectorEvent::new("svc", "a.b.c.d.e.f.g", 1).with_timestamp(ts);
+        let line = format_toon(&e);
+        assert!(line.contains("a.b.c.d.e.f.g"));
+        assert!(line.starts_with("[23:59:59]"));
+    }
+
+    // ── Additional format_json / format_ndjson tests ───────────────
+
+    #[test]
+    fn format_json_contains_all_fields() {
+        let e = ConnectorEvent::new("test", "a.b", 10)
+            .with_channel("ch1")
+            .with_summary("sum")
+            .with_data(json!({"k": "v"}));
+        let out = format_json(&e);
+        let parsed: Value = serde_json::from_str(&out).expect("parse");
+        assert_eq!(parsed["connector_id"], "test");
+        assert_eq!(parsed["sequence"], 10);
+        assert_eq!(parsed["channel"], "ch1");
+        assert_eq!(parsed["summary"], "sum");
+        assert_eq!(parsed["data"]["k"], "v");
+    }
+
+    #[test]
+    fn format_ndjson_contains_all_fields() {
+        let e = ConnectorEvent::new("test", "a.b", 10)
+            .with_channel("ch1")
+            .with_summary("sum")
+            .with_data(json!({"k": "v"}));
+        let out = format_ndjson(&e);
+        let parsed: Value = serde_json::from_str(&out).expect("parse");
+        assert_eq!(parsed["connector_id"], "test");
+        assert_eq!(parsed["sequence"], 10);
+        assert_eq!(parsed["channel"], "ch1");
+        assert_eq!(parsed["summary"], "sum");
+    }
+
+    #[test]
+    fn format_json_null_data_serialized() {
+        let e = ConnectorEvent::new("test", "x", 1);
+        let out = format_json(&e);
+        let parsed: Value = serde_json::from_str(&out).expect("parse");
+        assert!(parsed["data"].is_null());
+    }
+
+    #[test]
+    fn format_ndjson_null_optional_fields() {
+        let e = ConnectorEvent::new("test", "x", 1);
+        let out = format_ndjson(&e);
+        let parsed: Value = serde_json::from_str(&out).expect("parse");
+        assert!(parsed["channel"].is_null());
+        assert!(parsed["summary"].is_null());
+    }
+
+    #[test]
+    fn format_json_with_nested_data() {
+        let e = ConnectorEvent::new("test", "x", 1)
+            .with_data(json!({"a": {"b": [1, 2, {"c": true}]}}));
+        let out = format_json(&e);
+        let parsed: Value = serde_json::from_str(&out).expect("parse");
+        assert_eq!(parsed["data"]["a"]["b"][2]["c"], true);
+    }
+
+    #[test]
+    fn format_ndjson_with_special_chars() {
+        let e = ConnectorEvent::new("test", "x", 1)
+            .with_data(json!({"text": "line1\nline2\ttab"}));
+        let out = format_ndjson(&e);
+        // NDJSON is single-line, so newlines in data are escaped
+        assert!(!out.contains('\n'));
+        let parsed: Value = serde_json::from_str(&out).expect("parse");
+        assert_eq!(parsed["data"]["text"], "line1\nline2\ttab");
+    }
+
+    // ── Additional TypeFilter tests ────────────────────────────────
+
+    #[test]
+    fn type_filter_single_segment_exact() {
+        let f = parse_type_filter("heartbeat");
+        assert!(f.matches(&event("s", "heartbeat", 1)));
+        assert!(!f.matches(&event("s", "heartbeat.check", 1)));
+    }
+
+    #[test]
+    fn type_filter_empty_pattern_exact() {
+        let f = parse_type_filter("");
+        assert!(f.matches(&event("s", "", 1)));
+        assert!(!f.matches(&event("s", "x", 1)));
+    }
+
+    #[test]
+    fn type_filter_prefix_glob_deep_hierarchy() {
+        let f = parse_type_filter("project.*");
+        assert!(f.matches(&event("s", "project.a", 1)));
+        assert!(f.matches(&event("s", "project.a.b.c", 1)));
+        assert!(!f.matches(&event("s", "project", 1)));
+    }
+
+    #[test]
+    fn type_filter_suffix_glob_deep_hierarchy() {
+        let f = parse_type_filter("*.completed");
+        assert!(f.matches(&event("s", "task.completed", 1)));
+        assert!(f.matches(&event("s", "a.b.c.completed", 1)));
+        assert!(!f.matches(&event("s", "completed", 1)));
+    }
+
+    // ── Additional FieldFilter tests ───────────────────────────────
+
+    #[test]
+    fn field_filter_array_index_access() {
+        let f = parse_field_filter("items.0=first").expect("parse");
+        let e = event_with_data("s", "x", 1, json!({"items": ["first", "second"]}));
+        assert!(f.matches(&e));
+    }
+
+    #[test]
+    fn field_filter_array_index_out_of_bounds() {
+        let f = parse_field_filter("items.5=nope").expect("parse");
+        let e = event_with_data("s", "x", 1, json!({"items": ["a", "b"]}));
+        assert!(!f.matches(&e));
+    }
+
+    #[test]
+    fn field_filter_nested_array_index() {
+        let f = parse_field_filter("matrix.1.0=center").expect("parse");
+        let e = event_with_data("s", "x", 1, json!({"matrix": [["tl"], ["center"]]}));
+        assert!(f.matches(&e));
+    }
+
+    #[test]
+    fn field_filter_equality_bool_false() {
+        let f = parse_field_filter("active=false").expect("parse");
+        let e = event_with_data("s", "x", 1, json!({"active": false}));
+        assert!(f.matches(&e));
+    }
+
+    #[test]
+    fn field_filter_equality_number_float() {
+        let f = parse_field_filter("score=3.14").expect("parse");
+        let e = event_with_data("s", "x", 1, json!({"score": 3.14}));
+        assert!(f.matches(&e));
+    }
+
+    #[test]
+    fn field_filter_equality_mismatch_type() {
+        // "3" as string vs 3 as number
+        let f = parse_field_filter("count=3").expect("parse");
+        let e = event_with_data("s", "x", 1, json!({"count": "three"}));
+        assert!(!f.matches(&e));
+    }
+
+    #[test]
+    fn field_filter_contains_on_object() {
+        let f = parse_field_filter("meta~alice").expect("parse");
+        let e = event_with_data("s", "x", 1, json!({"meta": {"name": "alice"}}));
+        // Contains mode serializes non-strings, so should find "alice" in the JSON
+        assert!(f.matches(&e));
+    }
+
+    #[test]
+    fn field_filter_contains_no_match_on_object() {
+        let f = parse_field_filter("meta~zzz").expect("parse");
+        let e = event_with_data("s", "x", 1, json!({"meta": {"name": "alice"}}));
+        assert!(!f.matches(&e));
+    }
+
+    #[test]
+    fn field_filter_deeply_nested_missing_intermediate() {
+        let f = parse_field_filter("a.b.c.d=x").expect("parse");
+        let e = event_with_data("s", "x", 1, json!({"a": {"z": 1}}));
+        assert!(!f.matches(&e));
+    }
+
+    #[test]
+    fn field_filter_equality_on_null_mismatch() {
+        let f = parse_field_filter("status=active").expect("parse");
+        let e = event_with_data("s", "x", 1, json!({"status": null}));
+        assert!(!f.matches(&e));
+    }
+
+    #[test]
+    fn field_filter_equality_on_array_value_no_match() {
+        // Arrays are not handled by equality mode
+        let f = parse_field_filter("tags=deploy").expect("parse");
+        let e = event_with_data("s", "x", 1, json!({"tags": ["deploy"]}));
+        assert!(!f.matches(&e));
+    }
+
+    #[test]
+    fn field_filter_single_segment_path() {
+        let f = parse_field_filter("x=hello").expect("parse");
+        assert_eq!(f.path(), &["x"]);
+    }
+
+    #[test]
+    fn field_filter_contains_case_sensitive() {
+        let f = parse_field_filter("text~Deploy").expect("parse");
+        let e = event_with_data("s", "x", 1, json!({"text": "deploy in progress"}));
+        assert!(!f.matches(&e));
+    }
+
+    #[test]
+    fn field_filter_equality_with_special_chars() {
+        let f = parse_field_filter("tag=#foo-bar_baz").expect("parse");
+        let e = event_with_data("s", "x", 1, json!({"tag": "#foo-bar_baz"}));
+        assert!(f.matches(&e));
+    }
+
+    // ── Additional ExcludeFilter tests ─────────────────────────────
+
+    #[test]
+    fn exclude_filter_prefix_glob() {
+        let f = parse_exclude("debug.*");
+        assert!(!f.matches(&event("s", "debug.trace", 1)));
+        assert!(!f.matches(&event("s", "debug.verbose", 1)));
+        assert!(f.matches(&event("s", "info.status", 1)));
+    }
+
+    #[test]
+    fn exclude_filter_exact_type() {
+        let f = parse_exclude("heartbeat");
+        assert!(!f.matches(&event("s", "heartbeat", 1)));
+        assert!(f.matches(&event("s", "heartbeat.check", 1)));
+    }
+
+    #[test]
+    fn exclude_filter_from_explicit_constructor() {
+        let inner = TypeFilter::new("system.*");
+        let f = ExcludeFilter::new(inner);
+        assert!(!f.matches(&event("s", "system.health", 1)));
+        assert!(f.matches(&event("s", "user.action", 1)));
+    }
+
+    // ── Additional ConnectorFilter tests ───────────────────────────
+
+    #[test]
+    fn connector_filter_case_sensitive() {
+        let f = ConnectorFilter::new("Slack");
+        assert!(!f.matches(&event("slack", "x", 1)));
+        assert!(f.matches(&event("Slack", "x", 1)));
+    }
+
+    #[test]
+    fn connector_filter_empty_connector() {
+        let f = ConnectorFilter::new("");
+        assert!(f.matches(&event("", "x", 1)));
+        assert!(!f.matches(&event("slack", "x", 1)));
+    }
+
+    #[test]
+    fn connector_filter_with_special_chars() {
+        let f = ConnectorFilter::new("my-connector_v2");
+        assert!(f.matches(&event("my-connector_v2", "x", 1)));
+        assert!(!f.matches(&event("my-connector_v3", "x", 1)));
+    }
+
+    // ── Additional FilterChain tests ───────────────────────────────
+
+    #[test]
+    fn filter_chain_default_trait() {
+        let chain = FilterChain::default();
+        assert!(chain.is_empty());
+        assert!(chain.matches(&event("any", "x", 1)));
+    }
+
+    #[test]
+    fn filter_chain_three_filters_all_must_match() {
+        let mut chain = FilterChain::new();
+        chain.add(Box::new(ConnectorFilter::new("slack")));
+        chain.add(Box::new(TypeFilter::new("message.*")));
+        chain.add(Box::new(parse_exclude("message.delete")));
+
+        assert!(chain.matches(&event("slack", "message.new", 1)));
+        assert!(!chain.matches(&event("slack", "message.delete", 1)));
+        assert!(!chain.matches(&event("github", "message.new", 1)));
+        assert!(!chain.matches(&event("slack", "issue.closed", 1)));
+    }
+
+    #[test]
+    fn filter_chain_with_field_filter() {
+        let mut chain = FilterChain::new();
+        chain.add(Box::new(parse_field_filter("status=open").expect("parse")));
+        let open = event_with_data("s", "x", 1, json!({"status": "open"}));
+        let closed = event_with_data("s", "x", 2, json!({"status": "closed"}));
+        assert!(chain.matches(&open));
+        assert!(!chain.matches(&closed));
+    }
+
+    #[test]
+    fn filter_chain_len_after_multiple_adds() {
+        let mut chain = FilterChain::new();
+        for _ in 0..5 {
+            chain.add(Box::new(TypeFilter::new("*")));
+        }
+        assert_eq!(chain.len(), 5);
+        assert!(!chain.is_empty());
+    }
+
+    // ── Additional FilterChainBuilder tests ────────────────────────
+
+    #[test]
+    fn builder_multiple_type_filters() {
+        // Multiple with_type calls add separate filters (AND semantics)
+        let chain = FilterChainBuilder::new()
+            .with_type("message.*")
+            .with_type("*.new")
+            .build();
+        assert_eq!(chain.len(), 2);
+        // "message.new" matches both patterns
+        assert!(chain.matches(&event("s", "message.new", 1)));
+        // "message.delete" matches first but not second
+        assert!(!chain.matches(&event("s", "message.delete", 1)));
+    }
+
+    #[test]
+    fn builder_exclude_multiple_types() {
+        let chain = FilterChainBuilder::new()
+            .exclude_type("*.error")
+            .exclude_type("*.fatal")
+            .build();
+        assert!(chain.matches(&event("s", "network.success", 1)));
+        assert!(!chain.matches(&event("s", "network.error", 1)));
+        assert!(!chain.matches(&event("s", "system.fatal", 1)));
+    }
+
+    #[test]
+    fn builder_with_field_match_equality_and_contains() {
+        let chain = FilterChainBuilder::new()
+            .with_field_match("channel=#general")
+            .with_field_match("text~deploy")
+            .build();
+        assert_eq!(chain.len(), 2);
+        let good = event_with_data(
+            "s",
+            "x",
+            1,
+            json!({"channel": "#general", "text": "deploy v2.3"}),
+        );
+        assert!(chain.matches(&good));
+        let wrong_text = event_with_data(
+            "s",
+            "x",
+            1,
+            json!({"channel": "#general", "text": "rollback v1"}),
+        );
+        assert!(!chain.matches(&wrong_text));
+    }
+
+    #[test]
+    fn builder_with_connector_and_exclude() {
+        let chain = FilterChainBuilder::new()
+            .with_connector("slack")
+            .exclude_type("heartbeat")
+            .build();
+        assert!(chain.matches(&event("slack", "message.new", 1)));
+        assert!(!chain.matches(&event("slack", "heartbeat", 1)));
+        assert!(!chain.matches(&event("github", "message.new", 1)));
+    }
+
+    // ── Additional integration / edge case tests ───────────────────
+
+    #[test]
+    fn buffer_filter_format_pipeline() {
+        use chrono::TimeZone;
+        let ts = Utc.with_ymd_and_hms(2026, 3, 1, 12, 0, 0).unwrap();
+        let mut buf = EventBuffer::new(10);
+        buf.push(
+            ConnectorEvent::new("slack", "message.new", 1)
+                .with_timestamp(ts)
+                .with_channel("#dev")
+                .with_data(json!({"text": "hello"})),
+        );
+        buf.push(ConnectorEvent::new("slack", "heartbeat", 2).with_timestamp(ts));
+        buf.push(
+            ConnectorEvent::new("github", "push", 3)
+                .with_timestamp(ts)
+                .with_data(json!({"branch": "main"})),
+        );
+
+        let chain = FilterChainBuilder::new()
+            .with_connector("slack")
+            .exclude_type("heartbeat")
+            .build();
+
+        let results: Vec<String> = buf
+            .drain()
+            .into_iter()
+            .filter(|e| chain.matches(e))
+            .map(|e| format_event(&e, EventOutputFormat::Toon))
+            .collect();
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].contains("slack"));
+        assert!(results[0].contains("message.new"));
+    }
+
+    #[test]
+    fn filter_chain_on_events_with_varied_data() {
+        let chain = FilterChainBuilder::new()
+            .with_type("alert.*")
+            .with_field_match("severity=critical")
+            .build();
+
+        let critical_alert = event_with_data(
+            "monitor",
+            "alert.triggered",
+            1,
+            json!({"severity": "critical", "message": "CPU > 95%"}),
+        );
+        let warn_alert = event_with_data(
+            "monitor",
+            "alert.triggered",
+            2,
+            json!({"severity": "warning", "message": "CPU > 80%"}),
+        );
+        let non_alert = event_with_data(
+            "monitor",
+            "metric.reported",
+            3,
+            json!({"severity": "critical"}),
+        );
+
+        assert!(chain.matches(&critical_alert));
+        assert!(!chain.matches(&warn_alert));
+        assert!(!chain.matches(&non_alert));
+    }
+
+    #[test]
+    fn multiple_connectors_in_buffer_filtered_separately() {
+        let mut buf = EventBuffer::new(20);
+        for i in 0..5 {
+            buf.push(event("slack", "message.new", i));
+        }
+        for i in 5..10 {
+            buf.push(event("github", "push", i));
+        }
+        for i in 10..15 {
+            buf.push(event("linear", "issue.created", i));
+        }
+
+        let slack_chain = FilterChainBuilder::new().with_connector("slack").build();
+        let github_chain = FilterChainBuilder::new().with_connector("github").build();
+
+        let events = buf.drain();
+        let slack_events: Vec<_> = events.iter().filter(|e| slack_chain.matches(e)).collect();
+        let github_events: Vec<_> = events.iter().filter(|e| github_chain.matches(e)).collect();
+
+        assert_eq!(slack_events.len(), 5);
+        assert_eq!(github_events.len(), 5);
+    }
+
+    #[test]
+    fn format_ndjson_multiple_events_each_parseable() {
+        let events = vec![
+            event("a", "x.y", 1),
+            event("b", "z.w", 2),
+            event("c", "q.r", 3),
+        ];
+        for e in &events {
+            let line = format_ndjson(e);
+            assert!(!line.contains('\n'));
+            let parsed: Value = serde_json::from_str(&line).expect("parse");
+            assert!(parsed["connector_id"].is_string());
+        }
+    }
+
+    #[test]
+    fn event_type_pattern_matching_exhaustive() {
+        let et = EventType::new("a.b.c");
+        // Exact
+        assert!(et.matches_pattern("a.b.c"));
+        assert!(!et.matches_pattern("a.b.d"));
+        // Wildcard
+        assert!(et.matches_pattern("*"));
+        // Prefix globs
+        assert!(et.matches_pattern("a.*"));
+        assert!(et.matches_pattern("a.b.*"));
+        assert!(!et.matches_pattern("a.b.c.*"));
+        // Suffix globs
+        assert!(et.matches_pattern("*.c"));
+        assert!(et.matches_pattern("*.b.c"));
+        assert!(!et.matches_pattern("*.a.b.c"));
+    }
+
+    #[test]
+    fn connector_event_debug_format() {
+        let e = ConnectorEvent::new("test", "x", 1);
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("ConnectorEvent"));
+        assert!(dbg.contains("test"));
+    }
+
+    #[test]
+    fn event_source_debug_format() {
+        let src = EventSource::new("test", "stream-1");
+        let dbg = format!("{src:?}");
+        assert!(dbg.contains("EventSource"));
+        assert!(dbg.contains("test"));
+    }
+
+    #[test]
+    fn event_type_debug_format() {
+        let et = EventType::new("a.b");
+        let dbg = format!("{et:?}");
+        assert!(dbg.contains("EventType"));
+        assert!(dbg.contains("a.b"));
+    }
+
+    #[test]
+    fn buffer_with_data_events_preserves_payload() {
+        let mut buf = EventBuffer::new(3);
+        buf.push(event_with_data("s", "x", 1, json!({"key": "val1"})));
+        buf.push(event_with_data("s", "x", 2, json!({"key": "val2"})));
+        let drained = buf.drain();
+        assert_eq!(drained[0].data["key"], "val1");
+        assert_eq!(drained[1].data["key"], "val2");
+    }
+
+    #[test]
+    fn format_event_toon_dispatch_matches_direct() {
+        let e = event("test", "x", 1);
+        let via_dispatch = format_event(&e, EventOutputFormat::Toon);
+        let direct = format_toon(&e);
+        assert_eq!(via_dispatch, direct);
+    }
+
+    #[test]
+    fn format_event_json_dispatch_matches_direct() {
+        let e = event("test", "x", 1);
+        let via_dispatch = format_event(&e, EventOutputFormat::Json);
+        let direct = format_json(&e);
+        assert_eq!(via_dispatch, direct);
+    }
+
+    #[test]
+    fn format_event_ndjson_dispatch_matches_direct() {
+        let e = event("test", "x", 1);
+        let via_dispatch = format_event(&e, EventOutputFormat::Ndjson);
+        let direct = format_ndjson(&e);
+        assert_eq!(via_dispatch, direct);
+    }
+
+    #[test]
+    fn field_filter_contains_number_serialized() {
+        let f = parse_field_filter("count~42").expect("parse");
+        let e = event_with_data("s", "x", 1, json!({"count": 42}));
+        // Non-string: serialized to "42", contains "42"
+        assert!(f.matches(&e));
+    }
+
+    #[test]
+    fn field_filter_contains_bool_serialized() {
+        let f = parse_field_filter("flag~true").expect("parse");
+        let e = event_with_data("s", "x", 1, json!({"flag": true}));
+        assert!(f.matches(&e));
+    }
+
+    #[test]
+    fn exclude_filter_combined_with_connector_filter() {
+        let mut chain = FilterChain::new();
+        chain.add(Box::new(ConnectorFilter::new("slack")));
+        chain.add(Box::new(parse_exclude("*.error")));
+
+        assert!(chain.matches(&event("slack", "message.new", 1)));
+        assert!(!chain.matches(&event("slack", "network.error", 1)));
+        assert!(!chain.matches(&event("github", "message.new", 1)));
+    }
+
+    #[test]
+    fn parse_field_filter_error_message() {
+        match parse_field_filter("noop") {
+            Err(err) => {
+                let msg = format!("{err}");
+                assert!(msg.contains("invalid field filter"));
+                assert!(msg.contains("noop"));
+            }
+            Ok(_) => panic!("expected error for invalid expression"),
+        }
+    }
 }

@@ -1522,4 +1522,872 @@ mod tests {
             }
         }
     }
+
+    // ── Fuzzy distance budget tests ────────────────────────────────
+
+    #[test]
+    fn fuzzy_budget_zero_for_empty_candidate() {
+        assert_eq!(fuzzy_distance_budget("", "abcd"), 0);
+    }
+
+    #[test]
+    fn fuzzy_budget_zero_for_short_token() {
+        assert_eq!(fuzzy_distance_budget("send", "abc"), 0);
+        assert_eq!(fuzzy_distance_budget("send", "ab"), 0);
+        assert_eq!(fuzzy_distance_budget("send", "a"), 0);
+    }
+
+    #[test]
+    fn fuzzy_budget_zero_for_large_length_gap() {
+        // candidate=4, token=8 => gap=4 > 2
+        assert_eq!(fuzzy_distance_budget("send", "messages"), 0);
+    }
+
+    #[test]
+    fn fuzzy_budget_one_for_short_pair() {
+        // candidate=4, token=4 => gap=0, both < 8
+        assert_eq!(fuzzy_distance_budget("send", "sned"), 1);
+    }
+
+    #[test]
+    fn fuzzy_budget_two_for_long_pair() {
+        // candidate=12, token=11 => gap=1, both >= 8
+        assert_eq!(fuzzy_distance_budget("send_message", "send_mesage"), 2);
+    }
+
+    #[test]
+    fn fuzzy_budget_two_when_candidate_long_token_at_boundary() {
+        // candidate=8, token=7 => gap=1, candidate >= 8
+        assert_eq!(fuzzy_distance_budget("messages", "mesages"), 2);
+    }
+
+    #[test]
+    fn fuzzy_budget_one_when_both_under_eight() {
+        // candidate=5, token=5 => gap=0, both < 8
+        assert_eq!(fuzzy_distance_budget("hello", "hallo"), 1);
+    }
+
+    #[test]
+    fn fuzzy_budget_zero_gap_exactly_three() {
+        // candidate=7, token=4 => gap=3 > 2
+        assert_eq!(fuzzy_distance_budget("message", "mesg"), 0);
+    }
+
+    #[test]
+    fn fuzzy_budget_nonzero_gap_exactly_two() {
+        // candidate=6, token=4 => gap=2, both < 8
+        assert_eq!(fuzzy_distance_budget("create", "cret"), 1);
+    }
+
+    // ── fuzzy_term_matches tests ───────────────────────────────────
+
+    #[test]
+    fn fuzzy_term_matches_identical_strings() {
+        // distance=0, budget=1 for len-4 tokens, 1 > 0 && 0 <= 1 => true
+        assert!(fuzzy_term_matches("send", "send"));
+    }
+
+    #[test]
+    fn fuzzy_term_matches_one_typo() {
+        assert!(fuzzy_term_matches("send_message", "send_mesage"));
+    }
+
+    #[test]
+    fn fuzzy_term_rejects_many_typos() {
+        assert!(!fuzzy_term_matches("send", "xxxx"));
+    }
+
+    #[test]
+    fn fuzzy_term_rejects_short_token() {
+        assert!(!fuzzy_term_matches("hello", "hel"));
+    }
+
+    // ── identifier_has_fuzzy_match segment splitting ───────────────
+
+    #[test]
+    fn fuzzy_id_match_via_segment_split() {
+        // "send_message" splits on '_' into ["send", "message"]
+        // "mesage" (6 chars) vs "message" (7 chars) => gap=1, both < 8 => budget=1
+        // levenshtein("message","mesage")=1 => 1 <= 1 => true
+        assert!(identifier_has_fuzzy_match("send_message", "mesage"));
+    }
+
+    #[test]
+    fn fuzzy_id_match_whole_identifier() {
+        // "send_mesage" (11 chars) vs whole "send_message" (12 chars) => gap=1, both >= 8 => budget=2
+        // levenshtein=1 => match
+        assert!(identifier_has_fuzzy_match("send_message", "send_mesage"));
+    }
+
+    #[test]
+    fn fuzzy_id_no_match_on_completely_different() {
+        assert!(!identifier_has_fuzzy_match("send_message", "calendar"));
+    }
+
+    #[test]
+    fn fuzzy_id_segments_skip_empty() {
+        // "a..b" has empty segment between dots
+        assert!(!identifier_has_fuzzy_match("a..b", "xxxx"));
+    }
+
+    // ── Tokenization edge cases ────────────────────────────────────
+
+    #[test]
+    fn tokenize_unicode_chars_are_separators() {
+        let tokens = tokenize("hello\u{00e9}world");
+        // e-acute is not ascii alphanumeric, not :._- so it splits
+        assert_eq!(tokens, vec!["hello", "world"]);
+    }
+
+    #[test]
+    fn tokenize_tabs_and_newlines() {
+        let tokens = tokenize("hello\tworld\nfoo");
+        assert_eq!(tokens, vec!["hello", "world", "foo"]);
+    }
+
+    #[test]
+    fn tokenize_dot_colon_underscore_hyphen_all_preserved() {
+        let tokens = tokenize("a.b:c_d-e");
+        assert_eq!(tokens, vec!["a.b:c_d-e"]);
+    }
+
+    #[test]
+    fn tokenize_repeated_separators() {
+        let tokens = tokenize("a    b");
+        assert_eq!(tokens, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn tokenize_single_char() {
+        let tokens = tokenize("x");
+        assert_eq!(tokens, vec!["x"]);
+    }
+
+    #[test]
+    fn tokenize_only_numbers() {
+        let tokens = tokenize("123 456");
+        assert_eq!(tokens, vec!["123", "456"]);
+    }
+
+    #[test]
+    fn tokenize_alphanumeric_mix() {
+        let tokens = tokenize("v2 api3");
+        assert_eq!(tokens, vec!["v2", "api3"]);
+    }
+
+    // ── RiskCeiling exhaustive ─────────────────────────────────────
+
+    #[test]
+    fn risk_ceiling_high_allows_everything() {
+        // High.allows() returns true unconditionally
+        assert!(RiskCeiling::High.allows("high"));
+        assert!(RiskCeiling::High.allows("low"));
+        assert!(RiskCeiling::High.allows("extreme"));
+        assert!(RiskCeiling::High.allows(""));
+    }
+
+    #[test]
+    fn risk_ceiling_medium_rejects_unknown_string() {
+        assert!(!RiskCeiling::Medium.allows("none"));
+        assert!(!RiskCeiling::Medium.allows(""));
+    }
+
+    #[test]
+    fn risk_ceiling_low_rejects_empty() {
+        assert!(!RiskCeiling::Low.allows(""));
+    }
+
+    #[test]
+    fn risk_ceiling_debug_format() {
+        let r = RiskCeiling::Medium;
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("Medium"));
+    }
+
+    // ── SafetyCeiling exhaustive ───────────────────────────────────
+
+    #[test]
+    fn safety_ceiling_dangerous_rejects_unknown() {
+        assert!(!SafetyCeiling::Dangerous.allows("lethal"));
+        assert!(!SafetyCeiling::Dangerous.allows(""));
+    }
+
+    #[test]
+    fn safety_ceiling_risky_rejects_dangerous() {
+        assert!(!SafetyCeiling::Risky.allows("dangerous"));
+        assert!(!SafetyCeiling::Risky.allows("critical"));
+    }
+
+    #[test]
+    fn safety_ceiling_safe_rejects_all_above() {
+        assert!(!SafetyCeiling::Safe.allows("risky"));
+        assert!(!SafetyCeiling::Safe.allows("dangerous"));
+        assert!(!SafetyCeiling::Safe.allows("critical"));
+    }
+
+    #[test]
+    fn safety_ceiling_debug_format() {
+        let s = SafetyCeiling::Critical;
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("Critical"));
+    }
+
+    #[test]
+    fn safety_ceiling_parse_mixed_case() {
+        assert_eq!(
+            SafetyCeiling::parse("DaNgErOuS"),
+            Some(SafetyCeiling::Dangerous)
+        );
+        assert_eq!(SafetyCeiling::parse("rIsKy"), Some(SafetyCeiling::Risky));
+    }
+
+    #[test]
+    fn risk_ceiling_parse_mixed_case() {
+        assert_eq!(RiskCeiling::parse("MeDiUm"), Some(RiskCeiling::Medium));
+        assert_eq!(RiskCeiling::parse("hIgH"), Some(RiskCeiling::High));
+    }
+
+    // ── Connector filter edge cases ────────────────────────────────
+
+    #[test]
+    fn connector_filter_matches_by_id_suffix() {
+        let connectors = sample_connectors();
+        // filter by "github" should match connector whose id is "fcp.github"
+        let filters = SearchFilters {
+            connector: Some("github".to_owned()),
+            ..Default::default()
+        };
+        let result = connector_passes_filters(&connectors[0], &filters);
+        assert!(result);
+    }
+
+    #[test]
+    fn connector_filter_case_insensitive() {
+        let connectors = sample_connectors();
+        let filters = SearchFilters {
+            connector: Some("GITHUB".to_owned()),
+            ..Default::default()
+        };
+        let result = connector_passes_filters(&connectors[0], &filters);
+        assert!(result);
+    }
+
+    #[test]
+    fn connector_filter_rejects_partial_slug() {
+        let connectors = sample_connectors();
+        let filters = SearchFilters {
+            connector: Some("git".to_owned()),
+            ..Default::default()
+        };
+        // slug "github" != "git" and id "fcp.github" doesn't end_with "git"
+        let result = connector_passes_filters(&connectors[0], &filters);
+        assert!(!result);
+    }
+
+    #[test]
+    fn connector_filter_no_archetype_on_unknown() {
+        let mut connector = stub_connector("test", vec![]);
+        connector.detail.summary.archetypes = crate::readiness::MetadataField::Unknown;
+        let filters = SearchFilters {
+            archetype: Some("operational".to_owned()),
+            ..Default::default()
+        };
+        assert!(!connector_passes_filters(&connector, &filters));
+    }
+
+    #[test]
+    fn connector_filter_category_case_insensitive() {
+        let connectors = sample_connectors();
+        let filters = SearchFilters {
+            category: Some("DEV-TOOLS".to_owned()),
+            ..Default::default()
+        };
+        assert!(connector_passes_filters(&connectors[0], &filters));
+    }
+
+    // ── Operation filter edge cases ────────────────────────────────
+
+    #[test]
+    fn operation_filter_capability_case_insensitive() {
+        let op = stub_operation(
+            "test.op",
+            "Test",
+            "github.WRITE",
+            "low",
+            "safe",
+            "test",
+        );
+        let filters = SearchFilters {
+            capability: Some("write".to_owned()),
+            ..Default::default()
+        };
+        assert!(operation_passes_filters(&op, &filters));
+    }
+
+    #[test]
+    fn operation_filter_no_filters_passes_all() {
+        let op = stub_operation(
+            "test.op",
+            "Test",
+            "test.read",
+            "high",
+            "critical",
+            "test",
+        );
+        assert!(operation_passes_filters(&op, &SearchFilters::default()));
+    }
+
+    #[test]
+    fn operation_filter_idempotent_rejects_unknown_string() {
+        let mut op = stub_operation("t.op", "T", "t.w", "low", "safe", "t");
+        op.summary.idempotency = "unknown".to_owned();
+        let filters = SearchFilters {
+            idempotent_only: true,
+            ..Default::default()
+        };
+        assert!(!operation_passes_filters(&op, &filters));
+    }
+
+    // ── Connector relevance scoring ────────────────────────────────
+
+    #[test]
+    fn connector_relevance_slug_exact_match() {
+        let connector = stub_connector("github", vec![]);
+        let tokens = vec!["github".to_owned()];
+        let bonus = connector_relevance(&connector, &tokens);
+        assert_eq!(bonus, WEIGHT_CONNECTOR_NAME);
+    }
+
+    #[test]
+    fn connector_relevance_slug_contains() {
+        let connector = stub_connector("github", vec![]);
+        let tokens = vec!["git".to_owned()];
+        let bonus = connector_relevance(&connector, &tokens);
+        assert_eq!(bonus, WEIGHT_CONNECTOR_NAME);
+    }
+
+    #[test]
+    fn connector_relevance_name_contains() {
+        let connector = stub_connector("github", vec![]);
+        // name is "Github Connector"
+        let tokens = vec!["connector".to_owned()];
+        let bonus = connector_relevance(&connector, &tokens);
+        assert_eq!(bonus, WEIGHT_CONNECTOR_NAME / 2);
+    }
+
+    #[test]
+    fn connector_relevance_no_match() {
+        let connector = stub_connector("github", vec![]);
+        let tokens = vec!["zzzzz".to_owned()];
+        let bonus = connector_relevance(&connector, &tokens);
+        assert_eq!(bonus, 0);
+    }
+
+    #[test]
+    fn connector_relevance_multiple_tokens_accumulate() {
+        let connector = stub_connector("github", vec![]);
+        // "github" matches slug, "connector" matches name
+        let tokens = vec!["github".to_owned(), "connector".to_owned()];
+        let bonus = connector_relevance(&connector, &tokens);
+        assert_eq!(bonus, WEIGHT_CONNECTOR_NAME + WEIGHT_CONNECTOR_NAME / 2);
+    }
+
+    #[test]
+    fn connector_relevance_empty_tokens() {
+        let connector = stub_connector("github", vec![]);
+        let bonus = connector_relevance(&connector, &[]);
+        assert_eq!(bonus, 0);
+    }
+
+    // ── Score operation detailed tests ─────────────────────────────
+
+    #[test]
+    fn score_operation_exact_local_id_match() {
+        let op = stub_operation(
+            "github.create_issue",
+            "Create issue",
+            "github.write",
+            "medium",
+            "risky",
+            "Track bugs",
+        );
+        let connector = stub_connector("github", vec![op.clone()]);
+        let tokens = vec!["create_issue".to_owned()];
+        let (score, reasons) = score_operation(&connector, &op, &tokens);
+        assert!(score >= WEIGHT_OP_ID_EXACT);
+        assert!(reasons.contains(&"exact_id_match".to_owned()));
+    }
+
+    #[test]
+    fn score_operation_when_to_use_match() {
+        let op = stub_operation(
+            "slack.send",
+            "Send msg",
+            "slack.write",
+            "medium",
+            "risky",
+            "Notify team about deployments",
+        );
+        let connector = stub_connector("slack", vec![op.clone()]);
+        let tokens = vec!["deployments".to_owned()];
+        let (score, reasons) = score_operation(&connector, &op, &tokens);
+        assert!(score >= WEIGHT_WHEN_TO_USE);
+        assert!(reasons.contains(&"when_to_use_match".to_owned()));
+    }
+
+    #[test]
+    fn score_operation_summary_match() {
+        let op = stub_operation(
+            "test.op",
+            "Create a new repository",
+            "test.write",
+            "medium",
+            "risky",
+            "Use for repos",
+        );
+        let connector = stub_connector("test", vec![op.clone()]);
+        let tokens = vec!["repository".to_owned()];
+        let (score, reasons) = score_operation(&connector, &op, &tokens);
+        assert!(score >= WEIGHT_SUMMARY);
+        assert!(reasons.contains(&"summary_match".to_owned()));
+    }
+
+    #[test]
+    fn score_operation_capability_match() {
+        let op = stub_operation(
+            "test.op",
+            "Test",
+            "admin.write",
+            "high",
+            "dangerous",
+            "Use for admin",
+        );
+        let connector = stub_connector("test", vec![op.clone()]);
+        let tokens = vec!["admin".to_owned()];
+        let (score, reasons) = score_operation(&connector, &op, &tokens);
+        assert!(score >= WEIGHT_CAPABILITY);
+        assert!(reasons.contains(&"capability_match".to_owned()));
+    }
+
+    #[test]
+    fn score_operation_common_mistakes_match() {
+        let mut op = stub_operation("t.op", "T", "t.w", "low", "safe", "T");
+        op.common_mistakes = vec!["Remember to set the timeout".to_owned()];
+        let connector = stub_connector("t", vec![op.clone()]);
+        let tokens = vec!["timeout".to_owned()];
+        let (score, reasons) = score_operation(&connector, &op, &tokens);
+        assert!(score >= WEIGHT_COMMON_MISTAKES);
+        assert!(reasons.contains(&"common_mistakes_match".to_owned()));
+    }
+
+    #[test]
+    fn score_operation_related_match() {
+        let mut op = stub_operation("t.op", "T", "t.w", "low", "safe", "T");
+        op.related = vec!["t.other_op".to_owned()];
+        let connector = stub_connector("t", vec![op.clone()]);
+        let tokens = vec!["other_op".to_owned()];
+        let (score, reasons) = score_operation(&connector, &op, &tokens);
+        assert!(score >= WEIGHT_RELATED);
+        assert!(reasons.contains(&"related_match".to_owned()));
+    }
+
+    #[test]
+    fn score_operation_no_match_returns_zero() {
+        let op = stub_operation("t.op", "T", "t.w", "low", "safe", "T");
+        let connector = stub_connector("t", vec![op.clone()]);
+        let tokens = vec!["xyzzy12345".to_owned()];
+        let (score, reasons) = score_operation(&connector, &op, &tokens);
+        assert_eq!(score, 0);
+        assert!(reasons.is_empty());
+    }
+
+    #[test]
+    fn score_operation_empty_tokens_returns_zero() {
+        let op = stub_operation("t.op", "T", "t.w", "low", "safe", "T");
+        let connector = stub_connector("t", vec![op.clone()]);
+        let (score, reasons) = score_operation(&connector, &op, &[]);
+        assert_eq!(score, 0);
+        assert!(reasons.is_empty());
+    }
+
+    #[test]
+    fn score_operation_multiple_tokens_accumulate() {
+        let op = stub_operation(
+            "github.create_issue",
+            "Create an issue for tracking bugs",
+            "github.write",
+            "medium",
+            "risky",
+            "Track bugs in repositories",
+        );
+        let connector = stub_connector("github", vec![op.clone()]);
+        // "create" hits partial_id, summary, when_to_use(no); "bugs" hits summary, when_to_use
+        let tokens = vec!["create".to_owned(), "bugs".to_owned()];
+        let (score, _reasons) = score_operation(&connector, &op, &tokens);
+        // Should be well above any single-match weight
+        assert!(score > WEIGHT_OP_ID_PARTIAL);
+    }
+
+    // ── Search with aliases ────────────────────────────────────────
+
+    #[test]
+    fn alias_exact_match_gives_high_score() {
+        let mut op = stub_operation("t.op", "T", "t.w", "low", "safe", "T");
+        op.aliases = vec!["quick_lookup".to_owned()];
+        let connectors = vec![stub_connector("t", vec![op])];
+        let results = search_operations(&connectors, "quick_lookup", &SearchFilters::default());
+        assert!(!results.is_empty());
+        assert!(results[0].score >= WEIGHT_OP_ID_EXACT);
+    }
+
+    #[test]
+    fn alias_partial_match_gives_partial_score() {
+        let mut op = stub_operation("t.op", "T", "t.w", "low", "safe", "T");
+        op.aliases = vec!["quick_lookup_all".to_owned()];
+        let connectors = vec![stub_connector("t", vec![op])];
+        let results = search_operations(&connectors, "lookup", &SearchFilters::default());
+        assert!(!results.is_empty());
+        assert!(
+            results[0]
+                .match_reasons
+                .contains(&"partial_alias_match".to_owned())
+        );
+    }
+
+    #[test]
+    fn alias_fuzzy_match_on_typo() {
+        let mut op = stub_operation("t.op", "T", "t.w", "low", "safe", "T");
+        op.aliases = vec!["quick_lookup".to_owned()];
+        let connectors = vec![stub_connector("t", vec![op])];
+        let results = search_operations(&connectors, "quick_lokup", &SearchFilters::default());
+        assert!(!results.is_empty());
+        assert!(
+            results[0]
+                .match_reasons
+                .contains(&"fuzzy_alias_match".to_owned())
+        );
+    }
+
+    // ── Multiple connectors with mixed ops ─────────────────────────
+
+    #[test]
+    fn search_high_risk_ops_excluded_by_low_ceiling() {
+        let op_low = stub_operation("a.op", "A", "a.r", "low", "safe", "A");
+        let op_high = stub_operation("b.op", "B", "b.r", "high", "dangerous", "B");
+        let connectors = vec![
+            stub_connector("a", vec![op_low]),
+            stub_connector("b", vec![op_high]),
+        ];
+        let filters = SearchFilters {
+            risk_max: Some(RiskCeiling::Low),
+            ..Default::default()
+        };
+        // "op" is partial match for both
+        let results = search_operations(&connectors, "op", &filters);
+        assert!(results.iter().all(|r| r.risk_level == "low"));
+    }
+
+    #[test]
+    fn search_dangerous_ops_excluded_by_risky_safety() {
+        let op_safe = stub_operation("a.op", "A", "a.r", "low", "safe", "A");
+        let op_danger = stub_operation("b.op", "B", "b.r", "high", "dangerous", "B");
+        let connectors = vec![
+            stub_connector("a", vec![op_safe]),
+            stub_connector("b", vec![op_danger]),
+        ];
+        let filters = SearchFilters {
+            safety_max: Some(SafetyCeiling::Risky),
+            ..Default::default()
+        };
+        let results = search_operations(&connectors, "op", &filters);
+        assert!(
+            results
+                .iter()
+                .all(|r| matches!(r.safety_tier.as_str(), "safe" | "risky"))
+        );
+    }
+
+    // ── results_to_json detailed field tests ───────────────────────
+
+    #[test]
+    fn results_to_json_connector_name_present() {
+        let connectors = sample_connectors();
+        let results = search_operations(&connectors, "github.create_issue", &SearchFilters::default());
+        let json = results_to_json(&results, 10);
+        assert!(!json.is_empty());
+        assert_eq!(json[0]["connector_name"], "Github Connector");
+    }
+
+    #[test]
+    fn results_to_json_selector_present() {
+        let connectors = sample_connectors();
+        let results = search_operations(&connectors, "github.create_issue", &SearchFilters::default());
+        let json = results_to_json(&results, 10);
+        assert!(!json.is_empty());
+        assert_eq!(json[0]["selector"], "create_issue");
+    }
+
+    #[test]
+    fn results_to_json_summary_present() {
+        let connectors = sample_connectors();
+        let results = search_operations(&connectors, "github.create_issue", &SearchFilters::default());
+        let json = results_to_json(&results, 10);
+        assert!(!json.is_empty());
+        assert_eq!(json[0]["summary"], "Create a GitHub issue");
+    }
+
+    #[test]
+    fn results_to_json_capability_present() {
+        let connectors = sample_connectors();
+        let results = search_operations(&connectors, "github.create_issue", &SearchFilters::default());
+        let json = results_to_json(&results, 10);
+        assert!(!json.is_empty());
+        assert_eq!(json[0]["capability"], "github.write");
+    }
+
+    #[test]
+    fn results_to_json_idempotency_present() {
+        let connectors = sample_connectors();
+        let results = search_operations(&connectors, "github.create_issue", &SearchFilters::default());
+        let json = results_to_json(&results, 10);
+        assert!(!json.is_empty());
+        assert_eq!(json[0]["idempotency"], "strict");
+    }
+
+    #[test]
+    fn results_to_json_match_reasons_is_array() {
+        let connectors = sample_connectors();
+        let results = search_operations(&connectors, "github.create_issue", &SearchFilters::default());
+        let json = results_to_json(&results, 10);
+        assert!(!json.is_empty());
+        assert!(json[0]["match_reasons"].is_array());
+    }
+
+    // ── SearchFilters default ──────────────────────────────────────
+
+    #[test]
+    fn search_filters_default_has_no_constraints() {
+        let f = SearchFilters::default();
+        assert!(f.connector.is_none());
+        assert!(f.capability.is_none());
+        assert!(f.risk_max.is_none());
+        assert!(f.safety_max.is_none());
+        assert!(f.archetype.is_none());
+        assert!(f.category.is_none());
+        assert!(!f.idempotent_only);
+        assert!(f.zone.is_none());
+    }
+
+    #[test]
+    fn search_filters_debug_format() {
+        let f = SearchFilters {
+            connector: Some("test".to_owned()),
+            ..Default::default()
+        };
+        let dbg = format!("{f:?}");
+        assert!(dbg.contains("test"));
+    }
+
+    // ── SearchResult serialize ──────────────────────────────────────
+
+    #[test]
+    fn search_result_serializes_to_json() {
+        let connectors = sample_connectors();
+        let results = search_operations(&connectors, "github.create_issue", &SearchFilters::default());
+        assert!(!results.is_empty());
+        let json_str = serde_json::to_string(&results[0]).unwrap();
+        assert!(json_str.contains("github.create_issue"));
+        assert!(json_str.contains("score"));
+    }
+
+    #[test]
+    fn search_result_debug_format() {
+        let connectors = sample_connectors();
+        let results = search_operations(&connectors, "github.create_issue", &SearchFilters::default());
+        assert!(!results.is_empty());
+        let dbg = format!("{:?}", results[0]);
+        assert!(dbg.contains("github.create_issue"));
+    }
+
+    // ── Multi-token scoring interactions ───────────────────────────
+
+    #[test]
+    fn multi_token_all_miss_returns_empty() {
+        let connectors = sample_connectors();
+        let results =
+            search_operations(&connectors, "xyzzy foobar", &SearchFilters::default());
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn multi_token_one_hit_returns_results() {
+        let connectors = sample_connectors();
+        // "create" hits, "xyzzy" misses
+        let results =
+            search_operations(&connectors, "create xyzzy", &SearchFilters::default());
+        assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn multi_token_both_hit_boosts_score() {
+        let connectors = sample_connectors();
+        let single = search_operations(&connectors, "create", &SearchFilters::default());
+        let double =
+            search_operations(&connectors, "create issue", &SearchFilters::default());
+        // The top result for "create issue" should have higher score than "create" alone
+        assert!(!single.is_empty());
+        assert!(!double.is_empty());
+        assert!(double[0].score >= single[0].score);
+    }
+
+    // ── Edge: connector with empty slug ────────────────────────────
+
+    #[test]
+    fn empty_slug_connector_still_searchable() {
+        let op = stub_operation("x.op", "Some op", "x.read", "low", "safe", "useful");
+        let connectors = vec![stub_connector("", vec![op])];
+        let results = search_operations(&connectors, "useful", &SearchFilters::default());
+        assert!(!results.is_empty());
+    }
+
+    // ── Edge: very long query ──────────────────────────────────────
+
+    #[test]
+    fn long_query_does_not_panic() {
+        let connectors = sample_connectors();
+        let long_query = "a ".repeat(500);
+        let results = search_operations(&connectors, &long_query, &SearchFilters::default());
+        // May or may not find results, just must not panic
+        let _ = results;
+    }
+
+    // ── Edge: query with only preserved chars ──────────────────────
+
+    #[test]
+    fn query_only_dots_and_colons() {
+        let tokens = tokenize(".:_-");
+        // These chars are preserved, so the whole thing is one token
+        assert_eq!(tokens, vec![".:_-"]);
+    }
+
+    // ── Idempotency values ─────────────────────────────────────────
+
+    #[test]
+    fn idempotent_filter_accepts_strict() {
+        let op = stub_operation("t.op", "T", "t.r", "low", "safe", "T");
+        // default idempotency is "strict" from stub_operation
+        let filters = SearchFilters {
+            idempotent_only: true,
+            ..Default::default()
+        };
+        assert!(operation_passes_filters(&op, &filters));
+    }
+
+    // ── Combined filter + keyword search ───────────────────────────
+
+    #[test]
+    fn filter_connector_nonexistent_returns_empty() {
+        let connectors = sample_connectors();
+        let filters = SearchFilters {
+            connector: Some("nonexistent".to_owned()),
+            ..Default::default()
+        };
+        let results = search_operations(&connectors, "create", &filters);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn filter_archetype_case_insensitive() {
+        let connectors = sample_connectors();
+        let filters = SearchFilters {
+            archetype: Some("OPERATIONAL".to_owned()),
+            ..Default::default()
+        };
+        let results = search_operations(&connectors, "list", &filters);
+        assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn filter_zone_case_sensitive() {
+        let connectors = sample_connectors();
+        // zones are exact match, "Z:WORK" != "z:work"
+        let filters = SearchFilters {
+            zone: Some("Z:WORK".to_owned()),
+            ..Default::default()
+        };
+        let results = search_operations(&connectors, "list", &filters);
+        assert!(results.is_empty());
+    }
+
+    // ── Scoring weight ordering invariants ─────────────────────────
+
+    #[test]
+    fn exact_id_weight_is_highest() {
+        assert!(WEIGHT_OP_ID_EXACT > WEIGHT_WHEN_TO_USE);
+        assert!(WEIGHT_WHEN_TO_USE > WEIGHT_OP_ID_PARTIAL);
+        assert!(WEIGHT_OP_ID_PARTIAL > WEIGHT_SUMMARY);
+        assert!(WEIGHT_SUMMARY > WEIGHT_CAPABILITY);
+        assert!(WEIGHT_CAPABILITY > WEIGHT_CONNECTOR_NAME);
+        assert!(WEIGHT_CONNECTOR_NAME > WEIGHT_COMMON_MISTAKES);
+        assert!(WEIGHT_COMMON_MISTAKES > WEIGHT_RELATED);
+    }
+
+    #[test]
+    fn all_weights_are_positive() {
+        assert!(WEIGHT_OP_ID_EXACT > 0);
+        assert!(WEIGHT_OP_ID_PARTIAL > 0);
+        assert!(WEIGHT_OP_ID_FUZZY > 0);
+        assert!(WEIGHT_WHEN_TO_USE > 0);
+        assert!(WEIGHT_SUMMARY > 0);
+        assert!(WEIGHT_CAPABILITY > 0);
+        assert!(WEIGHT_CONNECTOR_NAME > 0);
+        assert!(WEIGHT_COMMON_MISTAKES > 0);
+        assert!(WEIGHT_RELATED > 0);
+    }
+
+    // ── stub_operation field mapping ───────────────────────────────
+
+    #[test]
+    fn stub_operation_local_id_is_last_segment() {
+        let op = stub_operation("github.create_issue", "S", "C", "low", "safe", "W");
+        assert_eq!(op.local_id, "create_issue");
+    }
+
+    #[test]
+    fn stub_operation_no_dot_uses_full_id() {
+        let op = stub_operation("noop", "S", "C", "low", "safe", "W");
+        assert_eq!(op.local_id, "noop");
+        assert_eq!(op.preferred_selector, "noop");
+    }
+
+    #[test]
+    fn stub_connector_operation_count_matches() {
+        let op1 = stub_operation("a.op1", "S1", "C1", "low", "safe", "W1");
+        let op2 = stub_operation("a.op2", "S2", "C2", "low", "safe", "W2");
+        let connector = stub_connector("a", vec![op1, op2]);
+        assert_eq!(connector.detail.summary.operation_count, 2);
+        assert_eq!(connector.detail.operations.len(), 2);
+    }
+
+    // ── Capitalize helper ──────────────────────────────────────────
+
+    #[test]
+    fn capitalize_empty_string() {
+        assert_eq!(capitalize(""), "");
+    }
+
+    #[test]
+    fn capitalize_single_char() {
+        assert_eq!(capitalize("a"), "A");
+    }
+
+    #[test]
+    fn capitalize_already_upper() {
+        assert_eq!(capitalize("Hello"), "Hello");
+    }
+
+    #[test]
+    fn capitalize_preserves_rest() {
+        assert_eq!(capitalize("github"), "Github");
+    }
 }

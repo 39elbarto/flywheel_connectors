@@ -1625,4 +1625,840 @@ mod tests {
         deduped.dedup();
         assert_eq!(ids.len(), deduped.len());
     }
+
+    // ── RecipeCategory deep tests ───────────────────────────────
+
+    #[test]
+    fn category_deserializes_from_string() {
+        let dev: RecipeCategory = serde_json::from_str("\"development\"").unwrap();
+        assert_eq!(dev, RecipeCategory::Development);
+        let sec: RecipeCategory = serde_json::from_str("\"security\"").unwrap();
+        assert_eq!(sec, RecipeCategory::Security);
+        let ds: RecipeCategory = serde_json::from_str("\"data_sync\"").unwrap();
+        assert_eq!(ds, RecipeCategory::DataSync);
+    }
+
+    #[test]
+    fn category_debug_format() {
+        let dbg = format!("{:?}", RecipeCategory::Monitoring);
+        assert_eq!(dbg, "Monitoring");
+        let dbg2 = format!("{:?}", RecipeCategory::DataSync);
+        assert_eq!(dbg2, "DataSync");
+    }
+
+    #[test]
+    fn category_display_matches_serde() {
+        for cat in [
+            RecipeCategory::Development,
+            RecipeCategory::Communication,
+            RecipeCategory::Deployment,
+            RecipeCategory::Analytics,
+            RecipeCategory::Security,
+            RecipeCategory::DataSync,
+            RecipeCategory::Monitoring,
+        ] {
+            let display = cat.to_string();
+            let serde_val: String = serde_json::from_value(serde_json::to_value(cat).unwrap()).unwrap();
+            assert_eq!(display, serde_val, "display vs serde mismatch for {cat:?}");
+        }
+    }
+
+    #[test]
+    fn category_invalid_deser_fails() {
+        let result: Result<RecipeCategory, _> = serde_json::from_str("\"nonexistent\"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn category_all_variants_display_nonempty() {
+        for cat in [
+            RecipeCategory::Development,
+            RecipeCategory::Communication,
+            RecipeCategory::Deployment,
+            RecipeCategory::Analytics,
+            RecipeCategory::Security,
+            RecipeCategory::DataSync,
+            RecipeCategory::Monitoring,
+        ] {
+            assert!(!cat.to_string().is_empty());
+        }
+    }
+
+    // ── RecipeParameter deep tests ──────────────────────────────
+
+    #[test]
+    fn param_required_defaults() {
+        let p = RecipeParameter::required("name", "Name");
+        assert_eq!(p.name, "name");
+        assert_eq!(p.label, "Name");
+        assert!(p.description.is_empty());
+        assert!(p.required);
+        assert!(p.default.is_none());
+        assert!(p.example.is_none());
+    }
+
+    #[test]
+    fn param_optional_defaults() {
+        let p = RecipeParameter::optional("env", "Environment", "staging");
+        assert_eq!(p.name, "env");
+        assert_eq!(p.label, "Environment");
+        assert!(p.description.is_empty());
+        assert!(!p.required);
+        assert_eq!(p.default.as_deref(), Some("staging"));
+        assert!(p.example.is_none());
+    }
+
+    #[test]
+    fn param_builder_chain() {
+        let p = RecipeParameter::required("owner", "Owner")
+            .with_description("The repo owner")
+            .with_example("octocat");
+        assert_eq!(p.description, "The repo owner");
+        assert_eq!(p.example.as_deref(), Some("octocat"));
+        assert!(p.required);
+    }
+
+    #[test]
+    fn param_debug_format() {
+        let p = RecipeParameter::required("x", "X");
+        let dbg = format!("{p:?}");
+        assert!(dbg.contains("RecipeParameter"));
+        assert!(dbg.contains("\"x\""));
+    }
+
+    #[test]
+    fn param_deser_with_defaults() {
+        let json = r#"{"name":"x","label":"X"}"#;
+        let p: RecipeParameter = serde_json::from_str(json).unwrap();
+        assert!(!p.required); // default false
+        assert!(p.description.is_empty()); // default empty
+        assert!(p.default.is_none());
+    }
+
+    #[test]
+    fn param_optional_empty_default() {
+        let p = RecipeParameter::optional("assignee", "Assignee", "");
+        assert!(!p.required);
+        assert_eq!(p.default.as_deref(), Some(""));
+    }
+
+    // ── RecipeStep deep tests ───────────────────────────────────
+
+    #[test]
+    fn step_input_ordering_is_sorted() {
+        // BTreeMap maintains sorted key order
+        let s = RecipeStep::new("s", "c", "o")
+            .with_input("zebra", "z")
+            .with_input("alpha", "a")
+            .with_input("mid", "m");
+        let keys: Vec<&String> = s.input.keys().collect();
+        assert_eq!(keys, vec!["alpha", "mid", "zebra"]);
+    }
+
+    #[test]
+    fn step_input_overwrite() {
+        let s = RecipeStep::new("s", "c", "o")
+            .with_input("key", "first")
+            .with_input("key", "second");
+        assert_eq!(s.input.len(), 1);
+        assert_eq!(s.input["key"], "second");
+    }
+
+    #[test]
+    fn step_debug_format() {
+        let s = RecipeStep::new("fetch", "github", "get_issue");
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("RecipeStep"));
+        assert!(dbg.contains("fetch"));
+    }
+
+    #[test]
+    fn step_condition_none_by_default() {
+        let s = RecipeStep::new("s", "c", "o");
+        assert!(s.condition.is_none());
+    }
+
+    #[test]
+    fn step_deser_minimal() {
+        let json = r#"{"name":"s","connector":"c","operation":"o"}"#;
+        let s: RecipeStep = serde_json::from_str(json).unwrap();
+        assert_eq!(s.name, "s");
+        assert!(s.input.is_empty());
+        assert!(!s.continue_on_error);
+        assert!(s.condition.is_none());
+    }
+
+    #[test]
+    fn step_deser_with_all_fields() {
+        let json = r#"{
+            "name":"fetch",
+            "connector":"github",
+            "operation":"list",
+            "input":{"a":"1","b":"2"},
+            "condition":"prev.ok",
+            "continue_on_error":true
+        }"#;
+        let s: RecipeStep = serde_json::from_str(json).unwrap();
+        assert_eq!(s.input.len(), 2);
+        assert!(s.continue_on_error);
+        assert_eq!(s.condition.as_deref(), Some("prev.ok"));
+    }
+
+    // ── Recipe deep tests ───────────────────────────────────────
+
+    #[test]
+    fn recipe_default_fields() {
+        let r = Recipe::new("id", "Name", RecipeCategory::Analytics);
+        assert!(r.description.is_empty());
+        assert!(r.required_connectors.is_empty());
+        assert!(r.parameters.is_empty());
+        assert!(r.steps.is_empty());
+        assert!(r.tags.is_empty());
+    }
+
+    #[test]
+    fn recipe_debug_format() {
+        let r = Recipe::new("test", "Test", RecipeCategory::Development);
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("Recipe"));
+        assert!(dbg.contains("test"));
+    }
+
+    #[test]
+    fn recipe_tags_serde_default() {
+        // tags should default to empty vec when absent in JSON
+        let json = r#"{
+            "id":"t","name":"T","description":"","category":"development",
+            "required_connectors":[],"parameters":[],"steps":[]
+        }"#;
+        let r: Recipe = serde_json::from_str(json).unwrap();
+        assert!(r.tags.is_empty());
+    }
+
+    #[test]
+    fn recipe_connectors_used_preserves_insertion_order() {
+        let r = Recipe::new("t", "T", RecipeCategory::Development)
+            .with_step(RecipeStep::new("z", "slack", "send"))
+            .with_step(RecipeStep::new("a", "github", "push"))
+            .with_step(RecipeStep::new("b", "slack", "post"));
+        let used = r.connectors_used();
+        assert_eq!(used, vec!["slack", "github"]);
+    }
+
+    #[test]
+    fn recipe_check_requirements_multiple_missing() {
+        let r = Recipe::new("t", "T", RecipeCategory::Development)
+            .with_connector("github")
+            .with_connector("slack")
+            .with_connector("jira");
+        let available = vec!["slack".to_string()];
+        let missing = r.check_requirements(&available);
+        assert_eq!(missing.len(), 2);
+        assert!(missing.contains(&"github".to_string()));
+        assert!(missing.contains(&"jira".to_string()));
+    }
+
+    #[test]
+    fn recipe_with_many_parameters() {
+        let r = Recipe::new("t", "T", RecipeCategory::Development)
+            .with_parameter(RecipeParameter::required("a", "A"))
+            .with_parameter(RecipeParameter::required("b", "B"))
+            .with_parameter(RecipeParameter::optional("c", "C", "default"))
+            .with_parameter(RecipeParameter::required("d", "D"));
+        assert_eq!(r.parameters.len(), 4);
+        assert!(r.parameters[2].default.is_some());
+    }
+
+    #[test]
+    fn recipe_multiple_connectors() {
+        let r = Recipe::new("t", "T", RecipeCategory::Communication)
+            .with_connector("slack")
+            .with_connector("discord")
+            .with_connector("telegram");
+        assert_eq!(r.required_connectors.len(), 3);
+    }
+
+    #[test]
+    fn recipe_step_count_large() {
+        let mut r = Recipe::new("t", "T", RecipeCategory::Development);
+        for i in 0..10 {
+            r = r.with_step(RecipeStep::new(format!("s{i}"), "c", "o"));
+        }
+        assert_eq!(r.step_count(), 10);
+    }
+
+    // ── RecipeLibrary deep tests ────────────────────────────────
+
+    #[test]
+    fn library_by_category_development() {
+        let lib = RecipeLibrary::with_builtins();
+        let dev = lib.by_category(RecipeCategory::Development);
+        let ids: Vec<&str> = dev.iter().map(|r| r.id.as_str()).collect();
+        assert!(ids.contains(&"issue-to-branch"));
+        assert!(ids.contains(&"pr-review-notify"));
+        assert!(ids.contains(&"bug-triage"));
+    }
+
+    #[test]
+    fn library_by_category_communication() {
+        let lib = RecipeLibrary::with_builtins();
+        let comm = lib.by_category(RecipeCategory::Communication);
+        let ids: Vec<&str> = comm.iter().map(|r| r.id.as_str()).collect();
+        assert!(ids.contains(&"cross-post"));
+        assert!(ids.contains(&"digest-email"));
+        assert!(ids.contains(&"meeting-notes"));
+    }
+
+    #[test]
+    fn library_by_category_deployment() {
+        let lib = RecipeLibrary::with_builtins();
+        let dep = lib.by_category(RecipeCategory::Deployment);
+        assert_eq!(dep.len(), 1);
+        assert_eq!(dep[0].id, "deploy-announce");
+    }
+
+    #[test]
+    fn library_by_category_security() {
+        let lib = RecipeLibrary::with_builtins();
+        let sec = lib.by_category(RecipeCategory::Security);
+        assert_eq!(sec.len(), 1);
+        assert_eq!(sec[0].id, "rotate-secrets");
+    }
+
+    #[test]
+    fn library_by_category_data_sync() {
+        let lib = RecipeLibrary::with_builtins();
+        let ds = lib.by_category(RecipeCategory::DataSync);
+        let ids: Vec<&str> = ds.iter().map(|r| r.id.as_str()).collect();
+        assert!(ids.contains(&"sync-contacts"));
+        assert!(ids.contains(&"backup-to-s3"));
+    }
+
+    #[test]
+    fn library_by_category_monitoring() {
+        let lib = RecipeLibrary::with_builtins();
+        let mon = lib.by_category(RecipeCategory::Monitoring);
+        assert_eq!(mon.len(), 1);
+        assert_eq!(mon[0].id, "health-check-all");
+    }
+
+    #[test]
+    fn library_search_by_id() {
+        let lib = RecipeLibrary::with_builtins();
+        let results = lib.search("issue-to-branch");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "issue-to-branch");
+    }
+
+    #[test]
+    fn library_search_partial_match() {
+        let lib = RecipeLibrary::with_builtins();
+        let results = lib.search("branch");
+        assert!(results.iter().any(|r| r.id == "issue-to-branch"));
+    }
+
+    #[test]
+    fn library_search_by_name() {
+        let lib = RecipeLibrary::with_builtins();
+        let results = lib.search("Secret Rotation");
+        assert!(results.iter().any(|r| r.id == "rotate-secrets"));
+    }
+
+    #[test]
+    fn library_search_empty_query() {
+        let lib = RecipeLibrary::with_builtins();
+        let results = lib.search("");
+        // Empty query matches everything
+        assert_eq!(results.len(), lib.len());
+    }
+
+    #[test]
+    fn library_categories_all_present() {
+        let lib = RecipeLibrary::with_builtins();
+        let cats = lib.categories();
+        assert!(cats.contains(&RecipeCategory::Development));
+        assert!(cats.contains(&RecipeCategory::Communication));
+        assert!(cats.contains(&RecipeCategory::Deployment));
+        assert!(cats.contains(&RecipeCategory::Analytics));
+        assert!(cats.contains(&RecipeCategory::Security));
+        assert!(cats.contains(&RecipeCategory::DataSync));
+        assert!(cats.contains(&RecipeCategory::Monitoring));
+        assert_eq!(cats.len(), 7);
+    }
+
+    #[test]
+    fn library_categories_empty_lib() {
+        let lib = RecipeLibrary::new();
+        assert!(lib.categories().is_empty());
+    }
+
+    #[test]
+    fn library_available_recipes_all_connectors() {
+        let lib = RecipeLibrary::with_builtins();
+        let available = vec![
+            "github".to_string(),
+            "slack".to_string(),
+            "discord".to_string(),
+            "gmail".to_string(),
+            "hubspot".to_string(),
+            "google-contacts".to_string(),
+            "mixpanel".to_string(),
+            "aws-s3".to_string(),
+        ];
+        let recipes = lib.available_recipes(&available);
+        assert_eq!(recipes.len(), lib.len());
+    }
+
+    #[test]
+    fn library_is_empty_after_add() {
+        let mut lib = RecipeLibrary::new();
+        assert!(lib.is_empty());
+        lib.add(Recipe::new("x", "X", RecipeCategory::Development));
+        assert!(!lib.is_empty());
+    }
+
+    #[test]
+    fn library_with_builtins_not_empty() {
+        let lib = RecipeLibrary::with_builtins();
+        assert!(!lib.is_empty());
+        assert!(lib.len() > 0);
+    }
+
+    // ── Built-in recipe deep inspections ────────────────────────
+
+    #[test]
+    fn builtin_issue_to_branch_steps() {
+        let r = recipe_issue_to_branch();
+        assert_eq!(r.steps[0].name, "get-issue");
+        assert_eq!(r.steps[0].operation, "get_issue");
+        assert_eq!(r.steps[1].name, "create-branch");
+        assert_eq!(r.steps[2].name, "comment-on-issue");
+        // All steps use github
+        for step in &r.steps {
+            assert_eq!(step.connector, "github");
+        }
+    }
+
+    #[test]
+    fn builtin_issue_to_branch_params() {
+        let r = recipe_issue_to_branch();
+        let param_names: Vec<&str> = r.parameters.iter().map(|p| p.name.as_str()).collect();
+        assert!(param_names.contains(&"owner"));
+        assert!(param_names.contains(&"repo"));
+        assert!(param_names.contains(&"issue_number"));
+        assert!(r.parameters.iter().all(|p| p.required));
+    }
+
+    #[test]
+    fn builtin_issue_to_branch_tags() {
+        let r = recipe_issue_to_branch();
+        assert!(r.tags.contains(&"git".to_string()));
+        assert!(r.tags.contains(&"automation".to_string()));
+    }
+
+    #[test]
+    fn builtin_pr_review_notify_connectors() {
+        let r = recipe_pr_review_notify();
+        assert!(r.required_connectors.contains(&"github".to_string()));
+        assert!(r.required_connectors.contains(&"slack".to_string()));
+    }
+
+    #[test]
+    fn builtin_pr_review_notify_params() {
+        let r = recipe_pr_review_notify();
+        let names: Vec<&str> = r.parameters.iter().map(|p| p.name.as_str()).collect();
+        assert!(names.contains(&"owner"));
+        assert!(names.contains(&"repo"));
+        assert!(names.contains(&"pr_number"));
+        assert!(names.contains(&"channel"));
+    }
+
+    #[test]
+    fn builtin_deploy_announce_has_optional_param() {
+        let r = recipe_deploy_announce();
+        let env_param = r.parameters.iter().find(|p| p.name == "environment").unwrap();
+        assert!(!env_param.required);
+        assert_eq!(env_param.default.as_deref(), Some("production"));
+    }
+
+    #[test]
+    fn builtin_deploy_announce_tags() {
+        let r = recipe_deploy_announce();
+        assert!(r.tags.contains(&"deploy".to_string()));
+        assert!(r.tags.contains(&"notification".to_string()));
+    }
+
+    #[test]
+    fn builtin_bug_triage_connectors() {
+        let r = recipe_bug_triage();
+        assert!(r.required_connectors.contains(&"github".to_string()));
+        assert!(r.required_connectors.contains(&"slack".to_string()));
+    }
+
+    #[test]
+    fn builtin_bug_triage_has_optional_params() {
+        let r = recipe_bug_triage();
+        let assignee = r.parameters.iter().find(|p| p.name == "assignee").unwrap();
+        assert!(!assignee.required);
+        let channel = r.parameters.iter().find(|p| p.name == "channel").unwrap();
+        assert!(!channel.required);
+        assert_eq!(channel.default.as_deref(), Some("bugs"));
+    }
+
+    #[test]
+    fn builtin_cross_post_continue_on_error() {
+        let r = recipe_cross_post();
+        // The discord step should have continue_on_error = true
+        let discord_step = r.steps.iter().find(|s| s.connector == "discord").unwrap();
+        assert!(discord_step.continue_on_error);
+        // The slack step should not
+        let slack_step = r.steps.iter().find(|s| s.connector == "slack").unwrap();
+        assert!(!slack_step.continue_on_error);
+    }
+
+    #[test]
+    fn builtin_digest_email_connectors() {
+        let r = recipe_digest_email();
+        assert!(r.required_connectors.contains(&"slack".to_string()));
+        assert!(r.required_connectors.contains(&"gmail".to_string()));
+    }
+
+    #[test]
+    fn builtin_sync_contacts_continue_on_error() {
+        let r = recipe_sync_contacts();
+        let sync_step = r.steps.iter().find(|s| s.connector == "google-contacts").unwrap();
+        assert!(sync_step.continue_on_error);
+    }
+
+    #[test]
+    fn builtin_analytics_report_params() {
+        let r = recipe_analytics_report();
+        let days = r.parameters.iter().find(|p| p.name == "days").unwrap();
+        assert!(!days.required);
+        assert_eq!(days.default.as_deref(), Some("7"));
+    }
+
+    #[test]
+    fn builtin_meeting_notes_params_all_required() {
+        let r = recipe_meeting_notes();
+        assert!(r.parameters.iter().all(|p| p.required));
+    }
+
+    #[test]
+    fn builtin_backup_to_s3_connector() {
+        let r = recipe_backup_to_s3();
+        assert_eq!(r.required_connectors, vec!["aws-s3"]);
+    }
+
+    #[test]
+    fn builtin_health_check_all_tags() {
+        let r = recipe_health_check_all();
+        assert!(r.tags.contains(&"health".to_string()));
+        assert!(r.tags.contains(&"monitoring".to_string()));
+    }
+
+    #[test]
+    fn builtin_rotate_secrets_optional_params() {
+        let r = recipe_rotate_secrets();
+        assert!(r.parameters.iter().all(|p| !p.required));
+        let threshold = r.parameters.iter().find(|p| p.name == "days_threshold").unwrap();
+        assert_eq!(threshold.default.as_deref(), Some("7"));
+    }
+
+    #[test]
+    fn builtin_recipes_all_have_at_least_one_step() {
+        for recipe in builtin_recipes() {
+            assert!(
+                recipe.step_count() > 0,
+                "recipe '{}' has no steps",
+                recipe.id
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_recipes_all_have_connectors() {
+        for recipe in builtin_recipes() {
+            assert!(
+                !recipe.required_connectors.is_empty(),
+                "recipe '{}' has no required connectors",
+                recipe.id
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_recipes_step_connectors_match_required() {
+        for recipe in builtin_recipes() {
+            for step in &recipe.steps {
+                assert!(
+                    recipe.required_connectors.contains(&step.connector),
+                    "recipe '{}' step '{}' uses connector '{}' not in required_connectors",
+                    recipe.id,
+                    step.name,
+                    step.connector
+                );
+            }
+        }
+    }
+
+    // ── validate_recipe deep tests ──────────────────────────────
+
+    #[test]
+    fn validate_step_empty_connector_and_operation() {
+        let r = Recipe::new("test", "Test", RecipeCategory::Development)
+            .with_step(RecipeStep::new("s", "", ""));
+        let errors = validate_recipe(&r);
+        assert!(errors.iter().any(|e| e.contains("no connector")));
+        assert!(errors.iter().any(|e| e.contains("no operation")));
+    }
+
+    #[test]
+    fn validate_multiple_steps_with_errors() {
+        let r = Recipe::new("test", "Test", RecipeCategory::Development)
+            .with_connector("github")
+            .with_step(RecipeStep::new("ok", "github", "o"))
+            .with_step(RecipeStep::new("bad-op", "github", ""))
+            .with_step(RecipeStep::new("bad-conn", "slack", "o"));
+        let errors = validate_recipe(&r);
+        assert!(errors.iter().any(|e| e.contains("bad-op") && e.contains("no operation")));
+        assert!(errors.iter().any(|e| e.contains("bad-conn") && e.contains("not in required_connectors")));
+    }
+
+    #[test]
+    fn validate_recipe_with_all_issues() {
+        let mut r = Recipe::new("", "", RecipeCategory::Development);
+        r.parameters.push(RecipeParameter {
+            name: String::new(),
+            label: "X".to_owned(),
+            description: String::new(),
+            required: false,
+            default: None,
+            example: None,
+        });
+        let errors = validate_recipe(&r);
+        assert!(errors.len() >= 3); // empty id, empty name, no steps, empty param name
+        assert!(errors.iter().any(|e| e.contains("id")));
+        assert!(errors.iter().any(|e| e.contains("name")));
+        assert!(errors.iter().any(|e| e.contains("at least one step")));
+        assert!(errors.iter().any(|e| e.contains("parameter name")));
+    }
+
+    #[test]
+    fn validate_recipe_valid_multi_connector() {
+        let r = Recipe::new("multi", "Multi", RecipeCategory::Communication)
+            .with_connector("slack")
+            .with_connector("discord")
+            .with_step(RecipeStep::new("a", "slack", "send"))
+            .with_step(RecipeStep::new("b", "discord", "send"));
+        assert!(validate_recipe(&r).is_empty());
+    }
+
+    // ── format_recipe_summary deep tests ────────────────────────
+
+    #[test]
+    fn format_summary_contains_category() {
+        let r = Recipe::new("t", "T", RecipeCategory::Security)
+            .with_connector("c")
+            .with_step(RecipeStep::new("s", "c", "o"));
+        let s = format_recipe_summary(&r);
+        assert!(s.contains("security"));
+    }
+
+    #[test]
+    fn format_summary_no_connectors() {
+        let r = Recipe::new("t", "T", RecipeCategory::Development)
+            .with_step(RecipeStep::new("s", "c", "o"));
+        let s = format_recipe_summary(&r);
+        assert!(s.contains("needs: "));
+    }
+
+    #[test]
+    fn format_summary_all_builtins() {
+        for recipe in builtin_recipes() {
+            let summary = format_recipe_summary(&recipe);
+            assert!(summary.contains(&recipe.id), "summary should contain recipe id");
+            assert!(summary.contains("steps"), "summary should contain 'steps'");
+        }
+    }
+
+    // ── format_recipe_detail deep tests ─────────────────────────
+
+    #[test]
+    fn format_detail_contains_all_steps() {
+        let r = recipe_issue_to_branch();
+        let s = format_recipe_detail(&r);
+        assert!(s.contains("1. get-issue"));
+        assert!(s.contains("2. create-branch"));
+        assert!(s.contains("3. comment-on-issue"));
+    }
+
+    #[test]
+    fn format_detail_step_numbering() {
+        let mut r = Recipe::new("t", "T", RecipeCategory::Development)
+            .with_connector("c");
+        for i in 0..5 {
+            r = r.with_step(RecipeStep::new(format!("step{i}"), "c", "op"));
+        }
+        let s = format_recipe_detail(&r);
+        assert!(s.contains("1. step0"));
+        assert!(s.contains("5. step4"));
+    }
+
+    #[test]
+    fn format_detail_all_builtins() {
+        for recipe in builtin_recipes() {
+            let detail = format_recipe_detail(&recipe);
+            assert!(detail.contains(&recipe.name));
+            assert!(detail.contains(&recipe.id));
+            assert!(detail.contains("Category:"));
+            assert!(detail.contains("Description:"));
+            assert!(detail.contains("Connectors:"));
+        }
+    }
+
+    #[test]
+    fn format_detail_optional_param_shows_default() {
+        let r = Recipe::new("t", "T", RecipeCategory::Development)
+            .with_connector("c")
+            .with_parameter(RecipeParameter::optional("timeout", "Timeout", "30"))
+            .with_step(RecipeStep::new("s", "c", "o"));
+        let s = format_recipe_detail(&r);
+        assert!(s.contains("[default: 30]"));
+        assert!(!s.contains("(required)"));
+    }
+
+    #[test]
+    fn format_detail_mixed_params() {
+        let r = Recipe::new("t", "T", RecipeCategory::Development)
+            .with_connector("c")
+            .with_parameter(RecipeParameter::required("owner", "Owner"))
+            .with_parameter(RecipeParameter::optional("env", "Env", "prod"))
+            .with_step(RecipeStep::new("s", "c", "o"));
+        let s = format_recipe_detail(&r);
+        assert!(s.contains("(required)"));
+        assert!(s.contains("[default: prod]"));
+    }
+
+    // ── Recipe serde edge cases ─────────────────────────────────
+
+    #[test]
+    fn recipe_full_roundtrip_preserves_all_fields() {
+        let r = Recipe::new("rt-test", "Roundtrip Test", RecipeCategory::Monitoring)
+            .with_description("Full roundtrip test")
+            .with_connector("slack")
+            .with_tag("tag1")
+            .with_tag("tag2")
+            .with_parameter(
+                RecipeParameter::required("ch", "Channel")
+                    .with_description("The channel")
+                    .with_example("#general"),
+            )
+            .with_parameter(RecipeParameter::optional("v", "Verbose", "false"))
+            .with_step(
+                RecipeStep::new("notify", "slack", "send_message")
+                    .with_input("channel", "{{param.ch}}")
+                    .with_input("text", "hello")
+                    .with_condition("prev.ok == true")
+                    .with_continue_on_error(true),
+            );
+
+        let json = serde_json::to_string(&r).unwrap();
+        let back: Recipe = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(back.id, "rt-test");
+        assert_eq!(back.name, "Roundtrip Test");
+        assert_eq!(back.description, "Full roundtrip test");
+        assert_eq!(back.category, RecipeCategory::Monitoring);
+        assert_eq!(back.required_connectors, vec!["slack"]);
+        assert_eq!(back.tags, vec!["tag1", "tag2"]);
+        assert_eq!(back.parameters.len(), 2);
+        assert_eq!(back.parameters[0].description, "The channel");
+        assert_eq!(back.parameters[0].example.as_deref(), Some("#general"));
+        assert_eq!(back.steps.len(), 1);
+        assert_eq!(back.steps[0].input.len(), 2);
+        assert_eq!(back.steps[0].condition.as_deref(), Some("prev.ok == true"));
+        assert!(back.steps[0].continue_on_error);
+    }
+
+    #[test]
+    fn library_roundtrip_with_builtins() {
+        let lib = RecipeLibrary::with_builtins();
+        let json = serde_json::to_string(&lib).unwrap();
+        let back: RecipeLibrary = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.len(), lib.len());
+        // Verify a specific recipe survived
+        let itb = back.get("issue-to-branch").unwrap();
+        assert_eq!(itb.step_count(), 3);
+        assert_eq!(itb.category, RecipeCategory::Development);
+    }
+
+    // ── Library search edge cases ───────────────────────────────
+
+    #[test]
+    fn library_search_matches_multiple() {
+        let lib = RecipeLibrary::with_builtins();
+        // "slack" appears in many recipes' descriptions/connectors
+        let results = lib.search("slack");
+        assert!(results.len() >= 2);
+    }
+
+    #[test]
+    fn library_search_by_tag_exact() {
+        let lib = RecipeLibrary::with_builtins();
+        let results = lib.search("s3");
+        assert!(results.iter().any(|r| r.id == "backup-to-s3"));
+    }
+
+    #[test]
+    fn library_search_mixed_case() {
+        let lib = RecipeLibrary::with_builtins();
+        let results_lower = lib.search("bug");
+        let results_upper = lib.search("BUG");
+        assert_eq!(results_lower.len(), results_upper.len());
+    }
+
+    #[test]
+    fn library_available_recipes_slack_only() {
+        let lib = RecipeLibrary::with_builtins();
+        let available = vec!["slack".to_string()];
+        let recipes = lib.available_recipes(&available);
+        // These need only slack: deploy-announce, health-check-all, rotate-secrets
+        for r in &recipes {
+            assert!(
+                r.check_requirements(&available).is_empty(),
+                "recipe '{}' should be available with slack only",
+                r.id
+            );
+        }
+        assert!(recipes.iter().any(|r| r.id == "deploy-announce"));
+        assert!(recipes.iter().any(|r| r.id == "health-check-all"));
+        assert!(recipes.iter().any(|r| r.id == "rotate-secrets"));
+    }
+
+    #[test]
+    fn library_get_all_builtin_by_id() {
+        let lib = RecipeLibrary::with_builtins();
+        let expected_ids = [
+            "issue-to-branch",
+            "pr-review-notify",
+            "deploy-announce",
+            "bug-triage",
+            "cross-post",
+            "digest-email",
+            "health-check-all",
+            "rotate-secrets",
+            "sync-contacts",
+            "analytics-report",
+            "meeting-notes",
+            "backup-to-s3",
+        ];
+        for id in &expected_ids {
+            assert!(
+                lib.get(id).is_some(),
+                "builtin recipe '{}' should be retrievable by id",
+                id
+            );
+        }
+    }
 }

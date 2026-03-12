@@ -1699,4 +1699,1073 @@ mod tests {
         };
         assert!(evaluate_condition(&expr, &ctx).unwrap());
     }
+
+    // ── split_path edge cases ─────────────────────────────────────────
+
+    #[test]
+    fn pipeline_cond_split_path_simple_dot() {
+        let segs = split_path("a.b.c");
+        assert_eq!(segs, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn pipeline_cond_split_path_bracket_only() {
+        let segs = split_path("[0]");
+        assert_eq!(segs, vec!["0"]);
+    }
+
+    #[test]
+    fn pipeline_cond_split_path_multiple_brackets() {
+        let segs = split_path("data[0][1]");
+        assert_eq!(segs, vec!["data", "0", "1"]);
+    }
+
+    #[test]
+    fn pipeline_cond_split_path_nested_dot_bracket() {
+        let segs = split_path("steps.fetch.output.items[2].name");
+        assert_eq!(segs, vec!["steps", "fetch", "output", "items", "2", "name"]);
+    }
+
+    #[test]
+    fn pipeline_cond_split_path_single_segment() {
+        let segs = split_path("root");
+        assert_eq!(segs, vec!["root"]);
+    }
+
+    #[test]
+    fn pipeline_cond_split_path_empty() {
+        let segs = split_path("");
+        assert_eq!(segs, vec![""]);
+    }
+
+    // ── resolve_template_path: short-form paths ───────────────────────
+
+    #[test]
+    fn pipeline_cond_resolve_short_form() {
+        let mut ctx = PipelineContext::new();
+        ctx.set_output("fetch", json!({"result": "ok"}));
+        let v = resolve_template_path("fetch.output.result", &ctx).unwrap();
+        assert_eq!(v, json!("ok"));
+    }
+
+    #[test]
+    fn pipeline_cond_resolve_short_form_root() {
+        let mut ctx = PipelineContext::new();
+        ctx.set_output("s", json!(42));
+        let v = resolve_template_path("s.output", &ctx).unwrap();
+        assert_eq!(v, json!(42));
+    }
+
+    #[test]
+    fn pipeline_cond_resolve_steps_too_short() {
+        let ctx = ctx_with_fetch();
+        // "steps.fetch" is only 2 segments (need at least 3 when starts with "steps")
+        assert!(resolve_template_path("steps.fetch", &ctx).is_none());
+    }
+
+    #[test]
+    fn pipeline_cond_resolve_single_segment() {
+        let ctx = ctx_with_fetch();
+        // Single segment without "output" as second
+        assert!(resolve_template_path("fetch", &ctx).is_none());
+    }
+
+    #[test]
+    fn pipeline_cond_resolve_steps_prefix_only() {
+        let ctx = ctx_with_fetch();
+        assert!(resolve_template_path("steps", &ctx).is_none());
+    }
+
+    #[test]
+    fn pipeline_cond_resolve_deep_nested() {
+        let mut ctx = PipelineContext::new();
+        ctx.set_output("s", json!({"a": {"b": {"c": {"d": 99}}}}));
+        let v = resolve_template_path("steps.s.output.a.b.c.d", &ctx).unwrap();
+        assert_eq!(v, json!(99));
+    }
+
+    #[test]
+    fn pipeline_cond_resolve_array_then_field() {
+        let ctx = ctx_with_fetch();
+        let v = resolve_template_path("steps.fetch.output.issues[1].title", &ctx).unwrap();
+        assert_eq!(v, json!("Bug B"));
+    }
+
+    // ── is_truthy coverage ────────────────────────────────────────────
+
+    #[test]
+    fn pipeline_cond_eval_truthy_number_zero() {
+        let mut ctx = PipelineContext::new();
+        ctx.set_output("s", json!({"val": 0}));
+        let expr = ConditionExpr::Truthy("steps.s.output.val".to_owned());
+        assert!(!evaluate_condition(&expr, &ctx).unwrap());
+    }
+
+    #[test]
+    fn pipeline_cond_eval_truthy_number_nonzero() {
+        let mut ctx = PipelineContext::new();
+        ctx.set_output("s", json!({"val": 42}));
+        let expr = ConditionExpr::Truthy("steps.s.output.val".to_owned());
+        assert!(evaluate_condition(&expr, &ctx).unwrap());
+    }
+
+    #[test]
+    fn pipeline_cond_eval_truthy_empty_string() {
+        let mut ctx = PipelineContext::new();
+        ctx.set_output("s", json!({"val": ""}));
+        let expr = ConditionExpr::Truthy("steps.s.output.val".to_owned());
+        assert!(!evaluate_condition(&expr, &ctx).unwrap());
+    }
+
+    #[test]
+    fn pipeline_cond_eval_truthy_nonempty_string() {
+        let mut ctx = PipelineContext::new();
+        ctx.set_output("s", json!({"val": "hi"}));
+        let expr = ConditionExpr::Truthy("steps.s.output.val".to_owned());
+        assert!(evaluate_condition(&expr, &ctx).unwrap());
+    }
+
+    #[test]
+    fn pipeline_cond_eval_truthy_empty_array() {
+        let mut ctx = PipelineContext::new();
+        ctx.set_output("s", json!({"val": []}));
+        let expr = ConditionExpr::Truthy("steps.s.output.val".to_owned());
+        assert!(!evaluate_condition(&expr, &ctx).unwrap());
+    }
+
+    #[test]
+    fn pipeline_cond_eval_truthy_nonempty_array() {
+        let mut ctx = PipelineContext::new();
+        ctx.set_output("s", json!({"val": [1]}));
+        let expr = ConditionExpr::Truthy("steps.s.output.val".to_owned());
+        assert!(evaluate_condition(&expr, &ctx).unwrap());
+    }
+
+    #[test]
+    fn pipeline_cond_eval_truthy_empty_object() {
+        let mut ctx = PipelineContext::new();
+        ctx.set_output("s", json!({"val": {}}));
+        let expr = ConditionExpr::Truthy("steps.s.output.val".to_owned());
+        assert!(!evaluate_condition(&expr, &ctx).unwrap());
+    }
+
+    #[test]
+    fn pipeline_cond_eval_truthy_nonempty_object() {
+        let mut ctx = PipelineContext::new();
+        ctx.set_output("s", json!({"val": {"k": "v"}}));
+        let expr = ConditionExpr::Truthy("steps.s.output.val".to_owned());
+        assert!(evaluate_condition(&expr, &ctx).unwrap());
+    }
+
+    #[test]
+    fn pipeline_cond_eval_truthy_bool_false() {
+        let mut ctx = PipelineContext::new();
+        ctx.set_output("s", json!({"val": false}));
+        let expr = ConditionExpr::Truthy("steps.s.output.val".to_owned());
+        assert!(!evaluate_condition(&expr, &ctx).unwrap());
+    }
+
+    // ── compare_value: type mismatches ────────────────────────────────
+
+    #[test]
+    fn pipeline_cond_compare_string_vs_number_returns_false() {
+        let mut ctx = PipelineContext::new();
+        ctx.set_output("s", json!({"val": "hello"}));
+        let expr = ConditionExpr::Comparison {
+            left: "steps.s.output.val".to_owned(),
+            op: CompareOp::Eq,
+            right: ConditionValue::Number(5.0),
+        };
+        assert!(!evaluate_condition(&expr, &ctx).unwrap());
+    }
+
+    #[test]
+    fn pipeline_cond_compare_number_vs_bool_returns_false() {
+        let mut ctx = PipelineContext::new();
+        ctx.set_output("s", json!({"val": 1}));
+        let expr = ConditionExpr::Comparison {
+            left: "steps.s.output.val".to_owned(),
+            op: CompareOp::Eq,
+            right: ConditionValue::Bool(true),
+        };
+        assert!(!evaluate_condition(&expr, &ctx).unwrap());
+    }
+
+    #[test]
+    fn pipeline_cond_compare_bool_ne() {
+        let mut ctx = PipelineContext::new();
+        ctx.set_output("s", json!({"flag": true}));
+        let expr = ConditionExpr::Comparison {
+            left: "steps.s.output.flag".to_owned(),
+            op: CompareOp::Ne,
+            right: ConditionValue::Bool(false),
+        };
+        assert!(evaluate_condition(&expr, &ctx).unwrap());
+    }
+
+    #[test]
+    fn pipeline_cond_compare_bool_gt_returns_false() {
+        let mut ctx = PipelineContext::new();
+        ctx.set_output("s", json!({"flag": true}));
+        let expr = ConditionExpr::Comparison {
+            left: "steps.s.output.flag".to_owned(),
+            op: CompareOp::Gt,
+            right: ConditionValue::Bool(false),
+        };
+        // Gt on booleans is not meaningful, returns false
+        assert!(!evaluate_condition(&expr, &ctx).unwrap());
+    }
+
+    #[test]
+    fn pipeline_cond_compare_null_ne() {
+        let mut ctx = PipelineContext::new();
+        ctx.set_output("s", json!({"val": "something"}));
+        let expr = ConditionExpr::Comparison {
+            left: "steps.s.output.val".to_owned(),
+            op: CompareOp::Ne,
+            right: ConditionValue::Null,
+        };
+        assert!(evaluate_condition(&expr, &ctx).unwrap());
+    }
+
+    #[test]
+    fn pipeline_cond_compare_null_gt_returns_false() {
+        let mut ctx = PipelineContext::new();
+        ctx.set_output("s", json!({"val": null}));
+        let expr = ConditionExpr::Comparison {
+            left: "steps.s.output.val".to_owned(),
+            op: CompareOp::Gt,
+            right: ConditionValue::Null,
+        };
+        assert!(!evaluate_condition(&expr, &ctx).unwrap());
+    }
+
+    // ── compare_value: string ordering ────────────────────────────────
+
+    #[test]
+    fn pipeline_cond_compare_string_gt() {
+        let mut ctx = PipelineContext::new();
+        ctx.set_output("s", json!({"val": "banana"}));
+        let expr = ConditionExpr::Comparison {
+            left: "steps.s.output.val".to_owned(),
+            op: CompareOp::Gt,
+            right: ConditionValue::String("apple".to_owned()),
+        };
+        assert!(evaluate_condition(&expr, &ctx).unwrap());
+    }
+
+    #[test]
+    fn pipeline_cond_compare_string_lt() {
+        let mut ctx = PipelineContext::new();
+        ctx.set_output("s", json!({"val": "apple"}));
+        let expr = ConditionExpr::Comparison {
+            left: "steps.s.output.val".to_owned(),
+            op: CompareOp::Lt,
+            right: ConditionValue::String("banana".to_owned()),
+        };
+        assert!(evaluate_condition(&expr, &ctx).unwrap());
+    }
+
+    #[test]
+    fn pipeline_cond_compare_string_gte_equal() {
+        let mut ctx = PipelineContext::new();
+        ctx.set_output("s", json!({"val": "same"}));
+        let expr = ConditionExpr::Comparison {
+            left: "steps.s.output.val".to_owned(),
+            op: CompareOp::Gte,
+            right: ConditionValue::String("same".to_owned()),
+        };
+        assert!(evaluate_condition(&expr, &ctx).unwrap());
+    }
+
+    #[test]
+    fn pipeline_cond_compare_string_lte_equal() {
+        let mut ctx = PipelineContext::new();
+        ctx.set_output("s", json!({"val": "same"}));
+        let expr = ConditionExpr::Comparison {
+            left: "steps.s.output.val".to_owned(),
+            op: CompareOp::Lte,
+            right: ConditionValue::String("same".to_owned()),
+        };
+        assert!(evaluate_condition(&expr, &ctx).unwrap());
+    }
+
+    // ── compare_value: number operators ───────────────────────────────
+
+    #[test]
+    fn pipeline_cond_compare_number_ne() {
+        let mut ctx = PipelineContext::new();
+        ctx.set_output("s", json!({"val": 10}));
+        let expr = ConditionExpr::Comparison {
+            left: "steps.s.output.val".to_owned(),
+            op: CompareOp::Ne,
+            right: ConditionValue::Number(5.0),
+        };
+        assert!(evaluate_condition(&expr, &ctx).unwrap());
+    }
+
+    #[test]
+    fn pipeline_cond_compare_number_lt() {
+        let mut ctx = PipelineContext::new();
+        ctx.set_output("s", json!({"val": 3}));
+        let expr = ConditionExpr::Comparison {
+            left: "steps.s.output.val".to_owned(),
+            op: CompareOp::Lt,
+            right: ConditionValue::Number(5.0),
+        };
+        assert!(evaluate_condition(&expr, &ctx).unwrap());
+    }
+
+    #[test]
+    fn pipeline_cond_compare_number_gte_equal() {
+        let mut ctx = PipelineContext::new();
+        ctx.set_output("s", json!({"val": 5}));
+        let expr = ConditionExpr::Comparison {
+            left: "steps.s.output.val".to_owned(),
+            op: CompareOp::Gte,
+            right: ConditionValue::Number(5.0),
+        };
+        assert!(evaluate_condition(&expr, &ctx).unwrap());
+    }
+
+    #[test]
+    fn pipeline_cond_compare_number_lte_strict() {
+        let mut ctx = PipelineContext::new();
+        ctx.set_output("s", json!({"val": 4}));
+        let expr = ConditionExpr::Comparison {
+            left: "steps.s.output.val".to_owned(),
+            op: CompareOp::Lte,
+            right: ConditionValue::Number(5.0),
+        };
+        assert!(evaluate_condition(&expr, &ctx).unwrap());
+    }
+
+    #[test]
+    fn pipeline_cond_compare_number_eq_exact() {
+        let mut ctx = PipelineContext::new();
+        ctx.set_output("s", json!({"val": 3.14}));
+        let expr = ConditionExpr::Comparison {
+            left: "steps.s.output.val".to_owned(),
+            op: CompareOp::Eq,
+            right: ConditionValue::Number(3.14),
+        };
+        assert!(evaluate_condition(&expr, &ctx).unwrap());
+    }
+
+    // ── value_length: non-container types ─────────────────────────────
+
+    #[test]
+    fn pipeline_cond_length_of_number_is_zero() {
+        let mut ctx = PipelineContext::new();
+        ctx.set_output("s", json!({"val": 42}));
+        let expr = ConditionExpr::LengthCheck {
+            path: "steps.s.output.val".to_owned(),
+            op: CompareOp::Eq,
+            value: 0,
+        };
+        assert!(evaluate_condition(&expr, &ctx).unwrap());
+    }
+
+    #[test]
+    fn pipeline_cond_length_of_bool_is_zero() {
+        let mut ctx = PipelineContext::new();
+        ctx.set_output("s", json!({"val": true}));
+        let expr = ConditionExpr::LengthCheck {
+            path: "steps.s.output.val".to_owned(),
+            op: CompareOp::Eq,
+            value: 0,
+        };
+        assert!(evaluate_condition(&expr, &ctx).unwrap());
+    }
+
+    #[test]
+    fn pipeline_cond_length_of_null_is_zero() {
+        let mut ctx = PipelineContext::new();
+        ctx.set_output("s", json!({"val": null}));
+        let expr = ConditionExpr::LengthCheck {
+            path: "steps.s.output.val".to_owned(),
+            op: CompareOp::Eq,
+            value: 0,
+        };
+        assert!(evaluate_condition(&expr, &ctx).unwrap());
+    }
+
+    #[test]
+    fn pipeline_cond_length_ne() {
+        let ctx = ctx_with_fetch();
+        let expr = ConditionExpr::LengthCheck {
+            path: "steps.fetch.output.issues".to_owned(),
+            op: CompareOp::Ne,
+            value: 5,
+        };
+        assert!(evaluate_condition(&expr, &ctx).unwrap());
+    }
+
+    #[test]
+    fn pipeline_cond_length_lt() {
+        let ctx = ctx_with_fetch();
+        let expr = ConditionExpr::LengthCheck {
+            path: "steps.fetch.output.issues".to_owned(),
+            op: CompareOp::Lt,
+            value: 10,
+        };
+        assert!(evaluate_condition(&expr, &ctx).unwrap());
+    }
+
+    #[test]
+    fn pipeline_cond_length_gte() {
+        let ctx = ctx_with_fetch();
+        let expr = ConditionExpr::LengthCheck {
+            path: "steps.fetch.output.issues".to_owned(),
+            op: CompareOp::Gte,
+            value: 2,
+        };
+        assert!(evaluate_condition(&expr, &ctx).unwrap());
+    }
+
+    #[test]
+    fn pipeline_cond_length_lte() {
+        let ctx = ctx_with_fetch();
+        let expr = ConditionExpr::LengthCheck {
+            path: "steps.fetch.output.issues".to_owned(),
+            op: CompareOp::Lte,
+            value: 2,
+        };
+        assert!(evaluate_condition(&expr, &ctx).unwrap());
+    }
+
+    // ── value_contains: edge cases ────────────────────────────────────
+
+    #[test]
+    fn pipeline_cond_contains_on_number_is_false() {
+        let mut ctx = PipelineContext::new();
+        ctx.set_output("s", json!({"val": 42}));
+        let expr = ConditionExpr::Contains {
+            haystack: "steps.s.output.val".to_owned(),
+            needle: "42".to_owned(),
+        };
+        assert!(!evaluate_condition(&expr, &ctx).unwrap());
+    }
+
+    #[test]
+    fn pipeline_cond_contains_missing_step() {
+        let ctx = PipelineContext::new();
+        let expr = ConditionExpr::Contains {
+            haystack: "steps.nope.output.text".to_owned(),
+            needle: "x".to_owned(),
+        };
+        assert!(evaluate_condition(&expr, &ctx).is_err());
+    }
+
+    #[test]
+    fn pipeline_cond_contains_empty_needle() {
+        let mut ctx = PipelineContext::new();
+        ctx.set_output("s", json!({"text": "hello world"}));
+        let expr = ConditionExpr::Contains {
+            haystack: "steps.s.output.text".to_owned(),
+            needle: String::new(),
+        };
+        // empty string is always contained
+        assert!(evaluate_condition(&expr, &ctx).unwrap());
+    }
+
+    #[test]
+    fn pipeline_cond_contains_array_with_non_string_elements() {
+        let mut ctx = PipelineContext::new();
+        ctx.set_output("s", json!({"arr": [1, 2, "three"]}));
+        let expr = ConditionExpr::Contains {
+            haystack: "steps.s.output.arr".to_owned(),
+            needle: "three".to_owned(),
+        };
+        assert!(evaluate_condition(&expr, &ctx).unwrap());
+    }
+
+    #[test]
+    fn pipeline_cond_contains_array_non_string_miss() {
+        let mut ctx = PipelineContext::new();
+        ctx.set_output("s", json!({"arr": [1, 2, 3]}));
+        let expr = ConditionExpr::Contains {
+            haystack: "steps.s.output.arr".to_owned(),
+            needle: "1".to_owned(),
+        };
+        // numbers in array don't match string needle
+        assert!(!evaluate_condition(&expr, &ctx).unwrap());
+    }
+
+    // ── Condition parsing: case-insensitive always/never ──────────────
+
+    #[test]
+    fn pipeline_cond_parse_always_upper() {
+        let c = parse_condition("ALWAYS").unwrap();
+        assert_eq!(c.parsed, ConditionExpr::Always);
+    }
+
+    #[test]
+    fn pipeline_cond_parse_never_mixed_case() {
+        let c = parse_condition("Never").unwrap();
+        assert_eq!(c.parsed, ConditionExpr::Never);
+    }
+
+    // ── Condition parsing: double-quoted string comparison ────────────
+
+    #[test]
+    fn pipeline_cond_parse_comparison_double_quoted() {
+        let c = parse_condition("{{steps.a.output.x}} == \"hello\"").unwrap();
+        assert_eq!(
+            c.parsed,
+            ConditionExpr::Comparison {
+                left: "steps.a.output.x".to_owned(),
+                op: CompareOp::Eq,
+                right: ConditionValue::String("hello".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn pipeline_cond_parse_comparison_bool_false() {
+        let c = parse_condition("{{steps.x.output.flag}} == false").unwrap();
+        assert_eq!(
+            c.parsed,
+            ConditionExpr::Comparison {
+                left: "steps.x.output.flag".to_owned(),
+                op: CompareOp::Eq,
+                right: ConditionValue::Bool(false),
+            }
+        );
+    }
+
+    #[test]
+    fn pipeline_cond_parse_comparison_negative_number() {
+        let c = parse_condition("{{steps.x.output.val}} > -1").unwrap();
+        assert_eq!(
+            c.parsed,
+            ConditionExpr::Comparison {
+                left: "steps.x.output.val".to_owned(),
+                op: CompareOp::Gt,
+                right: ConditionValue::Number(-1.0),
+            }
+        );
+    }
+
+    #[test]
+    fn pipeline_cond_parse_comparison_float() {
+        let c = parse_condition("{{steps.x.output.val}} == 3.14").unwrap();
+        assert_eq!(
+            c.parsed,
+            ConditionExpr::Comparison {
+                left: "steps.x.output.val".to_owned(),
+                op: CompareOp::Eq,
+                right: ConditionValue::Number(3.14),
+            }
+        );
+    }
+
+    // ── Condition parsing: complex logical expressions ────────────────
+
+    #[test]
+    fn pipeline_cond_parse_nested_not_and() {
+        let c = parse_condition(
+            "!{{steps.a.output.skip}} && {{steps.b.output.ready}} == true",
+        )
+        .unwrap();
+        match &c.parsed {
+            ConditionExpr::LogicalAnd(l, r) => {
+                assert!(matches!(l.as_ref(), ConditionExpr::Not(_)));
+                assert!(matches!(r.as_ref(), ConditionExpr::Comparison { .. }));
+            }
+            other => panic!("expected LogicalAnd, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pipeline_cond_parse_or_then_and() {
+        // OR has lower precedence than AND
+        let c = parse_condition(
+            "{{steps.a.output.x}} == 'yes' || {{steps.b.output.y}} == 'yes' && {{steps.c.output.z}} == 'yes'",
+        )
+        .unwrap();
+        // Should be OR(comparison, AND(comparison, comparison))
+        assert!(matches!(c.parsed, ConditionExpr::LogicalOr(_, _)));
+    }
+
+    #[test]
+    fn pipeline_cond_parse_double_not() {
+        let c = parse_condition("!!{{steps.a.output.x}}").unwrap();
+        match &c.parsed {
+            ConditionExpr::Not(inner) => {
+                assert!(matches!(inner.as_ref(), ConditionExpr::Not(_)));
+            }
+            other => panic!("expected Not(Not(...)), got {other:?}"),
+        }
+    }
+
+    // ── Condition parsing: invalid expressions ────────────────────────
+
+    #[test]
+    fn pipeline_cond_parse_empty_template() {
+        let err = parse_condition("{{}}").unwrap_err();
+        assert!(matches!(err, ConditionParseError::InvalidSyntax(_)));
+    }
+
+    #[test]
+    fn pipeline_cond_parse_bad_contains_needle() {
+        let err = parse_condition("{{steps.a.output.x}} contains unquoted").unwrap_err();
+        assert!(matches!(err, ConditionParseError::InvalidSyntax(_)));
+    }
+
+    #[test]
+    fn pipeline_cond_parse_bad_length_value() {
+        let err = parse_condition("{{steps.a.output.x | length}} > abc").unwrap_err();
+        assert!(matches!(err, ConditionParseError::InvalidSyntax(_)));
+    }
+
+    #[test]
+    fn pipeline_cond_parse_bad_operator() {
+        let err = parse_condition("{{steps.a.output.x}} ~= 5").unwrap_err();
+        assert!(matches!(err, ConditionParseError::InvalidSyntax(_)));
+    }
+
+    // ── Condition parsing: length with all operators ──────────────────
+
+    #[test]
+    fn pipeline_cond_parse_length_ne() {
+        let c = parse_condition("{{steps.a.output.items | length}} != 0").unwrap();
+        assert_eq!(
+            c.parsed,
+            ConditionExpr::LengthCheck {
+                path: "steps.a.output.items".to_owned(),
+                op: CompareOp::Ne,
+                value: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn pipeline_cond_parse_length_lt() {
+        let c = parse_condition("{{steps.a.output.items | length}} < 100").unwrap();
+        assert_eq!(
+            c.parsed,
+            ConditionExpr::LengthCheck {
+                path: "steps.a.output.items".to_owned(),
+                op: CompareOp::Lt,
+                value: 100,
+            }
+        );
+    }
+
+    #[test]
+    fn pipeline_cond_parse_length_gte() {
+        let c = parse_condition("{{steps.a.output.items | length}} >= 1").unwrap();
+        assert_eq!(
+            c.parsed,
+            ConditionExpr::LengthCheck {
+                path: "steps.a.output.items".to_owned(),
+                op: CompareOp::Gte,
+                value: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn pipeline_cond_parse_length_lte() {
+        let c = parse_condition("{{steps.a.output.items | length}} <= 50").unwrap();
+        assert_eq!(
+            c.parsed,
+            ConditionExpr::LengthCheck {
+                path: "steps.a.output.items".to_owned(),
+                op: CompareOp::Lte,
+                value: 50,
+            }
+        );
+    }
+
+    // ── Error mode parsing: whitespace / boundary ─────────────────────
+
+    #[test]
+    fn pipeline_cond_error_mode_skip_with_whitespace() {
+        assert_eq!(parse_error_mode("  skip  ").unwrap(), ErrorMode::Skip);
+    }
+
+    #[test]
+    fn pipeline_cond_error_mode_retry_one() {
+        assert_eq!(
+            parse_error_mode("retry(1)").unwrap(),
+            ErrorMode::Retry { max_attempts: 1 }
+        );
+    }
+
+    #[test]
+    fn pipeline_cond_error_mode_fallback_with_whitespace_id() {
+        assert_eq!(
+            parse_error_mode("fallback( cleanup_step )").unwrap(),
+            ErrorMode::Fallback {
+                step_id: "cleanup_step".to_owned(),
+            }
+        );
+    }
+
+    // ── Error decision: boundary conditions ───────────────────────────
+
+    #[test]
+    fn pipeline_cond_decision_retry_just_under_limit() {
+        let err = step_error("a", 2);
+        let mode = ErrorMode::Retry { max_attempts: 3 };
+        assert_eq!(apply_error_mode(&mode, &err, 2), ErrorDecision::Retry);
+    }
+
+    #[test]
+    fn pipeline_cond_decision_retry_over_limit() {
+        let err = step_error("a", 5);
+        let mode = ErrorMode::Retry { max_attempts: 3 };
+        assert_eq!(apply_error_mode(&mode, &err, 5), ErrorDecision::Abort);
+    }
+
+    #[test]
+    fn pipeline_cond_decision_retry_at_one() {
+        let err = step_error("a", 1);
+        let mode = ErrorMode::Retry { max_attempts: 1 };
+        // attempt == max_attempts, should abort
+        assert_eq!(apply_error_mode(&mode, &err, 1), ErrorDecision::Abort);
+    }
+
+    // ── Serde roundtrips ──────────────────────────────────────────────
+
+    #[test]
+    fn pipeline_cond_serde_condition_value_variants() {
+        let values = vec![
+            ConditionValue::String("test".to_owned()),
+            ConditionValue::Number(42.5),
+            ConditionValue::Bool(true),
+            ConditionValue::Null,
+        ];
+        for v in &values {
+            let json = serde_json::to_string(v).unwrap();
+            let back: ConditionValue = serde_json::from_str(&json).unwrap();
+            assert_eq!(&back, v);
+        }
+    }
+
+    #[test]
+    fn pipeline_cond_serde_condition_expr_truthy() {
+        let expr = ConditionExpr::Truthy("steps.a.output.x".to_owned());
+        let json = serde_json::to_string(&expr).unwrap();
+        let back: ConditionExpr = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, expr);
+    }
+
+    #[test]
+    fn pipeline_cond_serde_condition_expr_comparison() {
+        let expr = ConditionExpr::Comparison {
+            left: "steps.a.output.x".to_owned(),
+            op: CompareOp::Gte,
+            right: ConditionValue::Number(10.0),
+        };
+        let json = serde_json::to_string(&expr).unwrap();
+        let back: ConditionExpr = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, expr);
+    }
+
+    #[test]
+    fn pipeline_cond_serde_condition_expr_logical() {
+        let expr = ConditionExpr::LogicalAnd(
+            Box::new(ConditionExpr::Always),
+            Box::new(ConditionExpr::Not(Box::new(ConditionExpr::Never))),
+        );
+        let json = serde_json::to_string(&expr).unwrap();
+        let back: ConditionExpr = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, expr);
+    }
+
+    #[test]
+    fn pipeline_cond_serde_condition_expr_length_check() {
+        let expr = ConditionExpr::LengthCheck {
+            path: "steps.a.output.items".to_owned(),
+            op: CompareOp::Lt,
+            value: 50,
+        };
+        let json = serde_json::to_string(&expr).unwrap();
+        let back: ConditionExpr = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, expr);
+    }
+
+    #[test]
+    fn pipeline_cond_serde_condition_expr_contains() {
+        let expr = ConditionExpr::Contains {
+            haystack: "steps.a.output.text".to_owned(),
+            needle: "hello".to_owned(),
+        };
+        let json = serde_json::to_string(&expr).unwrap();
+        let back: ConditionExpr = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, expr);
+    }
+
+    #[test]
+    fn pipeline_cond_serde_condition_struct() {
+        let c = Condition {
+            raw: "always".to_owned(),
+            parsed: ConditionExpr::Always,
+        };
+        let json = serde_json::to_string(&c).unwrap();
+        let back: Condition = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, c);
+    }
+
+    #[test]
+    fn pipeline_cond_serde_error_mode_all_variants() {
+        let modes = vec![
+            ErrorMode::Skip,
+            ErrorMode::Abort,
+            ErrorMode::Retry { max_attempts: 5 },
+            ErrorMode::Fallback {
+                step_id: "backup".to_owned(),
+            },
+        ];
+        for m in &modes {
+            let json = serde_json::to_string(m).unwrap();
+            let back: ErrorMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(&back, m);
+        }
+    }
+
+    #[test]
+    fn pipeline_cond_serde_step_outcome_all_variants() {
+        let outcomes = vec![
+            StepOutcome::Executed(json!({"ok": true})),
+            StepOutcome::Skipped("no reason".to_owned()),
+            StepOutcome::Failed(StepError {
+                step_id: "x".to_owned(),
+                error_type: "io".to_owned(),
+                message: "timeout".to_owned(),
+                attempt: 3,
+            }),
+        ];
+        for o in &outcomes {
+            let json = serde_json::to_string(o).unwrap();
+            let _back: StepOutcome = serde_json::from_str(&json).unwrap();
+        }
+    }
+
+    #[test]
+    fn pipeline_cond_serde_step_error() {
+        let e = StepError {
+            step_id: "deploy".to_owned(),
+            error_type: "auth".to_owned(),
+            message: "token expired".to_owned(),
+            attempt: 1,
+        };
+        let json = serde_json::to_string(&e).unwrap();
+        let back: StepError = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.step_id, "deploy");
+        assert_eq!(back.error_type, "auth");
+        assert_eq!(back.message, "token expired");
+        assert_eq!(back.attempt, 1);
+    }
+
+    // ── Clone impls ───────────────────────────────────────────────────
+
+    #[test]
+    fn pipeline_cond_clone_compare_op() {
+        let op = CompareOp::Gte;
+        let cloned = op.clone();
+        assert_eq!(op, cloned);
+    }
+
+    #[test]
+    fn pipeline_cond_clone_condition_expr() {
+        let expr = ConditionExpr::LogicalOr(
+            Box::new(ConditionExpr::Always),
+            Box::new(ConditionExpr::Never),
+        );
+        let cloned = expr.clone();
+        assert_eq!(expr, cloned);
+    }
+
+    #[test]
+    fn pipeline_cond_clone_condition() {
+        let c = parse_condition("always").unwrap();
+        let cloned = c.clone();
+        assert_eq!(c, cloned);
+    }
+
+    #[test]
+    fn pipeline_cond_clone_error_mode() {
+        let m = ErrorMode::Retry { max_attempts: 3 };
+        let cloned = m.clone();
+        assert_eq!(m, cloned);
+    }
+
+    #[test]
+    fn pipeline_cond_clone_pipeline_context() {
+        let mut ctx = PipelineContext::new();
+        ctx.set_output("s1", json!(42));
+        let cloned = ctx.clone();
+        assert_eq!(cloned.get_output("s1").unwrap(), &json!(42));
+    }
+
+    // ── ExecutionTrace: additional coverage ───────────────────────────
+
+    #[test]
+    fn pipeline_cond_trace_empty() {
+        let trace = ExecutionTrace::default();
+        assert!(trace.steps.is_empty());
+    }
+
+    #[test]
+    fn pipeline_cond_trace_multiple_entries_roundtrip() {
+        let trace = ExecutionTrace {
+            steps: vec![
+                StepTraceEntry {
+                    step_id: "s1".to_owned(),
+                    outcome: StepOutcome::Executed(json!("ok")),
+                    condition_result: Some(true),
+                    error_mode: ErrorMode::Abort,
+                    duration_ms: 10,
+                    attempt: 1,
+                },
+                StepTraceEntry {
+                    step_id: "s2".to_owned(),
+                    outcome: StepOutcome::Skipped("cond false".to_owned()),
+                    condition_result: Some(false),
+                    error_mode: ErrorMode::Skip,
+                    duration_ms: 0,
+                    attempt: 1,
+                },
+                StepTraceEntry {
+                    step_id: "s3".to_owned(),
+                    outcome: StepOutcome::Failed(StepError {
+                        step_id: "s3".to_owned(),
+                        error_type: "net".to_owned(),
+                        message: "dns failed".to_owned(),
+                        attempt: 1,
+                    }),
+                    condition_result: Some(true),
+                    error_mode: ErrorMode::Fallback {
+                        step_id: "s4".to_owned(),
+                    },
+                    duration_ms: 5000,
+                    attempt: 1,
+                },
+            ],
+        };
+        let json_str = serde_json::to_string(&trace).unwrap();
+        let roundtrip: ExecutionTrace = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(roundtrip.steps.len(), 3);
+        assert_eq!(roundtrip.steps[2].step_id, "s3");
+    }
+
+    // ── Combined: full pipeline simulation ────────────────────────────
+
+    #[test]
+    fn pipeline_cond_combined_full_pipeline_sim() {
+        let mut ctx = PipelineContext::new();
+        ctx.set_output("fetch", json!({"items": ["a", "b", "c"], "count": 3}));
+
+        // Step 1: check length
+        let c1 = parse_condition("{{steps.fetch.output.items | length}} > 0").unwrap();
+        assert!(evaluate_condition(&c1.parsed, &ctx).unwrap());
+
+        // Step 2: check contains
+        let c2 = parse_condition("{{steps.fetch.output.items}} contains 'b'").unwrap();
+        assert!(evaluate_condition(&c2.parsed, &ctx).unwrap());
+
+        // Step 3: check count
+        let c3 = parse_condition("{{steps.fetch.output.count}} == 3").unwrap();
+        assert!(evaluate_condition(&c3.parsed, &ctx).unwrap());
+
+        // Record step outputs in trace
+        let mut trace = ExecutionTrace::default();
+        trace.steps.push(StepTraceEntry {
+            step_id: "length_check".to_owned(),
+            outcome: StepOutcome::Executed(json!(true)),
+            condition_result: Some(true),
+            error_mode: ErrorMode::Abort,
+            duration_ms: 1,
+            attempt: 1,
+        });
+        assert_eq!(trace.steps.len(), 1);
+    }
+
+    #[test]
+    fn pipeline_cond_combined_or_with_missing_and_present() {
+        let mut ctx = PipelineContext::new();
+        ctx.set_output("a", json!({"val": false}));
+        ctx.set_output("b", json!({"val": true}));
+
+        let expr = ConditionExpr::LogicalOr(
+            Box::new(ConditionExpr::Truthy("steps.a.output.val".to_owned())),
+            Box::new(ConditionExpr::Truthy("steps.b.output.val".to_owned())),
+        );
+        assert!(evaluate_condition(&expr, &ctx).unwrap());
+    }
+
+    #[test]
+    fn pipeline_cond_combined_and_with_both_comparisons() {
+        let mut ctx = PipelineContext::new();
+        ctx.set_output("s", json!({"x": 10, "y": "active"}));
+
+        let expr = ConditionExpr::LogicalAnd(
+            Box::new(ConditionExpr::Comparison {
+                left: "steps.s.output.x".to_owned(),
+                op: CompareOp::Gte,
+                right: ConditionValue::Number(5.0),
+            }),
+            Box::new(ConditionExpr::Comparison {
+                left: "steps.s.output.y".to_owned(),
+                op: CompareOp::Eq,
+                right: ConditionValue::String("active".to_owned()),
+            }),
+        );
+        assert!(evaluate_condition(&expr, &ctx).unwrap());
+    }
+
+    // ── Error type trait impls ────────────────────────────────────────
+
+    #[test]
+    fn pipeline_cond_condition_parse_error_is_std_error() {
+        let e: Box<dyn std::error::Error> =
+            Box::new(ConditionParseError::InvalidSyntax("oops".to_owned()));
+        assert!(e.to_string().contains("oops"));
+    }
+
+    #[test]
+    fn pipeline_cond_condition_eval_error_is_std_error() {
+        let e: Box<dyn std::error::Error> = Box::new(ConditionEvalError::MissingStep {
+            path: "steps.x.output".to_owned(),
+        });
+        assert!(e.to_string().contains("steps.x.output"));
+    }
+
+    #[test]
+    fn pipeline_cond_error_mode_parse_error_is_std_error() {
+        let e: Box<dyn std::error::Error> = Box::new(ErrorModeParseError {
+            input: "bad".to_owned(),
+            reason: "nope".to_owned(),
+        });
+        assert!(e.to_string().contains("bad"));
+    }
+
+    // ── ConditionValue Display: additional ────────────────────────────
+
+    #[test]
+    fn pipeline_cond_value_display_bool_false() {
+        assert_eq!(ConditionValue::Bool(false).to_string(), "false");
+    }
+
+    #[test]
+    fn pipeline_cond_value_display_negative_number() {
+        assert_eq!(ConditionValue::Number(-2.5).to_string(), "-2.5");
+    }
+
+    #[test]
+    fn pipeline_cond_value_display_zero() {
+        assert_eq!(ConditionValue::Number(0.0).to_string(), "0");
+    }
+
+    #[test]
+    fn pipeline_cond_value_display_empty_string() {
+        assert_eq!(
+            ConditionValue::String(String::new()).to_string(),
+            "''"
+        );
+    }
 }

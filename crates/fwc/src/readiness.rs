@@ -863,6 +863,10 @@ pub const COMMAND_FAMILY_CLASSIFICATION: &[CommandFamilyEntry] = &[
         mode: CommandTruthMode::OfflineOnly,
     },
     CommandFamilyEntry {
+        name: "auth",
+        mode: CommandTruthMode::OfflineOnly,
+    },
+    CommandFamilyEntry {
         name: "agent",
         mode: CommandTruthMode::OfflineOnly,
     },
@@ -9186,7 +9190,7 @@ output_schema = { type = "object" }
             .iter()
             .filter(|e| e.mode == CommandTruthMode::OfflineOnly)
             .count();
-        assert_eq!(count, 11, "Expected 11 offline-only commands, got {count}");
+        assert_eq!(count, 12, "Expected 12 offline-only commands, got {count}");
     }
 
     #[test]
@@ -9863,6 +9867,7 @@ output_schema = { type = "object" }
             "capabilities",
             "context",
             "session",
+            "auth",
             "agent",
             "task",
             "history",
@@ -10605,7 +10610,7 @@ output_schema = { type = "object" }
     #[test]
     fn golden_classification_count() {
         // Pinned count — if commands are added/removed, update this.
-        assert_eq!(COMMAND_FAMILY_CLASSIFICATION.len(), 46);
+        assert_eq!(COMMAND_FAMILY_CLASSIFICATION.len(), 47);
     }
 
     #[test]

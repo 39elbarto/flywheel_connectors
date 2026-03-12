@@ -190,6 +190,8 @@ fn should_redact_key(key: &str) -> bool {
         "token",
         "secret",
         "password",
+        "credential",
+        "authorization",
         "api_key",
         "apikey",
         "access_token",
@@ -278,6 +280,8 @@ mod tests {
         assert!(super::should_redact_key("password"));
         assert!(super::should_redact_key("secret"));
         assert!(super::should_redact_key("token"));
+        assert!(super::should_redact_key("credential"));
+        assert!(super::should_redact_key("authorization"));
     }
 
     #[test]
@@ -301,11 +305,16 @@ mod tests {
     fn redact_secrets_redacts_sensitive_keys() {
         let input = json!({
             "access_token": "bearer-xyz",
+            "credential": "sandbox-token",
             "name": "test"
         });
         let redacted = super::redact_secrets(&input);
         assert_eq!(
             redacted.get("access_token").and_then(|v| v.as_str()),
+            Some("redacted")
+        );
+        assert_eq!(
+            redacted.get("credential").and_then(|v| v.as_str()),
             Some("redacted")
         );
         assert_eq!(redacted.get("name").and_then(|v| v.as_str()), Some("test"));

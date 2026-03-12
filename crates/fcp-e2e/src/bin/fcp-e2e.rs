@@ -25,6 +25,7 @@ struct CliArgs {
     connector_cmd: Option<String>,
     connector_args: Vec<String>,
     requests: Vec<serde_json::Value>,
+    request_files: Vec<PathBuf>,
     help: bool,
 }
 
@@ -33,9 +34,49 @@ fn usage() -> &'static str {
   fcp-e2e --interop [--output <file>] [--test-name <name>] [--module <name>]
   fcp-e2e --validate-log <file>
   fcp-e2e --scan-log <file> --output <jsonl> --scan-report <report.json> [--test-name <name>] [--module <name>]
-  fcp-e2e --connector-cmd <path> --request <json> [--request <json> ...] \\
+  fcp-e2e --connector-cmd <path> [--request <json> ...] [--request-file <path> ...] \\
          [--connector-arg <arg> ...] [--output <file>] [--test-name <name>] [--module <name>]
 "
+}
+
+fn normalize_request_payload(
+    value: serde_json::Value,
+    source: &str,
+) -> Result<Vec<serde_json::Value>, String> {
+    match value {
+        serde_json::Value::Object(_) => Ok(vec![value]),
+        serde_json::Value::Array(values) => {
+            if values.is_empty() {
+                return Err(format!("{source} must contain at least one request object"));
+            }
+            let mut requests = Vec::with_capacity(values.len());
+            for (index, entry) in values.into_iter().enumerate() {
+                if !entry.is_object() {
+                    return Err(format!(
+                        "{source} entry {} must be a JSON object",
+                        index + 1
+                    ));
+                }
+                requests.push(entry);
+            }
+            Ok(requests)
+        }
+        _ => Err(format!(
+            "{source} must be a JSON object or an array of JSON objects"
+        )),
+    }
+}
+
+fn parse_request_payload(value: &str, source: &str) -> Result<Vec<serde_json::Value>, String> {
+    let json =
+        serde_json::from_str(value).map_err(|err| format!("{source} JSON invalid: {err}"))?;
+    normalize_request_payload(json, source)
+}
+
+fn load_requests_from_file(path: &Path) -> Result<Vec<serde_json::Value>, String> {
+    let payload = std::fs::read_to_string(path)
+        .map_err(|err| format!("failed to read request file {}: {err}", path.display()))?;
+    parse_request_payload(&payload, &format!("request file {}", path.display()))
 }
 
 fn parse_args() -> Result<CliArgs, String> {
@@ -51,6 +92,7 @@ fn parse_args() -> Result<CliArgs, String> {
         connector_cmd: None,
         connector_args: Vec::new(),
         requests: Vec::new(),
+        request_files: Vec::new(),
         help: false,
     };
 
@@ -114,9 +156,15 @@ fn parse_args() -> Result<CliArgs, String> {
                 let value = args
                     .next()
                     .ok_or_else(|| "--request requires a value".to_string())?;
-                let json = serde_json::from_str(&value)
-                    .map_err(|err| format!("--request JSON invalid: {err}"))?;
-                parsed.requests.push(json);
+                parsed
+                    .requests
+                    .extend(parse_request_payload(&value, "--request")?);
+            }
+            "--request-file" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--request-file requires a value".to_string())?;
+                parsed.request_files.push(PathBuf::from(value));
             }
             unknown => {
                 return Err(format!("Unknown argument: {unknown}"));
@@ -146,8 +194,14 @@ fn parse_args() -> Result<CliArgs, String> {
         );
     }
 
+    for path in &parsed.request_files {
+        parsed.requests.extend(load_requests_from_file(path)?);
+    }
+
     if parsed.connector_cmd.is_some() && parsed.requests.is_empty() {
-        return Err("At least one --request is required for connector mode".to_string());
+        return Err(
+            "At least one --request or --request-file is required for connector mode".to_string(),
+        );
     }
 
     if parsed.scan_log.is_some() && parsed.output.is_none() {
@@ -415,6 +469,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         serde_json::json!({
             "connector_cmd": connector_cmd,
             "connector_args": args.connector_args,
+            "request_files": args
+                .request_files
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>(),
             "request_count": args.requests.len(),
         }),
     );
@@ -432,4 +491,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     write_report(&report, args.output)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{load_requests_from_file, parse_request_payload};
+
+    #[test]
+    fn parse_request_payload_accepts_single_object() {
+        let requests = parse_request_payload(
+            r#"{"jsonrpc":"2.0","id":"1","method":"health","params":{}}"#,
+            "inline",
+        )
+        .expect("single object should parse");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0]["method"], "health");
+    }
+
+    #[test]
+    fn parse_request_payload_accepts_array_of_objects() {
+        let requests = parse_request_payload(
+            r#"[{"jsonrpc":"2.0","id":"1","method":"health","params":{}},{"jsonrpc":"2.0","id":"2","method":"introspect","params":{}}]"#,
+            "inline",
+        )
+        .expect("array should parse");
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[1]["method"], "introspect");
+    }
+
+    #[test]
+    fn parse_request_payload_rejects_non_object_entries() {
+        let err = parse_request_payload(r#"[{"jsonrpc":"2.0"},42]"#, "inline")
+            .expect_err("non-object entries should fail");
+        assert!(err.contains("entry 2"));
+    }
+
+    #[test]
+    fn load_requests_from_file_supports_arrays() {
+        let unique = format!(
+            "fcp-e2e-request-file-{}-{}.json",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        );
+        let path = std::env::temp_dir().join(unique);
+        std::fs::write(
+            &path,
+            r#"[{"jsonrpc":"2.0","id":"1","method":"health","params":{}},{"jsonrpc":"2.0","id":"2","method":"introspect","params":{}}]"#,
+        )
+        .expect("temp request file write");
+
+        let requests = load_requests_from_file(&path).expect("request file should parse");
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0]["method"], "health");
+
+        let _ = std::fs::remove_file(path);
+    }
 }

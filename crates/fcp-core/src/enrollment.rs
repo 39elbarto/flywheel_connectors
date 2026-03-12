@@ -417,7 +417,8 @@ impl DeviceEnrollmentApproval {
         validity_hours: u32,
     ) -> FcpResult<Self> {
         let now = Utc::now();
-        let expires_at = now + chrono::Duration::hours(i64::from(validity_hours));
+        let safe_hours = validity_hours.min(24 * 365 * 100); // 100 years max
+        let expires_at = now + chrono::Duration::hours(i64::from(safe_hours));
 
         let payload = EnrollmentApprovalPayload {
             schema: ENROLLMENT_APPROVAL_SCHEMA,
@@ -776,7 +777,8 @@ impl NodeKeyAttestation {
 
         let node_id = node_id.into();
         let now = Utc::now();
-        let expires_at = now + chrono::Duration::hours(i64::from(validity_hours));
+        let safe_hours = validity_hours.min(24 * 365 * 100); // 100 years max
+        let expires_at = now + chrono::Duration::hours(i64::from(safe_hours));
 
         let payload = NodeKeyAttestationPayload {
             schema: NODE_KEY_ATTESTATION_SCHEMA,

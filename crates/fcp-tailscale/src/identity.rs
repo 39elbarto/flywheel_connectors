@@ -237,7 +237,8 @@ impl NodeKeyAttestation {
         validity_hours: u32,
     ) -> TailscaleResult<Self> {
         let now = Utc::now();
-        let expires_at = now + chrono::Duration::hours(i64::from(validity_hours));
+        let safe_hours = validity_hours.min(24 * 365 * 100); // 100 years max
+        let expires_at = now + chrono::Duration::hours(i64::from(safe_hours));
 
         let payload = AttestationPayload {
             schema: AttestationPayload::SCHEMA,

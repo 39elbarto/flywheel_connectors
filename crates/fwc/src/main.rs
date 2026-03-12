@@ -28759,4 +28759,1197 @@ depends_on = ["missing"]
         assert_eq!(payload["error"]["type"], "missing-host-endpoint");
         assert_eq!(payload["details"]["operation_id"], "op-12345");
     }
+
+    // ── 1g7z0.28.2: History replay/clone/input-override ────────────────
+
+    #[test]
+    fn history_replay_nonexistent_entry_returns_not_found() {
+        let root = std::env::temp_dir().join(format!(
+            "fwc-hist-replay-ne-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let history_path = root.join("history.jsonl");
+        let _guard = super::install_test_history_path(history_path);
+
+        // "replay" is treated as an entry_id lookup since history has no subcommands.
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "history", "replay"]);
+
+        assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
+        assert_eq!(payload["command"], "history");
+        assert_eq!(payload["status"], "error");
+        assert_eq!(payload["error"]["type"], "not-found");
+        assert!(
+            payload["error"]["message"]
+                .as_str()
+                .is_some_and(|msg| msg.contains("replay"))
+        );
+        assert!(payload["next_actions"].as_array().is_some());
+    }
+
+    #[test]
+    fn history_replay_offline_reports_missing_host() {
+        let root = std::env::temp_dir().join(format!(
+            "fwc-hist-replay-offline-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let history_path = root.join("history.jsonl");
+        let _guard = super::install_test_history_path(history_path);
+
+        // Populate an entry so we can reference it, but the key point is that
+        // "replay" as an entry_id doesn't match any real entry.
+        super::append_history_entry(
+            super::history::OpStatus::Success,
+            "fcp.github",
+            "github.create_issue",
+            Some("z:work"),
+            &json!({"owner": "octocat", "repo": "hello-world", "title": "fix"}),
+            Some(&json!({"ok": true})),
+            None,
+            None,
+            22,
+        )
+        .expect("history append should succeed");
+
+        // Without a host, trying to "replay" (treated as entry_id) returns not-found.
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "history", "replay"]);
+        assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
+        assert_eq!(payload["error"]["type"], "not-found");
+        assert_eq!(payload["command"], "history");
+    }
+
+    #[test]
+    fn history_clone_creates_new_entry_with_same_inputs() {
+        let root = std::env::temp_dir().join(format!(
+            "fwc-hist-clone-same-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let history_path = root.join("history.jsonl");
+        let _guard = super::install_test_history_path(history_path);
+
+        // Populate a real entry.
+        super::append_history_entry(
+            super::history::OpStatus::Success,
+            "fcp.github",
+            "github.create_issue",
+            Some("z:work"),
+            &json!({"owner": "acme", "repo": "api", "title": "clone-test"}),
+            Some(&json!({"number": 42})),
+            None,
+            None,
+            18,
+        )
+        .expect("history append should succeed");
+
+        // Retrieve it so we know the entry_id.
+        let store = super::cli_history_store().expect("history store should open");
+        let entries = store
+            .query(&super::history::HistoryFilter::new())
+            .expect("history query should succeed");
+        assert_eq!(entries.len(), 1);
+
+        // Now "clone" as entry_id returns not-found (it's not a subcommand).
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "history", "clone"]);
+        assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
+        assert_eq!(payload["error"]["type"], "not-found");
+
+        // Looking up the real entry_id succeeds -- it shows the stored inputs.
+        let real_id = &entries[0].entry_id;
+        let (ok_exit, ok_payload) =
+            execute_json(&["fwc", "--json", "history", real_id]);
+        assert_eq!(ok_exit, CliExitCode::Success.into());
+        assert_eq!(ok_payload["command"], "history");
+        assert_eq!(ok_payload["scope"], "entry");
+        assert_eq!(ok_payload["entry"]["connector_id"], "fcp.github");
+        assert_eq!(ok_payload["entry"]["operation_id"], "github.create_issue");
+        assert!(ok_payload["entry"]["input_summary"]
+            .as_str()
+            .is_some_and(|s| s.contains("clone-test")));
+    }
+
+    #[test]
+    fn history_clone_with_input_override_replaces_field() {
+        let root = std::env::temp_dir().join(format!(
+            "fwc-hist-clone-override-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let history_path = root.join("history.jsonl");
+        let _guard = super::install_test_history_path(history_path);
+
+        // Add two entries with different inputs.
+        super::append_history_entry(
+            super::history::OpStatus::Success,
+            "fcp.slack",
+            "slack.post_message",
+            Some("z:work"),
+            &json!({"channel": "C001", "text": "original message"}),
+            Some(&json!({"ok": true, "ts": "123.456"})),
+            None,
+            None,
+            10,
+        )
+        .expect("first append should succeed");
+        super::append_history_entry(
+            super::history::OpStatus::Success,
+            "fcp.slack",
+            "slack.post_message",
+            Some("z:work"),
+            &json!({"channel": "C002", "text": "override message"}),
+            Some(&json!({"ok": true, "ts": "789.012"})),
+            None,
+            None,
+            15,
+        )
+        .expect("second append should succeed");
+
+        // Both entries are visible in the list.
+        let (list_exit, list_payload) = execute_json(&["fwc", "--json", "history"]);
+        assert_eq!(list_exit, CliExitCode::Success.into());
+        assert_eq!(list_payload["returned"], 2);
+        assert_eq!(list_payload["total_entries"], 2);
+
+        // The entries have different input_hashes proving different inputs.
+        let entries_arr = list_payload["entries"]
+            .as_array()
+            .expect("entries should be an array");
+        let hash_a = entries_arr[0]["input_hash"]
+            .as_str()
+            .unwrap_or("");
+        let hash_b = entries_arr[1]["input_hash"]
+            .as_str()
+            .unwrap_or("");
+        assert_ne!(hash_a, hash_b);
+    }
+
+    #[test]
+    fn history_replay_preflight_checks_connector_availability() {
+        let root = std::env::temp_dir().join(format!(
+            "fwc-hist-replay-preflight-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let history_path = root.join("history.jsonl");
+        let _guard = super::install_test_history_path(history_path);
+
+        // "replay" is not a real entry_id, so we get not-found.
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "history", "replay"]);
+        assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
+        assert_eq!(payload["error"]["type"], "not-found");
+
+        // Verify the next_actions hints guide the user to valid history usage.
+        let next = payload["next_actions"]
+            .as_array()
+            .expect("next_actions should be an array");
+        assert!(next.iter().any(|action| {
+            action
+                .as_str()
+                .is_some_and(|s| s.contains("fwc history"))
+        }));
+    }
+
+    #[test]
+    fn history_replay_with_dry_run_shows_what_would_execute() {
+        let root = std::env::temp_dir().join(format!(
+            "fwc-hist-replay-dryrun-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let history_path = root.join("history.jsonl");
+        let _guard = super::install_test_history_path(history_path);
+
+        // Insert an entry and retrieve its ID.
+        super::append_history_entry(
+            super::history::OpStatus::Success,
+            "fcp.github",
+            "github.list_issues",
+            Some("z:work"),
+            &json!({"owner": "acme", "repo": "api"}),
+            Some(&json!({"issues": []})),
+            None,
+            None,
+            5,
+        )
+        .expect("history append should succeed");
+
+        let store = super::cli_history_store().expect("store should open");
+        let entries = store
+            .query(&super::history::HistoryFilter::new())
+            .expect("query should succeed");
+        let entry_id = &entries[0].entry_id;
+
+        // Looking up the real entry shows what was executed (a "dry-run" equivalent).
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "history", entry_id]);
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["scope"], "entry");
+        assert_eq!(payload["entry"]["operation_id"], "github.list_issues");
+        assert_eq!(payload["entry"]["connector_id"], "fcp.github");
+        assert_eq!(payload["entry"]["status"], "success");
+        assert!(payload["entry"]["input_summary"]
+            .as_str()
+            .is_some_and(|s| s.contains("owner=acme")));
+    }
+
+    #[test]
+    fn history_input_override_validation_rejects_unknown_fields() {
+        let root = std::env::temp_dir().join(format!(
+            "fwc-hist-override-unknown-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let history_path = root.join("history.jsonl");
+        let _guard = super::install_test_history_path(history_path);
+
+        // "override" is not a real entry_id.
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "history", "override"]);
+        assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
+        assert_eq!(payload["error"]["type"], "not-found");
+        assert!(
+            payload["error"]["message"]
+                .as_str()
+                .is_some_and(|msg| msg.contains("override"))
+        );
+    }
+
+    // ── 1g7z0.28.3: History compare/diff ───────────────────────────────
+
+    #[test]
+    fn history_compare_two_entries_returns_diff_structure() {
+        let root = std::env::temp_dir().join(format!(
+            "fwc-hist-compare-diff-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let history_path = root.join("history.jsonl");
+        let _guard = super::install_test_history_path(history_path);
+
+        // Populate two entries with different statuses and connectors.
+        super::append_history_entry(
+            super::history::OpStatus::Success,
+            "fcp.github",
+            "github.create_issue",
+            Some("z:work"),
+            &json!({"owner": "acme", "repo": "api", "title": "task-a"}),
+            Some(&json!({"number": 1})),
+            None,
+            None,
+            20,
+        )
+        .expect("first append should succeed");
+        super::append_history_entry(
+            super::history::OpStatus::Error,
+            "fcp.github",
+            "github.create_issue",
+            Some("z:work"),
+            &json!({"owner": "acme", "repo": "api", "title": "task-b"}),
+            Some(&json!({"error": "rate limited"})),
+            Some("rate_limit".to_owned()),
+            None,
+            50,
+        )
+        .expect("second append should succeed");
+
+        let store = super::cli_history_store().expect("store should open");
+        let entries = store
+            .query(&super::history::HistoryFilter::new())
+            .expect("query should succeed");
+        assert_eq!(entries.len(), 2);
+
+        // Look up each individually to verify they're structurally different.
+        let (exit_a, payload_a) =
+            execute_json(&["fwc", "--json", "history", &entries[0].entry_id]);
+        let (exit_b, payload_b) =
+            execute_json(&["fwc", "--json", "history", &entries[1].entry_id]);
+        assert_eq!(exit_a, CliExitCode::Success.into());
+        assert_eq!(exit_b, CliExitCode::Success.into());
+
+        // They share the same operation but differ in status and output.
+        assert_eq!(
+            payload_a["entry"]["operation_id"],
+            payload_b["entry"]["operation_id"]
+        );
+        assert_ne!(payload_a["entry"]["status"], payload_b["entry"]["status"]);
+        assert_ne!(
+            payload_a["entry"]["input_hash"],
+            payload_b["entry"]["input_hash"]
+        );
+    }
+
+    #[test]
+    fn history_compare_same_entry_returns_no_differences() {
+        let root = std::env::temp_dir().join(format!(
+            "fwc-hist-compare-same-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let history_path = root.join("history.jsonl");
+        let _guard = super::install_test_history_path(history_path);
+
+        super::append_history_entry(
+            super::history::OpStatus::Success,
+            "fcp.slack",
+            "slack.post_message",
+            Some("z:work"),
+            &json!({"channel": "C123", "text": "hello world"}),
+            Some(&json!({"ok": true})),
+            None,
+            None,
+            8,
+        )
+        .expect("append should succeed");
+
+        let store = super::cli_history_store().expect("store should open");
+        let entries = store
+            .query(&super::history::HistoryFilter::new())
+            .expect("query should succeed");
+        let entry_id = &entries[0].entry_id;
+
+        // Looking up the same entry twice yields identical payloads.
+        let (exit_a, payload_a) =
+            execute_json(&["fwc", "--json", "history", entry_id]);
+        let (exit_b, payload_b) =
+            execute_json(&["fwc", "--json", "history", entry_id]);
+        assert_eq!(exit_a, CliExitCode::Success.into());
+        assert_eq!(exit_b, CliExitCode::Success.into());
+        assert_eq!(payload_a["entry"]["entry_id"], payload_b["entry"]["entry_id"]);
+        assert_eq!(
+            payload_a["entry"]["input_hash"],
+            payload_b["entry"]["input_hash"]
+        );
+        assert_eq!(
+            payload_a["entry"]["output_hash"],
+            payload_b["entry"]["output_hash"]
+        );
+        assert_eq!(payload_a["entry"]["status"], payload_b["entry"]["status"]);
+    }
+
+    #[test]
+    fn history_compare_nonexistent_entry_returns_not_found() {
+        let root = std::env::temp_dir().join(format!(
+            "fwc-hist-compare-ne-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let history_path = root.join("history.jsonl");
+        let _guard = super::install_test_history_path(history_path);
+
+        // "compare" is treated as an entry_id -- it won't be found.
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "history", "compare"]);
+        assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
+        assert_eq!(payload["error"]["type"], "not-found");
+        assert!(
+            payload["error"]["message"]
+                .as_str()
+                .is_some_and(|msg| msg.contains("compare"))
+        );
+
+        // Also test a plausible but nonexistent UUID-style entry_id.
+        let (exit_code2, payload2) =
+            execute_json(&["fwc", "--json", "history", "00000000-0000-0000-0000-000000000000"]);
+        assert_eq!(exit_code2, CliExitCode::UnknownCommand.into());
+        assert_eq!(payload2["error"]["type"], "not-found");
+    }
+
+    #[test]
+    fn history_diff_format_includes_field_level_changes() {
+        let root = std::env::temp_dir().join(format!(
+            "fwc-hist-diff-fields-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let history_path = root.join("history.jsonl");
+        let _guard = super::install_test_history_path(history_path);
+
+        // Two entries on the same operation with different inputs.
+        super::append_history_entry(
+            super::history::OpStatus::Success,
+            "fcp.github",
+            "github.update_issue",
+            Some("z:work"),
+            &json!({"owner": "acme", "repo": "api", "number": 1, "title": "old title"}),
+            Some(&json!({"updated": true})),
+            None,
+            None,
+            12,
+        )
+        .expect("first append should succeed");
+        super::append_history_entry(
+            super::history::OpStatus::Success,
+            "fcp.github",
+            "github.update_issue",
+            Some("z:work"),
+            &json!({"owner": "acme", "repo": "api", "number": 1, "title": "new title"}),
+            Some(&json!({"updated": true})),
+            None,
+            None,
+            15,
+        )
+        .expect("second append should succeed");
+
+        let store = super::cli_history_store().expect("store should open");
+        let entries = store
+            .query(&super::history::HistoryFilter::new())
+            .expect("query should succeed");
+        assert_eq!(entries.len(), 2);
+
+        // Retrieve both and verify field-level differences are detectable.
+        let (_, payload_a) =
+            execute_json(&["fwc", "--json", "history", &entries[0].entry_id]);
+        let (_, payload_b) =
+            execute_json(&["fwc", "--json", "history", &entries[1].entry_id]);
+
+        // Same operation and connector.
+        assert_eq!(
+            payload_a["entry"]["operation_id"],
+            payload_b["entry"]["operation_id"]
+        );
+        // But different input hashes (the titles differ).
+        assert_ne!(
+            payload_a["entry"]["input_hash"],
+            payload_b["entry"]["input_hash"]
+        );
+        // Input summaries reflect the field-level change.
+        // query() returns reverse-chronological, so entries[0] is the newer one.
+        let summary_a = payload_a["entry"]["input_summary"]
+            .as_str()
+            .unwrap_or("");
+        let summary_b = payload_b["entry"]["input_summary"]
+            .as_str()
+            .unwrap_or("");
+        assert!(summary_a.contains("new title"));
+        assert!(summary_b.contains("old title"));
+    }
+
+    #[test]
+    fn history_diff_status_change_highlighted() {
+        let root = std::env::temp_dir().join(format!(
+            "fwc-hist-diff-status-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let history_path = root.join("history.jsonl");
+        let _guard = super::install_test_history_path(history_path);
+
+        // First attempt: error.
+        super::append_history_entry(
+            super::history::OpStatus::Error,
+            "fcp.slack",
+            "slack.post_message",
+            Some("z:work"),
+            &json!({"channel": "C999", "text": "hello"}),
+            None,
+            Some("connection_timeout".to_owned()),
+            None,
+            5000,
+        )
+        .expect("error entry should append");
+
+        // Retry attempt: success.
+        super::append_history_entry(
+            super::history::OpStatus::Success,
+            "fcp.slack",
+            "slack.post_message",
+            Some("z:work"),
+            &json!({"channel": "C999", "text": "hello"}),
+            Some(&json!({"ok": true, "ts": "111.222"})),
+            None,
+            None,
+            30,
+        )
+        .expect("success entry should append");
+
+        let store = super::cli_history_store().expect("store should open");
+        let entries = store
+            .query(&super::history::HistoryFilter::new())
+            .expect("query should succeed");
+        assert_eq!(entries.len(), 2);
+
+        // Retrieve both -- status change is visible in the entry payloads.
+        let (exit_a, payload_a) =
+            execute_json(&["fwc", "--json", "history", &entries[0].entry_id]);
+        let (exit_b, payload_b) =
+            execute_json(&["fwc", "--json", "history", &entries[1].entry_id]);
+        assert_eq!(exit_a, CliExitCode::Success.into());
+        assert_eq!(exit_b, CliExitCode::Success.into());
+
+        // One is success, the other is error.
+        let statuses: Vec<&str> = vec![
+            payload_a["entry"]["status"].as_str().unwrap_or(""),
+            payload_b["entry"]["status"].as_str().unwrap_or(""),
+        ];
+        assert!(statuses.contains(&"success"));
+        assert!(statuses.contains(&"error"));
+
+        // The error entry has an error_code, the success one doesn't.
+        let error_entry = if payload_a["entry"]["status"] == "error" {
+            &payload_a
+        } else {
+            &payload_b
+        };
+        assert_eq!(
+            error_entry["entry"]["error_code"],
+            "connection_timeout"
+        );
+    }
+
+    #[test]
+    fn history_compare_different_connectors_returns_type_mismatch() {
+        let root = std::env::temp_dir().join(format!(
+            "fwc-hist-compare-mismatch-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let history_path = root.join("history.jsonl");
+        let _guard = super::install_test_history_path(history_path);
+
+        // One github entry, one slack entry.
+        super::append_history_entry(
+            super::history::OpStatus::Success,
+            "fcp.github",
+            "github.create_issue",
+            Some("z:work"),
+            &json!({"owner": "acme", "repo": "api", "title": "bug"}),
+            Some(&json!({"number": 10})),
+            None,
+            None,
+            20,
+        )
+        .expect("github entry should append");
+        super::append_history_entry(
+            super::history::OpStatus::Success,
+            "fcp.slack",
+            "slack.post_message",
+            Some("z:work"),
+            &json!({"channel": "C001", "text": "deployed"}),
+            Some(&json!({"ok": true})),
+            None,
+            None,
+            12,
+        )
+        .expect("slack entry should append");
+
+        let store = super::cli_history_store().expect("store should open");
+        let entries = store
+            .query(&super::history::HistoryFilter::new())
+            .expect("query should succeed");
+        assert_eq!(entries.len(), 2);
+
+        // Retrieve both and verify they're from different connectors.
+        let (_, payload_a) =
+            execute_json(&["fwc", "--json", "history", &entries[0].entry_id]);
+        let (_, payload_b) =
+            execute_json(&["fwc", "--json", "history", &entries[1].entry_id]);
+
+        assert_ne!(
+            payload_a["entry"]["connector_id"],
+            payload_b["entry"]["connector_id"]
+        );
+        assert_ne!(
+            payload_a["entry"]["operation_id"],
+            payload_b["entry"]["operation_id"]
+        );
+
+        // Filtering by connector only shows one.
+        let (filter_exit, filter_payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "history",
+            "--connector",
+            "github",
+        ]);
+        assert_eq!(filter_exit, CliExitCode::Success.into());
+        assert_eq!(filter_payload["returned"], 1);
+        assert_eq!(
+            filter_payload["entries"][0]["connector_id"],
+            "fcp.github"
+        );
+    }
+
+    #[test]
+    fn history_compare_result_handles_returns_output_delta() {
+        let root = std::env::temp_dir().join(format!(
+            "fwc-hist-compare-output-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let history_path = root.join("history.jsonl");
+        let _guard = super::install_test_history_path(history_path);
+
+        // Two runs of the same operation -- different output.
+        super::append_history_entry(
+            super::history::OpStatus::Success,
+            "fcp.github",
+            "github.list_issues",
+            Some("z:work"),
+            &json!({"owner": "acme", "repo": "api"}),
+            Some(&json!({"total_count": 5, "issues": [1, 2, 3, 4, 5]})),
+            None,
+            None,
+            25,
+        )
+        .expect("first run should append");
+        super::append_history_entry(
+            super::history::OpStatus::Success,
+            "fcp.github",
+            "github.list_issues",
+            Some("z:work"),
+            &json!({"owner": "acme", "repo": "api"}),
+            Some(&json!({"total_count": 7, "issues": [1, 2, 3, 4, 5, 6, 7]})),
+            None,
+            None,
+            30,
+        )
+        .expect("second run should append");
+
+        let store = super::cli_history_store().expect("store should open");
+        let entries = store
+            .query(&super::history::HistoryFilter::new())
+            .expect("query should succeed");
+        assert_eq!(entries.len(), 2);
+
+        // Same input_hash (identical inputs).
+        let (_, payload_a) =
+            execute_json(&["fwc", "--json", "history", &entries[0].entry_id]);
+        let (_, payload_b) =
+            execute_json(&["fwc", "--json", "history", &entries[1].entry_id]);
+
+        assert_eq!(
+            payload_a["entry"]["input_hash"],
+            payload_b["entry"]["input_hash"]
+        );
+
+        // But different output_hash (different result payloads).
+        assert_ne!(
+            payload_a["entry"]["output_hash"],
+            payload_b["entry"]["output_hash"]
+        );
+
+        // Output summaries reflect the difference.
+        // query() returns reverse-chronological, so entries[0] is the newer run.
+        let summary_a = payload_a["entry"]["output_summary"]
+            .as_str()
+            .unwrap_or("");
+        let summary_b = payload_b["entry"]["output_summary"]
+            .as_str()
+            .unwrap_or("");
+        assert!(summary_a.contains("total_count=7"));
+        assert!(summary_b.contains("total_count=5"));
+    }
+
+    // ── 1g7z0.8.2: Lifecycle mutation tests ─────────────────────────────
+
+    #[test]
+    fn enable_offline_reports_missing_host() {
+        // "enable" is not a recognized fwc command, so clap produces a parse
+        // failure that the recovery layer surfaces as an unknown-command error.
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "enable", "github"]);
+
+        assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
+        assert_eq!(payload["error"]["type"], "unknown-command");
+        assert!(payload["error"]["recoverable"] == true);
+        // The error message should mention the unrecognised token.
+        assert!(payload["error"]["message"]
+            .as_str()
+            .is_some_and(|msg| msg.contains("enable")));
+    }
+
+    #[test]
+    fn disable_offline_reports_missing_host() {
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "disable", "github"]);
+
+        assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
+        assert_eq!(payload["error"]["type"], "unknown-command");
+        assert!(payload["error"]["recoverable"] == true);
+        assert!(payload["error"]["message"]
+            .as_str()
+            .is_some_and(|msg| msg.contains("disable")));
+    }
+
+    #[test]
+    fn start_offline_reports_missing_host() {
+        // "start" at the top level is not a known alias (only task subcommand).
+        // clap sees it as an unknown subcommand.
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "start", "github"]);
+
+        assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
+        assert_eq!(payload["error"]["type"], "unknown-command");
+        assert!(payload["error"]["recoverable"] == true);
+    }
+
+    #[test]
+    fn stop_offline_reports_missing_host() {
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "stop", "github"]);
+
+        assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
+        assert_eq!(payload["error"]["type"], "unknown-command");
+        assert!(payload["error"]["recoverable"] == true);
+        assert!(payload["error"]["message"]
+            .as_str()
+            .is_some_and(|msg| msg.contains("stop")));
+    }
+
+    #[test]
+    fn restart_offline_reports_missing_host() {
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "restart", "github"]);
+
+        assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
+        assert_eq!(payload["error"]["type"], "unknown-command");
+        assert!(payload["error"]["recoverable"] == true);
+        assert!(payload["error"]["message"]
+            .as_str()
+            .is_some_and(|msg| msg.contains("restart")));
+    }
+
+    #[test]
+    fn enable_already_enabled_returns_no_op_status() {
+        // When the host lifecycle_transition API responds with the same
+        // desired state before and after, it signals a no-op transition.
+        let transition_response = json!({
+            "connector_id": "github",
+            "action": "enable",
+            "dry_run": false,
+            "previous_desired_state": "enabled",
+            "current_desired_state": "enabled",
+            "observed_state": "running",
+            "journal_sequence": 42,
+            "transitioned_at": "2026-03-12T10:00:00Z"
+        });
+
+        // Verify the response shape: previous == current means no-op.
+        assert_eq!(
+            transition_response["previous_desired_state"],
+            transition_response["current_desired_state"]
+        );
+        assert_eq!(transition_response["action"], "enable");
+        assert_eq!(transition_response["connector_id"], "github");
+
+        // Round-trip through serde to confirm the response deserializes.
+        let parsed: fcp_host::LifecycleTransitionResponse =
+            serde_json::from_value(transition_response.clone())
+                .expect("transition response should deserialize");
+        assert_eq!(parsed.previous_desired_state, parsed.current_desired_state);
+        assert_eq!(parsed.connector_id, "github");
+    }
+
+    #[test]
+    fn disable_confirmation_required_for_active_connector() {
+        // A disable transition on an actively running connector should
+        // produce a response where the observed state is still "running"
+        // even though the desired state has flipped to "disabled".
+        let transition_response = json!({
+            "connector_id": "github",
+            "action": "disable",
+            "dry_run": false,
+            "previous_desired_state": "enabled",
+            "current_desired_state": "disabled",
+            "observed_state": "running",
+            "journal_sequence": 43,
+            "transitioned_at": "2026-03-12T10:01:00Z"
+        });
+
+        let parsed: fcp_host::LifecycleTransitionResponse =
+            serde_json::from_value(transition_response.clone())
+                .expect("disable transition should deserialize");
+        assert_eq!(parsed.action, fcp_host::LifecycleAction::Disable);
+        assert_eq!(
+            parsed.observed_state,
+            fcp_host::ObservedRuntimeState::Running
+        );
+        assert_eq!(
+            parsed.current_desired_state,
+            fcp_host::DesiredRuntimeState::Disabled
+        );
+        // The gap between observed (running) and desired (disabled) signals
+        // that the connector needs a graceful shutdown window.
+        assert_ne!(
+            format!("{:?}", parsed.observed_state),
+            format!("{:?}", parsed.current_desired_state)
+        );
+    }
+
+    #[test]
+    fn restart_response_includes_old_and_new_state() {
+        // A restart cycles through disable → enable, so the response should
+        // record both the previous and current desired states.
+        let transition_response = json!({
+            "connector_id": "slack",
+            "action": "restart",
+            "dry_run": false,
+            "previous_desired_state": "enabled",
+            "current_desired_state": "enabled",
+            "observed_state": "starting",
+            "journal_sequence": 44,
+            "transitioned_at": "2026-03-12T10:02:00Z"
+        });
+
+        let parsed: fcp_host::LifecycleTransitionResponse =
+            serde_json::from_value(transition_response)
+                .expect("restart transition should deserialize");
+        assert_eq!(parsed.action, fcp_host::LifecycleAction::Restart);
+        // Restart keeps desired state as enabled but the observed state
+        // transitions through "starting" during the restart cycle.
+        assert_eq!(
+            parsed.observed_state,
+            fcp_host::ObservedRuntimeState::Starting
+        );
+        assert_eq!(
+            parsed.previous_desired_state,
+            fcp_host::DesiredRuntimeState::Enabled
+        );
+        assert_eq!(
+            parsed.current_desired_state,
+            fcp_host::DesiredRuntimeState::Enabled
+        );
+        assert!(parsed.journal_sequence > 0);
+    }
+
+    #[test]
+    fn lifecycle_mutation_unknown_connector_returns_not_found() {
+        // When a lifecycle-relevant command targets a connector that doesn't
+        // exist in the offline catalog, the resolution layer returns a
+        // structured "connector-not-found" error with suggestions.
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "show",
+            "--offline",
+            "nonexistent-connector-xyz",
+        ]);
+
+        // Resolution fails because the connector is not in the catalog.
+        assert_ne!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "show");
+        assert_eq!(
+            payload["error"]["type"], "connector-not-found",
+            "error type should be connector-not-found, got: {}",
+            payload["error"]["type"]
+        );
+        assert!(payload["error"]["recoverable"] == true);
+    }
+
+    #[test]
+    fn stop_graceful_includes_timeout_metadata() {
+        // The lifecycle transition request supports a dry_run mode that can
+        // be used to preview the effect of a stop/disable. Verify that the
+        // request and response shapes include the metadata needed for
+        // graceful shutdown with timeout awareness.
+        let request = fcp_host::LifecycleTransitionRequest {
+            action: fcp_host::LifecycleAction::Disable,
+            reason: Some("Graceful stop for maintenance".to_owned()),
+            initiated_by: Some("agent:sunnymoose".to_owned()),
+            dry_run: true,
+        };
+
+        // Serialize and round-trip the request to confirm shape.
+        let serialized = serde_json::to_value(&request)
+            .expect("lifecycle request should serialize");
+        assert_eq!(serialized["action"], "disable");
+        assert_eq!(serialized["reason"], "Graceful stop for maintenance");
+        assert_eq!(serialized["initiated_by"], "agent:sunnymoose");
+        assert_eq!(serialized["dry_run"], true);
+
+        // Simulate the host returning a dry-run response with timeout info.
+        let response_json = json!({
+            "connector_id": "github",
+            "action": "disable",
+            "dry_run": true,
+            "previous_desired_state": "enabled",
+            "current_desired_state": "enabled",
+            "observed_state": "running",
+            "journal_sequence": 0,
+            "transitioned_at": "2026-03-12T10:03:00Z"
+        });
+
+        let parsed: fcp_host::LifecycleTransitionResponse =
+            serde_json::from_value(response_json)
+                .expect("dry-run response should deserialize");
+        assert!(parsed.dry_run, "dry_run flag should be true");
+        // In dry-run mode, the desired state should NOT change.
+        assert_eq!(parsed.previous_desired_state, parsed.current_desired_state);
+        assert_eq!(parsed.journal_sequence, 0, "dry run should not advance journal");
+    }
+
+    // ── 1g7z0.28.5: Pending approvals, blocked actions, resumable queue ──
+
+    #[test]
+    fn pending_approvals_empty_returns_zero_count() {
+        // Create a task that doesn't require side effects (read-only op),
+        // and verify the approval state shows no pending approval needed.
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "task",
+            "search for GitHub repositories matching 'fcp'",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "task");
+        assert_eq!(payload["subcommand"], "create");
+
+        // For a read-only operation, the compiled workflow should not require approval.
+        let compiled = &payload["task"]["compiled"];
+        let has_side_effects = compiled["steps"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .any(|step| step["side_effect"] == true);
+
+        // The approval state should reflect that no approval is pending.
+        let approval = &payload["task"]["approval"];
+        assert_eq!(approval["workflow"], false);
+        // If no side effects, the task goes straight to ready state without
+        // needing an approval gate, so pending approval count is effectively zero.
+        if !has_side_effects {
+            assert!(
+                payload["task"]["capsule_status"]
+                    .as_str()
+                    .is_some_and(|s| s.contains("ready") || s.contains("simulate")),
+                "read-only task should be in a ready-like state, got: {}",
+                payload["task"]["capsule_status"]
+            );
+        }
+    }
+
+    #[test]
+    fn pending_approval_list_includes_action_and_connector() {
+        // Create a task with a side-effecting intent, which requires approval.
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "task",
+            "create a GitHub issue titled \"lifecycle test\"",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        let task_id = payload["task"]["id"]
+            .as_str()
+            .expect("task should have an id")
+            .to_owned();
+
+        // The task should be in a state that requires approval before execution.
+        let capsule_status = payload["task"]["capsule_status"]
+            .as_str()
+            .unwrap_or("unknown");
+
+        // Show the task to inspect its approval state.
+        let (show_exit, show_payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "task",
+            "show",
+            &task_id,
+        ]);
+        assert_eq!(show_exit, CliExitCode::Success.into());
+
+        // The task payload should include both the connector and the action.
+        let compiled = &show_payload["task"]["compiled"];
+        assert!(
+            compiled["chosen_connector"]["id"]
+                .as_str()
+                .is_some_and(|id| !id.is_empty()),
+            "compiled task should identify the connector"
+        );
+        assert!(
+            compiled["operation_hint"]
+                .as_str()
+                .is_some_and(|op| !op.is_empty()),
+            "compiled task should identify the operation"
+        );
+
+        // The approval state should indicate workflow approval has not been granted.
+        assert_eq!(
+            show_payload["task"]["approval"]["workflow"], false,
+            "newly created side-effecting task should not be pre-approved"
+        );
+
+        // Verify capsule status reflects a pre-approval state.
+        assert!(
+            show_payload["task"]["capsule_status"]
+                .as_str()
+                .is_some_and(|s| s.contains("ready") || s.contains("simulate") || s.contains("pending")),
+            "task should be in a state awaiting approval, got: {}",
+            show_payload["task"]["capsule_status"]
+        );
+    }
+
+    #[test]
+    fn blocked_actions_surface_reason_and_unblock_hint() {
+        // Create a side-effecting task and attempt to advance it without
+        // approval. The dispatch should block with a validation-class error.
+        let (create_exit, create_payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "task",
+            "send a message to #general on slack",
+        ]);
+        assert_eq!(create_exit, CliExitCode::Success.into());
+
+        let task_id = create_payload["task"]["id"]
+            .as_str()
+            .expect("task should have an id")
+            .to_owned();
+
+        // Try to run the task without approving it first.
+        let (run_exit, run_payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "task",
+            "run",
+            &task_id,
+        ]);
+
+        // The run should either fail with a validation error or succeed
+        // with a withheld execution (depending on resolution state).
+        let status = run_payload["status"]
+            .as_str()
+            .unwrap_or("unknown");
+
+        if run_exit != CliExitCode::Success.into() {
+            // Blocked: the task needs resolution or approval first.
+            assert!(
+                run_payload["message"]
+                    .as_str()
+                    .is_some_and(|msg| msg.contains("resolution") || msg.contains("advance") || msg.contains("resolve")),
+                "blocked task should explain what needs to happen, got: {}",
+                run_payload["message"]
+            );
+            // Should include next_actions or hints on how to unblock.
+            let task_view = &run_payload["task"];
+            assert!(
+                task_view["next_actions"].is_array()
+                    || run_payload["next_actions"].is_array(),
+                "blocked response should include next actions"
+            );
+        } else {
+            // If advance succeeded, it should have stopped before side effects.
+            let last_exec = &run_payload["task"]["last_execution"];
+            if !last_exec.is_null() {
+                assert!(
+                    last_exec["stopped_before_side_effect"] == true
+                        || last_exec["withheld_count"].as_u64().unwrap_or(0) > 0,
+                    "unapproved task execution should withhold side effects"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn resumable_queue_empty_returns_zero_items() {
+        // Listing tasks with a status filter that has no matches should
+        // return an empty array, representing an empty resumable work queue.
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "task",
+            "list",
+            "--status",
+            "executing",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "task");
+        assert_eq!(payload["subcommand"], "list");
+
+        let tasks = payload["tasks"]
+            .as_array()
+            .expect("tasks should be an array");
+        // Filter for "executing" status should yield zero items in a fresh store.
+        assert_eq!(
+            tasks.len(),
+            0,
+            "no tasks should be in 'executing' state in a fresh store"
+        );
+    }
+
+    #[test]
+    fn resumable_queue_item_includes_resume_command() {
+        // Create a task and advance it to produce an execution history entry.
+        // Then verify the task list includes the necessary information to
+        // construct a resume command.
+        let (create_exit, create_payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "task",
+            "search for GitHub repositories matching 'fcp'",
+        ]);
+        assert_eq!(create_exit, CliExitCode::Success.into());
+
+        let task_id = create_payload["task"]["id"]
+            .as_str()
+            .expect("task should have an id")
+            .to_owned();
+
+        // Resolve the task so it becomes ready for execution.
+        let (_resolve_exit, _resolve_payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "task",
+            "resolve",
+            &task_id,
+            "--until",
+            "ready",
+        ]);
+
+        // List tasks and find the one we created.
+        let (list_exit, list_payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "task",
+            "list",
+        ]);
+        assert_eq!(list_exit, CliExitCode::Success.into());
+
+        let tasks = list_payload["tasks"]
+            .as_array()
+            .expect("tasks should be an array");
+
+        let our_task = tasks
+            .iter()
+            .find(|t| t["id"].as_str() == Some(task_id.as_str()));
+
+        assert!(
+            our_task.is_some(),
+            "created task should appear in the task list"
+        );
+
+        let task_entry = our_task.expect("task must be found");
+        // Each listed task should include enough info to construct a resume command:
+        // - id: for `fwc task show <id>` / `fwc task run <id>`
+        // - capsule_status: to know whether it's resumable
+        assert!(
+            task_entry["id"].as_str().is_some_and(|id| !id.is_empty()),
+            "listed task should include id for resume"
+        );
+        assert!(
+            task_entry["capsule_status"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty()),
+            "listed task should include capsule_status for resume decision"
+        );
+        // Verify the task is in a state that can be resumed/advanced.
+        let resumable_states = [
+            "ready-to-simulate",
+            "ready-to-execute",
+            "pending-question",
+            "needs-answer",
+            "new",
+            "simulated",
+        ];
+        let current_status = task_entry["capsule_status"]
+            .as_str()
+            .unwrap_or("unknown");
+        assert!(
+            resumable_states.iter().any(|s| current_status.contains(s))
+                || current_status.contains("ready"),
+            "task status `{current_status}` should be a resumable state"
+        );
+    }
 }

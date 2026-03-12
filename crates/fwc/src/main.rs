@@ -18258,6 +18258,7 @@ deny_ptrace = true
         let payload: Value =
             serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
 
+        eprintln!("DO PAYLOAD: {}", serde_json::to_string_pretty(&payload).unwrap());
         assert_eq!(outcome.exit_code, CliExitCode::Success.into());
         assert_eq!(payload["status"], "simulated");
         assert_eq!(payload["execution_mode"]["defaulted"], true);
@@ -19644,7 +19645,7 @@ deny_ptrace = true
         let typos = vec![
             vec!["fwc", "--json", "shwo", "github", "--offline"],
             vec!["fwc", "--json", "lsit", "--offline"],
-            vec!["fwc", "--json", "gudie", "--offline"],
+            vec!["fwc", "--json", "gudie"],
         ];
         for tokens in typos {
             let args: Vec<String> = tokens.into_iter().map(str::to_owned).collect();

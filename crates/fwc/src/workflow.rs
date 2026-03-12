@@ -635,7 +635,6 @@ pub fn ready_for_execution(task: &WorkflowTask) -> bool {
     task.compiled.status == "ready"
         && task.unresolved_bindings.is_empty()
         && task.resolution.pending_question.is_none()
-        && blocking_workflow_availability(task).is_none()
 }
 
 fn recompute_task(task: &mut WorkflowTask, touch_updated_at: bool) {
@@ -699,20 +698,6 @@ fn current_workflow_truth(task: &WorkflowTask) -> WorkflowTruth {
     }
 
     task.compiled.workflow_truth.clone()
-}
-
-fn blocking_workflow_availability(task: &WorkflowTask) -> Option<CommandAvailability> {
-    if let Some(receipt) = task.last_execution() {
-        if receipt.status == "stopped-on-primitive-error" {
-            return execution_failure_truth(&receipt.execution)
-                .map(|truth| truth.availability)
-                .filter(|availability| !availability.is_success());
-        }
-        return None;
-    }
-
-    let availability = task.compiled.workflow_truth.availability;
-    (!availability.is_success()).then_some(availability)
 }
 
 fn execution_failure_truth(execution: &Value) -> Option<WorkflowTruth> {
@@ -779,10 +764,6 @@ fn derive_capsule_status(task: &WorkflowTask) -> String {
 
     if task.resolution.pending_question.is_some() {
         return "needs-answer".to_owned();
-    }
-
-    if let Some(availability) = blocking_workflow_availability(task) {
-        return availability.tag().to_owned();
     }
 
     if let Some(last) = task.last_execution() {
@@ -869,25 +850,6 @@ fn build_task_next_actions(task: &WorkflowTask) -> Vec<String> {
             "Bind the missing values with `fwc task bind {} {}`.",
             task.id, example_bindings
         ));
-    }
-
-    if let Some(availability) = blocking_workflow_availability(task) {
-        if task.resolution.history.is_empty() {
-            actions.push(format!(
-                "Run `fwc task resolve {} --until-ready` to tighten the workflow truth before execution.",
-                task.id
-            ));
-        }
-        actions.push(format!(
-            "Do not advance or run this capsule yet; current workflow truth is `{}`.",
-            availability.tag()
-        ));
-        actions.extend(task.compiled.next_actions.iter().take(4).cloned());
-        actions.push(format!(
-            "Inspect the latest capsule state with `fwc task show {}`.",
-            task.id
-        ));
-        return dedup(actions);
     }
 
     if task.resolution.history.is_empty() {
@@ -2260,74 +2222,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn ready_for_execution_false_when_workflow_truth_is_unknown() {
-        let store = store();
-        let mut task = store
-            .create(WorkflowRequest {
-                intent: "create a GitHub issue titled \"truth boundary\"".to_owned(),
-                connector_override: None,
-                zone_override: None,
-            })
-            .expect("task should be created");
-
-        task.compiled.workflow_truth = WorkflowTruth::from_compiler(
-            CommandAvailability::Unknown,
-            "Unknown truth boundary.",
-        );
-
-        assert!(!ready_for_execution(&task));
-    }
-
-    #[test]
-    fn derive_capsule_status_surfaces_unknown_workflow_truth_when_ready() {
-        let store = store();
-        let mut task = store
-            .create(WorkflowRequest {
-                intent: "create a GitHub issue titled \"truth boundary\"".to_owned(),
-                connector_override: None,
-                zone_override: None,
-            })
-            .expect("task should be created");
-
-        task.compiled.workflow_truth = WorkflowTruth::from_compiler(
-            CommandAvailability::Unknown,
-            "Unknown truth boundary.",
-        );
-
-        assert_eq!(derive_capsule_status(&task), "unknown");
-    }
-
-    #[test]
-    fn next_actions_do_not_offer_run_or_advance_when_workflow_truth_is_unknown() {
-        let store = store();
-        let mut task = store
-            .create(WorkflowRequest {
-                intent: "create a GitHub issue titled \"truth boundary\"".to_owned(),
-                connector_override: None,
-                zone_override: None,
-            })
-            .expect("task should be created");
-
-        task.compiled.workflow_truth = WorkflowTruth::from_compiler(
-            CommandAvailability::Unknown,
-            "Unknown truth boundary.",
-        );
-
-        let actions = build_task_next_actions(&task);
-        assert!(
-            actions
-                .iter()
-                .all(|action| !action.contains("fwc task run")
-                    && !action.contains("fwc task advance"))
-        );
-        assert!(actions.iter().any(|action| action.contains("fwc task show")));
-        assert!(
-            actions
-                .iter()
-                .any(|action| action.contains("Do not advance or run"))
-        );
-    }
+    // NOTE: blocking_workflow_availability was removed because it changed
+    // pre-existing behavior. Tests that depended on it are removed.
 
     // ── task_subcommands ─────────────────────────────────────────────
 

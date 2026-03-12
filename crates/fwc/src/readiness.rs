@@ -892,6 +892,14 @@ pub const COMMAND_FAMILY_CLASSIFICATION: &[CommandFamilyEntry] = &[
         mode: CommandTruthMode::OfflineOnly,
     },
     CommandFamilyEntry {
+        name: "compare",
+        mode: CommandTruthMode::OfflineOnly,
+    },
+    CommandFamilyEntry {
+        name: "approvals",
+        mode: CommandTruthMode::OfflineOnly,
+    },
+    CommandFamilyEntry {
         name: "pipe",
         mode: CommandTruthMode::OfflineOnly,
     },
@@ -966,6 +974,14 @@ pub const COMMAND_FAMILY_CLASSIFICATION: &[CommandFamilyEntry] = &[
     },
     CommandFamilyEntry {
         name: "pipeline",
+        mode: CommandTruthMode::Hybrid,
+    },
+    CommandFamilyEntry {
+        name: "replay",
+        mode: CommandTruthMode::Hybrid,
+    },
+    CommandFamilyEntry {
+        name: "undo",
         mode: CommandTruthMode::Hybrid,
     },
     // ── Passthrough commands (delegated to separate binaries) ──
@@ -9278,7 +9294,7 @@ output_schema = { type = "object" }
             .iter()
             .filter(|e| e.mode == CommandTruthMode::OfflineOnly)
             .count();
-        assert_eq!(count, 11, "Expected 11 offline-only commands, got {count}");
+        assert_eq!(count, 13, "Expected 13 offline-only commands, got {count}");
     }
 
     #[test]
@@ -9287,7 +9303,7 @@ output_schema = { type = "object" }
             .iter()
             .filter(|e| e.mode == CommandTruthMode::Hybrid)
             .count();
-        assert_eq!(count, 15, "Expected 15 hybrid commands, got {count}");
+        assert_eq!(count, 17, "Expected 17 hybrid commands, got {count}");
     }
 
     #[test]
@@ -10732,7 +10748,7 @@ output_schema = { type = "object" }
     #[test]
     fn golden_classification_count() {
         // Pinned count — if commands are added/removed, update this.
-        assert_eq!(COMMAND_FAMILY_CLASSIFICATION.len(), 52);
+        assert_eq!(COMMAND_FAMILY_CLASSIFICATION.len(), 56);
     }
 
     #[test]

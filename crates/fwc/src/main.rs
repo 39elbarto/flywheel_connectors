@@ -453,6 +453,32 @@ enum Commands {
     /// status, time range, or entry ID for debugging and replay.
     History(HistoryArgs),
 
+    /// Replay or clone a prior operation from history.
+    ///
+    /// Rebuilds a command from a history entry, optionally overriding
+    /// specific input fields. Forces preflight for risky replays.
+    #[command(visible_alias = "clone")]
+    Replay(ReplayArgs),
+
+    /// Compare two history entries side by side.
+    ///
+    /// Shows field-level diffs between two operations including
+    /// input, output, status, latency, and zone differences.
+    #[command(visible_alias = "diff")]
+    Compare(CompareArgs),
+
+    /// Show reversal or undo guidance for a completed operation.
+    ///
+    /// Reports whether a safe reversal path exists and what it
+    /// would involve, without making false promises about undoability.
+    Undo(UndoArgs),
+
+    /// Browse pending, approved, denied, and expired approval artifacts.
+    ///
+    /// Approval artifacts are created by preflight checks and stored
+    /// for resumable approval flows and audit purposes.
+    Approvals(ApprovalsArgs),
+
     /// Chain two operations: output of A feeds input of B via field mapping.
     ///
     /// Use `--map` to define source-to-target field mappings, or `--map-file`
@@ -1777,6 +1803,85 @@ struct HistoryArgs {
 }
 
 #[derive(Args, Debug, Serialize)]
+struct ReplayArgs {
+    /// History entry ID to replay.
+    entry_id: String,
+
+    /// Override specific input fields as `key=value` pairs.
+    #[arg(long = "set", value_name = "KEY=VALUE")]
+    set: Vec<String>,
+
+    /// Preview what would be replayed without executing.
+    #[arg(long, default_value_t = false)]
+    dry_run: bool,
+
+    /// Skip re-preflighting (dangerous).
+    #[arg(long, default_value_t = false)]
+    skip_preflight: bool,
+
+    /// Override the execution zone.
+    #[arg(long)]
+    zone: Option<String>,
+
+    /// Live authentication tokens.
+    #[command(flatten)]
+    auth: LiveAuthArgs,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct CompareArgs {
+    /// First history entry ID.
+    entry_a: String,
+
+    /// Second history entry ID.
+    entry_b: String,
+
+    /// Comma-separated list of fields to compare.
+    #[arg(long)]
+    fields: Option<String>,
+
+    /// Output format for comparison.
+    #[arg(long, default_value = "summary")]
+    compare_format: String,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct UndoArgs {
+    /// History entry ID to undo.
+    entry_id: String,
+
+    /// Actually execute the reversal if safe.
+    #[arg(long, default_value_t = false)]
+    execute: bool,
+
+    /// Skip safety warnings.
+    #[arg(long, default_value_t = false)]
+    force: bool,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct ApprovalsArgs {
+    /// Show details for a specific approval artifact ID.
+    artifact_id: Option<String>,
+
+    /// Filter by status: allowed, denied, expired.
+    #[arg(long)]
+    status: Option<String>,
+
+    /// Filter by connector slug.
+    #[arg(long)]
+    connector: Option<String>,
+
+    /// Show only expired approvals.
+    #[arg(long, default_value_t = false)]
+    expired: bool,
+
+    /// Maximum number of entries to return.
+    #[arg(long, default_value_t = 20)]
+    approvals_limit: usize,
+}
+
+#[derive(Args, Debug, Serialize)]
 struct PipeArgs {
     /// Source operation (e.g. `github.list_issues`).
     source: String,
@@ -2756,6 +2861,10 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         Commands::Template(args) => template_dispatch(args, cli.host.as_deref())?,
         Commands::Validate(args) => validate_dispatch(args, cli.host.as_deref())?,
         Commands::History(args) => history_dispatch(args)?,
+        Commands::Replay(args) => replay_dispatch(&args, cli.host.as_deref())?,
+        Commands::Compare(args) => compare_dispatch(&args)?,
+        Commands::Undo(args) => undo_dispatch(&args)?,
+        Commands::Approvals(args) => approvals_dispatch(&args)?,
         Commands::Pipe(args) => pipe_dispatch(args)?,
         Commands::Pipeline(args) => pipeline_dispatch(args, cli.host.as_deref())?,
         Commands::Recipe(args) => recipe_dispatch(args, cli.host.as_deref())?,
@@ -13655,6 +13764,655 @@ fn history_dispatch(args: &HistoryArgs) -> Result<DispatchOutcome> {
             "fwc history --connector github",
             "fwc history --status error",
             "fwc history --since 1h",
+        ],
+    });
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Success,
+    })
+}
+
+// ── Replay dispatch ─────────────────────────────────────────────────────────
+
+fn replay_dispatch(
+    args: &ReplayArgs,
+    _explicit_host: Option<&str>,
+) -> Result<DispatchOutcome> {
+    let store = cli_history_store()?;
+
+    let entry = match store.get(&args.entry_id)? {
+        Some(entry) => entry,
+        None => {
+            return Ok(DispatchOutcome {
+                payload: json!({
+                    "status": "error",
+                    "command": "replay",
+                    "error": {
+                        "type": "not-found",
+                        "message": format!("No history entry with ID '{}'.", args.entry_id),
+                    },
+                    "next_actions": [
+                        "fwc history",
+                        "fwc history --connector <slug>",
+                    ],
+                }),
+                exit_code: CliExitCode::UnknownCommand,
+            });
+        }
+    };
+
+    // Parse --set overrides into key=value pairs.
+    let mut overrides = std::collections::BTreeMap::new();
+    let mut override_errors = Vec::new();
+    for item in &args.set {
+        if let Some((key, val)) = item.split_once('=') {
+            overrides.insert(key.to_owned(), val.to_owned());
+        } else {
+            override_errors.push(json!({
+                "raw": item,
+                "reason": "Expected KEY=VALUE format.",
+            }));
+        }
+    }
+
+    if !override_errors.is_empty() {
+        return Ok(DispatchOutcome {
+            payload: json!({
+                "status": "error",
+                "command": "replay",
+                "error": {
+                    "type": "invalid-override",
+                    "message": "One or more --set values could not be parsed.",
+                    "details": override_errors,
+                },
+                "next_actions": [
+                    "fwc replay <entry_id> --set key=value",
+                ],
+            }),
+            exit_code: CliExitCode::Validation,
+        });
+    }
+
+    // Compute reused vs overridden fields.
+    let original_fields: Vec<String> = vec![
+        "connector_id".to_owned(),
+        "operation_id".to_owned(),
+        "zone".to_owned(),
+        "input_hash".to_owned(),
+    ];
+    let overridden_fields: Vec<String> = overrides.keys().cloned().collect();
+    let reused_fields: Vec<String> = original_fields
+        .iter()
+        .filter(|f| !overrides.contains_key(f.as_str()))
+        .cloned()
+        .collect();
+
+    let effective_zone = args
+        .zone
+        .clone()
+        .or_else(|| entry.zone.clone())
+        .unwrap_or_else(|| "z:work".to_owned());
+
+    if args.dry_run {
+        let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "replay");
+        let mut payload = json!({
+            "status": "ok",
+            "command": "replay",
+            "mode": "dry-run",
+            "replay_source": args.entry_id,
+            "original_entry": {
+                "entry_id": entry.entry_id,
+                "connector_id": entry.connector_id,
+                "operation_id": entry.operation_id,
+                "zone": entry.zone,
+                "status": entry.status,
+                "input_hash": entry.input_hash,
+                "input_summary": entry.input_summary,
+            },
+            "effective_zone": effective_zone,
+            "overrides": overrides,
+            "reused_fields": reused_fields,
+            "overridden_fields": overridden_fields,
+            "skip_preflight": args.skip_preflight,
+            "message": format!(
+                "Dry-run: would replay operation `{}` from connector `{}` (entry `{}`).",
+                entry.operation_id, entry.connector_id, entry.entry_id,
+            ),
+            "next_actions": [
+                format!("fwc replay {}", args.entry_id),
+                format!("fwc replay {} --set key=value", args.entry_id),
+            ],
+        });
+        envelope.inject_into(&mut payload);
+        return Ok(DispatchOutcome {
+            payload,
+            exit_code: CliExitCode::Success,
+        });
+    }
+
+    // Live replay: requires host.
+    let envelope = CommandEnvelope::new(CommandAvailability::Unavailable, "replay");
+    let mut payload = json!({
+        "status": "error",
+        "command": "replay",
+        "mode": "live",
+        "replay_source": args.entry_id,
+        "original_entry": {
+            "entry_id": entry.entry_id,
+            "connector_id": entry.connector_id,
+            "operation_id": entry.operation_id,
+            "zone": entry.zone,
+            "status": entry.status,
+        },
+        "effective_zone": effective_zone,
+        "overrides": overrides,
+        "reused_fields": reused_fields,
+        "overridden_fields": overridden_fields,
+        "error": {
+            "type": "host-required",
+            "message": "Live replay requires an fcp-host connection. Use --dry-run to preview.",
+        },
+        "next_actions": [
+            format!("fwc replay {} --dry-run", args.entry_id),
+            "fwc replay <entry_id> --host http://127.0.0.1:8787".to_owned(),
+        ],
+    });
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Transport,
+    })
+}
+
+// ── Compare dispatch ────────────────────────────────────────────────────────
+
+fn compare_dispatch(args: &CompareArgs) -> Result<DispatchOutcome> {
+    let store = cli_history_store()?;
+
+    let entry_a = match store.get(&args.entry_a)? {
+        Some(e) => e,
+        None => {
+            return Ok(DispatchOutcome {
+                payload: json!({
+                    "status": "error",
+                    "command": "compare",
+                    "error": {
+                        "type": "not-found",
+                        "message": format!("No history entry with ID '{}'.", args.entry_a),
+                        "entry": "a",
+                    },
+                    "next_actions": ["fwc history"],
+                }),
+                exit_code: CliExitCode::UnknownCommand,
+            });
+        }
+    };
+
+    let entry_b = match store.get(&args.entry_b)? {
+        Some(e) => e,
+        None => {
+            return Ok(DispatchOutcome {
+                payload: json!({
+                    "status": "error",
+                    "command": "compare",
+                    "error": {
+                        "type": "not-found",
+                        "message": format!("No history entry with ID '{}'.", args.entry_b),
+                        "entry": "b",
+                    },
+                    "next_actions": ["fwc history"],
+                }),
+                exit_code: CliExitCode::UnknownCommand,
+            });
+        }
+    };
+
+    // Build field comparisons.
+    let fields_to_compare = if let Some(ref fields_str) = args.fields {
+        fields_str
+            .split(',')
+            .map(|s| s.trim().to_owned())
+            .collect::<Vec<_>>()
+    } else {
+        vec![
+            "connector_id".to_owned(),
+            "operation_id".to_owned(),
+            "zone".to_owned(),
+            "status".to_owned(),
+            "input_hash".to_owned(),
+            "output_hash".to_owned(),
+            "latency_ms".to_owned(),
+        ]
+    };
+
+    let mut diffs = Vec::new();
+    let mut same_count = 0usize;
+    let mut diff_count = 0usize;
+
+    for field in &fields_to_compare {
+        let (val_a, val_b) = match field.as_str() {
+            "connector_id" => (
+                json!(entry_a.connector_id),
+                json!(entry_b.connector_id),
+            ),
+            "operation_id" => (
+                json!(entry_a.operation_id),
+                json!(entry_b.operation_id),
+            ),
+            "zone" => (json!(entry_a.zone), json!(entry_b.zone)),
+            "status" => (json!(entry_a.status), json!(entry_b.status)),
+            "input_hash" => (
+                json!(entry_a.input_hash),
+                json!(entry_b.input_hash),
+            ),
+            "output_hash" => (
+                json!(entry_a.output_hash),
+                json!(entry_b.output_hash),
+            ),
+            "latency_ms" => (
+                json!(entry_a.latency_ms),
+                json!(entry_b.latency_ms),
+            ),
+            other => (json!(null), json!(format!("unknown field: {other}"))),
+        };
+
+        let same = val_a == val_b;
+        if same {
+            same_count += 1;
+        } else {
+            diff_count += 1;
+        }
+        diffs.push(json!({
+            "field": field,
+            "a": val_a,
+            "b": val_b,
+            "same": same,
+        }));
+    }
+
+    // Compute summary classification.
+    let same_connector = entry_a.connector_id == entry_b.connector_id;
+    let same_operation = entry_a.operation_id == entry_b.operation_id;
+    let same_input = entry_a.input_hash == entry_b.input_hash;
+    let same_output = entry_a.output_hash == entry_b.output_hash;
+
+    let classification = if diff_count == 0 {
+        "identical"
+    } else if same_connector && same_operation && !same_input {
+        "same-operation-different-input"
+    } else if same_connector && !same_operation {
+        "same-connector-different-operation"
+    } else if !same_connector {
+        "completely-different"
+    } else if same_operation && same_input && !same_output {
+        "same-input-different-output"
+    } else {
+        "different"
+    };
+
+    let mut notes = Vec::new();
+    if !same_input {
+        notes.push("inputs differed".to_owned());
+    }
+    if !same_output {
+        notes.push("outputs differed".to_owned());
+    }
+
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "compare");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "compare",
+        "entry_a": args.entry_a,
+        "entry_b": args.entry_b,
+        "fields": diffs,
+        "summary": {
+            "same_count": same_count,
+            "diff_count": diff_count,
+            "classification": classification,
+            "notes": notes,
+        },
+        "next_actions": [
+            format!("fwc history {}", args.entry_a),
+            format!("fwc history {}", args.entry_b),
+            "fwc compare <a> <b> --fields connector_id,status".to_owned(),
+        ],
+    });
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Success,
+    })
+}
+
+// ── Undo dispatch ───────────────────────────────────────────────────────────
+
+fn undo_dispatch(args: &UndoArgs) -> Result<DispatchOutcome> {
+    let store = cli_history_store()?;
+
+    let entry = match store.get(&args.entry_id)? {
+        Some(e) => e,
+        None => {
+            return Ok(DispatchOutcome {
+                payload: json!({
+                    "status": "error",
+                    "command": "undo",
+                    "error": {
+                        "type": "not-found",
+                        "message": format!("No history entry with ID '{}'.", args.entry_id),
+                    },
+                    "next_actions": ["fwc history"],
+                }),
+                exit_code: CliExitCode::UnknownCommand,
+            });
+        }
+    };
+
+    // Use the undo module's registry to check reversibility.
+    let registry = undo::UndoRegistry::new();
+    let check = undo::check_reversibility(&registry, &entry.operation_id);
+
+    // Read-only operations have nothing to undo.
+    let status_str = serde_json::to_value(&entry.status)
+        .ok()
+        .and_then(|v| v.as_str().map(ToOwned::to_owned))
+        .unwrap_or_else(|| "unknown".to_owned());
+
+    let is_read_only = status_str == "simulated" || status_str == "denied";
+
+    let (safety_level, guidance) = if is_read_only {
+        (
+            "none".to_owned(),
+            "This was a read-only or denied operation. Nothing to undo.".to_owned(),
+        )
+    } else if check.reversible {
+        ("safe".to_owned(), check.guidance.clone())
+    } else {
+        ("unsafe".to_owned(), check.guidance.clone())
+    };
+
+    let reversible = check.reversible && !is_read_only;
+
+    // If --execute requested, check if we can actually do it.
+    if args.execute {
+        if !reversible && !args.force {
+            return Ok(DispatchOutcome {
+                payload: json!({
+                    "status": "error",
+                    "command": "undo",
+                    "error": {
+                        "type": "not-reversible",
+                        "message": format!(
+                            "Operation `{}` has no safe reversal path. Use --force to override.",
+                            entry.operation_id,
+                        ),
+                    },
+                    "reversible": false,
+                    "safety_level": safety_level,
+                    "guidance": guidance,
+                    "next_actions": [
+                        format!("fwc undo {}", args.entry_id),
+                        format!("fwc undo {} --execute --force", args.entry_id),
+                    ],
+                }),
+                exit_code: CliExitCode::PolicyDenied,
+            });
+        }
+
+        // Even with --execute, we need a host to actually run the reversal.
+        let envelope = CommandEnvelope::new(CommandAvailability::Unavailable, "undo");
+        let mut payload = json!({
+            "status": "error",
+            "command": "undo",
+            "mode": "execute",
+            "entry_id": args.entry_id,
+            "operation_id": entry.operation_id,
+            "reversible": reversible,
+            "reversal_path": check.inverse_operation,
+            "safety_level": safety_level,
+            "guidance": guidance,
+            "error": {
+                "type": "host-required",
+                "message": "Executing undo requires an fcp-host connection.",
+            },
+            "next_actions": [
+                format!("fwc undo {}", args.entry_id),
+                "fwc undo <entry_id> --execute --host http://127.0.0.1:8787".to_owned(),
+            ],
+        });
+        envelope.inject_into(&mut payload);
+        return Ok(DispatchOutcome {
+            payload,
+            exit_code: CliExitCode::Transport,
+        });
+    }
+
+    // Guidance mode (default).
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "undo");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "undo",
+        "mode": "guidance",
+        "entry_id": args.entry_id,
+        "operation_id": entry.operation_id,
+        "connector_id": entry.connector_id,
+        "original_status": entry.status,
+        "reversible": reversible,
+        "reversal_path": check.inverse_operation,
+        "safety_level": safety_level,
+        "guidance": guidance,
+        "next_actions": if reversible {
+            vec![
+                format!("fwc undo {} --execute", args.entry_id),
+                format!("fwc history {}", args.entry_id),
+            ]
+        } else {
+            vec![
+                format!("fwc history {}", args.entry_id),
+                "fwc undo <entry_id>".to_owned(),
+            ]
+        },
+    });
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Success,
+    })
+}
+
+// ── Approvals dispatch ──────────────────────────────────────────────────────
+
+#[cfg(test)]
+thread_local! {
+    static TEST_APPROVAL_DIR_OVERRIDE: std::cell::RefCell<Option<PathBuf>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+fn cli_approval_artifact_dir() -> Result<PathBuf> {
+    #[cfg(test)]
+    if let Some(path) = TEST_APPROVAL_DIR_OVERRIDE.with(|slot| slot.borrow().clone()) {
+        return Ok(path);
+    }
+
+    approval_artifact_dir()
+}
+
+#[cfg(test)]
+struct ApprovalDirOverrideGuard;
+
+#[cfg(test)]
+fn install_test_approval_dir(path: PathBuf) -> ApprovalDirOverrideGuard {
+    TEST_APPROVAL_DIR_OVERRIDE.with(|slot| {
+        *slot.borrow_mut() = Some(path);
+    });
+    ApprovalDirOverrideGuard
+}
+
+#[cfg(test)]
+impl Drop for ApprovalDirOverrideGuard {
+    fn drop(&mut self) {
+        TEST_APPROVAL_DIR_OVERRIDE.with(|slot| {
+            slot.borrow_mut().take();
+        });
+    }
+}
+
+fn approvals_dispatch(args: &ApprovalsArgs) -> Result<DispatchOutcome> {
+    let dir = cli_approval_artifact_dir()?;
+
+    if !dir.exists() {
+        if let Some(ref artifact_id) = args.artifact_id {
+            return Ok(DispatchOutcome {
+                payload: json!({
+                    "status": "error",
+                    "command": "approvals",
+                    "error": {
+                        "type": "not-found",
+                        "message": format!("No approval artifact with ID '{artifact_id}'."),
+                    },
+                    "next_actions": ["fwc approvals"],
+                }),
+                exit_code: CliExitCode::UnknownCommand,
+            });
+        }
+
+        let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "approvals");
+        let mut payload = json!({
+            "status": "ok",
+            "command": "approvals",
+            "scope": "list",
+            "total": 0,
+            "returned": 0,
+            "artifacts": [],
+            "message": "No approval artifacts found.",
+            "next_actions": [
+                "fwc preflight <connector> <operation>",
+            ],
+        });
+        envelope.inject_into(&mut payload);
+        return Ok(DispatchOutcome {
+            payload,
+            exit_code: CliExitCode::Success,
+        });
+    }
+
+    // Read all JSON files from the approvals directory.
+    let mut artifacts: Vec<ApprovalArtifact> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for dir_entry in entries.flatten() {
+            let path = dir_entry.path();
+            if path.extension().is_some_and(|ext| ext == "json") {
+                if let Ok(contents) = std::fs::read_to_string(&path) {
+                    if let Ok(artifact) =
+                        serde_json::from_str::<ApprovalArtifact>(&contents)
+                    {
+                        artifacts.push(artifact);
+                    }
+                }
+            }
+        }
+    }
+
+    // Single artifact lookup.
+    if let Some(ref artifact_id) = args.artifact_id {
+        let found = artifacts
+            .iter()
+            .find(|a| a.artifact_id == *artifact_id);
+
+        return found.map_or_else(
+            || {
+                Ok(DispatchOutcome {
+                    payload: json!({
+                        "status": "error",
+                        "command": "approvals",
+                        "error": {
+                            "type": "not-found",
+                            "message": format!("No approval artifact with ID '{artifact_id}'."),
+                        },
+                        "next_actions": ["fwc approvals"],
+                    }),
+                    exit_code: CliExitCode::UnknownCommand,
+                })
+            },
+            |artifact| {
+                let envelope =
+                    CommandEnvelope::new(CommandAvailability::OfflineArtifact, "approvals");
+                let status_label = if artifact.allowed { "allowed" } else { "denied" };
+                let mut payload = json!({
+                    "status": "ok",
+                    "command": "approvals",
+                    "scope": "detail",
+                    "artifact": {
+                        "artifact_id": artifact.artifact_id,
+                        "connector_id": artifact.connector_id,
+                        "operation": artifact.operation,
+                        "zone": artifact.zone,
+                        "allowed": artifact.allowed,
+                        "status": status_label,
+                        "reason": artifact.reason,
+                        "created_at": artifact.created_at,
+                    },
+                    "next_actions": [
+                        "fwc approvals",
+                        format!("fwc approvals --status {status_label}"),
+                    ],
+                });
+                envelope.inject_into(&mut payload);
+                Ok(DispatchOutcome {
+                    payload,
+                    exit_code: CliExitCode::Success,
+                })
+            },
+        );
+    }
+
+    // Filter artifacts.
+    let filtered: Vec<&ApprovalArtifact> = artifacts
+        .iter()
+        .filter(|a| {
+            if let Some(ref status) = args.status {
+                let artifact_status = if a.allowed { "allowed" } else { "denied" };
+                if artifact_status != status.as_str() {
+                    return false;
+                }
+            }
+            if let Some(ref connector) = args.connector {
+                if a.connector_id != *connector {
+                    return false;
+                }
+            }
+            true
+        })
+        .take(args.approvals_limit)
+        .collect();
+
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "approvals");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "approvals",
+        "scope": "list",
+        "total": artifacts.len(),
+        "returned": filtered.len(),
+        "filter": {
+            "status": args.status,
+            "connector": args.connector,
+            "expired": args.expired,
+            "limit": args.approvals_limit,
+        },
+        "artifacts": filtered.iter().map(|a| json!({
+            "artifact_id": a.artifact_id,
+            "connector_id": a.connector_id,
+            "operation": a.operation,
+            "zone": a.zone,
+            "allowed": a.allowed,
+            "status": if a.allowed { "allowed" } else { "denied" },
+            "reason": a.reason,
+            "created_at": a.created_at,
+        })).collect::<Vec<_>>(),
+        "next_actions": [
+            "fwc approvals <artifact_id>",
+            "fwc approvals --status denied",
         ],
     });
     envelope.inject_into(&mut payload);
@@ -29951,5 +30709,571 @@ depends_on = ["missing"]
                 || current_status.contains("ready"),
             "task status `{current_status}` should be a resumable state"
         );
+    }
+
+    // ── Seed helper for replay/compare/undo tests ───────────────────────
+
+    fn seed_history_entries() -> (TempDir, Vec<String>, super::HistoryPathOverrideGuard) {
+        let root = TempDir::new().expect("history tempdir should exist");
+        let history_path = root.path().join("history.jsonl");
+        let guard = super::install_test_history_path(history_path);
+
+        // Entry 1: successful github create_issue
+        super::append_history_entry(
+            super::history::OpStatus::Success,
+            "fcp.github",
+            "github.create_issue",
+            Some("z:work"),
+            &json!({"owner":"octocat","repo":"hello-world","title":"test issue"}),
+            Some(&json!({"ok":true,"issue":{"number":42}})),
+            None,
+            Some("idemp-replay-1"),
+            25,
+        )
+        .expect("history append should succeed");
+
+        // Entry 2: denied discord delete_message
+        super::append_history_entry(
+            super::history::OpStatus::Denied,
+            "fcp.discord",
+            "discord.delete_message",
+            Some("z:work"),
+            &json!({"channel_id":"123","message_id":"456"}),
+            Some(&json!({"allowed":false})),
+            Some("policy-denied".to_owned()),
+            None,
+            0,
+        )
+        .expect("history append should succeed");
+
+        // Entry 3: simulated slack post_message
+        super::append_history_entry(
+            super::history::OpStatus::Simulated,
+            "fcp.slack",
+            "slack.post_message",
+            Some("z:staging"),
+            &json!({"channel":"C123","text":"hello from test"}),
+            Some(&json!({"ok":true,"ts":"1234567890.123456"})),
+            None,
+            None,
+            10,
+        )
+        .expect("history append should succeed");
+
+        // Collect entry IDs from the store.
+        let store = super::cli_history_store().expect("store should open");
+        let mut filter = super::history::HistoryFilter::new();
+        filter.limit = 100;
+        let entries = store.query(&filter).expect("query should succeed");
+        // Entries are returned reverse chronological, so index 0 is newest.
+        let ids: Vec<String> = entries.iter().rev().map(|e| e.entry_id.clone()).collect();
+
+        (root, ids, guard)
+    }
+
+    // ── Replay tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn replay_dry_run_shows_original_entry_info() {
+        let (_root, ids, _guard) = seed_history_entries();
+        let entry_id = &ids[0]; // github.create_issue
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "replay", entry_id, "--dry-run",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "replay");
+        assert_eq!(payload["mode"], "dry-run");
+        assert_eq!(payload["replay_source"], entry_id.as_str());
+        assert_eq!(payload["original_entry"]["connector_id"], "fcp.github");
+        assert_eq!(payload["original_entry"]["operation_id"], "github.create_issue");
+        assert!(payload["reused_fields"].as_array().is_some());
+    }
+
+    #[test]
+    fn replay_not_found_returns_error() {
+        let (_root, _ids, _guard) = seed_history_entries();
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "replay", "nonexistent-id-999", "--dry-run",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
+        assert_eq!(payload["command"], "replay");
+        assert_eq!(payload["error"]["type"], "not-found");
+    }
+
+    #[test]
+    fn replay_dry_run_with_overrides_lists_overridden_fields() {
+        let (_root, ids, _guard) = seed_history_entries();
+        let entry_id = &ids[0];
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "replay", entry_id,
+            "--dry-run", "--set", "title=new title",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["overrides"]["title"], "new title");
+        assert!(
+            payload["overridden_fields"]
+                .as_array()
+                .is_some_and(|arr| arr.iter().any(|v| v == "title"))
+        );
+    }
+
+    #[test]
+    fn replay_invalid_override_format_returns_validation_error() {
+        let (_root, ids, _guard) = seed_history_entries();
+        let entry_id = &ids[0];
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "replay", entry_id,
+            "--dry-run", "--set", "no-equals-sign",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["error"]["type"], "invalid-override");
+    }
+
+    #[test]
+    fn replay_dry_run_with_zone_override() {
+        let (_root, ids, _guard) = seed_history_entries();
+        let entry_id = &ids[0];
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "replay", entry_id,
+            "--dry-run", "--zone", "z:staging",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["effective_zone"], "z:staging");
+    }
+
+    #[test]
+    fn replay_live_without_host_returns_transport_error() {
+        let (_root, ids, _guard) = seed_history_entries();
+        let entry_id = &ids[0];
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "replay", entry_id,
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "replay");
+        assert_eq!(payload["mode"], "live");
+        assert_eq!(payload["error"]["type"], "host-required");
+    }
+
+    #[test]
+    fn replay_dry_run_includes_skip_preflight_flag() {
+        let (_root, ids, _guard) = seed_history_entries();
+        let entry_id = &ids[0];
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "replay", entry_id,
+            "--dry-run", "--skip-preflight",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["skip_preflight"], true);
+    }
+
+    #[test]
+    fn replay_dry_run_has_next_actions() {
+        let (_root, ids, _guard) = seed_history_entries();
+        let entry_id = &ids[0];
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "replay", entry_id, "--dry-run",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert!(payload["next_actions"].as_array().is_some_and(|a| !a.is_empty()));
+    }
+
+    // ── Compare tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn compare_two_entries_shows_field_diffs() {
+        let (_root, ids, _guard) = seed_history_entries();
+        let (a, b) = (&ids[0], &ids[1]);
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "compare", a, b,
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "compare");
+        assert_eq!(payload["entry_a"], a.as_str());
+        assert_eq!(payload["entry_b"], b.as_str());
+        assert!(payload["fields"].as_array().is_some_and(|f| f.len() >= 5));
+        assert!(payload["summary"]["classification"].is_string());
+    }
+
+    #[test]
+    fn compare_entry_a_not_found() {
+        let (_root, ids, _guard) = seed_history_entries();
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "compare", "nonexistent-a", &ids[0],
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
+        assert_eq!(payload["error"]["type"], "not-found");
+        assert_eq!(payload["error"]["entry"], "a");
+    }
+
+    #[test]
+    fn compare_entry_b_not_found() {
+        let (_root, ids, _guard) = seed_history_entries();
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "compare", &ids[0], "nonexistent-b",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
+        assert_eq!(payload["error"]["type"], "not-found");
+        assert_eq!(payload["error"]["entry"], "b");
+    }
+
+    #[test]
+    fn compare_same_entry_is_identical() {
+        let (_root, ids, _guard) = seed_history_entries();
+        let entry_id = &ids[0];
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "compare", entry_id, entry_id,
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["summary"]["classification"], "identical");
+        assert_eq!(payload["summary"]["diff_count"], 0);
+    }
+
+    #[test]
+    fn compare_different_connectors_is_completely_different() {
+        let (_root, ids, _guard) = seed_history_entries();
+        let (a, b) = (&ids[0], &ids[1]); // github vs discord
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "compare", a, b,
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["summary"]["classification"], "completely-different");
+    }
+
+    #[test]
+    fn compare_with_field_filter() {
+        let (_root, ids, _guard) = seed_history_entries();
+        let (a, b) = (&ids[0], &ids[1]);
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "compare", a, b, "--fields", "connector_id,status",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        let fields = payload["fields"].as_array().expect("fields should be array");
+        assert_eq!(fields.len(), 2);
+    }
+
+    #[test]
+    fn compare_notes_input_diff() {
+        let (_root, ids, _guard) = seed_history_entries();
+        let (a, b) = (&ids[0], &ids[1]);
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "compare", a, b,
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        let notes = payload["summary"]["notes"].as_array().expect("notes should be array");
+        assert!(notes.iter().any(|n| n.as_str().is_some_and(|s| s.contains("inputs differed"))));
+    }
+
+    #[test]
+    fn compare_has_next_actions() {
+        let (_root, ids, _guard) = seed_history_entries();
+        let (a, b) = (&ids[0], &ids[1]);
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "compare", a, b,
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert!(payload["next_actions"].as_array().is_some_and(|a| !a.is_empty()));
+    }
+
+    // ── Undo tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn undo_guidance_for_reversible_operation() {
+        let (_root, ids, _guard) = seed_history_entries();
+        let entry_id = &ids[0]; // github.create_issue — has inverse
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "undo", entry_id,
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "undo");
+        assert_eq!(payload["mode"], "guidance");
+    }
+
+    #[test]
+    fn undo_not_found_returns_error() {
+        let (_root, _ids, _guard) = seed_history_entries();
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "undo", "nonexistent-id-999",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
+        assert_eq!(payload["error"]["type"], "not-found");
+    }
+
+    #[test]
+    fn undo_denied_operation_reports_nothing_to_undo() {
+        let (_root, ids, _guard) = seed_history_entries();
+        let entry_id = &ids[1]; // discord.delete_message — status denied
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "undo", entry_id,
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["reversible"], false);
+        assert_eq!(payload["safety_level"], "none");
+    }
+
+    #[test]
+    fn undo_simulated_operation_reports_nothing_to_undo() {
+        let (_root, ids, _guard) = seed_history_entries();
+        let entry_id = &ids[2]; // slack.post_message — status simulated
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "undo", entry_id,
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["reversible"], false);
+        assert_eq!(payload["safety_level"], "none");
+    }
+
+    #[test]
+    fn undo_execute_not_reversible_without_force_denied() {
+        let (_root, ids, _guard) = seed_history_entries();
+        let entry_id = &ids[1]; // discord.delete_message — denied
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "undo", entry_id, "--execute",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::PolicyDenied.into());
+        assert_eq!(payload["error"]["type"], "not-reversible");
+    }
+
+    #[test]
+    fn undo_guidance_has_next_actions() {
+        let (_root, ids, _guard) = seed_history_entries();
+        let entry_id = &ids[0];
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "undo", entry_id,
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert!(payload["next_actions"].as_array().is_some_and(|a| !a.is_empty()));
+    }
+
+    #[test]
+    fn undo_includes_connector_and_operation_ids() {
+        let (_root, ids, _guard) = seed_history_entries();
+        let entry_id = &ids[0];
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "undo", entry_id,
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["connector_id"], "fcp.github");
+        assert_eq!(payload["operation_id"], "github.create_issue");
+    }
+
+    // ── Approvals tests ─────────────────────────────────────────────────
+
+    fn seed_approval_artifacts(dir: &std::path::Path) {
+        fs::create_dir_all(dir).expect("approval dir should create");
+        let artifacts = vec![
+            super::ApprovalArtifact {
+                artifact_id: "apr-001".to_owned(),
+                connector_id: "fcp.github".to_owned(),
+                operation: "github.create_issue".to_owned(),
+                zone: "z:work".to_owned(),
+                allowed: true,
+                reason: Some("Policy approved".to_owned()),
+                input: json!({"owner":"octocat"}),
+                created_at: "2026-03-01T00:00:00Z".to_owned(),
+                approval_token_hint: None,
+            },
+            super::ApprovalArtifact {
+                artifact_id: "apr-002".to_owned(),
+                connector_id: "fcp.discord".to_owned(),
+                operation: "discord.delete_message".to_owned(),
+                zone: "z:work".to_owned(),
+                allowed: false,
+                reason: Some("High risk operation".to_owned()),
+                input: json!({"channel_id":"123"}),
+                created_at: "2026-03-02T00:00:00Z".to_owned(),
+                approval_token_hint: None,
+            },
+            super::ApprovalArtifact {
+                artifact_id: "apr-003".to_owned(),
+                connector_id: "fcp.slack".to_owned(),
+                operation: "slack.post_message".to_owned(),
+                zone: "z:staging".to_owned(),
+                allowed: true,
+                reason: None,
+                input: json!({"channel":"C123"}),
+                created_at: "2026-01-01T00:00:00Z".to_owned(),
+                approval_token_hint: None,
+            },
+        ];
+        for artifact in &artifacts {
+            let path = dir.join(format!("{}.json", artifact.artifact_id));
+            let contents = serde_json::to_string_pretty(artifact).expect("json should serialize");
+            fs::write(&path, contents).expect("write should succeed");
+        }
+    }
+
+    #[test]
+    fn approvals_empty_directory_returns_empty_list() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let approval_dir = tempdir.path().join("empty-approvals");
+        let _guard = super::install_test_approval_dir(approval_dir);
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "approvals",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "approvals");
+        assert_eq!(payload["total"], 0);
+        assert_eq!(payload["returned"], 0);
+    }
+
+    #[test]
+    fn approvals_lists_all_artifacts() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let approval_dir = tempdir.path().join("approvals");
+        seed_approval_artifacts(&approval_dir);
+        let _guard = super::install_test_approval_dir(approval_dir);
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "approvals",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "approvals");
+        assert_eq!(payload["total"], 3);
+        assert_eq!(payload["returned"], 3);
+    }
+
+    #[test]
+    fn approvals_single_artifact_detail() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let approval_dir = tempdir.path().join("approvals");
+        seed_approval_artifacts(&approval_dir);
+        let _guard = super::install_test_approval_dir(approval_dir);
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "approvals", "apr-001",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["scope"], "detail");
+        assert_eq!(payload["artifact"]["artifact_id"], "apr-001");
+        assert_eq!(payload["artifact"]["connector_id"], "fcp.github");
+        assert_eq!(payload["artifact"]["status"], "allowed");
+    }
+
+    #[test]
+    fn approvals_artifact_not_found() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let approval_dir = tempdir.path().join("approvals");
+        seed_approval_artifacts(&approval_dir);
+        let _guard = super::install_test_approval_dir(approval_dir);
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "approvals", "nonexistent-artifact",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
+        assert_eq!(payload["error"]["type"], "not-found");
+    }
+
+    #[test]
+    fn approvals_filter_by_status() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let approval_dir = tempdir.path().join("approvals");
+        seed_approval_artifacts(&approval_dir);
+        let _guard = super::install_test_approval_dir(approval_dir);
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "approvals", "--status", "denied",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        let artifacts = payload["artifacts"].as_array().expect("artifacts should be array");
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0]["connector_id"], "fcp.discord");
+    }
+
+    #[test]
+    fn approvals_filter_by_connector() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let approval_dir = tempdir.path().join("approvals");
+        seed_approval_artifacts(&approval_dir);
+        let _guard = super::install_test_approval_dir(approval_dir);
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "approvals", "--connector", "fcp.slack",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        let artifacts = payload["artifacts"].as_array().expect("artifacts should be array");
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0]["artifact_id"], "apr-003");
+    }
+
+    #[test]
+    fn approvals_has_next_actions() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let approval_dir = tempdir.path().join("approvals");
+        seed_approval_artifacts(&approval_dir);
+        let _guard = super::install_test_approval_dir(approval_dir);
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "approvals",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert!(payload["next_actions"].as_array().is_some_and(|a| !a.is_empty()));
+    }
+
+    #[test]
+    fn approvals_not_found_when_dir_missing() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let approval_dir = tempdir.path().join("no-such-approvals");
+        let _guard = super::install_test_approval_dir(approval_dir);
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "approvals", "apr-001",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
+        assert_eq!(payload["error"]["type"], "not-found");
     }
 }

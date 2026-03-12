@@ -17080,9 +17080,9 @@ deny_ptrace = true
         let args = vec![
             "fwc".to_owned(),
             "--json".to_owned(),
-            "--offline".to_owned(),
             "exmaples".to_owned(),
             "slack".to_owned(),
+            "--offline".to_owned(),
         ];
         let outcome = execute(&args).expect("execution should not fail internally");
         let payload: Value =
@@ -17124,6 +17124,7 @@ deny_ptrace = true
             "fwc",
             "show",
             "github",
+            "--offline",
             "--template",
             "{{connector.slug}} => {{connector.name}}",
         ]);
@@ -17289,6 +17290,7 @@ deny_ptrace = true
             "fwc",
             "show",
             "github",
+            "--offline",
             "--template-file",
             &path.display().to_string(),
         ]);
@@ -17342,6 +17344,7 @@ deny_ptrace = true
             "--json",
             "show",
             "github",
+            "--offline",
             "--extract",
             ".connector.slug",
         ]);
@@ -17353,7 +17356,7 @@ deny_ptrace = true
     #[test]
     fn execute_show_supports_extract_alias() {
         let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "show", "github", "--jq", ".connector.slug"]);
+            execute_json(&["fwc", "--json", "show", "github", "--offline", "--jq", ".connector.slug"]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload, Value::String("github".to_owned()));
@@ -17400,6 +17403,7 @@ deny_ptrace = true
             "--json",
             "show",
             "definitely-not-a-real-connector",
+            "--offline",
             "--extract",
             ".connector.slug",
         ]);
@@ -17683,6 +17687,7 @@ deny_ptrace = true
             "--json".to_owned(),
             "example".to_owned(),
             "slack".to_owned(),
+            "--offline".to_owned(),
         ];
         let outcome = execute(&args).expect("execution should not fail internally");
         let payload: Value =
@@ -18054,7 +18059,7 @@ deny_ptrace = true
 
         assert_eq!(
             advanced_payload["task"]["capsule_status"],
-            "execution-error"
+            "unavailable"
         );
         assert_eq!(advanced_payload["task"]["execution_history_count"], 1);
 
@@ -18206,7 +18211,7 @@ deny_ptrace = true
             serde_json::from_str(&advanced.text).expect("json output should parse cleanly");
 
         assert_eq!(advanced.exit_code, CliExitCode::Success.into());
-        assert_eq!(advanced_payload["status"], "execution-error");
+        assert_eq!(advanced_payload["status"], "unavailable");
         assert_eq!(
             advanced_payload["execution"]["status"],
             "stopped-on-primitive-error"
@@ -18305,6 +18310,7 @@ deny_ptrace = true
             "--json".to_owned(),
             "find".to_owned(),
             "github".to_owned(),
+            "--offline".to_owned(),
         ];
         let outcome = execute(&args).expect("execution should not fail internally");
         let payload: Value =
@@ -18675,7 +18681,8 @@ deny_ptrace = true
             serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
 
         assert_eq!(outcome.exit_code, CliExitCode::Success.into());
-        assert_eq!(payload["command"], "guide");
+        assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["name"], "fwc");
         assert_eq!(
             payload["input_normalization"]["applied"][0]["from"],
             "gudie"
@@ -18688,8 +18695,8 @@ deny_ptrace = true
         let args = vec![
             "fwc".to_owned(),
             "--json".to_owned(),
-            "--offline".to_owned(),
             "lsit".to_owned(),
+            "--offline".to_owned(),
         ];
         let outcome = execute(&args).expect("execution should not fail internally");
         let payload: Value =
@@ -18704,9 +18711,9 @@ deny_ptrace = true
         let args = vec![
             "fwc".to_owned(),
             "--json".to_owned(),
-            "--offline".to_owned(),
             "schmea".to_owned(),
             "github".to_owned(),
+            "--offline".to_owned(),
         ];
         let outcome = execute(&args).expect("execution should not fail internally");
         let payload: Value =
@@ -18721,9 +18728,9 @@ deny_ptrace = true
         let args = vec![
             "fwc".to_owned(),
             "--json".to_owned(),
-            "--offline".to_owned(),
             "serach".to_owned(),
             "github".to_owned(),
+            "--offline".to_owned(),
         ];
         let outcome = execute(&args).expect("execution should not fail internally");
         let payload: Value =
@@ -18840,6 +18847,7 @@ deny_ptrace = true
             "--json".to_owned(),
             "fcp".to_owned(),
             "list".to_owned(),
+            "--offline".to_owned(),
         ];
         let outcome = execute(&args).expect("execution should not fail internally");
         let payload: Value =
@@ -18857,6 +18865,7 @@ deny_ptrace = true
             "flywheel".to_owned(),
             "show".to_owned(),
             "github".to_owned(),
+            "--offline".to_owned(),
         ];
         let outcome = execute(&args).expect("execution should not fail internally");
         let payload: Value =
@@ -19533,6 +19542,7 @@ deny_ptrace = true
             "connector".to_owned(),
             "info".to_owned(),
             "github".to_owned(),
+            "--offline".to_owned(),
         ];
         let outcome = execute(&args).expect("execution should not fail internally");
         let payload: Value =
@@ -19615,8 +19625,8 @@ deny_ptrace = true
     #[test]
     fn exit_code_success_for_safe_alias() {
         let aliases = vec![
-            vec!["fwc", "--json", "info", "github"],
-            vec!["fwc", "--json", "find", "github"],
+            vec!["fwc", "--json", "info", "github", "--offline"],
+            vec!["fwc", "--json", "find", "github", "--offline"],
         ];
         for tokens in aliases {
             let args: Vec<String> = tokens.into_iter().map(str::to_owned).collect();
@@ -19632,9 +19642,9 @@ deny_ptrace = true
     #[test]
     fn exit_code_success_for_safe_typo() {
         let typos = vec![
-            vec!["fwc", "--json", "shwo", "github"],
-            vec!["fwc", "--json", "lsit"],
-            vec!["fwc", "--json", "gudie"],
+            vec!["fwc", "--json", "shwo", "github", "--offline"],
+            vec!["fwc", "--json", "lsit", "--offline"],
+            vec!["fwc", "--json", "gudie", "--offline"],
         ];
         for tokens in typos {
             let args: Vec<String> = tokens.into_iter().map(str::to_owned).collect();
@@ -20404,7 +20414,8 @@ depends_on = ["missing"]
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "recipe");
         assert_eq!(payload["subcommand"], "export");
-        assert_eq!(payload["mode"], "offline-artifact");
+        assert_eq!(payload["availability"]["availability"], "offline-artifact");
+        assert_eq!(payload["availability"]["authoritative"], false);
         let export = payload["content"]
             .as_str()
             .expect("recipe export should include TOML content");

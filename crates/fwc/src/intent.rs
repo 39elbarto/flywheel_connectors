@@ -1615,6 +1615,14 @@ fn compiled_workflow_truth(
             "The compiler still needs concrete identifiers, payload content, or connector selection before it can truthfully materialize an executable workflow."
                 .to_owned()
         }
+        CommandAvailability::Unknown
+            if steps.iter().any(|step| {
+                compiled_step_availability(step) == CommandAvailability::Unknown
+            }) =>
+        {
+            "At least one compiled step still has an unknown truth boundary, so the workflow cannot truthfully claim live-runtime or offline-artifact execution yet."
+                .to_owned()
+        }
         CommandAvailability::Unknown => {
             "The intent compiler has not derived a truthful execution path yet.".to_owned()
         }
@@ -1645,6 +1653,7 @@ fn compiled_workflow_truth(
 fn aggregate_compiled_step_availability(steps: &[CompiledStep]) -> CommandAvailability {
     let mut saw_live_runtime = false;
     let mut saw_offline_artifact = false;
+    let mut saw_unknown = false;
 
     for step in steps {
         match compiled_step_availability(step) {
@@ -1655,11 +1664,13 @@ fn aggregate_compiled_step_availability(steps: &[CompiledStep]) -> CommandAvaila
             CommandAvailability::Unavailable | CommandAvailability::Denied => {
                 return CommandAvailability::Unknown;
             }
-            CommandAvailability::Unknown => {}
+            CommandAvailability::Unknown => saw_unknown = true,
         }
     }
 
-    if saw_live_runtime {
+    if saw_unknown {
+        CommandAvailability::Unknown
+    } else if saw_live_runtime {
         CommandAvailability::LiveRuntime
     } else if saw_offline_artifact {
         CommandAvailability::OfflineArtifact
@@ -3571,6 +3582,75 @@ mod tests {
         );
     }
 
+    #[test]
+    fn aggregate_live_and_unknown_prefers_unknown() {
+        let steps = vec![
+            CompiledStep {
+                ordinal: 1,
+                phase: "execute".to_owned(),
+                purpose: "Invoke".to_owned(),
+                command: "invoke".to_owned(),
+                command_line: "fwc invoke github issues.create".to_owned(),
+                argv: vec!["fwc".to_owned(), "invoke".to_owned()],
+                side_effecting: true,
+                approval_required: true,
+                notes: Vec::new(),
+            },
+            CompiledStep {
+                ordinal: 2,
+                phase: "handoff".to_owned(),
+                purpose: "Unknown passthrough".to_owned(),
+                command: "mystery".to_owned(),
+                command_line: "fwc mystery".to_owned(),
+                argv: vec!["fwc".to_owned(), "mystery".to_owned()],
+                side_effecting: false,
+                approval_required: false,
+                notes: Vec::new(),
+            },
+        ];
+
+        assert_eq!(
+            aggregate_compiled_step_availability(&steps),
+            CommandAvailability::Unknown,
+        );
+    }
+
+    #[test]
+    fn workflow_truth_unknown_step_explanation_mentions_unknown_boundary() {
+        let steps = vec![
+            CompiledStep {
+                ordinal: 1,
+                phase: "inspect".to_owned(),
+                purpose: "Local context".to_owned(),
+                command: "session".to_owned(),
+                command_line: "fwc session list".to_owned(),
+                argv: vec!["fwc".to_owned(), "session".to_owned()],
+                side_effecting: false,
+                approval_required: false,
+                notes: Vec::new(),
+            },
+            CompiledStep {
+                ordinal: 2,
+                phase: "handoff".to_owned(),
+                purpose: "Unknown passthrough".to_owned(),
+                command: "mystery".to_owned(),
+                command_line: "fwc mystery".to_owned(),
+                argv: vec!["fwc".to_owned(), "mystery".to_owned()],
+                side_effecting: false,
+                approval_required: false,
+                notes: Vec::new(),
+            },
+        ];
+
+        let truth = compiled_workflow_truth("ready", &steps, &[], &[], &[]);
+        assert_eq!(truth.availability, CommandAvailability::Unknown);
+        assert!(
+            truth.explanation.contains("unknown truth boundary"),
+            "Unexpected explanation: {}",
+            truth.explanation,
+        );
+    }
+
     // ── Compiler integration: planner honesty invariants ─────────
 
     #[test]
@@ -3729,5 +3809,177 @@ mod tests {
         assert!(json.get("recoverable").is_some());
         assert!(json.get("exit_code_hint").is_some());
         assert!(json.get("explanation").is_some());
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Bead 29.8.4: WorkflowTruth truthfulness invariants
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn from_compiler_always_non_authoritative_for_all_7_variants() {
+        let variants = [
+            CommandAvailability::LiveRuntime,
+            CommandAvailability::OfflineArtifact,
+            CommandAvailability::Unsupported,
+            CommandAvailability::Planned,
+            CommandAvailability::Unavailable,
+            CommandAvailability::Denied,
+            CommandAvailability::Unknown,
+        ];
+        for v in &variants {
+            let truth = WorkflowTruth::from_compiler(*v, "test");
+            assert!(
+                !truth.authoritative,
+                "from_compiler({:?}) should always be non-authoritative",
+                v,
+            );
+            assert_eq!(truth.source_of_truth, WORKFLOW_TRUTH_COMPILER_SOURCE);
+        }
+    }
+
+    #[test]
+    fn from_execution_receipt_can_be_authoritative() {
+        let truth = WorkflowTruth::from_execution_receipt(
+            CommandAvailability::LiveRuntime,
+            true,
+            false,
+            "Live execution",
+        );
+        assert!(truth.authoritative);
+        assert_eq!(truth.source_of_truth, "workflow-execution-receipt");
+    }
+
+    #[test]
+    fn from_execution_receipt_can_be_non_authoritative() {
+        let truth = WorkflowTruth::from_execution_receipt(
+            CommandAvailability::OfflineArtifact,
+            false,
+            false,
+            "Offline result",
+        );
+        assert!(!truth.authoritative);
+    }
+
+    #[test]
+    fn exit_code_hint_matches_availability_for_all_7() {
+        let variants = [
+            CommandAvailability::LiveRuntime,
+            CommandAvailability::OfflineArtifact,
+            CommandAvailability::Unsupported,
+            CommandAvailability::Planned,
+            CommandAvailability::Unavailable,
+            CommandAvailability::Denied,
+            CommandAvailability::Unknown,
+        ];
+        for v in &variants {
+            let truth = WorkflowTruth::from_compiler(*v, "test");
+            assert_eq!(
+                truth.exit_code_hint,
+                v.exit_code_u8(),
+                "exit_code_hint mismatch for {:?}",
+                v,
+            );
+        }
+    }
+
+    #[test]
+    fn from_compiler_recoverability_matches_availability() {
+        // Recoverable: Unavailable, Denied, Unknown
+        // Not recoverable: LiveRuntime, OfflineArtifact, Unsupported, Planned
+        let cases = [
+            (CommandAvailability::LiveRuntime, false),
+            (CommandAvailability::OfflineArtifact, false),
+            (CommandAvailability::Unsupported, false),
+            (CommandAvailability::Planned, false),
+            (CommandAvailability::Unavailable, true),
+            (CommandAvailability::Denied, true),
+            (CommandAvailability::Unknown, true),
+        ];
+        for (v, expected) in &cases {
+            let truth = WorkflowTruth::from_compiler(*v, "test");
+            assert_eq!(
+                truth.recoverable, *expected,
+                "recoverable mismatch for {:?}",
+                v,
+            );
+        }
+    }
+
+    #[test]
+    fn all_7_variants_produce_distinct_explanations_via_from_compiler() {
+        let variants = [
+            CommandAvailability::LiveRuntime,
+            CommandAvailability::OfflineArtifact,
+            CommandAvailability::Unsupported,
+            CommandAvailability::Planned,
+            CommandAvailability::Unavailable,
+            CommandAvailability::Denied,
+            CommandAvailability::Unknown,
+        ];
+        // Each variant gets a unique explanation when we use unique messages
+        let explanations: std::collections::HashSet<String> = variants
+            .iter()
+            .map(|v| {
+                WorkflowTruth::from_compiler(*v, format!("test-{}", v.tag())).explanation
+            })
+            .collect();
+        assert_eq!(
+            explanations.len(),
+            variants.len(),
+            "Not all variants produce distinct explanations"
+        );
+    }
+
+    #[test]
+    fn from_compiler_and_receipt_have_different_source_of_truth() {
+        let compiler = WorkflowTruth::from_compiler(CommandAvailability::LiveRuntime, "c");
+        let receipt = WorkflowTruth::from_execution_receipt(
+            CommandAvailability::LiveRuntime,
+            true,
+            false,
+            "r",
+        );
+        assert_ne!(compiler.source_of_truth, receipt.source_of_truth);
+    }
+
+    #[test]
+    fn workflow_truth_json_availability_uses_kebab_case() {
+        let truth =
+            WorkflowTruth::from_compiler(CommandAvailability::LiveRuntime, "test");
+        let json = serde_json::to_value(&truth).unwrap();
+        assert_eq!(json["availability"], "live-runtime");
+    }
+
+    #[test]
+    fn workflow_truth_json_offline_artifact_kebab_case() {
+        let truth =
+            WorkflowTruth::from_compiler(CommandAvailability::OfflineArtifact, "test");
+        let json = serde_json::to_value(&truth).unwrap();
+        assert_eq!(json["availability"], "offline-artifact");
+    }
+
+    #[test]
+    fn workflow_truth_json_has_exactly_six_keys() {
+        let truth =
+            WorkflowTruth::from_compiler(CommandAvailability::Planned, "test");
+        let json = serde_json::to_value(&truth).unwrap();
+        let obj = json.as_object().unwrap();
+        assert_eq!(
+            obj.len(),
+            6,
+            "WorkflowTruth JSON should have exactly 6 keys, got: {:?}",
+            obj.keys().collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn compiled_workflow_truth_empty_steps_yields_unknown() {
+        // Empty intent → compiled status not "ready" → should produce relevant truth
+        let truth = compiled_workflow_truth("", &[], &[], &[], &[]);
+        assert!(
+            matches!(truth.availability, CommandAvailability::Unknown),
+            "Empty steps should yield Unknown, got {:?}",
+            truth.availability,
+        );
     }
 }

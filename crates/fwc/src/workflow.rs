@@ -635,6 +635,7 @@ pub fn ready_for_execution(task: &WorkflowTask) -> bool {
     task.compiled.status == "ready"
         && task.unresolved_bindings.is_empty()
         && task.resolution.pending_question.is_none()
+        && blocking_workflow_availability(task).is_none()
 }
 
 fn recompute_task(task: &mut WorkflowTask, touch_updated_at: bool) {
@@ -698,6 +699,20 @@ fn current_workflow_truth(task: &WorkflowTask) -> WorkflowTruth {
     }
 
     task.compiled.workflow_truth.clone()
+}
+
+fn blocking_workflow_availability(task: &WorkflowTask) -> Option<CommandAvailability> {
+    if let Some(receipt) = task.last_execution() {
+        if receipt.status == "stopped-on-primitive-error" {
+            return execution_failure_truth(&receipt.execution)
+                .map(|truth| truth.availability)
+                .filter(|availability| !availability.is_success());
+        }
+        return None;
+    }
+
+    let availability = task.compiled.workflow_truth.availability;
+    (!availability.is_success()).then_some(availability)
 }
 
 fn execution_failure_truth(execution: &Value) -> Option<WorkflowTruth> {
@@ -764,6 +779,10 @@ fn derive_capsule_status(task: &WorkflowTask) -> String {
 
     if task.resolution.pending_question.is_some() {
         return "needs-answer".to_owned();
+    }
+
+    if let Some(availability) = blocking_workflow_availability(task) {
+        return availability.tag().to_owned();
     }
 
     if let Some(last) = task.last_execution() {
@@ -850,6 +869,25 @@ fn build_task_next_actions(task: &WorkflowTask) -> Vec<String> {
             "Bind the missing values with `fwc task bind {} {}`.",
             task.id, example_bindings
         ));
+    }
+
+    if let Some(availability) = blocking_workflow_availability(task) {
+        if task.resolution.history.is_empty() {
+            actions.push(format!(
+                "Run `fwc task resolve {} --until-ready` to tighten the workflow truth before execution.",
+                task.id
+            ));
+        }
+        actions.push(format!(
+            "Do not advance or run this capsule yet; current workflow truth is `{}`.",
+            availability.tag()
+        ));
+        actions.extend(task.compiled.next_actions.iter().take(4).cloned());
+        actions.push(format!(
+            "Inspect the latest capsule state with `fwc task show {}`.",
+            task.id
+        ));
+        return dedup(actions);
     }
 
     if task.resolution.history.is_empty() {
@@ -1287,7 +1325,8 @@ fn now_rfc3339() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ResolutionPatch, TaskStore, WorkflowRequest, current_workflow_truth, effective_bindings,
+        ResolutionPatch, TaskStore, WorkflowRequest, WorkflowTruth, build_task_next_actions,
+        current_workflow_truth, derive_capsule_status, effective_bindings,
         execution_failure_capsule_status, execution_failure_truth, parse_command_availability,
         ready_for_execution, resolution_patch, resolution_patch_would_change,
         validate_binding_entries,
@@ -2219,6 +2258,75 @@ mod tests {
         if task.compiled.status != "ready" {
             assert!(!ready_for_execution(&task));
         }
+    }
+
+    #[test]
+    fn ready_for_execution_false_when_workflow_truth_is_unknown() {
+        let store = store();
+        let mut task = store
+            .create(WorkflowRequest {
+                intent: "create a GitHub issue titled \"truth boundary\"".to_owned(),
+                connector_override: None,
+                zone_override: None,
+            })
+            .expect("task should be created");
+
+        task.compiled.workflow_truth = WorkflowTruth::from_compiler(
+            CommandAvailability::Unknown,
+            "Unknown truth boundary.",
+        );
+
+        assert!(!ready_for_execution(&task));
+    }
+
+    #[test]
+    fn derive_capsule_status_surfaces_unknown_workflow_truth_when_ready() {
+        let store = store();
+        let mut task = store
+            .create(WorkflowRequest {
+                intent: "create a GitHub issue titled \"truth boundary\"".to_owned(),
+                connector_override: None,
+                zone_override: None,
+            })
+            .expect("task should be created");
+
+        task.compiled.workflow_truth = WorkflowTruth::from_compiler(
+            CommandAvailability::Unknown,
+            "Unknown truth boundary.",
+        );
+
+        assert_eq!(derive_capsule_status(&task), "unknown");
+    }
+
+    #[test]
+    fn next_actions_do_not_offer_run_or_advance_when_workflow_truth_is_unknown() {
+        let store = store();
+        let mut task = store
+            .create(WorkflowRequest {
+                intent: "create a GitHub issue titled \"truth boundary\"".to_owned(),
+                connector_override: None,
+                zone_override: None,
+            })
+            .expect("task should be created");
+
+        task.compiled.workflow_truth = WorkflowTruth::from_compiler(
+            CommandAvailability::Unknown,
+            "Unknown truth boundary.",
+        );
+
+        let actions = build_task_next_actions(&task);
+        assert!(
+            actions
+                .iter()
+                .all(|action| !action.contains("fwc task run")
+                    && !action.contains("fwc task advance"))
+        );
+        assert!(actions.iter().any(|action| action.contains("fwc task show")));
+        assert!(
+            actions
+                .iter()
+                .any(|action| action.contains("Do not advance or run"))
+        );
     }
 
     // ── task_subcommands ─────────────────────────────────────────────
@@ -3188,5 +3296,218 @@ mod tests {
         let truth = execution_failure_truth(&execution).unwrap();
         // LiveRuntime.is_authoritative() == true
         assert!(truth.authoritative);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Bead 29.8.4: Truthfulness snapshot/invariant expansion
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn parse_availability_round_trips_with_tag() {
+        let tags = [
+            "live-runtime",
+            "offline-artifact",
+            "unsupported",
+            "planned",
+            "unavailable",
+            "denied",
+            "unknown",
+        ];
+        for tag in &tags {
+            let parsed = parse_command_availability(tag);
+            assert!(parsed.is_some(), "Failed to parse '{}'", tag);
+            assert_eq!(parsed.unwrap().tag(), *tag, "Round-trip failed for '{}'", tag);
+        }
+    }
+
+    #[test]
+    fn parse_availability_whitespace_returns_none() {
+        assert!(parse_command_availability(" live-runtime").is_none());
+        assert!(parse_command_availability("live-runtime ").is_none());
+        assert!(parse_command_availability("").is_none());
+    }
+
+    #[test]
+    fn parse_availability_case_sensitive() {
+        assert!(parse_command_availability("Live-Runtime").is_none());
+        assert!(parse_command_availability("DENIED").is_none());
+        assert!(parse_command_availability("Unknown").is_none());
+    }
+
+    #[test]
+    fn execution_failure_truth_extracts_planned() {
+        let execution = json!({
+            "executed_steps": [{
+                "result": {
+                    "availability": {
+                        "availability": "planned",
+                        "explanation": "Not yet implemented"
+                    }
+                }
+            }]
+        });
+        let truth = execution_failure_truth(&execution).unwrap();
+        assert!(matches!(truth.availability, CommandAvailability::Planned));
+    }
+
+    #[test]
+    fn execution_failure_truth_extracts_unknown() {
+        let execution = json!({
+            "executed_steps": [{
+                "result": {
+                    "availability": {
+                        "availability": "unknown",
+                        "explanation": "Cannot determine"
+                    }
+                }
+            }]
+        });
+        let truth = execution_failure_truth(&execution).unwrap();
+        assert!(matches!(truth.availability, CommandAvailability::Unknown));
+    }
+
+    #[test]
+    fn execution_failure_truth_extracts_offline_artifact() {
+        let execution = json!({
+            "executed_steps": [{
+                "result": {
+                    "availability": {
+                        "availability": "offline-artifact",
+                        "explanation": "From local cache"
+                    }
+                }
+            }]
+        });
+        let truth = execution_failure_truth(&execution).unwrap();
+        assert!(matches!(truth.availability, CommandAvailability::OfflineArtifact));
+    }
+
+    #[test]
+    fn execution_failure_truth_extracts_live_runtime() {
+        let execution = json!({
+            "executed_steps": [{
+                "result": {
+                    "availability": {
+                        "availability": "live-runtime",
+                        "explanation": "Live host"
+                    }
+                }
+            }]
+        });
+        let truth = execution_failure_truth(&execution).unwrap();
+        assert!(matches!(truth.availability, CommandAvailability::LiveRuntime));
+        assert!(truth.authoritative);
+    }
+
+    #[test]
+    fn execution_failure_truth_authoritative_defaults_from_availability() {
+        let all_tags = [
+            ("live-runtime", true),
+            ("offline-artifact", false),
+            ("unsupported", false),
+            ("planned", false),
+            ("unavailable", false),
+            ("denied", false),
+            ("unknown", false),
+        ];
+        for (tag, expected_auth) in &all_tags {
+            let execution = json!({
+                "executed_steps": [{
+                    "result": {
+                        "availability": {
+                            "availability": tag,
+                            "explanation": "test"
+                        }
+                    }
+                }]
+            });
+            if let Some(truth) = execution_failure_truth(&execution) {
+                assert_eq!(
+                    truth.authoritative, *expected_auth,
+                    "authoritative mismatch for tag '{}'", tag,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn execution_failure_truth_returns_none_for_wrong_key() {
+        let execution = json!({
+            "steps": [{ "result": { "availability": { "availability": "denied" } } }]
+        });
+        assert!(execution_failure_truth(&execution).is_none());
+    }
+
+    #[test]
+    fn execution_failure_truth_uses_last_step() {
+        let execution = json!({
+            "executed_steps": [
+                { "result": { "availability": { "availability": "live-runtime", "explanation": "first" } } },
+                { "result": { "availability": { "availability": "denied", "explanation": "second" } } }
+            ]
+        });
+        let truth = execution_failure_truth(&execution).unwrap();
+        assert!(matches!(truth.availability, CommandAvailability::Denied));
+    }
+
+    #[test]
+    fn execution_failure_capsule_status_unsupported() {
+        let execution = json!({
+            "executed_steps": [{
+                "result": {
+                    "availability": { "availability": "unsupported", "explanation": "test" }
+                }
+            }]
+        });
+        let status = execution_failure_capsule_status(&execution);
+        assert!(status.is_some());
+        assert!(status.unwrap().contains("unsupported"));
+    }
+
+    #[test]
+    fn execution_failure_capsule_status_planned() {
+        let execution = json!({
+            "executed_steps": [{
+                "result": {
+                    "availability": { "availability": "planned", "explanation": "test" }
+                }
+            }]
+        });
+        let status = execution_failure_capsule_status(&execution);
+        assert!(status.is_some());
+        assert!(status.unwrap().contains("planned"));
+    }
+
+    #[test]
+    fn execution_failure_capsule_status_unknown() {
+        let execution = json!({
+            "executed_steps": [{
+                "result": {
+                    "availability": { "availability": "unknown", "explanation": "test" }
+                }
+            }]
+        });
+        let status = execution_failure_capsule_status(&execution);
+        assert!(status.is_some());
+    }
+
+    #[test]
+    fn execution_failure_capsule_status_offline_returns_none() {
+        let execution = json!({
+            "executed_steps": [{
+                "result": {
+                    "availability": { "availability": "offline-artifact", "explanation": "test" }
+                }
+            }]
+        });
+        // Success state: no failure capsule
+        let status = execution_failure_capsule_status(&execution);
+        assert!(status.is_none());
+    }
+
+    #[test]
+    fn execution_failure_capsule_status_empty_steps_returns_none() {
+        let execution = json!({ "executed_steps": [] });
+        assert!(execution_failure_capsule_status(&execution).is_none());
     }
 }

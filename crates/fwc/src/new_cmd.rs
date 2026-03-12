@@ -642,7 +642,7 @@ fn generate_files(
         ),
         (
             "src/limits.rs".to_string(),
-            generate_limits_rs(short_name),
+            generate_limits_rs(short_name, archetype),
             "Connector API limit constants".to_string(),
         ),
         (
@@ -1405,16 +1405,106 @@ pub fn empty_event_stream() -> fcp_sdk::prelude::EventStream {{
     )
 }
 
-/// Generate limits.rs content.
-fn generate_limits_rs(short_name: &str) -> String {
+/// Generate limits.rs content tailored to the connector archetype.
+fn generate_limits_rs(short_name: &str, archetype: ConnectorArchetype) -> String {
     let struct_name = to_pascal_case(short_name);
-    format!(
-        r"//! {struct_name} connector API limits.
-//!
-//! TODO: Replace placeholders with the actual service limits before shipping.
+    let archetype_constants = match archetype {
+        ConnectorArchetype::Streaming | ConnectorArchetype::Bidirectional => {
+            r"
+/// Max length for message text payloads (chars).
+pub const MAX_MESSAGE_CHARS: usize = 0;
 
-#![allow(dead_code)]
+/// Max payload size in bytes (serialized JSON).
+pub const MAX_PAYLOAD_BYTES: usize = 0;
 
+/// Max items buffered before applying backpressure.
+pub const MAX_BUFFER_ITEMS: usize = 0;
+
+/// Max reconnection attempts before giving up.
+pub const MAX_RECONNECT_ATTEMPTS: usize = 0;
+
+/// Keepalive interval in seconds (0 = disabled).
+pub const KEEPALIVE_INTERVAL_SECS: u64 = 0;
+"
+        }
+        ConnectorArchetype::Webhook => {
+            r"
+/// Max webhook payload size in bytes.
+pub const MAX_PAYLOAD_BYTES: usize = 0;
+
+/// Max registered webhooks per resource.
+pub const MAX_WEBHOOKS_PER_RESOURCE: usize = 0;
+
+/// Max event types per webhook subscription.
+pub const MAX_EVENT_TYPES: usize = 0;
+
+/// Max character length for webhook URL.
+pub const MAX_URL_CHARS: usize = 0;
+"
+        }
+        ConnectorArchetype::Polling => {
+            r"
+/// Max payload size in bytes (serialized JSON).
+pub const MAX_PAYLOAD_BYTES: usize = 0;
+
+/// Max items returned per poll request.
+pub const MAX_ITEMS_PER_POLL: usize = 0;
+
+/// Minimum poll interval in seconds.
+pub const MIN_POLL_INTERVAL_SECS: u64 = 0;
+
+/// Max offset/cursor value for pagination.
+pub const MAX_OFFSET: usize = 0;
+"
+        }
+        ConnectorArchetype::Queue => {
+            r"
+/// Max message body size in bytes.
+pub const MAX_MESSAGE_BYTES: usize = 0;
+
+/// Max messages per batch send/receive.
+pub const MAX_BATCH_SIZE: usize = 0;
+
+/// Max visibility timeout in seconds.
+pub const MAX_VISIBILITY_TIMEOUT_SECS: u64 = 0;
+
+/// Max message attributes per message.
+pub const MAX_ATTRIBUTES: usize = 0;
+"
+        }
+        ConnectorArchetype::File => {
+            r"
+/// Max file upload size in bytes.
+pub const MAX_UPLOAD_BYTES: usize = 0;
+
+/// Max file name length in chars.
+pub const MAX_FILENAME_CHARS: usize = 0;
+
+/// Max files per batch operation.
+pub const MAX_BATCH_FILES: usize = 0;
+
+/// Max path depth (nested folders).
+pub const MAX_PATH_DEPTH: usize = 0;
+"
+        }
+        ConnectorArchetype::Database => {
+            r"
+/// Max payload size in bytes (serialized JSON).
+pub const MAX_PAYLOAD_BYTES: usize = 0;
+
+/// Max rows per query result.
+pub const MAX_ROWS_PER_QUERY: usize = 0;
+
+/// Max query length in chars.
+pub const MAX_QUERY_CHARS: usize = 0;
+
+/// Max batch insert size (rows).
+pub const MAX_BATCH_ROWS: usize = 0;
+"
+        }
+        // RequestResponse, Cli, Browser all use the generic template
+        _ => {
+            r"
 /// Max length for message text payloads (chars).
 pub const MAX_MESSAGE_CHARS: usize = 0;
 
@@ -1433,6 +1523,15 @@ pub const MAX_EMBEDS: usize = 0;
 /// Max character length for titles/subject fields.
 pub const MAX_TITLE_CHARS: usize = 0;
 "
+        }
+    };
+    format!(
+        r"//! {struct_name} connector API limits.
+//!
+//! TODO: Replace placeholders with the actual service limits before shipping.
+
+#![allow(dead_code)]
+{archetype_constants}"
     )
 }
 
@@ -1586,6 +1685,67 @@ impl Bidirectional for {struct_name}Connector {{
     } else {
         String::new()
     };
+    let enforce_limits_body = match archetype {
+        ConnectorArchetype::Queue => {
+            r#"    fn enforce_limits(&self, input: &serde_json::Value) -> FcpResult<()> {{
+        if limits::MAX_MESSAGE_BYTES > 0 && input.to_string().len() > limits::MAX_MESSAGE_BYTES {{
+            return Err(FcpError::InvalidRequest {{
+                code: 1006,
+                message: "message exceeds MAX_MESSAGE_BYTES limit".to_string(),
+            }});
+        }}
+        Ok(())
+    }}"#
+        }
+        ConnectorArchetype::File => {
+            r#"    fn enforce_limits(&self, input: &serde_json::Value) -> FcpResult<()> {{
+        if limits::MAX_FILENAME_CHARS > 0 {{
+            if let Some(name) = input.get("filename").and_then(|v| v.as_str()) {{
+                if name.chars().count() > limits::MAX_FILENAME_CHARS {{
+                    return Err(FcpError::InvalidRequest {{
+                        code: 1005,
+                        message: "filename exceeds MAX_FILENAME_CHARS limit".to_string(),
+                    }});
+                }}
+            }}
+        }}
+        Ok(())
+    }}"#
+        }
+        ConnectorArchetype::Webhook | ConnectorArchetype::Polling | ConnectorArchetype::Database => {
+            r#"    fn enforce_limits(&self, input: &serde_json::Value) -> FcpResult<()> {{
+        if limits::MAX_PAYLOAD_BYTES > 0 && input.to_string().len() > limits::MAX_PAYLOAD_BYTES {{
+            return Err(FcpError::InvalidRequest {{
+                code: 1006,
+                message: "payload exceeds MAX_PAYLOAD_BYTES limit".to_string(),
+            }});
+        }}
+        Ok(())
+    }}"#
+        }
+        // RequestResponse, Streaming, Bidirectional, Cli, Browser
+        _ => {
+            r#"    fn enforce_limits(&self, input: &serde_json::Value) -> FcpResult<()> {{
+        if limits::MAX_MESSAGE_CHARS > 0 {{
+            if let Some(message) = input.get("message").and_then(|value| value.as_str()) {{
+                if message.chars().count() > limits::MAX_MESSAGE_CHARS {{
+                    return Err(FcpError::InvalidRequest {{
+                        code: 1005,
+                        message: "message exceeds MAX_MESSAGE_CHARS limit".to_string(),
+                    }});
+                }}
+            }}
+        }}
+        if limits::MAX_PAYLOAD_BYTES > 0 && input.to_string().len() > limits::MAX_PAYLOAD_BYTES {{
+            return Err(FcpError::InvalidRequest {{
+                code: 1006,
+                message: "payload exceeds MAX_PAYLOAD_BYTES limit".to_string(),
+            }});
+        }}
+        Ok(())
+    }}"#
+        }
+    };
     let supports_streaming = matches!(
         archetype,
         ConnectorArchetype::Streaming
@@ -1640,27 +1800,7 @@ impl {struct_name}Connector {{
         format!("sha256:{{}}", hex::encode(hasher.finalize()))
     }}
 
-    fn enforce_limits(&self, input: &serde_json::Value) -> FcpResult<()> {{
-        if limits::MAX_MESSAGE_CHARS > 0 {{
-            if let Some(message) = input.get("message").and_then(|value| value.as_str()) {{
-                if message.chars().count() > limits::MAX_MESSAGE_CHARS {{
-                    return Err(FcpError::InvalidRequest {{
-                        code: 1005,
-                        message: "message exceeds MAX_MESSAGE_CHARS limit".to_string(),
-                    }});
-                }}
-            }}
-        }}
-
-        if limits::MAX_PAYLOAD_BYTES > 0 && input.to_string().len() > limits::MAX_PAYLOAD_BYTES {{
-            return Err(FcpError::InvalidRequest {{
-                code: 1006,
-                message: "payload exceeds MAX_PAYLOAD_BYTES limit".to_string(),
-            }});
-        }}
-
-        Ok(())
-    }}
+{enforce_limits_body}
 
     fn placeholder_operation(&self) -> OperationInfo {{
         OperationInfo {{
@@ -3076,6 +3216,78 @@ mod tests {
     }
 
     #[test]
+    fn limits_rs_is_archetype_specific() {
+        fn get_limits(archetype: ConnectorArchetype) -> String {
+            let files = generate_files(
+                "fcp.test",
+                "test",
+                "fcp-test",
+                archetype,
+                "z:project:test",
+                false,
+            )
+            .expect("generate files");
+            files
+                .iter()
+                .find(|(p, _, _)| p == "src/limits.rs")
+                .expect("limits.rs present")
+                .1
+                .clone()
+        }
+
+        let rr = get_limits(ConnectorArchetype::RequestResponse);
+        assert!(rr.contains("MAX_MESSAGE_CHARS"));
+        assert!(rr.contains("MAX_PAYLOAD_BYTES"));
+        assert!(rr.contains("MAX_ATTACHMENTS"));
+
+        let streaming = get_limits(ConnectorArchetype::Streaming);
+        assert!(streaming.contains("MAX_BUFFER_ITEMS"));
+        assert!(streaming.contains("MAX_RECONNECT_ATTEMPTS"));
+        assert!(streaming.contains("KEEPALIVE_INTERVAL_SECS"));
+
+        let webhook = get_limits(ConnectorArchetype::Webhook);
+        assert!(webhook.contains("MAX_WEBHOOKS_PER_RESOURCE"));
+        assert!(webhook.contains("MAX_EVENT_TYPES"));
+        assert!(!webhook.contains("MAX_MESSAGE_CHARS"));
+
+        let polling = get_limits(ConnectorArchetype::Polling);
+        assert!(polling.contains("MAX_ITEMS_PER_POLL"));
+        assert!(polling.contains("MIN_POLL_INTERVAL_SECS"));
+
+        let queue = get_limits(ConnectorArchetype::Queue);
+        assert!(queue.contains("MAX_MESSAGE_BYTES"));
+        assert!(queue.contains("MAX_BATCH_SIZE"));
+        assert!(queue.contains("MAX_VISIBILITY_TIMEOUT_SECS"));
+
+        let file = get_limits(ConnectorArchetype::File);
+        assert!(file.contains("MAX_UPLOAD_BYTES"));
+        assert!(file.contains("MAX_FILENAME_CHARS"));
+        assert!(file.contains("MAX_BATCH_FILES"));
+
+        let db = get_limits(ConnectorArchetype::Database);
+        assert!(db.contains("MAX_ROWS_PER_QUERY"));
+        assert!(db.contains("MAX_QUERY_CHARS"));
+        assert!(db.contains("MAX_BATCH_ROWS"));
+
+        // All archetypes include the TODO marker
+        for archetype in [
+            ConnectorArchetype::RequestResponse,
+            ConnectorArchetype::Streaming,
+            ConnectorArchetype::Webhook,
+            ConnectorArchetype::Polling,
+            ConnectorArchetype::Queue,
+            ConnectorArchetype::File,
+            ConnectorArchetype::Database,
+        ] {
+            let limits = get_limits(archetype);
+            assert!(
+                limits.contains("TODO: Replace placeholders"),
+                "archetype {archetype} missing TODO marker"
+            );
+        }
+    }
+
+    #[test]
     fn scaffold_no_e2e_skips_e2e() {
         let result = scaffold_connector(
             "fcp.test",
@@ -3334,7 +3546,7 @@ members = [
 
     #[test]
     fn generate_limits_rs_has_constants() {
-        let output = generate_limits_rs("test");
+        let output = generate_limits_rs("test", ConnectorArchetype::RequestResponse);
         assert!(output.contains("MAX_MESSAGE_CHARS"));
         assert!(output.contains("MAX_PAYLOAD_BYTES"));
         assert!(output.contains("MAX_ATTACHMENTS"));

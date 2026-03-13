@@ -322,6 +322,74 @@ How to read the bundle:
 - `environment.json`: the execution context needed to decide whether a mismatch is environmental or semantic, including whether replay is expected to stay offloaded through `rch`
 - `replay.sh`: the deterministic rerun entrypoint; cargo-backed verification steps should preserve `rch exec -- ...`, and if the script cannot reproduce the scenario, the evidence is incomplete
 
+### Fastest path from a failed run to a reproducible case
+
+Use the bundle in this order when a `fwc` scenario or host-backed workflow fails:
+
+1. Start with `summary.json`.
+   This is the fastest way to answer whether the result was `live-runtime`, `offline-artifact`, `planned`, `denied`, or `unknown`, and which `host_request_id`, `host_response_id`, or `receipt_id` you can join on next.
+   ```bash
+   jq '.truthfulness' artifacts/e2e/workflow/replayable_failure/summary.json
+   ```
+2. Move to `trace.jsonl`.
+   Use it to see the actual phase sequence, provenance markers, reconnect/cancellation markers, and the exact step where the story diverged.
+   ```bash
+   jq -c '.' artifacts/e2e/workflow/replayable_failure/trace.jsonl
+   ```
+3. Check `environment.json`.
+   This tells you whether the mismatch is semantic or environmental by showing the captured working directory, git SHA, runner prefix, redacted env vars, and replay notes.
+   ```bash
+   jq '.' artifacts/e2e/workflow/replayable_failure/environment.json
+   ```
+4. Only then run `replay.sh`.
+   A valid replay script should preserve the original rerun envelope, including `rch exec -- ...` for cargo-backed steps.
+   ```bash
+   bash artifacts/e2e/workflow/replayable_failure/replay.sh
+   ```
+
+If `replay.sh` cannot reproduce the failure and `environment.json` does not explain the drift, the evidence bundle is incomplete and the bug is in the observability contract before it is in the connector flow.
+
+### Common failure map
+
+Use these shortcuts instead of guessing:
+
+- Template expansion failed or a macro-style render looks unsafe:
+  inspect `summary.json` and `trace.jsonl` first, then compare schema and rendered output directly.
+  ```bash
+  fwc schema github issues.create --json
+  fwc template github issues.create --offline --json
+  fwc show github --template '{{json connector}}'
+  ```
+- Context, preset, bookmark, or pinned-profile activation drift:
+  the current tree does not yet expose a dedicated preset/bookmark activation CLI, so debug the persisted target selection surfaces directly through context, session, history, and connector config.
+  ```bash
+  fwc context current --json
+  fwc session list --status paused --json
+  fwc session show --json
+  fwc history --limit 10 --json
+  fwc config get github --json
+  fwc config doctor github --json
+  ```
+- Stale resume path or interrupted workflow recovery:
+  treat resume as persisted-state inspection, not as conversational memory.
+  ```bash
+  fwc session list --status paused --json
+  fwc session show --json
+  fwc session resume <SESSION_ID> --json
+  ```
+- Replay diverges from the original failure:
+  compare `environment.json` with the current checkout and rerun envelope before widening the investigation.
+  ```bash
+  jq '.' artifacts/e2e/workflow/replayable_failure/environment.json
+  bash artifacts/e2e/workflow/replayable_failure/replay.sh
+  ```
+- Cargo-backed contract or artifact regressions:
+  keep the replay and verification path offloaded through `rch`.
+  ```bash
+  rch exec -- cargo test -p fwc test_observability::full_workflow_replay_round_trip -- --exact --nocapture
+  rch exec -- cargo test -p fwc confusion_workflow -- --nocapture
+  ```
+
 ### Structured E2E logs
 
 `docs/testing/e2e_log_schema.md` defines the shared JSONL schema for E2E/conformance/script runs.

@@ -820,6 +820,15 @@ Delivers the core safety story ("zones + explicit authority + auditable operatio
 - Some command families are still transitional hybrids in the current tree (`config`, `recipe`, `pipeline`, `do`, and parts of `serve-mcp` classification). The direction is command-level truthfulness rather than over-broad family labels.
 - Evidence for this model is layered: local semantics in `crates/fwc/src/catalog.rs` and `crates/fwc/src/readiness.rs`, CLI integration coverage in `crates/fwc/tests/cual_integration.rs`, and replayable artifact bundles (`trace.jsonl`, `summary.json`, `environment.json`, `replay.sh`) defined by `crates/fwc/src/test_observability.rs`.
 
+When a `fwc` run fails, the shortest trustworthy debugging loop is:
+
+1. Read `summary.json` for availability state, provenance markers, and join keys.
+2. Read `trace.jsonl` for the exact phase sequence and correlation trail.
+3. Read `environment.json` for the captured working directory, git SHA, redacted environment, and replay envelope.
+4. Run `replay.sh` only after the first three files agree on what should be reproduced.
+
+Template expansion failures, context/preset/bookmark activation drift, pinned-profile mismatches, stale session resume, and replay-environment mismatches should all be debugged through that bundle contract rather than through ad hoc shell retries. The current tree does not yet expose a dedicated preset/bookmark activation CLI, so those symptoms are diagnosed through `fwc context current`, `fwc session ...`, `fwc history ...`, and connector config surfaces instead.
+
 For operator and agent workflows, migration guidance, and evidence-bundle expectations, see [docs/FWC_Host_First_Truthfulness_Playbook.md](docs/FWC_Host_First_Truthfulness_Playbook.md).
 
 ## Project Structure

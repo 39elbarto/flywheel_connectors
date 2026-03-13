@@ -637,6 +637,289 @@ pub fn format_mental_model_toon(model: &MentalModel) -> String {
     out
 }
 
+// ── Quickstart Guide ─────────────────────────────────────────────────────────
+
+/// A quickstart step with a command and explanation.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct QuickstartStep {
+    /// Step number.
+    pub step: usize,
+    /// The command to run.
+    pub command: String,
+    /// What this step accomplishes.
+    pub explanation: String,
+}
+
+/// Returns the FWC quickstart guide.
+#[must_use]
+pub fn get_quickstart() -> Vec<QuickstartStep> {
+    vec![
+        QuickstartStep {
+            step: 1,
+            command: "fwc list".into(),
+            explanation: "See all available connectors and their status".into(),
+        },
+        QuickstartStep {
+            step: 2,
+            command: "fwc search 'create issue'".into(),
+            explanation: "Find operations by keyword across all connectors".into(),
+        },
+        QuickstartStep {
+            step: 3,
+            command: "fwc ops github".into(),
+            explanation: "List all operations for a specific connector".into(),
+        },
+        QuickstartStep {
+            step: 4,
+            command: "fwc schema github create_issue".into(),
+            explanation: "View the input/output schema before invoking".into(),
+        },
+        QuickstartStep {
+            step: 5,
+            command: "fwc template github create_issue".into(),
+            explanation: "Generate a fill-in-the-blanks JSON template".into(),
+        },
+        QuickstartStep {
+            step: 6,
+            command: "fwc simulate github create_issue --input '{...}'".into(),
+            explanation: "Dry-run the operation to validate without side effects".into(),
+        },
+        QuickstartStep {
+            step: 7,
+            command: "fwc invoke github create_issue --input '{...}'".into(),
+            explanation: "Execute the operation for real".into(),
+        },
+        QuickstartStep {
+            step: 8,
+            command: "fwc history --limit 5".into(),
+            explanation: "Review recent invocations".into(),
+        },
+    ]
+}
+
+/// Format the quickstart guide as TOON text.
+#[must_use]
+pub fn format_quickstart_toon(steps: &[QuickstartStep]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = writeln!(out, "FWC Quickstart");
+    let _ = writeln!(out, "==============");
+    let _ = writeln!(out);
+    for s in steps {
+        let _ = writeln!(out, "  {}. {}", s.step, s.explanation);
+        let _ = writeln!(out, "     $ {}", s.command);
+        let _ = writeln!(out);
+    }
+    out
+}
+
+// ── Output Format Guide ──────────────────────────────────────────────────────
+
+/// Description of an output format mode.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OutputFormatGuide {
+    /// Format name (e.g., "toon", "json").
+    pub name: String,
+    /// Flag to activate this format.
+    pub flag: String,
+    /// When to use this format.
+    pub when_to_use: String,
+    /// Whether this is the default.
+    pub is_default: bool,
+}
+
+/// Returns the FWC output format guide.
+#[must_use]
+pub fn get_output_format_guide() -> Vec<OutputFormatGuide> {
+    vec![
+        OutputFormatGuide {
+            name: "TOON".into(),
+            flag: "(default)".into(),
+            when_to_use: "Human-readable table output for terminal use. Best for interactive exploration and quick answers.".into(),
+            is_default: true,
+        },
+        OutputFormatGuide {
+            name: "JSON".into(),
+            flag: "--json".into(),
+            when_to_use: "Machine-readable output for piping to jq, scripts, or other tools. Use when composing commands.".into(),
+            is_default: false,
+        },
+        OutputFormatGuide {
+            name: "NDJSON".into(),
+            flag: "--format ndjson".into(),
+            when_to_use: "Streaming line-delimited JSON. Each result on its own line. Best for real-time processing and piping between commands.".into(),
+            is_default: false,
+        },
+        OutputFormatGuide {
+            name: "Table".into(),
+            flag: "--format table".into(),
+            when_to_use: "Explicit tabular output with column headers. Good for structured reports.".into(),
+            is_default: false,
+        },
+        OutputFormatGuide {
+            name: "CSV".into(),
+            flag: "--format csv".into(),
+            when_to_use: "Comma-separated values for spreadsheet import.".into(),
+            is_default: false,
+        },
+        OutputFormatGuide {
+            name: "YAML".into(),
+            flag: "--format yaml".into(),
+            when_to_use: "YAML output for config files and human-readable structured data.".into(),
+            is_default: false,
+        },
+        OutputFormatGuide {
+            name: "Markdown".into(),
+            flag: "--format markdown".into(),
+            when_to_use: "Markdown table output for documentation and reports.".into(),
+            is_default: false,
+        },
+    ]
+}
+
+// ── Decision Guide: When to Use What ─────────────────────────────────────────
+
+/// A decision guide entry: agent need → recommended command path.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DecisionGuideEntry {
+    /// What the agent wants to accomplish.
+    pub goal: String,
+    /// The recommended command or command sequence.
+    pub recommended_command: String,
+    /// Why this is the right choice.
+    pub rationale: String,
+    /// Whether this is a primitive command or a workflow surface.
+    pub surface: String,
+}
+
+/// Returns the "when to use what" decision guide.
+#[must_use]
+pub fn get_decision_guide() -> Vec<DecisionGuideEntry> {
+    vec![
+        DecisionGuideEntry {
+            goal: "Run a single operation".into(),
+            recommended_command: "fwc invoke <conn> <op>".into(),
+            rationale: "Direct, auditable, one operation = one history entry".into(),
+            surface: "primitive".into(),
+        },
+        DecisionGuideEntry {
+            goal: "Chain two operations (A's output → B's input)".into(),
+            recommended_command: "fwc pipe <conn.op_a> <conn.op_b> --field-map ...".into(),
+            rationale: "Explicit field mapping, both operations recorded".into(),
+            surface: "primitive".into(),
+        },
+        DecisionGuideEntry {
+            goal: "Run a complex multi-step workflow".into(),
+            recommended_command: "fwc pipeline run workflow.toml".into(),
+            rationale: "Reusable, versionable, validates before running".into(),
+            surface: "workflow".into(),
+        },
+        DecisionGuideEntry {
+            goal: "Apply one operation to many inputs".into(),
+            recommended_command: "fwc map <conn> <op> --inputs items.json".into(),
+            rationale: "Parallel execution, one receipt per input".into(),
+            surface: "primitive".into(),
+        },
+        DecisionGuideEntry {
+            goal: "Run mixed operations from a file".into(),
+            recommended_command: "fwc batch-file ops.jsonl".into(),
+            rationale: "Heterogeneous operations, sequential or parallel".into(),
+            surface: "primitive".into(),
+        },
+        DecisionGuideEntry {
+            goal: "Save reusable input for an operation".into(),
+            recommended_command: "fwc template <conn> <op> > tpl.json".into(),
+            rationale: "Schema-seeded template, fill in values per use".into(),
+            surface: "template".into(),
+        },
+        DecisionGuideEntry {
+            goal: "Resume interrupted work".into(),
+            recommended_command: "fwc session resume <handle>".into(),
+            rationale: "Restores context without repeating discovery".into(),
+            surface: "session".into(),
+        },
+        DecisionGuideEntry {
+            goal: "Understand why something failed".into(),
+            recommended_command: "fwc history <entry_id>".into(),
+            rationale: "Full invocation detail with error codes and timing".into(),
+            surface: "primitive".into(),
+        },
+        DecisionGuideEntry {
+            goal: "Check if an operation is allowed".into(),
+            recommended_command: "fwc preflight <conn> <op>".into(),
+            rationale: "Risk analysis, approval check, capability verification".into(),
+            surface: "primitive".into(),
+        },
+        DecisionGuideEntry {
+            goal: "Export connector tools for AI agent".into(),
+            recommended_command: "fwc export-tools --format mcp".into(),
+            rationale: "Schema-compliant tool export for MCP/Claude/OpenAI".into(),
+            surface: "primitive".into(),
+        },
+    ]
+}
+
+/// Format the decision guide as TOON text.
+#[must_use]
+pub fn format_decision_guide_toon(entries: &[DecisionGuideEntry]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = writeln!(out, "FWC Decision Guide: When to Use What");
+    let _ = writeln!(out, "=====================================");
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "{:<42} {:<40} {}",
+        "GOAL", "COMMAND", "SURFACE"
+    );
+    for e in entries {
+        let _ = writeln!(
+            out,
+            "{:<42} {:<40} {}",
+            e.goal, e.recommended_command, e.surface
+        );
+    }
+    out
+}
+
+// ── TOON-First Behavior Documentation ────────────────────────────────────────
+
+/// Explains the TOON-first design philosophy.
+#[must_use]
+pub fn toon_first_explanation() -> String {
+    [
+        "TOON-First Output Behavior",
+        "==========================",
+        "",
+        "FWC defaults to TOON (Text-Oriented Output Notation) for all commands.",
+        "TOON is designed for human readability in a terminal:",
+        "",
+        "  - Aligned columns with meaningful headers",
+        "  - Status indicators and color hints",
+        "  - Truncation of long values with '...'",
+        "  - Summary counts and timing information",
+        "",
+        "For machine consumption, switch to JSON:",
+        "",
+        "  $ fwc list --json           # Full JSON array",
+        "  $ fwc list --format ndjson   # One JSON line per item (streaming)",
+        "",
+        "JSON output includes all fields (no truncation), stable field names,",
+        "and structured error objects with error_code fields.",
+        "",
+        "The same data is available in both formats. TOON is lossy (truncates",
+        "for readability); JSON is lossless. An agent should use --json when",
+        "parsing output programmatically and TOON when presenting to a human.",
+        "",
+        "Safety Boundaries:",
+        "  - Read-only commands (search, list, schema) never mutate state",
+        "  - Write commands (invoke, pipe) require explicit confirmation",
+        "  - Destructive commands require --force or interactive approval",
+        "  - Simulate mode (--dry-run) is available for all write commands",
+    ]
+    .join("\n")
+}
+
 // ── Validation ───────────────────────────────────────────────────────────────
 
 /// Validate the taxonomy for gaps and duplicates.
@@ -1346,5 +1629,249 @@ mod tests {
         let model = get_mental_model();
         let dbg = format!("{model:?}");
         assert!(dbg.contains("MentalModel"));
+    }
+
+    // ── Quickstart guide ────────────────────────────────────────────────
+
+    #[test]
+    fn quickstart_has_steps() {
+        let steps = get_quickstart();
+        assert!(steps.len() >= 5);
+    }
+
+    #[test]
+    fn quickstart_steps_sequential() {
+        let steps = get_quickstart();
+        for (i, s) in steps.iter().enumerate() {
+            assert_eq!(s.step, i + 1);
+        }
+    }
+
+    #[test]
+    fn quickstart_starts_with_discovery() {
+        let steps = get_quickstart();
+        assert!(steps[0].command.contains("list"));
+    }
+
+    #[test]
+    fn quickstart_ends_with_review() {
+        let steps = get_quickstart();
+        let last = steps.last().unwrap();
+        assert!(last.command.contains("history"));
+    }
+
+    #[test]
+    fn quickstart_all_have_content() {
+        for s in &get_quickstart() {
+            assert!(!s.command.is_empty());
+            assert!(!s.explanation.is_empty());
+        }
+    }
+
+    #[test]
+    fn quickstart_serializes() {
+        let steps = get_quickstart();
+        let json = serde_json::to_value(&steps).unwrap();
+        assert!(json.is_array());
+    }
+
+    #[test]
+    fn quickstart_toon_format() {
+        let steps = get_quickstart();
+        let toon = format_quickstart_toon(&steps);
+        assert!(toon.contains("FWC Quickstart"));
+        assert!(toon.contains("$ fwc list"));
+        assert!(toon.contains("$ fwc search"));
+    }
+
+    #[test]
+    fn quickstart_toon_empty() {
+        let toon = format_quickstart_toon(&[]);
+        assert!(toon.contains("FWC Quickstart"));
+    }
+
+    // ── Output format guide ─────────────────────────────────────────────
+
+    #[test]
+    fn output_format_guide_has_entries() {
+        let guide = get_output_format_guide();
+        assert!(guide.len() >= 5);
+    }
+
+    #[test]
+    fn output_format_guide_has_default() {
+        let guide = get_output_format_guide();
+        let defaults: Vec<_> = guide.iter().filter(|g| g.is_default).collect();
+        assert_eq!(defaults.len(), 1);
+        assert_eq!(defaults[0].name, "TOON");
+    }
+
+    #[test]
+    fn output_format_guide_includes_json() {
+        let guide = get_output_format_guide();
+        assert!(guide.iter().any(|g| g.name == "JSON"));
+    }
+
+    #[test]
+    fn output_format_guide_includes_ndjson() {
+        let guide = get_output_format_guide();
+        assert!(guide.iter().any(|g| g.name == "NDJSON"));
+    }
+
+    #[test]
+    fn output_format_guide_all_have_content() {
+        for g in &get_output_format_guide() {
+            assert!(!g.name.is_empty());
+            assert!(!g.flag.is_empty());
+            assert!(!g.when_to_use.is_empty());
+        }
+    }
+
+    #[test]
+    fn output_format_guide_serializes() {
+        let guide = get_output_format_guide();
+        let json = serde_json::to_value(&guide).unwrap();
+        assert!(json.is_array());
+    }
+
+    // ── Decision guide ──────────────────────────────────────────────────
+
+    #[test]
+    fn decision_guide_has_entries() {
+        let guide = get_decision_guide();
+        assert!(guide.len() >= 8);
+    }
+
+    #[test]
+    fn decision_guide_covers_primitive_and_workflow() {
+        let guide = get_decision_guide();
+        assert!(guide.iter().any(|e| e.surface == "primitive"));
+        assert!(guide.iter().any(|e| e.surface == "workflow"));
+    }
+
+    #[test]
+    fn decision_guide_covers_invoke() {
+        let guide = get_decision_guide();
+        assert!(guide.iter().any(|e| e.recommended_command.contains("invoke")));
+    }
+
+    #[test]
+    fn decision_guide_covers_pipeline() {
+        let guide = get_decision_guide();
+        assert!(guide.iter().any(|e| e.recommended_command.contains("pipeline")));
+    }
+
+    #[test]
+    fn decision_guide_covers_template() {
+        let guide = get_decision_guide();
+        assert!(guide.iter().any(|e| e.surface == "template"));
+    }
+
+    #[test]
+    fn decision_guide_covers_session() {
+        let guide = get_decision_guide();
+        assert!(guide.iter().any(|e| e.surface == "session"));
+    }
+
+    #[test]
+    fn decision_guide_all_have_content() {
+        for e in &get_decision_guide() {
+            assert!(!e.goal.is_empty());
+            assert!(!e.recommended_command.is_empty());
+            assert!(!e.rationale.is_empty());
+            assert!(!e.surface.is_empty());
+        }
+    }
+
+    #[test]
+    fn decision_guide_serializes() {
+        let guide = get_decision_guide();
+        let json = serde_json::to_value(&guide).unwrap();
+        assert!(json.is_array());
+    }
+
+    #[test]
+    fn decision_guide_toon_format() {
+        let guide = get_decision_guide();
+        let toon = format_decision_guide_toon(&guide);
+        assert!(toon.contains("FWC Decision Guide"));
+        assert!(toon.contains("GOAL"));
+        assert!(toon.contains("COMMAND"));
+        assert!(toon.contains("SURFACE"));
+    }
+
+    #[test]
+    fn decision_guide_toon_empty() {
+        let toon = format_decision_guide_toon(&[]);
+        assert!(toon.contains("FWC Decision Guide"));
+    }
+
+    // ── TOON-first explanation ──────────────────────────────────────────
+
+    #[test]
+    fn toon_first_explanation_covers_key_topics() {
+        let text = toon_first_explanation();
+        assert!(text.contains("TOON"));
+        assert!(text.contains("JSON"));
+        assert!(text.contains("--json"));
+        assert!(text.contains("ndjson"));
+        assert!(text.contains("Safety"));
+        assert!(text.contains("Read-only"));
+    }
+
+    #[test]
+    fn toon_first_explanation_has_examples() {
+        let text = toon_first_explanation();
+        assert!(text.contains("$ fwc list --json"));
+        assert!(text.contains("$ fwc list --format ndjson"));
+    }
+
+    #[test]
+    fn toon_first_explanation_non_empty() {
+        let text = toon_first_explanation();
+        assert!(text.len() > 200);
+    }
+
+    // ── QuickstartStep struct ───────────────────────────────────────────
+
+    #[test]
+    fn quickstart_step_clone() {
+        let s = QuickstartStep {
+            step: 1,
+            command: "fwc list".into(),
+            explanation: "List connectors".into(),
+        };
+        let s2 = s.clone();
+        assert_eq!(s.step, s2.step);
+        assert_eq!(s.command, s2.command);
+    }
+
+    // ── OutputFormatGuide struct ────────────────────────────────────────
+
+    #[test]
+    fn output_format_guide_clone() {
+        let g = OutputFormatGuide {
+            name: "JSON".into(),
+            flag: "--json".into(),
+            when_to_use: "Machine output".into(),
+            is_default: false,
+        };
+        let g2 = g.clone();
+        assert_eq!(g.name, g2.name);
+    }
+
+    // ── DecisionGuideEntry struct ───────────────────────────────────────
+
+    #[test]
+    fn decision_guide_entry_clone() {
+        let e = DecisionGuideEntry {
+            goal: "Run one op".into(),
+            recommended_command: "fwc invoke".into(),
+            rationale: "Direct".into(),
+            surface: "primitive".into(),
+        };
+        let e2 = e.clone();
+        assert_eq!(e.goal, e2.goal);
+        assert_eq!(e.surface, e2.surface);
     }
 }

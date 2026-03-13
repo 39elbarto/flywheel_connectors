@@ -435,6 +435,223 @@ pub fn get_operator_playbooks() -> Vec<OperatorPlaybook> {
             ],
             estimated_duration: "5 minutes".into(),
         },
+        OperatorPlaybook {
+            id: "op-012".into(),
+            title: "Config Rollback After Bad Change".into(),
+            scenario: "A config change broke the connector and needs to be reverted".into(),
+            steps: vec![
+                OperatorStep {
+                    action: "Check current broken config".into(),
+                    command: "fwc config get my-connector --json".into(),
+                    explanation: "Capture the current (broken) state for reference".into(),
+                    on_failure: "Config may not be readable; proceed to export".into(),
+                },
+                OperatorStep {
+                    action: "Export current config before rollback".into(),
+                    command: "fwc config export my-connector > backup.json".into(),
+                    explanation: "Safety backup in case the rollback itself fails".into(),
+                    on_failure: "If export fails, the connector may be in a bad state; use doctor".into(),
+                },
+                OperatorStep {
+                    action: "Import the last known good config".into(),
+                    command: "fwc config import my-connector < last_good.json".into(),
+                    explanation: "Restores the connector to the previously working configuration".into(),
+                    on_failure: "Run fwc config doctor my-connector to diagnose import failure".into(),
+                },
+                OperatorStep {
+                    action: "Verify the rollback worked".into(),
+                    command: "fwc status my-connector && fwc invoke my-connector health_check".into(),
+                    explanation: "Confirm the connector is healthy with the restored config".into(),
+                    on_failure: "If still broken, check fwc history for the original config change and try an earlier backup".into(),
+                },
+            ],
+            recovery_hints: vec![
+                "Keep config exports in version control for reliable rollback".into(),
+                "Use fwc config doctor before and after changes to catch drift".into(),
+            ],
+            estimated_duration: "5 minutes".into(),
+        },
+        OperatorPlaybook {
+            id: "op-013".into(),
+            title: "Auth Bootstrap for New Connector".into(),
+            scenario: "Setting up authentication for a connector from scratch".into(),
+            steps: vec![
+                OperatorStep {
+                    action: "Check what auth the connector needs".into(),
+                    command: "fwc schema my-connector --section auth".into(),
+                    explanation: "Shows required auth fields (API key, OAuth, etc.)".into(),
+                    on_failure: "Check connector README or manifest for auth docs".into(),
+                },
+                OperatorStep {
+                    action: "Add credentials to the store".into(),
+                    command: "fwc auth add my-connector --type api_key --token $TOKEN".into(),
+                    explanation: "Stores the credential securely in the local keyring".into(),
+                    on_failure: "Ensure keyring daemon is running; check fwc doctor".into(),
+                },
+                OperatorStep {
+                    action: "Verify credentials work".into(),
+                    command: "fwc auth verify my-connector".into(),
+                    explanation: "Tests the stored credentials against the live API".into(),
+                    on_failure: "Double-check token value, expiry, and required scopes".into(),
+                },
+            ],
+            recovery_hints: vec![
+                "OAuth tokens expire; set up rotation reminders".into(),
+                "Use fwc auth status to check credential health regularly".into(),
+            ],
+            estimated_duration: "3 minutes".into(),
+        },
+        OperatorPlaybook {
+            id: "op-014".into(),
+            title: "Auth Repair After Token Expiry".into(),
+            scenario: "A connector's auth token has expired and operations are failing".into(),
+            steps: vec![
+                OperatorStep {
+                    action: "Confirm auth is the problem".into(),
+                    command: "fwc auth status my-connector".into(),
+                    explanation: "Shows credential health: valid, expired, or missing".into(),
+                    on_failure: "If status itself fails, the credential store may be corrupted".into(),
+                },
+                OperatorStep {
+                    action: "Remove the expired credential".into(),
+                    command: "fwc auth remove my-connector".into(),
+                    explanation: "Clears the expired token from the store".into(),
+                    on_failure: "If removal fails, try fwc doctor --fix for store repair".into(),
+                },
+                OperatorStep {
+                    action: "Add fresh credentials".into(),
+                    command: "fwc auth add my-connector --type api_key --token $NEW_TOKEN".into(),
+                    explanation: "Stores the new token".into(),
+                    on_failure: "Verify the new token is valid before storing".into(),
+                },
+                OperatorStep {
+                    action: "Verify and test".into(),
+                    command: "fwc auth verify my-connector && fwc invoke my-connector list_items --limit 1".into(),
+                    explanation: "Confirms the new token works end-to-end".into(),
+                    on_failure: "Check token scopes and permissions".into(),
+                },
+            ],
+            recovery_hints: vec![
+                "Set up monitoring for auth token expiry before it happens".into(),
+                "Use fwc health to detect auth failures in the fleet".into(),
+            ],
+            estimated_duration: "5 minutes".into(),
+        },
+        OperatorPlaybook {
+            id: "op-015".into(),
+            title: "Context/Profile Switching".into(),
+            scenario: "Switching between different host environments (staging, production)".into(),
+            steps: vec![
+                OperatorStep {
+                    action: "List available contexts".into(),
+                    command: "fwc context list".into(),
+                    explanation: "Shows all configured host contexts".into(),
+                    on_failure: "Create a context with fwc context create".into(),
+                },
+                OperatorStep {
+                    action: "Check current context".into(),
+                    command: "fwc context current".into(),
+                    explanation: "Confirms which host you're currently targeting".into(),
+                    on_failure: "No context set; use fwc context use <name>".into(),
+                },
+                OperatorStep {
+                    action: "Switch to target context".into(),
+                    command: "fwc context use staging".into(),
+                    explanation: "All subsequent fwc commands target the staging host".into(),
+                    on_failure: "Context may not exist; create it first".into(),
+                },
+                OperatorStep {
+                    action: "Verify the switch".into(),
+                    command: "fwc context current && fwc list --limit 3".into(),
+                    explanation: "Confirms you see the connectors from the new context".into(),
+                    on_failure: "Check host connectivity: fwc doctor".into(),
+                },
+            ],
+            recovery_hints: vec![
+                "Always check fwc context current before destructive operations".into(),
+                "Use named contexts for every environment to avoid confusion".into(),
+            ],
+            estimated_duration: "2 minutes".into(),
+        },
+        OperatorPlaybook {
+            id: "op-016".into(),
+            title: "Reading Evidence Bundles After Failure".into(),
+            scenario: "An operation failed and you need to understand what happened from the evidence".into(),
+            steps: vec![
+                OperatorStep {
+                    action: "Find the failed invocation".into(),
+                    command: "fwc history --status failed --limit 5".into(),
+                    explanation: "Lists recent failed operations with their entry IDs".into(),
+                    on_failure: "If history is empty, check the operation was recorded".into(),
+                },
+                OperatorStep {
+                    action: "Get full invocation detail".into(),
+                    command: "fwc history <entry_id> --json".into(),
+                    explanation: "Shows the complete evidence: input, output, error, timing, approval status".into(),
+                    on_failure: "Entry may have been pruned; check retention settings".into(),
+                },
+                OperatorStep {
+                    action: "Compare with a successful run".into(),
+                    command: "fwc compare <failed_id> <success_id>".into(),
+                    explanation: "Side-by-side diff shows what differed between success and failure".into(),
+                    on_failure: "No prior success to compare; check schema for expected output".into(),
+                },
+                OperatorStep {
+                    action: "Check the error code".into(),
+                    command: "fwc history <entry_id> --json | jq '.error_code'".into(),
+                    explanation: "Machine-readable error code for programmatic diagnosis".into(),
+                    on_failure: "If no error_code, the failure may be unstructured; check raw output".into(),
+                },
+            ],
+            recovery_hints: vec![
+                "Error codes like FCP_ERR_AUTH, FCP_ERR_RATE_LIMIT, FCP_ERR_TIMEOUT have specific remediation paths".into(),
+                "Use fwc undo <entry_id> to check if the failed operation left partial state".into(),
+            ],
+            estimated_duration: "5 minutes".into(),
+        },
+        OperatorPlaybook {
+            id: "op-017".into(),
+            title: "Drift Recovery After Unexpected State Change".into(),
+            scenario: "A connector's live state has drifted from expected configuration".into(),
+            steps: vec![
+                OperatorStep {
+                    action: "Run doctor to detect drift".into(),
+                    command: "fwc doctor my-connector".into(),
+                    explanation: "Diagnoses state mismatches, config drift, and health issues".into(),
+                    on_failure: "If doctor itself fails, the host connection may be down".into(),
+                },
+                OperatorStep {
+                    action: "Export current live state".into(),
+                    command: "fwc config export my-connector > live_state.json".into(),
+                    explanation: "Captures what the connector currently has".into(),
+                    on_failure: "Config may be unreadable; try status first".into(),
+                },
+                OperatorStep {
+                    action: "Diff live state vs expected".into(),
+                    command: "fwc config doctor my-connector --diff expected_config.json".into(),
+                    explanation: "Shows exactly which fields drifted from the expected config".into(),
+                    on_failure: "If no expected config file exists, reconstruct from history".into(),
+                },
+                OperatorStep {
+                    action: "Apply corrective config".into(),
+                    command: "fwc config import my-connector < expected_config.json".into(),
+                    explanation: "Restores the connector to the desired state".into(),
+                    on_failure: "Some fields may be read-only; apply changes individually with fwc config set".into(),
+                },
+                OperatorStep {
+                    action: "Verify drift is resolved".into(),
+                    command: "fwc doctor my-connector".into(),
+                    explanation: "Doctor should report no issues after correction".into(),
+                    on_failure: "Remaining issues may require lifecycle restart".into(),
+                },
+            ],
+            recovery_hints: vec![
+                "Store expected configs in version control for drift detection".into(),
+                "Run fwc doctor periodically to catch drift early".into(),
+                "Use fwc config doctor for config-specific health checks".into(),
+            ],
+            estimated_duration: "10 minutes".into(),
+        },
     ]
 }
 
@@ -1281,5 +1498,176 @@ mod tests {
     fn procedure_batch_stuck_exists() {
         let procs = get_recovery_procedures();
         assert!(procs.iter().any(|p| p.name.contains("Batch")));
+    }
+
+    // ── New playbook coverage ───────────────────────────────────────────
+
+    #[test]
+    fn playbook_config_rollback_exists() {
+        let playbooks = get_operator_playbooks();
+        assert!(
+            playbooks
+                .iter()
+                .any(|p| p.title.contains("Config Rollback"))
+        );
+    }
+
+    #[test]
+    fn playbook_config_rollback_has_export_step() {
+        let playbooks = get_operator_playbooks();
+        let pb = playbooks
+            .iter()
+            .find(|p| p.title.contains("Config Rollback"))
+            .unwrap();
+        assert!(pb.steps.iter().any(|s| s.command.contains("config export")));
+    }
+
+    #[test]
+    fn playbook_config_rollback_has_import_step() {
+        let playbooks = get_operator_playbooks();
+        let pb = playbooks
+            .iter()
+            .find(|p| p.title.contains("Config Rollback"))
+            .unwrap();
+        assert!(pb.steps.iter().any(|s| s.command.contains("config import")));
+    }
+
+    #[test]
+    fn playbook_auth_bootstrap_exists() {
+        let playbooks = get_operator_playbooks();
+        assert!(playbooks.iter().any(|p| p.title.contains("Auth Bootstrap")));
+    }
+
+    #[test]
+    fn playbook_auth_bootstrap_includes_verify() {
+        let playbooks = get_operator_playbooks();
+        let pb = playbooks
+            .iter()
+            .find(|p| p.title.contains("Auth Bootstrap"))
+            .unwrap();
+        assert!(pb.steps.iter().any(|s| s.command.contains("auth verify")));
+    }
+
+    #[test]
+    fn playbook_auth_repair_exists() {
+        let playbooks = get_operator_playbooks();
+        assert!(playbooks.iter().any(|p| p.title.contains("Auth Repair")));
+    }
+
+    #[test]
+    fn playbook_auth_repair_includes_remove_and_add() {
+        let playbooks = get_operator_playbooks();
+        let pb = playbooks
+            .iter()
+            .find(|p| p.title.contains("Auth Repair"))
+            .unwrap();
+        assert!(pb.steps.iter().any(|s| s.command.contains("auth remove")));
+        assert!(pb.steps.iter().any(|s| s.command.contains("auth add")));
+    }
+
+    #[test]
+    fn playbook_context_switching_exists() {
+        let playbooks = get_operator_playbooks();
+        assert!(
+            playbooks
+                .iter()
+                .any(|p| p.title.contains("Context") || p.title.contains("Profile"))
+        );
+    }
+
+    #[test]
+    fn playbook_context_switching_uses_context_commands() {
+        let playbooks = get_operator_playbooks();
+        let pb = playbooks
+            .iter()
+            .find(|p| p.title.contains("Context") || p.title.contains("Profile"))
+            .unwrap();
+        assert!(pb.steps.iter().any(|s| s.command.contains("context")));
+    }
+
+    #[test]
+    fn playbook_evidence_bundles_exists() {
+        let playbooks = get_operator_playbooks();
+        assert!(playbooks.iter().any(|p| p.title.contains("Evidence")));
+    }
+
+    #[test]
+    fn playbook_evidence_bundles_uses_history_and_compare() {
+        let playbooks = get_operator_playbooks();
+        let pb = playbooks
+            .iter()
+            .find(|p| p.title.contains("Evidence"))
+            .unwrap();
+        assert!(pb.steps.iter().any(|s| s.command.contains("history")));
+        assert!(pb.steps.iter().any(|s| s.command.contains("compare")));
+    }
+
+    #[test]
+    fn playbook_drift_recovery_exists() {
+        let playbooks = get_operator_playbooks();
+        assert!(playbooks.iter().any(|p| p.title.contains("Drift")));
+    }
+
+    #[test]
+    fn playbook_drift_recovery_uses_doctor() {
+        let playbooks = get_operator_playbooks();
+        let pb = playbooks
+            .iter()
+            .find(|p| p.title.contains("Drift"))
+            .unwrap();
+        assert!(pb.steps.iter().any(|s| s.command.contains("doctor")));
+    }
+
+    #[test]
+    fn playbook_drift_recovery_has_verify_step() {
+        let playbooks = get_operator_playbooks();
+        let pb = playbooks
+            .iter()
+            .find(|p| p.title.contains("Drift"))
+            .unwrap();
+        // Last step should verify drift is resolved
+        assert!(pb.steps.last().unwrap().command.contains("doctor"));
+    }
+
+    #[test]
+    fn all_new_playbooks_have_unique_ids() {
+        let playbooks = get_operator_playbooks();
+        let ids: Vec<&str> = playbooks.iter().map(|p| p.id.as_str()).collect();
+        let unique: std::collections::BTreeSet<&str> = ids.iter().copied().collect();
+        assert_eq!(ids.len(), unique.len(), "Duplicate playbook IDs found");
+    }
+
+    #[test]
+    fn total_playbook_count_at_least_17() {
+        let playbooks = get_operator_playbooks();
+        assert!(
+            playbooks.len() >= 17,
+            "Expected at least 17 playbooks, got {}",
+            playbooks.len()
+        );
+    }
+
+    #[test]
+    fn all_new_playbooks_have_on_failure() {
+        let playbooks = get_operator_playbooks();
+        for pb in &playbooks {
+            for step in &pb.steps {
+                assert!(
+                    !step.on_failure.is_empty(),
+                    "Playbook '{}' step '{}' has no on_failure guidance",
+                    pb.title,
+                    step.action
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn playbook_new_entries_serialize() {
+        let playbooks = get_operator_playbooks();
+        for pb in &playbooks {
+            let json = serde_json::to_value(pb).unwrap();
+            assert!(!json["title"].as_str().unwrap().is_empty());
+        }
     }
 }

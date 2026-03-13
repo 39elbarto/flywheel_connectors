@@ -269,11 +269,7 @@ pub struct MeshTopologyEdge {
 impl MeshTopologyEdge {
     /// Create a new topology edge.
     #[must_use]
-    pub fn new(
-        from_node: impl Into<String>,
-        to_node: impl Into<String>,
-        healthy: bool,
-    ) -> Self {
+    pub fn new(from_node: impl Into<String>, to_node: impl Into<String>, healthy: bool) -> Self {
         Self {
             from_node: from_node.into(),
             to_node: to_node.into(),
@@ -342,10 +338,7 @@ impl MeshTopology {
     /// Build a topology from a set of nodes and edges.
     /// Zone statuses are computed from the node list.
     #[must_use]
-    pub fn from_nodes_and_edges(
-        nodes: Vec<MeshNodeInfo>,
-        edges: Vec<MeshTopologyEdge>,
-    ) -> Self {
+    pub fn from_nodes_and_edges(nodes: Vec<MeshNodeInfo>, edges: Vec<MeshTopologyEdge>) -> Self {
         let zones = compute_zone_statuses(&nodes);
         Self {
             nodes,
@@ -425,8 +418,7 @@ impl MeshTopology {
 
                     e.healthy
                         && ((from_zone == Some(z1.as_str()) && to_zone == Some(z2.as_str()))
-                            || (from_zone == Some(z2.as_str())
-                                && to_zone == Some(z1.as_str())))
+                            || (from_zone == Some(z2.as_str()) && to_zone == Some(z1.as_str())))
                 });
 
                 if !has_healthy_cross_edge {
@@ -743,8 +735,7 @@ pub fn mesh_availability(
         let zone_nodes = topology.nodes_in_zone(zone_id);
         let has_capable_active_node = zone_nodes.iter().any(|n| {
             n.state.is_available()
-                && (n.capabilities.is_empty()
-                    || n.capabilities.iter().any(|c| c == &required_cap))
+                && (n.capabilities.is_empty() || n.capabilities.iter().any(|c| c == &required_cap))
         });
 
         if has_capable_active_node {
@@ -783,8 +774,11 @@ pub fn mesh_availability(
                 )
         };
 
-        result.placement_recommendation =
-            Some(PlacementRecommendation::new(preferred, reason, alternatives));
+        result.placement_recommendation = Some(PlacementRecommendation::new(
+            preferred,
+            reason,
+            alternatives,
+        ));
     }
 
     result
@@ -968,7 +962,9 @@ pub fn format_topology_toon(topology: &MeshTopology) -> Vec<String> {
         lines.push(String::new());
         lines.push("WARNING: Potential split-brain detected:".to_owned());
         for (z1, z2) in &splits {
-            lines.push(format!("  No healthy cross-zone edges between {z1} and {z2}"));
+            lines.push(format!(
+                "  No healthy cross-zone edges between {z1} and {z2}"
+            ));
         }
     }
 
@@ -1016,10 +1012,7 @@ pub fn format_availability_toon(result: &MeshAvailabilityResult) -> Vec<String> 
         lines.push(format!("Recommendation: place in `{}`", rec.preferred_zone));
         lines.push(format!("  Reason: {}", rec.reason));
         if !rec.alternatives.is_empty() {
-            lines.push(format!(
-                "  Alternatives: {}",
-                rec.alternatives.join(", ")
-            ));
+            lines.push(format!("  Alternatives: {}", rec.alternatives.join(", ")));
         }
     }
 
@@ -1044,9 +1037,7 @@ pub fn format_status_json(
 /// # Errors
 ///
 /// Returns an error if serialization fails.
-pub fn format_nodes_json(
-    nodes: &[MeshNodeInfo],
-) -> Result<serde_json::Value, serde_json::Error> {
+pub fn format_nodes_json(nodes: &[MeshNodeInfo]) -> Result<serde_json::Value, serde_json::Error> {
     serde_json::to_value(nodes)
 }
 
@@ -1084,12 +1075,7 @@ mod tests {
         MeshNodeInfo::new(id, zone, state, format!("10.0.0.{}", id.len()))
     }
 
-    fn node_with_caps(
-        id: &str,
-        zone: &str,
-        state: MeshNodeState,
-        caps: &[&str],
-    ) -> MeshNodeInfo {
+    fn node_with_caps(id: &str, zone: &str, state: MeshNodeState, caps: &[&str]) -> MeshNodeInfo {
         MeshNodeInfo::new(id, zone, state, format!("10.0.0.{}", id.len()))
             .with_capabilities(caps.iter().map(|c| (*c).to_owned()).collect())
     }
@@ -1107,10 +1093,18 @@ mod tests {
             node("n5", "eu-west", MeshNodeState::Offline),
         ];
         let edges = vec![
-            edge("n1", "n2", true).with_latency(5).with_bandwidth("high"),
-            edge("n1", "n3", true).with_latency(45).with_bandwidth("medium"),
-            edge("n2", "n4", true).with_latency(40).with_bandwidth("medium"),
-            edge("n3", "n5", false).with_latency(200).with_bandwidth("low"),
+            edge("n1", "n2", true)
+                .with_latency(5)
+                .with_bandwidth("high"),
+            edge("n1", "n3", true)
+                .with_latency(45)
+                .with_bandwidth("medium"),
+            edge("n2", "n4", true)
+                .with_latency(40)
+                .with_bandwidth("medium"),
+            edge("n3", "n5", false)
+                .with_latency(200)
+                .with_bandwidth("low"),
         ];
         MeshTopology::from_nodes_and_edges(nodes, edges)
     }
@@ -1151,18 +1145,42 @@ mod tests {
 
     #[test]
     fn node_state_from_str_valid() {
-        assert_eq!("active".parse::<MeshNodeState>().unwrap(), MeshNodeState::Active);
-        assert_eq!("draining".parse::<MeshNodeState>().unwrap(), MeshNodeState::Draining);
-        assert_eq!("offline".parse::<MeshNodeState>().unwrap(), MeshNodeState::Offline);
-        assert_eq!("joining".parse::<MeshNodeState>().unwrap(), MeshNodeState::Joining);
-        assert_eq!("unknown".parse::<MeshNodeState>().unwrap(), MeshNodeState::Unknown);
+        assert_eq!(
+            "active".parse::<MeshNodeState>().unwrap(),
+            MeshNodeState::Active
+        );
+        assert_eq!(
+            "draining".parse::<MeshNodeState>().unwrap(),
+            MeshNodeState::Draining
+        );
+        assert_eq!(
+            "offline".parse::<MeshNodeState>().unwrap(),
+            MeshNodeState::Offline
+        );
+        assert_eq!(
+            "joining".parse::<MeshNodeState>().unwrap(),
+            MeshNodeState::Joining
+        );
+        assert_eq!(
+            "unknown".parse::<MeshNodeState>().unwrap(),
+            MeshNodeState::Unknown
+        );
     }
 
     #[test]
     fn node_state_from_str_case_insensitive() {
-        assert_eq!("ACTIVE".parse::<MeshNodeState>().unwrap(), MeshNodeState::Active);
-        assert_eq!("Draining".parse::<MeshNodeState>().unwrap(), MeshNodeState::Draining);
-        assert_eq!("OFFLINE".parse::<MeshNodeState>().unwrap(), MeshNodeState::Offline);
+        assert_eq!(
+            "ACTIVE".parse::<MeshNodeState>().unwrap(),
+            MeshNodeState::Active
+        );
+        assert_eq!(
+            "Draining".parse::<MeshNodeState>().unwrap(),
+            MeshNodeState::Draining
+        );
+        assert_eq!(
+            "OFFLINE".parse::<MeshNodeState>().unwrap(),
+            MeshNodeState::Offline
+        );
     }
 
     #[test]
@@ -1472,7 +1490,9 @@ mod tests {
 
     #[test]
     fn edge_description_unhealthy() {
-        let e = edge("a", "b", false).with_latency(200).with_bandwidth("low");
+        let e = edge("a", "b", false)
+            .with_latency(200)
+            .with_bandwidth("low");
         let desc = e.description();
         assert!(desc.contains("FAIL"));
     }
@@ -1486,7 +1506,9 @@ mod tests {
 
     #[test]
     fn edge_serialization_roundtrip() {
-        let e = edge("x", "y", true).with_latency(100).with_bandwidth("medium");
+        let e = edge("x", "y", true)
+            .with_latency(100)
+            .with_bandwidth("medium");
         let json = serde_json::to_string(&e).unwrap();
         let back: MeshTopologyEdge = serde_json::from_str(&json).unwrap();
         assert_eq!(back.from_node, "x");
@@ -1638,11 +1660,7 @@ mod tests {
 
     #[test]
     fn placement_has_alternatives_true() {
-        let p = PlacementRecommendation::new(
-            "us-east",
-            "best",
-            vec!["us-west".to_owned()],
-        );
+        let p = PlacementRecommendation::new("us-east", "best", vec!["us-west".to_owned()]);
         assert!(p.has_alternatives());
     }
 
@@ -1660,21 +1678,14 @@ mod tests {
 
     #[test]
     fn placement_viable_zone_count_multiple() {
-        let p = PlacementRecommendation::new(
-            "z1",
-            "r",
-            vec!["z2".to_owned(), "z3".to_owned()],
-        );
+        let p = PlacementRecommendation::new("z1", "r", vec!["z2".to_owned(), "z3".to_owned()]);
         assert_eq!(p.viable_zone_count(), 3);
     }
 
     #[test]
     fn placement_serialization_roundtrip() {
-        let p = PlacementRecommendation::new(
-            "us-east",
-            "highest health",
-            vec!["eu-west".to_owned()],
-        );
+        let p =
+            PlacementRecommendation::new("us-east", "highest health", vec!["eu-west".to_owned()]);
         let json = serde_json::to_string(&p).unwrap();
         let back: PlacementRecommendation = serde_json::from_str(&json).unwrap();
         assert_eq!(back.preferred_zone, "us-east");
@@ -1713,8 +1724,7 @@ mod tests {
 
     #[test]
     fn availability_result_not_available() {
-        let r = MeshAvailabilityResult::new("github")
-            .with_unavailable_zone("z1");
+        let r = MeshAvailabilityResult::new("github").with_unavailable_zone("z1");
         assert!(!r.is_available());
     }
 
@@ -2138,10 +2148,7 @@ mod tests {
     #[test]
     fn format_status_toon_multi_zone() {
         let zones = vec![
-            MeshZoneStatus::from_nodes(
-                "us-east",
-                &[node("n1", "us-east", MeshNodeState::Active)],
-            ),
+            MeshZoneStatus::from_nodes("us-east", &[node("n1", "us-east", MeshNodeState::Active)]),
             MeshZoneStatus::from_nodes(
                 "eu-west",
                 &[node("n2", "eu-west", MeshNodeState::Draining)],
@@ -2199,7 +2206,12 @@ mod tests {
 
     #[test]
     fn format_nodes_toon_with_capabilities() {
-        let nodes = vec![node_with_caps("n1", "z1", MeshNodeState::Active, &["github", "slack"])];
+        let nodes = vec![node_with_caps(
+            "n1",
+            "z1",
+            MeshNodeState::Active,
+            &["github", "slack"],
+        )];
         let lines = format_nodes_toon(&nodes);
         let text = lines.join("\n");
         assert!(text.contains("github"));
@@ -2331,8 +2343,7 @@ mod tests {
 
     #[test]
     fn format_availability_toon_not_available() {
-        let r = MeshAvailabilityResult::new("github")
-            .with_unavailable_zone("eu-west");
+        let r = MeshAvailabilityResult::new("github").with_unavailable_zone("eu-west");
         let lines = format_availability_toon(&r);
         let text = lines.join("\n");
         assert!(text.contains("NOT available"));
@@ -2365,8 +2376,7 @@ mod tests {
 
     #[test]
     fn format_availability_toon_no_recommendation() {
-        let r = MeshAvailabilityResult::new("github")
-            .with_unavailable_zone("z1");
+        let r = MeshAvailabilityResult::new("github").with_unavailable_zone("z1");
         let lines = format_availability_toon(&r);
         let text = lines.join("\n");
         assert!(!text.contains("Recommendation"));
@@ -2581,10 +2591,7 @@ mod tests {
             node("n1", "z1", MeshNodeState::Active),
             node("n2", "z1", MeshNodeState::Active),
         ];
-        let edges = vec![
-            edge("n1", "n2", true),
-            edge("n1", "n2", false),
-        ];
+        let edges = vec![edge("n1", "n2", true), edge("n1", "n2", false)];
         let t = MeshTopology::from_nodes_and_edges(nodes, edges);
         assert_eq!(t.edge_count(), 2);
         assert_eq!(t.healthy_edge_count(), 1);

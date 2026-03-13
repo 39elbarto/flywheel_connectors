@@ -416,6 +416,138 @@ pub fn get_agent_playbooks() -> Vec<AgentPlaybook> {
             token_budget_hint: 2000,
             complexity: PlaybookComplexity::Simple,
         },
+        AgentPlaybook {
+            id: "agent-012".into(),
+            title: "Plan: Natural-Language Goal to Workflow".into(),
+            goal: "Convert a high-level goal into concrete fwc steps".into(),
+            workflow_steps: vec![
+                WorkflowStep {
+                    description: "Compile the goal into a plan".into(),
+                    command_template: "fwc plan '{goal}' --format json".into(),
+                    expected_output_shape: "JSON array of planned steps with connectors and operations".into(),
+                    fallback: "If plan fails, use search to find relevant operations manually".into(),
+                },
+                WorkflowStep {
+                    description: "Review the plan before execution".into(),
+                    command_template: "fwc explain '{goal}' --format json".into(),
+                    expected_output_shape: "Explanation of why each step was chosen".into(),
+                    fallback: "Manually inspect each operation's schema".into(),
+                },
+                WorkflowStep {
+                    description: "Execute the plan with simulation first".into(),
+                    command_template: "fwc do '{goal}' --dry-run --format json".into(),
+                    expected_output_shape: "Simulated results for each step".into(),
+                    fallback: "Execute steps individually with fwc invoke".into(),
+                },
+                WorkflowStep {
+                    description: "Execute the plan for real".into(),
+                    command_template: "fwc do '{goal}' --format json".into(),
+                    expected_output_shape: "Actual execution results with history entries".into(),
+                    fallback: "Fall back to individual invocations for failed steps".into(),
+                },
+            ],
+            token_budget_hint: 4000,
+            complexity: PlaybookComplexity::Advanced,
+        },
+        AgentPlaybook {
+            id: "agent-013".into(),
+            title: "Task: Durable Workflow Capsule".into(),
+            goal: "Create and manage a resumable multi-step task".into(),
+            workflow_steps: vec![
+                WorkflowStep {
+                    description: "Create a task capsule from a goal".into(),
+                    command_template: "fwc task create --goal '{goal}' --format json".into(),
+                    expected_output_shape: "Task handle and initial step list".into(),
+                    fallback: "Break goal into individual operations manually".into(),
+                },
+                WorkflowStep {
+                    description: "Check task status".into(),
+                    command_template: "fwc task show {task_handle} --format json".into(),
+                    expected_output_shape: "Current step, completed steps, pending steps".into(),
+                    fallback: "Use fwc task list to find the handle".into(),
+                },
+                WorkflowStep {
+                    description: "Advance the task to the next step".into(),
+                    command_template: "fwc task advance {task_handle} --format json".into(),
+                    expected_output_shape: "Result of the current step and next action".into(),
+                    fallback: "If step needs approval, use fwc task approve".into(),
+                },
+                WorkflowStep {
+                    description: "Resume a paused task".into(),
+                    command_template: "fwc task run {task_handle} --format json".into(),
+                    expected_output_shape: "Execution results and completion status".into(),
+                    fallback: "Resolve any blockers shown in task show output".into(),
+                },
+            ],
+            token_budget_hint: 3500,
+            complexity: PlaybookComplexity::Advanced,
+        },
+        AgentPlaybook {
+            id: "agent-014".into(),
+            title: "Session: Persistent Agent Context".into(),
+            goal: "Track work across multiple operations in a session".into(),
+            workflow_steps: vec![
+                WorkflowStep {
+                    description: "Start a new session".into(),
+                    command_template: "fwc session start --name '{session_name}' --format json".into(),
+                    expected_output_shape: "Session handle and context snapshot".into(),
+                    fallback: "Continue without session tracking".into(),
+                },
+                WorkflowStep {
+                    description: "Perform operations within the session".into(),
+                    command_template: "fwc invoke {connector} {operation} --input '{input}' --format json".into(),
+                    expected_output_shape: "Operation result, automatically linked to session".into(),
+                    fallback: "Each invocation is recorded in history with session context".into(),
+                },
+                WorkflowStep {
+                    description: "Review session history".into(),
+                    command_template: "fwc session show {session_handle} --format json".into(),
+                    expected_output_shape: "All operations performed in this session".into(),
+                    fallback: "Use fwc history with time range matching session start".into(),
+                },
+                WorkflowStep {
+                    description: "End or resume the session".into(),
+                    command_template: "fwc session end {session_handle} --format json".into(),
+                    expected_output_shape: "Session summary with operation count and outcomes".into(),
+                    fallback: "Session can be resumed later with fwc session resume".into(),
+                },
+            ],
+            token_budget_hint: 2500,
+            complexity: PlaybookComplexity::Moderate,
+        },
+        AgentPlaybook {
+            id: "agent-015".into(),
+            title: "Pipeline: Multi-Step Workflow from TOML".into(),
+            goal: "Define and execute a reusable multi-step pipeline".into(),
+            workflow_steps: vec![
+                WorkflowStep {
+                    description: "List available pipeline definitions".into(),
+                    command_template: "fwc pipeline list --format json".into(),
+                    expected_output_shape: "JSON array of pipeline names and descriptions".into(),
+                    fallback: "Check the pipelines/ directory for .toml files".into(),
+                },
+                WorkflowStep {
+                    description: "Validate the pipeline before running".into(),
+                    command_template: "fwc pipeline validate {pipeline_file} --format json".into(),
+                    expected_output_shape: "Validation result with any errors or warnings".into(),
+                    fallback: "Fix TOML syntax or schema errors in the pipeline file".into(),
+                },
+                WorkflowStep {
+                    description: "Preview the pipeline without executing".into(),
+                    command_template: "fwc pipeline dry-run {pipeline_file} --format json".into(),
+                    expected_output_shape: "Simulated results for each pipeline step".into(),
+                    fallback: "Check individual operations with fwc simulate".into(),
+                },
+                WorkflowStep {
+                    description: "Execute the pipeline".into(),
+                    command_template: "fwc pipeline run {pipeline_file} --format json".into(),
+                    expected_output_shape: "Step-by-step results with receipt handles".into(),
+                    fallback: "If a step fails, check fwc history for the failing operation".into(),
+                },
+            ],
+            token_budget_hint: 3000,
+            complexity: PlaybookComplexity::Moderate,
+        },
     ]
 }
 
@@ -1212,5 +1344,174 @@ mod tests {
     fn playbook_progressive_discovery_exists() {
         let pbs = get_agent_playbooks();
         assert!(pbs.iter().any(|pb| pb.title.contains("Progressive")));
+    }
+
+    // ── New agent playbooks (012–015) ────────────────────────────────────
+
+    #[test]
+    fn playbook_plan_natural_language_exists() {
+        let pbs = get_agent_playbooks();
+        assert!(pbs.iter().any(|pb| pb.id == "agent-012"));
+    }
+
+    #[test]
+    fn playbook_plan_has_correct_title() {
+        let pbs = get_agent_playbooks();
+        let pb = pbs.iter().find(|pb| pb.id == "agent-012").unwrap();
+        assert!(pb.title.contains("Plan"));
+        assert!(pb.title.contains("Natural-Language"));
+    }
+
+    #[test]
+    fn playbook_plan_has_four_steps() {
+        let pbs = get_agent_playbooks();
+        let pb = pbs.iter().find(|pb| pb.id == "agent-012").unwrap();
+        assert_eq!(pb.workflow_steps.len(), 4);
+    }
+
+    #[test]
+    fn playbook_plan_steps_reference_plan_and_do() {
+        let pbs = get_agent_playbooks();
+        let pb = pbs.iter().find(|pb| pb.id == "agent-012").unwrap();
+        let cmds: Vec<&str> = pb
+            .workflow_steps
+            .iter()
+            .map(|s| s.command_template.as_str())
+            .collect();
+        assert!(cmds.iter().any(|c| c.contains("plan")));
+        assert!(cmds.iter().any(|c| c.contains("do")));
+    }
+
+    #[test]
+    fn playbook_task_durable_capsule_exists() {
+        let pbs = get_agent_playbooks();
+        assert!(pbs.iter().any(|pb| pb.id == "agent-013"));
+    }
+
+    #[test]
+    fn playbook_task_has_correct_title() {
+        let pbs = get_agent_playbooks();
+        let pb = pbs.iter().find(|pb| pb.id == "agent-013").unwrap();
+        assert!(pb.title.contains("Task"));
+        assert!(pb.title.contains("Durable"));
+    }
+
+    #[test]
+    fn playbook_task_has_four_steps() {
+        let pbs = get_agent_playbooks();
+        let pb = pbs.iter().find(|pb| pb.id == "agent-013").unwrap();
+        assert_eq!(pb.workflow_steps.len(), 4);
+    }
+
+    #[test]
+    fn playbook_task_steps_reference_create_and_advance() {
+        let pbs = get_agent_playbooks();
+        let pb = pbs.iter().find(|pb| pb.id == "agent-013").unwrap();
+        let cmds: Vec<&str> = pb
+            .workflow_steps
+            .iter()
+            .map(|s| s.command_template.as_str())
+            .collect();
+        assert!(cmds.iter().any(|c| c.contains("create")));
+        assert!(cmds.iter().any(|c| c.contains("advance")));
+    }
+
+    #[test]
+    fn playbook_session_persistent_context_exists() {
+        let pbs = get_agent_playbooks();
+        assert!(pbs.iter().any(|pb| pb.id == "agent-014"));
+    }
+
+    #[test]
+    fn playbook_session_has_correct_title() {
+        let pbs = get_agent_playbooks();
+        let pb = pbs.iter().find(|pb| pb.id == "agent-014").unwrap();
+        assert!(pb.title.contains("Session"));
+        assert!(pb.title.contains("Persistent"));
+    }
+
+    #[test]
+    fn playbook_session_has_four_steps() {
+        let pbs = get_agent_playbooks();
+        let pb = pbs.iter().find(|pb| pb.id == "agent-014").unwrap();
+        assert_eq!(pb.workflow_steps.len(), 4);
+    }
+
+    #[test]
+    fn playbook_session_steps_reference_start_and_end() {
+        let pbs = get_agent_playbooks();
+        let pb = pbs.iter().find(|pb| pb.id == "agent-014").unwrap();
+        let cmds: Vec<&str> = pb
+            .workflow_steps
+            .iter()
+            .map(|s| s.command_template.as_str())
+            .collect();
+        assert!(cmds.iter().any(|c| c.contains("start")));
+        assert!(cmds.iter().any(|c| c.contains("end")));
+    }
+
+    #[test]
+    fn playbook_pipeline_multi_step_exists() {
+        let pbs = get_agent_playbooks();
+        assert!(pbs.iter().any(|pb| pb.id == "agent-015"));
+    }
+
+    #[test]
+    fn playbook_pipeline_has_correct_title() {
+        let pbs = get_agent_playbooks();
+        let pb = pbs.iter().find(|pb| pb.id == "agent-015").unwrap();
+        assert!(pb.title.contains("Pipeline"));
+        assert!(pb.title.contains("TOML"));
+    }
+
+    #[test]
+    fn playbook_pipeline_has_four_steps() {
+        let pbs = get_agent_playbooks();
+        let pb = pbs.iter().find(|pb| pb.id == "agent-015").unwrap();
+        assert_eq!(pb.workflow_steps.len(), 4);
+    }
+
+    #[test]
+    fn playbook_pipeline_steps_reference_validate_and_run() {
+        let pbs = get_agent_playbooks();
+        let pb = pbs.iter().find(|pb| pb.id == "agent-015").unwrap();
+        let cmds: Vec<&str> = pb
+            .workflow_steps
+            .iter()
+            .map(|s| s.command_template.as_str())
+            .collect();
+        assert!(cmds.iter().any(|c| c.contains("validate")));
+        assert!(cmds.iter().any(|c| c.contains("run")));
+    }
+
+    #[test]
+    fn playbook_count_at_least_fifteen() {
+        let pbs = get_agent_playbooks();
+        assert!(
+            pbs.len() >= 15,
+            "Expected at least 15 playbooks, got {}",
+            pbs.len()
+        );
+    }
+
+    #[test]
+    fn new_playbooks_all_serialize() {
+        for id in &["agent-012", "agent-013", "agent-014", "agent-015"] {
+            let pbs = get_agent_playbooks();
+            let pb = pbs.iter().find(|pb| pb.id == *id).unwrap();
+            let json = serde_json::to_string(pb).unwrap();
+            assert!(json.contains(id));
+        }
+    }
+
+    #[test]
+    fn new_playbooks_all_format_toon() {
+        for id in &["agent-012", "agent-013", "agent-014", "agent-015"] {
+            let pbs = get_agent_playbooks();
+            let pb = pbs.iter().find(|pb| pb.id == *id).unwrap();
+            let out = format_agent_playbook_toon(pb);
+            assert!(out.contains("Workflow:"));
+            assert!(out.contains(&pb.title));
+        }
     }
 }

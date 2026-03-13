@@ -129,6 +129,8 @@ pub struct ZoneScopedTool {
     pub zones: BTreeSet<ZoneId>,
     /// Description.
     pub description: String,
+    /// Capability summary for this operation.
+    pub capability: String,
 }
 
 impl ZoneScopedTool {
@@ -143,6 +145,7 @@ impl ZoneScopedTool {
             operation,
             zones: BTreeSet::new(),
             description: String::new(),
+            capability: String::new(),
         }
     }
 
@@ -155,6 +158,12 @@ impl ZoneScopedTool {
     /// Builder: set description.
     pub fn with_description(mut self, desc: impl Into<String>) -> Self {
         self.description = desc.into();
+        self
+    }
+
+    /// Builder: set capability summary.
+    pub fn with_capability(mut self, capability: impl Into<String>) -> Self {
+        self.capability = capability.into();
         self
     }
 
@@ -306,6 +315,16 @@ impl ZoneRegistry {
         self.tools_in_zone(zone)
             .iter()
             .map(|t| t.connector.clone())
+            .collect()
+    }
+
+    /// All unique capabilities surfaced in a zone.
+    pub fn capabilities_in_zone(&self, zone: &ZoneId) -> BTreeSet<String> {
+        self.tools_in_zone(zone)
+            .iter()
+            .filter_map(|tool| {
+                (!tool.capability.trim().is_empty()).then(|| tool.capability.clone())
+            })
             .collect()
     }
 }
@@ -922,9 +941,7 @@ pub fn plan_migration(
         // Policy conflicts
         for binding in &target.policy_bindings {
             if !source_config.policy_bindings.contains(binding) {
-                policy_conflicts.push(format!(
-                    "Target zone has policy '{binding}' not in source"
-                ));
+                policy_conflicts.push(format!("Target zone has policy '{binding}' not in source"));
             }
         }
     } else {
@@ -1030,10 +1047,7 @@ pub fn execute_migration(
 }
 
 /// Export a zone's configs with secrets redacted.
-pub fn export_zone(
-    zone: &str,
-    configs: &[ConnectorZoneConfig],
-) -> ZoneExport {
+pub fn export_zone(zone: &str, configs: &[ConnectorZoneConfig]) -> ZoneExport {
     let redacted: Vec<ConnectorZoneConfig> = configs
         .iter()
         .filter(|c| c.zone == zone)
@@ -1178,6 +1192,8 @@ pub struct ZoneInfo {
     pub tool_count: usize,
     /// Connector names in this zone.
     pub connectors: Vec<String>,
+    /// Distinct capabilities surfaced by the connectors in this zone.
+    pub capabilities: Vec<String>,
     /// Whether this is a well-known zone.
     pub well_known: bool,
     /// Policy type (inferred from zone name).
@@ -1191,12 +1207,15 @@ pub fn zone_overview(registry: &ZoneRegistry) -> Vec<ZoneInfo> {
         .iter()
         .map(|zone| {
             let connectors: Vec<String> = registry.connectors_in_zone(zone).into_iter().collect();
+            let capabilities: Vec<String> =
+                registry.capabilities_in_zone(zone).into_iter().collect();
             let policy_type = infer_policy_type(zone);
             ZoneInfo {
                 zone_id: zone.as_str().to_owned(),
                 connector_count: connectors.len(),
                 tool_count: registry.tool_count_in_zone(zone),
                 connectors,
+                capabilities,
                 well_known: zone.is_well_known(),
                 policy_type,
             }
@@ -1207,7 +1226,7 @@ pub fn zone_overview(registry: &ZoneRegistry) -> Vec<ZoneInfo> {
 }
 
 /// Infer a policy type label from the zone name.
-fn infer_policy_type(zone: &ZoneId) -> String {
+pub fn infer_policy_type(zone: &ZoneId) -> String {
     let s = zone.as_str();
     if s.contains("private") {
         "restricted".to_owned()
@@ -1228,26 +1247,20 @@ pub fn format_zones_toon(infos: &[ZoneInfo]) -> String {
     let _ = writeln!(out, "Zones: {total} configured");
     let _ = writeln!(
         out,
-        "{:<20} {:>5} {:>5}  {:<12} {}",
-        "ZONE", "CONN", "TOOLS", "POLICY", "CONNECTORS"
+        "{:<20} {:>5} {:>5}  {:<12} {:<24} {}",
+        "ZONE", "CONN", "TOOLS", "POLICY", "CAPABILITIES", "CONNECTORS"
     );
     for info in infos {
-        let connectors_display = if info.connectors.len() <= 3 {
-            info.connectors.join(", ")
-        } else {
-            format!(
-                "{}, ... (+{})",
-                info.connectors[..2].join(", "),
-                info.connectors.len() - 2
-            )
-        };
+        let connectors_display = summarize_zone_items(&info.connectors, 2);
+        let capability_display = summarize_zone_items(&info.capabilities, 2);
         let _ = writeln!(
             out,
-            "{:<20} {:>5} {:>5}  {:<12} {}",
+            "{:<20} {:>5} {:>5}  {:<12} {:<24} {}",
             info.zone_id,
             info.connector_count,
             info.tool_count,
             info.policy_type,
+            capability_display,
             connectors_display
         );
     }
@@ -1263,6 +1276,13 @@ pub fn format_zone_detail_toon(info: &ZoneInfo) -> String {
     let _ = writeln!(out, "  Well-known: {}", info.well_known);
     let _ = writeln!(out, "  Connectors: {}", info.connector_count);
     let _ = writeln!(out, "  Tools: {}", info.tool_count);
+    let _ = writeln!(out, "  Capabilities: {}", info.capabilities.len());
+    if !info.capabilities.is_empty() {
+        let _ = writeln!(out, "  Capability list:");
+        for capability in &info.capabilities {
+            let _ = writeln!(out, "    - {capability}");
+        }
+    }
     if !info.connectors.is_empty() {
         let _ = writeln!(out, "  Connector list:");
         for c in &info.connectors {
@@ -1270,6 +1290,14 @@ pub fn format_zone_detail_toon(info: &ZoneInfo) -> String {
         }
     }
     out
+}
+
+fn summarize_zone_items(items: &[String], visible: usize) -> String {
+    match items.len() {
+        0 => "-".to_owned(),
+        len if len <= visible => items.join(", "),
+        len => format!("{}, ... (+{})", items[..visible].join(", "), len - visible),
+    }
 }
 
 // ── Tests ──────────────────────────────────────────────────────────
@@ -1299,15 +1327,25 @@ mod tests {
         reg.register_tool(
             ZoneScopedTool::new("github", "create_issue")
                 .with_zone(zone_work())
-                .with_zone(zone_public()),
+                .with_zone(zone_public())
+                .with_capability("issue.write"),
         );
         reg.register_tool(
             ZoneScopedTool::new("github", "list_repos")
                 .with_zone(zone_work())
-                .with_zone(zone_public()),
+                .with_zone(zone_public())
+                .with_capability("repo.read"),
         );
-        reg.register_tool(ZoneScopedTool::new("slack", "send_message").with_zone(zone_work()));
-        reg.register_tool(ZoneScopedTool::new("vault", "get_secret").with_zone(zone_private()));
+        reg.register_tool(
+            ZoneScopedTool::new("slack", "send_message")
+                .with_zone(zone_work())
+                .with_capability("chat.write"),
+        );
+        reg.register_tool(
+            ZoneScopedTool::new("vault", "get_secret")
+                .with_zone(zone_private())
+                .with_capability("secret.read"),
+        );
         reg
     }
 
@@ -3049,6 +3087,16 @@ mod tests {
     }
 
     #[test]
+    fn zone_overview_capabilities_listed() {
+        let reg = sample_registry();
+        let infos = zone_overview(&reg);
+        let work = infos.iter().find(|i| i.zone_id == "z:work").unwrap();
+        assert!(work.capabilities.contains(&"issue.write".to_owned()));
+        assert!(work.capabilities.contains(&"repo.read".to_owned()));
+        assert!(work.capabilities.contains(&"chat.write".to_owned()));
+    }
+
+    #[test]
     fn zone_overview_empty_registry() {
         let reg = ZoneRegistry::new();
         let infos = zone_overview(&reg);
@@ -3063,6 +3111,7 @@ mod tests {
         assert!(json.is_array());
         assert_eq!(json.as_array().unwrap().len(), 3);
         assert_eq!(json[0]["zone_id"], "z:private");
+        assert_eq!(json[2]["capabilities"].as_array().unwrap().len(), 3);
     }
 
     #[test]
@@ -3097,6 +3146,7 @@ mod tests {
         assert!(toon.contains("CONN"));
         assert!(toon.contains("TOOLS"));
         assert!(toon.contains("POLICY"));
+        assert!(toon.contains("CAPABILITIES"));
     }
 
     #[test]
@@ -3117,6 +3167,16 @@ mod tests {
         assert!(toon.contains("standard"));
         assert!(toon.contains("open"));
         assert!(toon.contains("restricted"));
+    }
+
+    #[test]
+    fn format_zones_toon_shows_capability_summaries() {
+        let reg = sample_registry();
+        let infos = zone_overview(&reg);
+        let toon = format_zones_toon(&infos);
+        assert!(toon.contains("issue.write"));
+        assert!(toon.contains("repo.read"));
+        assert!(toon.contains("(+1)"));
     }
 
     #[test]
@@ -3149,6 +3209,9 @@ mod tests {
         assert!(detail.contains("Well-known: true"));
         assert!(detail.contains("Connectors: 2"));
         assert!(detail.contains("Tools: 3"));
+        assert!(detail.contains("Capabilities: 3"));
+        assert!(detail.contains("- chat.write"));
+        assert!(detail.contains("- issue.write"));
         assert!(detail.contains("- github"));
         assert!(detail.contains("- slack"));
     }
@@ -3160,12 +3223,14 @@ mod tests {
             connector_count: 0,
             tool_count: 0,
             connectors: vec![],
+            capabilities: vec![],
             well_known: true,
             policy_type: "custom".to_owned(),
         };
         let detail = format_zone_detail_toon(&info);
         assert!(detail.contains("Zone: z:empty"));
         assert!(detail.contains("Connectors: 0"));
+        assert!(detail.contains("Capabilities: 0"));
         assert!(!detail.contains("Connector list:"));
     }
 
@@ -3178,6 +3243,7 @@ mod tests {
             connector_count: 2,
             tool_count: 5,
             connectors: vec!["github".to_owned()],
+            capabilities: vec!["repo.read".to_owned()],
             well_known: true,
             policy_type: "standard".to_owned(),
         };
@@ -3193,6 +3259,7 @@ mod tests {
             connector_count: 0,
             tool_count: 0,
             connectors: vec![],
+            capabilities: vec![],
             well_known: true,
             policy_type: "custom".to_owned(),
         };
@@ -3207,6 +3274,7 @@ mod tests {
             connector_count: 2,
             tool_count: 5,
             connectors: vec!["github".to_owned(), "slack".to_owned()],
+            capabilities: vec!["chat.write".to_owned(), "issue.write".to_owned()],
             well_known: true,
             policy_type: "standard".to_owned(),
         };
@@ -3217,6 +3285,7 @@ mod tests {
         assert_eq!(json["well_known"], true);
         assert_eq!(json["policy_type"], "standard");
         assert_eq!(json["connectors"].as_array().unwrap().len(), 2);
+        assert_eq!(json["capabilities"].as_array().unwrap().len(), 2);
     }
 
     // ── Cross-zone check: allowed ───────────────────────────────
@@ -3921,7 +3990,10 @@ mod tests {
     fn migration_detects_credentials() {
         let source = sample_source_config();
         let plan = plan_migration("github", &source, "z:public", None);
-        assert!(plan.credentials_needing_reprovision.contains(&"api_key".to_owned()));
+        assert!(
+            plan.credentials_needing_reprovision
+                .contains(&"api_key".to_owned())
+        );
     }
 
     // ── Secret redaction in migration plans ─────────────────────
@@ -3935,10 +4007,7 @@ mod tests {
             .iter()
             .find(|c| c.field == "api_key")
             .unwrap();
-        assert_eq!(
-            api_key_change.new_value.as_deref(),
-            Some("***REDACTED***")
-        );
+        assert_eq!(api_key_change.new_value.as_deref(), Some("***REDACTED***"));
     }
 
     // ── format_migration_toon ───────────────────────────────────

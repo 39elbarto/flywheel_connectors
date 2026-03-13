@@ -153,6 +153,15 @@ pub const COMMAND_CLASSIFICATIONS: &[CommandClassification] = &[
         may_need_approval: false,
         transport_note: "Local JQ-style data transformation, no connector calls",
     },
+    CommandClassification {
+        command: "zones",
+        truth_source: CommandTruthSource::OfflineArtifact,
+        execution_mode: CommandExecutionMode::LocalOnly,
+        host_absent: HostAbsentBehavior::Unaffected,
+        requires_capability_token: false,
+        may_need_approval: false,
+        transport_note: "Manifest-backed zone topology and inferred policy summary",
+    },
     // ── Dual-source commands (live by default, explicit offline opt-in) ─
     CommandClassification {
         command: "list",
@@ -3320,6 +3329,7 @@ pub const COMMANDS: &[&str] = &[
     "explain",
     "do",
     "list",
+    "zones",
     "search",
     "show",
     "ops",
@@ -3450,7 +3460,7 @@ pub fn guide_payload(command: Option<&str>) -> Value {
                     },
                     {
                         "name": "discovery",
-                        "commands": ["list", "search", "show", "ops", "schema", "examples"],
+                        "commands": ["list", "zones", "search", "show", "ops", "schema", "examples"],
                     },
                     {
                         "name": "evidence",
@@ -3581,6 +3591,10 @@ fn command_contract(command: &str) -> Option<Value> {
         "list" => Some(discovery_contract(
             "Show a low-token connector inventory with concise lifecycle and health state.",
             "Connector summaries grouped or filtered without expanding operation schemas.",
+        )),
+        "zones" => Some(discovery_contract(
+            "Summarize zone topology, connector bindings, capability coverage, and inferred policy posture.",
+            "Per-zone topology view that stays concise in TOON while preserving machine-readable zone metadata in JSON.",
         )),
         "search" => Some(discovery_contract(
             "Search connectors and operations by ids, names, capabilities, or domains.",
@@ -5205,7 +5219,9 @@ mod tests {
 
     #[test]
     fn discovery_commands_have_discovery_family() {
-        for cmd in &["list", "search", "show", "ops", "schema", "examples"] {
+        for cmd in &[
+            "list", "zones", "search", "show", "ops", "schema", "examples",
+        ] {
             let p = guide_payload(Some(cmd));
             assert_eq!(
                 p["contract"]["family"], "discovery",
@@ -5843,8 +5859,18 @@ mod tests {
         let offline = offline_capable_commands();
         assert!(offline.contains(&"guide"));
         assert!(offline.contains(&"list"));
+        assert!(offline.contains(&"zones"));
         assert!(offline.contains(&"search"));
         assert!(!offline.contains(&"invoke"));
+    }
+
+    #[test]
+    fn zones_is_offline_local_only() {
+        let cls = classify_command("zones").unwrap();
+        assert_eq!(cls.truth_source, CommandTruthSource::OfflineArtifact);
+        assert_eq!(cls.execution_mode, CommandExecutionMode::LocalOnly);
+        assert_eq!(cls.host_absent, HostAbsentBehavior::Unaffected);
+        assert!(!cls.requires_capability_token);
     }
 
     #[test]

@@ -636,10 +636,7 @@ impl AccessPlan {
         let mut errors = Vec::new();
         for (i, step) in self.steps.iter().enumerate() {
             if step.index != i {
-                errors.push(format!(
-                    "step {i} has index {} (expected {i})",
-                    step.index
-                ));
+                errors.push(format!("step {i} has index {} (expected {i})", step.index));
             }
         }
         errors
@@ -811,6 +808,43 @@ impl AccessBundle {
     pub const fn deny(&mut self) {
         self.status = BundleStatus::Denied;
     }
+
+    /// Abandon the bundle (agent-initiated withdrawal).
+    ///
+    /// Sets the bundle to Denied status, effectively withdrawing the
+    /// request before approval.  Only valid from Pending state.
+    pub fn abandon(&mut self) -> Result<(), &'static str> {
+        if self.status != BundleStatus::Pending {
+            return Err("can only abandon a pending bundle");
+        }
+        self.status = BundleStatus::Denied;
+        Ok(())
+    }
+
+    /// Check whether this bundle's context is stale.
+    ///
+    /// A bundle is stale when it was created too long ago (beyond the
+    /// given max age) and is still pending.
+    pub fn is_stale_context(&self, max_age: chrono::Duration) -> bool {
+        self.status == BundleStatus::Pending
+            && Utc::now().signed_duration_since(self.created_at) > max_age
+    }
+
+    /// Check whether a resume attempt is valid.
+    ///
+    /// Returns an error string if the bundle cannot be resumed.
+    pub fn validate_resume(&self) -> Result<(), String> {
+        match self.status {
+            BundleStatus::Active => Ok(()),
+            BundleStatus::Partial => Ok(()),
+            BundleStatus::Pending => Err("bundle is still pending approval".into()),
+            BundleStatus::Revoked => Err("bundle has been revoked — request a new one".into()),
+            BundleStatus::Expired => Err("bundle has expired — request a new one".into()),
+            BundleStatus::Denied => {
+                Err("bundle was denied — request a new one with updated justification".into())
+            }
+        }
+    }
 }
 
 /// An audit trail entry.
@@ -829,11 +863,7 @@ pub struct AuditEntry {
 }
 
 impl AuditEntry {
-    pub fn new(
-        action: AuditAction,
-        actor: impl Into<String>,
-        target: impl Into<String>,
-    ) -> Self {
+    pub fn new(action: AuditAction, actor: impl Into<String>, target: impl Into<String>) -> Self {
         Self {
             timestamp: Utc::now(),
             action,
@@ -863,10 +893,7 @@ pub struct ActiveSession {
 }
 
 impl ActiveSession {
-    pub fn new(
-        session_id: impl Into<String>,
-        bundle_handle: impl Into<String>,
-    ) -> Self {
+    pub fn new(session_id: impl Into<String>, bundle_handle: impl Into<String>) -> Self {
         let now = Utc::now();
         Self {
             session_id: session_id.into(),
@@ -962,7 +989,10 @@ pub fn is_valid_handle(handle: &str) -> bool {
 
 /// Generate a deterministic handle from components.
 pub fn generate_handle(prefix: &str, connector: &str, operation: &str) -> String {
-    let hash_input = format!("{prefix}:{connector}:{operation}:{}", Utc::now().timestamp_millis());
+    let hash_input = format!(
+        "{prefix}:{connector}:{operation}:{}",
+        Utc::now().timestamp_millis()
+    );
     let hash = blake3::hash(hash_input.as_bytes());
     let short = &hash.to_hex()[..12];
     format!("{prefix}-{short}")
@@ -987,22 +1017,28 @@ pub fn check_access(args: &AccessCheckArgs) -> Result<AccessCheckResult, String>
     // Zone check — if a zone is specified, verify it is valid.
     if let Some(zone) = &args.zone {
         if zone.starts_with("restricted-") {
-            blockers.push(AccessBlocker::new(
-                "restricted_zone",
-                format!("zone '{zone}' is restricted"),
-                BlockerSeverity::Error,
-            ).with_remediation("Contact zone administrator for access"));
+            blockers.push(
+                AccessBlocker::new(
+                    "restricted_zone",
+                    format!("zone '{zone}' is restricted"),
+                    BlockerSeverity::Error,
+                )
+                .with_remediation("Contact zone administrator for access"),
+            );
         }
     }
 
     // Context check — look for known problematic contexts.
     if let Some(env) = args.context.get("environment") {
         if env == "production" {
-            blockers.push(AccessBlocker::new(
-                "production_env",
-                "production environment requires elevated access",
-                BlockerSeverity::Warning,
-            ).with_remediation("Use `fwc access request` with justification"));
+            blockers.push(
+                AccessBlocker::new(
+                    "production_env",
+                    "production environment requires elevated access",
+                    BlockerSeverity::Warning,
+                )
+                .with_remediation("Use `fwc access request` with justification"),
+            );
         }
     }
 
@@ -1034,12 +1070,16 @@ pub fn plan_access(args: &AccessPlanArgs) -> Result<AccessPlan, String> {
     }
 
     // Build standard plan steps.
-    plan = plan.with_step(
-        AccessPlanStep::new("Verify credentials", &args.connector, 0),
-    );
-    plan = plan.with_step(
-        AccessPlanStep::new("Check policy engine", &args.operation, 1),
-    );
+    plan = plan.with_step(AccessPlanStep::new(
+        "Verify credentials",
+        &args.connector,
+        0,
+    ));
+    plan = plan.with_step(AccessPlanStep::new(
+        "Check policy engine",
+        &args.operation,
+        1,
+    ));
     plan = plan.with_step(
         AccessPlanStep::new("Request grant", &args.connector, 2)
             .with_approval()
@@ -1053,7 +1093,11 @@ pub fn plan_access(args: &AccessPlanArgs) -> Result<AccessPlan, String> {
     plan = plan.with_estimated_duration(Duration::from_secs(30));
 
     // Add prerequisites based on context.
-    if args.context.get("environment").is_some_and(|e| e == "production") {
+    if args
+        .context
+        .get("environment")
+        .is_some_and(|e| e == "production")
+    {
         plan = plan.with_prerequisite("Manager approval required for production");
     }
 
@@ -1148,7 +1192,10 @@ pub fn format_check_toon(result: &AccessCheckResult) -> Vec<String> {
     ));
     lines.push(format!("  Connector: {}", result.connector));
     lines.push(format!("  Operation: {}", result.operation));
-    lines.push(format!("  Checked:   {}", result.checked_at.format("%Y-%m-%d %H:%M:%S UTC")));
+    lines.push(format!(
+        "  Checked:   {}",
+        result.checked_at.format("%Y-%m-%d %H:%M:%S UTC")
+    ));
 
     if result.blockers.is_empty() {
         lines.push("  Blockers:  (none)".into());
@@ -1224,7 +1271,10 @@ pub fn format_bundle_toon(bundle: &AccessBundle) -> Vec<String> {
     lines.push(format!("Access Bundle: {}", bundle.handle));
     lines.push(format!("  Status:  {}", bundle.status.label()));
     lines.push(format!("  Grants:  {}", bundle.grant_count()));
-    lines.push(format!("  Created: {}", bundle.created_at.format("%Y-%m-%d %H:%M:%S UTC")));
+    lines.push(format!(
+        "  Created: {}",
+        bundle.created_at.format("%Y-%m-%d %H:%M:%S UTC")
+    ));
 
     if let Some(j) = &bundle.justification {
         lines.push(format!("  Justification: {j}"));
@@ -1238,7 +1288,10 @@ pub fn format_bundle_toon(bundle: &AccessBundle) -> Vec<String> {
         lines.push(format!("    Connector: {}", grant.connector));
         lines.push(format!("    Operation: {}", grant.operation));
         lines.push(format!("    Scope:     {}", grant.scope.label()));
-        lines.push(format!("    Expires:   {}", grant.expires_at.format("%Y-%m-%d %H:%M:%S UTC")));
+        lines.push(format!(
+            "    Expires:   {}",
+            grant.expires_at.format("%Y-%m-%d %H:%M:%S UTC")
+        ));
         lines.push(format!("    Revocable: {}", grant.revocable));
     }
 
@@ -1249,12 +1302,19 @@ pub fn format_bundle_toon(bundle: &AccessBundle) -> Vec<String> {
 pub fn format_grant_toon(grant: &AccessGrant) -> Vec<String> {
     let mut lines = Vec::new();
 
-    let status = if grant.is_expired() { "EXPIRED" } else { "ACTIVE" };
+    let status = if grant.is_expired() {
+        "EXPIRED"
+    } else {
+        "ACTIVE"
+    };
     lines.push(format!("Grant: {} [{}]", grant.handle, status));
     lines.push(format!("  Connector: {}", grant.connector));
     lines.push(format!("  Operation: {}", grant.operation));
     lines.push(format!("  Scope:     {}", grant.scope.label()));
-    lines.push(format!("  Expires:   {}", grant.expires_at.format("%Y-%m-%d %H:%M:%S UTC")));
+    lines.push(format!(
+        "  Expires:   {}",
+        grant.expires_at.format("%Y-%m-%d %H:%M:%S UTC")
+    ));
     lines.push(format!("  Remaining: {}", grant.remaining_display()));
     lines.push(format!("  Revocable: {}", grant.revocable));
 
@@ -1324,7 +1384,10 @@ pub fn format_inspection_toon(inspection: &AccessInspection) -> Vec<String> {
     if inspection.audit_trail.is_empty() {
         lines.push("  Audit trail: (none)".into());
     } else {
-        lines.push(format!("  Audit trail: {} entries", inspection.audit_trail.len()));
+        lines.push(format!(
+            "  Audit trail: {} entries",
+            inspection.audit_trail.len()
+        ));
         for e in &inspection.audit_trail {
             let detail = e.details.as_deref().unwrap_or("");
             let detail_suffix = if detail.is_empty() {
@@ -1359,6 +1422,194 @@ pub fn format_audit_entry_toon(entry: &AuditEntry) -> Vec<String> {
     ));
     if let Some(d) = &entry.details {
         lines.push(format!("  Details: {d}"));
+    }
+
+    lines
+}
+
+// ── Blocker Diagnosis ────────────────────────────────────────────────
+
+/// The specific remedy family for a blocker.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemedyFamily {
+    /// Caller should refresh stale data (e.g., re-fetch revocation list).
+    Refresh,
+    /// Caller needs to re-request approval.
+    ReApprove,
+    /// Caller should shrink the request scope.
+    ShrinkRequest,
+    /// Caller needs a policy change from an administrator.
+    PolicyChange,
+    /// Caller should switch to the correct zone.
+    ZoneSwitch,
+    /// Caller needs to wait for a time-based gate to expire.
+    WaitForExpiry,
+}
+
+impl RemedyFamily {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Refresh => "refresh",
+            Self::ReApprove => "re-approve",
+            Self::ShrinkRequest => "shrink-request",
+            Self::PolicyChange => "policy-change",
+            Self::ZoneSwitch => "zone-switch",
+            Self::WaitForExpiry => "wait",
+        }
+    }
+
+    /// Classify a `BlockerType` into its remedy family.
+    pub const fn from_blocker(bt: BlockerType) -> Self {
+        match bt {
+            BlockerType::MissingCapability => Self::ReApprove,
+            BlockerType::CeilingViolation => Self::PolicyChange,
+            BlockerType::ApprovalGated => Self::ReApprove,
+            BlockerType::ZoneMismatch => Self::ZoneSwitch,
+            BlockerType::OverBroadRequest => Self::ShrinkRequest,
+            BlockerType::ExpiredCredential => Self::Refresh,
+            BlockerType::PolicyDenied => Self::PolicyChange,
+        }
+    }
+}
+
+impl fmt::Display for RemedyFamily {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+/// A full blocker diagnosis — structured explanation of why access failed
+/// and exactly what to do about it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BlockerDiagnosis {
+    /// The blocker being diagnosed.
+    pub blocker_type: BlockerType,
+    /// FCP_ERR code.
+    pub fcp_err_code: String,
+    /// Human-readable summary.
+    pub summary: String,
+    /// Which remedy family this falls into.
+    pub remedy: RemedyFamily,
+    /// Specific next commands to run.
+    pub next_commands: Vec<String>,
+    /// Whether the blocker is from stale/outdated data.
+    pub is_freshness_issue: bool,
+    /// The exact object or boundary that caused the failure.
+    pub failed_object: Option<String>,
+}
+
+impl BlockerDiagnosis {
+    pub fn new(blocker_type: BlockerType, summary: impl Into<String>) -> Self {
+        Self {
+            fcp_err_code: blocker_type.label().into(),
+            remedy: RemedyFamily::from_blocker(blocker_type),
+            blocker_type,
+            summary: summary.into(),
+            next_commands: Vec::new(),
+            is_freshness_issue: false,
+            failed_object: None,
+        }
+    }
+
+    pub fn with_next_command(mut self, cmd: impl Into<String>) -> Self {
+        self.next_commands.push(cmd.into());
+        self
+    }
+
+    pub fn with_freshness_issue(mut self) -> Self {
+        self.is_freshness_issue = true;
+        self
+    }
+
+    pub fn with_failed_object(mut self, obj: impl Into<String>) -> Self {
+        self.failed_object = Some(obj.into());
+        self
+    }
+}
+
+/// Diagnose a typed blocker into a full structured explanation.
+pub fn diagnose_blocker(
+    blocker: &TypedBlocker,
+    connector: &str,
+    operation: &str,
+    zone: &str,
+) -> BlockerDiagnosis {
+    let mut diag = BlockerDiagnosis::new(blocker.blocker_type, &blocker.message);
+
+    match blocker.blocker_type {
+        BlockerType::MissingCapability => {
+            diag = diag
+                .with_next_command(format!(
+                    "fwc access plan {connector} {operation} --zone {zone}"
+                ))
+                .with_next_command(format!(
+                    "fwc access request {connector} {operation} --zone {zone}"
+                ));
+        }
+        BlockerType::CeilingViolation => {
+            diag = diag
+                .with_failed_object(format!("zone ceiling for {zone}"))
+                .with_next_command(format!("fwc zones {zone} --policy"))
+                .with_next_command("Contact zone administrator to raise ceiling");
+        }
+        BlockerType::ApprovalGated => {
+            diag = diag
+                .with_next_command(format!(
+                    "fwc access request {connector} {operation} --zone {zone}"
+                ))
+                .with_next_command("fwc history --pending-approvals");
+        }
+        BlockerType::ZoneMismatch => {
+            diag = diag
+                .with_failed_object(format!("zone {zone}"))
+                .with_next_command("fwc zones")
+                .with_next_command(format!(
+                    "fwc access check {connector} {operation} --zone z:work"
+                ));
+        }
+        BlockerType::OverBroadRequest => {
+            diag = diag
+                .with_next_command(format!(
+                    "fwc access plan {connector} {operation} --zone {zone}"
+                ))
+                .with_next_command("Review required capabilities and request only what is needed");
+        }
+        BlockerType::ExpiredCredential => {
+            diag = diag
+                .with_freshness_issue()
+                .with_failed_object(format!("credential for {connector}"))
+                .with_next_command(format!("fwc auth verify {connector}"))
+                .with_next_command(format!("fwc auth refresh {connector}"));
+        }
+        BlockerType::PolicyDenied => {
+            diag = diag
+                .with_failed_object(format!("policy for {zone}"))
+                .with_next_command(format!("fwc zones {zone} --policy"))
+                .with_next_command("Contact policy administrator");
+        }
+    }
+
+    diag
+}
+
+/// Format a blocker diagnosis as TOON lines.
+pub fn format_diagnosis_toon(diag: &BlockerDiagnosis) -> Vec<String> {
+    let mut lines = Vec::new();
+    lines.push(format!("[{}] {}", diag.fcp_err_code, diag.summary));
+    lines.push(format!("  Remedy: {}", diag.remedy));
+
+    if let Some(obj) = &diag.failed_object {
+        lines.push(format!("  Failed object: {obj}"));
+    }
+    if diag.is_freshness_issue {
+        lines.push("  Note: This may be a freshness issue — try refreshing first.".into());
+    }
+    if !diag.next_commands.is_empty() {
+        lines.push("  Next steps:".into());
+        for cmd in &diag.next_commands {
+            lines.push(format!("    $ {cmd}"));
+        }
     }
 
     lines
@@ -1590,7 +1841,11 @@ pub struct CapabilityGapAnalysis {
 }
 
 impl CapabilityGapAnalysis {
-    pub fn allowed(connector: impl Into<String>, operation: impl Into<String>, zone: impl Into<String>) -> Self {
+    pub fn allowed(
+        connector: impl Into<String>,
+        operation: impl Into<String>,
+        zone: impl Into<String>,
+    ) -> Self {
         Self {
             verdict: AuthorizationVerdict::Allowed,
             blockers: Vec::new(),
@@ -1629,7 +1884,10 @@ impl CapabilityGapAnalysis {
 
     /// Count of blockers by type.
     pub fn blocker_count_by_type(&self, bt: BlockerType) -> usize {
-        self.blockers.iter().filter(|b| b.blocker_type == bt).count()
+        self.blockers
+            .iter()
+            .filter(|b| b.blocker_type == bt)
+            .count()
     }
 }
 
@@ -1688,11 +1946,16 @@ pub fn analyze_capability_gap(
     // Check for missing capabilities.
     for req in required_capabilities {
         if !existing_capabilities.contains(req) {
-            analysis = analysis.with_blocker(TypedBlocker::new(
-                BlockerType::MissingCapability,
-                format!("capability '{req}' required for {connector}.{operation} in {zone}"),
-                BlockerSeverity::Error,
-            ).with_remediation(format!("fwc access request {connector} {operation} --zone {zone}")));
+            analysis = analysis.with_blocker(
+                TypedBlocker::new(
+                    BlockerType::MissingCapability,
+                    format!("capability '{req}' required for {connector}.{operation} in {zone}"),
+                    BlockerSeverity::Error,
+                )
+                .with_remediation(format!(
+                    "fwc access request {connector} {operation} --zone {zone}"
+                )),
+            );
 
             diff = diff.with_entry(
                 GrantDiffEntry::new(req, GrantScope::Operation, GrantDiffAction::Add, connector)
@@ -1705,11 +1968,16 @@ pub fn analyze_capability_gap(
     if let Some(ceiling_caps) = ceiling {
         for req in required_capabilities {
             if !ceiling_caps.contains(req) {
-                analysis = analysis.with_blocker(TypedBlocker::new(
-                    BlockerType::CeilingViolation,
-                    format!("capability '{req}' exceeds zone ceiling for {zone}"),
-                    BlockerSeverity::Critical,
-                ).with_remediation(format!("Request a zone policy exception or move to a zone that supports '{req}'")));
+                analysis = analysis.with_blocker(
+                    TypedBlocker::new(
+                        BlockerType::CeilingViolation,
+                        format!("capability '{req}' exceeds zone ceiling for {zone}"),
+                        BlockerSeverity::Critical,
+                    )
+                    .with_remediation(format!(
+                        "Request a zone policy exception or move to a zone that supports '{req}'"
+                    )),
+                );
             }
         }
     }
@@ -1718,20 +1986,28 @@ pub fn analyze_capability_gap(
     if required_capabilities.len() > 3 {
         let narrower: Vec<String> = required_capabilities.iter().take(2).cloned().collect();
         let alt = GrantDiffAlternative::new(
-            format!("Request only essential capabilities: {}", narrower.join(", ")),
+            format!(
+                "Request only essential capabilities: {}",
+                narrower.join(", ")
+            ),
             GrantScope::Operation,
             narrower.join(", "),
             "Smaller grant set reduces risk and is easier to approve",
         );
         diff = diff.with_alternative(alt);
-        analysis = analysis.with_blocker(TypedBlocker::new(
-            BlockerType::OverBroadRequest,
-            format!(
-                "requesting {} capabilities when fewer may suffice",
-                required_capabilities.len()
+        analysis = analysis.with_blocker(
+            TypedBlocker::new(
+                BlockerType::OverBroadRequest,
+                format!(
+                    "requesting {} capabilities when fewer may suffice",
+                    required_capabilities.len()
+                ),
+                BlockerSeverity::Warning,
+            )
+            .with_remediation(
+                "Consider requesting only the capabilities needed for the specific operation",
             ),
-            BlockerSeverity::Warning,
-        ).with_remediation("Consider requesting only the capabilities needed for the specific operation"));
+        );
     }
 
     // Zone mismatch — check if zone is the expected format.
@@ -1747,8 +2023,12 @@ pub fn analyze_capability_gap(
 
     // Add follow-up commands.
     if analysis.verdict != AuthorizationVerdict::Allowed {
-        analysis = analysis.with_follow_up(format!("fwc access check {connector} {operation} --zone {zone}"));
-        analysis = analysis.with_follow_up(format!("fwc access plan {connector} {operation} --zone {zone}"));
+        analysis = analysis.with_follow_up(format!(
+            "fwc access check {connector} {operation} --zone {zone}"
+        ));
+        analysis = analysis.with_follow_up(format!(
+            "fwc access plan {connector} {operation} --zone {zone}"
+        ));
     }
 
     analysis
@@ -1781,7 +2061,11 @@ pub fn format_gap_analysis_toon(analysis: &CapabilityGapAnalysis) -> Vec<String>
         lines.push(format!(
             "  Grant diff ({} change{}):",
             analysis.grant_diff.change_count(),
-            if analysis.grant_diff.change_count() == 1 { "" } else { "s" }
+            if analysis.grant_diff.change_count() == 1 {
+                ""
+            } else {
+                "s"
+            }
         ));
         for entry in &analysis.grant_diff.entries {
             lines.push(format!(
@@ -1947,8 +2231,7 @@ mod tests {
 
     #[test]
     fn check_args_with_context() {
-        let a = AccessCheckArgs::new("github", "list_repos")
-            .with_context("env", "staging");
+        let a = AccessCheckArgs::new("github", "list_repos").with_context("env", "staging");
         assert_eq!(a.context.get("env").unwrap(), "staging");
     }
 
@@ -2007,8 +2290,7 @@ mod tests {
 
     #[test]
     fn plan_args_context() {
-        let a = AccessPlanArgs::new("slack", "post_message")
-            .with_context("team", "engineering");
+        let a = AccessPlanArgs::new("slack", "post_message").with_context("team", "engineering");
         assert_eq!(a.context.get("team").unwrap(), "engineering");
     }
 
@@ -2264,8 +2546,7 @@ mod tests {
 
     #[test]
     fn plan_step_with_side_effect() {
-        let s = AccessPlanStep::new("create", "db", 2)
-            .with_side_effect("writes record");
+        let s = AccessPlanStep::new("create", "db", 2).with_side_effect("writes record");
         assert!(s.has_side_effects());
         assert_eq!(s.side_effects.len(), 1);
     }
@@ -2292,8 +2573,7 @@ mod tests {
 
     #[test]
     fn plan_with_step() {
-        let p = AccessPlan::new("gh", "list")
-            .with_step(AccessPlanStep::new("a", "b", 0));
+        let p = AccessPlan::new("gh", "list").with_step(AccessPlanStep::new("a", "b", 0));
         assert_eq!(p.step_count(), 1);
     }
 
@@ -2314,8 +2594,7 @@ mod tests {
 
     #[test]
     fn plan_prerequisites() {
-        let p = AccessPlan::new("gh", "list")
-            .with_prerequisite("creds configured");
+        let p = AccessPlan::new("gh", "list").with_prerequisite("creds configured");
         assert!(p.has_prerequisites());
         assert_eq!(p.prerequisites.len(), 1);
     }
@@ -2343,8 +2622,7 @@ mod tests {
 
     #[test]
     fn plan_validate_step_order_bad() {
-        let p = AccessPlan::new("gh", "list")
-            .with_step(AccessPlanStep::new("a", "b", 5));
+        let p = AccessPlan::new("gh", "list").with_step(AccessPlanStep::new("a", "b", 5));
         let errs = p.validate_step_order();
         assert_eq!(errs.len(), 1);
         assert!(errs[0].contains("index 5"));
@@ -2366,8 +2644,7 @@ mod tests {
     #[test]
     fn grant_non_revocable() {
         let exp = Utc::now() + Duration::hours(1);
-        let g = AccessGrant::new("grt-1", "gh", "list", GrantScope::Operation, exp)
-            .non_revocable();
+        let g = AccessGrant::new("grt-1", "gh", "list", GrantScope::Operation, exp).non_revocable();
         assert!(!g.revocable);
     }
 
@@ -2436,8 +2713,20 @@ mod tests {
         let future = Utc::now() + Duration::hours(1);
         let past = Utc::now() - Duration::hours(1);
         let b = AccessBundle::new("bnd-1")
-            .with_grant(AccessGrant::new("g1", "c", "o", GrantScope::Operation, future))
-            .with_grant(AccessGrant::new("g2", "c", "o", GrantScope::Operation, past));
+            .with_grant(AccessGrant::new(
+                "g1",
+                "c",
+                "o",
+                GrantScope::Operation,
+                future,
+            ))
+            .with_grant(AccessGrant::new(
+                "g2",
+                "c",
+                "o",
+                GrantScope::Operation,
+                past,
+            ));
         assert_eq!(b.active_grant_count(), 1);
     }
 
@@ -2581,8 +2870,7 @@ mod tests {
 
     #[test]
     fn check_access_restricted_zone_blocked() {
-        let args = AccessCheckArgs::new("github", "list_repos")
-            .with_zone("restricted-prod");
+        let args = AccessCheckArgs::new("github", "list_repos").with_zone("restricted-prod");
         let result = check_access(&args).unwrap();
         assert!(!result.allowed);
         assert_eq!(result.blocking_count(), 1);
@@ -2591,8 +2879,8 @@ mod tests {
 
     #[test]
     fn check_access_production_warning() {
-        let args = AccessCheckArgs::new("github", "list_repos")
-            .with_context("environment", "production");
+        let args =
+            AccessCheckArgs::new("github", "list_repos").with_context("environment", "production");
         let result = check_access(&args).unwrap();
         assert!(result.allowed); // warning does not block
         assert_eq!(result.warning_count(), 1);
@@ -2608,16 +2896,15 @@ mod tests {
 
     #[test]
     fn check_access_normal_zone_ok() {
-        let args = AccessCheckArgs::new("github", "list_repos")
-            .with_zone("us-west-2");
+        let args = AccessCheckArgs::new("github", "list_repos").with_zone("us-west-2");
         let result = check_access(&args).unwrap();
         assert!(result.allowed);
     }
 
     #[test]
     fn check_access_staging_env_ok() {
-        let args = AccessCheckArgs::new("github", "list_repos")
-            .with_context("environment", "staging");
+        let args =
+            AccessCheckArgs::new("github", "list_repos").with_context("environment", "staging");
         let result = check_access(&args).unwrap();
         assert!(result.allowed);
         assert_eq!(result.warning_count(), 0);
@@ -2658,8 +2945,8 @@ mod tests {
 
     #[test]
     fn plan_access_production_prereq() {
-        let args = AccessPlanArgs::new("github", "list_repos")
-            .with_context("environment", "production");
+        let args =
+            AccessPlanArgs::new("github", "list_repos").with_context("environment", "production");
         let plan = plan_access(&args).unwrap();
         assert!(plan.has_prerequisites());
     }
@@ -2882,8 +3169,7 @@ mod tests {
 
     #[test]
     fn format_plan_toon_prerequisites() {
-        let plan = AccessPlan::new("gh", "op")
-            .with_prerequisite("manager approval");
+        let plan = AccessPlan::new("gh", "op").with_prerequisite("manager approval");
         let lines = format_plan_toon(&plan);
         assert!(lines.iter().any(|l| l.contains("Prerequisites")));
         assert!(lines.iter().any(|l| l.contains("manager approval")));
@@ -2891,8 +3177,8 @@ mod tests {
 
     #[test]
     fn format_plan_toon_duration() {
-        let plan = AccessPlan::new("gh", "op")
-            .with_estimated_duration(std::time::Duration::from_secs(30));
+        let plan =
+            AccessPlan::new("gh", "op").with_estimated_duration(std::time::Duration::from_secs(30));
         let lines = format_plan_toon(&plan);
         assert!(lines.iter().any(|l| l.contains("30")));
     }
@@ -2909,8 +3195,7 @@ mod tests {
 
     #[test]
     fn format_bundle_toon_basic() {
-        let b = AccessBundle::new("bnd-1")
-            .with_status(BundleStatus::Active);
+        let b = AccessBundle::new("bnd-1").with_status(BundleStatus::Active);
         let lines = format_bundle_toon(&b);
         assert!(lines[0].contains("Access Bundle"));
         assert!(lines.iter().any(|l| l.contains("active")));
@@ -2928,16 +3213,14 @@ mod tests {
 
     #[test]
     fn format_bundle_toon_justification() {
-        let b = AccessBundle::new("bnd-1")
-            .with_justification("need access");
+        let b = AccessBundle::new("bnd-1").with_justification("need access");
         let lines = format_bundle_toon(&b);
         assert!(lines.iter().any(|l| l.contains("Justification")));
     }
 
     #[test]
     fn format_bundle_toon_receipt() {
-        let b = AccessBundle::new("bnd-1")
-            .with_receipt("rcpt-xyz");
+        let b = AccessBundle::new("bnd-1").with_receipt("rcpt-xyz");
         let lines = format_bundle_toon(&b);
         assert!(lines.iter().any(|l| l.contains("rcpt-xyz")));
     }
@@ -2965,8 +3248,7 @@ mod tests {
     #[test]
     fn format_grant_toon_non_revocable() {
         let exp = Utc::now() + Duration::hours(1);
-        let g = AccessGrant::new("grt-1", "gh", "list", GrantScope::Operation, exp)
-            .non_revocable();
+        let g = AccessGrant::new("grt-1", "gh", "list", GrantScope::Operation, exp).non_revocable();
         let lines = format_grant_toon(&g);
         assert!(lines.iter().any(|l| l.contains("false")));
     }
@@ -3042,8 +3324,8 @@ mod tests {
 
     #[test]
     fn format_inspection_toon_with_audit() {
-        let e = AuditEntry::new(AuditAction::Grant, "admin", "github.list")
-            .with_details("approved");
+        let e =
+            AuditEntry::new(AuditAction::Grant, "admin", "github.list").with_details("approved");
         let i = AccessInspection::new("github").with_audit_entry(e);
         let lines = format_inspection_toon(&i);
         assert!(lines.iter().any(|l| l.contains("grant")));
@@ -3073,8 +3355,7 @@ mod tests {
 
     #[test]
     fn format_audit_entry_toon_with_details() {
-        let e = AuditEntry::new(AuditAction::Grant, "sys", "target")
-            .with_details("auto approved");
+        let e = AuditEntry::new(AuditAction::Grant, "sys", "target").with_details("auto approved");
         let lines = format_audit_entry_toon(&e);
         assert!(lines.len() >= 2);
         assert!(lines[1].contains("auto approved"));
@@ -3162,8 +3443,7 @@ mod tests {
 
     #[test]
     fn audit_entry_serde() {
-        let e = AuditEntry::new(AuditAction::Grant, "admin", "gh")
-            .with_details("ok");
+        let e = AuditEntry::new(AuditAction::Grant, "admin", "gh").with_details("ok");
         let json = serde_json::to_string(&e).unwrap();
         let back: AuditEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(back.details.as_deref(), Some("ok"));
@@ -3194,8 +3474,7 @@ mod tests {
 
     #[test]
     fn plan_access_no_production_prereqs() {
-        let args = AccessPlanArgs::new("gh", "list")
-            .with_context("environment", "staging");
+        let args = AccessPlanArgs::new("gh", "list").with_context("environment", "staging");
         let plan = plan_access(&args).unwrap();
         assert!(!plan.has_prerequisites());
     }
@@ -3204,8 +3483,20 @@ mod tests {
     fn bundle_all_grants_expired() {
         let past = Utc::now() - Duration::hours(1);
         let b = AccessBundle::new("bnd-1")
-            .with_grant(AccessGrant::new("g1", "c", "o", GrantScope::Operation, past))
-            .with_grant(AccessGrant::new("g2", "c", "o", GrantScope::Operation, past));
+            .with_grant(AccessGrant::new(
+                "g1",
+                "c",
+                "o",
+                GrantScope::Operation,
+                past,
+            ))
+            .with_grant(AccessGrant::new(
+                "g2",
+                "c",
+                "o",
+                GrantScope::Operation,
+                past,
+            ));
         assert_eq!(b.active_grant_count(), 0);
         assert_eq!(b.grant_count(), 2);
     }
@@ -3228,10 +3519,8 @@ mod tests {
 
     #[test]
     fn format_check_toon_lines_count_blocked() {
-        let blockers = vec![
-            AccessBlocker::new("a", "msg", BlockerSeverity::Error)
-                .with_remediation("fix"),
-        ];
+        let blockers =
+            vec![AccessBlocker::new("a", "msg", BlockerSeverity::Error).with_remediation("fix")];
         let r = AccessCheckResult::blocked("gh", "op", blockers);
         let lines = format_check_toon(&r);
         assert!(lines.len() >= 6);
@@ -3283,7 +3572,12 @@ mod tests {
 
     #[test]
     fn blocker_all_severities() {
-        for sev in [BlockerSeverity::Info, BlockerSeverity::Warning, BlockerSeverity::Error, BlockerSeverity::Critical] {
+        for sev in [
+            BlockerSeverity::Info,
+            BlockerSeverity::Warning,
+            BlockerSeverity::Error,
+            BlockerSeverity::Critical,
+        ] {
             let b = AccessBlocker::new("code", "msg", sev);
             assert_eq!(b.severity, sev);
             assert!(!b.code.is_empty());
@@ -3304,7 +3598,12 @@ mod tests {
 
     #[test]
     fn grant_scope_all_variants_label() {
-        let scopes = [GrantScope::Operation, GrantScope::Connector, GrantScope::Zone, GrantScope::Global];
+        let scopes = [
+            GrantScope::Operation,
+            GrantScope::Connector,
+            GrantScope::Zone,
+            GrantScope::Global,
+        ];
         for s in scopes {
             assert!(!s.label().is_empty());
         }
@@ -3313,8 +3612,12 @@ mod tests {
     #[test]
     fn bundle_status_all_variants_label() {
         let statuses = [
-            BundleStatus::Pending, BundleStatus::Active, BundleStatus::Revoked,
-            BundleStatus::Expired, BundleStatus::Denied, BundleStatus::Partial,
+            BundleStatus::Pending,
+            BundleStatus::Active,
+            BundleStatus::Revoked,
+            BundleStatus::Expired,
+            BundleStatus::Denied,
+            BundleStatus::Partial,
         ];
         for s in statuses {
             assert!(!s.label().is_empty());
@@ -3324,12 +3627,1008 @@ mod tests {
     #[test]
     fn audit_action_all_variants_label() {
         let actions = [
-            AuditAction::Check, AuditAction::Request, AuditAction::Grant,
-            AuditAction::Deny, AuditAction::Revoke, AuditAction::Attach,
-            AuditAction::Resume, AuditAction::Expire,
+            AuditAction::Check,
+            AuditAction::Request,
+            AuditAction::Grant,
+            AuditAction::Deny,
+            AuditAction::Revoke,
+            AuditAction::Attach,
+            AuditAction::Resume,
+            AuditAction::Expire,
         ];
         for a in actions {
             assert!(!a.label().is_empty());
         }
+    }
+
+    // ── AuthorizationVerdict ────────────────────────────────────────
+
+    #[test]
+    fn verdict_labels() {
+        assert_eq!(AuthorizationVerdict::Allowed.label(), "allowed");
+        assert_eq!(
+            AuthorizationVerdict::ConditionallyAllowed.label(),
+            "conditionally_allowed"
+        );
+        assert_eq!(AuthorizationVerdict::Blocked.label(), "blocked");
+    }
+
+    #[test]
+    fn verdict_display() {
+        assert_eq!(format!("{}", AuthorizationVerdict::Allowed), "allowed");
+        assert_eq!(format!("{}", AuthorizationVerdict::Blocked), "blocked");
+    }
+
+    #[test]
+    fn verdict_serde_roundtrip() {
+        let v = AuthorizationVerdict::ConditionallyAllowed;
+        let json = serde_json::to_string(&v).unwrap();
+        let back: AuthorizationVerdict = serde_json::from_str(&json).unwrap();
+        assert_eq!(v, back);
+    }
+
+    // ── BlockerType ─────────────────────────────────────────────────
+
+    #[test]
+    fn blocker_type_fcp_err_codes() {
+        assert_eq!(
+            BlockerType::MissingCapability.label(),
+            "FCP_ERR_MISSING_CAPABILITY"
+        );
+        assert_eq!(
+            BlockerType::CeilingViolation.label(),
+            "FCP_ERR_CEILING_VIOLATION"
+        );
+        assert_eq!(BlockerType::ApprovalGated.label(), "FCP_ERR_APPROVAL_GATED");
+        assert_eq!(BlockerType::ZoneMismatch.label(), "FCP_ERR_ZONE_MISMATCH");
+        assert_eq!(BlockerType::OverBroadRequest.label(), "FCP_ERR_OVER_BROAD");
+        assert_eq!(
+            BlockerType::ExpiredCredential.label(),
+            "FCP_ERR_EXPIRED_CREDENTIAL"
+        );
+        assert_eq!(BlockerType::PolicyDenied.label(), "FCP_ERR_POLICY_DENIED");
+    }
+
+    #[test]
+    fn blocker_type_display() {
+        assert_eq!(
+            format!("{}", BlockerType::MissingCapability),
+            "FCP_ERR_MISSING_CAPABILITY"
+        );
+    }
+
+    #[test]
+    fn blocker_type_serde_roundtrip() {
+        let bt = BlockerType::CeilingViolation;
+        let json = serde_json::to_string(&bt).unwrap();
+        let back: BlockerType = serde_json::from_str(&json).unwrap();
+        assert_eq!(bt, back);
+    }
+
+    // ── GrantDiffEntry ──────────────────────────────────────────────
+
+    #[test]
+    fn grant_diff_entry_new() {
+        let e = GrantDiffEntry::new(
+            "read",
+            GrantScope::Operation,
+            GrantDiffAction::Add,
+            "github",
+        );
+        assert_eq!(e.capability, "read");
+        assert_eq!(e.target, "github");
+        assert!(e.rationale.is_empty());
+    }
+
+    #[test]
+    fn grant_diff_entry_with_rationale() {
+        let e = GrantDiffEntry::new(
+            "write",
+            GrantScope::Connector,
+            GrantDiffAction::Modify,
+            "slack",
+        )
+        .with_rationale("Need write for messages");
+        assert_eq!(e.rationale, "Need write for messages");
+    }
+
+    #[test]
+    fn grant_diff_action_display() {
+        assert_eq!(format!("{}", GrantDiffAction::Add), "add");
+        assert_eq!(format!("{}", GrantDiffAction::Modify), "modify");
+        assert_eq!(format!("{}", GrantDiffAction::Narrow), "narrow");
+    }
+
+    // ── GrantDiff ───────────────────────────────────────────────────
+
+    #[test]
+    fn grant_diff_empty() {
+        let d = GrantDiff::new();
+        assert_eq!(d.change_count(), 0);
+        assert!(d.is_minimal);
+        assert!(!d.has_alternatives());
+    }
+
+    #[test]
+    fn grant_diff_with_entries() {
+        let d = GrantDiff::new()
+            .with_entry(GrantDiffEntry::new(
+                "a",
+                GrantScope::Operation,
+                GrantDiffAction::Add,
+                "t",
+            ))
+            .with_entry(GrantDiffEntry::new(
+                "b",
+                GrantScope::Operation,
+                GrantDiffAction::Add,
+                "t",
+            ));
+        assert_eq!(d.change_count(), 2);
+        assert!(d.is_minimal);
+    }
+
+    #[test]
+    fn grant_diff_with_alternative() {
+        let d = GrantDiff::new().with_alternative(GrantDiffAlternative::new(
+            "Smaller",
+            GrantScope::Operation,
+            "read",
+            "Less risky",
+        ));
+        assert!(!d.is_minimal);
+        assert!(d.has_alternatives());
+    }
+
+    #[test]
+    fn grant_diff_default() {
+        let d = GrantDiff::default();
+        assert_eq!(d.change_count(), 0);
+    }
+
+    #[test]
+    fn grant_diff_serde_roundtrip() {
+        let d = GrantDiff::new().with_entry(GrantDiffEntry::new(
+            "cap",
+            GrantScope::Zone,
+            GrantDiffAction::Add,
+            "gh",
+        ));
+        let json = serde_json::to_string(&d).unwrap();
+        let back: GrantDiff = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.entries.len(), 1);
+        assert_eq!(back.entries[0].capability, "cap");
+    }
+
+    // ── GrantDiffAlternative ────────────────────────────────────────
+
+    #[test]
+    fn alternative_new() {
+        let a = GrantDiffAlternative::new("desc", GrantScope::Operation, "read", "safer");
+        assert_eq!(a.description, "desc");
+        assert_eq!(a.capability, "read");
+        assert_eq!(a.reason, "safer");
+    }
+
+    // ── TypedBlocker ────────────────────────────────────────────────
+
+    #[test]
+    fn typed_blocker_new() {
+        let b = TypedBlocker::new(
+            BlockerType::MissingCapability,
+            "missing",
+            BlockerSeverity::Error,
+        );
+        assert_eq!(b.blocker_type, BlockerType::MissingCapability);
+        assert_eq!(b.message, "missing");
+        assert!(b.remediation.is_empty());
+    }
+
+    #[test]
+    fn typed_blocker_with_remediation() {
+        let b = TypedBlocker::new(
+            BlockerType::ZoneMismatch,
+            "bad zone",
+            BlockerSeverity::Error,
+        )
+        .with_remediation("Use z:work");
+        assert_eq!(b.remediation.len(), 1);
+        assert_eq!(b.remediation[0], "Use z:work");
+    }
+
+    #[test]
+    fn typed_blocker_serde_roundtrip() {
+        let b = TypedBlocker::new(
+            BlockerType::ApprovalGated,
+            "needs approval",
+            BlockerSeverity::Warning,
+        );
+        let json = serde_json::to_string(&b).unwrap();
+        let back: TypedBlocker = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.blocker_type, BlockerType::ApprovalGated);
+    }
+
+    // ── CapabilityGapAnalysis ───────────────────────────────────────
+
+    #[test]
+    fn gap_analysis_allowed() {
+        let a = CapabilityGapAnalysis::allowed("gh", "read", "z:work");
+        assert_eq!(a.verdict, AuthorizationVerdict::Allowed);
+        assert!(a.blockers.is_empty());
+        assert_eq!(a.grant_diff.change_count(), 0);
+    }
+
+    #[test]
+    fn gap_analysis_with_blocker_becomes_blocked() {
+        let a = CapabilityGapAnalysis::allowed("gh", "write", "z:work").with_blocker(
+            TypedBlocker::new(
+                BlockerType::MissingCapability,
+                "missing",
+                BlockerSeverity::Error,
+            ),
+        );
+        assert_eq!(a.verdict, AuthorizationVerdict::Blocked);
+        assert_eq!(a.blockers.len(), 1);
+    }
+
+    #[test]
+    fn gap_analysis_approval_gated_is_conditional() {
+        let a = CapabilityGapAnalysis::allowed("gh", "admin", "z:work").with_blocker(
+            TypedBlocker::new(
+                BlockerType::ApprovalGated,
+                "needs approval",
+                BlockerSeverity::Warning,
+            ),
+        );
+        assert_eq!(a.verdict, AuthorizationVerdict::ConditionallyAllowed);
+    }
+
+    #[test]
+    fn gap_analysis_has_blocker_type() {
+        let a = CapabilityGapAnalysis::allowed("gh", "op", "z:work").with_blocker(
+            TypedBlocker::new(BlockerType::ZoneMismatch, "msg", BlockerSeverity::Error),
+        );
+        assert!(a.has_blocker_type(BlockerType::ZoneMismatch));
+        assert!(!a.has_blocker_type(BlockerType::MissingCapability));
+    }
+
+    #[test]
+    fn gap_analysis_blocker_count_by_type() {
+        let a = CapabilityGapAnalysis::allowed("gh", "op", "z:work")
+            .with_blocker(TypedBlocker::new(
+                BlockerType::MissingCapability,
+                "a",
+                BlockerSeverity::Error,
+            ))
+            .with_blocker(TypedBlocker::new(
+                BlockerType::MissingCapability,
+                "b",
+                BlockerSeverity::Error,
+            ))
+            .with_blocker(TypedBlocker::new(
+                BlockerType::CeilingViolation,
+                "c",
+                BlockerSeverity::Critical,
+            ));
+        assert_eq!(a.blocker_count_by_type(BlockerType::MissingCapability), 2);
+        assert_eq!(a.blocker_count_by_type(BlockerType::CeilingViolation), 1);
+    }
+
+    #[test]
+    fn gap_analysis_with_follow_up() {
+        let a = CapabilityGapAnalysis::allowed("gh", "op", "z:work")
+            .with_follow_up("fwc access check gh op");
+        assert_eq!(a.follow_up_commands.len(), 1);
+    }
+
+    #[test]
+    fn gap_analysis_serde_roundtrip() {
+        let a =
+            CapabilityGapAnalysis::allowed("gh", "read", "z:work").with_blocker(TypedBlocker::new(
+                BlockerType::MissingCapability,
+                "msg",
+                BlockerSeverity::Error,
+            ));
+        let json = serde_json::to_string(&a).unwrap();
+        let back: CapabilityGapAnalysis = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.verdict, AuthorizationVerdict::Blocked);
+        assert_eq!(back.blockers.len(), 1);
+    }
+
+    // ── analyze_capability_gap ──────────────────────────────────────
+
+    #[test]
+    fn analyze_gap_all_caps_present() {
+        let existing = vec!["read".into(), "write".into()];
+        let required = vec!["read".into()];
+        let a = analyze_capability_gap("gh", "issues", "z:work", &existing, &required, None);
+        assert_eq!(a.verdict, AuthorizationVerdict::Allowed);
+        assert!(a.blockers.is_empty());
+    }
+
+    #[test]
+    fn analyze_gap_missing_capability() {
+        let existing = vec!["read".into()];
+        let required = vec!["read".into(), "write".into()];
+        let a = analyze_capability_gap("gh", "issues", "z:work", &existing, &required, None);
+        assert_eq!(a.verdict, AuthorizationVerdict::Blocked);
+        assert!(a.has_blocker_type(BlockerType::MissingCapability));
+        assert_eq!(a.grant_diff.change_count(), 1);
+        assert_eq!(a.grant_diff.entries[0].capability, "write");
+    }
+
+    #[test]
+    fn analyze_gap_ceiling_violation() {
+        let existing: Vec<String> = vec![];
+        let required = vec!["admin".into()];
+        let ceiling = vec!["read".into(), "write".into()];
+        let a = analyze_capability_gap(
+            "gh",
+            "admin_op",
+            "z:work",
+            &existing,
+            &required,
+            Some(&ceiling),
+        );
+        assert!(a.has_blocker_type(BlockerType::CeilingViolation));
+        assert!(a.has_blocker_type(BlockerType::MissingCapability));
+    }
+
+    #[test]
+    fn analyze_gap_zone_mismatch() {
+        let existing = vec!["read".into()];
+        let required = vec!["read".into()];
+        let a = analyze_capability_gap("gh", "issues", "invalid_zone", &existing, &required, None);
+        assert!(a.has_blocker_type(BlockerType::ZoneMismatch));
+    }
+
+    #[test]
+    fn analyze_gap_over_broad_request() {
+        let existing: Vec<String> = vec![];
+        let required: Vec<String> = vec!["a".into(), "b".into(), "c".into(), "d".into()];
+        let a = analyze_capability_gap("gh", "op", "z:work", &existing, &required, None);
+        assert!(a.has_blocker_type(BlockerType::OverBroadRequest));
+        assert!(a.grant_diff.has_alternatives());
+    }
+
+    #[test]
+    fn analyze_gap_over_broad_suggests_narrower() {
+        let existing: Vec<String> = vec![];
+        let required: Vec<String> = vec!["a".into(), "b".into(), "c".into(), "d".into()];
+        let a = analyze_capability_gap("gh", "op", "z:work", &existing, &required, None);
+        let alt = &a.grant_diff.alternatives[0];
+        assert!(alt.description.contains("essential"));
+        assert_eq!(alt.scope, GrantScope::Operation);
+    }
+
+    #[test]
+    fn analyze_gap_follow_up_commands_when_blocked() {
+        let existing: Vec<String> = vec![];
+        let required = vec!["write".into()];
+        let a = analyze_capability_gap("gh", "create", "z:work", &existing, &required, None);
+        assert!(!a.follow_up_commands.is_empty());
+        assert!(
+            a.follow_up_commands
+                .iter()
+                .any(|c| c.contains("fwc access"))
+        );
+    }
+
+    #[test]
+    fn analyze_gap_no_follow_up_when_allowed() {
+        let existing = vec!["read".into()];
+        let required = vec!["read".into()];
+        let a = analyze_capability_gap("gh", "list", "z:work", &existing, &required, None);
+        assert!(a.follow_up_commands.is_empty());
+    }
+
+    #[test]
+    fn analyze_gap_grant_diff_has_rationale() {
+        let existing: Vec<String> = vec![];
+        let required = vec!["write".into()];
+        let a = analyze_capability_gap("gh", "create", "z:work", &existing, &required, None);
+        assert!(!a.grant_diff.entries[0].rationale.is_empty());
+    }
+
+    #[test]
+    fn analyze_gap_multiple_missing_caps() {
+        let existing: Vec<String> = vec![];
+        let required = vec!["read".into(), "write".into(), "admin".into()];
+        let a = analyze_capability_gap("gh", "manage", "z:work", &existing, &required, None);
+        assert_eq!(a.blocker_count_by_type(BlockerType::MissingCapability), 3);
+        assert_eq!(a.grant_diff.change_count(), 3);
+    }
+
+    #[test]
+    fn analyze_gap_ceiling_no_extra_for_present_caps() {
+        let existing = vec!["read".into()];
+        let required = vec!["read".into()];
+        let ceiling = vec!["read".into(), "write".into()];
+        let a =
+            analyze_capability_gap("gh", "list", "z:work", &existing, &required, Some(&ceiling));
+        assert_eq!(a.verdict, AuthorizationVerdict::Allowed);
+        assert!(!a.has_blocker_type(BlockerType::CeilingViolation));
+    }
+
+    // ── format_gap_analysis_toon ────────────────────────────────────
+
+    #[test]
+    fn format_gap_toon_allowed() {
+        let a = CapabilityGapAnalysis::allowed("gh", "read", "z:work");
+        let lines = format_gap_analysis_toon(&a);
+        assert!(lines[0].contains("allowed"));
+        assert!(lines.iter().any(|l| l.contains("No blockers")));
+    }
+
+    #[test]
+    fn format_gap_toon_blocked_shows_blocker() {
+        let a = CapabilityGapAnalysis::allowed("gh", "write", "z:work").with_blocker(
+            TypedBlocker::new(
+                BlockerType::MissingCapability,
+                "need write",
+                BlockerSeverity::Error,
+            )
+            .with_remediation("fwc access request gh write"),
+        );
+        let lines = format_gap_analysis_toon(&a);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("FCP_ERR_MISSING_CAPABILITY"))
+        );
+        assert!(lines.iter().any(|l| l.contains("Remediation")));
+    }
+
+    #[test]
+    fn format_gap_toon_shows_grant_diff() {
+        let a = CapabilityGapAnalysis::allowed("gh", "write", "z:work").with_diff(
+            GrantDiff::new().with_entry(GrantDiffEntry::new(
+                "write",
+                GrantScope::Operation,
+                GrantDiffAction::Add,
+                "gh",
+            )),
+        );
+        let lines = format_gap_analysis_toon(&a);
+        assert!(lines.iter().any(|l| l.contains("Grant diff")));
+        assert!(lines.iter().any(|l| l.contains("write")));
+    }
+
+    #[test]
+    fn format_gap_toon_shows_alternatives() {
+        let a = CapabilityGapAnalysis::allowed("gh", "op", "z:work").with_diff(
+            GrantDiff::new().with_alternative(GrantDiffAlternative::new(
+                "Use read only",
+                GrantScope::Operation,
+                "read",
+                "Safer",
+            )),
+        );
+        let lines = format_gap_analysis_toon(&a);
+        assert!(lines.iter().any(|l| l.contains("Safer alternatives")));
+    }
+
+    #[test]
+    fn format_gap_toon_shows_follow_up() {
+        let a = CapabilityGapAnalysis::allowed("gh", "op", "z:work")
+            .with_follow_up("fwc access check gh op");
+        let lines = format_gap_analysis_toon(&a);
+        assert!(lines.iter().any(|l| l.contains("fwc access check")));
+    }
+
+    // ── Bundle lifecycle: abandon, stale-context, validate_resume ────
+
+    #[test]
+    fn bundle_abandon_pending_ok() {
+        let mut b = AccessBundle::new("bnd-test");
+        assert!(b.abandon().is_ok());
+        assert_eq!(b.status, BundleStatus::Denied);
+    }
+
+    #[test]
+    fn bundle_abandon_active_fails() {
+        let mut b = AccessBundle::new("bnd-test").with_status(BundleStatus::Active);
+        assert!(b.abandon().is_err());
+        assert_eq!(b.status, BundleStatus::Active);
+    }
+
+    #[test]
+    fn bundle_abandon_revoked_fails() {
+        let mut b = AccessBundle::new("bnd-test").with_status(BundleStatus::Revoked);
+        assert!(b.abandon().is_err());
+    }
+
+    #[test]
+    fn bundle_stale_context_fresh() {
+        let b = AccessBundle::new("bnd-test");
+        assert!(!b.is_stale_context(Duration::hours(1)));
+    }
+
+    #[test]
+    fn bundle_stale_context_old() {
+        let mut b = AccessBundle::new("bnd-test");
+        b.created_at = Utc::now() - Duration::hours(2);
+        assert!(b.is_stale_context(Duration::hours(1)));
+    }
+
+    #[test]
+    fn bundle_stale_context_not_pending() {
+        let mut b = AccessBundle::new("bnd-test").with_status(BundleStatus::Active);
+        b.created_at = Utc::now() - Duration::hours(2);
+        assert!(!b.is_stale_context(Duration::hours(1)));
+    }
+
+    #[test]
+    fn validate_resume_active_ok() {
+        let b = AccessBundle::new("bnd-test").with_status(BundleStatus::Active);
+        assert!(b.validate_resume().is_ok());
+    }
+
+    #[test]
+    fn validate_resume_partial_ok() {
+        let b = AccessBundle::new("bnd-test").with_status(BundleStatus::Partial);
+        assert!(b.validate_resume().is_ok());
+    }
+
+    #[test]
+    fn validate_resume_pending_err() {
+        let b = AccessBundle::new("bnd-test");
+        let err = b.validate_resume().unwrap_err();
+        assert!(err.contains("pending"));
+    }
+
+    #[test]
+    fn validate_resume_revoked_err() {
+        let b = AccessBundle::new("bnd-test").with_status(BundleStatus::Revoked);
+        let err = b.validate_resume().unwrap_err();
+        assert!(err.contains("revoked"));
+    }
+
+    #[test]
+    fn validate_resume_expired_err() {
+        let b = AccessBundle::new("bnd-test").with_status(BundleStatus::Expired);
+        let err = b.validate_resume().unwrap_err();
+        assert!(err.contains("expired"));
+    }
+
+    #[test]
+    fn validate_resume_denied_err() {
+        let b = AccessBundle::new("bnd-test").with_status(BundleStatus::Denied);
+        let err = b.validate_resume().unwrap_err();
+        assert!(err.contains("denied"));
+    }
+
+    #[test]
+    fn validate_resume_denied_has_guidance() {
+        let b = AccessBundle::new("bnd-test").with_status(BundleStatus::Denied);
+        let err = b.validate_resume().unwrap_err();
+        assert!(err.contains("request a new one"));
+    }
+
+    // ── RemedyFamily ────────────────────────────────────────────────
+
+    #[test]
+    fn remedy_family_labels() {
+        assert_eq!(RemedyFamily::Refresh.label(), "refresh");
+        assert_eq!(RemedyFamily::ReApprove.label(), "re-approve");
+        assert_eq!(RemedyFamily::ShrinkRequest.label(), "shrink-request");
+        assert_eq!(RemedyFamily::PolicyChange.label(), "policy-change");
+        assert_eq!(RemedyFamily::ZoneSwitch.label(), "zone-switch");
+        assert_eq!(RemedyFamily::WaitForExpiry.label(), "wait");
+    }
+
+    #[test]
+    fn remedy_family_display() {
+        assert_eq!(format!("{}", RemedyFamily::Refresh), "refresh");
+    }
+
+    #[test]
+    fn remedy_from_missing_capability() {
+        assert_eq!(
+            RemedyFamily::from_blocker(BlockerType::MissingCapability),
+            RemedyFamily::ReApprove
+        );
+    }
+
+    #[test]
+    fn remedy_from_ceiling_violation() {
+        assert_eq!(
+            RemedyFamily::from_blocker(BlockerType::CeilingViolation),
+            RemedyFamily::PolicyChange
+        );
+    }
+
+    #[test]
+    fn remedy_from_zone_mismatch() {
+        assert_eq!(
+            RemedyFamily::from_blocker(BlockerType::ZoneMismatch),
+            RemedyFamily::ZoneSwitch
+        );
+    }
+
+    #[test]
+    fn remedy_from_over_broad() {
+        assert_eq!(
+            RemedyFamily::from_blocker(BlockerType::OverBroadRequest),
+            RemedyFamily::ShrinkRequest
+        );
+    }
+
+    #[test]
+    fn remedy_from_expired_credential() {
+        assert_eq!(
+            RemedyFamily::from_blocker(BlockerType::ExpiredCredential),
+            RemedyFamily::Refresh
+        );
+    }
+
+    #[test]
+    fn remedy_serde_roundtrip() {
+        let r = RemedyFamily::PolicyChange;
+        let json = serde_json::to_string(&r).unwrap();
+        let back: RemedyFamily = serde_json::from_str(&json).unwrap();
+        assert_eq!(r, back);
+    }
+
+    // ── BlockerDiagnosis ────────────────────────────────────────────
+
+    #[test]
+    fn diagnosis_new() {
+        let d = BlockerDiagnosis::new(BlockerType::MissingCapability, "missing write");
+        assert_eq!(d.blocker_type, BlockerType::MissingCapability);
+        assert_eq!(d.fcp_err_code, "FCP_ERR_MISSING_CAPABILITY");
+        assert_eq!(d.remedy, RemedyFamily::ReApprove);
+        assert!(!d.is_freshness_issue);
+        assert!(d.failed_object.is_none());
+    }
+
+    #[test]
+    fn diagnosis_with_next_command() {
+        let d = BlockerDiagnosis::new(BlockerType::ZoneMismatch, "bad zone")
+            .with_next_command("fwc zones");
+        assert_eq!(d.next_commands.len(), 1);
+    }
+
+    #[test]
+    fn diagnosis_with_freshness() {
+        let d =
+            BlockerDiagnosis::new(BlockerType::ExpiredCredential, "expired").with_freshness_issue();
+        assert!(d.is_freshness_issue);
+    }
+
+    #[test]
+    fn diagnosis_with_failed_object() {
+        let d = BlockerDiagnosis::new(BlockerType::CeilingViolation, "ceiling")
+            .with_failed_object("zone ceiling for z:work");
+        assert_eq!(d.failed_object.as_deref(), Some("zone ceiling for z:work"));
+    }
+
+    #[test]
+    fn diagnosis_serde_roundtrip() {
+        let d = BlockerDiagnosis::new(BlockerType::PolicyDenied, "denied");
+        let json = serde_json::to_string(&d).unwrap();
+        let back: BlockerDiagnosis = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.blocker_type, BlockerType::PolicyDenied);
+        assert_eq!(back.remedy, RemedyFamily::PolicyChange);
+    }
+
+    // ── diagnose_blocker ────────────────────────────────────────────
+
+    #[test]
+    fn diagnose_missing_capability() {
+        let b = TypedBlocker::new(
+            BlockerType::MissingCapability,
+            "missing write",
+            BlockerSeverity::Error,
+        );
+        let d = diagnose_blocker(&b, "github", "issues.create", "z:work");
+        assert_eq!(d.remedy, RemedyFamily::ReApprove);
+        assert!(
+            d.next_commands
+                .iter()
+                .any(|c| c.contains("fwc access plan"))
+        );
+        assert!(
+            d.next_commands
+                .iter()
+                .any(|c| c.contains("fwc access request"))
+        );
+    }
+
+    #[test]
+    fn diagnose_ceiling_violation() {
+        let b = TypedBlocker::new(
+            BlockerType::CeilingViolation,
+            "exceeds ceiling",
+            BlockerSeverity::Critical,
+        );
+        let d = diagnose_blocker(&b, "github", "admin", "z:work");
+        assert_eq!(d.remedy, RemedyFamily::PolicyChange);
+        assert!(d.failed_object.is_some());
+        assert!(d.next_commands.iter().any(|c| c.contains("fwc zones")));
+    }
+
+    #[test]
+    fn diagnose_approval_gated() {
+        let b = TypedBlocker::new(
+            BlockerType::ApprovalGated,
+            "needs approval",
+            BlockerSeverity::Warning,
+        );
+        let d = diagnose_blocker(&b, "github", "delete", "z:work");
+        assert_eq!(d.remedy, RemedyFamily::ReApprove);
+        assert!(
+            d.next_commands
+                .iter()
+                .any(|c| c.contains("fwc access request"))
+        );
+        assert!(
+            d.next_commands
+                .iter()
+                .any(|c| c.contains("pending-approvals"))
+        );
+    }
+
+    #[test]
+    fn diagnose_zone_mismatch() {
+        let b = TypedBlocker::new(
+            BlockerType::ZoneMismatch,
+            "wrong zone",
+            BlockerSeverity::Error,
+        );
+        let d = diagnose_blocker(&b, "github", "read", "invalid");
+        assert_eq!(d.remedy, RemedyFamily::ZoneSwitch);
+        assert!(d.next_commands.iter().any(|c| c.contains("fwc zones")));
+    }
+
+    #[test]
+    fn diagnose_over_broad() {
+        let b = TypedBlocker::new(
+            BlockerType::OverBroadRequest,
+            "too many caps",
+            BlockerSeverity::Warning,
+        );
+        let d = diagnose_blocker(&b, "github", "manage", "z:work");
+        assert_eq!(d.remedy, RemedyFamily::ShrinkRequest);
+        assert!(
+            d.next_commands
+                .iter()
+                .any(|c| c.contains("fwc access plan"))
+        );
+    }
+
+    #[test]
+    fn diagnose_expired_credential() {
+        let b = TypedBlocker::new(
+            BlockerType::ExpiredCredential,
+            "token expired",
+            BlockerSeverity::Error,
+        );
+        let d = diagnose_blocker(&b, "github", "read", "z:work");
+        assert_eq!(d.remedy, RemedyFamily::Refresh);
+        assert!(d.is_freshness_issue);
+        assert!(d.failed_object.is_some());
+        assert!(d.next_commands.iter().any(|c| c.contains("fwc auth")));
+    }
+
+    #[test]
+    fn diagnose_policy_denied() {
+        let b = TypedBlocker::new(
+            BlockerType::PolicyDenied,
+            "policy forbids",
+            BlockerSeverity::Critical,
+        );
+        let d = diagnose_blocker(&b, "github", "admin", "z:private");
+        assert_eq!(d.remedy, RemedyFamily::PolicyChange);
+        assert!(d.failed_object.is_some());
+        assert!(d.next_commands.iter().any(|c| c.contains("fwc zones")));
+    }
+
+    // ── format_diagnosis_toon ───────────────────────────────────────
+
+    #[test]
+    fn format_diagnosis_toon_shows_code() {
+        let d = BlockerDiagnosis::new(BlockerType::MissingCapability, "missing");
+        let lines = format_diagnosis_toon(&d);
+        assert!(lines[0].contains("FCP_ERR_MISSING_CAPABILITY"));
+    }
+
+    #[test]
+    fn format_diagnosis_toon_shows_remedy() {
+        let d = BlockerDiagnosis::new(BlockerType::ZoneMismatch, "bad zone");
+        let lines = format_diagnosis_toon(&d);
+        assert!(lines.iter().any(|l| l.contains("zone-switch")));
+    }
+
+    #[test]
+    fn format_diagnosis_toon_shows_failed_object() {
+        let d = BlockerDiagnosis::new(BlockerType::CeilingViolation, "ceiling")
+            .with_failed_object("zone ceiling for z:work");
+        let lines = format_diagnosis_toon(&d);
+        assert!(lines.iter().any(|l| l.contains("zone ceiling for z:work")));
+    }
+
+    #[test]
+    fn format_diagnosis_toon_shows_freshness_note() {
+        let d =
+            BlockerDiagnosis::new(BlockerType::ExpiredCredential, "expired").with_freshness_issue();
+        let lines = format_diagnosis_toon(&d);
+        assert!(lines.iter().any(|l| l.contains("freshness")));
+    }
+
+    #[test]
+    fn format_diagnosis_toon_shows_next_steps() {
+        let d = BlockerDiagnosis::new(BlockerType::MissingCapability, "missing")
+            .with_next_command("fwc access plan gh op");
+        let lines = format_diagnosis_toon(&d);
+        assert!(lines.iter().any(|l| l.contains("fwc access plan")));
+    }
+
+    // ── Verification matrix: full path coverage ─────────────────────
+
+    #[test]
+    fn matrix_allowed_path() {
+        let existing = vec!["read".into(), "write".into()];
+        let required = vec!["read".into()];
+        let gap = analyze_capability_gap("gh", "list", "z:work", &existing, &required, None);
+        assert_eq!(gap.verdict, AuthorizationVerdict::Allowed);
+        assert!(gap.blockers.is_empty());
+        assert_eq!(gap.grant_diff.change_count(), 0);
+        // TOON output verifiable
+        let toon = format_gap_analysis_toon(&gap);
+        assert!(toon[0].contains("allowed"));
+    }
+
+    #[test]
+    fn matrix_approval_gated_path() {
+        let gap = CapabilityGapAnalysis::allowed("gh", "delete", "z:work").with_blocker(
+            TypedBlocker::new(
+                BlockerType::ApprovalGated,
+                "delete requires manager approval",
+                BlockerSeverity::Warning,
+            ),
+        );
+        assert_eq!(gap.verdict, AuthorizationVerdict::ConditionallyAllowed);
+        let diag = diagnose_blocker(&gap.blockers[0], "gh", "delete", "z:work");
+        assert_eq!(diag.remedy, RemedyFamily::ReApprove);
+        // JSON round-trips
+        let json = serde_json::to_string(&gap).unwrap();
+        let back: CapabilityGapAnalysis = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.verdict, AuthorizationVerdict::ConditionallyAllowed);
+    }
+
+    #[test]
+    fn matrix_denied_path() {
+        let gap = analyze_capability_gap("gh", "admin", "z:work", &[], &["admin".into()], None);
+        assert_eq!(gap.verdict, AuthorizationVerdict::Blocked);
+        let diag = diagnose_blocker(&gap.blockers[0], "gh", "admin", "z:work");
+        assert_eq!(diag.remedy, RemedyFamily::ReApprove);
+        let toon = format_gap_analysis_toon(&gap);
+        assert!(toon.iter().any(|l| l.contains("FCP_ERR")));
+    }
+
+    #[test]
+    fn matrix_stale_context_path() {
+        let mut bundle = AccessBundle::new("bnd-stale");
+        bundle.created_at = Utc::now() - Duration::hours(25);
+        assert!(bundle.is_stale_context(Duration::hours(24)));
+        assert!(bundle.validate_resume().is_err());
+    }
+
+    #[test]
+    fn matrix_superseded_path() {
+        let mut bundle = AccessBundle::new("bnd-old").with_status(BundleStatus::Active);
+        bundle.revoke();
+        assert_eq!(bundle.status, BundleStatus::Revoked);
+        let err = bundle.validate_resume().unwrap_err();
+        assert!(err.contains("revoked"));
+    }
+
+    #[test]
+    fn matrix_changed_context_expired() {
+        let mut bundle = AccessBundle::new("bnd-expired").with_status(BundleStatus::Active);
+        bundle.expire();
+        assert_eq!(bundle.status, BundleStatus::Expired);
+        let err = bundle.validate_resume().unwrap_err();
+        assert!(err.contains("expired"));
+    }
+
+    #[test]
+    fn matrix_cross_zone_path() {
+        let gap = analyze_capability_gap(
+            "gh",
+            "read",
+            "not-a-zone",
+            &["read".into()],
+            &["read".into()],
+            None,
+        );
+        assert!(gap.has_blocker_type(BlockerType::ZoneMismatch));
+        let diag = diagnose_blocker(&gap.blockers[0], "gh", "read", "not-a-zone");
+        assert_eq!(diag.remedy, RemedyFamily::ZoneSwitch);
+    }
+
+    #[test]
+    fn matrix_policy_conflict_path() {
+        let gap = CapabilityGapAnalysis::allowed("gh", "admin", "z:private").with_blocker(
+            TypedBlocker::new(
+                BlockerType::PolicyDenied,
+                "z:private policy forbids admin operations",
+                BlockerSeverity::Critical,
+            ),
+        );
+        assert_eq!(gap.verdict, AuthorizationVerdict::Blocked);
+        let diag = diagnose_blocker(&gap.blockers[0], "gh", "admin", "z:private");
+        assert_eq!(diag.remedy, RemedyFamily::PolicyChange);
+        let toon = format_diagnosis_toon(&diag);
+        assert!(toon.iter().any(|l| l.contains("FCP_ERR_POLICY_DENIED")));
+    }
+
+    #[test]
+    fn matrix_toon_json_parity() {
+        let gap = analyze_capability_gap("gh", "write", "z:work", &[], &["write".into()], None);
+        // TOON has the verdict
+        let toon = format_gap_analysis_toon(&gap);
+        assert!(toon[0].contains("blocked"));
+        // JSON has the same verdict
+        let json: serde_json::Value = serde_json::to_value(&gap).unwrap();
+        assert_eq!(json["verdict"], "blocked");
+        // Both have the blocker
+        assert!(
+            toon.iter()
+                .any(|l| l.contains("FCP_ERR_MISSING_CAPABILITY"))
+        );
+        assert!(
+            json["blockers"][0]["blocker_type"]
+                .as_str()
+                .unwrap()
+                .contains("missing_capability")
+        );
+    }
+
+    #[test]
+    fn matrix_all_blocker_types_have_diagnoses() {
+        let types = [
+            BlockerType::MissingCapability,
+            BlockerType::CeilingViolation,
+            BlockerType::ApprovalGated,
+            BlockerType::ZoneMismatch,
+            BlockerType::OverBroadRequest,
+            BlockerType::ExpiredCredential,
+            BlockerType::PolicyDenied,
+        ];
+        for bt in types {
+            let blocker = TypedBlocker::new(bt, "test", BlockerSeverity::Error);
+            let diag = diagnose_blocker(&blocker, "gh", "op", "z:work");
+            assert!(!diag.fcp_err_code.is_empty());
+            assert!(
+                !diag.next_commands.is_empty(),
+                "blocker type {bt} should have next commands"
+            );
+        }
+    }
+
+    #[test]
+    fn matrix_all_remedy_families_from_blockers() {
+        let remedies: Vec<RemedyFamily> = [
+            BlockerType::MissingCapability,
+            BlockerType::CeilingViolation,
+            BlockerType::ApprovalGated,
+            BlockerType::ZoneMismatch,
+            BlockerType::OverBroadRequest,
+            BlockerType::ExpiredCredential,
+            BlockerType::PolicyDenied,
+        ]
+        .iter()
+        .map(|bt| RemedyFamily::from_blocker(*bt))
+        .collect();
+        // We should have at least 4 distinct remedies.
+        let unique: std::collections::BTreeSet<String> =
+            remedies.iter().map(|r| r.label().to_owned()).collect();
+        assert!(
+            unique.len() >= 4,
+            "Expected at least 4 distinct remedies, got {}",
+            unique.len()
+        );
     }
 }

@@ -867,11 +867,7 @@ pub fn format_decision_guide_toon(entries: &[DecisionGuideEntry]) -> String {
     let _ = writeln!(out, "FWC Decision Guide: When to Use What");
     let _ = writeln!(out, "=====================================");
     let _ = writeln!(out);
-    let _ = writeln!(
-        out,
-        "{:<42} {:<40} {}",
-        "GOAL", "COMMAND", "SURFACE"
-    );
+    let _ = writeln!(out, "{:<42} {:<40} {}", "GOAL", "COMMAND", "SURFACE");
     for e in entries {
         let _ = writeln!(
             out,
@@ -1752,13 +1748,21 @@ mod tests {
     #[test]
     fn decision_guide_covers_invoke() {
         let guide = get_decision_guide();
-        assert!(guide.iter().any(|e| e.recommended_command.contains("invoke")));
+        assert!(
+            guide
+                .iter()
+                .any(|e| e.recommended_command.contains("invoke"))
+        );
     }
 
     #[test]
     fn decision_guide_covers_pipeline() {
         let guide = get_decision_guide();
-        assert!(guide.iter().any(|e| e.recommended_command.contains("pipeline")));
+        assert!(
+            guide
+                .iter()
+                .any(|e| e.recommended_command.contains("pipeline"))
+        );
     }
 
     #[test]

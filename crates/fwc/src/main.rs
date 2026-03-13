@@ -2327,13 +2327,16 @@ fn execute_passthrough_command(prepared: &PreparedCli) -> Result<Option<Executio
                 exit_code: ExitCode::SUCCESS,
             }))
         }
-        Commands::Audit(args) => {
-            audit_chain::run(args.clone())?;
-            Ok(Some(ExecutionOutcome {
-                text: String::new(),
-                exit_code: ExitCode::SUCCESS,
-            }))
-        }
+        Commands::Audit(args) => match &args.command {
+            audit_chain::AuditCommands::Matrix(_) | audit_chain::AuditCommands::Gaps(_) => Ok(None),
+            _ => {
+                audit_chain::run(args.clone())?;
+                Ok(Some(ExecutionOutcome {
+                    text: String::new(),
+                    exit_code: ExitCode::SUCCESS,
+                }))
+            }
+        },
         Commands::Manifest(args) => {
             manifest_cmd::run(args.clone())?;
             Ok(Some(ExecutionOutcome {
@@ -2971,7 +2974,7 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         Commands::Schema(args) => schema_dispatch(args, cli.host.as_deref())?,
         Commands::Examples(args) => examples_dispatch(args, cli.host.as_deref())?,
         Commands::SupplyChain(_) => passthrough_only_dispatch("supply-chain"),
-        Commands::Audit(_) => passthrough_only_dispatch("audit"),
+        Commands::Audit(args) => audit_dispatch(args)?,
         Commands::Manifest(_) => passthrough_only_dispatch("manifest"),
         Commands::Net(_) => passthrough_only_dispatch("net"),
         Commands::Trace(_) => passthrough_only_dispatch("trace"),
@@ -5503,7 +5506,9 @@ fn zones_dispatch(args: &ZonesArgs) -> Result<DispatchOutcome> {
                 connectors: Vec::new(),
                 capabilities: Vec::new(),
                 well_known: zone_id.as_str().starts_with("z:"),
-                policy_type: zone_scope::infer_policy_type(&zone_scope::ZoneId::from(zone_id.as_str())),
+                policy_type: zone_scope::infer_policy_type(&zone_scope::ZoneId::from(
+                    zone_id.as_str(),
+                )),
             });
         let policy = zone_policy_summary(&zone_info);
         let mut toon = zone_scope::format_zone_detail_toon(&zone_info);
@@ -5645,6 +5650,410 @@ fn format_zone_policy_toon(policy: &ZonePolicySummary) -> String {
         for constraint in &policy.constraints {
             let _ = writeln!(out, "    - {constraint}");
         }
+    }
+    out
+}
+
+#[derive(Debug, Serialize)]
+struct AuditGapReport {
+    connector: String,
+    crate_path: String,
+    connector_id: Option<String>,
+    readiness_level: String,
+    category: String,
+    severity: String,
+    message: String,
+}
+
+fn audit_dispatch(args: &audit_chain::AuditArgs) -> Result<DispatchOutcome> {
+    match &args.command {
+        audit_chain::AuditCommands::Matrix(matrix_args) => audit_matrix_dispatch(matrix_args),
+        audit_chain::AuditCommands::Gaps(gaps_args) => audit_gaps_dispatch(gaps_args),
+        _ => Ok(passthrough_only_dispatch("audit")),
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn audit_matrix_dispatch(args: &audit_chain::MatrixArgs) -> Result<DispatchOutcome> {
+    let connectors_root = match audit_connectors_root() {
+        Ok(root) => root,
+        Err(error) => {
+            return Ok(audit_connectors_root_error_dispatch(
+                "matrix",
+                args.connector.as_deref(),
+                &error,
+            ));
+        }
+    };
+    let matrix = audit::run_audit(&connectors_root)?;
+    let connectors_root_display = connectors_root.display().to_string();
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "audit");
+
+    if let Some(name) = args.connector.as_deref() {
+        let Some(entry) = matrix.connectors.get(name) else {
+            return Ok(DispatchOutcome {
+                payload: json!({
+                    "status": "error",
+                    "command": "audit",
+                    "subcommand": "matrix",
+                    "error": {
+                        "type": "connector-not-found",
+                        "message": format!("Connector `{name}` was not found in the audit matrix built from workspace manifests."),
+                        "recoverable": true,
+                    },
+                    "filters": {
+                        "connector": name,
+                    },
+                    "details": {
+                        "connectors_root": connectors_root_display,
+                        "available": matrix.connectors.keys().take(10).cloned().collect::<Vec<_>>(),
+                    },
+                    "next_actions": [
+                        "Run `fwc audit matrix` to inspect the full compliance matrix first.".to_owned(),
+                        "Use a connector directory name such as `github` or `slack`.".to_owned(),
+                    ],
+                }),
+                exit_code: CliExitCode::Validation,
+            });
+        };
+
+        let mut payload = json!({
+            "status": "ok",
+            "command": "audit",
+            "subcommand": "matrix",
+            "source": "workspace-manifests",
+            "mode": "offline-artifact",
+            "message": format!("Audited metadata readiness for connector `{name}` from workspace manifests."),
+            "generated_at": matrix.generated_at.clone(),
+            "connectors_root": connectors_root_display,
+            "filters": {
+                "connector": name,
+            },
+            "connector": entry,
+            "remediation_boundary": "The audit matrix reports metadata and readiness gaps only; it does not repair manifests or grant capabilities.",
+            "next_actions": [
+                format!("fwc audit gaps {name}"),
+                format!("fwc show {name} --offline"),
+            ],
+        });
+        payload["toon"] = json!(format_connector_audit_toon(entry));
+        envelope.inject_into(&mut payload);
+        return Ok(DispatchOutcome {
+            payload,
+            exit_code: CliExitCode::Success,
+        });
+    }
+
+    let mut payload = json!({
+        "status": "ok",
+        "command": "audit",
+        "subcommand": "matrix",
+        "source": "workspace-manifests",
+        "mode": "offline-artifact",
+        "message": format!(
+            "Audited {} connector manifest{} under `{}`.",
+            matrix.total_connectors,
+            if matrix.total_connectors == 1 { "" } else { "s" },
+            connectors_root_display
+        ),
+        "generated_at": matrix.generated_at.clone(),
+        "connectors_root": connectors_root_display.clone(),
+        "matrix": &matrix,
+        "remediation_boundary": "The audit matrix reports metadata and readiness gaps only; it does not repair manifests or grant capabilities.",
+        "next_actions": [
+            "Use `fwc audit matrix <connector>` for one connector's detailed readiness record.".to_owned(),
+            "Use `fwc audit gaps --blocking-only` to isolate blocking metadata debt.".to_owned(),
+        ],
+    });
+    payload["toon"] = json!(format_audit_matrix_toon(&matrix));
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Success,
+    })
+}
+
+#[allow(clippy::too_many_lines)]
+fn audit_gaps_dispatch(args: &audit_chain::GapsArgs) -> Result<DispatchOutcome> {
+    let connectors_root = match audit_connectors_root() {
+        Ok(root) => root,
+        Err(error) => {
+            return Ok(audit_connectors_root_error_dispatch(
+                "gaps",
+                args.connector.as_deref(),
+                &error,
+            ));
+        }
+    };
+    let matrix = audit::run_audit(&connectors_root)?;
+    let connectors_root_display = connectors_root.display().to_string();
+
+    if let Some(name) = args.connector.as_deref()
+        && !matrix.connectors.contains_key(name)
+    {
+        return Ok(DispatchOutcome {
+            payload: json!({
+                "status": "error",
+                "command": "audit",
+                "subcommand": "gaps",
+                "error": {
+                    "type": "connector-not-found",
+                    "message": format!("Connector `{name}` was not found in the audit gap report built from workspace manifests."),
+                    "recoverable": true,
+                },
+                "filters": {
+                    "connector": name,
+                    "blocking_only": args.blocking_only,
+                },
+                "details": {
+                    "connectors_root": connectors_root_display,
+                    "available": matrix.connectors.keys().take(10).cloned().collect::<Vec<_>>(),
+                },
+                "next_actions": [
+                    "Run `fwc audit matrix` to inspect the full connector inventory first.".to_owned(),
+                    "Use a connector directory name such as `github` or `slack`.".to_owned(),
+                ],
+            }),
+            exit_code: CliExitCode::Validation,
+        });
+    }
+
+    let gap_reports = audit_gap_reports(&matrix, args.connector.as_deref(), args.blocking_only);
+    let blocking_count = gap_reports
+        .iter()
+        .filter(|gap| gap.severity == "blocking")
+        .count();
+    let degraded_count = gap_reports
+        .iter()
+        .filter(|gap| gap.severity == "degraded")
+        .count();
+    let cosmetic_count = gap_reports
+        .iter()
+        .filter(|gap| gap.severity == "cosmetic")
+        .count();
+    let affected_connectors = gap_reports
+        .iter()
+        .map(|gap| gap.connector.as_str())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "audit");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "audit",
+        "subcommand": "gaps",
+        "source": "workspace-manifests",
+        "mode": "offline-artifact",
+        "message": format!(
+            "Reported {} readiness gap{} from workspace manifests{}.",
+            gap_reports.len(),
+            if gap_reports.len() == 1 { "" } else { "s" },
+            args.connector.as_ref().map_or_else(String::new, |name| format!(" for `{name}`"))
+        ),
+        "generated_at": matrix.generated_at.clone(),
+        "connectors_root": connectors_root_display,
+        "filters": {
+            "connector": args.connector.clone(),
+            "blocking_only": args.blocking_only,
+        },
+        "summary": {
+            "count": gap_reports.len(),
+            "affected_connectors": affected_connectors,
+            "blocking": blocking_count,
+            "degraded": degraded_count,
+            "cosmetic": cosmetic_count,
+        },
+        "gaps": &gap_reports,
+        "remediation_boundary": "Audit gap queries report declared readiness debt; they do not repair manifests or invent missing evidence.",
+        "next_actions": args.connector.as_ref().map_or_else(
+            || vec![
+                "Use `fwc audit matrix <connector>` to inspect one connector in detail.".to_owned(),
+                "Use `fwc show <connector> --offline` before editing a manifest.".to_owned(),
+            ],
+            |name| vec![
+                format!("fwc audit matrix {name}"),
+                format!("fwc show {name} --offline"),
+            ],
+        ),
+    });
+    payload["toon"] = json!(format_audit_gaps_toon(&gap_reports, args.blocking_only));
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn audit_connectors_root() -> Result<PathBuf> {
+    let cwd = std::env::current_dir()?;
+    for ancestor in cwd.ancestors() {
+        let candidate = ancestor.join("connectors");
+        if candidate.is_dir() {
+            return Ok(candidate);
+        }
+    }
+    anyhow::bail!(
+        "Cannot find a `connectors/` directory from {} or any ancestor directory.",
+        cwd.display()
+    );
+}
+
+fn audit_connectors_root_error_dispatch(
+    subcommand: &str,
+    connector: Option<&str>,
+    error: &anyhow::Error,
+) -> DispatchOutcome {
+    DispatchOutcome {
+        payload: json!({
+            "status": "error",
+            "command": "audit",
+            "subcommand": subcommand,
+            "error": {
+                "type": "connectors-root-not-found",
+                "message": error.to_string(),
+                "recoverable": true,
+            },
+            "filters": {
+                "connector": connector,
+            },
+            "next_actions": [
+                "Run `fwc audit matrix` from a repository that contains a top-level `connectors/` directory.".to_owned(),
+                "If you are inside a nested workspace, `cd` into the Flywheel connectors repo root first.".to_owned(),
+            ],
+        }),
+        exit_code: CliExitCode::Validation,
+    }
+}
+
+fn audit_gap_reports(
+    matrix: &audit::AuditMatrix,
+    connector_filter: Option<&str>,
+    blocking_only: bool,
+) -> Vec<AuditGapReport> {
+    let mut gaps = Vec::new();
+    for (name, entry) in &matrix.connectors {
+        if let Some(filter) = connector_filter
+            && filter != name
+        {
+            continue;
+        }
+        for gap in &entry.gaps {
+            if blocking_only && gap.severity != crate::readiness::GapSeverity::Blocking {
+                continue;
+            }
+            gaps.push(AuditGapReport {
+                connector: name.clone(),
+                crate_path: entry.crate_path.clone(),
+                connector_id: entry.connector_id.clone(),
+                readiness_level: format!("{:?}", entry.level).to_ascii_lowercase(),
+                category: format!("{:?}", gap.category).to_ascii_lowercase(),
+                severity: format!("{:?}", gap.severity).to_ascii_lowercase(),
+                message: gap.description.clone(),
+            });
+        }
+    }
+    gaps
+}
+
+fn format_audit_matrix_toon(matrix: &audit::AuditMatrix) -> String {
+    use std::fmt::Write;
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "Audit Matrix: {} connectors scanned",
+        matrix.total_connectors
+    );
+    let _ = writeln!(
+        out,
+        "  With manifest: {}  Missing: {}",
+        matrix.with_manifest, matrix.missing_manifest
+    );
+    let _ = writeln!(out);
+    let _ = writeln!(out, "Readiness:");
+    let _ = writeln!(out, "  Ready:           {}", matrix.summary.ready);
+    let _ = writeln!(out, "  Partially ready: {}", matrix.summary.partially_ready);
+    let _ = writeln!(out, "  Not ready:       {}", matrix.summary.not_ready);
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "Gaps: {} total ({} blocking, {} degraded, {} cosmetic)",
+        matrix.summary.total_gaps,
+        matrix.summary.blocking_gaps,
+        matrix.summary.degraded_gaps,
+        matrix.summary.cosmetic_gaps
+    );
+    out
+}
+
+fn format_connector_audit_toon(entry: &audit::ConnectorAudit) -> String {
+    use std::fmt::Write;
+
+    let mut out = String::new();
+    let _ = writeln!(out, "Connector: {}", entry.name);
+    let _ = writeln!(out, "  Cohort:     {:?}", entry.cohort);
+    let _ = writeln!(out, "  Readiness:  {:?}", entry.level);
+    let _ = writeln!(
+        out,
+        "  Manifest:   {}",
+        if entry.has_manifest { "yes" } else { "no" }
+    );
+    let _ = writeln!(
+        out,
+        "  Operations: {} total, {:.0}% complete",
+        entry.operations.count,
+        entry.operations.completeness * 100.0
+    );
+    let _ = writeln!(
+        out,
+        "  Agent hints: {:.0}% coverage",
+        entry.agent_hints.coverage * 100.0
+    );
+    if entry.gaps.is_empty() {
+        let _ = writeln!(out, "  Gaps:       none");
+    } else {
+        let _ = writeln!(out, "  Gaps:       {}", entry.gaps.len());
+        for gap in &entry.gaps {
+            let _ = writeln!(
+                out,
+                "    [{sev:?}] [{cat:?}] {msg}",
+                sev = gap.severity,
+                cat = gap.category,
+                msg = gap.description,
+            );
+        }
+    }
+    out
+}
+
+fn format_audit_gaps_toon(gaps: &[AuditGapReport], blocking_only: bool) -> String {
+    use std::fmt::Write;
+
+    if gaps.is_empty() {
+        return "No gaps found.".to_owned();
+    }
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "Gaps: {} found{}",
+        gaps.len(),
+        if blocking_only {
+            " (blocking only)"
+        } else {
+            ""
+        }
+    );
+    let _ = writeln!(out);
+    for gap in gaps {
+        let _ = writeln!(
+            out,
+            "  [{sev}] {connector}: [{cat}] {msg}",
+            sev = gap.severity,
+            connector = gap.connector,
+            cat = gap.category,
+            msg = gap.message,
+        );
     }
     out
 }
@@ -8005,7 +8414,6 @@ fn health_dispatch(args: &HealthArgs, explicit_host: Option<&str>) -> Result<Dis
                 "count": violations_list.len(),
             });
         }
-
     }
 
     Ok(DispatchOutcome {
@@ -8015,9 +8423,7 @@ fn health_dispatch(args: &HealthArgs, explicit_host: Option<&str>) -> Result<Dis
 }
 
 /// Map catalog connectors to fleet_health types for aggregation.
-fn fleet_health_from_catalog(
-    catalog: &HostConnectorCatalog,
-) -> Vec<fleet_health::ConnectorHealth> {
+fn fleet_health_from_catalog(catalog: &HostConnectorCatalog) -> Vec<fleet_health::ConnectorHealth> {
     catalog
         .connectors
         .iter()
@@ -8252,13 +8658,19 @@ fn unpin_dispatch(args: &TargetArgs, explicit_host: Option<&str>) -> Result<Disp
     })
 }
 
-fn lifecycle_dispatch(args: &LifecycleArgs, explicit_host: Option<&str>) -> Result<DispatchOutcome> {
+fn lifecycle_dispatch(
+    args: &LifecycleArgs,
+    explicit_host: Option<&str>,
+) -> Result<DispatchOutcome> {
     let Some(host) = resolve_host_config(explicit_host)? else {
         return Ok(missing_host_dispatch(
             "lifecycle",
             serde_json::to_value(args)?,
             vec![
-                format!("fwc lifecycle {} --valid-actions --host <endpoint>", args.connector),
+                format!(
+                    "fwc lifecycle {} --valid-actions --host <endpoint>",
+                    args.connector
+                ),
                 "Set `FWC_HOST` or `FCP_HOST_ENDPOINT`, or configure an active FCP context."
                     .to_owned(),
             ],
@@ -8269,7 +8681,11 @@ fn lifecycle_dispatch(args: &LifecycleArgs, explicit_host: Option<&str>) -> Resu
     let connector = match catalog.resolve_connector(&args.connector) {
         Ok(c) => c,
         Err(error) => {
-            return Ok(connector_resolution_dispatch("lifecycle", &args.connector, &error));
+            return Ok(connector_resolution_dispatch(
+                "lifecycle",
+                &args.connector,
+                &error,
+            ));
         }
     };
 
@@ -8284,7 +8700,11 @@ fn lifecycle_dispatch(args: &LifecycleArgs, explicit_host: Option<&str>) -> Resu
             "Lifecycle: {}\n  State: {}\n  Valid actions: {}",
             connector.slug,
             current_state.label(),
-            if valid_labels.is_empty() { "none".to_owned() } else { valid_labels.join(", ") },
+            if valid_labels.is_empty() {
+                "none".to_owned()
+            } else {
+                valid_labels.join(", ")
+            },
         );
         let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "lifecycle");
         let mut payload = json!({
@@ -8349,12 +8769,10 @@ fn lifecycle_dispatch(args: &LifecycleArgs, explicit_host: Option<&str>) -> Resu
             }
         };
 
-        let request = lifecycle_mutations::MutationRequest::new(
-            connector.summary.id.to_string(),
-            action,
-        )
-        .with_force(args.force)
-        .with_dry_run(args.dry_run);
+        let request =
+            lifecycle_mutations::MutationRequest::new(connector.summary.id.to_string(), action)
+                .with_force(args.force)
+                .with_dry_run(args.dry_run);
         let check = lifecycle_mutations::preflight(&request, current_state);
         let toon = lifecycle_mutations::format_preflight_toon(&check);
 
@@ -8403,7 +8821,11 @@ fn lifecycle_dispatch(args: &LifecycleArgs, explicit_host: Option<&str>) -> Resu
         "Lifecycle: {}\n  State: {}\n  Valid actions: {}",
         connector.slug,
         current_state.label(),
-        if valid_labels.is_empty() { "none".to_owned() } else { valid_labels.join(", ") },
+        if valid_labels.is_empty() {
+            "none".to_owned()
+        } else {
+            valid_labels.join(", ")
+        },
     );
     let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "lifecycle");
     let mut payload = json!({
@@ -19255,9 +19677,7 @@ fn materialize_safe_resolution_steps(
 
 fn is_resolution_safe_step(step: &intent::CompiledStep) -> bool {
     match step.command.as_str() {
-        "show" | "ops" | "schema" | "examples" | "search" | "list" | "zones" | "status" => {
-            true
-        }
+        "show" | "ops" | "schema" | "examples" | "search" | "list" | "zones" | "status" => true,
         "config" => matches!(
             step.argv.get(2).map(String::as_str),
             Some("schema" | "get" | "doctor" | "export")
@@ -24720,8 +25140,16 @@ deny_ptrace = true
         assert_eq!(payload["command"], "zones");
         assert_eq!(payload["source"], "workspace-manifests");
         assert_eq!(payload["mode"], "offline-artifact");
-        assert!(payload["zones"].as_array().is_some_and(|zones| !zones.is_empty()));
-        assert!(payload["toon"].as_str().is_some_and(|toon| toon.contains("Zones:")));
+        assert!(
+            payload["zones"]
+                .as_array()
+                .is_some_and(|zones| !zones.is_empty())
+        );
+        assert!(
+            payload["toon"]
+                .as_str()
+                .is_some_and(|toon| toon.contains("Zones:"))
+        );
         assert!(payload["zones"].as_array().unwrap().iter().any(|zone| {
             zone["zone_id"] == "z:work"
                 && zone["capabilities"]
@@ -24764,13 +25192,107 @@ deny_ptrace = true
             execute_json(&["fwc", "--json", "zones", "z:totally-empty-test-zone"]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
-        assert_eq!(
-            payload["zone"]["zone_id"],
-            "z:totally-empty-test-zone"
-        );
+        assert_eq!(payload["zone"]["zone_id"], "z:totally-empty-test-zone");
         assert_eq!(payload["zone"]["connector_count"], 0);
         assert_eq!(payload["zone"]["tool_count"], 0);
         assert_eq!(payload["zone"]["policy_type"], "custom");
+    }
+
+    #[test]
+    fn prepare_cli_parses_audit_matrix_command() {
+        let prepared = prepare_cli(&[
+            "fwc".to_owned(),
+            "audit".to_owned(),
+            "matrix".to_owned(),
+            "github".to_owned(),
+            "--json".to_owned(),
+        ])
+        .expect("audit matrix command should parse");
+
+        match prepared.cli.command {
+            Commands::Audit(args) => match args.command {
+                super::audit_chain::AuditCommands::Matrix(matrix_args) => {
+                    assert_eq!(matrix_args.connector.as_deref(), Some("github"));
+                    assert!(matrix_args.json);
+                }
+                command => panic!("expected audit matrix command, got {command:?}"),
+            },
+            command => panic!("expected audit command, got {command:?}"),
+        }
+    }
+
+    #[test]
+    fn audit_matrix_skips_passthrough_execution() {
+        let prepared = prepare_cli(&["fwc".to_owned(), "audit".to_owned(), "matrix".to_owned()])
+            .expect("audit matrix command should parse");
+
+        let outcome =
+            super::execute_passthrough_command(&prepared).expect("passthrough check should work");
+        assert!(
+            outcome.is_none(),
+            "audit matrix should use structured dispatch"
+        );
+    }
+
+    #[test]
+    fn execute_audit_matrix_returns_structured_summary() {
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "audit", "matrix"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "audit");
+        assert_eq!(payload["subcommand"], "matrix");
+        assert_eq!(payload["source"], "workspace-manifests");
+        assert_eq!(payload["mode"], "offline-artifact");
+        assert!(
+            payload["matrix"]["total_connectors"]
+                .as_u64()
+                .is_some_and(|count| count > 0)
+        );
+        assert!(
+            payload["toon"]
+                .as_str()
+                .is_some_and(|toon| toon.contains("Audit Matrix:"))
+        );
+    }
+
+    #[test]
+    fn execute_audit_matrix_missing_connector_is_validation_error() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "audit",
+            "matrix",
+            "totally-missing-connector",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["command"], "audit");
+        assert_eq!(payload["subcommand"], "matrix");
+        assert_eq!(payload["error"]["type"], "connector-not-found");
+    }
+
+    #[test]
+    fn execute_audit_gaps_filters_blocking_only() {
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "audit", "gaps", "--blocking-only"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "audit");
+        assert_eq!(payload["subcommand"], "gaps");
+        assert_eq!(payload["filters"]["blocking_only"], true);
+        assert!(payload["gaps"].as_array().is_some());
+        assert!(
+            payload["gaps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|gap| { gap["severity"] == "blocking" })
+        );
+        assert!(
+            payload["toon"]
+                .as_str()
+                .is_some_and(|toon| !toon.trim().is_empty())
+        );
     }
 
     #[test]
@@ -29509,13 +30031,15 @@ depends_on = ["missing"]
             2,
         );
 
-        let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "--host", &host, "health", "--fleet-score",
-        ]);
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "--host", &host, "health", "--fleet-score"]);
 
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Success.into());
-        assert!(payload["fleet_score"].is_object(), "fleet_score block missing");
+        assert!(
+            payload["fleet_score"].is_object(),
+            "fleet_score block missing"
+        );
         assert!(
             payload["fleet_score"]["score"]
                 .as_f64()
@@ -29523,7 +30047,11 @@ depends_on = ["missing"]
             "fleet score should be between 0.0 and 1.0"
         );
         assert!(payload["fleet_score"]["score_pct"].is_string());
-        assert!(payload["fleet_score"]["total"].as_u64().is_some_and(|n| n > 0));
+        assert!(
+            payload["fleet_score"]["total"]
+                .as_u64()
+                .is_some_and(|n| n > 0)
+        );
     }
 
     #[test]
@@ -29548,22 +30076,22 @@ depends_on = ["missing"]
             2,
         );
 
-        let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "--host", &host, "health", "--violations",
-        ]);
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "--host", &host, "health", "--violations"]);
 
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Success.into());
-        assert!(payload["violations"].is_object(), "violations block missing");
+        assert!(
+            payload["violations"].is_object(),
+            "violations block missing"
+        );
         assert!(payload["violations"]["threshold"].is_object());
         assert!(payload["violations"]["violators"].is_array());
     }
 
     #[test]
     fn health_fleet_score_without_host_reports_missing() {
-        let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "health", "--fleet-score",
-        ]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "health", "--fleet-score"]);
 
         assert_eq!(exit_code, CliExitCode::Transport.into());
         assert_eq!(payload["command"], "health");
@@ -29593,8 +30121,13 @@ depends_on = ["missing"]
         );
 
         let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "--host", &host, "health",
-            "--fleet-score", "--violations",
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "health",
+            "--fleet-score",
+            "--violations",
         ]);
 
         server.join().expect("mock host thread should complete");
@@ -31069,9 +31602,8 @@ depends_on = ["missing"]
 
     #[test]
     fn lifecycle_offline_reports_missing_host() {
-        let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "lifecycle", "github", "--valid-actions",
-        ]);
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "lifecycle", "github", "--valid-actions"]);
 
         assert_eq!(exit_code, CliExitCode::Transport.into());
         assert_eq!(payload["command"], "lifecycle");
@@ -31089,8 +31621,13 @@ depends_on = ["missing"]
         );
 
         let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "--host", &host, "lifecycle",
-            "github", "--valid-actions",
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "lifecycle",
+            "github",
+            "--valid-actions",
         ]);
 
         server.join().expect("mock host thread should complete");
@@ -31099,7 +31636,11 @@ depends_on = ["missing"]
         assert_eq!(payload["mode"], "valid-actions");
         assert!(payload["current_state"].is_string());
         assert!(payload["valid_actions"].is_array());
-        assert!(payload["toon"].as_str().is_some_and(|t| t.contains("Lifecycle:")));
+        assert!(
+            payload["toon"]
+                .as_str()
+                .is_some_and(|t| t.contains("Lifecycle:"))
+        );
     }
 
     #[test]
@@ -31113,8 +31654,13 @@ depends_on = ["missing"]
         );
 
         let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "--host", &host, "lifecycle",
-            "github", "--preflight",
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "lifecycle",
+            "github",
+            "--preflight",
         ]);
 
         server.join().expect("mock host thread should complete");
@@ -31133,8 +31679,15 @@ depends_on = ["missing"]
         );
 
         let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "--host", &host, "lifecycle",
-            "github", "--preflight", "--action", "teleport",
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "lifecycle",
+            "github",
+            "--preflight",
+            "--action",
+            "teleport",
         ]);
 
         server.join().expect("mock host thread should complete");
@@ -31153,8 +31706,15 @@ depends_on = ["missing"]
         );
 
         let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "--host", &host, "lifecycle",
-            "github", "--preflight", "--action", "restart",
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "lifecycle",
+            "github",
+            "--preflight",
+            "--action",
+            "restart",
         ]);
 
         server.join().expect("mock host thread should complete");
@@ -31163,7 +31723,11 @@ depends_on = ["missing"]
         assert_eq!(payload["mode"], "preflight");
         assert!(payload["preflight"]["risk_level"].is_string());
         assert!(payload["preflight"]["can_proceed"].is_boolean());
-        assert!(payload["toon"].as_str().is_some_and(|t| t.contains("Preflight:")));
+        assert!(
+            payload["toon"]
+                .as_str()
+                .is_some_and(|t| t.contains("Preflight:"))
+        );
     }
 
     #[test]
@@ -31176,10 +31740,8 @@ depends_on = ["missing"]
             1,
         );
 
-        let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "--host", &host, "lifecycle",
-            "github",
-        ]);
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "--host", &host, "lifecycle", "github"]);
 
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Success.into());
@@ -31199,8 +31761,13 @@ depends_on = ["missing"]
         );
 
         let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "--host", &host, "lifecycle",
-            "nonexistent-connector", "--valid-actions",
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "lifecycle",
+            "nonexistent-connector",
+            "--valid-actions",
         ]);
 
         server.join().expect("mock host thread should complete");

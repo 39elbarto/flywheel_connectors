@@ -572,10 +572,7 @@ impl RepairResult {
     }
 
     /// Create with explicit failure count.
-    pub fn with_failures(
-        actions: Vec<RepairAction>,
-        failure_count: usize,
-    ) -> Self {
+    pub fn with_failures(actions: Vec<RepairAction>, failure_count: usize) -> Self {
         let success_count = actions.iter().filter(|a| a.applied).count();
         let skipped_count = actions.len().saturating_sub(success_count + failure_count);
         Self {
@@ -728,7 +725,11 @@ fn generate_recommendations(components: &[ComponentHealth]) -> Vec<String> {
         }
     }
 
-    if recs.is_empty() && components.iter().all(|c| c.status == ComponentStatus::Healthy) {
+    if recs.is_empty()
+        && components
+            .iter()
+            .all(|c| c.status == ComponentStatus::Healthy)
+    {
         recs.push("All components are healthy. No action needed.".to_owned());
     }
 
@@ -770,7 +771,11 @@ fn check_component(component: SetupComponent, verbose: bool) -> ComponentHealth 
                     dep.display_name(),
                     dep_health.status
                 ),
-                format!("Fix {} first: `fwc setup repair --component {}`", dep.display_name(), dep.label()),
+                format!(
+                    "Fix {} first: `fwc setup repair --component {}`",
+                    dep.display_name(),
+                    dep.label()
+                ),
             );
         }
     }
@@ -785,7 +790,9 @@ fn check_component_basic(component: SetupComponent) -> ComponentHealth {
 }
 
 /// Simulate component checks from pre-built health data (for testing/scripting).
-pub fn check_setup_with_health(health_map: &BTreeMap<SetupComponent, ComponentHealth>) -> SetupCheckResult {
+pub fn check_setup_with_health(
+    health_map: &BTreeMap<SetupComponent, ComponentHealth>,
+) -> SetupCheckResult {
     let components: Vec<ComponentHealth> = SetupComponent::all()
         .iter()
         .map(|c| {
@@ -800,10 +807,7 @@ pub fn check_setup_with_health(health_map: &BTreeMap<SetupComponent, ComponentHe
 }
 
 /// Repair degraded/missing components.
-pub fn repair_setup(
-    args: &SetupRepairArgs,
-    check_result: &SetupCheckResult,
-) -> RepairResult {
+pub fn repair_setup(args: &SetupRepairArgs, check_result: &SetupCheckResult) -> RepairResult {
     let targets: Vec<&ComponentHealth> = check_result
         .components
         .iter()
@@ -863,13 +867,19 @@ fn plan_repair(health: &ComponentHealth) -> Vec<RepairAction> {
 fn plan_repair_host(status: ComponentStatus) -> Vec<RepairAction> {
     match status {
         ComponentStatus::Missing => vec![RepairAction::new(
-            SetupComponent::Host, RepairActionType::Install, "Install FCP host runtime",
+            SetupComponent::Host,
+            RepairActionType::Install,
+            "Install FCP host runtime",
         )],
         ComponentStatus::Error => vec![RepairAction::new(
-            SetupComponent::Host, RepairActionType::Restart, "Restart FCP host process",
+            SetupComponent::Host,
+            RepairActionType::Restart,
+            "Restart FCP host process",
         )],
         ComponentStatus::Degraded => vec![RepairAction::new(
-            SetupComponent::Host, RepairActionType::Reconfigure, "Reconfigure FCP host settings",
+            SetupComponent::Host,
+            RepairActionType::Reconfigure,
+            "Reconfigure FCP host settings",
         )],
         ComponentStatus::Healthy => Vec::new(),
     }
@@ -878,13 +888,18 @@ fn plan_repair_host(status: ComponentStatus) -> Vec<RepairAction> {
 fn plan_repair_credentials(status: ComponentStatus) -> Vec<RepairAction> {
     match status {
         ComponentStatus::Missing => vec![RepairAction::new(
-            SetupComponent::Credentials, RepairActionType::CreateResource, "Initialize credential store",
+            SetupComponent::Credentials,
+            RepairActionType::CreateResource,
+            "Initialize credential store",
         )],
         ComponentStatus::Degraded => vec![RepairAction::new(
-            SetupComponent::Credentials, RepairActionType::Reconfigure, "Refresh expired credentials",
+            SetupComponent::Credentials,
+            RepairActionType::Reconfigure,
+            "Refresh expired credentials",
         )],
         ComponentStatus::Error => vec![RepairAction::new(
-            SetupComponent::Credentials, RepairActionType::Reconfigure,
+            SetupComponent::Credentials,
+            RepairActionType::Reconfigure,
             "Repair credential store",
         )],
         ComponentStatus::Healthy => Vec::new(),
@@ -895,17 +910,25 @@ fn plan_repair_context(status: ComponentStatus) -> Vec<RepairAction> {
     match status {
         ComponentStatus::Missing => vec![
             RepairAction::new(
-                SetupComponent::Context, RepairActionType::CreateResource, "Create project context directory",
+                SetupComponent::Context,
+                RepairActionType::CreateResource,
+                "Create project context directory",
             ),
             RepairAction::new(
-                SetupComponent::Context, RepairActionType::CreateResource, "Generate default configuration files",
+                SetupComponent::Context,
+                RepairActionType::CreateResource,
+                "Generate default configuration files",
             ),
         ],
         ComponentStatus::Error => vec![RepairAction::new(
-            SetupComponent::Context, RepairActionType::ClearState, "Clear corrupted context state",
+            SetupComponent::Context,
+            RepairActionType::ClearState,
+            "Clear corrupted context state",
         )],
         ComponentStatus::Degraded => vec![RepairAction::new(
-            SetupComponent::Context, RepairActionType::Reconfigure, "Repair context configuration",
+            SetupComponent::Context,
+            RepairActionType::Reconfigure,
+            "Repair context configuration",
         )],
         ComponentStatus::Healthy => Vec::new(),
     }
@@ -914,13 +937,19 @@ fn plan_repair_context(status: ComponentStatus) -> Vec<RepairAction> {
 fn plan_repair_mesh(status: ComponentStatus) -> Vec<RepairAction> {
     match status {
         ComponentStatus::Missing => vec![RepairAction::new(
-            SetupComponent::Mesh, RepairActionType::Install, "Initialize mesh network configuration",
+            SetupComponent::Mesh,
+            RepairActionType::Install,
+            "Initialize mesh network configuration",
         )],
         ComponentStatus::Degraded => vec![RepairAction::new(
-            SetupComponent::Mesh, RepairActionType::Restart, "Restart mesh peer discovery",
+            SetupComponent::Mesh,
+            RepairActionType::Restart,
+            "Restart mesh peer discovery",
         )],
         ComponentStatus::Error => vec![RepairAction::new(
-            SetupComponent::Mesh, RepairActionType::Reconfigure, "Repair mesh configuration",
+            SetupComponent::Mesh,
+            RepairActionType::Reconfigure,
+            "Repair mesh configuration",
         )],
         ComponentStatus::Healthy => Vec::new(),
     }
@@ -930,14 +959,21 @@ fn plan_repair_connectivity(status: ComponentStatus) -> Vec<RepairAction> {
     match status {
         ComponentStatus::Error => vec![
             RepairAction::new(
-                SetupComponent::Connectivity, RepairActionType::Reconfigure, "Reset network proxy configuration",
-            ).irreversible(),
+                SetupComponent::Connectivity,
+                RepairActionType::Reconfigure,
+                "Reset network proxy configuration",
+            )
+            .irreversible(),
         ],
         ComponentStatus::Degraded => vec![RepairAction::new(
-            SetupComponent::Connectivity, RepairActionType::ClearState, "Clear DNS cache",
+            SetupComponent::Connectivity,
+            RepairActionType::ClearState,
+            "Clear DNS cache",
         )],
         ComponentStatus::Missing => vec![RepairAction::new(
-            SetupComponent::Connectivity, RepairActionType::Reconfigure, "Configure network settings",
+            SetupComponent::Connectivity,
+            RepairActionType::Reconfigure,
+            "Configure network settings",
         )],
         ComponentStatus::Healthy => Vec::new(),
     }
@@ -946,13 +982,19 @@ fn plan_repair_connectivity(status: ComponentStatus) -> Vec<RepairAction> {
 fn plan_repair_runtime(status: ComponentStatus) -> Vec<RepairAction> {
     match status {
         ComponentStatus::Missing => vec![RepairAction::new(
-            SetupComponent::Runtime, RepairActionType::Install, "Install connector runtime binaries",
+            SetupComponent::Runtime,
+            RepairActionType::Install,
+            "Install connector runtime binaries",
         )],
         ComponentStatus::Degraded => vec![RepairAction::new(
-            SetupComponent::Runtime, RepairActionType::Update, "Update connector runtimes to latest version",
+            SetupComponent::Runtime,
+            RepairActionType::Update,
+            "Update connector runtimes to latest version",
         )],
         ComponentStatus::Error => vec![RepairAction::new(
-            SetupComponent::Runtime, RepairActionType::Restart, "Restart connector runtime",
+            SetupComponent::Runtime,
+            RepairActionType::Restart,
+            "Restart connector runtime",
         )],
         ComponentStatus::Healthy => Vec::new(),
     }
@@ -1040,10 +1082,7 @@ impl std::fmt::Display for InitError {
 
 /// Generate config file names for a given template.
 fn generate_config_files(template: &str) -> Vec<String> {
-    let mut files = vec![
-        "fcp.toml".to_owned(),
-        ".fcp/config.json".to_owned(),
-    ];
+    let mut files = vec!["fcp.toml".to_owned(), ".fcp/config.json".to_owned()];
 
     match template {
         "default" => {
@@ -1139,11 +1178,7 @@ pub fn format_repair_toon(result: &RepairResult) -> Vec<String> {
     lines.push(String::new());
 
     for action in &result.actions {
-        let status = if action.applied {
-            "[DONE]"
-        } else {
-            "[SKIP]"
-        };
+        let status = if action.applied { "[DONE]" } else { "[SKIP]" };
         let reversible = if action.reversible {
             ""
         } else {
@@ -1288,10 +1323,16 @@ mod tests {
     #[test]
     fn component_display_names() {
         assert_eq!(SetupComponent::Host.display_name(), "FCP Host");
-        assert_eq!(SetupComponent::Credentials.display_name(), "Credential Store");
+        assert_eq!(
+            SetupComponent::Credentials.display_name(),
+            "Credential Store"
+        );
         assert_eq!(SetupComponent::Context.display_name(), "Project Context");
         assert_eq!(SetupComponent::Mesh.display_name(), "Mesh Network");
-        assert_eq!(SetupComponent::Connectivity.display_name(), "Network Connectivity");
+        assert_eq!(
+            SetupComponent::Connectivity.display_name(),
+            "Network Connectivity"
+        );
         assert_eq!(SetupComponent::Runtime.display_name(), "Connector Runtime");
     }
 
@@ -1304,20 +1345,44 @@ mod tests {
     #[test]
     fn component_parse_canonical() {
         assert_eq!(SetupComponent::parse("host"), Some(SetupComponent::Host));
-        assert_eq!(SetupComponent::parse("credentials"), Some(SetupComponent::Credentials));
-        assert_eq!(SetupComponent::parse("context"), Some(SetupComponent::Context));
+        assert_eq!(
+            SetupComponent::parse("credentials"),
+            Some(SetupComponent::Credentials)
+        );
+        assert_eq!(
+            SetupComponent::parse("context"),
+            Some(SetupComponent::Context)
+        );
         assert_eq!(SetupComponent::parse("mesh"), Some(SetupComponent::Mesh));
-        assert_eq!(SetupComponent::parse("connectivity"), Some(SetupComponent::Connectivity));
-        assert_eq!(SetupComponent::parse("runtime"), Some(SetupComponent::Runtime));
+        assert_eq!(
+            SetupComponent::parse("connectivity"),
+            Some(SetupComponent::Connectivity)
+        );
+        assert_eq!(
+            SetupComponent::parse("runtime"),
+            Some(SetupComponent::Runtime)
+        );
     }
 
     #[test]
     fn component_parse_aliases() {
-        assert_eq!(SetupComponent::parse("creds"), Some(SetupComponent::Credentials));
-        assert_eq!(SetupComponent::parse("credential"), Some(SetupComponent::Credentials));
+        assert_eq!(
+            SetupComponent::parse("creds"),
+            Some(SetupComponent::Credentials)
+        );
+        assert_eq!(
+            SetupComponent::parse("credential"),
+            Some(SetupComponent::Credentials)
+        );
         assert_eq!(SetupComponent::parse("ctx"), Some(SetupComponent::Context));
-        assert_eq!(SetupComponent::parse("network"), Some(SetupComponent::Connectivity));
-        assert_eq!(SetupComponent::parse("net"), Some(SetupComponent::Connectivity));
+        assert_eq!(
+            SetupComponent::parse("network"),
+            Some(SetupComponent::Connectivity)
+        );
+        assert_eq!(
+            SetupComponent::parse("net"),
+            Some(SetupComponent::Connectivity)
+        );
         assert_eq!(SetupComponent::parse("rt"), Some(SetupComponent::Runtime));
     }
 
@@ -1325,7 +1390,10 @@ mod tests {
     fn component_parse_case_insensitive() {
         assert_eq!(SetupComponent::parse("HOST"), Some(SetupComponent::Host));
         assert_eq!(SetupComponent::parse("Mesh"), Some(SetupComponent::Mesh));
-        assert_eq!(SetupComponent::parse("RUNTIME"), Some(SetupComponent::Runtime));
+        assert_eq!(
+            SetupComponent::parse("RUNTIME"),
+            Some(SetupComponent::Runtime)
+        );
     }
 
     #[test]
@@ -1538,7 +1606,10 @@ mod tests {
             ComponentHealth::healthy(SetupComponent::Runtime),
             ComponentHealth::degraded(SetupComponent::Mesh, "Slow", "Restart"),
         ];
-        assert_eq!(compute_overall_status(&comps), OverallStatus::PartiallyReady);
+        assert_eq!(
+            compute_overall_status(&comps),
+            OverallStatus::PartiallyReady
+        );
     }
 
     #[test]
@@ -1548,7 +1619,10 @@ mod tests {
             ComponentHealth::healthy(SetupComponent::Runtime),
             ComponentHealth::missing(SetupComponent::Mesh, "Not configured", "Configure"),
         ];
-        assert_eq!(compute_overall_status(&comps), OverallStatus::PartiallyReady);
+        assert_eq!(
+            compute_overall_status(&comps),
+            OverallStatus::PartiallyReady
+        );
     }
 
     #[test]
@@ -1870,7 +1944,11 @@ mod tests {
 
     #[test]
     fn repair_action_new() {
-        let a = RepairAction::new(SetupComponent::Host, RepairActionType::Install, "Install host");
+        let a = RepairAction::new(
+            SetupComponent::Host,
+            RepairActionType::Install,
+            "Install host",
+        );
         assert_eq!(a.component, SetupComponent::Host);
         assert_eq!(a.action_type, RepairActionType::Install);
         assert!(a.reversible);
@@ -1879,8 +1957,12 @@ mod tests {
 
     #[test]
     fn repair_action_irreversible() {
-        let a = RepairAction::new(SetupComponent::Connectivity, RepairActionType::Reconfigure, "Reset proxy")
-            .irreversible();
+        let a = RepairAction::new(
+            SetupComponent::Connectivity,
+            RepairActionType::Reconfigure,
+            "Reset proxy",
+        )
+        .irreversible();
         assert!(!a.reversible);
         assert!(!a.is_auto_safe());
     }
@@ -1997,9 +2079,11 @@ mod tests {
         let h = ComponentHealth::missing(SetupComponent::Context, "Not found", "Create");
         let actions = plan_repair(&h);
         assert_eq!(actions.len(), 2);
-        assert!(actions
-            .iter()
-            .all(|a| a.action_type == RepairActionType::CreateResource));
+        assert!(
+            actions
+                .iter()
+                .all(|a| a.action_type == RepairActionType::CreateResource)
+        );
     }
 
     #[test]
@@ -2121,10 +2205,12 @@ mod tests {
         let check_result = SetupCheckResult::from_components(comps);
         let args = SetupRepairArgs::new().with_component(SetupComponent::Mesh);
         let result = repair_setup(&args, &check_result);
-        assert!(result
-            .actions
-            .iter()
-            .all(|a| a.component == SetupComponent::Mesh));
+        assert!(
+            result
+                .actions
+                .iter()
+                .all(|a| a.component == SetupComponent::Mesh)
+        );
     }
 
     #[test]
@@ -2184,21 +2270,27 @@ mod tests {
         let args = SetupInitArgs::new("test-proj");
         let result = init_setup(&args).unwrap();
         assert!(result.config_files_created.contains(&"fcp.toml".to_owned()));
-        assert!(result
-            .config_files_created
-            .contains(&".fcp/credentials.json".to_owned()));
+        assert!(
+            result
+                .config_files_created
+                .contains(&".fcp/credentials.json".to_owned())
+        );
     }
 
     #[test]
     fn init_mesh_template() {
         let args = SetupInitArgs::new("mesh-proj").with_template("mesh");
         let result = init_setup(&args).unwrap();
-        assert!(result
-            .config_files_created
-            .contains(&".fcp/mesh.toml".to_owned()));
-        assert!(result
-            .config_files_created
-            .contains(&".fcp/peers.json".to_owned()));
+        assert!(
+            result
+                .config_files_created
+                .contains(&".fcp/mesh.toml".to_owned())
+        );
+        assert!(
+            result
+                .config_files_created
+                .contains(&".fcp/peers.json".to_owned())
+        );
     }
 
     #[test]
@@ -2206,9 +2298,11 @@ mod tests {
         let args = SetupInitArgs::new("min-proj").with_template("minimal");
         let result = init_setup(&args).unwrap();
         // Minimal does not include credentials.json.
-        assert!(!result
-            .config_files_created
-            .contains(&".fcp/credentials.json".to_owned()));
+        assert!(
+            !result
+                .config_files_created
+                .contains(&".fcp/credentials.json".to_owned())
+        );
         assert!(result.config_files_created.contains(&"fcp.toml".to_owned()));
     }
 
@@ -2216,19 +2310,28 @@ mod tests {
     fn init_full_template() {
         let args = SetupInitArgs::new("full-proj").with_template("full");
         let result = init_setup(&args).unwrap();
-        assert!(result
-            .config_files_created
-            .contains(&".fcp/policies.toml".to_owned()));
-        assert!(result
-            .config_files_created
-            .contains(&".fcp/zones.json".to_owned()));
+        assert!(
+            result
+                .config_files_created
+                .contains(&".fcp/policies.toml".to_owned())
+        );
+        assert!(
+            result
+                .config_files_created
+                .contains(&".fcp/zones.json".to_owned())
+        );
     }
 
     #[test]
     fn init_mesh_template_includes_mesh_next_step() {
         let args = SetupInitArgs::new("mesh-proj").with_template("mesh");
         let result = init_setup(&args).unwrap();
-        assert!(result.next_steps.iter().any(|s| s.contains("mesh configure")));
+        assert!(
+            result
+                .next_steps
+                .iter()
+                .any(|s| s.contains("mesh configure"))
+        );
     }
 
     #[test]
@@ -2332,10 +2435,7 @@ mod tests {
         let args = SetupCheckArgs::new().with_component(SetupComponent::Host);
         let result = check_setup(&args);
         assert_eq!(result.total_count(), 1);
-        assert_eq!(
-            result.components[0].component,
-            SetupComponent::Host
-        );
+        assert_eq!(result.components[0].component, SetupComponent::Host);
     }
 
     #[test]
@@ -2549,11 +2649,7 @@ mod tests {
 
     #[test]
     fn format_status_toon_not_ready() {
-        let comps = vec![ComponentHealth::error(
-            SetupComponent::Host,
-            "Down",
-            "Fix",
-        )];
+        let comps = vec![ComponentHealth::error(SetupComponent::Host, "Down", "Fix")];
         let result = SetupCheckResult::from_components(comps);
         let lines = format_status_toon(&result);
         assert!(lines[0].contains("NOT READY"));

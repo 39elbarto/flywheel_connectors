@@ -6219,9 +6219,7 @@ fn mesh_status_dispatch(_args: &MeshStatusArgs) -> Result<DispatchOutcome> {
     });
 
     if context.mesh_targets.active_node.is_none() {
-        warnings.push(
-            "No active default node is configured for this host context.".to_owned(),
-        );
+        warnings.push("No active default node is configured for this host context.".to_owned());
     }
 
     let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "mesh");
@@ -6372,7 +6370,10 @@ fn mesh_target_dispatch(args: &MeshTargetArgs) -> Result<DispatchOutcome> {
     if args.clear {
         let clear_result = {
             let (context_name, context) = active_context_entry_mut(&mut config)?;
-            let removed = context.mesh_targets.connector_targets.remove(&args.connector);
+            let removed = context
+                .mesh_targets
+                .connector_targets
+                .remove(&args.connector);
             removed.map(|_| {
                 let known_nodes =
                     mesh_known_nodes(&context.mesh_targets, context.default_zone.as_deref());
@@ -21801,6 +21802,13 @@ mod tests {
         (tempdir, super::CredentialStore::new(path, [7; 32]))
     }
 
+    fn temp_context_config() -> (TempDir, PathBuf, super::ContextConfigPathOverrideGuard) {
+        let tempdir = TempDir::new().expect("context tempdir should exist");
+        let path = tempdir.path().join("contexts.toml");
+        let guard = super::install_test_context_config_path(path.clone());
+        (tempdir, path, guard)
+    }
+
     fn assert_discovery_provenance(payload: &Value, source: &str, authoritative: bool, mode: &str) {
         assert_eq!(payload["mode"], mode);
         assert_eq!(payload["provenance"]["source"], source);
@@ -25767,6 +25775,491 @@ deny_ptrace = true
                     connector["slug"] == "github" && connector["canonical_id"] == "fcp.github"
                 })
         );
+    }
+
+    #[test]
+    fn prepare_cli_parses_mesh_status_command() {
+        let prepared = prepare_cli(&["fwc".to_owned(), "mesh".to_owned(), "status".to_owned()])
+            .expect("mesh status command should parse");
+
+        match prepared.cli.command {
+            Commands::Mesh(args) => match args.command {
+                super::MeshCommand::Status(_) => {}
+                command => panic!("expected mesh status command, got {command:?}"),
+            },
+            command => panic!("expected mesh command, got {command:?}"),
+        }
+    }
+
+    #[test]
+    fn prepare_cli_parses_mesh_nodes_connector_filter() {
+        let prepared = prepare_cli(&[
+            "fwc".to_owned(),
+            "mesh".to_owned(),
+            "nodes".to_owned(),
+            "github".to_owned(),
+        ])
+        .expect("mesh nodes command should parse");
+
+        match prepared.cli.command {
+            Commands::Mesh(args) => match args.command {
+                super::MeshCommand::Nodes(args) => {
+                    assert_eq!(args.connector.as_deref(), Some("github"));
+                }
+                command => panic!("expected mesh nodes command, got {command:?}"),
+            },
+            command => panic!("expected mesh command, got {command:?}"),
+        }
+    }
+
+    #[test]
+    fn prepare_cli_parses_mesh_use_command() {
+        let prepared = prepare_cli(&[
+            "fwc".to_owned(),
+            "mesh".to_owned(),
+            "use".to_owned(),
+            "desktop".to_owned(),
+        ])
+        .expect("mesh use command should parse");
+
+        match prepared.cli.command {
+            Commands::Mesh(args) => match args.command {
+                super::MeshCommand::Use(args) => {
+                    assert_eq!(args.node, "desktop");
+                }
+                command => panic!("expected mesh use command, got {command:?}"),
+            },
+            command => panic!("expected mesh command, got {command:?}"),
+        }
+    }
+
+    #[test]
+    fn prepare_cli_parses_mesh_target_command() {
+        let prepared = prepare_cli(&[
+            "fwc".to_owned(),
+            "mesh".to_owned(),
+            "target".to_owned(),
+            "github".to_owned(),
+            "--node".to_owned(),
+            "desktop".to_owned(),
+            "--zone".to_owned(),
+            "z:private".to_owned(),
+        ])
+        .expect("mesh target command should parse");
+
+        match prepared.cli.command {
+            Commands::Mesh(args) => match args.command {
+                super::MeshCommand::Target(args) => {
+                    assert_eq!(args.connector, "github");
+                    assert_eq!(args.node.as_deref(), Some("desktop"));
+                    assert_eq!(args.zone.as_deref(), Some("z:private"));
+                    assert!(!args.clear);
+                }
+                command => panic!("expected mesh target command, got {command:?}"),
+            },
+            command => panic!("expected mesh command, got {command:?}"),
+        }
+    }
+
+    #[test]
+    fn prepare_cli_parses_mesh_target_clear_command() {
+        let prepared = prepare_cli(&[
+            "fwc".to_owned(),
+            "mesh".to_owned(),
+            "target".to_owned(),
+            "github".to_owned(),
+            "--clear".to_owned(),
+        ])
+        .expect("mesh target clear command should parse");
+
+        match prepared.cli.command {
+            Commands::Mesh(args) => match args.command {
+                super::MeshCommand::Target(args) => {
+                    assert_eq!(args.connector, "github");
+                    assert!(args.clear);
+                    assert!(args.node.is_none());
+                    assert!(args.zone.is_none());
+                }
+                command => panic!("expected mesh target command, got {command:?}"),
+            },
+            command => panic!("expected mesh command, got {command:?}"),
+        }
+    }
+
+    #[test]
+    fn execute_mesh_status_reports_default_state_and_guidance() {
+        let (tempdir, _path, _guard) = temp_context_config();
+        let _session_guard = super::install_test_session_dir(tempdir.path().join("sessions"));
+
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "mesh", "status"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "mesh");
+        assert_eq!(payload["subcommand"], "status");
+        assert_eq!(payload["current_context"], "local");
+        assert_eq!(payload["context"]["persistence_scope"], "host-context");
+        assert!(payload["active_session"].is_null());
+        assert_eq!(payload["target_state"]["active_default_node"], Value::Null);
+        assert_eq!(
+            payload["target_state"]["selection_precedence"],
+            json!(["connector-target", "active-default", "none"])
+        );
+        assert_eq!(payload["live_inventory"]["available"], false);
+        assert_eq!(payload["next_actions"][0], "fwc mesh nodes");
+        let warnings = payload["warnings"]
+            .as_array()
+            .expect("mesh status warnings should be present");
+        assert!(warnings.iter().any(|warning| {
+            warning
+                .as_str()
+                .is_some_and(|warning| warning.contains("persisted target state only"))
+        }));
+        assert!(warnings.iter().any(|warning| {
+            warning
+                .as_str()
+                .is_some_and(|warning| warning.contains("No active default node"))
+        }));
+    }
+
+    #[test]
+    fn execute_mesh_status_marks_stale_active_default_node() {
+        let (tempdir, path, _guard) = temp_context_config();
+        let _session_guard = super::install_test_session_dir(tempdir.path().join("sessions"));
+        let mut config = super::default_context_config();
+        config
+            .contexts
+            .get_mut("local")
+            .expect("local context should exist")
+            .mesh_targets
+            .active_node = Some("stale-laptop".to_owned());
+        super::save_context_config(&path, &config).expect("context config should save");
+
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "mesh", "status"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(
+            payload["target_state"]["active_default_node"],
+            "stale-laptop"
+        );
+        assert_eq!(payload["target_state"]["active_default_node_stale"], true);
+        assert!(
+            payload["target_state"]["known_nodes"]
+                .as_array()
+                .is_some_and(|nodes| {
+                    nodes.iter().any(|node| {
+                        node["node"] == "stale-laptop"
+                            && node["stale"] == true
+                            && node["sources"] == json!(["active-default"])
+                    })
+                })
+        );
+    }
+
+    #[test]
+    fn execute_mesh_use_persists_verified_active_default_node() {
+        let (_tempdir, path, _guard) = temp_context_config();
+        let mut config = super::default_context_config();
+        config
+            .contexts
+            .get_mut("local")
+            .expect("local context should exist")
+            .mesh_targets
+            .connector_targets
+            .insert(
+                "github".to_owned(),
+                super::MeshConnectorTarget {
+                    node: "desktop".to_owned(),
+                    zone: Some("z:work".to_owned()),
+                    persisted_at: "2026-03-12T00:00:00Z".to_owned(),
+                },
+            );
+        super::save_context_config(&path, &config).expect("context config should save");
+
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "mesh", "use", "desktop"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["target_state"]["active_default_node"], "desktop");
+        assert_eq!(payload["target_state"]["active_default_node_stale"], false);
+        let (_, reloaded) = super::load_context_config().expect("context config should load");
+        assert_eq!(
+            reloaded.contexts["local"]
+                .mesh_targets
+                .active_node
+                .as_deref(),
+            Some("desktop")
+        );
+    }
+
+    #[test]
+    fn execute_mesh_use_warns_for_unverified_node() {
+        let (_tempdir, _path, _guard) = temp_context_config();
+
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "mesh", "use", "laptop-work"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(
+            payload["target_state"]["active_default_node"],
+            "laptop-work"
+        );
+        assert_eq!(payload["target_state"]["active_default_node_stale"], true);
+        let warnings = payload["warnings"]
+            .as_array()
+            .expect("mesh use warning should be present");
+        assert!(warnings.iter().any(|warning| {
+            warning
+                .as_str()
+                .is_some_and(|warning| warning.contains("currently unverified"))
+        }));
+    }
+
+    #[test]
+    fn execute_mesh_nodes_lists_persisted_known_nodes() {
+        let (_tempdir, path, _guard) = temp_context_config();
+        let mut config = super::default_context_config();
+        let mesh_targets = &mut config
+            .contexts
+            .get_mut("local")
+            .expect("local context should exist")
+            .mesh_targets;
+        mesh_targets.active_node = Some("desktop".to_owned());
+        mesh_targets.connector_targets.insert(
+            "github".to_owned(),
+            super::MeshConnectorTarget {
+                node: "desktop".to_owned(),
+                zone: Some("z:work".to_owned()),
+                persisted_at: "2026-03-12T00:00:00Z".to_owned(),
+            },
+        );
+        mesh_targets.connector_targets.insert(
+            "slack".to_owned(),
+            super::MeshConnectorTarget {
+                node: "laptop".to_owned(),
+                zone: Some("z:community".to_owned()),
+                persisted_at: "2026-03-12T00:00:01Z".to_owned(),
+            },
+        );
+        super::save_context_config(&path, &config).expect("context config should save");
+
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "mesh", "nodes"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["inventory_source"], "persisted-targets");
+        assert_eq!(payload["node_count"], 2);
+        let nodes = payload["nodes"]
+            .as_array()
+            .expect("mesh nodes should be an array");
+        assert!(nodes.iter().any(|node| {
+            node["node"] == "desktop"
+                && node["connectors"]
+                    .as_array()
+                    .is_some_and(|connectors| connectors.iter().any(|item| item == "github"))
+                && node["sources"]
+                    .as_array()
+                    .is_some_and(|sources| sources.iter().any(|item| item == "active-default"))
+        }));
+        assert!(nodes.iter().any(|node| {
+            node["node"] == "laptop"
+                && node["zone"] == "z:community"
+                && node["connectors"]
+                    .as_array()
+                    .is_some_and(|connectors| connectors.iter().any(|item| item == "slack"))
+        }));
+    }
+
+    #[test]
+    fn execute_mesh_nodes_connector_filter_uses_connector_target() {
+        let (_tempdir, path, _guard) = temp_context_config();
+        let mut config = super::default_context_config();
+        let mesh_targets = &mut config
+            .contexts
+            .get_mut("local")
+            .expect("local context should exist")
+            .mesh_targets;
+        mesh_targets.active_node = Some("laptop".to_owned());
+        mesh_targets.connector_targets.insert(
+            "github".to_owned(),
+            super::MeshConnectorTarget {
+                node: "desktop".to_owned(),
+                zone: Some("z:work".to_owned()),
+                persisted_at: "2026-03-12T00:00:00Z".to_owned(),
+            },
+        );
+        super::save_context_config(&path, &config).expect("context config should save");
+
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "mesh", "nodes", "github"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["connector_filter"], "github");
+        assert_eq!(payload["node_count"], 1);
+        assert_eq!(payload["nodes"][0]["node"], "desktop");
+    }
+
+    #[test]
+    fn execute_mesh_nodes_connector_filter_falls_back_to_active_default() {
+        let (_tempdir, path, _guard) = temp_context_config();
+        let mut config = super::default_context_config();
+        config
+            .contexts
+            .get_mut("local")
+            .expect("local context should exist")
+            .mesh_targets
+            .active_node = Some("laptop".to_owned());
+        super::save_context_config(&path, &config).expect("context config should save");
+
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "mesh", "nodes", "github"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["node_count"], 1);
+        assert_eq!(payload["nodes"][0]["node"], "laptop");
+        let warnings = payload["warnings"]
+            .as_array()
+            .expect("mesh nodes warnings should be present");
+        assert!(warnings.iter().any(|warning| {
+            warning.as_str().is_some_and(|warning| {
+                warning.contains("No connector-specific target exists for `github`")
+            })
+        }));
+    }
+
+    #[test]
+    fn execute_mesh_nodes_connector_filter_without_any_target_returns_recovery_warning() {
+        let (_tempdir, _path, _guard) = temp_context_config();
+
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "mesh", "nodes", "github"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["node_count"], 0);
+        let warnings = payload["warnings"]
+            .as_array()
+            .expect("mesh nodes warnings should be present");
+        assert!(warnings.iter().any(|warning| {
+            warning.as_str().is_some_and(|warning| {
+                warning.contains("there is no active default node to fall back to")
+            })
+        }));
+    }
+
+    #[test]
+    fn execute_mesh_target_persists_connector_target_with_context_default_zone() {
+        let (_tempdir, _path, _guard) = temp_context_config();
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "mesh", "target", "github", "--node", "desktop",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["zone_source"], "context-default");
+        assert_eq!(payload["effective_target"]["node"], "desktop");
+        assert_eq!(payload["effective_target"]["zone"], "z:work");
+        assert_eq!(payload["effective_target"]["source"], "connector-target");
+        let (_, reloaded) = super::load_context_config().expect("context config should load");
+        let target = reloaded.contexts["local"]
+            .mesh_targets
+            .connector_targets
+            .get("github")
+            .expect("github mesh target should be persisted");
+        assert_eq!(target.node, "desktop");
+        assert_eq!(target.zone.as_deref(), Some("z:work"));
+    }
+
+    #[test]
+    fn execute_mesh_target_persists_explicit_zone_override() {
+        let (_tempdir, _path, _guard) = temp_context_config();
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "mesh",
+            "target",
+            "github",
+            "--node",
+            "desktop",
+            "--zone",
+            "z:private",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["zone_source"], "explicit");
+        assert_eq!(payload["effective_target"]["zone"], "z:private");
+        let (_, reloaded) = super::load_context_config().expect("context config should load");
+        let target = reloaded.contexts["local"]
+            .mesh_targets
+            .connector_targets
+            .get("github")
+            .expect("github mesh target should be persisted");
+        assert_eq!(target.zone.as_deref(), Some("z:private"));
+    }
+
+    #[test]
+    fn execute_mesh_target_reports_persisted_effective_target() {
+        let (_tempdir, path, _guard) = temp_context_config();
+        let mut config = super::default_context_config();
+        let mesh_targets = &mut config
+            .contexts
+            .get_mut("local")
+            .expect("local context should exist")
+            .mesh_targets;
+        mesh_targets.active_node = Some("laptop".to_owned());
+        mesh_targets.connector_targets.insert(
+            "github".to_owned(),
+            super::MeshConnectorTarget {
+                node: "desktop".to_owned(),
+                zone: Some("z:work".to_owned()),
+                persisted_at: "2026-03-12T00:00:00Z".to_owned(),
+            },
+        );
+        super::save_context_config(&path, &config).expect("context config should save");
+
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "mesh", "target", "github"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["effective_target"]["node"], "desktop");
+        assert_eq!(payload["effective_target"]["source"], "connector-target");
+    }
+
+    #[test]
+    fn execute_mesh_target_clear_removes_override() {
+        let (_tempdir, path, _guard) = temp_context_config();
+        let mut config = super::default_context_config();
+        config
+            .contexts
+            .get_mut("local")
+            .expect("local context should exist")
+            .mesh_targets
+            .connector_targets
+            .insert(
+                "github".to_owned(),
+                super::MeshConnectorTarget {
+                    node: "desktop".to_owned(),
+                    zone: Some("z:work".to_owned()),
+                    persisted_at: "2026-03-12T00:00:00Z".to_owned(),
+                },
+            );
+        super::save_context_config(&path, &config).expect("context config should save");
+
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "mesh", "target", "github", "--clear"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert!(payload["effective_target"].is_null());
+        let (_, reloaded) = super::load_context_config().expect("context config should load");
+        assert!(
+            !reloaded.contexts["local"]
+                .mesh_targets
+                .connector_targets
+                .contains_key("github")
+        );
+    }
+
+    #[test]
+    fn execute_mesh_target_missing_returns_validation_error() {
+        let (_tempdir, _path, _guard) = temp_context_config();
+
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "mesh", "target", "github"]);
+
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["error"]["type"], "mesh-target-not-found");
+        assert_eq!(payload["connector"], "github");
     }
 
     #[test]

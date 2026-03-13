@@ -701,8 +701,7 @@ pub fn select_execution_target(
         .iter()
         .filter(|n| n.schedulable)
         .filter(|n| {
-            constraints.zone_filter.is_empty()
-                || constraints.zone_filter.contains(&n.zone_id)
+            constraints.zone_filter.is_empty() || constraints.zone_filter.contains(&n.zone_id)
         })
         .filter(|n| {
             constraints
@@ -710,11 +709,7 @@ pub fn select_execution_target(
                 .iter()
                 .all(|(k, v)| n.labels.get(k) == Some(v))
         })
-        .filter(|n| {
-            constraints
-                .max_load
-                .is_none_or(|max| n.load <= max)
-        })
+        .filter(|n| constraints.max_load.is_none_or(|max| n.load <= max))
         .filter(|n| {
             constraints
                 .max_latency_ms
@@ -739,7 +734,11 @@ pub fn select_execution_target(
     // Pick least-loaded.
     let best = candidates
         .iter()
-        .min_by(|a, b| a.load.partial_cmp(&b.load).unwrap_or(std::cmp::Ordering::Equal))
+        .min_by(|a, b| {
+            a.load
+                .partial_cmp(&b.load)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
         .unwrap(); // safe: candidates.len() >= 2
 
     // Confidence based on how much better this is than the next-best.
@@ -794,10 +793,7 @@ fn check_node_rejection(
         if node.latency_ms > max && !rejected {
             rejections.push(AlternativeRejection {
                 node_id: node.node_id.clone(),
-                reason: format!(
-                    "latency {:.1}ms exceeds max {:.1}ms",
-                    node.latency_ms, max
-                ),
+                reason: format!("latency {:.1}ms exceeds max {:.1}ms", node.latency_ms, max),
             });
             true
         } else {
@@ -980,14 +976,20 @@ pub fn check_offline_availability(
 /// Check mirror status for a list of mirrors. Returns a map of url -> verified.
 #[must_use]
 pub fn check_mirror_status(mirrors: &[MirrorSource]) -> HashMap<String, bool> {
-    mirrors.iter().map(|m| (m.url.clone(), m.verified)).collect()
+    mirrors
+        .iter()
+        .map(|m| (m.url.clone(), m.verified))
+        .collect()
 }
 
 /// Run a verification matrix: apply each scenario and collect results.
 ///
 /// The `runner` function receives a scenario and returns `(passed, actual_outcome, details)`.
 #[must_use]
-pub fn run_verification_matrix<F>(scenarios: &[VerificationScenario], runner: F) -> Vec<VerificationResult>
+pub fn run_verification_matrix<F>(
+    scenarios: &[VerificationScenario],
+    runner: F,
+) -> Vec<VerificationResult>
 where
     F: Fn(&VerificationScenario) -> (bool, String, String),
 {
@@ -1044,7 +1046,10 @@ pub fn format_placement_toon(target: &ExecutionTarget) -> Vec<String> {
 pub fn format_explanation_toon(exp: &PlacementExplanation) -> Vec<String> {
     let mut out = Vec::new();
     out.push("=== Placement Explanation ===".to_string());
-    out.push(format!("Chosen: {} ({})", exp.target.node_id, exp.target.zone_id));
+    out.push(format!(
+        "Chosen: {} ({})",
+        exp.target.node_id, exp.target.zone_id
+    ));
     out.push(format!("Why:    {}", exp.why_chosen));
 
     if !exp.constraints.is_empty() {
@@ -1084,7 +1089,11 @@ pub fn format_rollout_toon(cohort: &RolloutCohort) -> Vec<String> {
     out.push("=== Rollout Cohort ===".to_string());
     out.push(format!("Cohort:   {}", cohort.cohort_id));
     out.push(format!("Strategy: {}", cohort.strategy));
-    out.push(format!("Nodes ({}): {}", cohort.nodes.len(), cohort.nodes.join(", ")));
+    out.push(format!(
+        "Nodes ({}): {}",
+        cohort.nodes.len(),
+        cohort.nodes.join(", ")
+    ));
     out
 }
 
@@ -1098,9 +1107,21 @@ pub fn format_convergence_toon(report: &ConvergenceReport) -> Vec<String> {
         "Converged: {:.0}%",
         report.convergence_ratio() * 100.0
     ));
-    out.push(format!("At target ({}): {}", report.nodes_at_target.len(), report.nodes_at_target.join(", ")));
-    out.push(format!("Behind ({}):    {}", report.nodes_behind.len(), report.nodes_behind.join(", ")));
-    out.push(format!("Drift ({}):     {}", report.drift_nodes.len(), report.drift_nodes.join(", ")));
+    out.push(format!(
+        "At target ({}): {}",
+        report.nodes_at_target.len(),
+        report.nodes_at_target.join(", ")
+    ));
+    out.push(format!(
+        "Behind ({}):    {}",
+        report.nodes_behind.len(),
+        report.nodes_behind.join(", ")
+    ));
+    out.push(format!(
+        "Drift ({}):     {}",
+        report.drift_nodes.len(),
+        report.drift_nodes.join(", ")
+    ));
     if report.is_converged() {
         out.push("Status: CONVERGED".to_string());
     } else {
@@ -1142,7 +1163,9 @@ pub fn format_verification_toon(results: &[VerificationResult]) -> Vec<String> {
     let passed = results.iter().filter(|r| r.passed).count();
     let failed = total - passed;
     out.push("=== Verification Matrix ===".to_string());
-    out.push(format!("Total: {total}  Passed: {passed}  Failed: {failed}"));
+    out.push(format!(
+        "Total: {total}  Passed: {passed}  Failed: {failed}"
+    ));
     for r in results {
         let mark = if r.passed { "PASS" } else { "FAIL" };
         out.push(format!("[{}] {}", mark, r.scenario.name));
@@ -1720,11 +1743,7 @@ mod tests {
 
     #[test]
     fn plan_rollout_single_node() {
-        let cohort = plan_rollout(
-            "single",
-            vec!["solo".to_string()],
-            RolloutStrategy::Rolling,
-        );
+        let cohort = plan_rollout("single", vec!["solo".to_string()], RolloutStrategy::Rolling);
         assert_eq!(cohort.len(), 1);
     }
 
@@ -1977,9 +1996,8 @@ mod tests {
     #[test]
     fn verification_all_pass() {
         let scenarios = sample_scenarios();
-        let results = run_verification_matrix(&scenarios, |_s| {
-            (true, "ok".to_string(), String::new())
-        });
+        let results =
+            run_verification_matrix(&scenarios, |_s| (true, "ok".to_string(), String::new()));
         assert_eq!(results.len(), 3);
         assert!(results.iter().all(|r| r.passed));
     }
@@ -2025,7 +2043,11 @@ mod tests {
             "should pass",
         )];
         let results = run_verification_matrix(&scenarios, |_| {
-            (false, "bad".to_string(), "detailed error message".to_string())
+            (
+                false,
+                "bad".to_string(),
+                "detailed error message".to_string(),
+            )
         });
         assert_eq!(results[0].details, "detailed error message");
         assert_eq!(results[0].actual_outcome, "bad");
@@ -2084,8 +2106,7 @@ mod tests {
 
     #[test]
     fn toon_placement_reason_displayed() {
-        let target =
-            ExecutionTarget::new("n", "z", PlacementReason::DataLocality, 0.9);
+        let target = ExecutionTarget::new("n", "z", PlacementReason::DataLocality, 0.9);
         let lines = format_placement_toon(&target);
         assert!(lines.iter().any(|l| l.contains("data-locality")));
     }
@@ -2251,9 +2272,8 @@ mod tests {
     #[test]
     fn toon_verification_all_pass() {
         let scenarios = sample_scenarios();
-        let results = run_verification_matrix(&scenarios, |_| {
-            (true, "ok".to_string(), String::new())
-        });
+        let results =
+            run_verification_matrix(&scenarios, |_| (true, "ok".to_string(), String::new()));
         let lines = format_verification_toon(&results);
         assert!(lines.iter().any(|l| l.contains("Verification Matrix")));
         assert!(lines.iter().any(|l| l.contains("Passed: 3")));
@@ -2298,7 +2318,11 @@ mod tests {
             "expected good",
         )];
         let results = run_verification_matrix(&scenarios, |_| {
-            (false, "actual bad".to_string(), "something went wrong".to_string())
+            (
+                false,
+                "actual bad".to_string(),
+                "something went wrong".to_string(),
+            )
         });
         let lines = format_verification_toon(&results);
         assert!(lines.iter().any(|l| l.contains("Details")));
@@ -2358,11 +2382,7 @@ mod tests {
 
     #[test]
     fn convergence_report_serialization() {
-        let cohort = plan_rollout(
-            "test",
-            vec!["n1".to_string()],
-            RolloutStrategy::Canary,
-        );
+        let cohort = plan_rollout("test", vec!["n1".to_string()], RolloutStrategy::Canary);
         let report = ConvergenceReport {
             cohort,
             target_version: "1.0.0".to_string(),
@@ -2481,11 +2501,7 @@ mod tests {
     fn convergence_ratio_precision() {
         let cohort = plan_rollout(
             "c",
-            vec![
-                "n1".to_string(),
-                "n2".to_string(),
-                "n3".to_string(),
-            ],
+            vec!["n1".to_string(), "n2".to_string(), "n3".to_string()],
             RolloutStrategy::Rolling,
         );
         let states = vec![NodeVersionState {
@@ -2801,16 +2817,14 @@ mod tests {
 
     #[test]
     fn toon_placement_100_percent_confidence() {
-        let target =
-            ExecutionTarget::new("n", "z", PlacementReason::OnlyAvailable, 1.0);
+        let target = ExecutionTarget::new("n", "z", PlacementReason::OnlyAvailable, 1.0);
         let lines = format_placement_toon(&target);
         assert!(lines.iter().any(|l| l.contains("100%")));
     }
 
     #[test]
     fn toon_placement_zero_confidence() {
-        let target =
-            ExecutionTarget::new("n", "z", PlacementReason::LeastLoaded, 0.0);
+        let target = ExecutionTarget::new("n", "z", PlacementReason::LeastLoaded, 0.0);
         let lines = format_placement_toon(&target);
         assert!(lines.iter().any(|l| l.contains("0%")));
     }
@@ -2858,9 +2872,21 @@ mod tests {
             ),
         ];
         let lines = format_offline_toon(&avail);
-        assert!(lines.iter().any(|l| l.contains("[available]") && l.contains("slack")));
-        assert!(lines.iter().any(|l| l.contains("[unavailable]") && l.contains("github")));
-        assert!(lines.iter().any(|l| l.contains("[available]") && l.contains("jira")));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("[available]") && l.contains("slack"))
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("[unavailable]") && l.contains("github"))
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("[available]") && l.contains("jira"))
+        );
     }
 
     #[test]
@@ -2871,9 +2897,8 @@ mod tests {
             serde_json::json!({}),
             "pass",
         )];
-        let results = run_verification_matrix(&scenarios, |_| {
-            (true, "ok".to_string(), String::new())
-        });
+        let results =
+            run_verification_matrix(&scenarios, |_| (true, "ok".to_string(), String::new()));
         let lines = format_verification_toon(&results);
         assert!(lines.iter().any(|l| l.contains("Total: 1")));
         assert!(lines.iter().any(|l| l.contains("Passed: 1")));

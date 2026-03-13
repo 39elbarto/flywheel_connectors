@@ -180,7 +180,11 @@ impl PrerequisiteCheck {
     }
 
     /// Create a missing check result.
-    pub fn missing(descriptor: PrerequisiteDescriptor, remediation: &str, checked_at: &str) -> Self {
+    pub fn missing(
+        descriptor: PrerequisiteDescriptor,
+        remediation: &str,
+        checked_at: &str,
+    ) -> Self {
         Self {
             message: format!("{} is not configured", descriptor.name),
             descriptor,
@@ -191,7 +195,11 @@ impl PrerequisiteCheck {
     }
 
     /// Create an expired check result.
-    pub fn expired(descriptor: PrerequisiteDescriptor, remediation: &str, checked_at: &str) -> Self {
+    pub fn expired(
+        descriptor: PrerequisiteDescriptor,
+        remediation: &str,
+        checked_at: &str,
+    ) -> Self {
         Self {
             message: format!("{} has expired", descriptor.name),
             descriptor,
@@ -729,7 +737,11 @@ pub fn generate_onboarding_workflow(
             PrerequisiteKind::Resource => format!("Provision {}", desc.name),
             PrerequisiteKind::Custom => format!("Set up {}", desc.name),
         };
-        steps.push(OnboardingStep::blocking(step_num, &action, &desc.description));
+        steps.push(OnboardingStep::blocking(
+            step_num,
+            &action,
+            &desc.description,
+        ));
         step_num += 1;
     }
 
@@ -762,11 +774,7 @@ pub fn generate_onboarding_workflow(
 }
 
 /// Detect drift between expected and actual prerequisite states.
-pub fn detect_drift(
-    connector: &str,
-    checks: &[PrerequisiteCheck],
-    now: &str,
-) -> DriftReport {
+pub fn detect_drift(connector: &str, checks: &[PrerequisiteCheck], now: &str) -> DriftReport {
     let mut entries = Vec::new();
 
     for check in checks {
@@ -840,7 +848,10 @@ pub fn plan_repair(checks: &[PrerequisiteCheck], dry_run: bool) -> Vec<RepairAct
                 format!("Refresh expired prerequisite: {}", check.descriptor.name)
             }
             RepairActionType::Reconfigure => {
-                format!("Reconfigure degraded prerequisite: {}", check.descriptor.name)
+                format!(
+                    "Reconfigure degraded prerequisite: {}",
+                    check.descriptor.name
+                )
             }
             RepairActionType::Replace => {
                 format!(
@@ -867,11 +878,7 @@ pub fn plan_repair(checks: &[PrerequisiteCheck], dry_run: bool) -> Vec<RepairAct
 /// In dry-run mode, actions are planned but not executed. The `executor`
 /// callback performs the actual repair; it returns `true` if the repair
 /// succeeded.
-pub fn apply_repair<F>(
-    checks: &[PrerequisiteCheck],
-    dry_run: bool,
-    executor: F,
-) -> RepairResult
+pub fn apply_repair<F>(checks: &[PrerequisiteCheck], dry_run: bool, executor: F) -> RepairResult
 where
     F: Fn(&RepairAction) -> bool,
 {
@@ -1064,9 +1071,11 @@ pub fn format_onboarding_toon(workflow: &OnboardingWorkflow) -> Vec<String> {
         lines.push(format!("      {}", step.description));
     }
 
-    if let Some(remaining) = workflow.steps.len().checked_sub(
-        workflow.steps.iter().filter(|s| s.completed).count(),
-    ) {
+    if let Some(remaining) = workflow
+        .steps
+        .len()
+        .checked_sub(workflow.steps.iter().filter(|s| s.completed).count())
+    {
         if remaining > 0 {
             lines.push(String::new());
             lines.push(format!("{remaining} step(s) remaining"));
@@ -1126,7 +1135,11 @@ pub fn format_drift_toon(report: &DriftReport) -> Vec<String> {
 pub fn format_repair_toon(result: &RepairResult) -> Vec<String> {
     let mut lines = Vec::new();
 
-    let mode = if result.dry_run { "DRY RUN" } else { "EXECUTED" };
+    let mode = if result.dry_run {
+        "DRY RUN"
+    } else {
+        "EXECUTED"
+    };
     lines.push(format!("=== Repair Result ({mode}) ==="));
     lines.push(format!(
         "Actions: {} total, {} fixed, {} still broken",
@@ -1216,10 +1229,7 @@ pub fn format_verification_toon(matrix: &VerificationMatrix) -> Vec<String> {
 
         lines.push(format!(
             "  {} {} : expected={}, actual={}",
-            pass_marker,
-            case.scenario,
-            case.expected,
-            actual_label
+            pass_marker, case.scenario, case.expected, actual_label
         ));
 
         if let Some(ref msg) = case.message {
@@ -1239,7 +1249,11 @@ mod tests {
     // ── Helper factories ─────────────────────────────────────────
 
     fn api_key_desc(name: &str) -> PrerequisiteDescriptor {
-        PrerequisiteDescriptor::required(name, PrerequisiteKind::ApiKey, "API key for authentication")
+        PrerequisiteDescriptor::required(
+            name,
+            PrerequisiteKind::ApiKey,
+            "API key for authentication",
+        )
     }
 
     fn oauth_desc(name: &str) -> PrerequisiteDescriptor {
@@ -1476,14 +1490,22 @@ mod tests {
         let descs = sample_descriptors();
         let checks = all_satisfied_checks(&descs);
         assert_eq!(checks.len(), 3);
-        assert!(checks.iter().all(|c| c.status == PrerequisiteStatus::Satisfied));
+        assert!(
+            checks
+                .iter()
+                .all(|c| c.status == PrerequisiteStatus::Satisfied)
+        );
     }
 
     #[test]
     fn check_all_missing() {
         let descs = sample_descriptors();
         let checks = all_missing_checks(&descs);
-        assert!(checks.iter().all(|c| c.status == PrerequisiteStatus::Missing));
+        assert!(
+            checks
+                .iter()
+                .all(|c| c.status == PrerequisiteStatus::Missing)
+        );
         assert!(checks.iter().all(|c| c.remediation.is_some()));
     }
 
@@ -1538,9 +1560,7 @@ mod tests {
     #[test]
     fn check_custom_kind() {
         let descs = vec![custom_desc("custom_thing")];
-        let checks = check_prerequisites(&descs, NOW, |_| {
-            (PrerequisiteStatus::Unknown, None)
-        });
+        let checks = check_prerequisites(&descs, NOW, |_| (PrerequisiteStatus::Unknown, None));
         assert_eq!(checks[0].status, PrerequisiteStatus::Unknown);
         assert!(checks[0].message.contains("Cannot determine"));
     }
@@ -1548,19 +1568,15 @@ mod tests {
     #[test]
     fn check_messages_per_status() {
         let d = api_key_desc("tok");
-        let checks = check_prerequisites(&[d.clone()], NOW, |_| {
-            (PrerequisiteStatus::Missing, None)
-        });
+        let checks =
+            check_prerequisites(&[d.clone()], NOW, |_| (PrerequisiteStatus::Missing, None));
         assert!(checks[0].message.contains("not configured"));
 
-        let checks = check_prerequisites(&[d.clone()], NOW, |_| {
-            (PrerequisiteStatus::Expired, None)
-        });
+        let checks =
+            check_prerequisites(&[d.clone()], NOW, |_| (PrerequisiteStatus::Expired, None));
         assert!(checks[0].message.contains("expired"));
 
-        let checks = check_prerequisites(&[d], NOW, |_| {
-            (PrerequisiteStatus::Satisfied, None)
-        });
+        let checks = check_prerequisites(&[d], NOW, |_| (PrerequisiteStatus::Satisfied, None));
         assert!(checks[0].message.contains("available"));
     }
 
@@ -1854,9 +1870,7 @@ mod tests {
     #[test]
     fn drift_severity_required_unknown_is_medium() {
         let descs = vec![api_key_desc("tok")];
-        let checks = check_prerequisites(&descs, NOW, |_| {
-            (PrerequisiteStatus::Unknown, None)
-        });
+        let checks = check_prerequisites(&descs, NOW, |_| (PrerequisiteStatus::Unknown, None));
         let report = detect_drift("myconn", &checks, NOW);
         assert_eq!(report.entries[0].severity, DriftSeverity::Medium);
     }
@@ -1882,9 +1896,7 @@ mod tests {
     #[test]
     fn drift_severity_optional_unknown_is_low() {
         let descs = vec![webhook_desc("hook")];
-        let checks = check_prerequisites(&descs, NOW, |_| {
-            (PrerequisiteStatus::Unknown, None)
-        });
+        let checks = check_prerequisites(&descs, NOW, |_| (PrerequisiteStatus::Unknown, None));
         let report = detect_drift("myconn", &checks, NOW);
         assert_eq!(report.entries[0].severity, DriftSeverity::Low);
     }
@@ -2040,9 +2052,7 @@ mod tests {
     #[test]
     fn plan_repair_unknown_generates_replace() {
         let descs = vec![api_key_desc("tok")];
-        let checks = check_prerequisites(&descs, NOW, |_| {
-            (PrerequisiteStatus::Unknown, None)
-        });
+        let checks = check_prerequisites(&descs, NOW, |_| (PrerequisiteStatus::Unknown, None));
         let actions = plan_repair(&checks, false);
         assert_eq!(actions[0].action_type, RepairActionType::Replace);
         assert!(!actions[0].reversible);
@@ -2112,9 +2122,7 @@ mod tests {
     fn apply_repair_dry_run_no_execute() {
         let descs = vec![api_key_desc("tok")];
         let checks = all_missing_checks(&descs);
-        let result = apply_repair(&checks, true, |_| {
-            panic!("should not execute in dry run")
-        });
+        let result = apply_repair(&checks, true, |_| panic!("should not execute in dry run"));
         assert!(result.dry_run);
         assert_eq!(result.prerequisites_fixed, 0);
         assert_eq!(result.still_broken.len(), 1);
@@ -2369,7 +2377,11 @@ mod tests {
         // Required: present, missing_required, expired = 3 cases.
         assert_eq!(cases.len(), 3);
         assert!(cases.iter().any(|c| c.scenario.contains("present")));
-        assert!(cases.iter().any(|c| c.scenario.contains("missing_required")));
+        assert!(
+            cases
+                .iter()
+                .any(|c| c.scenario.contains("missing_required"))
+        );
         assert!(cases.iter().any(|c| c.scenario.contains("expired")));
     }
 
@@ -2379,7 +2391,11 @@ mod tests {
         let cases = build_verification_cases(&descs);
         // Optional: present, expired = 2 cases (no missing_required).
         assert_eq!(cases.len(), 2);
-        assert!(!cases.iter().any(|c| c.scenario.contains("missing_required")));
+        assert!(
+            !cases
+                .iter()
+                .any(|c| c.scenario.contains("missing_required"))
+        );
     }
 
     #[test]
@@ -2454,9 +2470,7 @@ mod tests {
 
     #[test]
     fn verify_empty_cases() {
-        let matrix = verify_prerequisites("test", vec![], |_| {
-            (VerificationOutcome::Pass, None)
-        });
+        let matrix = verify_prerequisites("test", vec![], |_| (VerificationOutcome::Pass, None));
         assert!(matrix.all_passed());
         assert_eq!(matrix.cases.len(), 0);
     }
@@ -2670,7 +2684,11 @@ mod tests {
         let checks = all_missing_checks(&descs);
         let report = detect_drift("test", &checks, NOW);
         let lines = format_drift_toon(&report);
-        assert!(lines.iter().any(|l| l.contains("expected=") && l.contains("actual=")));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("expected=") && l.contains("actual="))
+        );
     }
 
     #[test]
@@ -2912,7 +2930,11 @@ mod tests {
             cases,
         };
         let lines = format_verification_toon(&matrix);
-        assert!(lines.iter().any(|l| l.contains("expected=pass") && l.contains("actual=fail")));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("expected=pass") && l.contains("actual=fail"))
+        );
     }
 
     #[test]
@@ -3034,10 +3056,7 @@ mod tests {
 
     #[test]
     fn edge_mixed_required_optional_drift() {
-        let descs = vec![
-            api_key_desc("required_key"),
-            webhook_desc("optional_hook"),
-        ];
+        let descs = vec![api_key_desc("required_key"), webhook_desc("optional_hook")];
         let checks = check_prerequisites(&descs, NOW, |d| {
             if d.required {
                 (PrerequisiteStatus::Expired, Some("renew".to_string()))
@@ -3105,9 +3124,7 @@ mod tests {
     #[test]
     fn edge_ready_state_with_all_unknown() {
         let descs = vec![api_key_desc("a"), api_key_desc("b")];
-        let checks = check_prerequisites(&descs, NOW, |_| {
-            (PrerequisiteStatus::Unknown, None)
-        });
+        let checks = check_prerequisites(&descs, NOW, |_| (PrerequisiteStatus::Unknown, None));
         let state = build_ready_state("test", checks);
         assert!(!state.overall_ready);
         assert!((state.score - 0.0).abs() < f64::EPSILON);
@@ -3116,8 +3133,8 @@ mod tests {
     #[test]
     fn edge_repair_reversible_vs_irreversible() {
         let descs = vec![
-            api_key_desc("missing_key"),    // Missing -> Install (irreversible)
-            api_key_desc("expired_key"),    // need expired
+            api_key_desc("missing_key"), // Missing -> Install (irreversible)
+            api_key_desc("expired_key"), // need expired
         ];
         let checks = check_prerequisites(&descs, NOW, |d| {
             if d.name == "missing_key" {
@@ -3129,6 +3146,6 @@ mod tests {
         let actions = plan_repair(&checks, false);
         assert_eq!(actions.len(), 2);
         assert!(!actions[0].reversible); // Install
-        assert!(actions[1].reversible);  // Refresh
+        assert!(actions[1].reversible); // Refresh
     }
 }

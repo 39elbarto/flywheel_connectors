@@ -376,7 +376,12 @@ const FCP2_REQUIREMENTS: &[RequirementDef] = &[
                 ComplianceStatus::Fail
             }
         },
-        evidence: |a| format!("network constraint coverage: {:.0}%", a.network.coverage * 100.0),
+        evidence: |a| {
+            format!(
+                "network constraint coverage: {:.0}%",
+                a.network.coverage * 100.0
+            )
+        },
     },
     RequirementDef {
         id: "FCP2-ID-001",
@@ -447,8 +452,7 @@ const FCP3_REQUIREMENTS: &[RequirementDef] = &[
                 && a.operations.with_output_schema == a.operations.count
             {
                 ComplianceStatus::Pass
-            } else if a.operations.with_input_properties > 0
-                || a.operations.with_output_schema > 0
+            } else if a.operations.with_input_properties > 0 || a.operations.with_output_schema > 0
             {
                 ComplianceStatus::Partial
             } else {
@@ -602,9 +606,10 @@ const FCP3_REQUIREMENTS: &[RequirementDef] = &[
             }
         },
         evidence: |a| {
-            a.connector_id
-                .as_ref()
-                .map_or_else(|| "connector_id missing".to_string(), |id| format!("connector_id: {id}"))
+            a.connector_id.as_ref().map_or_else(
+                || "connector_id missing".to_string(),
+                |id| format!("connector_id: {id}"),
+            )
         },
     },
 ];
@@ -669,10 +674,7 @@ pub fn audit_all(matrix: &AuditMatrix) -> (Vec<AuditResult>, AuditSummary) {
 }
 
 /// Perform gap analysis with severity filtering.
-pub fn audit_gaps(
-    matrix: &AuditMatrix,
-    args: &AuditGapsArgs,
-) -> Vec<GapEntry> {
+pub fn audit_gaps(matrix: &AuditMatrix, args: &AuditGapsArgs) -> Vec<GapEntry> {
     let mut all_gaps = Vec::new();
 
     let connectors: Vec<&ConnectorAudit> = args.connector.as_ref().map_or_else(
@@ -813,15 +815,14 @@ fn build_matrix_entries(audit: &ConnectorAudit) -> Vec<MatrixEntry> {
     };
 
     #[allow(clippy::cast_precision_loss)]
-    let rate_limit_coverage = if audit.rate_limits.pool_count > 0
-        && audit.rate_limits.has_operation_pools
-    {
-        1.0
-    } else if audit.rate_limits.pool_count > 0 {
-        0.5
-    } else {
-        0.0
-    };
+    let rate_limit_coverage =
+        if audit.rate_limits.pool_count > 0 && audit.rate_limits.has_operation_pools {
+            1.0
+        } else if audit.rate_limits.pool_count > 0 {
+            0.5
+        } else {
+            0.0
+        };
 
     vec![
         MatrixEntry {
@@ -905,7 +906,10 @@ fn build_recommendations(audit: &ConnectorAudit) -> Vec<String> {
     }
 
     if audit.operations.completeness < 0.5 {
-        recs.push("Improve operation metadata completeness (descriptions, schemas, capabilities)".to_string());
+        recs.push(
+            "Improve operation metadata completeness (descriptions, schemas, capabilities)"
+                .to_string(),
+        );
     } else if audit.operations.completeness < 0.9 {
         recs.push("Fill remaining operation metadata gaps for full readiness".to_string());
     }
@@ -938,7 +942,10 @@ pub fn format_audit_toon(result: &AuditResult) -> Vec<String> {
     let mut lines = Vec::new();
 
     lines.push(format!("== Audit: {} ==", result.connector));
-    lines.push(format!("Compliance score: {:.0}%", result.compliance_score * 100.0));
+    lines.push(format!(
+        "Compliance score: {:.0}%",
+        result.compliance_score * 100.0
+    ));
     lines.push(String::new());
 
     lines.push("Matrix:".to_string());
@@ -1097,7 +1104,9 @@ mod tests {
     use crate::audit::{
         AgentHintAudit, ConfigAudit, EventAudit, NetworkAudit, OperationsAudit, RateLimitAudit,
     };
-    use crate::readiness::{ConnectorCohort, GapCategory, GapSeverity, ReadinessGap, ReadinessLevel};
+    use crate::readiness::{
+        ConnectorCohort, GapCategory, GapSeverity, ReadinessGap, ReadinessLevel,
+    };
 
     // ── Test fixtures ───────────────────────────────────────────────
 
@@ -1392,7 +1401,11 @@ mod tests {
         let c = make_full_connector("github");
         let result = audit_connector(&c);
         assert_eq!(result.matrix_entries.len(), 6);
-        let areas: Vec<&str> = result.matrix_entries.iter().map(|e| e.area.as_str()).collect();
+        let areas: Vec<&str> = result
+            .matrix_entries
+            .iter()
+            .map(|e| e.area.as_str())
+            .collect();
         assert!(areas.contains(&"operations"));
         assert!(areas.contains(&"agent_hints"));
         assert!(areas.contains(&"network"));
@@ -1437,7 +1450,12 @@ mod tests {
     fn audit_empty_connector_has_manifest_recommendation() {
         let c = make_empty_connector("unknown");
         let result = audit_connector(&c);
-        assert!(result.recommendations.iter().any(|r| r.contains("manifest.toml")));
+        assert!(
+            result
+                .recommendations
+                .iter()
+                .any(|r| r.contains("manifest.toml"))
+        );
     }
 
     #[test]
@@ -1519,10 +1537,7 @@ mod tests {
 
     #[test]
     fn audit_all_all_passing() {
-        let matrix = make_matrix(vec![
-            make_full_connector("a"),
-            make_full_connector("b"),
-        ]);
+        let matrix = make_matrix(vec![make_full_connector("a"), make_full_connector("b")]);
         let (_, summary) = audit_all(&matrix);
         assert_eq!(summary.passed, 2);
         assert_eq!(summary.failed, 0);
@@ -1530,10 +1545,7 @@ mod tests {
 
     #[test]
     fn audit_all_all_failing() {
-        let matrix = make_matrix(vec![
-            make_empty_connector("a"),
-            make_empty_connector("b"),
-        ]);
+        let matrix = make_matrix(vec![make_empty_connector("a"), make_empty_connector("b")]);
         let (_, summary) = audit_all(&matrix);
         assert_eq!(summary.passed, 0);
         assert_eq!(summary.failed, 2);
@@ -1541,10 +1553,7 @@ mod tests {
 
     #[test]
     fn audit_all_preserves_total_connectors() {
-        let matrix = make_matrix(vec![
-            make_full_connector("a"),
-            make_empty_connector("b"),
-        ]);
+        let matrix = make_matrix(vec![make_full_connector("a"), make_empty_connector("b")]);
         let (_, summary) = audit_all(&matrix);
         assert_eq!(summary.total_connectors, 2);
     }
@@ -1742,7 +1751,12 @@ mod tests {
         let report = audit_compliance(&c, &args).unwrap();
         assert!(report.pass_rate < 1.0);
         // At least some requirements fail or are partial
-        assert!(report.entries.iter().any(|e| e.status != ComplianceStatus::Pass));
+        assert!(
+            report
+                .entries
+                .iter()
+                .any(|e| e.status != ComplianceStatus::Pass)
+        );
     }
 
     #[test]
@@ -1806,7 +1820,11 @@ mod tests {
         };
         let report = audit_compliance(&c, &args).unwrap();
         for entry in &report.entries {
-            assert!(!entry.evidence.is_empty(), "entry {} lacks evidence", entry.requirement);
+            assert!(
+                !entry.evidence.is_empty(),
+                "entry {} lacks evidence",
+                entry.requirement
+            );
         }
     }
 
@@ -1846,7 +1864,10 @@ mod tests {
             cohort: ConnectorCohort::Other,
             level: ReadinessLevel::NotReady,
             has_manifest: true,
-            operations: OperationsAudit { count: 0, ..Default::default() },
+            operations: OperationsAudit {
+                count: 0,
+                ..Default::default()
+            },
             config: ConfigAudit::default(),
             agent_hints: AgentHintAudit::default(),
             events: EventAudit::default(),
@@ -1952,10 +1973,7 @@ mod tests {
 
     #[test]
     fn summary_some_pass() {
-        let matrix = make_matrix(vec![
-            make_full_connector("a"),
-            make_empty_connector("b"),
-        ]);
+        let matrix = make_matrix(vec![make_full_connector("a"), make_empty_connector("b")]);
         let (_, summary) = audit_all(&matrix);
         assert_eq!(summary.passed, 1);
         assert_eq!(summary.failed, 1);
@@ -2275,7 +2293,10 @@ mod tests {
             cohort: ConnectorCohort::Other,
             level: ReadinessLevel::NotReady,
             has_manifest: true,
-            operations: OperationsAudit { count: 0, ..Default::default() },
+            operations: OperationsAudit {
+                count: 0,
+                ..Default::default()
+            },
             config: ConfigAudit::default(),
             agent_hints: AgentHintAudit::default(),
             events: EventAudit::default(),
@@ -2367,7 +2388,11 @@ mod tests {
         let c = make_full_connector("github");
         let entries = build_matrix_entries(&c);
         for entry in &entries {
-            assert!(entry.passing, "area {} should pass on full connector", entry.area);
+            assert!(
+                entry.passing,
+                "area {} should pass on full connector",
+                entry.area
+            );
         }
     }
 
@@ -2438,7 +2463,10 @@ mod tests {
     fn recommendations_full_connector_minimal() {
         let c = make_full_connector("github");
         let recs = build_recommendations(&c);
-        assert!(recs.is_empty(), "full connector should have no recommendations");
+        assert!(
+            recs.is_empty(),
+            "full connector should have no recommendations"
+        );
     }
 
     #[test]
@@ -2552,7 +2580,11 @@ mod tests {
 
     #[test]
     fn detail_level_json_roundtrip() {
-        for level in [DetailLevel::Summary, DetailLevel::Detailed, DetailLevel::Full] {
+        for level in [
+            DetailLevel::Summary,
+            DetailLevel::Detailed,
+            DetailLevel::Full,
+        ] {
             let json = serde_json::to_string(&level).unwrap();
             let parsed: DetailLevel = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed, level);
@@ -2593,7 +2625,10 @@ mod tests {
             cohort: ConnectorCohort::Other,
             level: ReadinessLevel::NotReady,
             has_manifest: true,
-            operations: OperationsAudit { count: 0, ..Default::default() },
+            operations: OperationsAudit {
+                count: 0,
+                ..Default::default()
+            },
             config: ConfigAudit::default(),
             agent_hints: AgentHintAudit::default(),
             events: EventAudit::default(),

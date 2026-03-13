@@ -958,15 +958,19 @@ pub(crate) fn run(args: &BenchArgs) -> anyhow::Result<()> {
             run_primitives(*target, args.iterations, args.warmup)
         }
         BenchCommand::Search { operations } => {
-            vec![bench_search_index(*operations, args.iterations, args.warmup),
-                 bench_search_query(*operations, args.iterations, args.warmup)]
+            vec![
+                bench_search_index(*operations, args.iterations, args.warmup),
+                bench_search_query(*operations, args.iterations, args.warmup),
+            ]
         }
         BenchCommand::Batch { items } => {
             vec![bench_batch_throughput(*items, args.iterations, args.warmup)]
         }
         BenchCommand::Mcp { connectors } => {
-            vec![bench_mcp_tool_list(*connectors, args.iterations, args.warmup),
-                 bench_mcp_tool_route(*connectors, args.iterations, args.warmup)]
+            vec![
+                bench_mcp_tool_list(*connectors, args.iterations, args.warmup),
+                bench_mcp_tool_route(*connectors, args.iterations, args.warmup),
+            ]
         }
         BenchCommand::Pipeline { steps } => {
             vec![bench_pipeline_setup(*steps, args.iterations, args.warmup)]
@@ -1573,9 +1577,8 @@ fn bench_search_query(operation_count: u32, iterations: u32, warmup: u32) -> Ben
     }
     let query = "connector_5".to_owned();
 
-    let (percentiles, outliers) = run_benchmark_with_result(warmup, iterations, || {
-        index.get(&query).cloned()
-    });
+    let (percentiles, outliers) =
+        run_benchmark_with_result(warmup, iterations, || index.get(&query).cloned());
 
     let mut result = BenchmarkResult::new(
         format!("search-query-{operation_count}"),
@@ -1600,7 +1603,8 @@ fn bench_batch_throughput(item_count: u32, iterations: u32, warmup: u32) -> Benc
         .collect();
 
     let (percentiles, outliers) = run_benchmark_with_result(warmup, iterations, || {
-        items.iter()
+        items
+            .iter()
             .map(|item| item["data"].as_str().unwrap_or("").to_uppercase())
             .collect::<Vec<String>>()
     });
@@ -1624,9 +1628,7 @@ fn bench_batch_throughput(item_count: u32, iterations: u32, warmup: u32) -> Benc
 /// Benchmark MCP tools/list response time.
 fn bench_mcp_tool_list(connector_count: u32, iterations: u32, warmup: u32) -> BenchmarkResult {
     let tools: Vec<(String, String)> = (0..connector_count)
-        .flat_map(|c| {
-            (0..3).map(move |o| (format!("connector_{c}"), format!("op_{o}")))
-        })
+        .flat_map(|c| (0..3).map(move |o| (format!("connector_{c}"), format!("op_{o}"))))
         .collect();
 
     let (percentiles, outliers) = run_benchmark_with_result(warmup, iterations, || {
@@ -1637,12 +1639,17 @@ fn bench_mcp_tool_list(connector_count: u32, iterations: u32, warmup: u32) -> Be
 
     let mut result = BenchmarkResult::new(
         format!("mcp-tool-list-{connector_count}"),
-        format!("MCP tools/list for {connector_count} connectors ({} tools)", connector_count * 3),
+        format!(
+            "MCP tools/list for {connector_count} connectors ({} tools)",
+            connector_count * 3
+        ),
         iterations,
         warmup,
         percentiles,
     )
-    .with_parameters(serde_json::json!({ "connectors": connector_count, "tools": connector_count * 3 }))
+    .with_parameters(
+        serde_json::json!({ "connectors": connector_count, "tools": connector_count * 3 }),
+    )
     .with_targets(Targets {
         p50_target_ms: 5.0,
         p99_target_ms: 20.0,
@@ -1662,9 +1669,8 @@ fn bench_mcp_tool_route(connector_count: u32, iterations: u32, warmup: u32) -> B
     }
     let target = format!("connector_{}.op_1", connector_count / 2);
 
-    let (percentiles, outliers) = run_benchmark_with_result(warmup, iterations, || {
-        tool_index.get(&target).cloned()
-    });
+    let (percentiles, outliers) =
+        run_benchmark_with_result(warmup, iterations, || tool_index.get(&target).cloned());
 
     let mut result = BenchmarkResult::new(
         format!("mcp-tool-route-{connector_count}"),
@@ -1685,11 +1691,13 @@ fn bench_mcp_tool_route(connector_count: u32, iterations: u32, warmup: u32) -> B
 /// Benchmark pipeline setup and scheduling overhead.
 fn bench_pipeline_setup(step_count: u32, iterations: u32, warmup: u32) -> BenchmarkResult {
     let steps: Vec<serde_json::Value> = (0..step_count)
-        .map(|i| serde_json::json!({
-            "name": format!("step_{i}"),
-            "command": format!("connector_{}.op_{}", i / 3, i % 3),
-            "depends_on": if i > 0 { vec![format!("step_{}", i - 1)] } else { vec![] },
-        }))
+        .map(|i| {
+            serde_json::json!({
+                "name": format!("step_{i}"),
+                "command": format!("connector_{}.op_{}", i / 3, i % 3),
+                "depends_on": if i > 0 { vec![format!("step_{}", i - 1)] } else { vec![] },
+            })
+        })
         .collect();
 
     let (percentiles, outliers) = run_benchmark_with_result(warmup, iterations, || {

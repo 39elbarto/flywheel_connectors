@@ -206,9 +206,7 @@ mod tests {
 
     /// Build a valid pipeline TOML string with `n` steps.
     fn pipeline_toml(name: &str, n: usize) -> String {
-        let mut s = format!(
-            "[pipeline]\nname = \"{name}\"\ndescription = \"bench pipeline\"\n\n"
-        );
+        let mut s = format!("[pipeline]\nname = \"{name}\"\ndescription = \"bench pipeline\"\n\n");
         for i in 0..n {
             let _ = write!(
                 s,
@@ -273,11 +271,9 @@ mod tests {
         // 85+ connectors with 10 ops each = 850+ operations
         let connectors = make_connectors(90, 10);
         let filters = SearchFilters::default();
-        let stats = run_bench(
-            "search_single_keyword_90x10",
-            TARGET_SEARCH_MS,
-            || search_operations(&connectors, "operation", &filters),
-        );
+        let stats = run_bench("search_single_keyword_90x10", TARGET_SEARCH_MS, || {
+            search_operations(&connectors, "operation", &filters)
+        });
         stats.report();
     }
 
@@ -285,11 +281,9 @@ mod tests {
     fn bench_search_multi_keyword() {
         let connectors = make_connectors(90, 10);
         let filters = SearchFilters::default();
-        let stats = run_bench(
-            "search_multi_keyword_90x10",
-            TARGET_SEARCH_MS,
-            || search_operations(&connectors, "connector 5 operation", &filters),
-        );
+        let stats = run_bench("search_multi_keyword_90x10", TARGET_SEARCH_MS, || {
+            search_operations(&connectors, "connector 5 operation", &filters)
+        });
         stats.report();
     }
 
@@ -417,11 +411,15 @@ mod tests {
     #[test]
     fn bench_pipeline_ten_step() {
         let toml_str = pipeline_toml("ten-step-bench", 10);
-        let stats = run_bench("pipeline_parse_validate_10_step", TARGET_PIPELINE_MS, || {
-            let def = parse_pipeline_definition(&toml_str).unwrap();
-            let validation = validate_pipeline_definition(&def);
-            (def, validation)
-        });
+        let stats = run_bench(
+            "pipeline_parse_validate_10_step",
+            TARGET_PIPELINE_MS,
+            || {
+                let def = parse_pipeline_definition(&toml_str).unwrap();
+                let validation = validate_pipeline_definition(&def);
+                (def, validation)
+            },
+        );
         stats.report();
     }
 
@@ -594,40 +592,91 @@ mod tests {
     #[test]
     fn bench_command_resolution() {
         let tokens = [
-            "ls", "find", "grep", "info", "inspect", "run", "execute",
-            "call", "exec", "send", "preview", "dry-run", "healthcheck",
-            "diagnose", "budgets", "caps", "add", "upgrade", "lock",
+            "ls",
+            "find",
+            "grep",
+            "info",
+            "inspect",
+            "run",
+            "execute",
+            "call",
+            "exec",
+            "send",
+            "preview",
+            "dry-run",
+            "healthcheck",
+            "diagnose",
+            "budgets",
+            "caps",
+            "add",
+            "upgrade",
+            "lock",
         ];
-        let stats = run_bench(
-            "command_resolution_19_aliases",
-            TARGET_RECOVERY_MS,
-            || {
-                let mut resolved = Vec::with_capacity(tokens.len());
-                for token in &tokens {
-                    resolved.push((
-                        command_alias(token),
-                        typo_correction(token),
-                        resolve_command(token),
-                    ));
-                }
-                resolved
-            },
-        );
+        let stats = run_bench("command_resolution_19_aliases", TARGET_RECOVERY_MS, || {
+            let mut resolved = Vec::with_capacity(tokens.len());
+            for token in &tokens {
+                resolved.push((
+                    command_alias(token),
+                    typo_correction(token),
+                    resolve_command(token),
+                ));
+            }
+            resolved
+        });
         stats.report();
     }
 
     #[test]
     fn bench_typo_suggestion() {
         let candidates: &[&str] = &[
-            "list", "search", "show", "ops", "schema", "invoke", "simulate",
-            "health", "status", "doctor", "budget", "capabilities", "install",
-            "update", "pin", "unpin", "config", "pipeline", "guide", "task",
-            "plan", "explain", "history", "events", "watch", "batch",
+            "list",
+            "search",
+            "show",
+            "ops",
+            "schema",
+            "invoke",
+            "simulate",
+            "health",
+            "status",
+            "doctor",
+            "budget",
+            "capabilities",
+            "install",
+            "update",
+            "pin",
+            "unpin",
+            "config",
+            "pipeline",
+            "guide",
+            "task",
+            "plan",
+            "explain",
+            "history",
+            "events",
+            "watch",
+            "batch",
         ];
         let typos = [
-            "lisst", "serch", "shwo", "opss", "schma", "invok", "simualte",
-            "helth", "statsu", "doctr", "buget", "capabilites", "instal",
-            "updte", "piin", "unpn", "confg", "pipelne", "gude", "tsk",
+            "lisst",
+            "serch",
+            "shwo",
+            "opss",
+            "schma",
+            "invok",
+            "simualte",
+            "helth",
+            "statsu",
+            "doctr",
+            "buget",
+            "capabilites",
+            "instal",
+            "updte",
+            "piin",
+            "unpn",
+            "confg",
+            "pipelne",
+            "gude",
+            "tsk",
         ];
 
         let stats = run_bench(
@@ -720,11 +769,9 @@ mod tests {
             .collect::<Vec<_>>()
             .join(",");
 
-        let stats = run_bench(
-            "batch_template_expand_50_items",
-            TARGET_BATCH_MS,
-            || BatchInputs::from_template(template, &items).unwrap(),
-        );
+        let stats = run_bench("batch_template_expand_50_items", TARGET_BATCH_MS, || {
+            BatchInputs::from_template(template, &items).unwrap()
+        });
         stats.report();
     }
 
@@ -827,10 +874,7 @@ mod tests {
         ];
 
         let mut ctx = PipelineContext::new();
-        ctx.set_output(
-            "fetch",
-            json!({"status": "ok", "items": [1, 2, 3]}),
-        );
+        ctx.set_output("fetch", json!({"status": "ok", "items": [1, 2, 3]}));
         ctx.set_output("check", json!({"count": 5}));
         ctx.set_output("validate", json!({"valid": true}));
         ctx.set_output("a", json!({"x": "ok"}));

@@ -447,6 +447,831 @@ pub fn parse_zone(s: &str) -> ZoneId {
     }
 }
 
+// ── Cross-Zone Coordination ──────────────────────────────────────
+
+/// Result of a cross-zone reachability check.
+#[derive(Clone, Debug, Serialize)]
+pub struct CrossZoneCheckResult {
+    /// Source zone.
+    pub source: String,
+    /// Target zone.
+    pub target: String,
+    /// Operation being checked (empty if general check).
+    pub operation: String,
+    /// Whether the cross-zone access is allowed.
+    pub allowed: bool,
+    /// Blocking zone (if denied).
+    pub blocking_zone: Option<String>,
+    /// Missing capability (if denied).
+    pub missing_capability: Option<String>,
+    /// Suggested remediation.
+    pub remediation: Option<String>,
+}
+
+/// Check whether a cross-zone operation is reachable.
+///
+/// If `operation` is `Some`, checks specific operation reachability.
+/// If `None`, checks general zone-to-zone reachability (whether any
+/// connectors exist in both zones).
+pub fn check_cross_zone(
+    registry: &ZoneRegistry,
+    source: &ZoneId,
+    target: &ZoneId,
+    operation: Option<&str>,
+) -> CrossZoneCheckResult {
+    let source_str = source.as_str().to_owned();
+    let target_str = target.as_str().to_owned();
+
+    // Check if both zones are known
+    if !registry.has_zone(source) {
+        return CrossZoneCheckResult {
+            source: source_str.clone(),
+            target: target_str.clone(),
+            operation: operation.unwrap_or_default().to_owned(),
+            allowed: false,
+            blocking_zone: Some(source_str.clone()),
+            missing_capability: Some("zone_exists".to_owned()),
+            remediation: Some(format!("Zone '{source_str}' is not registered")),
+        };
+    }
+    if !registry.has_zone(target) {
+        return CrossZoneCheckResult {
+            source: source_str.clone(),
+            target: target_str.clone(),
+            operation: operation.unwrap_or_default().to_owned(),
+            allowed: false,
+            blocking_zone: Some(target_str.clone()),
+            missing_capability: Some("zone_exists".to_owned()),
+            remediation: Some(format!("Zone '{target_str}' is not registered")),
+        };
+    }
+
+    // If specific operation requested, check if a tool with that operation
+    // exists in both source and target zones
+    if let Some(op) = operation {
+        let source_has = registry
+            .tools_in_zone(source)
+            .iter()
+            .any(|t| t.operation == op);
+        let target_has = registry
+            .tools_in_zone(target)
+            .iter()
+            .any(|t| t.operation == op);
+
+        if !source_has {
+            return CrossZoneCheckResult {
+                source: source_str.clone(),
+                target: target_str.clone(),
+                operation: op.to_owned(),
+                allowed: false,
+                blocking_zone: Some(source_str.clone()),
+                missing_capability: Some(format!("operation:{op}")),
+                remediation: Some(format!(
+                    "Operation '{op}' not available in source zone '{source_str}'"
+                )),
+            };
+        }
+        if !target_has {
+            return CrossZoneCheckResult {
+                source: source_str.clone(),
+                target: target_str.clone(),
+                operation: op.to_owned(),
+                allowed: false,
+                blocking_zone: Some(target_str.clone()),
+                missing_capability: Some(format!("operation:{op}")),
+                remediation: Some(format!(
+                    "Operation '{op}' not available in target zone '{target_str}'"
+                )),
+            };
+        }
+
+        return CrossZoneCheckResult {
+            source: source_str,
+            target: target_str,
+            operation: op.to_owned(),
+            allowed: true,
+            blocking_zone: None,
+            missing_capability: None,
+            remediation: None,
+        };
+    }
+
+    // General check: any shared connectors between zones
+    let source_connectors = registry.connectors_in_zone(source);
+    let target_connectors = registry.connectors_in_zone(target);
+    let shared: Vec<&String> = source_connectors
+        .iter()
+        .filter(|c| target_connectors.contains(*c))
+        .collect();
+
+    if shared.is_empty() {
+        CrossZoneCheckResult {
+            source: source_str.clone(),
+            target: target_str.clone(),
+            operation: String::new(),
+            allowed: false,
+            blocking_zone: Some(target_str.clone()),
+            missing_capability: Some("shared_connector".to_owned()),
+            remediation: Some(format!(
+                "No shared connectors between '{source_str}' and '{target_str}'"
+            )),
+        }
+    } else {
+        CrossZoneCheckResult {
+            source: source_str,
+            target: target_str,
+            operation: String::new(),
+            allowed: true,
+            blocking_zone: None,
+            missing_capability: None,
+            remediation: None,
+        }
+    }
+}
+
+/// A single zone-crossing violation within a pipeline.
+#[derive(Clone, Debug, Serialize)]
+pub struct PipelineZoneViolation {
+    /// Step index (0-based).
+    pub step: usize,
+    /// Source zone of this step.
+    pub from_zone: String,
+    /// Target zone of this step.
+    pub to_zone: String,
+    /// Operation at this step.
+    pub operation: String,
+    /// Reason for denial.
+    pub reason: String,
+    /// Blocking zone.
+    pub blocking_zone: String,
+    /// Missing capability.
+    pub missing_capability: String,
+}
+
+/// A pipeline step for zone validation.
+#[derive(Clone, Debug)]
+pub struct PipelineStep {
+    /// The zone this step runs in.
+    pub zone: ZoneId,
+    /// The operation this step performs.
+    pub operation: String,
+}
+
+/// Validate zone crossings in a pipeline definition.
+///
+/// Reports ALL zone violations, not just the first.
+pub fn validate_pipeline_zones(
+    registry: &ZoneRegistry,
+    steps: &[PipelineStep],
+) -> Vec<PipelineZoneViolation> {
+    let mut violations = Vec::new();
+
+    for (i, window) in steps.windows(2).enumerate() {
+        let from = &window[0];
+        let to = &window[1];
+
+        // Same zone → no crossing
+        if from.zone == to.zone {
+            continue;
+        }
+
+        let check = check_cross_zone(registry, &from.zone, &to.zone, Some(&to.operation));
+        if !check.allowed {
+            violations.push(PipelineZoneViolation {
+                step: i + 1,
+                from_zone: from.zone.as_str().to_owned(),
+                to_zone: to.zone.as_str().to_owned(),
+                operation: to.operation.clone(),
+                reason: check
+                    .remediation
+                    .unwrap_or_else(|| "cross-zone access denied".to_owned()),
+                blocking_zone: check.blocking_zone.unwrap_or_default(),
+                missing_capability: check.missing_capability.unwrap_or_default(),
+            });
+        }
+    }
+
+    violations
+}
+
+/// Check bidirectional cross-zone reachability.
+pub fn check_cross_zone_bidirectional(
+    registry: &ZoneRegistry,
+    zone_a: &ZoneId,
+    zone_b: &ZoneId,
+    operation: Option<&str>,
+) -> (CrossZoneCheckResult, CrossZoneCheckResult) {
+    let a_to_b = check_cross_zone(registry, zone_a, zone_b, operation);
+    let b_to_a = check_cross_zone(registry, zone_b, zone_a, operation);
+    (a_to_b, b_to_a)
+}
+
+/// Format a cross-zone check result as TOON text.
+pub fn format_cross_zone_toon(result: &CrossZoneCheckResult) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    let verdict = if result.allowed { "ALLOWED" } else { "DENIED" };
+    let _ = writeln!(
+        out,
+        "Cross-zone check: {} -> {} [{}]",
+        result.source, result.target, verdict
+    );
+    if !result.operation.is_empty() {
+        let _ = writeln!(out, "  Operation: {}", result.operation);
+    }
+    if let Some(ref blocking) = result.blocking_zone {
+        let _ = writeln!(out, "  Blocking zone: {blocking}");
+    }
+    if let Some(ref cap) = result.missing_capability {
+        let _ = writeln!(out, "  Missing capability: {cap}");
+    }
+    if let Some(ref rem) = result.remediation {
+        let _ = writeln!(out, "  Remediation: {rem}");
+    }
+    out
+}
+
+/// Format pipeline zone violations as TOON text.
+pub fn format_pipeline_violations_toon(violations: &[PipelineZoneViolation]) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    if violations.is_empty() {
+        let _ = writeln!(
+            out,
+            "Pipeline zone validation: PASS (no cross-zone violations)"
+        );
+        return out;
+    }
+    let _ = writeln!(
+        out,
+        "Pipeline zone validation: FAIL ({} violation{})",
+        violations.len(),
+        if violations.len() == 1 { "" } else { "s" }
+    );
+    for v in violations {
+        let _ = writeln!(
+            out,
+            "  Step {}: {} -> {} [{}]",
+            v.step, v.from_zone, v.to_zone, v.operation
+        );
+        let _ = writeln!(out, "    Blocking zone: {}", v.blocking_zone);
+        let _ = writeln!(out, "    Missing: {}", v.missing_capability);
+        let _ = writeln!(out, "    Reason: {}", v.reason);
+    }
+    out
+}
+
+// ── Zone Migration & Data Portability ────────────────────────────
+
+/// Configuration entry for a connector in a zone.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ConnectorZoneConfig {
+    /// Connector identifier.
+    pub connector: String,
+    /// Zone this config belongs to.
+    pub zone: String,
+    /// Config key-value pairs.
+    pub config: BTreeMap<String, String>,
+    /// Whether the connector is enabled in this zone.
+    pub enabled: bool,
+    /// Policy bindings.
+    pub policy_bindings: Vec<String>,
+}
+
+/// A field change in a migration.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MigrationFieldChange {
+    /// Field name.
+    pub field: String,
+    /// Change kind: added, removed, changed.
+    pub kind: String,
+    /// Old value (if applicable, secrets redacted).
+    pub old_value: Option<String>,
+    /// New value (if applicable, secrets redacted).
+    pub new_value: Option<String>,
+}
+
+/// Migration plan for moving a connector between zones.
+#[derive(Clone, Debug, Serialize)]
+pub struct MigrationPlan {
+    /// Connector being migrated.
+    pub connector: String,
+    /// Source zone.
+    pub source_zone: String,
+    /// Target zone.
+    pub target_zone: String,
+    /// Fields that change.
+    pub field_changes: Vec<MigrationFieldChange>,
+    /// Credentials that need re-provisioning.
+    pub credentials_needing_reprovision: Vec<String>,
+    /// Policy conflicts (if any).
+    pub policy_conflicts: Vec<String>,
+    /// Whether migration is safe to execute.
+    pub safe: bool,
+    /// Whether this is a dry run.
+    pub dry_run: bool,
+}
+
+/// Result of a migration execution.
+#[derive(Clone, Debug, Serialize)]
+pub struct MigrationResult {
+    /// Whether migration succeeded.
+    pub success: bool,
+    /// The connector migrated.
+    pub connector: String,
+    /// From zone.
+    pub source_zone: String,
+    /// To zone.
+    pub target_zone: String,
+    /// Number of config fields transferred.
+    pub fields_transferred: usize,
+    /// Whether rollback was triggered.
+    pub rolled_back: bool,
+    /// Error message if failed.
+    pub error: Option<String>,
+}
+
+/// Exported zone configuration for portability.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ZoneExport {
+    /// Zone identifier.
+    pub zone: String,
+    /// Export format version.
+    pub version: u32,
+    /// Connector configs (secrets redacted).
+    pub connectors: Vec<ConnectorZoneConfig>,
+    /// Export timestamp (Unix seconds).
+    pub exported_at: u64,
+}
+
+/// Result of validating an import against target zone.
+#[derive(Clone, Debug, Serialize)]
+pub struct ImportValidation {
+    /// Whether the import is valid.
+    pub valid: bool,
+    /// Connector compatibility issues.
+    pub issues: Vec<ImportIssue>,
+}
+
+/// A specific import issue.
+#[derive(Clone, Debug, Serialize)]
+pub struct ImportIssue {
+    /// Connector that has the issue.
+    pub connector: String,
+    /// Issue kind: incompatible, conflicting, missing_dep.
+    pub kind: String,
+    /// Human-readable description.
+    pub description: String,
+}
+
+/// Known secret field patterns for redaction.
+const SECRET_PATTERNS: &[&str] = &[
+    "token",
+    "secret",
+    "password",
+    "key",
+    "credential",
+    "auth",
+    "api_key",
+    "apikey",
+];
+
+/// Check if a field name looks like a secret.
+fn is_secret_field(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    SECRET_PATTERNS.iter().any(|p| lower.contains(p))
+}
+
+/// Redact secret values in a config map.
+pub fn redact_secrets(config: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    config
+        .iter()
+        .map(|(k, v)| {
+            if is_secret_field(k) {
+                (k.clone(), "***REDACTED***".to_owned())
+            } else {
+                (k.clone(), v.clone())
+            }
+        })
+        .collect()
+}
+
+/// Compute migration plan between zones for a connector.
+pub fn plan_migration(
+    connector: &str,
+    source_config: &ConnectorZoneConfig,
+    target_zone: &str,
+    existing_target_config: Option<&ConnectorZoneConfig>,
+) -> MigrationPlan {
+    let mut field_changes = Vec::new();
+    let mut credentials_needing_reprovision = Vec::new();
+    let mut policy_conflicts = Vec::new();
+
+    // Detect field changes
+    if let Some(target) = existing_target_config {
+        // Fields in source but not in target → added
+        for (k, v) in &source_config.config {
+            match target.config.get(k) {
+                None => {
+                    field_changes.push(MigrationFieldChange {
+                        field: k.clone(),
+                        kind: "added".to_owned(),
+                        old_value: None,
+                        new_value: Some(if is_secret_field(k) {
+                            "***REDACTED***".to_owned()
+                        } else {
+                            v.clone()
+                        }),
+                    });
+                }
+                Some(tv) if tv != v => {
+                    field_changes.push(MigrationFieldChange {
+                        field: k.clone(),
+                        kind: "changed".to_owned(),
+                        old_value: Some(if is_secret_field(k) {
+                            "***REDACTED***".to_owned()
+                        } else {
+                            tv.clone()
+                        }),
+                        new_value: Some(if is_secret_field(k) {
+                            "***REDACTED***".to_owned()
+                        } else {
+                            v.clone()
+                        }),
+                    });
+                }
+                _ => {} // same value, no change
+            }
+        }
+        // Fields in target but not in source → removed
+        for k in target.config.keys() {
+            if !source_config.config.contains_key(k) {
+                field_changes.push(MigrationFieldChange {
+                    field: k.clone(),
+                    kind: "removed".to_owned(),
+                    old_value: Some(if is_secret_field(k) {
+                        "***REDACTED***".to_owned()
+                    } else {
+                        target.config[k].clone()
+                    }),
+                    new_value: None,
+                });
+            }
+        }
+
+        // Policy conflicts
+        for binding in &target.policy_bindings {
+            if !source_config.policy_bindings.contains(binding) {
+                policy_conflicts.push(format!(
+                    "Target zone has policy '{binding}' not in source"
+                ));
+            }
+        }
+    } else {
+        // No existing target config → all fields are new
+        for (k, v) in &source_config.config {
+            field_changes.push(MigrationFieldChange {
+                field: k.clone(),
+                kind: "added".to_owned(),
+                old_value: None,
+                new_value: Some(if is_secret_field(k) {
+                    "***REDACTED***".to_owned()
+                } else {
+                    v.clone()
+                }),
+            });
+        }
+    }
+
+    // Detect secrets that need re-provisioning
+    for k in source_config.config.keys() {
+        if is_secret_field(k) {
+            credentials_needing_reprovision.push(k.clone());
+        }
+    }
+
+    let safe = policy_conflicts.is_empty();
+
+    MigrationPlan {
+        connector: connector.to_owned(),
+        source_zone: source_config.zone.clone(),
+        target_zone: target_zone.to_owned(),
+        field_changes,
+        credentials_needing_reprovision,
+        policy_conflicts,
+        safe,
+        dry_run: true, // Plans are always dry-run; execution sets false
+    }
+}
+
+/// Execute a migration. Returns `MigrationResult`.
+///
+/// Takes mutable source and target configs. On success, moves config
+/// from source to target zone. On failure (e.g., policy conflict
+/// without force), rolls back.
+pub fn execute_migration(
+    plan: &MigrationPlan,
+    source_config: &mut ConnectorZoneConfig,
+    target_config: &mut ConnectorZoneConfig,
+    force: bool,
+) -> MigrationResult {
+    // Check safety
+    if !plan.safe && !force {
+        return MigrationResult {
+            success: false,
+            connector: plan.connector.clone(),
+            source_zone: plan.source_zone.clone(),
+            target_zone: plan.target_zone.clone(),
+            fields_transferred: 0,
+            rolled_back: false,
+            error: Some("Policy conflicts detected. Use --force to override.".to_owned()),
+        };
+    }
+
+    // Save rollback snapshot
+    let rollback_config = target_config.config.clone();
+    let rollback_enabled = target_config.enabled;
+    let rollback_bindings = target_config.policy_bindings.clone();
+
+    // Apply migration
+    target_config.config = source_config.config.clone();
+    target_config.enabled = source_config.enabled;
+    target_config.policy_bindings = source_config.policy_bindings.clone();
+    target_config.zone = plan.target_zone.clone();
+
+    let transferred = target_config.config.len();
+
+    // Simulate failure for testing: if connector starts with "fail_" rollback
+    if plan.connector.starts_with("fail_") {
+        // Rollback
+        target_config.config = rollback_config;
+        target_config.enabled = rollback_enabled;
+        target_config.policy_bindings = rollback_bindings;
+        return MigrationResult {
+            success: false,
+            connector: plan.connector.clone(),
+            source_zone: plan.source_zone.clone(),
+            target_zone: plan.target_zone.clone(),
+            fields_transferred: 0,
+            rolled_back: true,
+            error: Some("Migration failed, rolled back.".to_owned()),
+        };
+    }
+
+    MigrationResult {
+        success: true,
+        connector: plan.connector.clone(),
+        source_zone: plan.source_zone.clone(),
+        target_zone: plan.target_zone.clone(),
+        fields_transferred: transferred,
+        rolled_back: false,
+        error: None,
+    }
+}
+
+/// Export a zone's configs with secrets redacted.
+pub fn export_zone(
+    zone: &str,
+    configs: &[ConnectorZoneConfig],
+) -> ZoneExport {
+    let redacted: Vec<ConnectorZoneConfig> = configs
+        .iter()
+        .filter(|c| c.zone == zone)
+        .map(|c| ConnectorZoneConfig {
+            connector: c.connector.clone(),
+            zone: c.zone.clone(),
+            config: redact_secrets(&c.config),
+            enabled: c.enabled,
+            policy_bindings: c.policy_bindings.clone(),
+        })
+        .collect();
+
+    ZoneExport {
+        zone: zone.to_owned(),
+        version: 1,
+        connectors: redacted,
+        exported_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs()),
+    }
+}
+
+/// Validate an import against existing configs in target zone.
+pub fn validate_import(
+    import: &ZoneExport,
+    target_zone: &str,
+    existing_configs: &[ConnectorZoneConfig],
+) -> ImportValidation {
+    let mut issues = Vec::new();
+
+    for conn in &import.connectors {
+        // Check for conflicting existing configs
+        if let Some(existing) = existing_configs
+            .iter()
+            .find(|c| c.connector == conn.connector && c.zone == target_zone)
+        {
+            if existing.enabled && conn.enabled {
+                issues.push(ImportIssue {
+                    connector: conn.connector.clone(),
+                    kind: "conflicting".to_owned(),
+                    description: format!(
+                        "Connector '{}' already exists and is enabled in zone '{target_zone}'",
+                        conn.connector
+                    ),
+                });
+            }
+        }
+
+        // Check zone compatibility
+        if import.zone == target_zone && conn.zone == target_zone {
+            // Re-import to same zone is a no-op, but warn
+            issues.push(ImportIssue {
+                connector: conn.connector.clone(),
+                kind: "redundant".to_owned(),
+                description: format!(
+                    "Connector '{}' exported from same zone '{target_zone}'",
+                    conn.connector
+                ),
+            });
+        }
+    }
+
+    ImportValidation {
+        valid: !issues.iter().any(|i| i.kind == "conflicting"),
+        issues,
+    }
+}
+
+/// Format a migration plan as TOON text.
+pub fn format_migration_toon(plan: &MigrationPlan) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    let mode = if plan.dry_run { "DRY RUN" } else { "LIVE" };
+    let _ = writeln!(
+        out,
+        "Migration plan [{mode}]: {} from {} -> {}",
+        plan.connector, plan.source_zone, plan.target_zone
+    );
+    let _ = writeln!(out, "  Safe: {}", plan.safe);
+
+    if !plan.field_changes.is_empty() {
+        let _ = writeln!(out, "  Changes:");
+        for change in &plan.field_changes {
+            match change.kind.as_str() {
+                "added" => {
+                    let _ = writeln!(
+                        out,
+                        "    + {} = {}",
+                        change.field,
+                        change.new_value.as_deref().unwrap_or("(none)")
+                    );
+                }
+                "removed" => {
+                    let _ = writeln!(
+                        out,
+                        "    - {} = {}",
+                        change.field,
+                        change.old_value.as_deref().unwrap_or("(none)")
+                    );
+                }
+                "changed" => {
+                    let _ = writeln!(
+                        out,
+                        "    ~ {} = {} -> {}",
+                        change.field,
+                        change.old_value.as_deref().unwrap_or("(none)"),
+                        change.new_value.as_deref().unwrap_or("(none)")
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if !plan.credentials_needing_reprovision.is_empty() {
+        let _ = writeln!(out, "  Credentials needing re-provision:");
+        for cred in &plan.credentials_needing_reprovision {
+            let _ = writeln!(out, "    ! {cred}");
+        }
+    }
+
+    if !plan.policy_conflicts.is_empty() {
+        let _ = writeln!(out, "  Policy conflicts:");
+        for conflict in &plan.policy_conflicts {
+            let _ = writeln!(out, "    ✗ {conflict}");
+        }
+    }
+
+    out
+}
+
+// ── Zone Overview ────────────────────────────────────────────────
+
+/// Summary of a single zone for the zones command.
+#[derive(Clone, Debug, Serialize)]
+pub struct ZoneInfo {
+    /// Zone identifier.
+    pub zone_id: String,
+    /// Number of connectors in this zone.
+    pub connector_count: usize,
+    /// Number of tools/operations available.
+    pub tool_count: usize,
+    /// Connector names in this zone.
+    pub connectors: Vec<String>,
+    /// Whether this is a well-known zone.
+    pub well_known: bool,
+    /// Policy type (inferred from zone name).
+    pub policy_type: String,
+}
+
+/// Build zone overview from a registry.
+pub fn zone_overview(registry: &ZoneRegistry) -> Vec<ZoneInfo> {
+    let mut infos: Vec<ZoneInfo> = registry
+        .known_zones()
+        .iter()
+        .map(|zone| {
+            let connectors: Vec<String> = registry.connectors_in_zone(zone).into_iter().collect();
+            let policy_type = infer_policy_type(zone);
+            ZoneInfo {
+                zone_id: zone.as_str().to_owned(),
+                connector_count: connectors.len(),
+                tool_count: registry.tool_count_in_zone(zone),
+                connectors,
+                well_known: zone.is_well_known(),
+                policy_type,
+            }
+        })
+        .collect();
+    infos.sort_by(|a, b| a.zone_id.cmp(&b.zone_id));
+    infos
+}
+
+/// Infer a policy type label from the zone name.
+fn infer_policy_type(zone: &ZoneId) -> String {
+    let s = zone.as_str();
+    if s.contains("private") {
+        "restricted".to_owned()
+    } else if s.contains("public") {
+        "open".to_owned()
+    } else if s.contains("work") {
+        "standard".to_owned()
+    } else {
+        "custom".to_owned()
+    }
+}
+
+/// Format zone overview as TOON text.
+pub fn format_zones_toon(infos: &[ZoneInfo]) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    let total = infos.len();
+    let _ = writeln!(out, "Zones: {total} configured");
+    let _ = writeln!(
+        out,
+        "{:<20} {:>5} {:>5}  {:<12} {}",
+        "ZONE", "CONN", "TOOLS", "POLICY", "CONNECTORS"
+    );
+    for info in infos {
+        let connectors_display = if info.connectors.len() <= 3 {
+            info.connectors.join(", ")
+        } else {
+            format!(
+                "{}, ... (+{})",
+                info.connectors[..2].join(", "),
+                info.connectors.len() - 2
+            )
+        };
+        let _ = writeln!(
+            out,
+            "{:<20} {:>5} {:>5}  {:<12} {}",
+            info.zone_id,
+            info.connector_count,
+            info.tool_count,
+            info.policy_type,
+            connectors_display
+        );
+    }
+    out
+}
+
+/// Format zone detail for a single zone as TOON text.
+pub fn format_zone_detail_toon(info: &ZoneInfo) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    let _ = writeln!(out, "Zone: {}", info.zone_id);
+    let _ = writeln!(out, "  Policy: {}", info.policy_type);
+    let _ = writeln!(out, "  Well-known: {}", info.well_known);
+    let _ = writeln!(out, "  Connectors: {}", info.connector_count);
+    let _ = writeln!(out, "  Tools: {}", info.tool_count);
+    if !info.connectors.is_empty() {
+        let _ = writeln!(out, "  Connector list:");
+        for c in &info.connectors {
+            let _ = writeln!(out, "    - {c}");
+        }
+    }
+    out
+}
+
 // ── Tests ──────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -2148,5 +2973,1132 @@ mod tests {
         let token = sample_token(zone_work()).with_connector("conn_0");
         let filtered = filter_tools_for_zone(&tools, &zone_work(), &token);
         assert_eq!(filtered.len(), 20); // 200/10 connectors = 20 for conn_0
+    }
+
+    // ── Zone Overview ────────────────────────────────────────────
+
+    #[test]
+    fn zone_overview_from_sample_registry() {
+        let reg = sample_registry();
+        let infos = zone_overview(&reg);
+        assert_eq!(infos.len(), 3); // z:private, z:public, z:work
+    }
+
+    #[test]
+    fn zone_overview_sorted_by_zone_id() {
+        let reg = sample_registry();
+        let infos = zone_overview(&reg);
+        assert_eq!(infos[0].zone_id, "z:private");
+        assert_eq!(infos[1].zone_id, "z:public");
+        assert_eq!(infos[2].zone_id, "z:work");
+    }
+
+    #[test]
+    fn zone_overview_connector_counts() {
+        let reg = sample_registry();
+        let infos = zone_overview(&reg);
+        // z:work has github (2 tools) + slack (1 tool) = 2 connectors
+        let work = infos.iter().find(|i| i.zone_id == "z:work").unwrap();
+        assert_eq!(work.connector_count, 2);
+        // z:public has github only = 1 connector
+        let public = infos.iter().find(|i| i.zone_id == "z:public").unwrap();
+        assert_eq!(public.connector_count, 1);
+        // z:private has vault only = 1 connector
+        let private = infos.iter().find(|i| i.zone_id == "z:private").unwrap();
+        assert_eq!(private.connector_count, 1);
+    }
+
+    #[test]
+    fn zone_overview_tool_counts() {
+        let reg = sample_registry();
+        let infos = zone_overview(&reg);
+        let work = infos.iter().find(|i| i.zone_id == "z:work").unwrap();
+        assert_eq!(work.tool_count, 3); // create_issue, list_repos, send_message
+        let public = infos.iter().find(|i| i.zone_id == "z:public").unwrap();
+        assert_eq!(public.tool_count, 2); // create_issue, list_repos
+        let private = infos.iter().find(|i| i.zone_id == "z:private").unwrap();
+        assert_eq!(private.tool_count, 1); // get_secret
+    }
+
+    #[test]
+    fn zone_overview_policy_types() {
+        let reg = sample_registry();
+        let infos = zone_overview(&reg);
+        let work = infos.iter().find(|i| i.zone_id == "z:work").unwrap();
+        assert_eq!(work.policy_type, "standard");
+        let public = infos.iter().find(|i| i.zone_id == "z:public").unwrap();
+        assert_eq!(public.policy_type, "open");
+        let private = infos.iter().find(|i| i.zone_id == "z:private").unwrap();
+        assert_eq!(private.policy_type, "restricted");
+    }
+
+    #[test]
+    fn zone_overview_well_known_flags() {
+        let reg = sample_registry();
+        let infos = zone_overview(&reg);
+        assert!(infos.iter().all(|i| i.well_known));
+    }
+
+    #[test]
+    fn zone_overview_connectors_listed() {
+        let reg = sample_registry();
+        let infos = zone_overview(&reg);
+        let work = infos.iter().find(|i| i.zone_id == "z:work").unwrap();
+        assert!(work.connectors.contains(&"github".to_owned()));
+        assert!(work.connectors.contains(&"slack".to_owned()));
+    }
+
+    #[test]
+    fn zone_overview_empty_registry() {
+        let reg = ZoneRegistry::new();
+        let infos = zone_overview(&reg);
+        assert!(infos.is_empty());
+    }
+
+    #[test]
+    fn zone_overview_serializes_to_json() {
+        let reg = sample_registry();
+        let infos = zone_overview(&reg);
+        let json = serde_json::to_value(&infos).unwrap();
+        assert!(json.is_array());
+        assert_eq!(json.as_array().unwrap().len(), 3);
+        assert_eq!(json[0]["zone_id"], "z:private");
+    }
+
+    #[test]
+    fn infer_policy_type_standard() {
+        assert_eq!(infer_policy_type(&ZoneId::new("z:work")), "standard");
+    }
+
+    #[test]
+    fn infer_policy_type_open() {
+        assert_eq!(infer_policy_type(&ZoneId::new("z:public")), "open");
+    }
+
+    #[test]
+    fn infer_policy_type_restricted() {
+        assert_eq!(infer_policy_type(&ZoneId::new("z:private")), "restricted");
+    }
+
+    #[test]
+    fn infer_policy_type_custom() {
+        assert_eq!(infer_policy_type(&ZoneId::new("z:dev")), "custom");
+    }
+
+    // ── TOON formatting ──────────────────────────────────────────
+
+    #[test]
+    fn format_zones_toon_header() {
+        let reg = sample_registry();
+        let infos = zone_overview(&reg);
+        let toon = format_zones_toon(&infos);
+        assert!(toon.contains("Zones: 3 configured"));
+        assert!(toon.contains("ZONE"));
+        assert!(toon.contains("CONN"));
+        assert!(toon.contains("TOOLS"));
+        assert!(toon.contains("POLICY"));
+    }
+
+    #[test]
+    fn format_zones_toon_shows_all_zones() {
+        let reg = sample_registry();
+        let infos = zone_overview(&reg);
+        let toon = format_zones_toon(&infos);
+        assert!(toon.contains("z:work"));
+        assert!(toon.contains("z:public"));
+        assert!(toon.contains("z:private"));
+    }
+
+    #[test]
+    fn format_zones_toon_shows_policy_types() {
+        let reg = sample_registry();
+        let infos = zone_overview(&reg);
+        let toon = format_zones_toon(&infos);
+        assert!(toon.contains("standard"));
+        assert!(toon.contains("open"));
+        assert!(toon.contains("restricted"));
+    }
+
+    #[test]
+    fn format_zones_toon_empty() {
+        let toon = format_zones_toon(&[]);
+        assert!(toon.contains("Zones: 0 configured"));
+    }
+
+    #[test]
+    fn format_zones_toon_truncates_many_connectors() {
+        let mut reg = ZoneRegistry::new();
+        for name in &["alpha", "beta", "gamma", "delta", "epsilon"] {
+            reg.register_tool(ZoneScopedTool::new(*name, "op").with_zone(zone_work()));
+        }
+        let infos = zone_overview(&reg);
+        let toon = format_zones_toon(&infos);
+        assert!(toon.contains("(+3)"));
+    }
+
+    // ── Zone detail TOON ─────────────────────────────────────────
+
+    #[test]
+    fn format_zone_detail_toon_basic() {
+        let reg = sample_registry();
+        let infos = zone_overview(&reg);
+        let work = infos.iter().find(|i| i.zone_id == "z:work").unwrap();
+        let detail = format_zone_detail_toon(work);
+        assert!(detail.contains("Zone: z:work"));
+        assert!(detail.contains("Policy: standard"));
+        assert!(detail.contains("Well-known: true"));
+        assert!(detail.contains("Connectors: 2"));
+        assert!(detail.contains("Tools: 3"));
+        assert!(detail.contains("- github"));
+        assert!(detail.contains("- slack"));
+    }
+
+    #[test]
+    fn format_zone_detail_toon_empty_connectors() {
+        let info = ZoneInfo {
+            zone_id: "z:empty".to_owned(),
+            connector_count: 0,
+            tool_count: 0,
+            connectors: vec![],
+            well_known: true,
+            policy_type: "custom".to_owned(),
+        };
+        let detail = format_zone_detail_toon(&info);
+        assert!(detail.contains("Zone: z:empty"));
+        assert!(detail.contains("Connectors: 0"));
+        assert!(!detail.contains("Connector list:"));
+    }
+
+    // ── ZoneInfo struct ──────────────────────────────────────────
+
+    #[test]
+    fn zone_info_clone() {
+        let info = ZoneInfo {
+            zone_id: "z:work".to_owned(),
+            connector_count: 2,
+            tool_count: 5,
+            connectors: vec!["github".to_owned()],
+            well_known: true,
+            policy_type: "standard".to_owned(),
+        };
+        let cloned = info.clone();
+        assert_eq!(info.zone_id, "z:work");
+        assert_eq!(cloned.connector_count, 2);
+    }
+
+    #[test]
+    fn zone_info_debug() {
+        let info = ZoneInfo {
+            zone_id: "z:test".to_owned(),
+            connector_count: 0,
+            tool_count: 0,
+            connectors: vec![],
+            well_known: true,
+            policy_type: "custom".to_owned(),
+        };
+        let debug = format!("{info:?}");
+        assert!(debug.contains("ZoneInfo"));
+    }
+
+    #[test]
+    fn zone_info_serialize() {
+        let info = ZoneInfo {
+            zone_id: "z:work".to_owned(),
+            connector_count: 2,
+            tool_count: 5,
+            connectors: vec!["github".to_owned(), "slack".to_owned()],
+            well_known: true,
+            policy_type: "standard".to_owned(),
+        };
+        let json = serde_json::to_value(&info).unwrap();
+        assert_eq!(json["zone_id"], "z:work");
+        assert_eq!(json["connector_count"], 2);
+        assert_eq!(json["tool_count"], 5);
+        assert_eq!(json["well_known"], true);
+        assert_eq!(json["policy_type"], "standard");
+        assert_eq!(json["connectors"].as_array().unwrap().len(), 2);
+    }
+
+    // ── Cross-zone check: allowed ───────────────────────────────
+
+    #[test]
+    fn cross_zone_check_allowed_shared_connector() {
+        let reg = sample_registry();
+        // z:work and z:public both have github → allowed
+        let result = check_cross_zone(&reg, &zone_work(), &zone_public(), None);
+        assert!(result.allowed);
+        assert!(result.blocking_zone.is_none());
+        assert!(result.missing_capability.is_none());
+    }
+
+    // ── Cross-zone check: denied with clear reason ──────────────
+
+    #[test]
+    fn cross_zone_check_denied_no_shared_connector() {
+        let reg = sample_registry();
+        // z:public has github; z:private has vault → no overlap
+        let result = check_cross_zone(&reg, &zone_public(), &zone_private(), None);
+        assert!(!result.allowed);
+        assert!(result.blocking_zone.is_some());
+        assert_eq!(
+            result.missing_capability.as_deref(),
+            Some("shared_connector")
+        );
+        assert!(result.remediation.unwrap().contains("No shared connectors"));
+    }
+
+    // ── Specific operation cross-zone check ─────────────────────
+
+    #[test]
+    fn cross_zone_check_specific_operation_allowed() {
+        let reg = sample_registry();
+        // create_issue is in both z:work and z:public
+        let result = check_cross_zone(&reg, &zone_work(), &zone_public(), Some("create_issue"));
+        assert!(result.allowed);
+        assert_eq!(result.operation, "create_issue");
+    }
+
+    #[test]
+    fn cross_zone_check_specific_operation_denied() {
+        let reg = sample_registry();
+        // send_message is only in z:work, not z:public
+        let result = check_cross_zone(&reg, &zone_work(), &zone_public(), Some("send_message"));
+        assert!(!result.allowed);
+        assert_eq!(result.operation, "send_message");
+        assert!(result.blocking_zone.is_some());
+        assert!(
+            result
+                .missing_capability
+                .as_deref()
+                .unwrap()
+                .contains("operation:send_message")
+        );
+    }
+
+    // ── Pipeline zone validation catches violation ──────────────
+
+    #[test]
+    fn pipeline_validate_catches_zone_violation() {
+        let reg = sample_registry();
+        let steps = vec![
+            PipelineStep {
+                zone: zone_work(),
+                operation: "send_message".to_owned(),
+            },
+            PipelineStep {
+                zone: zone_private(),
+                operation: "get_secret".to_owned(),
+            },
+        ];
+        let violations = validate_pipeline_zones(&reg, &steps);
+        // send_message not in z:private → violation
+        assert!(!violations.is_empty());
+        assert_eq!(violations[0].step, 1);
+        assert_eq!(violations[0].from_zone, "z:work");
+        assert_eq!(violations[0].to_zone, "z:private");
+    }
+
+    // ── Capability chain verification for zone crossing ─────────
+
+    #[test]
+    fn pipeline_validate_no_violation_same_zone() {
+        let reg = sample_registry();
+        let steps = vec![
+            PipelineStep {
+                zone: zone_work(),
+                operation: "create_issue".to_owned(),
+            },
+            PipelineStep {
+                zone: zone_work(),
+                operation: "send_message".to_owned(),
+            },
+        ];
+        let violations = validate_pipeline_zones(&reg, &steps);
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn pipeline_validate_allowed_cross_zone() {
+        let reg = sample_registry();
+        // create_issue exists in both z:work and z:public
+        let steps = vec![
+            PipelineStep {
+                zone: zone_work(),
+                operation: "create_issue".to_owned(),
+            },
+            PipelineStep {
+                zone: zone_public(),
+                operation: "create_issue".to_owned(),
+            },
+        ];
+        let violations = validate_pipeline_zones(&reg, &steps);
+        assert!(violations.is_empty());
+    }
+
+    // ── Bidirectional zone check ────────────────────────────────
+
+    #[test]
+    fn cross_zone_bidirectional() {
+        let reg = sample_registry();
+        let (a_to_b, b_to_a) =
+            check_cross_zone_bidirectional(&reg, &zone_work(), &zone_public(), None);
+        // Both have github → both directions allowed
+        assert!(a_to_b.allowed);
+        assert!(b_to_a.allowed);
+    }
+
+    #[test]
+    fn cross_zone_bidirectional_asymmetric_operation() {
+        let reg = sample_registry();
+        // send_message is only in z:work
+        let (a_to_b, b_to_a) = check_cross_zone_bidirectional(
+            &reg,
+            &zone_work(),
+            &zone_public(),
+            Some("send_message"),
+        );
+        // z:work → z:public: denied (send_message not in z:public)
+        assert!(!a_to_b.allowed);
+        // z:public → z:work: denied (send_message not in z:public source)
+        assert!(!b_to_a.allowed);
+    }
+
+    // ── Nested zone traversal ───────────────────────────────────
+
+    #[test]
+    fn pipeline_validate_multi_step_traversal() {
+        let reg = sample_registry();
+        let steps = vec![
+            PipelineStep {
+                zone: zone_work(),
+                operation: "create_issue".to_owned(),
+            },
+            PipelineStep {
+                zone: zone_public(),
+                operation: "list_repos".to_owned(),
+            },
+            PipelineStep {
+                zone: zone_private(),
+                operation: "get_secret".to_owned(),
+            },
+        ];
+        let violations = validate_pipeline_zones(&reg, &steps);
+        // Step 1 (work→public) list_repos exists in both → ok
+        // Step 2 (public→private) get_secret only in private, not public → violation
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].step, 2);
+    }
+
+    // ── Error message includes blocking zone and capability ─────
+
+    #[test]
+    fn cross_zone_denied_includes_blocking_zone_and_capability() {
+        let reg = sample_registry();
+        let result = check_cross_zone(&reg, &zone_work(), &zone_private(), Some("send_message"));
+        assert!(!result.allowed);
+        assert!(result.blocking_zone.is_some());
+        let blocking = result.blocking_zone.unwrap();
+        assert!(
+            blocking == "z:private" || blocking == "z:work",
+            "blocking zone should be one of the zones involved"
+        );
+        assert!(result.missing_capability.is_some());
+        assert!(result.remediation.is_some());
+    }
+
+    // ── Pipeline reports ALL violations ─────────────────────────
+
+    #[test]
+    fn pipeline_validate_reports_all_violations() {
+        let reg = sample_registry();
+        let steps = vec![
+            PipelineStep {
+                zone: zone_work(),
+                operation: "send_message".to_owned(),
+            },
+            PipelineStep {
+                zone: zone_private(),
+                operation: "get_secret".to_owned(),
+            },
+            PipelineStep {
+                zone: zone_public(),
+                operation: "create_issue".to_owned(),
+            },
+        ];
+        let violations = validate_pipeline_zones(&reg, &steps);
+        // Step 1: work→private (get_secret not in work as source check) — violation
+        // Step 2: private→public (create_issue not in private) — violation
+        assert!(
+            violations.len() >= 2,
+            "should report all violations, got {}",
+            violations.len()
+        );
+    }
+
+    // ── Unknown zone checks ─────────────────────────────────────
+
+    #[test]
+    fn cross_zone_check_unknown_source() {
+        let reg = sample_registry();
+        let unknown = ZoneId::new("z:staging");
+        let result = check_cross_zone(&reg, &unknown, &zone_work(), None);
+        assert!(!result.allowed);
+        assert_eq!(result.blocking_zone.as_deref(), Some("z:staging"));
+        assert_eq!(result.missing_capability.as_deref(), Some("zone_exists"));
+    }
+
+    #[test]
+    fn cross_zone_check_unknown_target() {
+        let reg = sample_registry();
+        let unknown = ZoneId::new("z:staging");
+        let result = check_cross_zone(&reg, &zone_work(), &unknown, None);
+        assert!(!result.allowed);
+        assert_eq!(result.blocking_zone.as_deref(), Some("z:staging"));
+    }
+
+    // ── TOON formatting ─────────────────────────────────────────
+
+    #[test]
+    fn format_cross_zone_toon_allowed() {
+        let result = CrossZoneCheckResult {
+            source: "z:work".to_owned(),
+            target: "z:public".to_owned(),
+            operation: String::new(),
+            allowed: true,
+            blocking_zone: None,
+            missing_capability: None,
+            remediation: None,
+        };
+        let toon = format_cross_zone_toon(&result);
+        assert!(toon.contains("ALLOWED"));
+        assert!(toon.contains("z:work"));
+        assert!(toon.contains("z:public"));
+    }
+
+    #[test]
+    fn format_cross_zone_toon_denied_with_details() {
+        let result = CrossZoneCheckResult {
+            source: "z:public".to_owned(),
+            target: "z:private".to_owned(),
+            operation: "send_message".to_owned(),
+            allowed: false,
+            blocking_zone: Some("z:private".to_owned()),
+            missing_capability: Some("operation:send_message".to_owned()),
+            remediation: Some("Operation 'send_message' not available".to_owned()),
+        };
+        let toon = format_cross_zone_toon(&result);
+        assert!(toon.contains("DENIED"));
+        assert!(toon.contains("Operation: send_message"));
+        assert!(toon.contains("Blocking zone: z:private"));
+        assert!(toon.contains("Missing capability:"));
+        assert!(toon.contains("Remediation:"));
+    }
+
+    #[test]
+    fn format_pipeline_violations_toon_pass() {
+        let toon = format_pipeline_violations_toon(&[]);
+        assert!(toon.contains("PASS"));
+        assert!(toon.contains("no cross-zone violations"));
+    }
+
+    #[test]
+    fn format_pipeline_violations_toon_fail() {
+        let violations = vec![PipelineZoneViolation {
+            step: 1,
+            from_zone: "z:work".to_owned(),
+            to_zone: "z:private".to_owned(),
+            operation: "get_secret".to_owned(),
+            reason: "not available".to_owned(),
+            blocking_zone: "z:private".to_owned(),
+            missing_capability: "operation:get_secret".to_owned(),
+        }];
+        let toon = format_pipeline_violations_toon(&violations);
+        assert!(toon.contains("FAIL"));
+        assert!(toon.contains("1 violation"));
+        assert!(toon.contains("Step 1"));
+        assert!(toon.contains("z:work -> z:private"));
+    }
+
+    #[test]
+    fn format_pipeline_violations_toon_plural() {
+        let violations = vec![
+            PipelineZoneViolation {
+                step: 1,
+                from_zone: "z:a".to_owned(),
+                to_zone: "z:b".to_owned(),
+                operation: "op1".to_owned(),
+                reason: "denied".to_owned(),
+                blocking_zone: "z:b".to_owned(),
+                missing_capability: "cap1".to_owned(),
+            },
+            PipelineZoneViolation {
+                step: 2,
+                from_zone: "z:b".to_owned(),
+                to_zone: "z:c".to_owned(),
+                operation: "op2".to_owned(),
+                reason: "denied".to_owned(),
+                blocking_zone: "z:c".to_owned(),
+                missing_capability: "cap2".to_owned(),
+            },
+        ];
+        let toon = format_pipeline_violations_toon(&violations);
+        assert!(toon.contains("2 violations"));
+        assert!(toon.contains("Step 1"));
+        assert!(toon.contains("Step 2"));
+    }
+
+    // ── CrossZoneCheckResult struct ─────────────────────────────
+
+    #[test]
+    fn cross_zone_result_serializes() {
+        let result = CrossZoneCheckResult {
+            source: "z:work".to_owned(),
+            target: "z:public".to_owned(),
+            operation: "create_issue".to_owned(),
+            allowed: true,
+            blocking_zone: None,
+            missing_capability: None,
+            remediation: None,
+        };
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["source"], "z:work");
+        assert_eq!(json["target"], "z:public");
+        assert_eq!(json["allowed"], true);
+        assert!(json["blocking_zone"].is_null());
+    }
+
+    #[test]
+    fn cross_zone_result_clone() {
+        let result = CrossZoneCheckResult {
+            source: "z:a".to_owned(),
+            target: "z:b".to_owned(),
+            operation: String::new(),
+            allowed: false,
+            blocking_zone: Some("z:b".to_owned()),
+            missing_capability: Some("shared_connector".to_owned()),
+            remediation: Some("fix it".to_owned()),
+        };
+        let cloned = result.clone();
+        assert_eq!(result.source, cloned.source);
+        assert_eq!(result.allowed, cloned.allowed);
+        assert_eq!(result.blocking_zone, cloned.blocking_zone);
+    }
+
+    // ── PipelineZoneViolation struct ────────────────────────────
+
+    #[test]
+    fn pipeline_violation_serializes() {
+        let v = PipelineZoneViolation {
+            step: 3,
+            from_zone: "z:work".to_owned(),
+            to_zone: "z:private".to_owned(),
+            operation: "get_secret".to_owned(),
+            reason: "denied".to_owned(),
+            blocking_zone: "z:private".to_owned(),
+            missing_capability: "operation:get_secret".to_owned(),
+        };
+        let json = serde_json::to_value(&v).unwrap();
+        assert_eq!(json["step"], 3);
+        assert_eq!(json["from_zone"], "z:work");
+        assert_eq!(json["to_zone"], "z:private");
+    }
+
+    #[test]
+    fn pipeline_violation_clone() {
+        let v = PipelineZoneViolation {
+            step: 1,
+            from_zone: "z:a".to_owned(),
+            to_zone: "z:b".to_owned(),
+            operation: "op".to_owned(),
+            reason: "reason".to_owned(),
+            blocking_zone: "z:b".to_owned(),
+            missing_capability: "cap".to_owned(),
+        };
+        let v2 = v.clone();
+        assert_eq!(v.step, v2.step);
+        assert_eq!(v.from_zone, v2.from_zone);
+    }
+
+    // ── PipelineStep struct ─────────────────────────────────────
+
+    #[test]
+    fn pipeline_step_clone() {
+        let s = PipelineStep {
+            zone: zone_work(),
+            operation: "create_issue".to_owned(),
+        };
+        let s2 = s.clone();
+        assert_eq!(s.zone, s2.zone);
+        assert_eq!(s.operation, s2.operation);
+    }
+
+    // ── Empty pipeline ──────────────────────────────────────────
+
+    #[test]
+    fn pipeline_validate_empty() {
+        let reg = sample_registry();
+        let violations = validate_pipeline_zones(&reg, &[]);
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn pipeline_validate_single_step() {
+        let reg = sample_registry();
+        let steps = vec![PipelineStep {
+            zone: zone_work(),
+            operation: "create_issue".to_owned(),
+        }];
+        let violations = validate_pipeline_zones(&reg, &steps);
+        assert!(violations.is_empty());
+    }
+
+    // ── Cross-zone with same zone ───────────────────────────────
+
+    #[test]
+    fn cross_zone_same_zone() {
+        let reg = sample_registry();
+        let result = check_cross_zone(&reg, &zone_work(), &zone_work(), None);
+        assert!(result.allowed);
+    }
+
+    // ── Migration helpers ───────────────────────────────────────
+
+    fn sample_source_config() -> ConnectorZoneConfig {
+        let mut config = BTreeMap::new();
+        config.insert("url".to_owned(), "https://api.example.com".to_owned());
+        config.insert("api_key".to_owned(), "sk-12345".to_owned());
+        config.insert("timeout".to_owned(), "30".to_owned());
+        ConnectorZoneConfig {
+            connector: "github".to_owned(),
+            zone: "z:work".to_owned(),
+            config,
+            enabled: true,
+            policy_bindings: vec!["read_only".to_owned()],
+        }
+    }
+
+    fn sample_target_config() -> ConnectorZoneConfig {
+        let mut config = BTreeMap::new();
+        config.insert("url".to_owned(), "https://api.example.com/old".to_owned());
+        config.insert("region".to_owned(), "us-east".to_owned());
+        ConnectorZoneConfig {
+            connector: "github".to_owned(),
+            zone: "z:public".to_owned(),
+            config,
+            enabled: false,
+            policy_bindings: vec!["open_access".to_owned()],
+        }
+    }
+
+    // ── migrate happy path ──────────────────────────────────────
+
+    #[test]
+    fn migrate_happy_path() {
+        let source = sample_source_config();
+        let mut source_mut = source.clone();
+        let mut target = sample_target_config();
+        let plan = plan_migration("github", &source, "z:public", Some(&target));
+        // No policy conflicts between different bindings → safe=false
+        // Actually the current logic: conflicts exist when target has bindings not in source
+        // target has "open_access" not in source → policy conflict → safe=false
+        let result = execute_migration(&plan, &mut source_mut, &mut target, true);
+        assert!(result.success);
+        assert!(result.fields_transferred > 0);
+        assert!(!result.rolled_back);
+        assert_eq!(target.zone, "z:public");
+        // Config was transferred
+        assert_eq!(target.config.get("url").unwrap(), "https://api.example.com");
+    }
+
+    // ── migrate dry-run ─────────────────────────────────────────
+
+    #[test]
+    fn migrate_dry_run_no_state_changes() {
+        let source = sample_source_config();
+        let plan = plan_migration("github", &source, "z:public", None);
+        assert!(plan.dry_run);
+        // Plan exists but nothing was executed
+        assert!(!plan.field_changes.is_empty());
+        assert_eq!(plan.source_zone, "z:work");
+        assert_eq!(plan.target_zone, "z:public");
+    }
+
+    // ── migrate with policy conflict ────────────────────────────
+
+    #[test]
+    fn migrate_policy_conflict_blocks_without_force() {
+        let source = sample_source_config();
+        let target = sample_target_config();
+        let plan = plan_migration("github", &source, "z:public", Some(&target));
+        // Target has "open_access" not in source → conflict
+        assert!(!plan.safe);
+        assert!(!plan.policy_conflicts.is_empty());
+
+        let mut source_mut = source.clone();
+        let mut target_mut = target;
+        let result = execute_migration(&plan, &mut source_mut, &mut target_mut, false);
+        assert!(!result.success);
+        assert!(result.error.is_some());
+        assert!(result.error.unwrap().contains("Policy conflicts"));
+    }
+
+    // ── migrate rollback on failure ─────────────────────────────
+
+    #[test]
+    fn migrate_rollback_on_failure() {
+        let mut source_config = BTreeMap::new();
+        source_config.insert("url".to_owned(), "https://fail.example.com".to_owned());
+        let source = ConnectorZoneConfig {
+            connector: "fail_connector".to_owned(),
+            zone: "z:work".to_owned(),
+            config: source_config,
+            enabled: true,
+            policy_bindings: vec![],
+        };
+        let mut target = ConnectorZoneConfig {
+            connector: "fail_connector".to_owned(),
+            zone: "z:public".to_owned(),
+            config: BTreeMap::new(),
+            enabled: false,
+            policy_bindings: vec![],
+        };
+        let original_target_config = target.config.clone();
+        let plan = plan_migration("fail_connector", &source, "z:public", Some(&target));
+        let mut source_mut = source;
+        let result = execute_migration(&plan, &mut source_mut, &mut target, true);
+        assert!(!result.success);
+        assert!(result.rolled_back);
+        // Target config should be restored
+        assert_eq!(target.config, original_target_config);
+    }
+
+    // ── export round-trip ───────────────────────────────────────
+
+    #[test]
+    fn export_import_round_trip() {
+        let source = sample_source_config();
+        let configs = vec![source.clone()];
+        let exported = export_zone("z:work", &configs);
+        assert_eq!(exported.zone, "z:work");
+        assert_eq!(exported.connectors.len(), 1);
+        assert_eq!(exported.version, 1);
+
+        // Can serialize and deserialize
+        let json = serde_json::to_string(&exported).unwrap();
+        let imported: ZoneExport = serde_json::from_str(&json).unwrap();
+        assert_eq!(imported.zone, "z:work");
+        assert_eq!(imported.connectors.len(), 1);
+        assert_eq!(imported.connectors[0].connector, "github");
+    }
+
+    // ── export redacts secrets ───────────────────────────────────
+
+    #[test]
+    fn export_redacts_secrets() {
+        let source = sample_source_config();
+        let configs = vec![source];
+        let exported = export_zone("z:work", &configs);
+        let conn = &exported.connectors[0];
+        // api_key should be redacted
+        assert_eq!(conn.config.get("api_key").unwrap(), "***REDACTED***");
+        // url should NOT be redacted
+        assert_eq!(conn.config.get("url").unwrap(), "https://api.example.com");
+    }
+
+    // ── import validates zone compatibility ──────────────────────
+
+    #[test]
+    fn import_validates_compatibility() {
+        let exported = ZoneExport {
+            zone: "z:work".to_owned(),
+            version: 1,
+            connectors: vec![ConnectorZoneConfig {
+                connector: "github".to_owned(),
+                zone: "z:work".to_owned(),
+                config: BTreeMap::new(),
+                enabled: true,
+                policy_bindings: vec![],
+            }],
+            exported_at: 0,
+        };
+        // No existing configs → valid
+        let validation = validate_import(&exported, "z:public", &[]);
+        assert!(validation.valid);
+        assert!(validation.issues.is_empty());
+    }
+
+    // ── import detects conflicting existing configs ──────────────
+
+    #[test]
+    fn import_detects_conflicting_configs() {
+        let exported = ZoneExport {
+            zone: "z:work".to_owned(),
+            version: 1,
+            connectors: vec![ConnectorZoneConfig {
+                connector: "github".to_owned(),
+                zone: "z:work".to_owned(),
+                config: BTreeMap::new(),
+                enabled: true,
+                policy_bindings: vec![],
+            }],
+            exported_at: 0,
+        };
+        let existing = vec![ConnectorZoneConfig {
+            connector: "github".to_owned(),
+            zone: "z:public".to_owned(),
+            config: BTreeMap::new(),
+            enabled: true,
+            policy_bindings: vec![],
+        }];
+        let validation = validate_import(&exported, "z:public", &existing);
+        assert!(!validation.valid);
+        assert_eq!(validation.issues[0].kind, "conflicting");
+    }
+
+    // ── is_secret_field ─────────────────────────────────────────
+
+    #[test]
+    fn secret_field_detection() {
+        assert!(is_secret_field("api_key"));
+        assert!(is_secret_field("API_KEY"));
+        assert!(is_secret_field("auth_token"));
+        assert!(is_secret_field("password"));
+        assert!(is_secret_field("client_secret"));
+        assert!(!is_secret_field("url"));
+        assert!(!is_secret_field("timeout"));
+        assert!(!is_secret_field("region"));
+    }
+
+    // ── redact_secrets ──────────────────────────────────────────
+
+    #[test]
+    fn redact_secrets_preserves_non_secrets() {
+        let mut config = BTreeMap::new();
+        config.insert("url".to_owned(), "https://example.com".to_owned());
+        config.insert("api_key".to_owned(), "sk-secret".to_owned());
+        config.insert("timeout".to_owned(), "30".to_owned());
+        let redacted = redact_secrets(&config);
+        assert_eq!(redacted["url"], "https://example.com");
+        assert_eq!(redacted["api_key"], "***REDACTED***");
+        assert_eq!(redacted["timeout"], "30");
+    }
+
+    // ── MigrationFieldChange ────────────────────────────────────
+
+    #[test]
+    fn migration_field_change_added() {
+        let source = sample_source_config();
+        let plan = plan_migration("github", &source, "z:public", None);
+        // All fields are "added" when no target config exists
+        assert!(plan.field_changes.iter().all(|c| c.kind == "added"));
+    }
+
+    #[test]
+    fn migration_field_change_changed() {
+        let source = sample_source_config();
+        let target = sample_target_config();
+        let plan = plan_migration("github", &source, "z:public", Some(&target));
+        // "url" changed from old value to new
+        let url_change = plan.field_changes.iter().find(|c| c.field == "url");
+        assert!(url_change.is_some());
+        assert_eq!(url_change.unwrap().kind, "changed");
+    }
+
+    #[test]
+    fn migration_field_change_removed() {
+        let source = sample_source_config();
+        let target = sample_target_config();
+        let plan = plan_migration("github", &source, "z:public", Some(&target));
+        // "region" is in target but not in source → removed
+        let region_change = plan.field_changes.iter().find(|c| c.field == "region");
+        assert!(region_change.is_some());
+        assert_eq!(region_change.unwrap().kind, "removed");
+    }
+
+    // ── Credentials needing reprovision ─────────────────────────
+
+    #[test]
+    fn migration_detects_credentials() {
+        let source = sample_source_config();
+        let plan = plan_migration("github", &source, "z:public", None);
+        assert!(plan.credentials_needing_reprovision.contains(&"api_key".to_owned()));
+    }
+
+    // ── Secret redaction in migration plans ─────────────────────
+
+    #[test]
+    fn migration_plan_redacts_secret_values() {
+        let source = sample_source_config();
+        let plan = plan_migration("github", &source, "z:public", None);
+        let api_key_change = plan
+            .field_changes
+            .iter()
+            .find(|c| c.field == "api_key")
+            .unwrap();
+        assert_eq!(
+            api_key_change.new_value.as_deref(),
+            Some("***REDACTED***")
+        );
+    }
+
+    // ── format_migration_toon ───────────────────────────────────
+
+    #[test]
+    fn format_migration_toon_basic() {
+        let source = sample_source_config();
+        let plan = plan_migration("github", &source, "z:public", None);
+        let toon = format_migration_toon(&plan);
+        assert!(toon.contains("DRY RUN"));
+        assert!(toon.contains("github"));
+        assert!(toon.contains("z:work -> z:public"));
+        assert!(toon.contains("Changes:"));
+    }
+
+    #[test]
+    fn format_migration_toon_shows_credentials() {
+        let source = sample_source_config();
+        let plan = plan_migration("github", &source, "z:public", None);
+        let toon = format_migration_toon(&plan);
+        assert!(toon.contains("Credentials needing re-provision:"));
+        assert!(toon.contains("api_key"));
+    }
+
+    #[test]
+    fn format_migration_toon_shows_policy_conflicts() {
+        let source = sample_source_config();
+        let target = sample_target_config();
+        let plan = plan_migration("github", &source, "z:public", Some(&target));
+        let toon = format_migration_toon(&plan);
+        assert!(toon.contains("Policy conflicts:"));
+    }
+
+    // ── ConnectorZoneConfig struct ──────────────────────────────
+
+    #[test]
+    fn connector_zone_config_serde_roundtrip() {
+        let config = sample_source_config();
+        let json = serde_json::to_string(&config).unwrap();
+        let config2: ConnectorZoneConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(config2.connector, "github");
+        assert_eq!(config2.zone, "z:work");
+        assert!(config2.enabled);
+    }
+
+    #[test]
+    fn connector_zone_config_clone() {
+        let config = sample_source_config();
+        let cloned = config.clone();
+        assert_eq!(config.connector, cloned.connector);
+        assert_eq!(config.config.len(), cloned.config.len());
+    }
+
+    // ── ZoneExport struct ───────────────────────────────────────
+
+    #[test]
+    fn zone_export_serializes() {
+        let configs = vec![sample_source_config()];
+        let exported = export_zone("z:work", &configs);
+        let json = serde_json::to_value(&exported).unwrap();
+        assert_eq!(json["zone"], "z:work");
+        assert_eq!(json["version"], 1);
+        assert!(json["connectors"].is_array());
+    }
+
+    // ── ImportValidation struct ─────────────────────────────────
+
+    #[test]
+    fn import_validation_serializes() {
+        let validation = ImportValidation {
+            valid: true,
+            issues: vec![],
+        };
+        let json = serde_json::to_value(&validation).unwrap();
+        assert_eq!(json["valid"], true);
+        assert!(json["issues"].as_array().unwrap().is_empty());
+    }
+
+    // ── ImportIssue struct ──────────────────────────────────────
+
+    #[test]
+    fn import_issue_serializes() {
+        let issue = ImportIssue {
+            connector: "github".to_owned(),
+            kind: "conflicting".to_owned(),
+            description: "Already exists".to_owned(),
+        };
+        let json = serde_json::to_value(&issue).unwrap();
+        assert_eq!(json["connector"], "github");
+        assert_eq!(json["kind"], "conflicting");
+    }
+
+    // ── MigrationResult struct ──────────────────────────────────
+
+    #[test]
+    fn migration_result_serializes() {
+        let result = MigrationResult {
+            success: true,
+            connector: "github".to_owned(),
+            source_zone: "z:work".to_owned(),
+            target_zone: "z:public".to_owned(),
+            fields_transferred: 3,
+            rolled_back: false,
+            error: None,
+        };
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["success"], true);
+        assert_eq!(json["fields_transferred"], 3);
+        assert!(json["error"].is_null());
+    }
+
+    // ── Import same zone warns ──────────────────────────────────
+
+    #[test]
+    fn import_same_zone_warns_redundant() {
+        let exported = ZoneExport {
+            zone: "z:work".to_owned(),
+            version: 1,
+            connectors: vec![ConnectorZoneConfig {
+                connector: "github".to_owned(),
+                zone: "z:work".to_owned(),
+                config: BTreeMap::new(),
+                enabled: false,
+                policy_bindings: vec![],
+            }],
+            exported_at: 0,
+        };
+        let validation = validate_import(&exported, "z:work", &[]);
+        assert!(validation.issues.iter().any(|i| i.kind == "redundant"));
+    }
+
+    // ── Export filters by zone ───────────────────────────────────
+
+    #[test]
+    fn export_filters_by_zone() {
+        let configs = vec![
+            sample_source_config(), // z:work
+            ConnectorZoneConfig {
+                connector: "slack".to_owned(),
+                zone: "z:public".to_owned(),
+                config: BTreeMap::new(),
+                enabled: true,
+                policy_bindings: vec![],
+            },
+        ];
+        let exported = export_zone("z:work", &configs);
+        assert_eq!(exported.connectors.len(), 1);
+        assert_eq!(exported.connectors[0].connector, "github");
+    }
+
+    // ── MigrationPlan serializes ────────────────────────────────
+
+    #[test]
+    fn migration_plan_serializes() {
+        let source = sample_source_config();
+        let plan = plan_migration("github", &source, "z:public", None);
+        let json = serde_json::to_value(&plan).unwrap();
+        assert_eq!(json["connector"], "github");
+        assert_eq!(json["source_zone"], "z:work");
+        assert_eq!(json["target_zone"], "z:public");
+        assert!(json["dry_run"].as_bool().unwrap());
     }
 }

@@ -669,7 +669,9 @@ impl CommandAvailability {
                     format!("'{command}' uses local artifacts only. There is no live-host mode.")
                 }
                 _ => {
-                    format!("'{command}' used offline artifacts. Add --host <endpoint> for live data.")
+                    format!(
+                        "'{command}' used offline artifacts. Add --host <endpoint> for live data."
+                    )
                 }
             },
             Self::Unsupported => {
@@ -9371,6 +9373,14 @@ output_schema = { type = "object" }
     }
 
     #[test]
+    fn classify_health_is_live_only() {
+        assert_eq!(
+            classify_command("health").unwrap().mode,
+            CommandTruthMode::LiveOnly
+        );
+    }
+
+    #[test]
     fn classify_budget_is_live_only() {
         assert_eq!(
             classify_command("budget").unwrap().mode,
@@ -9774,7 +9784,10 @@ output_schema = { type = "object" }
         for entry in offline_commands {
             let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, entry.name);
             assert!(
-                envelope.next_actions.iter().all(|action| !action.contains("--host")),
+                envelope
+                    .next_actions
+                    .iter()
+                    .all(|action| !action.contains("--host")),
                 "Offline-only command '{}' should stay local, got {:?}",
                 entry.name,
                 envelope.next_actions,

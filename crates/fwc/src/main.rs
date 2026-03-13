@@ -20,7 +20,11 @@ mod batch;
 mod batch_file;
 #[allow(dead_code)] // Progress tracking wired when host integration lands.
 mod batch_progress;
-#[allow(dead_code, clippy::redundant_pub_crate, clippy::needless_borrows_for_generic_args)]
+#[allow(
+    dead_code,
+    clippy::redundant_pub_crate,
+    clippy::needless_borrows_for_generic_args
+)]
 mod bench_cmd;
 mod catalog;
 #[allow(dead_code)] // Event checkpoint and replay from sequence/time.
@@ -33,8 +37,16 @@ mod confusion_workflow;
 mod credential;
 #[allow(dead_code)]
 mod credential_store;
+#[allow(dead_code)] // Agent playbooks for plan/task/session/pipeline.
+mod doc_agent;
+#[allow(dead_code)] // Debugging, replay, and observability field guide.
+mod doc_debugging;
+#[allow(dead_code)] // Operator playbooks for lifecycle/config/recovery.
+mod doc_operator;
 #[allow(dead_code)]
 mod doc_playbooks;
+#[allow(dead_code)] // Command taxonomy, mental model, README contracts.
+mod doc_readme;
 #[allow(dead_code)]
 mod doctor;
 #[allow(dead_code)] // E2E playbooks for agent workflow scenarios.
@@ -53,10 +65,18 @@ mod export_tools;
 mod extract;
 #[allow(dead_code)] // Fallback routing with circuit-breaker integration.
 mod fallback_routing;
-mod format_table;
 #[allow(dead_code)] // Fleet-wide health aggregation and bulk operations.
 mod fleet_health;
+mod format_table;
 mod health;
+#[allow(
+    dead_code,
+    clippy::writeln_empty_string,
+    clippy::missing_const_for_fn,
+    clippy::collection_is_never_read,
+    clippy::needless_continue
+)]
+mod history;
 #[allow(dead_code)] // History replay, clone, and input-override flows.
 mod history_replay;
 #[allow(dead_code)] // Host integration test harness with archetype fixtures.
@@ -67,14 +87,6 @@ mod host_integration_discovery;
 mod host_integration_invoke;
 #[allow(dead_code)] // Host integration: streaming, logs, watch, reconnect test matrix.
 mod host_integration_streaming;
-#[allow(
-    dead_code,
-    clippy::writeln_empty_string,
-    clippy::missing_const_for_fn,
-    clippy::collection_is_never_read,
-    clippy::needless_continue
-)]
-mod history;
 #[allow(dead_code)] // Discovery types wired into host-backed commands in later beads.
 mod identifier;
 mod intent;
@@ -160,7 +172,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
 use base64::Engine;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use clap::{Args, Parser, Subcommand, ValueEnum, error::ErrorKind};
 use reqwest::blocking::{Client as BlockingClient, ClientBuilder as BlockingClientBuilder};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -189,10 +201,10 @@ use fcp_host::{
     ConnectorInventoryResponse as HostConnectorInventoryResponse,
     DiscoveryFilter as HostDiscoveryFilter, DiscoveryResponse as HostDiscoveryResponse,
     DoctorReport as HostDoctorReport, DoctorRequest as HostDoctorRequest,
-    EventQueryRequest as HostEventQueryRequest,
-    EventQueryResponse as HostEventQueryResponse, HostHealthResponse, HostPreflightRequest,
-    IntrospectionResponse as HostIntrospectionResponse,
-    LifecycleTransitionRequest, LifecycleTransitionResponse, ManagedConnectorConfig,
+    EventQueryRequest as HostEventQueryRequest, EventQueryResponse as HostEventQueryResponse,
+    HostEvent as HostAdminEvent, HostEventKind, HostHealthResponse, HostPreflightRequest,
+    IntrospectionResponse as HostIntrospectionResponse, LifecycleTransitionRequest,
+    LifecycleTransitionResponse, ManagedConnectorConfig,
     PreflightResponse as HostPreflightResponse, ToolDescriptor as HostToolDescriptor,
 };
 use fcp_manifest::ConnectorManifest;
@@ -1174,6 +1186,14 @@ struct HealthArgs {
     /// Only show connectors that are not healthy (degraded, error, or unknown).
     #[arg(long)]
     unhealthy: bool,
+
+    /// Include fleet health score (0–100%) and threshold violation summary.
+    #[arg(long, default_value_t = false)]
+    fleet_score: bool,
+
+    /// Report threshold violations (error-rate, latency, uptime).
+    #[arg(long, default_value_t = false)]
+    violations: bool,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -2988,6 +3008,8 @@ fn tail_dispatch(args: &TailArgs, explicit_host: Option<&str>) -> Result<Dispatc
         connectors: connectors.clone(),
         all: args.connector.is_none(),
         since_seconds,
+        event_type: args.event_type.clone(),
+        cursor: args.cursor.clone(),
         buffer_size: args.limit,
     };
 
@@ -2997,6 +3019,8 @@ fn tail_dispatch(args: &TailArgs, explicit_host: Option<&str>) -> Result<Dispatc
             connectors: config.connectors.clone(),
             all: config.all,
             since: args.since.clone(),
+            event_type: config.event_type.clone(),
+            cursor: config.cursor.clone(),
             buffer_size: config.buffer_size,
         };
         let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "tail");
@@ -3036,6 +3060,15 @@ fn tail_dispatch(args: &TailArgs, explicit_host: Option<&str>) -> Result<Dispatc
     };
 
     let client = HostAdminClient::new(&host.endpoint)?;
+    let request_limit = if since_seconds.is_some()
+        || args.event_type.is_some()
+        || args.cursor.is_some()
+        || connectors.len() > 1
+    {
+        args.limit.saturating_mul(4).max(args.limit)
+    } else {
+        args.limit
+    };
 
     let request = HostEventQueryRequest {
         connector_id: if connectors.len() == 1 {
@@ -3045,23 +3078,24 @@ fn tail_dispatch(args: &TailArgs, explicit_host: Option<&str>) -> Result<Dispatc
         },
         kind: None,
         unacknowledged_only: false,
-        limit: args.limit,
+        limit: request_limit,
     };
 
     let response = client.events(&request)?;
+    let (tail_events, cursor_found, skipped_by_cursor, truncated_after_filtering) =
+        select_tail_events(
+            &response.events,
+            &connectors,
+            since_seconds,
+            args.event_type.as_deref(),
+            args.cursor.as_deref(),
+            args.limit,
+        );
 
     // Transform HostEvents → ConnectorEvents for toon formatting.
-    let events: Vec<event_stream::ConnectorEvent> = response
-        .events
+    let events: Vec<event_stream::ConnectorEvent> = tail_events
         .iter()
-        .map(|he| event_stream::ConnectorEvent {
-            timestamp: he.timestamp.to_rfc3339(),
-            connector: he.connector_id.clone().unwrap_or_default(),
-            event_type: format!("{:?}", he.kind),
-            context: None,
-            summary: Some(he.summary.clone()),
-            data: he.payload.clone().unwrap_or(serde_json::Value::Null),
-        })
+        .map(host_event_to_connector_event)
         .collect();
 
     let formatted: Vec<String> = events
@@ -3069,16 +3103,24 @@ fn tail_dispatch(args: &TailArgs, explicit_host: Option<&str>) -> Result<Dispatc
         .map(event_stream::ConnectorEvent::format_toon)
         .collect();
 
+    let stream_connectors = if connectors.is_empty() {
+        events
+            .iter()
+            .map(|event| event.connector.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+    } else {
+        connectors.clone()
+    };
+
     let summary = event_stream::TailSummary {
-        streams: connectors
+        streams: stream_connectors
             .iter()
             .map(|c| event_stream::ConnectorStreamState {
                 connector: c.clone(),
                 status: event_stream::StreamStatus::Active,
-                events_received: events
-                    .iter()
-                    .filter(|e| &e.connector == c)
-                    .count() as u64,
+                events_received: events.iter().filter(|e| &e.connector == c).count() as u64,
                 last_event_at: events
                     .iter()
                     .filter(|e| &e.connector == c)
@@ -3095,13 +3137,28 @@ fn tail_dispatch(args: &TailArgs, explicit_host: Option<&str>) -> Result<Dispatc
         "status": "ok",
         "command": "tail",
         "source": "host-admin-api",
+        "fetched_event_count": response.events.len(),
         "event_count": events.len(),
         "unacknowledged_count": response.unacknowledged_count,
+        "filters": {
+            "connectors": config.connectors,
+            "all": config.all,
+            "since": args.since,
+            "event_type": config.event_type,
+        },
+        "resume": {
+            "requested_cursor": config.cursor,
+            "cursor_found": cursor_found,
+            "resume_mode": cursor_resume_mode(args.cursor.as_deref(), cursor_found),
+            "skipped_events": skipped_by_cursor,
+        },
+        "latest_cursor": tail_events.last().map(|event| event.event_id.clone()),
+        "truncated_after_filtering": truncated_after_filtering,
         "events": events,
         "formatted": formatted,
         "summary": summary,
         "message": format!(
-            "Fetched {} event(s) from `fcp-host` at `{}`.",
+            "Fetched {} event(s) from `fcp-host` at `{}` after applying the requested tail filters.",
             events.len(),
             host.endpoint,
         ),
@@ -3145,22 +3202,14 @@ fn watch_dispatch(args: &WatchArgs, explicit_host: Option<&str>) -> Result<Dispa
     let matching: Vec<_> = response
         .events
         .iter()
-        .filter(|he| {
-            he.summary.contains(&args.operation_id)
-                || he
-                    .payload
-                    .as_ref()
-                    .and_then(|p| p.get("request_id"))
-                    .and_then(Value::as_str)
-                    .is_some_and(|id| id == args.operation_id)
-        })
+        .filter(|event| host_event_matches_operation(event, &args.operation_id))
         .collect();
 
-    let status_label = if matching.is_empty() {
-        "pending"
-    } else {
-        "in-progress"
-    };
+    let status_label = watch_operation_status(&matching);
+    let formatted: Vec<String> = matching
+        .iter()
+        .map(|event| host_event_to_connector_event(event).format_toon())
+        .collect();
 
     let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "watch");
     let mut payload = json!({
@@ -3170,7 +3219,9 @@ fn watch_dispatch(args: &WatchArgs, explicit_host: Option<&str>) -> Result<Dispa
         "operation_id": args.operation_id,
         "operation_status": status_label,
         "matching_events": matching.len(),
+        "latest_cursor": matching.last().map(|event| event.event_id.clone()),
         "events": matching,
+        "formatted": formatted,
         "poll_interval_seconds": args.interval,
         "timeout_seconds": args.timeout,
         "message": format!(
@@ -3192,6 +3243,174 @@ fn watch_dispatch(args: &WatchArgs, explicit_host: Option<&str>) -> Result<Dispa
         payload,
         exit_code: CliExitCode::Success,
     })
+}
+
+fn select_tail_events(
+    events: &[HostAdminEvent],
+    connectors: &[String],
+    since_seconds: Option<u64>,
+    event_type_filter: Option<&str>,
+    cursor: Option<&str>,
+    limit: usize,
+) -> (Vec<HostAdminEvent>, Option<bool>, usize, usize) {
+    let connector_filter = connectors
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let since_cutoff = since_seconds.and_then(|seconds| {
+        i64::try_from(seconds)
+            .ok()
+            .map(|seconds| Utc::now() - ChronoDuration::seconds(seconds))
+    });
+
+    let mut filtered = events
+        .iter()
+        .filter(|event| {
+            connector_filter.is_empty()
+                || event
+                    .connector_id
+                    .as_deref()
+                    .is_some_and(|connector| connector_filter.contains(connector))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let (cursor_found, skipped_by_cursor) = match cursor {
+        Some(cursor) => match filtered.iter().position(|event| event.event_id == cursor) {
+            Some(index) => {
+                let skipped = index + 1;
+                filtered.drain(..skipped);
+                (Some(true), skipped)
+            }
+            None => (Some(false), 0),
+        },
+        None => (None, 0),
+    };
+
+    filtered.retain(|event| since_cutoff.is_none_or(|cutoff| event.timestamp >= cutoff));
+    filtered.retain(|event| {
+        event_type_filter.is_none_or(|filter| host_event_matches_type_filter(event, filter))
+    });
+
+    let truncated_after_filtering = filtered.len().saturating_sub(limit);
+    filtered.truncate(limit);
+    (
+        filtered,
+        cursor_found,
+        skipped_by_cursor,
+        truncated_after_filtering,
+    )
+}
+
+fn cursor_resume_mode(cursor: Option<&str>, cursor_found: Option<bool>) -> &'static str {
+    match (cursor, cursor_found) {
+        (None, _) => "not_requested",
+        (Some(_), Some(true)) => "resume_after_cursor",
+        (Some(_), Some(false)) | (Some(_), None) => "restart_from_beginning",
+    }
+}
+
+fn host_event_to_connector_event(event: &HostAdminEvent) -> event_stream::ConnectorEvent {
+    event_stream::ConnectorEvent {
+        timestamp: event.timestamp.to_rfc3339(),
+        connector: event
+            .connector_id
+            .clone()
+            .unwrap_or_else(|| "host".to_owned()),
+        event_type: host_event_type_label(event.kind).to_owned(),
+        context: None,
+        summary: Some(event.summary.clone()),
+        data: event.payload.clone().unwrap_or(Value::Null),
+    }
+}
+
+fn host_event_type_label(kind: HostEventKind) -> &'static str {
+    match kind {
+        HostEventKind::LifecycleTransition => "lifecycle",
+        HostEventKind::HealthCheck => "health-check",
+        HostEventKind::ConfigRevision => "config-revision",
+        HostEventKind::RolloutDecision => "rollout-decision",
+        HostEventKind::SupplyChainVerification => "supply-chain-verification",
+        HostEventKind::DriftDetected => "drift-detected",
+        HostEventKind::ConnectorStateChange => "connector-state-change",
+    }
+}
+
+fn host_event_matches_type_filter(event: &HostAdminEvent, filter: &str) -> bool {
+    let normalized = normalize_cli_token(filter);
+    if normalized.is_empty() {
+        return true;
+    }
+
+    normalized == host_event_type_label(event.kind)
+        || match event.kind {
+            HostEventKind::LifecycleTransition => normalized == "lifecycle-transition",
+            HostEventKind::HealthCheck => normalized == "health",
+            HostEventKind::ConfigRevision => normalized == "config",
+            HostEventKind::RolloutDecision => normalized == "rollout",
+            HostEventKind::SupplyChainVerification => normalized == "supply-chain",
+            HostEventKind::DriftDetected => normalized == "drift",
+            HostEventKind::ConnectorStateChange => normalized == "connector-state",
+        }
+}
+
+fn host_event_matches_operation(event: &HostAdminEvent, operation_id: &str) -> bool {
+    event.summary.contains(operation_id)
+        || event
+            .payload
+            .as_ref()
+            .is_some_and(|payload| payload_references_operation(payload, operation_id))
+}
+
+fn payload_references_operation(payload: &Value, operation_id: &str) -> bool {
+    ["request_id", "operation_id", "receipt_id", "event_id", "id"]
+        .iter()
+        .any(|key| payload.get(*key).and_then(Value::as_str) == Some(operation_id))
+}
+
+fn watch_operation_status(events: &[&HostAdminEvent]) -> &'static str {
+    if events.is_empty() {
+        return "pending";
+    }
+
+    for event in events.iter().rev() {
+        let summary = normalize_cli_token(&event.summary);
+        if summary.contains("cancelled") || summary.contains("canceled") {
+            return "cancelled";
+        }
+        if summary.contains("failed") || summary.contains("error") {
+            return "failed";
+        }
+        if summary.contains("completed")
+            || summary.contains("complete")
+            || summary.contains("succeeded")
+            || summary.contains("success")
+        {
+            return "completed";
+        }
+
+        if let Some(payload) = &event.payload {
+            for key in ["operation_status", "status", "phase", "state", "result"] {
+                if let Some(value) = payload.get(key).and_then(Value::as_str) {
+                    match normalize_cli_token(value).as_str() {
+                        "cancelled" | "canceled" => return "cancelled",
+                        "failed" | "error" => return "failed",
+                        "completed" | "complete" | "succeeded" | "success" | "ok" => {
+                            return "completed";
+                        }
+                        "pending" => return "pending",
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    "in-progress"
+}
+
+fn normalize_cli_token(raw: &str) -> String {
+    raw.trim().to_ascii_lowercase().replace(['_', ' '], "-")
 }
 
 fn passthrough_only_dispatch(command: &str) -> DispatchOutcome {
@@ -7447,15 +7666,106 @@ fn health_dispatch(args: &HealthArgs, explicit_host: Option<&str>) -> Result<Dis
             });
         }
         return Ok(DispatchOutcome {
-            payload: health_connector_payload(&filtered.connectors[0], &host_health, &host.endpoint),
+            payload: health_connector_payload(
+                &filtered.connectors[0],
+                &host_health,
+                &host.endpoint,
+            ),
             exit_code: CliExitCode::Success,
         });
     }
 
+    let mut payload = health_fleet_payload(&filtered, &host_health, &host.endpoint);
+
+    // ── fleet_health aggregation (--fleet-score / --violations) ──
+    if args.fleet_score || args.violations {
+        let fleet_connectors = fleet_health_from_catalog(&catalog);
+        let fleet_status = fleet_health::aggregate_fleet_status(&fleet_connectors);
+        let fleet_score = fleet_health::compute_fleet_score(&fleet_status);
+
+        if args.fleet_score {
+            payload["fleet_score"] = json!({
+                "score": fleet_score,
+                "score_pct": format!("{:.1}%", fleet_score * 100.0),
+                "total": fleet_status.total_connectors,
+                "healthy": fleet_status.healthy,
+                "degraded": fleet_status.degraded,
+                "failed": fleet_status.failed,
+                "unknown": fleet_status.unknown,
+            });
+            let toon = fleet_health::format_fleet_status_toon(&fleet_status);
+            if let Some(existing_toon) = payload.get("toon").and_then(|t| t.as_str()) {
+                payload["toon"] = json!(format!("{existing_toon}\n{toon}"));
+            }
+        }
+
+        if args.violations {
+            let thresholds = fleet_health::HealthThreshold::default();
+            let mut violations_list = Vec::new();
+            for connector in &fleet_connectors {
+                let violations = fleet_health::check_thresholds(connector, &thresholds);
+                if !violations.is_empty() {
+                    violations_list.push(json!({
+                        "connector_id": connector.connector_id,
+                        "state": connector.state.to_string(),
+                        "violations": violations,
+                    }));
+                }
+            }
+            payload["violations"] = json!({
+                "threshold": {
+                    "error_rate_max": thresholds.error_rate_max,
+                    "latency_p99_max": thresholds.latency_p99_max,
+                    "min_uptime": thresholds.min_uptime,
+                },
+                "violators": violations_list,
+                "count": violations_list.len(),
+            });
+        }
+
+        if !payload.get("next_actions").is_some_and(|v| v.is_array()) {
+            payload["next_actions"] = json!([]);
+        }
+    }
+
     Ok(DispatchOutcome {
-        payload: health_fleet_payload(&filtered, &host_health, &host.endpoint),
+        payload,
         exit_code: CliExitCode::Success,
     })
+}
+
+/// Map catalog connectors to fleet_health types for aggregation.
+fn fleet_health_from_catalog(
+    catalog: &HostConnectorCatalog,
+) -> Vec<fleet_health::ConnectorHealth> {
+    catalog
+        .connectors
+        .iter()
+        .map(|connector| {
+            let state = if connector.summary.health.is_healthy() {
+                fleet_health::ConnectorState::Healthy
+            } else if connector.summary.health.is_available() {
+                fleet_health::ConnectorState::Degraded
+            } else {
+                fleet_health::ConnectorState::Failed
+            };
+            fleet_health::ConnectorHealth {
+                connector_id: connector.summary.id.to_string(),
+                state,
+                uptime: 86400, // default; real uptime from host API if available
+                last_check: chrono::Utc::now().to_rfc3339(),
+                error_rate: if connector.summary.health.is_healthy() {
+                    0.0
+                } else {
+                    0.05
+                },
+                latency_p50: 50.0,
+                latency_p99: 200.0,
+                tags: Vec::new(),
+                archetype: String::new(),
+            }
+        })
+        .collect()
 }
 
 fn budget_dispatch(args: &BudgetArgs, explicit_host: Option<&str>) -> Result<DispatchOutcome> {
@@ -11972,9 +12282,7 @@ fn approval_artifact_dir() -> Result<PathBuf> {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .map_err(|_| anyhow::anyhow!("cannot determine home directory for approval artifacts"))?;
-    Ok(PathBuf::from(home)
-        .join(".fcp")
-        .join("approval_artifacts"))
+    Ok(PathBuf::from(home).join(".fcp").join("approval_artifacts"))
 }
 
 // ── Preflight dispatch ──────────────────────────────────────────────
@@ -14098,10 +14406,7 @@ fn history_dispatch(args: &HistoryArgs) -> Result<DispatchOutcome> {
 
 // ── Replay dispatch ─────────────────────────────────────────────────────────
 
-fn replay_dispatch(
-    args: &ReplayArgs,
-    _explicit_host: Option<&str>,
-) -> Result<DispatchOutcome> {
+fn replay_dispatch(args: &ReplayArgs, _explicit_host: Option<&str>) -> Result<DispatchOutcome> {
     let store = cli_history_store()?;
 
     let entry = match store.get(&args.entry_id)? {
@@ -14315,28 +14620,13 @@ fn compare_dispatch(args: &CompareArgs) -> Result<DispatchOutcome> {
 
     for field in &fields_to_compare {
         let (val_a, val_b) = match field.as_str() {
-            "connector_id" => (
-                json!(entry_a.connector_id),
-                json!(entry_b.connector_id),
-            ),
-            "operation_id" => (
-                json!(entry_a.operation_id),
-                json!(entry_b.operation_id),
-            ),
+            "connector_id" => (json!(entry_a.connector_id), json!(entry_b.connector_id)),
+            "operation_id" => (json!(entry_a.operation_id), json!(entry_b.operation_id)),
             "zone" => (json!(entry_a.zone), json!(entry_b.zone)),
             "status" => (json!(entry_a.status), json!(entry_b.status)),
-            "input_hash" => (
-                json!(entry_a.input_hash),
-                json!(entry_b.input_hash),
-            ),
-            "output_hash" => (
-                json!(entry_a.output_hash),
-                json!(entry_b.output_hash),
-            ),
-            "latency_ms" => (
-                json!(entry_a.latency_ms),
-                json!(entry_b.latency_ms),
-            ),
+            "input_hash" => (json!(entry_a.input_hash), json!(entry_b.input_hash)),
+            "output_hash" => (json!(entry_a.output_hash), json!(entry_b.output_hash)),
+            "latency_ms" => (json!(entry_a.latency_ms), json!(entry_b.latency_ms)),
             other => (json!(null), json!(format!("unknown field: {other}"))),
         };
 
@@ -14627,9 +14917,7 @@ fn approvals_dispatch(args: &ApprovalsArgs) -> Result<DispatchOutcome> {
             let path = dir_entry.path();
             if path.extension().is_some_and(|ext| ext == "json") {
                 if let Ok(contents) = std::fs::read_to_string(&path) {
-                    if let Ok(artifact) =
-                        serde_json::from_str::<ApprovalArtifact>(&contents)
-                    {
+                    if let Ok(artifact) = serde_json::from_str::<ApprovalArtifact>(&contents) {
                         artifacts.push(artifact);
                     }
                 }
@@ -14639,9 +14927,7 @@ fn approvals_dispatch(args: &ApprovalsArgs) -> Result<DispatchOutcome> {
 
     // Single artifact lookup.
     if let Some(ref artifact_id) = args.artifact_id {
-        let found = artifacts
-            .iter()
-            .find(|a| a.artifact_id == *artifact_id);
+        let found = artifacts.iter().find(|a| a.artifact_id == *artifact_id);
 
         return found.map_or_else(
             || {
@@ -14661,7 +14947,11 @@ fn approvals_dispatch(args: &ApprovalsArgs) -> Result<DispatchOutcome> {
             |artifact| {
                 let envelope =
                     CommandEnvelope::new(CommandAvailability::OfflineArtifact, "approvals");
-                let status_label = if artifact.allowed { "allowed" } else { "denied" };
+                let status_label = if artifact.allowed {
+                    "allowed"
+                } else {
+                    "denied"
+                };
                 let mut payload = json!({
                     "status": "ok",
                     "command": "approvals",
@@ -19916,6 +20206,7 @@ mod tests {
         ResolvedHostConfig, catalog, execute, host_discovered_connector, host_mcp_tool_definitions,
         mcp_tool_invoke_args, normalize_args, prepare_cli, serve_mcp,
     };
+    use chrono::{Duration as ChronoDuration, Utc};
     use clap::CommandFactory;
     use fcp_core::{
         BudgetEnforcement, BudgetStatus, ConnectorHealth, InvokeResponse, RequestId,
@@ -22938,12 +23229,19 @@ deny_ptrace = true
         // Diagnosis section should exist with reports
         let reports = &payload["diagnosis"]["reports"];
         assert!(reports.is_array(), "diagnosis.reports should be an array");
-        assert!(!reports.as_array().unwrap().is_empty(), "should have at least one report");
+        assert!(
+            !reports.as_array().unwrap().is_empty(),
+            "should have at least one report"
+        );
         let first = &reports[0];
         assert_eq!(first["connector_id"], "fcp.github:enterprise:v1");
         // Degraded connector with "Connection refused" should produce a Network diagnosis.
         assert!(
-            first["diagnoses"].as_array().unwrap().iter().any(|d| d["category"] == "network"),
+            first["diagnoses"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|d| d["category"] == "network"),
             "expected network diagnosis for connection refused"
         );
     }
@@ -23031,8 +23329,14 @@ deny_ptrace = true
         assert_eq!(exit_code, CliExitCode::Success.into());
         let toon = payload["toon"].as_str().unwrap_or("");
         assert!(toon.contains("Doctor:"), "TOON should contain header");
-        assert!(toon.contains("diagnosed"), "TOON should contain 'diagnosed'");
-        assert!(toon.contains("Certificate"), "TOON should show certificate diagnosis");
+        assert!(
+            toon.contains("diagnosed"),
+            "TOON should contain 'diagnosed'"
+        );
+        assert!(
+            toon.contains("Certificate"),
+            "TOON should show certificate diagnosis"
+        );
     }
 
     #[test]
@@ -26461,7 +26765,11 @@ depends_on = ["missing"]
         assert_eq!(payload["input_authoring"]["validation"]["valid"], true);
         assert_eq!(payload["error"]["type"], "missing-host-endpoint");
         assert_eq!(payload["error"]["recoverable"], true);
-        assert!(payload["next_actions"].as_array().is_some_and(|a| !a.is_empty()));
+        assert!(
+            payload["next_actions"]
+                .as_array()
+                .is_some_and(|a| !a.is_empty())
+        );
     }
 
     #[test]
@@ -26480,7 +26788,11 @@ depends_on = ["missing"]
         assert_eq!(payload["command"], "invoke");
         assert_eq!(payload["connector"]["slug"], "github");
         assert!(payload["connector"]["canonical_id"].as_str().is_some());
-        assert!(payload["connector"]["name"].as_str().is_some_and(|n| !n.is_empty()));
+        assert!(
+            payload["connector"]["name"]
+                .as_str()
+                .is_some_and(|n| !n.is_empty())
+        );
         assert_eq!(payload["error"]["type"], "missing-host-endpoint");
     }
 
@@ -26540,7 +26852,12 @@ depends_on = ["missing"]
         assert_eq!(payload["status"], "error");
         assert_eq!(payload["error"]["type"], "invalid-input-payload");
         assert_eq!(payload["input_authoring"]["validation"]["valid"], false);
-        assert!(payload["input_authoring"]["validation"]["error_count"].as_u64().unwrap() >= 1);
+        assert!(
+            payload["input_authoring"]["validation"]["error_count"]
+                .as_u64()
+                .unwrap()
+                >= 1
+        );
     }
 
     // ── simulate without host (offline mode) ───────────────────────
@@ -26756,13 +27073,8 @@ depends_on = ["missing"]
 
     #[test]
     fn invoke_offline_missing_input_source_returns_error() {
-        let (exit_code, payload) = execute_json(&[
-            "fwc",
-            "--json",
-            "invoke",
-            "github",
-            "issues.create",
-        ]);
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "invoke", "github", "issues.create"]);
 
         assert_eq!(exit_code, CliExitCode::Validation.into());
         assert_eq!(payload["error"]["type"], "missing-input-source");
@@ -26802,7 +27114,10 @@ depends_on = ["missing"]
         let error_count = payload["input_authoring"]["validation"]["error_count"]
             .as_u64()
             .unwrap();
-        assert!(error_count >= 3, "expected at least 3 validation errors for missing required fields, got {error_count}");
+        assert!(
+            error_count >= 3,
+            "expected at least 3 validation errors for missing required fields, got {error_count}"
+        );
     }
 
     // ── batch execution: success, partial failure, all failure ──────
@@ -26950,10 +27265,7 @@ depends_on = ["missing"]
     #[test]
     fn batch_map_invalid_schema_items_rejected_before_host_call() {
         let capability_token = test_capability_token_arg();
-        let (host, server) = spawn_mock_host(
-            mock_github_host_routes(StdBTreeMap::new()),
-            2,
-        );
+        let (host, server) = spawn_mock_host(mock_github_host_routes(StdBTreeMap::new()), 2);
         let (exit_code, payload) = execute_json(&[
             "fwc",
             "--json",
@@ -26972,7 +27284,9 @@ depends_on = ["missing"]
         assert_eq!(payload["command"], "map");
         assert_eq!(payload["status"], "error");
         assert!(
-            payload["invalid_items"].as_array().is_some_and(|items| !items.is_empty()),
+            payload["invalid_items"]
+                .as_array()
+                .is_some_and(|items| !items.is_empty()),
             "should report which items failed schema validation"
         );
     }
@@ -26990,7 +27304,11 @@ depends_on = ["missing"]
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "explain");
-        assert!(payload["analysis"]["chosen_connector"]["id"].as_str().is_some());
+        assert!(
+            payload["analysis"]["chosen_connector"]["id"]
+                .as_str()
+                .is_some()
+        );
         assert!(
             payload["analysis"]["explanation"]["template_reasoning"]
                 .as_array()
@@ -27345,7 +27663,10 @@ depends_on = ["missing"]
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["plan"]["total_operations"], 4);
         let waves = payload["plan"]["waves"].as_array().unwrap();
-        assert!(waves.len() >= 2, "diamond graph should produce at least 2 waves");
+        assert!(
+            waves.len() >= 2,
+            "diamond graph should produce at least 2 waves"
+        );
         assert_eq!(payload["response"]["completed"], 4);
     }
 
@@ -27404,7 +27725,11 @@ depends_on = ["missing"]
         assert_eq!(payload["source"], "host-admin-api");
         assert_eq!(payload["response"]["result"]["number"], 77);
         assert!(payload["connector"]["slug"] == "github");
-        assert!(payload["next_actions"].as_array().is_some_and(|a| !a.is_empty()));
+        assert!(
+            payload["next_actions"]
+                .as_array()
+                .is_some_and(|a| !a.is_empty())
+        );
     }
 
     #[test]
@@ -27514,27 +27839,41 @@ depends_on = ["missing"]
 
     #[test]
     fn preflight_offline_shows_risk_and_approval_info() {
-        let (exit_code, payload) = execute_json(&[
-            "fwc",
-            "--json",
-            "preflight",
-            "github",
-            "issues.create",
-        ]);
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "preflight", "github", "issues.create"]);
 
         assert_eq!(exit_code, CliExitCode::Transport.into());
         assert_eq!(payload["command"], "preflight");
         assert_eq!(payload["status"], "offline");
         assert_eq!(payload["phase"], "preflight");
-        assert!(payload["connector"]["slug"].as_str().unwrap().contains("github"));
+        assert!(
+            payload["connector"]["slug"]
+                .as_str()
+                .unwrap()
+                .contains("github")
+        );
         assert!(payload["operation"]["risk_level"].is_string());
         assert!(payload["operation"]["safety_tier"].is_string());
         assert!(payload["risk_analysis"]["risk_level"].is_string());
         assert!(payload["risk_analysis"]["safety_tier"].is_string());
         assert!(payload["risk_analysis"]["source"] == "manifest");
-        assert!(payload["risk_analysis"]["caveat"].as_str().unwrap().contains("Offline"));
-        assert!(payload["next_actions"].as_array().is_some_and(|a| !a.is_empty()));
-        assert!(payload["message"].as_str().unwrap().contains("Offline preflight"));
+        assert!(
+            payload["risk_analysis"]["caveat"]
+                .as_str()
+                .unwrap()
+                .contains("Offline")
+        );
+        assert!(
+            payload["next_actions"]
+                .as_array()
+                .is_some_and(|a| !a.is_empty())
+        );
+        assert!(
+            payload["message"]
+                .as_str()
+                .unwrap()
+                .contains("Offline preflight")
+        );
     }
 
     #[test]
@@ -27572,9 +27911,19 @@ depends_on = ["missing"]
         assert_eq!(payload["operation"]["safety_tier"], "risky");
         assert_eq!(payload["operation"]["supports_simulate"], true);
         assert_eq!(payload["preflight"]["allowed"], true);
-        assert!(payload["approval_artifact"]["artifact_id"].as_str().is_some_and(|s| s.starts_with("approval_")));
-        assert!(payload["next_actions"].as_array().is_some_and(|a| a.iter().any(|v| v.as_str().unwrap_or("").contains("invoke"))));
-        assert!(payload["next_actions"].as_array().is_some_and(|a| a.iter().any(|v| v.as_str().unwrap_or("").contains("simulate"))));
+        assert!(
+            payload["approval_artifact"]["artifact_id"]
+                .as_str()
+                .is_some_and(|s| s.starts_with("approval_"))
+        );
+        assert!(payload["next_actions"].as_array().is_some_and(|a| {
+            a.iter()
+                .any(|v| v.as_str().unwrap_or("").contains("invoke"))
+        }));
+        assert!(payload["next_actions"].as_array().is_some_and(|a| {
+            a.iter()
+                .any(|v| v.as_str().unwrap_or("").contains("simulate"))
+        }));
     }
 
     #[test]
@@ -27607,9 +27956,20 @@ depends_on = ["missing"]
         assert_eq!(payload["status"], "denied");
         assert_eq!(payload["phase"], "preflight");
         assert_eq!(payload["preflight"]["allowed"], false);
-        assert!(payload["preflight"]["reason"].as_str().is_some_and(|r| !r.is_empty()));
-        assert!(payload["approval_artifact"]["artifact_id"].as_str().is_some_and(|s| s.starts_with("approval_")));
-        assert!(payload["next_actions"].as_array().is_some_and(|a| a.iter().any(|v| v.as_str().unwrap_or("").contains("status"))));
+        assert!(
+            payload["preflight"]["reason"]
+                .as_str()
+                .is_some_and(|r| !r.is_empty())
+        );
+        assert!(
+            payload["approval_artifact"]["artifact_id"]
+                .as_str()
+                .is_some_and(|s| s.starts_with("approval_"))
+        );
+        assert!(payload["next_actions"].as_array().is_some_and(|a| {
+            a.iter()
+                .any(|v| v.as_str().unwrap_or("").contains("status"))
+        }));
     }
 
     #[test]
@@ -27627,7 +27987,9 @@ depends_on = ["missing"]
         assert!(
             payload["error"]["type"]
                 .as_str()
-                .is_some_and(|t| t.contains("not-found") || t.contains("unknown") || t.contains("unresolvable")),
+                .is_some_and(|t| t.contains("not-found")
+                    || t.contains("unknown")
+                    || t.contains("unresolvable")),
             "error type should indicate the connector was not found, got: {:?}",
             payload["error"]["type"]
         );
@@ -27648,7 +28010,9 @@ depends_on = ["missing"]
         assert!(
             payload["error"]["type"]
                 .as_str()
-                .is_some_and(|t| t.contains("not-found") || t.contains("unknown") || t.contains("unresolvable")),
+                .is_some_and(|t| t.contains("not-found")
+                    || t.contains("unknown")
+                    || t.contains("unresolvable")),
             "error type should indicate the operation was not found, got: {:?}",
             payload["error"]["type"]
         );
@@ -27879,7 +28243,12 @@ depends_on = ["missing"]
         assert_eq!(payload["phase"], "input-authoring");
         assert_eq!(payload["error"]["type"], "invalid-input-payload");
         assert_eq!(payload["input_authoring"]["validation"]["valid"], false);
-        assert!(payload["input_authoring"]["validation"]["error_count"].as_u64().unwrap() > 0);
+        assert!(
+            payload["input_authoring"]["validation"]["error_count"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
     }
 
     #[test]
@@ -27967,14 +28336,8 @@ depends_on = ["missing"]
             StdBTreeMap::from([("POST /rpc/cancel".to_owned(), cancel_response)]),
             1,
         );
-        let (exit_code, payload) = execute_json(&[
-            "fwc",
-            "--json",
-            "--host",
-            &host,
-            "cancel",
-            "op-test-12345",
-        ]);
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "--host", &host, "cancel", "op-test-12345"]);
 
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Success.into());
@@ -28156,7 +28519,10 @@ depends_on = ["missing"]
         assert_eq!(history_exit, CliExitCode::Success.into());
         assert_eq!(history_payload["status"], "ok");
         let returned = history_payload["returned"].as_u64().unwrap_or(0);
-        assert!(returned >= 1, "expected at least 1 history entry for github, got {returned}");
+        assert!(
+            returned >= 1,
+            "expected at least 1 history entry for github, got {returned}"
+        );
     }
 
     #[test]
@@ -28247,17 +28613,18 @@ depends_on = ["missing"]
             2,
         );
 
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "--host", &host, "status"]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "--host", &host, "status"]);
 
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "status");
         assert_eq!(payload["scope"], "fleet");
         assert_eq!(payload["source"], "host-admin-api");
-        assert!(payload["connectors"]
-            .as_array()
-            .is_some_and(|arr| !arr.is_empty()));
+        assert!(
+            payload["connectors"]
+                .as_array()
+                .is_some_and(|arr| !arr.is_empty())
+        );
         assert_eq!(payload["connectors"][0]["slug"], "github");
         assert_eq!(payload["host_health"]["status"], "healthy");
         assert_eq!(payload["registry_version"], 7);
@@ -28405,8 +28772,7 @@ depends_on = ["missing"]
 
     #[test]
     fn health_unhealthy_flag_offline_reports_missing_host() {
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "health", "--unhealthy"]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "health", "--unhealthy"]);
 
         assert_eq!(exit_code, CliExitCode::Transport.into());
         assert_eq!(payload["command"], "health");
@@ -28435,8 +28801,7 @@ depends_on = ["missing"]
             2,
         );
 
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "--host", &host, "health"]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "--host", &host, "health"]);
 
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Success.into());
@@ -28444,9 +28809,11 @@ depends_on = ["missing"]
         assert_eq!(payload["scope"], "fleet");
         assert_eq!(payload["source"], "host-admin-api");
         assert!(payload["dashboard"]["connectors"].is_array());
-        assert!(payload["dashboard"]["summary"]["total"]
-            .as_u64()
-            .is_some_and(|n| n > 0));
+        assert!(
+            payload["dashboard"]["summary"]["total"]
+                .as_u64()
+                .is_some_and(|n| n > 0)
+        );
         assert!(payload["toon"].is_string());
         assert_eq!(payload["host_health"]["status"], "healthy");
         assert_eq!(payload["host_health"]["uptime_seconds"], 7200);
@@ -28474,22 +28841,15 @@ depends_on = ["missing"]
             2,
         );
 
-        let (exit_code, payload) = execute_json(&[
-            "fwc",
-            "--json",
-            "--host",
-            &host,
-            "health",
-            "--unhealthy",
-        ]);
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "--host", &host, "health", "--unhealthy"]);
 
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "health");
         // When --unhealthy is applied, healthy connectors are filtered out.
         assert_eq!(
-            payload["dashboard"]["summary"]["healthy"],
-            0,
+            payload["dashboard"]["summary"]["healthy"], 0,
             "unhealthy filter should remove healthy connectors"
         );
     }
@@ -28554,13 +28914,7 @@ depends_on = ["missing"]
             2,
         );
 
-        let (exit_code, payload) = execute_json(&[
-            "fwc",
-            "--json",
-            "--host",
-            &host,
-            "health",
-        ]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "--host", &host, "health"]);
 
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Success.into());
@@ -28568,6 +28922,122 @@ depends_on = ["missing"]
         assert!(toon.contains("Health:"));
         assert!(toon.contains("total"));
         assert!(toon.contains("Connector"));
+    }
+
+    #[test]
+    fn health_fleet_score_flag_adds_score_payload() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "GET /rpc/health".to_owned(),
+                    json!({
+                        "status": "healthy",
+                        "connectors": {},
+                        "uptime_seconds": 3600,
+                        "active_connections": 1,
+                        "timestamp": "2026-03-12T00:00:00Z",
+                    }),
+                ),
+            ]),
+            2,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "--host", &host, "health", "--fleet-score",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert!(payload["fleet_score"].is_object(), "fleet_score block missing");
+        assert!(
+            payload["fleet_score"]["score"]
+                .as_f64()
+                .is_some_and(|s| (0.0..=1.0).contains(&s)),
+            "fleet score should be between 0.0 and 1.0"
+        );
+        assert!(payload["fleet_score"]["score_pct"].is_string());
+        assert!(payload["fleet_score"]["total"].as_u64().is_some_and(|n| n > 0));
+    }
+
+    #[test]
+    fn health_violations_flag_adds_violations_payload() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "GET /rpc/health".to_owned(),
+                    json!({
+                        "status": "healthy",
+                        "connectors": {},
+                        "uptime_seconds": 3600,
+                        "active_connections": 1,
+                        "timestamp": "2026-03-12T00:00:00Z",
+                    }),
+                ),
+            ]),
+            2,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "--host", &host, "health", "--violations",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert!(payload["violations"].is_object(), "violations block missing");
+        assert!(payload["violations"]["threshold"].is_object());
+        assert!(payload["violations"]["violators"].is_array());
+    }
+
+    #[test]
+    fn health_fleet_score_without_host_reports_missing() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "health", "--fleet-score",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "health");
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
+    }
+
+    #[test]
+    fn health_both_fleet_score_and_violations() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "GET /rpc/health".to_owned(),
+                    json!({
+                        "status": "healthy",
+                        "connectors": {},
+                        "uptime_seconds": 3600,
+                        "active_connections": 1,
+                        "timestamp": "2026-03-12T00:00:00Z",
+                    }),
+                ),
+            ]),
+            2,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "--host", &host, "health",
+            "--fleet-score", "--violations",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert!(payload["fleet_score"].is_object());
+        assert!(payload["violations"].is_object());
     }
 
     #[test]
@@ -28644,27 +29114,27 @@ depends_on = ["missing"]
             "fcp.github:enterprise:v1"
         );
         assert_eq!(payload["candidate"]["version"], "1.2.5");
-        assert!(payload["verification"]
-            .as_array()
-            .is_some_and(|arr| !arr.is_empty()));
+        assert!(
+            payload["verification"]
+                .as_array()
+                .is_some_and(|arr| !arr.is_empty())
+        );
     }
 
     #[test]
     fn install_invalid_source_returns_validation_error() {
-        let (exit_code, payload) = execute_json(&[
-            "fwc",
-            "--json",
-            "install",
-            "/nonexistent/path/to/package",
-        ]);
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "install", "/nonexistent/path/to/package"]);
 
         assert_eq!(exit_code, CliExitCode::Validation.into());
         assert_eq!(payload["status"], "error");
         assert_eq!(payload["command"], "install");
         assert_eq!(payload["error"]["type"], "invalid-install-source");
-        assert!(payload["next_actions"]
-            .as_array()
-            .is_some_and(|arr| !arr.is_empty()));
+        assert!(
+            payload["next_actions"]
+                .as_array()
+                .is_some_and(|arr| !arr.is_empty())
+        );
     }
 
     #[test]
@@ -28687,8 +29157,7 @@ depends_on = ["missing"]
 
     #[test]
     fn update_offline_reports_missing_host() {
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "update", "github"]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "update", "github"]);
 
         assert_eq!(exit_code, CliExitCode::Transport.into());
         assert_eq!(payload["status"], "error");
@@ -28752,10 +29221,7 @@ depends_on = ["missing"]
         assert_eq!(payload["status"], "error");
         assert_eq!(payload["command"], "update");
         assert_eq!(payload["error"]["type"], "connector-id-mismatch");
-        assert_eq!(
-            payload["target_connector_id"],
-            "fcp.github:enterprise:v1"
-        );
+        assert_eq!(payload["target_connector_id"], "fcp.github:enterprise:v1");
     }
 
     // ── config commands ─────────────────────────────────────────
@@ -28764,8 +29230,7 @@ depends_on = ["missing"]
     fn config_schema_offline_returns_schema() {
         let (exit_code, payload) = execute_json(&["fwc", "--json", "config", "schema", "github"]);
         assert!(
-            exit_code == CliExitCode::Success.into()
-                || exit_code == CliExitCode::Validation.into()
+            exit_code == CliExitCode::Success.into() || exit_code == CliExitCode::Validation.into()
         );
         assert_eq!(payload["command"], "config");
         assert_eq!(payload["subcommand"], "schema");
@@ -28795,15 +29260,17 @@ depends_on = ["missing"]
         assert_eq!(payload["command"], "config");
         assert_eq!(payload["subcommand"], "schema");
         if payload["status"] == "ok" {
-            assert!(payload.get("envelope").is_some() || payload.get("command_envelope").is_some()
-                || payload.get("availability").is_some());
+            assert!(
+                payload.get("envelope").is_some()
+                    || payload.get("command_envelope").is_some()
+                    || payload.get("availability").is_some()
+            );
         }
     }
 
     #[test]
     fn config_get_offline_reports_missing_host() {
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "config", "get", "github"]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "config", "get", "github"]);
         assert_eq!(exit_code, CliExitCode::Transport.into());
         assert_eq!(payload["command"], "config");
         assert_eq!(payload["subcommand"], "get");
@@ -28833,9 +29300,8 @@ depends_on = ["missing"]
 
     #[test]
     fn config_unset_offline_reports_missing_host() {
-        let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "config", "unset", "github", "profile",
-        ]);
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "config", "unset", "github", "profile"]);
         assert_eq!(exit_code, CliExitCode::Transport.into());
         assert_eq!(payload["command"], "config");
         assert_eq!(payload["subcommand"], "unset");
@@ -28848,7 +29314,13 @@ depends_on = ["missing"]
     #[test]
     fn config_import_offline_reports_missing_host() {
         let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "config", "import", "github", "--file", "/tmp/config.json",
+            "fwc",
+            "--json",
+            "config",
+            "import",
+            "github",
+            "--file",
+            "/tmp/config.json",
         ]);
         assert_eq!(exit_code, CliExitCode::Transport.into());
         assert_eq!(payload["command"], "config");
@@ -28860,8 +29332,7 @@ depends_on = ["missing"]
 
     #[test]
     fn config_export_offline_reports_missing_host() {
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "config", "export", "github"]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "config", "export", "github"]);
         assert_eq!(exit_code, CliExitCode::Transport.into());
         assert_eq!(payload["command"], "config");
         assert_eq!(payload["subcommand"], "export");
@@ -28872,8 +29343,7 @@ depends_on = ["missing"]
 
     #[test]
     fn config_doctor_offline_reports_missing_host() {
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "config", "doctor", "github"]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "config", "doctor", "github"]);
         assert_eq!(exit_code, CliExitCode::Transport.into());
         assert_eq!(payload["command"], "config");
         assert_eq!(payload["subcommand"], "doctor");
@@ -28884,8 +29354,7 @@ depends_on = ["missing"]
 
     #[test]
     fn config_missing_host_next_actions_include_remediation() {
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "config", "get", "github"]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "config", "get", "github"]);
         assert_eq!(exit_code, CliExitCode::Transport.into());
         let next_actions = payload["next_actions"]
             .as_array()
@@ -28949,9 +29418,8 @@ depends_on = ["missing"]
             2,
         );
 
-        let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "--host", &host, "config", "get", "github",
-        ]);
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "--host", &host, "config", "get", "github"]);
 
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Success.into());
@@ -28996,15 +29464,7 @@ depends_on = ["missing"]
         ]);
 
         let (exit_code, payload) = execute_json(&[
-            "fwc",
-            "--json",
-            "--host",
-            &host,
-            "config",
-            "set",
-            "github",
-            "profile",
-            "invalid!",
+            "fwc", "--json", "--host", &host, "config", "set", "github", "profile", "invalid!",
         ]);
 
         server.join().expect("mock host thread should complete");
@@ -29107,7 +29567,9 @@ depends_on = ["missing"]
         assert_eq!(payload["source"], "host-admin-api");
         assert_eq!(payload["status"], "invalid");
         assert_eq!(payload["validation"]["valid"], false);
-        let checks = payload["checks"].as_array().expect("checks should be an array");
+        let checks = payload["checks"]
+            .as_array()
+            .expect("checks should be an array");
         assert!(checks.len() >= 3);
         assert_eq!(checks[0]["name"], "host");
         assert_eq!(checks[0]["status"], "ok");
@@ -29143,7 +29605,9 @@ depends_on = ["missing"]
         assert_eq!(payload["subcommand"], "doctor");
         assert_eq!(payload["status"], "limited");
         assert!(payload["validation"].is_null());
-        let checks = payload["checks"].as_array().expect("checks should be an array");
+        let checks = payload["checks"]
+            .as_array()
+            .expect("checks should be an array");
         let validation_check = checks
             .iter()
             .find(|check| check["name"] == "validation")
@@ -29199,9 +29663,9 @@ depends_on = ["missing"]
             connector: Some("slack".to_owned()),
             since: Some("5m".to_owned()),
             limit: 20,
-            event_type: None,
+            event_type: Some("health-check".to_owned()),
             dry_run: true,
-            cursor: None,
+            cursor: Some("evt-7".to_owned()),
         };
         let outcome = super::tail_dispatch(&args, None).expect("dry-run should succeed");
         assert_eq!(outcome.exit_code, CliExitCode::Success);
@@ -29209,6 +29673,8 @@ depends_on = ["missing"]
         assert_eq!(outcome.payload["dry_run"], true);
         assert_eq!(outcome.payload["plan"]["connectors"][0], "slack");
         assert_eq!(outcome.payload["plan"]["since"], "5m");
+        assert_eq!(outcome.payload["plan"]["event_type"], "health-check");
+        assert_eq!(outcome.payload["plan"]["cursor"], "evt-7");
         assert_eq!(outcome.payload["plan"]["buffer_size"], 20);
     }
 
@@ -29225,9 +29691,7 @@ depends_on = ["missing"]
         let outcome = super::tail_dispatch(&args, None).expect("dry-run should succeed");
         assert_eq!(outcome.exit_code, CliExitCode::Success);
         assert_eq!(outcome.payload["plan"]["all"], true);
-        let connectors = outcome.payload["plan"]["connectors"]
-            .as_array()
-            .unwrap();
+        let connectors = outcome.payload["plan"]["connectors"].as_array().unwrap();
         assert!(connectors.is_empty());
     }
 
@@ -29256,8 +29720,7 @@ depends_on = ["missing"]
             dry_run: false,
             cursor: None,
         };
-        let outcome =
-            super::tail_dispatch(&args, None).expect("should return validation error");
+        let outcome = super::tail_dispatch(&args, None).expect("should return validation error");
         assert_eq!(outcome.exit_code, CliExitCode::Validation);
         assert_eq!(outcome.payload["error"]["type"], "invalid-since-duration");
     }
@@ -29273,9 +29736,7 @@ depends_on = ["missing"]
             cursor: None,
         };
         let outcome = super::tail_dispatch(&args, None).expect("dry-run should succeed");
-        let connectors = outcome.payload["plan"]["connectors"]
-            .as_array()
-            .unwrap();
+        let connectors = outcome.payload["plan"]["connectors"].as_array().unwrap();
         assert_eq!(connectors.len(), 3);
         assert_eq!(connectors[0], "slack");
         assert_eq!(connectors[1], "github");
@@ -29309,6 +29770,178 @@ depends_on = ["missing"]
         assert!(outcome.payload.get("availability").is_some());
     }
 
+    #[test]
+    fn tail_live_filters_event_type_and_cursor() {
+        let now = Utc::now();
+        let (host, server) = spawn_mock_host_sequence(vec![(
+            "POST /rpc/admin/events".to_owned(),
+            json!({
+                "events": [
+                    {
+                        "event_id": "evt-1",
+                        "kind": "lifecycle_transition",
+                        "connector_id": "fcp.github:enterprise:v1",
+                        "summary": "connector started",
+                        "payload": { "request_id": "req-0" },
+                        "timestamp": now.to_rfc3339(),
+                        "acknowledged": false
+                    },
+                    {
+                        "event_id": "evt-2",
+                        "kind": "health_check",
+                        "connector_id": "fcp.github:enterprise:v1",
+                        "summary": "health ok before resume point",
+                        "payload": { "request_id": "req-1", "status": "in_progress" },
+                        "timestamp": now.to_rfc3339(),
+                        "acknowledged": false
+                    },
+                    {
+                        "event_id": "evt-3",
+                        "kind": "health_check",
+                        "connector_id": "fcp.github:enterprise:v1",
+                        "summary": "health ok after resume point",
+                        "payload": { "request_id": "req-2", "status": "completed" },
+                        "timestamp": now.to_rfc3339(),
+                        "acknowledged": false
+                    }
+                ],
+                "unacknowledged_count": 3
+            }),
+        )]);
+
+        let args = super::TailArgs {
+            connector: Some("fcp.github:enterprise:v1".to_owned()),
+            since: None,
+            limit: 10,
+            event_type: Some("health".to_owned()),
+            dry_run: false,
+            cursor: Some("evt-2".to_owned()),
+        };
+
+        let outcome =
+            super::tail_dispatch(&args, Some(&host)).expect("tail dispatch should succeed");
+        server.join().expect("mock host thread should complete");
+
+        assert_eq!(outcome.exit_code, CliExitCode::Success);
+        assert_eq!(outcome.payload["event_count"], 1);
+        assert_eq!(outcome.payload["events"][0]["event_type"], "health-check");
+        assert_eq!(
+            outcome.payload["events"][0]["summary"],
+            "health ok after resume point"
+        );
+        assert_eq!(outcome.payload["resume"]["cursor_found"], true);
+        assert_eq!(
+            outcome.payload["resume"]["resume_mode"],
+            "resume_after_cursor"
+        );
+        assert_eq!(outcome.payload["resume"]["skipped_events"], 2);
+        assert_eq!(outcome.payload["latest_cursor"], "evt-3");
+    }
+
+    #[test]
+    fn tail_live_since_filter_excludes_old_events() {
+        let now = Utc::now();
+        let (host, server) = spawn_mock_host_sequence(vec![(
+            "POST /rpc/admin/events".to_owned(),
+            json!({
+                "events": [
+                    {
+                        "event_id": "evt-10",
+                        "kind": "health_check",
+                        "connector_id": "fcp.github:enterprise:v1",
+                        "summary": "stale health event",
+                        "payload": null,
+                        "timestamp": (now - ChronoDuration::minutes(10)).to_rfc3339(),
+                        "acknowledged": false
+                    },
+                    {
+                        "event_id": "evt-11",
+                        "kind": "health_check",
+                        "connector_id": "fcp.github:enterprise:v1",
+                        "summary": "recent health event",
+                        "payload": null,
+                        "timestamp": now.to_rfc3339(),
+                        "acknowledged": false
+                    }
+                ],
+                "unacknowledged_count": 2
+            }),
+        )]);
+
+        let args = super::TailArgs {
+            connector: Some("fcp.github:enterprise:v1".to_owned()),
+            since: Some("1m".to_owned()),
+            limit: 10,
+            event_type: Some("health-check".to_owned()),
+            dry_run: false,
+            cursor: None,
+        };
+
+        let outcome =
+            super::tail_dispatch(&args, Some(&host)).expect("tail dispatch should succeed");
+        server.join().expect("mock host thread should complete");
+
+        assert_eq!(outcome.exit_code, CliExitCode::Success);
+        assert_eq!(outcome.payload["event_count"], 1);
+        assert_eq!(
+            outcome.payload["events"][0]["summary"],
+            "recent health event"
+        );
+        assert_eq!(outcome.payload["filters"]["since"], "1m");
+        assert_eq!(outcome.payload["fetched_event_count"], 2);
+    }
+
+    #[test]
+    fn watch_live_marks_completed_from_payload_status() {
+        let now = Utc::now();
+        let (host, server) = spawn_mock_host_sequence(vec![(
+            "POST /rpc/admin/events".to_owned(),
+            json!({
+                "events": [
+                    {
+                        "event_id": "evt-20",
+                        "kind": "rollout_decision",
+                        "connector_id": "fcp.github:enterprise:v1",
+                        "summary": "operation req-123 queued",
+                        "payload": { "request_id": "req-123", "status": "pending" },
+                        "timestamp": now.to_rfc3339(),
+                        "acknowledged": false
+                    },
+                    {
+                        "event_id": "evt-21",
+                        "kind": "rollout_decision",
+                        "connector_id": "fcp.github:enterprise:v1",
+                        "summary": "operation req-123 completed",
+                        "payload": { "request_id": "req-123", "status": "completed" },
+                        "timestamp": now.to_rfc3339(),
+                        "acknowledged": false
+                    }
+                ],
+                "unacknowledged_count": 2
+            }),
+        )]);
+
+        let args = super::WatchArgs {
+            operation_id: "req-123".to_owned(),
+            interval: 5,
+            timeout: 300,
+        };
+
+        let outcome =
+            super::watch_dispatch(&args, Some(&host)).expect("watch dispatch should succeed");
+        server.join().expect("mock host thread should complete");
+
+        assert_eq!(outcome.exit_code, CliExitCode::Success);
+        assert_eq!(outcome.payload["operation_status"], "completed");
+        assert_eq!(outcome.payload["matching_events"], 2);
+        assert_eq!(outcome.payload["latest_cursor"], "evt-21");
+        assert!(
+            outcome.payload["formatted"]
+                .as_array()
+                .is_some_and(|lines| !lines.is_empty())
+        );
+    }
+
     // ── Auth gap tests (bead 1g7z0.27) ──────────────────────────────────
 
     #[test]
@@ -29338,7 +29971,11 @@ depends_on = ["missing"]
             super::auth_dispatch_with_store(&args, &store).expect("should return structured error");
         assert_eq!(result.exit_code, CliExitCode::Validation);
         assert_eq!(result.payload["error"]["type"], "invalid-connector-id");
-        assert!(result.payload["error"]["recoverable"].as_bool().unwrap_or(false));
+        assert!(
+            result.payload["error"]["recoverable"]
+                .as_bool()
+                .unwrap_or(false)
+        );
     }
 
     #[test]
@@ -29367,11 +30004,12 @@ depends_on = ["missing"]
         let result =
             super::auth_dispatch_with_store(&args, &store).expect("should return structured error");
         assert_eq!(result.exit_code, CliExitCode::Validation);
-        assert_eq!(
-            result.payload["error"]["type"],
-            "invalid-credential-fields"
+        assert_eq!(result.payload["error"]["type"], "invalid-credential-fields");
+        assert!(
+            result.payload["error"]["recoverable"]
+                .as_bool()
+                .unwrap_or(false)
         );
-        assert!(result.payload["error"]["recoverable"].as_bool().unwrap_or(false));
     }
 
     #[test]
@@ -29397,8 +30035,7 @@ depends_on = ["missing"]
                 expires_at: None,
             }),
         };
-        let result =
-            super::auth_dispatch_with_store(&args, &store).expect("auth add should work");
+        let result = super::auth_dispatch_with_store(&args, &store).expect("auth add should work");
         assert_eq!(result.exit_code, CliExitCode::Success);
         assert_eq!(result.payload["subcommand"], "add");
         assert!(
@@ -29540,10 +30177,22 @@ depends_on = ["missing"]
 
         assert_eq!(status.exit_code, CliExitCode::Success);
         assert_eq!(status.payload["summary"]["credential_count"], 2);
-        assert!(status.payload["summary"]["warning_count"].as_u64().unwrap_or(0) >= 1);
-        assert!(status.payload["summary"]["attention_count"].as_u64().unwrap_or(0) >= 1);
+        assert!(
+            status.payload["summary"]["warning_count"]
+                .as_u64()
+                .unwrap_or(0)
+                >= 1
+        );
+        assert!(
+            status.payload["summary"]["attention_count"]
+                .as_u64()
+                .unwrap_or(0)
+                >= 1
+        );
 
-        let creds = status.payload["credentials"].as_array().expect("should be array");
+        let creds = status.payload["credentials"]
+            .as_array()
+            .expect("should be array");
         assert_eq!(creds.len(), 2);
 
         let github_entry = creds
@@ -29557,10 +30206,7 @@ depends_on = ["missing"]
             .find(|c| c["connector_id"] == "slack")
             .expect("slack entry should exist");
         assert_eq!(slack_entry["structural_status"], "expired");
-        assert_eq!(
-            slack_entry["status_entry"]["expiry_status"],
-            "expired"
-        );
+        assert_eq!(slack_entry["status_entry"]["expiry_status"], "expired");
     }
 
     // ── History tests (bead 1g7z0.28) ───────────────────────────────────
@@ -29582,7 +30228,11 @@ depends_on = ["missing"]
         assert_eq!(payload["scope"], "list");
         assert_eq!(payload["total_entries"], 0);
         assert_eq!(payload["returned"], 0);
-        assert!(payload["entries"].as_array().is_some_and(|arr| arr.is_empty()));
+        assert!(
+            payload["entries"]
+                .as_array()
+                .is_some_and(|arr| arr.is_empty())
+        );
     }
 
     #[test]
@@ -29620,17 +30270,14 @@ depends_on = ["missing"]
         )
         .expect("append should succeed");
 
-        let (exit_code, payload) = execute_json(&[
-            "fwc",
-            "--json",
-            "history",
-            "--connector",
-            "fcp.github",
-        ]);
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "history", "--connector", "fcp.github"]);
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["returned"], 1);
         assert_eq!(payload["filter"]["connector"], "fcp.github");
-        let entries = payload["entries"].as_array().expect("entries should be array");
+        let entries = payload["entries"]
+            .as_array()
+            .expect("entries should be array");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0]["connector_id"], "fcp.github");
     }
@@ -29670,12 +30317,13 @@ depends_on = ["missing"]
         )
         .expect("append should succeed");
 
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "history", "--status", "error"]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "history", "--status", "error"]);
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["returned"], 1);
         assert_eq!(payload["filter"]["status"], "error");
-        let entries = payload["entries"].as_array().expect("entries should be array");
+        let entries = payload["entries"]
+            .as_array()
+            .expect("entries should be array");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0]["status"], "error");
     }
@@ -29703,8 +30351,7 @@ depends_on = ["missing"]
         )
         .expect("append should succeed");
 
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "history", "--since", "1h"]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "history", "--since", "1h"]);
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["returned"], 1);
         assert_eq!(payload["filter"]["since"], "1h");
@@ -29735,13 +30382,14 @@ depends_on = ["missing"]
             .expect("append should succeed");
         }
 
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "history", "--limit", "2"]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "history", "--limit", "2"]);
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["returned"], 2);
         assert_eq!(payload["total_entries"], 5);
         assert_eq!(payload["filter"]["limit"], 2);
-        let entries = payload["entries"].as_array().expect("entries should be array");
+        let entries = payload["entries"]
+            .as_array()
+            .expect("entries should be array");
         assert_eq!(entries.len(), 2);
     }
 
@@ -29811,39 +30459,47 @@ depends_on = ["missing"]
         assert!(payload["filter"]["since"].is_null());
         assert_eq!(payload["filter"]["limit"], 20);
 
-        let entries = payload["entries"].as_array().expect("entries should be array");
+        let entries = payload["entries"]
+            .as_array()
+            .expect("entries should be array");
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0]["connector_id"], "fcp.slack");
         assert_eq!(entries[1]["connector_id"], "fcp.github");
 
-        assert!(payload["next_actions"].as_array().is_some_and(|arr| !arr.is_empty()));
+        assert!(
+            payload["next_actions"]
+                .as_array()
+                .is_some_and(|arr| !arr.is_empty())
+        );
     }
 
     // ── 1g7z0.8.1  Lifecycle UX ─────────────────────────────────────────
 
     #[test]
     fn unpin_offline_reports_missing_host() {
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "unpin", "github"]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "unpin", "github"]);
 
         assert_eq!(exit_code, CliExitCode::Transport.into());
         assert_eq!(payload["command"], "unpin");
         assert_eq!(payload["error"]["type"], "missing-host-endpoint");
-        assert!(payload["details"]["connector"]
-            .as_str()
-            .is_some_and(|connector| connector == "github"));
+        assert!(
+            payload["details"]["connector"]
+                .as_str()
+                .is_some_and(|connector| connector == "github")
+        );
     }
 
     #[test]
     fn rollout_status_offline_reports_missing_host() {
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "rollout", "status", "github"]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "rollout", "status", "github"]);
 
         assert_eq!(exit_code, CliExitCode::Transport.into());
         assert_eq!(payload["error"]["type"], "missing-host-endpoint");
-        assert!(payload["next_actions"]
-            .as_array()
-            .is_some_and(|actions| !actions.is_empty()));
+        assert!(
+            payload["next_actions"]
+                .as_array()
+                .is_some_and(|actions| !actions.is_empty())
+        );
     }
 
     #[test]
@@ -29895,9 +30551,8 @@ depends_on = ["missing"]
             5,
         );
 
-        let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "--host", &host, "status", "github",
-        ]);
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "--host", &host, "status", "github"]);
 
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Success.into());
@@ -29907,19 +30562,19 @@ depends_on = ["missing"]
             .as_array()
             .expect("next_actions should be an array");
         assert!(
-            next_actions.iter().any(|action| action
-                .as_str()
-                .is_some_and(|text| text.contains("show")))
+            next_actions
+                .iter()
+                .any(|action| action.as_str().is_some_and(|text| text.contains("show")))
         );
         assert!(
-            next_actions.iter().any(|action| action
-                .as_str()
-                .is_some_and(|text| text.contains("ops")))
+            next_actions
+                .iter()
+                .any(|action| action.as_str().is_some_and(|text| text.contains("ops")))
         );
         assert!(
-            next_actions.iter().any(|action| action
-                .as_str()
-                .is_some_and(|text| text.contains("pin")))
+            next_actions
+                .iter()
+                .any(|action| action.as_str().is_some_and(|text| text.contains("pin")))
         );
     }
 
@@ -29927,22 +30582,22 @@ depends_on = ["missing"]
 
     #[test]
     fn config_schema_field_level_for_known_connector() {
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "config", "schema", "github"]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "config", "schema", "github"]);
 
         assert_eq!(exit_code, CliExitCode::Validation.into());
         assert_eq!(payload["command"], "config");
         assert_eq!(payload["subcommand"], "schema");
         assert_eq!(payload["status"], "unavailable");
-        assert!(payload["connector"]["slug"]
-            .as_str()
-            .is_some_and(|slug| slug == "github"));
+        assert!(
+            payload["connector"]["slug"]
+                .as_str()
+                .is_some_and(|slug| slug == "github")
+        );
     }
 
     #[test]
     fn config_doctor_offline_known_shows_missing_host() {
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "config", "doctor", "github"]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "config", "doctor", "github"]);
 
         assert_eq!(exit_code, CliExitCode::Transport.into());
         assert_eq!(payload["command"], "config");
@@ -29980,14 +30635,14 @@ depends_on = ["missing"]
             .as_array()
             .expect("next_actions should be an array");
         assert!(
-            next_actions.iter().any(|action| action
-                .as_str()
-                .is_some_and(|text| text.contains("doctor")))
+            next_actions
+                .iter()
+                .any(|action| action.as_str().is_some_and(|text| text.contains("doctor")))
         );
         assert!(
-            next_actions.iter().any(|action| action
-                .as_str()
-                .is_some_and(|text| text.contains("export")))
+            next_actions
+                .iter()
+                .any(|action| action.as_str().is_some_and(|text| text.contains("export")))
         );
     }
 
@@ -30005,9 +30660,11 @@ depends_on = ["missing"]
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "explain");
         assert!(payload["analysis"]["chosen_connector"].is_object());
-        assert!(payload["analysis"]["explanation"]["template_reasoning"]
-            .as_array()
-            .is_some_and(|entries| !entries.is_empty()));
+        assert!(
+            payload["analysis"]["explanation"]["template_reasoning"]
+                .as_array()
+                .is_some_and(|entries| !entries.is_empty())
+        );
     }
 
     #[test]
@@ -30058,8 +30715,10 @@ depends_on = ["missing"]
         assert_eq!(exit_code, CliExitCode::Transport.into());
         assert_eq!(payload["command"], "simulate");
         assert!(payload["operation"]["risk_level"].is_string());
-        assert!(payload["operation"]["approval_mode"].is_string()
-            || payload["operation"]["approval_mode"].is_null());
+        assert!(
+            payload["operation"]["approval_mode"].is_string()
+                || payload["operation"]["approval_mode"].is_null()
+        );
     }
 
     // ── 1g7z0.10.3  Invoke UX: invoke, batch, idempotency ───────────────
@@ -30180,12 +30839,16 @@ depends_on = ["missing"]
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["phase"], "execution");
-        assert!(payload["request"]["request_id"]
-            .as_str()
-            .is_some_and(|id| !id.is_empty()));
-        assert!(payload["response"]["id"]
-            .as_str()
-            .is_some_and(|id| !id.is_empty()));
+        assert!(
+            payload["request"]["request_id"]
+                .as_str()
+                .is_some_and(|id| !id.is_empty())
+        );
+        assert!(
+            payload["response"]["id"]
+                .as_str()
+                .is_some_and(|id| !id.is_empty())
+        );
     }
 
     // ── 1g7z0.10.4  Invoke UX: streaming, log-tail, watch, resume ───────
@@ -30333,16 +30996,17 @@ depends_on = ["missing"]
 
         // Looking up the real entry_id succeeds -- it shows the stored inputs.
         let real_id = &entries[0].entry_id;
-        let (ok_exit, ok_payload) =
-            execute_json(&["fwc", "--json", "history", real_id]);
+        let (ok_exit, ok_payload) = execute_json(&["fwc", "--json", "history", real_id]);
         assert_eq!(ok_exit, CliExitCode::Success.into());
         assert_eq!(ok_payload["command"], "history");
         assert_eq!(ok_payload["scope"], "entry");
         assert_eq!(ok_payload["entry"]["connector_id"], "fcp.github");
         assert_eq!(ok_payload["entry"]["operation_id"], "github.create_issue");
-        assert!(ok_payload["entry"]["input_summary"]
-            .as_str()
-            .is_some_and(|s| s.contains("clone-test")));
+        assert!(
+            ok_payload["entry"]["input_summary"]
+                .as_str()
+                .is_some_and(|s| s.contains("clone-test"))
+        );
     }
 
     #[test]
@@ -30391,12 +31055,8 @@ depends_on = ["missing"]
         let entries_arr = list_payload["entries"]
             .as_array()
             .expect("entries should be an array");
-        let hash_a = entries_arr[0]["input_hash"]
-            .as_str()
-            .unwrap_or("");
-        let hash_b = entries_arr[1]["input_hash"]
-            .as_str()
-            .unwrap_or("");
+        let hash_a = entries_arr[0]["input_hash"].as_str().unwrap_or("");
+        let hash_b = entries_arr[1]["input_hash"].as_str().unwrap_or("");
         assert_ne!(hash_a, hash_b);
     }
 
@@ -30419,11 +31079,10 @@ depends_on = ["missing"]
         let next = payload["next_actions"]
             .as_array()
             .expect("next_actions should be an array");
-        assert!(next.iter().any(|action| {
-            action
-                .as_str()
-                .is_some_and(|s| s.contains("fwc history"))
-        }));
+        assert!(
+            next.iter()
+                .any(|action| { action.as_str().is_some_and(|s| s.contains("fwc history")) })
+        );
     }
 
     #[test]
@@ -30457,16 +31116,17 @@ depends_on = ["missing"]
         let entry_id = &entries[0].entry_id;
 
         // Looking up the real entry shows what was executed (a "dry-run" equivalent).
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "history", entry_id]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "history", entry_id]);
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["scope"], "entry");
         assert_eq!(payload["entry"]["operation_id"], "github.list_issues");
         assert_eq!(payload["entry"]["connector_id"], "fcp.github");
         assert_eq!(payload["entry"]["status"], "success");
-        assert!(payload["entry"]["input_summary"]
-            .as_str()
-            .is_some_and(|s| s.contains("owner=acme")));
+        assert!(
+            payload["entry"]["input_summary"]
+                .as_str()
+                .is_some_and(|s| s.contains("owner=acme"))
+        );
     }
 
     #[test]
@@ -30535,10 +31195,8 @@ depends_on = ["missing"]
         assert_eq!(entries.len(), 2);
 
         // Look up each individually to verify they're structurally different.
-        let (exit_a, payload_a) =
-            execute_json(&["fwc", "--json", "history", &entries[0].entry_id]);
-        let (exit_b, payload_b) =
-            execute_json(&["fwc", "--json", "history", &entries[1].entry_id]);
+        let (exit_a, payload_a) = execute_json(&["fwc", "--json", "history", &entries[0].entry_id]);
+        let (exit_b, payload_b) = execute_json(&["fwc", "--json", "history", &entries[1].entry_id]);
         assert_eq!(exit_a, CliExitCode::Success.into());
         assert_eq!(exit_b, CliExitCode::Success.into());
 
@@ -30584,13 +31242,14 @@ depends_on = ["missing"]
         let entry_id = &entries[0].entry_id;
 
         // Looking up the same entry twice yields identical payloads.
-        let (exit_a, payload_a) =
-            execute_json(&["fwc", "--json", "history", entry_id]);
-        let (exit_b, payload_b) =
-            execute_json(&["fwc", "--json", "history", entry_id]);
+        let (exit_a, payload_a) = execute_json(&["fwc", "--json", "history", entry_id]);
+        let (exit_b, payload_b) = execute_json(&["fwc", "--json", "history", entry_id]);
         assert_eq!(exit_a, CliExitCode::Success.into());
         assert_eq!(exit_b, CliExitCode::Success.into());
-        assert_eq!(payload_a["entry"]["entry_id"], payload_b["entry"]["entry_id"]);
+        assert_eq!(
+            payload_a["entry"]["entry_id"],
+            payload_b["entry"]["entry_id"]
+        );
         assert_eq!(
             payload_a["entry"]["input_hash"],
             payload_b["entry"]["input_hash"]
@@ -30623,8 +31282,12 @@ depends_on = ["missing"]
         );
 
         // Also test a plausible but nonexistent UUID-style entry_id.
-        let (exit_code2, payload2) =
-            execute_json(&["fwc", "--json", "history", "00000000-0000-0000-0000-000000000000"]);
+        let (exit_code2, payload2) = execute_json(&[
+            "fwc",
+            "--json",
+            "history",
+            "00000000-0000-0000-0000-000000000000",
+        ]);
         assert_eq!(exit_code2, CliExitCode::UnknownCommand.into());
         assert_eq!(payload2["error"]["type"], "not-found");
     }
@@ -30672,10 +31335,8 @@ depends_on = ["missing"]
         assert_eq!(entries.len(), 2);
 
         // Retrieve both and verify field-level differences are detectable.
-        let (_, payload_a) =
-            execute_json(&["fwc", "--json", "history", &entries[0].entry_id]);
-        let (_, payload_b) =
-            execute_json(&["fwc", "--json", "history", &entries[1].entry_id]);
+        let (_, payload_a) = execute_json(&["fwc", "--json", "history", &entries[0].entry_id]);
+        let (_, payload_b) = execute_json(&["fwc", "--json", "history", &entries[1].entry_id]);
 
         // Same operation and connector.
         assert_eq!(
@@ -30689,12 +31350,8 @@ depends_on = ["missing"]
         );
         // Input summaries reflect the field-level change.
         // query() returns reverse-chronological, so entries[0] is the newer one.
-        let summary_a = payload_a["entry"]["input_summary"]
-            .as_str()
-            .unwrap_or("");
-        let summary_b = payload_b["entry"]["input_summary"]
-            .as_str()
-            .unwrap_or("");
+        let summary_a = payload_a["entry"]["input_summary"].as_str().unwrap_or("");
+        let summary_b = payload_b["entry"]["input_summary"].as_str().unwrap_or("");
         assert!(summary_a.contains("new title"));
         assert!(summary_b.contains("old title"));
     }
@@ -30744,10 +31401,8 @@ depends_on = ["missing"]
         assert_eq!(entries.len(), 2);
 
         // Retrieve both -- status change is visible in the entry payloads.
-        let (exit_a, payload_a) =
-            execute_json(&["fwc", "--json", "history", &entries[0].entry_id]);
-        let (exit_b, payload_b) =
-            execute_json(&["fwc", "--json", "history", &entries[1].entry_id]);
+        let (exit_a, payload_a) = execute_json(&["fwc", "--json", "history", &entries[0].entry_id]);
+        let (exit_b, payload_b) = execute_json(&["fwc", "--json", "history", &entries[1].entry_id]);
         assert_eq!(exit_a, CliExitCode::Success.into());
         assert_eq!(exit_b, CliExitCode::Success.into());
 
@@ -30765,10 +31420,7 @@ depends_on = ["missing"]
         } else {
             &payload_b
         };
-        assert_eq!(
-            error_entry["entry"]["error_code"],
-            "connection_timeout"
-        );
+        assert_eq!(error_entry["entry"]["error_code"], "connection_timeout");
     }
 
     #[test]
@@ -30814,10 +31466,8 @@ depends_on = ["missing"]
         assert_eq!(entries.len(), 2);
 
         // Retrieve both and verify they're from different connectors.
-        let (_, payload_a) =
-            execute_json(&["fwc", "--json", "history", &entries[0].entry_id]);
-        let (_, payload_b) =
-            execute_json(&["fwc", "--json", "history", &entries[1].entry_id]);
+        let (_, payload_a) = execute_json(&["fwc", "--json", "history", &entries[0].entry_id]);
+        let (_, payload_b) = execute_json(&["fwc", "--json", "history", &entries[1].entry_id]);
 
         assert_ne!(
             payload_a["entry"]["connector_id"],
@@ -30829,19 +31479,11 @@ depends_on = ["missing"]
         );
 
         // Filtering by connector only shows one.
-        let (filter_exit, filter_payload) = execute_json(&[
-            "fwc",
-            "--json",
-            "history",
-            "--connector",
-            "github",
-        ]);
+        let (filter_exit, filter_payload) =
+            execute_json(&["fwc", "--json", "history", "--connector", "github"]);
         assert_eq!(filter_exit, CliExitCode::Success.into());
         assert_eq!(filter_payload["returned"], 1);
-        assert_eq!(
-            filter_payload["entries"][0]["connector_id"],
-            "fcp.github"
-        );
+        assert_eq!(filter_payload["entries"][0]["connector_id"], "fcp.github");
     }
 
     #[test]
@@ -30887,10 +31529,8 @@ depends_on = ["missing"]
         assert_eq!(entries.len(), 2);
 
         // Same input_hash (identical inputs).
-        let (_, payload_a) =
-            execute_json(&["fwc", "--json", "history", &entries[0].entry_id]);
-        let (_, payload_b) =
-            execute_json(&["fwc", "--json", "history", &entries[1].entry_id]);
+        let (_, payload_a) = execute_json(&["fwc", "--json", "history", &entries[0].entry_id]);
+        let (_, payload_b) = execute_json(&["fwc", "--json", "history", &entries[1].entry_id]);
 
         assert_eq!(
             payload_a["entry"]["input_hash"],
@@ -30905,12 +31545,8 @@ depends_on = ["missing"]
 
         // Output summaries reflect the difference.
         // query() returns reverse-chronological, so entries[0] is the newer run.
-        let summary_a = payload_a["entry"]["output_summary"]
-            .as_str()
-            .unwrap_or("");
-        let summary_b = payload_b["entry"]["output_summary"]
-            .as_str()
-            .unwrap_or("");
+        let summary_a = payload_a["entry"]["output_summary"].as_str().unwrap_or("");
+        let summary_b = payload_b["entry"]["output_summary"].as_str().unwrap_or("");
         assert!(summary_a.contains("total_count=7"));
         assert!(summary_b.contains("total_count=5"));
     }
@@ -30921,37 +31557,38 @@ depends_on = ["missing"]
     fn enable_offline_reports_missing_host() {
         // "enable" is not a recognized fwc command, so clap produces a parse
         // failure that the recovery layer surfaces as an unknown-command error.
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "enable", "github"]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "enable", "github"]);
 
         assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
         assert_eq!(payload["error"]["type"], "unknown-command");
         assert!(payload["error"]["recoverable"] == true);
         // The error message should mention the unrecognised token.
-        assert!(payload["error"]["message"]
-            .as_str()
-            .is_some_and(|msg| msg.contains("enable")));
+        assert!(
+            payload["error"]["message"]
+                .as_str()
+                .is_some_and(|msg| msg.contains("enable"))
+        );
     }
 
     #[test]
     fn disable_offline_reports_missing_host() {
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "disable", "github"]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "disable", "github"]);
 
         assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
         assert_eq!(payload["error"]["type"], "unknown-command");
         assert!(payload["error"]["recoverable"] == true);
-        assert!(payload["error"]["message"]
-            .as_str()
-            .is_some_and(|msg| msg.contains("disable")));
+        assert!(
+            payload["error"]["message"]
+                .as_str()
+                .is_some_and(|msg| msg.contains("disable"))
+        );
     }
 
     #[test]
     fn start_offline_reports_missing_host() {
         // "start" at the top level is not a known alias (only task subcommand).
         // clap sees it as an unknown subcommand.
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "start", "github"]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "start", "github"]);
 
         assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
         assert_eq!(payload["error"]["type"], "unknown-command");
@@ -30960,28 +31597,30 @@ depends_on = ["missing"]
 
     #[test]
     fn stop_offline_reports_missing_host() {
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "stop", "github"]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "stop", "github"]);
 
         assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
         assert_eq!(payload["error"]["type"], "unknown-command");
         assert!(payload["error"]["recoverable"] == true);
-        assert!(payload["error"]["message"]
-            .as_str()
-            .is_some_and(|msg| msg.contains("stop")));
+        assert!(
+            payload["error"]["message"]
+                .as_str()
+                .is_some_and(|msg| msg.contains("stop"))
+        );
     }
 
     #[test]
     fn restart_offline_reports_missing_host() {
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "restart", "github"]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "restart", "github"]);
 
         assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
         assert_eq!(payload["error"]["type"], "unknown-command");
         assert!(payload["error"]["recoverable"] == true);
-        assert!(payload["error"]["message"]
-            .as_str()
-            .is_some_and(|msg| msg.contains("restart")));
+        assert!(
+            payload["error"]["message"]
+                .as_str()
+                .is_some_and(|msg| msg.contains("restart"))
+        );
     }
 
     #[test]
@@ -31125,8 +31764,8 @@ depends_on = ["missing"]
         };
 
         // Serialize and round-trip the request to confirm shape.
-        let serialized = serde_json::to_value(&request)
-            .expect("lifecycle request should serialize");
+        let serialized =
+            serde_json::to_value(&request).expect("lifecycle request should serialize");
         assert_eq!(serialized["action"], "disable");
         assert_eq!(serialized["reason"], "Graceful stop for maintenance");
         assert_eq!(serialized["initiated_by"], "agent:sunnymoose");
@@ -31145,12 +31784,14 @@ depends_on = ["missing"]
         });
 
         let parsed: fcp_host::LifecycleTransitionResponse =
-            serde_json::from_value(response_json)
-                .expect("dry-run response should deserialize");
+            serde_json::from_value(response_json).expect("dry-run response should deserialize");
         assert!(parsed.dry_run, "dry_run flag should be true");
         // In dry-run mode, the desired state should NOT change.
         assert_eq!(parsed.previous_desired_state, parsed.current_desired_state);
-        assert_eq!(parsed.journal_sequence, 0, "dry run should not advance journal");
+        assert_eq!(
+            parsed.journal_sequence, 0,
+            "dry run should not advance journal"
+        );
     }
 
     // ── 1g7z0.28.5: Pending approvals, blocked actions, resumable queue ──
@@ -31216,13 +31857,7 @@ depends_on = ["missing"]
             .unwrap_or("unknown");
 
         // Show the task to inspect its approval state.
-        let (show_exit, show_payload) = execute_json(&[
-            "fwc",
-            "--json",
-            "task",
-            "show",
-            &task_id,
-        ]);
+        let (show_exit, show_payload) = execute_json(&["fwc", "--json", "task", "show", &task_id]);
         assert_eq!(show_exit, CliExitCode::Success.into());
 
         // The task payload should include both the connector and the action.
@@ -31250,7 +31885,9 @@ depends_on = ["missing"]
         assert!(
             show_payload["task"]["capsule_status"]
                 .as_str()
-                .is_some_and(|s| s.contains("ready") || s.contains("simulate") || s.contains("pending")),
+                .is_some_and(|s| s.contains("ready")
+                    || s.contains("simulate")
+                    || s.contains("pending")),
             "task should be in a state awaiting approval, got: {}",
             show_payload["task"]["capsule_status"]
         );
@@ -31274,34 +31911,27 @@ depends_on = ["missing"]
             .to_owned();
 
         // Try to run the task without approving it first.
-        let (run_exit, run_payload) = execute_json(&[
-            "fwc",
-            "--json",
-            "task",
-            "run",
-            &task_id,
-        ]);
+        let (run_exit, run_payload) = execute_json(&["fwc", "--json", "task", "run", &task_id]);
 
         // The run should either fail with a validation error or succeed
         // with a withheld execution (depending on resolution state).
-        let status = run_payload["status"]
-            .as_str()
-            .unwrap_or("unknown");
+        let status = run_payload["status"].as_str().unwrap_or("unknown");
 
         if run_exit != CliExitCode::Success.into() {
             // Blocked: the task needs resolution or approval first.
             assert!(
                 run_payload["message"]
                     .as_str()
-                    .is_some_and(|msg| msg.contains("resolution") || msg.contains("advance") || msg.contains("resolve")),
+                    .is_some_and(|msg| msg.contains("resolution")
+                        || msg.contains("advance")
+                        || msg.contains("resolve")),
                 "blocked task should explain what needs to happen, got: {}",
                 run_payload["message"]
             );
             // Should include next_actions or hints on how to unblock.
             let task_view = &run_payload["task"];
             assert!(
-                task_view["next_actions"].is_array()
-                    || run_payload["next_actions"].is_array(),
+                task_view["next_actions"].is_array() || run_payload["next_actions"].is_array(),
                 "blocked response should include next actions"
             );
         } else {
@@ -31321,14 +31951,8 @@ depends_on = ["missing"]
     fn resumable_queue_empty_returns_zero_items() {
         // Listing tasks with a status filter that has no matches should
         // return an empty array, representing an empty resumable work queue.
-        let (exit_code, payload) = execute_json(&[
-            "fwc",
-            "--json",
-            "task",
-            "list",
-            "--status",
-            "executing",
-        ]);
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "task", "list", "--status", "executing"]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "task");
@@ -31365,22 +31989,11 @@ depends_on = ["missing"]
 
         // Resolve the task so it becomes ready for execution.
         let (_resolve_exit, _resolve_payload) = execute_json(&[
-            "fwc",
-            "--json",
-            "task",
-            "resolve",
-            &task_id,
-            "--until",
-            "ready",
+            "fwc", "--json", "task", "resolve", &task_id, "--until", "ready",
         ]);
 
         // List tasks and find the one we created.
-        let (list_exit, list_payload) = execute_json(&[
-            "fwc",
-            "--json",
-            "task",
-            "list",
-        ]);
+        let (list_exit, list_payload) = execute_json(&["fwc", "--json", "task", "list"]);
         assert_eq!(list_exit, CliExitCode::Success.into());
 
         let tasks = list_payload["tasks"]
@@ -31419,9 +32032,7 @@ depends_on = ["missing"]
             "new",
             "simulated",
         ];
-        let current_status = task_entry["capsule_status"]
-            .as_str()
-            .unwrap_or("unknown");
+        let current_status = task_entry["capsule_status"].as_str().unwrap_or("unknown");
         assert!(
             resumable_states.iter().any(|s| current_status.contains(s))
                 || current_status.contains("ready"),
@@ -31496,16 +32107,18 @@ depends_on = ["missing"]
         let (_root, ids, _guard) = seed_history_entries();
         let entry_id = &ids[0]; // github.create_issue
 
-        let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "replay", entry_id, "--dry-run",
-        ]);
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "replay", entry_id, "--dry-run"]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "replay");
         assert_eq!(payload["mode"], "dry-run");
         assert_eq!(payload["replay_source"], entry_id.as_str());
         assert_eq!(payload["original_entry"]["connector_id"], "fcp.github");
-        assert_eq!(payload["original_entry"]["operation_id"], "github.create_issue");
+        assert_eq!(
+            payload["original_entry"]["operation_id"],
+            "github.create_issue"
+        );
         assert!(payload["reused_fields"].as_array().is_some());
     }
 
@@ -31513,9 +32126,8 @@ depends_on = ["missing"]
     fn replay_not_found_returns_error() {
         let (_root, _ids, _guard) = seed_history_entries();
 
-        let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "replay", "nonexistent-id-999", "--dry-run",
-        ]);
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "replay", "nonexistent-id-999", "--dry-run"]);
 
         assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
         assert_eq!(payload["command"], "replay");
@@ -31528,8 +32140,13 @@ depends_on = ["missing"]
         let entry_id = &ids[0];
 
         let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "replay", entry_id,
-            "--dry-run", "--set", "title=new title",
+            "fwc",
+            "--json",
+            "replay",
+            entry_id,
+            "--dry-run",
+            "--set",
+            "title=new title",
         ]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
@@ -31547,8 +32164,13 @@ depends_on = ["missing"]
         let entry_id = &ids[0];
 
         let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "replay", entry_id,
-            "--dry-run", "--set", "no-equals-sign",
+            "fwc",
+            "--json",
+            "replay",
+            entry_id,
+            "--dry-run",
+            "--set",
+            "no-equals-sign",
         ]);
 
         assert_eq!(exit_code, CliExitCode::Validation.into());
@@ -31561,8 +32183,13 @@ depends_on = ["missing"]
         let entry_id = &ids[0];
 
         let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "replay", entry_id,
-            "--dry-run", "--zone", "z:staging",
+            "fwc",
+            "--json",
+            "replay",
+            entry_id,
+            "--dry-run",
+            "--zone",
+            "z:staging",
         ]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
@@ -31574,9 +32201,7 @@ depends_on = ["missing"]
         let (_root, ids, _guard) = seed_history_entries();
         let entry_id = &ids[0];
 
-        let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "replay", entry_id,
-        ]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "replay", entry_id]);
 
         assert_eq!(exit_code, CliExitCode::Transport.into());
         assert_eq!(payload["command"], "replay");
@@ -31590,8 +32215,12 @@ depends_on = ["missing"]
         let entry_id = &ids[0];
 
         let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "replay", entry_id,
-            "--dry-run", "--skip-preflight",
+            "fwc",
+            "--json",
+            "replay",
+            entry_id,
+            "--dry-run",
+            "--skip-preflight",
         ]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
@@ -31603,12 +32232,15 @@ depends_on = ["missing"]
         let (_root, ids, _guard) = seed_history_entries();
         let entry_id = &ids[0];
 
-        let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "replay", entry_id, "--dry-run",
-        ]);
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "replay", entry_id, "--dry-run"]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
-        assert!(payload["next_actions"].as_array().is_some_and(|a| !a.is_empty()));
+        assert!(
+            payload["next_actions"]
+                .as_array()
+                .is_some_and(|a| !a.is_empty())
+        );
     }
 
     // ── Compare tests ───────────────────────────────────────────────────
@@ -31618,9 +32250,7 @@ depends_on = ["missing"]
         let (_root, ids, _guard) = seed_history_entries();
         let (a, b) = (&ids[0], &ids[1]);
 
-        let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "compare", a, b,
-        ]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "compare", a, b]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "compare");
@@ -31634,9 +32264,8 @@ depends_on = ["missing"]
     fn compare_entry_a_not_found() {
         let (_root, ids, _guard) = seed_history_entries();
 
-        let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "compare", "nonexistent-a", &ids[0],
-        ]);
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "compare", "nonexistent-a", &ids[0]]);
 
         assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
         assert_eq!(payload["error"]["type"], "not-found");
@@ -31647,9 +32276,8 @@ depends_on = ["missing"]
     fn compare_entry_b_not_found() {
         let (_root, ids, _guard) = seed_history_entries();
 
-        let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "compare", &ids[0], "nonexistent-b",
-        ]);
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "compare", &ids[0], "nonexistent-b"]);
 
         assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
         assert_eq!(payload["error"]["type"], "not-found");
@@ -31661,9 +32289,7 @@ depends_on = ["missing"]
         let (_root, ids, _guard) = seed_history_entries();
         let entry_id = &ids[0];
 
-        let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "compare", entry_id, entry_id,
-        ]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "compare", entry_id, entry_id]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["summary"]["classification"], "identical");
@@ -31675,9 +32301,7 @@ depends_on = ["missing"]
         let (_root, ids, _guard) = seed_history_entries();
         let (a, b) = (&ids[0], &ids[1]); // github vs discord
 
-        let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "compare", a, b,
-        ]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "compare", a, b]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["summary"]["classification"], "completely-different");
@@ -31689,11 +32313,19 @@ depends_on = ["missing"]
         let (a, b) = (&ids[0], &ids[1]);
 
         let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "compare", a, b, "--fields", "connector_id,status",
+            "fwc",
+            "--json",
+            "compare",
+            a,
+            b,
+            "--fields",
+            "connector_id,status",
         ]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
-        let fields = payload["fields"].as_array().expect("fields should be array");
+        let fields = payload["fields"]
+            .as_array()
+            .expect("fields should be array");
         assert_eq!(fields.len(), 2);
     }
 
@@ -31702,13 +32334,17 @@ depends_on = ["missing"]
         let (_root, ids, _guard) = seed_history_entries();
         let (a, b) = (&ids[0], &ids[1]);
 
-        let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "compare", a, b,
-        ]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "compare", a, b]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
-        let notes = payload["summary"]["notes"].as_array().expect("notes should be array");
-        assert!(notes.iter().any(|n| n.as_str().is_some_and(|s| s.contains("inputs differed"))));
+        let notes = payload["summary"]["notes"]
+            .as_array()
+            .expect("notes should be array");
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.as_str().is_some_and(|s| s.contains("inputs differed")))
+        );
     }
 
     #[test]
@@ -31716,12 +32352,14 @@ depends_on = ["missing"]
         let (_root, ids, _guard) = seed_history_entries();
         let (a, b) = (&ids[0], &ids[1]);
 
-        let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "compare", a, b,
-        ]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "compare", a, b]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
-        assert!(payload["next_actions"].as_array().is_some_and(|a| !a.is_empty()));
+        assert!(
+            payload["next_actions"]
+                .as_array()
+                .is_some_and(|a| !a.is_empty())
+        );
     }
 
     // ── Undo tests ──────────────────────────────────────────────────────
@@ -31731,9 +32369,7 @@ depends_on = ["missing"]
         let (_root, ids, _guard) = seed_history_entries();
         let entry_id = &ids[0]; // github.create_issue — has inverse
 
-        let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "undo", entry_id,
-        ]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "undo", entry_id]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "undo");
@@ -31744,9 +32380,7 @@ depends_on = ["missing"]
     fn undo_not_found_returns_error() {
         let (_root, _ids, _guard) = seed_history_entries();
 
-        let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "undo", "nonexistent-id-999",
-        ]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "undo", "nonexistent-id-999"]);
 
         assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
         assert_eq!(payload["error"]["type"], "not-found");
@@ -31757,9 +32391,7 @@ depends_on = ["missing"]
         let (_root, ids, _guard) = seed_history_entries();
         let entry_id = &ids[1]; // discord.delete_message — status denied
 
-        let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "undo", entry_id,
-        ]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "undo", entry_id]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["reversible"], false);
@@ -31771,9 +32403,7 @@ depends_on = ["missing"]
         let (_root, ids, _guard) = seed_history_entries();
         let entry_id = &ids[2]; // slack.post_message — status simulated
 
-        let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "undo", entry_id,
-        ]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "undo", entry_id]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["reversible"], false);
@@ -31785,9 +32415,7 @@ depends_on = ["missing"]
         let (_root, ids, _guard) = seed_history_entries();
         let entry_id = &ids[1]; // discord.delete_message — denied
 
-        let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "undo", entry_id, "--execute",
-        ]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "undo", entry_id, "--execute"]);
 
         assert_eq!(exit_code, CliExitCode::PolicyDenied.into());
         assert_eq!(payload["error"]["type"], "not-reversible");
@@ -31798,12 +32426,14 @@ depends_on = ["missing"]
         let (_root, ids, _guard) = seed_history_entries();
         let entry_id = &ids[0];
 
-        let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "undo", entry_id,
-        ]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "undo", entry_id]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
-        assert!(payload["next_actions"].as_array().is_some_and(|a| !a.is_empty()));
+        assert!(
+            payload["next_actions"]
+                .as_array()
+                .is_some_and(|a| !a.is_empty())
+        );
     }
 
     #[test]
@@ -31811,9 +32441,7 @@ depends_on = ["missing"]
         let (_root, ids, _guard) = seed_history_entries();
         let entry_id = &ids[0];
 
-        let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "undo", entry_id,
-        ]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "undo", entry_id]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["connector_id"], "fcp.github");
@@ -31872,9 +32500,7 @@ depends_on = ["missing"]
         let approval_dir = tempdir.path().join("empty-approvals");
         let _guard = super::install_test_approval_dir(approval_dir);
 
-        let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "approvals",
-        ]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "approvals"]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "approvals");
@@ -31889,9 +32515,7 @@ depends_on = ["missing"]
         seed_approval_artifacts(&approval_dir);
         let _guard = super::install_test_approval_dir(approval_dir);
 
-        let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "approvals",
-        ]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "approvals"]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "approvals");
@@ -31906,9 +32530,7 @@ depends_on = ["missing"]
         seed_approval_artifacts(&approval_dir);
         let _guard = super::install_test_approval_dir(approval_dir);
 
-        let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "approvals", "apr-001",
-        ]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "approvals", "apr-001"]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["scope"], "detail");
@@ -31924,9 +32546,8 @@ depends_on = ["missing"]
         seed_approval_artifacts(&approval_dir);
         let _guard = super::install_test_approval_dir(approval_dir);
 
-        let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "approvals", "nonexistent-artifact",
-        ]);
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "approvals", "nonexistent-artifact"]);
 
         assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
         assert_eq!(payload["error"]["type"], "not-found");
@@ -31939,12 +32560,13 @@ depends_on = ["missing"]
         seed_approval_artifacts(&approval_dir);
         let _guard = super::install_test_approval_dir(approval_dir);
 
-        let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "approvals", "--status", "denied",
-        ]);
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "approvals", "--status", "denied"]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
-        let artifacts = payload["artifacts"].as_array().expect("artifacts should be array");
+        let artifacts = payload["artifacts"]
+            .as_array()
+            .expect("artifacts should be array");
         assert_eq!(artifacts.len(), 1);
         assert_eq!(artifacts[0]["connector_id"], "fcp.discord");
     }
@@ -31956,12 +32578,13 @@ depends_on = ["missing"]
         seed_approval_artifacts(&approval_dir);
         let _guard = super::install_test_approval_dir(approval_dir);
 
-        let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "approvals", "--connector", "fcp.slack",
-        ]);
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "approvals", "--connector", "fcp.slack"]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
-        let artifacts = payload["artifacts"].as_array().expect("artifacts should be array");
+        let artifacts = payload["artifacts"]
+            .as_array()
+            .expect("artifacts should be array");
         assert_eq!(artifacts.len(), 1);
         assert_eq!(artifacts[0]["artifact_id"], "apr-003");
     }
@@ -31973,12 +32596,14 @@ depends_on = ["missing"]
         seed_approval_artifacts(&approval_dir);
         let _guard = super::install_test_approval_dir(approval_dir);
 
-        let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "approvals",
-        ]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "approvals"]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
-        assert!(payload["next_actions"].as_array().is_some_and(|a| !a.is_empty()));
+        assert!(
+            payload["next_actions"]
+                .as_array()
+                .is_some_and(|a| !a.is_empty())
+        );
     }
 
     #[test]
@@ -31987,9 +32612,7 @@ depends_on = ["missing"]
         let approval_dir = tempdir.path().join("no-such-approvals");
         let _guard = super::install_test_approval_dir(approval_dir);
 
-        let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "approvals", "apr-001",
-        ]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "approvals", "apr-001"]);
 
         assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
         assert_eq!(payload["error"]["type"], "not-found");
@@ -32007,16 +32630,13 @@ depends_on = ["missing"]
         let history_path = root.join("history.jsonl");
         let _guard = super::install_test_history_path(history_path);
 
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "history", "reversal"]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "history", "reversal"]);
 
         assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
         assert_eq!(payload["status"], "error");
         assert_eq!(payload["command"], "history");
         assert_eq!(payload["error"]["type"], "not-found");
-        let msg = payload["error"]["message"]
-            .as_str()
-            .unwrap_or("");
+        let msg = payload["error"]["message"].as_str().unwrap_or("");
         assert!(
             msg.contains("reversal"),
             "Error message should mention the attempted entry id 'reversal': {msg}"
@@ -32025,7 +32645,8 @@ depends_on = ["missing"]
             .as_array()
             .expect("next_actions should be present");
         assert!(
-            next.iter().any(|action| action.as_str().unwrap_or("").contains("fwc history")),
+            next.iter()
+                .any(|action| action.as_str().unwrap_or("").contains("fwc history")),
             "next_actions should suggest fwc history: {next:?}"
         );
     }
@@ -32044,8 +32665,7 @@ depends_on = ["missing"]
         let history_path = root.join("history.jsonl");
         let _guard = super::install_test_history_path(history_path);
 
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "history", "reversal"]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "history", "reversal"]);
 
         // History is offline-capable — even without a host endpoint the command
         // returns a valid not-found error rather than a transport error.
@@ -32066,14 +32686,11 @@ depends_on = ["missing"]
         let history_path = root.join("history.jsonl");
         let _guard = super::install_test_history_path(history_path);
 
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "history", "undo"]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "history", "undo"]);
 
         assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
         assert_eq!(payload["error"]["type"], "not-found");
-        let msg = payload["error"]["message"]
-            .as_str()
-            .unwrap_or("");
+        let msg = payload["error"]["message"].as_str().unwrap_or("");
         assert!(
             msg.contains("undo"),
             "Error message should reference the attempted id 'undo': {msg}"
@@ -32119,8 +32736,7 @@ depends_on = ["missing"]
         )
         .expect("history append should succeed");
 
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "history"]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "history"]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["scope"], "list");
@@ -32167,8 +32783,7 @@ depends_on = ["missing"]
         )
         .expect("history append should succeed");
 
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "history"]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "history"]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         let entries = payload["entries"]
@@ -32213,8 +32828,7 @@ depends_on = ["missing"]
             .expect("history append should succeed");
         }
 
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "history"]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "history"]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         let entries = payload["entries"]
@@ -32260,8 +32874,7 @@ depends_on = ["missing"]
         .expect("history append should succeed");
 
         // List entries to get the entry_id.
-        let (_, list_payload) =
-            execute_json(&["fwc", "--json", "history"]);
+        let (_, list_payload) = execute_json(&["fwc", "--json", "history"]);
         let entries = list_payload["entries"]
             .as_array()
             .expect("entries should be present");
@@ -32270,8 +32883,7 @@ depends_on = ["missing"]
             .expect("entry_id should be a string");
 
         // Fetch single entry detail.
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "history", entry_id]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "history", entry_id]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["scope"], "entry");
@@ -32313,8 +32925,7 @@ depends_on = ["missing"]
         )
         .expect("history append should succeed");
 
-        let (_, list_payload) =
-            execute_json(&["fwc", "--json", "history"]);
+        let (_, list_payload) = execute_json(&["fwc", "--json", "history"]);
         let entries = list_payload["entries"]
             .as_array()
             .expect("entries should be present");
@@ -32322,8 +32933,7 @@ depends_on = ["missing"]
             .as_str()
             .expect("entry_id should be a string");
 
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "history", entry_id]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "history", entry_id]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["entry"]["connector_id"], "fcp.slack");
@@ -32346,9 +32956,7 @@ depends_on = ["missing"]
             execute_json(&["fwc", "--json", "auth", "bootstrap", "nonexistent-xyz"]);
 
         assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
-        let error_type = payload["error"]["type"]
-            .as_str()
-            .unwrap_or("");
+        let error_type = payload["error"]["type"].as_str().unwrap_or("");
         assert!(
             error_type.contains("auth") || error_type.contains("unknown"),
             "Error type should reference auth or unknown subcommand: {error_type}"
@@ -32367,13 +32975,10 @@ depends_on = ["missing"]
         // "bootstrap" is not a real subcommand.  Even without a host, the CLI
         // should report it as an unknown auth subcommand rather than a
         // transport error, because the issue is the nonexistent subcommand.
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "auth", "bootstrap"]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "auth", "bootstrap"]);
 
         assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
-        let error_type = payload["error"]["type"]
-            .as_str()
-            .unwrap_or("");
+        let error_type = payload["error"]["type"].as_str().unwrap_or("");
         assert!(
             error_type.contains("auth") || error_type.contains("unknown"),
             "Error type should indicate unknown auth subcommand: {error_type}"
@@ -32389,13 +32994,10 @@ depends_on = ["missing"]
     fn auth_connect_oauth_flow_starts_device_code() {
         // "connect" is not a real auth subcommand.  The CLI should truthfully
         // report it as unknown rather than fabricating an OAuth device flow.
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "auth", "connect", "--oauth"]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "auth", "connect", "--oauth"]);
 
         assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
-        let error_type = payload["error"]["type"]
-            .as_str()
-            .unwrap_or("");
+        let error_type = payload["error"]["type"].as_str().unwrap_or("");
         assert!(
             error_type.contains("auth") || error_type.contains("unknown"),
             "Error type should reference auth unknown subcommand: {error_type}"
@@ -32445,10 +33047,7 @@ depends_on = ["missing"]
         assert_eq!(result.exit_code, CliExitCode::Success);
         assert_eq!(result.payload["status"], "ok");
         assert_eq!(result.payload["subcommand"], "add");
-        assert_eq!(
-            result.payload["credential"]["connector_id"],
-            "github"
-        );
+        assert_eq!(result.payload["credential"]["connector_id"], "github");
         // Credential fields should be redacted in the response.
         let api_key_redacted = result.payload["credential"]["fields"]["api_key"]
             .as_str()
@@ -32462,7 +33061,8 @@ depends_on = ["missing"]
             .as_array()
             .expect("next_actions should be present");
         assert!(
-            next.iter().any(|action| action.as_str().unwrap_or("").contains("auth show")),
+            next.iter()
+                .any(|action| action.as_str().unwrap_or("").contains("auth show")),
             "next_actions should suggest auth show: {next:?}"
         );
     }
@@ -32499,19 +33099,14 @@ depends_on = ["missing"]
 
         assert_eq!(result.exit_code, CliExitCode::Validation);
         assert_eq!(result.payload["status"], "error");
-        assert_eq!(
-            result.payload["error"]["type"],
-            "invalid-credential-fields"
-        );
-        assert_eq!(
-            result.payload["error"]["recoverable"],
-            true
-        );
+        assert_eq!(result.payload["error"]["type"], "invalid-credential-fields");
+        assert_eq!(result.payload["error"]["recoverable"], true);
         let next = result.payload["next_actions"]
             .as_array()
             .expect("next_actions should be present");
         assert!(
-            next.iter().any(|action| action.as_str().unwrap_or("").contains("--token")),
+            next.iter()
+                .any(|action| action.as_str().unwrap_or("").contains("--token")),
             "next_actions should suggest --token: {next:?}"
         );
     }
@@ -32521,13 +33116,10 @@ depends_on = ["missing"]
         // "bootstrap" is not a real auth subcommand.  Verify the CLI returns
         // structured guidance that includes real subcommand suggestions as
         // steps, not a fabricated guided bootstrap flow.
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "auth", "bootstrap"]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "auth", "bootstrap"]);
 
         assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
-        let error_type = payload["error"]["type"]
-            .as_str()
-            .unwrap_or("");
+        let error_type = payload["error"]["type"].as_str().unwrap_or("");
         assert!(
             error_type.contains("auth") || error_type.contains("unknown"),
             "Error type should reference auth subcommand: {error_type}"
@@ -32552,13 +33144,10 @@ depends_on = ["missing"]
     fn auth_connect_response_includes_next_actions() {
         // "connect" is not a real auth subcommand.  The error response must
         // include next_actions that guide toward real auth subcommands.
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "auth", "connect"]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "auth", "connect"]);
 
         assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
-        let error_type = payload["error"]["type"]
-            .as_str()
-            .unwrap_or("");
+        let error_type = payload["error"]["type"].as_str().unwrap_or("");
         assert!(
             error_type.contains("auth") || error_type.contains("unknown"),
             "Error type should reference auth subcommand: {error_type}"
@@ -32570,9 +33159,7 @@ depends_on = ["missing"]
         // At least one action should reference a real auth subcommand.
         let has_real_cmd = next_actions.iter().any(|action| {
             let text = action.as_str().unwrap_or("");
-            text.contains("auth list")
-                || text.contains("auth add")
-                || text.contains("auth status")
+            text.contains("auth list") || text.contains("auth add") || text.contains("auth status")
         });
         assert!(
             has_real_cmd,
@@ -32617,16 +33204,15 @@ depends_on = ["missing"]
     #[test]
     fn confusion_wrong_subcommand_shows_available_options() {
         // "pipeline xyzzy" is not a valid pipeline subcommand.
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "pipeline", "xyzzy"]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "pipeline", "xyzzy"]);
 
         assert_eq!(payload["status"], "error");
-        let error_type = payload["error"]["type"]
-            .as_str()
-            .unwrap_or("");
+        let error_type = payload["error"]["type"].as_str().unwrap_or("");
         // Could be "pipeline-subcommand" or "unknown-command" depending on clap path
         assert!(
-            error_type.contains("subcommand") || error_type.contains("unknown") || error_type.contains("parse"),
+            error_type.contains("subcommand")
+                || error_type.contains("unknown")
+                || error_type.contains("parse"),
             "error type should indicate a subcommand or parse issue, got: {error_type}"
         );
         assert_ne!(exit_code, CliExitCode::Success.into());
@@ -32658,8 +33244,7 @@ depends_on = ["missing"]
         // actually invoked.
 
         // `pipe` without required positional args (source, target) should error
-        let (pipe_exit, pipe_payload) =
-            execute_json(&["fwc", "--json", "pipe"]);
+        let (pipe_exit, pipe_payload) = execute_json(&["fwc", "--json", "pipe"]);
         assert_ne!(pipe_exit, CliExitCode::Success.into());
         // The error should reference "pipe", not "pipeline"
         let pipe_text = serde_json::to_string(&pipe_payload).unwrap_or_default();
@@ -32670,8 +33255,7 @@ depends_on = ["missing"]
         );
 
         // `pipeline` without required subcommand should also error
-        let (pipeline_exit, pipeline_payload) =
-            execute_json(&["fwc", "--json", "pipeline"]);
+        let (pipeline_exit, pipeline_payload) = execute_json(&["fwc", "--json", "pipeline"]);
         assert_ne!(pipeline_exit, CliExitCode::Success.into());
         let pipeline_text = serde_json::to_string(&pipeline_payload).unwrap_or_default();
         assert!(
@@ -32684,8 +33268,7 @@ depends_on = ["missing"]
     fn confusion_unknown_flag_shows_similar_flags() {
         // An unknown flag like `--vrsion` should be caught by clap and produce
         // a structured parse or unknown-command error.
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "--vrsion"]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "--vrsion"]);
 
         assert_ne!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["status"], "error");
@@ -32704,9 +33287,7 @@ depends_on = ["missing"]
 
         assert_ne!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["status"], "error");
-        let error_type = payload["error"]["type"]
-            .as_str()
-            .unwrap_or("");
+        let error_type = payload["error"]["type"].as_str().unwrap_or("");
         assert!(
             error_type.contains("missing") || error_type.contains("parse"),
             "error type should indicate a missing command, got: {error_type}"
@@ -32718,7 +33299,10 @@ depends_on = ["missing"]
             || payload["error"]["next_actions"]
                 .as_array()
                 .is_some_and(|arr| !arr.is_empty());
-        assert!(has_guidance, "error should include examples or next_actions");
+        assert!(
+            has_guidance,
+            "error should include examples or next_actions"
+        );
     }
 
     #[test]
@@ -32726,8 +33310,7 @@ depends_on = ["missing"]
         // `resolve_command` lowercases the token first. "LS" (uppercase)
         // should resolve to "list" (via the "ls" alias). Since "list" is
         // read-only, the correction is safe and auto-applied.
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "LS", "--offline"]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "LS", "--offline"]);
 
         // LS -> ls -> list via alias (safe, read-only).
         assert_eq!(exit_code, CliExitCode::Success.into());
@@ -32745,15 +33328,16 @@ depends_on = ["missing"]
     fn confusion_extra_positional_args_graceful_error() {
         // Passing extra positional arguments to a command that does not expect
         // them should produce a structured error rather than a crash.
-        let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "guide", "extra-arg-1", "extra-arg-2",
-        ]);
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "guide", "extra-arg-1", "extra-arg-2"]);
 
         // guide accepts an optional topic argument but not two extras.
         // The behaviour depends on clap: it may accept the first and reject
         // the second, or treat both as unexpected.
         assert!(
-            payload["status"] == "ok" || payload["status"] == "error" || payload["status"] == "unknown-command",
+            payload["status"] == "ok"
+                || payload["status"] == "error"
+                || payload["status"] == "unknown-command",
             "response should be a valid structured JSON payload"
         );
         // We just care that we get a valid JSON response, no panic.
@@ -32770,13 +33354,8 @@ depends_on = ["missing"]
             write_test_package_output("fcp.test:verifier:v1", "0.1.0");
         let source = package_output_path.display().to_string();
 
-        let (exit_code, payload) = execute_json(&[
-            "fwc",
-            "--json",
-            "install",
-            &source,
-            "--verify-only",
-        ]);
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "install", &source, "--verify-only"]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["status"], "ok");
@@ -32803,9 +33382,7 @@ depends_on = ["missing"]
             write_test_package_output("fcp.test:offline:v1", "0.2.0");
         let source = package_output_path.display().to_string();
 
-        let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "install", &source,
-        ]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "install", &source]);
 
         assert_eq!(exit_code, CliExitCode::Transport.into());
         assert_eq!(payload["status"], "error");
@@ -32832,14 +33409,7 @@ depends_on = ["missing"]
         );
 
         let (exit_code, payload) = execute_json(&[
-            "fwc",
-            "--json",
-            "--host",
-            &host,
-            "update",
-            "github",
-            "--source",
-            &source,
+            "fwc", "--json", "--host", &host, "update", "github", "--source", &source,
         ]);
 
         server.join().expect("mock host thread should complete");
@@ -32851,9 +33421,7 @@ depends_on = ["missing"]
 
     #[test]
     fn update_package_offline_reports_missing_host() {
-        let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "update", "github",
-        ]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "update", "github"]);
 
         assert_eq!(exit_code, CliExitCode::Transport.into());
         assert_eq!(payload["status"], "error");
@@ -32867,13 +33435,7 @@ depends_on = ["missing"]
         // `rollout rollback` is a subcommand of `rollout`. Without a host,
         // the rollout dispatch should return missing-host-endpoint.
         let (exit_code, payload) = execute_json(&[
-            "fwc",
-            "--json",
-            "rollout",
-            "rollback",
-            "github",
-            "--to",
-            "1.0.0",
+            "fwc", "--json", "rollout", "rollback", "github", "--to", "1.0.0",
         ]);
 
         assert_eq!(exit_code, CliExitCode::Transport.into());
@@ -32887,9 +33449,8 @@ depends_on = ["missing"]
         // `pin` requires a host to resolve the connector, so without a host
         // we get a missing-host-endpoint error before version validation occurs.
         // This test verifies the structured error for pin without host.
-        let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "pin", "github", "--to", "not-a-semver",
-        ]);
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "pin", "github", "--to", "not-a-semver"]);
 
         assert_eq!(exit_code, CliExitCode::Transport.into());
         assert_eq!(payload["status"], "error");
@@ -32901,9 +33462,7 @@ depends_on = ["missing"]
     fn unpin_response_confirms_previous_pin() {
         // Without a host, unpin also returns missing-host-endpoint.
         // The structured error should include the connector name in the details.
-        let (exit_code, payload) = execute_json(&[
-            "fwc", "--json", "unpin", "github",
-        ]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "unpin", "github"]);
 
         assert_eq!(exit_code, CliExitCode::Transport.into());
         assert_eq!(payload["status"], "error");
@@ -32955,9 +33514,11 @@ depends_on = ["missing"]
         assert_eq!(result.payload["subcommand"], "verify");
         assert_eq!(result.payload["connector_id"], "github");
         assert_eq!(result.payload["result"]["structural"]["status"], "valid");
-        assert!(result.payload["result"]["expiry"]["time_remaining"]
-            .as_str()
-            .is_some_and(|s| !s.is_empty()));
+        assert!(
+            result.payload["result"]["expiry"]["time_remaining"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty())
+        );
     }
 
     #[test]
@@ -32998,14 +33559,13 @@ depends_on = ["missing"]
         // Expired credential is structurally valid but structurally expired,
         // so the verify dispatch marks it as error at the structural layer.
         assert_eq!(result.payload["subcommand"], "verify");
-        assert_eq!(
-            result.payload["result"]["structural"]["status"],
-            "expired"
-        );
+        assert_eq!(result.payload["result"]["structural"]["status"], "expired");
         // Expiry info should indicate negative days remaining
-        assert!(result.payload["result"]["structural"]["expiry_info"]["days_remaining"]
-            .as_i64()
-            .is_some_and(|d| d < 0));
+        assert!(
+            result.payload["result"]["structural"]["expiry_info"]["days_remaining"]
+                .as_i64()
+                .is_some_and(|d| d < 0)
+        );
     }
 
     #[test]
@@ -33053,9 +33613,11 @@ depends_on = ["missing"]
         );
         assert_eq!(result.payload["result"]["status"], "valid");
         // Credential is redacted
-        assert!(result.payload["credential"]["fields"]["token"]
-            .as_str()
-            .is_some_and(|s| s.contains("***")));
+        assert!(
+            result.payload["credential"]["fields"]["token"]
+                .as_str()
+                .is_some_and(|s| s.contains("***"))
+        );
     }
 
     #[test]
@@ -33153,8 +33715,7 @@ depends_on = ["missing"]
     fn auth_profile_list_empty_returns_default_only() {
         // "profile" is not a valid AuthCommand subcommand; it routes to unknown-subcommand dispatch.
         // An empty store has no profiles concept yet.
-        let (exit_code, payload) =
-            execute_json(&["fwc", "--json", "auth", "profile", "list"]);
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "auth", "profile", "list"]);
 
         assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
         let error_type = payload["error"]["type"].as_str().unwrap_or("");
@@ -33254,10 +33815,7 @@ depends_on = ["missing"]
         let mut fields = std::collections::BTreeMap::new();
         fields.insert("token".to_owned(), "ghp_zonetest12345678".to_owned());
         fields.insert("zone".to_owned(), "z:production".to_owned());
-        fields.insert(
-            "expires_at".to_owned(),
-            "2030-01-01T00:00:00Z".to_owned(),
-        );
+        fields.insert("expires_at".to_owned(), "2030-01-01T00:00:00Z".to_owned());
         let credential = super::credential_store::Credential::new(
             "github-prod",
             fields,
@@ -33287,12 +33845,12 @@ depends_on = ["missing"]
         // Workspace scoping is modeled similarly to zone scoping via extra fields.
         let (_tempdir, store) = temp_auth_store();
         let mut fields = std::collections::BTreeMap::new();
-        fields.insert("api_key".to_owned(), "sk_workspace_longapikey123".to_owned());
-        fields.insert("workspace".to_owned(), "ws:engineering".to_owned());
         fields.insert(
-            "expires_at".to_owned(),
-            "2030-06-01T00:00:00Z".to_owned(),
+            "api_key".to_owned(),
+            "sk_workspace_longapikey123".to_owned(),
         );
+        fields.insert("workspace".to_owned(), "ws:engineering".to_owned());
+        fields.insert("expires_at".to_owned(), "2030-06-01T00:00:00Z".to_owned());
         let credential = super::credential_store::Credential::new(
             "linear",
             fields,
@@ -33378,7 +33936,9 @@ depends_on = ["missing"]
         assert_eq!(list.exit_code, CliExitCode::Success);
         assert_eq!(list.payload["summary"]["credential_count"], 2);
         // Each credential in the list has a label that could serve as profile marker
-        let creds = list.payload["credentials"].as_array().expect("credentials should be array");
+        let creds = list.payload["credentials"]
+            .as_array()
+            .expect("credentials should be array");
         assert!(creds.iter().any(|c| c["label"] == "default"));
         assert!(creds.iter().any(|c| c["label"] == "secondary"));
         // Sorted alphabetically by connector_id
@@ -33405,10 +33965,7 @@ depends_on = ["missing"]
         // "shwo" is Levenshtein distance 2 from "show" — should auto-correct.
         assert_eq!(outcome.exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "show");
-        assert_eq!(
-            payload["input_normalization"]["applied"][0]["from"],
-            "shwo"
-        );
+        assert_eq!(payload["input_normalization"]["applied"][0]["from"], "shwo");
         assert_eq!(payload["input_normalization"]["applied"][0]["to"], "show");
     }
 
@@ -33437,10 +33994,7 @@ depends_on = ["missing"]
             "ambiguous correction should provide at least one candidate"
         );
         assert!(
-            did_you_mean[0]
-                .as_str()
-                .unwrap_or("")
-                .contains("invoke"),
+            did_you_mean[0].as_str().unwrap_or("").contains("invoke"),
             "candidate should mention the intended command"
         );
     }
@@ -33475,8 +34029,7 @@ depends_on = ["missing"]
         assert_eq!(payload["error"]["type"], "ambiguous-typo");
         // The command was NOT silently executed — no "command": "install" at the top.
         assert!(
-            payload.get("command").is_none()
-                || payload["command"] != "install",
+            payload.get("command").is_none() || payload["command"] != "install",
             "mutating command typo must not be auto-applied"
         );
     }
@@ -33484,11 +34037,7 @@ depends_on = ["missing"]
     #[test]
     fn confusion_recovery_safe_correction_auto_applied() {
         // A typo for a readonly command IS auto-corrected and the command succeeds.
-        let args = vec![
-            "fwc".to_owned(),
-            "--json".to_owned(),
-            "gudie".to_owned(),
-        ];
+        let args = vec!["fwc".to_owned(), "--json".to_owned(), "gudie".to_owned()];
         let outcome = execute(&args).expect("execution should not fail internally");
         let payload: Value =
             serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
@@ -33742,7 +34291,9 @@ depends_on = ["missing"]
             assert!(
                 payload.get("status").is_some(),
                 "JSON output for {scenario:?} must have a 'status' field, got keys: {:?}",
-                payload.as_object().map(|obj| obj.keys().collect::<Vec<_>>())
+                payload
+                    .as_object()
+                    .map(|obj| obj.keys().collect::<Vec<_>>())
             );
         }
     }

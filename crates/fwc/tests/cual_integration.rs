@@ -1,16 +1,23 @@
 use std::collections::BTreeMap;
+use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use fcp_core::{CapabilityToken, ConnectorHealth, InvokeResponse, RequestId};
-use fcp_host::PreflightResponse as HostPreflightResponse;
+use fcp_host::{
+    EventQueryRequest as HostEventQueryRequest, HostAdminStateStore, HostEventKind,
+    PreflightResponse as HostPreflightResponse,
+};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tempfile::tempdir;
+use tokio::runtime::Builder as TokioRuntimeBuilder;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -24,6 +31,30 @@ fn fixture_path(relative: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("testdata")
         .join(relative)
+}
+
+#[derive(Debug, Deserialize)]
+struct HostIntegrationFixtureMatrix {
+    fixtures: Vec<HostIntegrationFixture>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HostIntegrationFixture {
+    id: String,
+    connector_id: String,
+    display_name: String,
+    archetype: String,
+    coverage_mode: String,
+    risk_level: String,
+    safety_tier: String,
+    readiness: String,
+    auth_scope: String,
+    reversibility: String,
+    operation_family: String,
+    tool_count: usize,
+    #[serde(default)]
+    provenance_markers: Vec<String>,
+    notes: String,
 }
 
 fn run_fwc(args: &[&str]) -> Output {
@@ -86,6 +117,18 @@ fn run_text_ok(args: &[&str]) -> String {
         "expected success for {args:?}\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     stdout
+}
+
+fn load_host_integration_fixture(id: &str) -> HostIntegrationFixture {
+    let path = fixture_path("host_integration/fixture_matrix.json");
+    let content = fs::read_to_string(&path).expect("host integration fixture matrix should load");
+    let matrix: HostIntegrationFixtureMatrix =
+        serde_json::from_str(&content).expect("host integration fixture matrix should parse");
+    matrix
+        .fixtures
+        .into_iter()
+        .find(|fixture| fixture.id == id)
+        .unwrap_or_else(|| panic!("missing host integration fixture `{id}`"))
 }
 
 fn spawn_mock_host_sequence(routes: Vec<(String, Value)>) -> (String, thread::JoinHandle<()>) {
@@ -191,6 +234,137 @@ fn spawn_mock_host_sequence(routes: Vec<(String, Value)>) -> (String, thread::Jo
         assert_eq!(
             served, expected_requests,
             "mock host served {served} request(s), expected {expected_requests}"
+        );
+    });
+
+    (endpoint, handle)
+}
+
+fn emit_host_admin_event(
+    store: &HostAdminStateStore,
+    kind: HostEventKind,
+    connector_id: Option<&str>,
+    summary: &str,
+    payload: Option<Value>,
+) {
+    let runtime = TokioRuntimeBuilder::new_current_thread()
+        .build()
+        .expect("tokio runtime should build");
+    runtime.block_on(store.emit_event(kind, connector_id, summary.to_owned(), payload));
+}
+
+fn spawn_host_admin_state_server(
+    store: Arc<HostAdminStateStore>,
+    expected_requests: usize,
+) -> (String, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("host admin server should bind");
+    listener
+        .set_nonblocking(true)
+        .expect("host admin server should configure nonblocking accept");
+    let endpoint = format!(
+        "http://{}",
+        listener.local_addr().expect("host admin server address")
+    );
+
+    let handle = thread::spawn(move || {
+        let runtime = TokioRuntimeBuilder::new_current_thread()
+            .build()
+            .expect("tokio runtime should build");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut served = 0usize;
+
+        while served < expected_requests && Instant::now() < deadline {
+            let (mut stream, _) = match listener.accept() {
+                Ok(connection) => connection,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                Err(error) => panic!("host admin server accept failed: {error}"),
+            };
+
+            stream
+                .set_nonblocking(false)
+                .expect("host admin stream should switch back to blocking mode");
+
+            let mut reader = BufReader::new(
+                stream
+                    .try_clone()
+                    .expect("host admin server should clone socket"),
+            );
+            let mut request_line = String::new();
+            reader
+                .read_line(&mut request_line)
+                .expect("host admin server should read request line");
+            assert!(
+                !request_line.trim().is_empty(),
+                "host admin server received an empty request line"
+            );
+
+            let mut content_length = 0usize;
+            loop {
+                let mut header = String::new();
+                reader
+                    .read_line(&mut header)
+                    .expect("host admin server should read headers");
+                if header == "\r\n" || header.is_empty() {
+                    break;
+                }
+                if let Some((name, value)) = header.split_once(':')
+                    && name.eq_ignore_ascii_case("content-length")
+                {
+                    content_length = value
+                        .trim()
+                        .parse()
+                        .expect("content-length should be numeric");
+                }
+            }
+
+            let mut body = vec![0u8; content_length];
+            if content_length > 0 {
+                reader
+                    .read_exact(&mut body)
+                    .expect("host admin server should read request body");
+            }
+
+            let mut parts = request_line.split_whitespace();
+            let method = parts.next().expect("request method should exist");
+            let path = parts.next().expect("request path should exist");
+
+            let response = match (method, path) {
+                ("POST", "/rpc/admin/events") => {
+                    let request: HostEventQueryRequest =
+                        serde_json::from_slice(&body).expect("event query request should parse");
+                    serde_json::to_string(&runtime.block_on(store.query_events(&request)))
+                        .expect("event query response should serialize")
+                }
+                ("GET", "/rpc/health") => serde_json::to_string(&json!({
+                    "status": "healthy",
+                    "connectors": {},
+                    "uptime_seconds": 1,
+                    "active_connections": 1,
+                    "timestamp": chrono::Utc::now(),
+                }))
+                .expect("health response should serialize"),
+                _ => panic!("unexpected host admin request: {method} {path}"),
+            };
+
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                response.len(),
+                response
+            )
+            .expect("host admin server should write response");
+            stream
+                .flush()
+                .expect("host admin server should flush response");
+            served += 1;
+        }
+
+        assert_eq!(
+            served, expected_requests,
+            "host admin server served {served} request(s), expected {expected_requests}"
         );
     });
 
@@ -878,7 +1052,10 @@ fn invoke_denial_records_history_and_suggests_recovery_actions() {
     assert_eq!(history["command"], "history");
     assert_eq!(history["scope"], "list");
     assert_eq!(history["returned"], 1);
-    assert_eq!(history["entries"][0]["connector_id"], "fcp.github:enterprise:v1");
+    assert_eq!(
+        history["entries"][0]["connector_id"],
+        "fcp.github:enterprise:v1"
+    );
     assert_eq!(history["entries"][0]["operation_id"], "github.create_issue");
     assert_eq!(history["entries"][0]["status"], "denied");
     assert_eq!(
@@ -1039,9 +1216,11 @@ fn session_pipeline_history_workflow_persists_agent_context() {
         .as_array()
         .expect("history entries should be present");
     assert_eq!(entries.len(), 2);
-    assert!(entries.iter().all(|entry| {
-        entry["agent_session"].as_str() == Some(session_id.as_str())
-    }));
+    assert!(
+        entries
+            .iter()
+            .all(|entry| { entry["agent_session"].as_str() == Some(session_id.as_str()) })
+    );
     assert_eq!(entries[0]["status"], "simulated");
     assert_eq!(entries[1]["status"], "success");
 
@@ -1155,9 +1334,9 @@ fn truth_matrix_auth_enforcement_denies_without_capability_token() {
         .as_array()
         .expect("auth error should include next_actions");
     assert!(
-        next_actions
-            .iter()
-            .any(|action| action.as_str().is_some_and(|s| s.contains("capability-token"))),
+        next_actions.iter().any(|action| action
+            .as_str()
+            .is_some_and(|s| s.contains("capability-token"))),
         "Next actions should mention --capability-token"
     );
 }
@@ -1257,16 +1436,17 @@ fn truth_matrix_metadata_honesty_unknown_stays_unknown() {
     let show_offline = run_json_ok(&["--json", "show", "github", "--offline"]);
     assert_eq!(show_offline["command"], "show");
     assert_eq!(show_offline["connector"]["state"], "unknown");
-    assert_eq!(show_offline["availability"]["availability"], "offline-artifact");
+    assert_eq!(
+        show_offline["availability"]["availability"],
+        "offline-artifact"
+    );
 
     // The offline show should NOT fabricate health, last_check, or runtime
     // fields that only the live host can provide.
     assert!(
         show_offline["connector"]["health"].is_null()
             || show_offline["connector"]["health"] == "unknown"
-            || show_offline["connector"]
-                .get("health")
-                .is_none(),
+            || show_offline["connector"].get("health").is_none(),
         "Offline show should not fabricate health data"
     );
 }
@@ -1277,8 +1457,7 @@ fn truth_matrix_metadata_honesty_unknown_stays_unknown() {
 #[test]
 fn truth_matrix_export_tools_reflects_inventory_provenance() {
     // ── Offline export ──
-    let offline_export =
-        run_json_ok(&["--json", "export-tools", "--offline", "--format", "mcp"]);
+    let offline_export = run_json_ok(&["--json", "export-tools", "--offline", "--format", "mcp"]);
     assert_eq!(offline_export["command"], "export-tools");
     assert_eq!(offline_export["source"], "workspace-manifests");
     assert_eq!(
@@ -1327,25 +1506,17 @@ fn truth_matrix_export_tools_reflects_inventory_provenance() {
         ),
     ]);
 
-    let live_export = run_json_ok(&[
-        "--json",
-        "--host",
-        &host,
-        "export-tools",
-        "--format",
-        "mcp",
-    ]);
+    let live_export = run_json_ok(&["--json", "--host", &host, "export-tools", "--format", "mcp"]);
     server.join().expect("mock host thread should complete");
 
     assert_eq!(live_export["command"], "export-tools");
     assert_eq!(live_export["source"], "host-admin-api");
-    assert_eq!(
-        live_export["availability"]["availability"],
-        "live-runtime"
-    );
+    assert_eq!(live_export["availability"]["availability"], "live-runtime");
     assert_eq!(live_export["tool_count"], 1);
     assert!(
-        live_export["tools"].as_array().is_some_and(|tools| !tools.is_empty()),
+        live_export["tools"]
+            .as_array()
+            .is_some_and(|tools| !tools.is_empty()),
         "Live export should include the tool definitions in the response"
     );
 }
@@ -1431,7 +1602,11 @@ fn truth_matrix_receipt_evidence_in_history() {
     let entries = history["entries"]
         .as_array()
         .expect("history should have entries");
-    assert_eq!(entries.len(), 1, "One invoke should produce one history entry");
+    assert_eq!(
+        entries.len(),
+        1,
+        "One invoke should produce one history entry"
+    );
 
     let entry = &entries[0];
     // Receipt evidence: must have connector_id, operation_id, status, timestamp.
@@ -1737,7 +1912,10 @@ fn e2e_denied_invoke_with_recovery_evidence_and_history() {
         .filter_map(|e| e["status"].as_str())
         .collect();
     assert!(statuses.contains(&"denied"), "History must contain denial");
-    assert!(statuses.contains(&"success"), "History must contain success");
+    assert!(
+        statuses.contains(&"success"),
+        "History must contain success"
+    );
 }
 
 /// E2E scenario: Offline-only workflow must never leak live-runtime markers.
@@ -1867,22 +2045,12 @@ fn e2e_live_export_reflects_host_inventory_not_stale_manifests() {
         ),
     ]);
 
-    let live_export = run_json_ok(&[
-        "--json",
-        "--host",
-        &host,
-        "export-tools",
-        "--format",
-        "mcp",
-    ]);
+    let live_export = run_json_ok(&["--json", "--host", &host, "export-tools", "--format", "mcp"]);
     server.join().expect("mock host thread should complete");
 
     // Regression gate: live export must match the mock host's exact inventory.
     assert_eq!(live_export["source"], "host-admin-api");
-    assert_eq!(
-        live_export["availability"]["availability"],
-        "live-runtime"
-    );
+    assert_eq!(live_export["availability"]["availability"], "live-runtime");
     assert_eq!(
         live_export["tool_count"], 2,
         "Live export tool count must match mock host (2 tools)"
@@ -1894,10 +2062,7 @@ fn e2e_live_export_reflects_host_inventory_not_stale_manifests() {
         .expect("live export should have tools array");
     assert_eq!(tools.len(), 2);
 
-    let tool_names: Vec<&str> = tools
-        .iter()
-        .filter_map(|t| t["name"].as_str())
-        .collect();
+    let tool_names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
     assert!(
         tool_names.contains(&"github.create_issue"),
         "Live export must include create_issue from host"
@@ -1909,8 +2074,7 @@ fn e2e_live_export_reflects_host_inventory_not_stale_manifests() {
 
     // Compare with offline export — the offline tool count will likely differ
     // because it uses workspace manifests, not the mock host.
-    let offline_export =
-        run_json_ok(&["--json", "export-tools", "--offline", "--format", "mcp"]);
+    let offline_export = run_json_ok(&["--json", "export-tools", "--offline", "--format", "mcp"]);
     assert_eq!(offline_export["source"], "workspace-manifests");
     assert_eq!(
         offline_export["availability"]["availability"],
@@ -2079,15 +2243,37 @@ fn regression_gate_plan_commands_include_workflow_truth() {
 fn workflow_search_to_invoke_to_history_full_chain() {
     let capability_token = test_capability_token_arg();
     let home = tempdir().expect("temp home should be created");
+    let github_fixture = load_host_integration_fixture("github_issue_workflow");
+    assert_eq!(github_fixture.archetype, "request_response");
+    assert_eq!(github_fixture.coverage_mode, "mock_host");
+    assert_eq!(github_fixture.readiness, "live-runtime");
+    assert_eq!(github_fixture.auth_scope, "tenant_scoped");
+    assert_eq!(github_fixture.reversibility, "mixed");
+    assert_eq!(github_fixture.operation_family, "issues");
+    assert!(
+        github_fixture
+            .provenance_markers
+            .iter()
+            .any(|marker| marker == "mock-host-sequence")
+    );
+    assert!(
+        github_fixture
+            .notes
+            .contains("workflow_search_to_invoke_to_history_full_chain")
+    );
 
     // --- Setup: mock connectors and tools ---
-    let github_connector =
-        mock_connector_summary_json("fcp.github:enterprise:v1", "GitHub Enterprise", 2, "risky");
+    let github_connector = mock_connector_summary_json(
+        &github_fixture.connector_id,
+        &github_fixture.display_name,
+        github_fixture.tool_count,
+        &github_fixture.safety_tier,
+    );
     let github_create_issue = mock_tool_descriptor_json(
         "github.create_issue",
         "github.issue_write",
-        "medium",
-        "risky",
+        &github_fixture.risk_level,
+        &github_fixture.safety_tier,
         "none",
         Some("interactive"),
         &json!({
@@ -2131,12 +2317,7 @@ fn workflow_search_to_invoke_to_history_full_chain() {
     );
 
     // Phase 1: Search — find "create issue" operations via semantic search.
-    let search_result = run_json_ok(&[
-        "--json",
-        "search",
-        "create issue",
-        "--offline",
-    ]);
+    let search_result = run_json_ok(&["--json", "search", "create issue", "--offline"]);
     assert_eq!(search_result["command"], "search");
     let results = search_result["results"]
         .as_array()
@@ -2153,13 +2334,7 @@ fn workflow_search_to_invoke_to_history_full_chain() {
     );
 
     // Phase 2: Schema — retrieve the input schema for the found operation.
-    let schema_result = run_json_ok(&[
-        "--json",
-        "schema",
-        "github",
-        "issues.create",
-        "--offline",
-    ]);
+    let schema_result = run_json_ok(&["--json", "schema", "github", "issues.create", "--offline"]);
     assert_eq!(schema_result["command"], "schema");
     assert!(
         schema_result["input_schema"].is_object(),
@@ -2254,16 +2429,18 @@ fn workflow_search_to_invoke_to_history_full_chain() {
     // Phase 5: History — verify the invoke is recorded with correct metadata.
     let history = run_json_ok_in_home(home.path(), &["--json", "history"]);
     let entries = history["entries"].as_array().expect("history entries");
-    assert_eq!(entries.len(), 1, "One invoke should produce one history entry");
+    assert_eq!(
+        entries.len(),
+        1,
+        "One invoke should produce one history entry"
+    );
     assert_eq!(entries[0]["status"], "success");
     assert_eq!(entries[0]["operation_id"], "github.create_issue");
     assert_eq!(entries[0]["connector_id"], "fcp.github:enterprise:v1");
 
     // Phase 6: History filter — verify filtering by connector works.
-    let filtered = run_json_ok_in_home(
-        home.path(),
-        &["--json", "history", "--connector", "github"],
-    );
+    let filtered =
+        run_json_ok_in_home(home.path(), &["--json", "history", "--connector", "github"]);
     let filtered_entries = filtered["entries"].as_array().expect("filtered entries");
     assert_eq!(
         filtered_entries.len(),
@@ -2275,14 +2452,104 @@ fn workflow_search_to_invoke_to_history_full_chain() {
     let first_entry_id = entries[0]["entry_id"]
         .as_str()
         .expect("history entry should have an entry_id");
-    let detail = run_json_ok_in_home(
-        home.path(),
-        &["--json", "history", first_entry_id],
-    );
+    let detail = run_json_ok_in_home(home.path(), &["--json", "history", first_entry_id]);
     // Detail view should include the operation and input for re-execution.
     assert!(
         detail["entry"].is_object() || detail["entry_id"].is_string(),
         "History detail should produce structured entry: {detail:?}"
+    );
+}
+
+#[test]
+fn live_tail_host_admin_events_apply_resume_cursor_before_type_filtering() {
+    let connector_id = "fcp.github:enterprise:v1";
+    let store = Arc::new(HostAdminStateStore::new());
+    emit_host_admin_event(
+        store.as_ref(),
+        HostEventKind::LifecycleTransition,
+        Some(connector_id),
+        "connector enabled",
+        Some(json!({ "request_id": "req-tail" })),
+    );
+    emit_host_admin_event(
+        store.as_ref(),
+        HostEventKind::HealthCheck,
+        Some(connector_id),
+        "health check pending",
+        Some(json!({ "request_id": "req-tail", "status": "pending" })),
+    );
+    emit_host_admin_event(
+        store.as_ref(),
+        HostEventKind::HealthCheck,
+        Some(connector_id),
+        "health check completed",
+        Some(json!({ "request_id": "req-tail", "status": "completed" })),
+    );
+
+    let (host, server) = spawn_host_admin_state_server(store, 1);
+    let payload = run_json_ok(&[
+        "--json",
+        "--host",
+        &host,
+        "tail",
+        connector_id,
+        "--event-type",
+        "health",
+        "--cursor",
+        "evt-1",
+        "--limit",
+        "10",
+    ]);
+    server
+        .join()
+        .expect("host admin state server thread should complete");
+
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["source"], "host-admin-api");
+    assert_eq!(payload["event_count"], 2);
+    assert_eq!(payload["resume"]["cursor_found"], true);
+    assert_eq!(payload["resume"]["resume_mode"], "resume_after_cursor");
+    assert_eq!(payload["resume"]["skipped_events"], 1);
+    assert_eq!(payload["events"][0]["event_type"], "health-check");
+    assert_eq!(payload["events"][0]["summary"], "health check pending");
+    assert_eq!(payload["events"][1]["summary"], "health check completed");
+    assert_eq!(payload["latest_cursor"], "evt-3");
+}
+
+#[test]
+fn live_watch_host_admin_events_match_request_id_and_terminal_status() {
+    let connector_id = "fcp.github:enterprise:v1";
+    let store = Arc::new(HostAdminStateStore::new());
+    emit_host_admin_event(
+        store.as_ref(),
+        HostEventKind::RolloutDecision,
+        Some(connector_id),
+        "operation req-watch queued",
+        Some(json!({ "request_id": "req-watch", "status": "pending" })),
+    );
+    emit_host_admin_event(
+        store.as_ref(),
+        HostEventKind::RolloutDecision,
+        Some(connector_id),
+        "operation req-watch completed",
+        Some(json!({ "request_id": "req-watch", "status": "completed" })),
+    );
+
+    let (host, server) = spawn_host_admin_state_server(store, 1);
+    let payload = run_json_ok(&["--json", "--host", &host, "watch", "req-watch"]);
+    server
+        .join()
+        .expect("host admin state server thread should complete");
+
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["operation_status"], "completed");
+    assert_eq!(payload["matching_events"], 2);
+    assert_eq!(payload["latest_cursor"], "evt-2");
+    assert_eq!(payload["events"][0]["payload"]["request_id"], "req-watch");
+    assert!(
+        payload["formatted"]
+            .as_array()
+            .is_some_and(|lines| !lines.is_empty())
     );
 }
 
@@ -2418,7 +2685,11 @@ fn workflow_batch_throttle_and_progress_tracking() {
     let waves = batch_plan["plan"]["waves"]
         .as_array()
         .expect("batch plan should have waves");
-    assert_eq!(waves.len(), 3, "Three-step dependency chain should produce three waves");
+    assert_eq!(
+        waves.len(),
+        3,
+        "Three-step dependency chain should produce three waves"
+    );
 
     // All preflights should be present and allowed.
     let preflights = batch_plan["preflights"]
@@ -2492,8 +2763,7 @@ fn workflow_pipe_mapping_and_pipeline_validation() {
     ]);
     assert_ne!(invalid_code, 0, "Invalid pipeline should fail validation");
     assert!(
-        invalid_payload["validation"]["valid"] == false
-            || invalid_payload["status"] == "error",
+        invalid_payload["validation"]["valid"] == false || invalid_payload["status"] == "error",
         "Invalid pipeline must report validation failure"
     );
 
@@ -2511,12 +2781,17 @@ fn workflow_pipe_mapping_and_pipeline_validation() {
     assert_eq!(estimate["command"], "pipeline");
     assert_eq!(estimate["subcommand"], "estimate");
     // Offline estimate correctly reports missing operations or missing parameters.
-    assert_ne!(est_code, 0, "Offline estimate should fail for unresolved operations");
+    assert_ne!(
+        est_code, 0,
+        "Offline estimate should fail for unresolved operations"
+    );
     assert_eq!(estimate["status"], "error");
     assert!(
         estimate["error"]["type"]
             .as_str()
-            .is_some_and(|t| t.contains("pipeline") || t.contains("invalid") || t.contains("not-found")),
+            .is_some_and(|t| t.contains("pipeline")
+                || t.contains("invalid")
+                || t.contains("not-found")),
         "Estimate error should identify pipeline/operation issue: {:?}",
         estimate["error"]["type"]
     );
@@ -2551,13 +2826,7 @@ fn workflow_pipe_mapping_and_pipeline_validation() {
 #[test]
 fn workflow_mcp_server_protocol_tools_and_export() {
     // Phase 1: Offline MCP export — verify tool schemas from workspace manifests.
-    let offline_export = run_json_ok(&[
-        "--json",
-        "export-tools",
-        "--offline",
-        "--format",
-        "mcp",
-    ]);
+    let offline_export = run_json_ok(&["--json", "export-tools", "--offline", "--format", "mcp"]);
     assert_eq!(offline_export["command"], "export-tools");
     assert_eq!(offline_export["source"], "workspace-manifests");
     assert_eq!(
@@ -2640,25 +2909,19 @@ fn workflow_mcp_server_protocol_tools_and_export() {
             ),
         ),
     ]);
-    let live_export = run_json_ok(&[
-        "--json",
-        "--host",
-        &host,
-        "export-tools",
-        "--format",
-        "mcp",
-    ]);
+    let live_export = run_json_ok(&["--json", "--host", &host, "export-tools", "--format", "mcp"]);
     server.join().expect("mock host thread should complete");
 
     assert_eq!(live_export["source"], "host-admin-api");
-    assert_eq!(
-        live_export["availability"]["availability"],
-        "live-runtime"
-    );
+    assert_eq!(live_export["availability"]["availability"], "live-runtime");
     let live_tools = live_export["tools"]
         .as_array()
         .expect("live export should have tools array");
-    assert_eq!(live_tools.len(), 2, "Live export should have exactly 2 tools");
+    assert_eq!(
+        live_tools.len(),
+        2,
+        "Live export should have exactly 2 tools"
+    );
 
     // Phase 3: Verify live and offline sources are distinct.
     assert_ne!(
@@ -2666,8 +2929,7 @@ fn workflow_mcp_server_protocol_tools_and_export() {
         "Live and offline exports must have different source labels"
     );
     assert_ne!(
-        live_export["availability"]["availability"],
-        offline_export["availability"]["availability"],
+        live_export["availability"]["availability"], offline_export["availability"]["availability"],
         "Live and offline exports must have different availability"
     );
 
@@ -2738,8 +3000,7 @@ fn workflow_cross_module_error_propagation() {
     // Should fail validation (type mismatch).
     assert_ne!(code, 0, "Type-mismatched input should fail validation");
     assert!(
-        payload["errors"].as_array().is_some_and(|e| !e.is_empty())
-            || payload["status"] == "error",
+        payload["errors"].as_array().is_some_and(|e| !e.is_empty()) || payload["status"] == "error",
         "Type mismatch should produce structured errors"
     );
 
@@ -2753,11 +3014,16 @@ fn workflow_cross_module_error_propagation() {
         "{}",
         "--offline",
     ]);
-    assert_ne!(code2, 0, "Empty input for required-fields schema should fail");
+    assert_ne!(
+        code2, 0,
+        "Empty input for required-fields schema should fail"
+    );
     // Error messages should reference the missing fields.
     let error_str = serde_json::to_string(&payload2).expect("payload serializes");
     assert!(
-        error_str.contains("owner") || error_str.contains("required") || error_str.contains("missing"),
+        error_str.contains("owner")
+            || error_str.contains("required")
+            || error_str.contains("missing"),
         "Validation error should mention missing required fields"
     );
 }
@@ -2865,9 +3131,7 @@ fn workflow_history_persistence_and_status_filtering() {
 
     // Step 3: Query full history — should have 2 entries.
     let full_history = run_json_ok_in_home(home.path(), &["--json", "history"]);
-    let all_entries = full_history["entries"]
-        .as_array()
-        .expect("history entries");
+    let all_entries = full_history["entries"].as_array().expect("history entries");
     assert_eq!(
         all_entries.len(),
         2,
@@ -2875,10 +3139,8 @@ fn workflow_history_persistence_and_status_filtering() {
     );
 
     // Step 4: Filter by success status.
-    let success_history = run_json_ok_in_home(
-        home.path(),
-        &["--json", "history", "--status", "success"],
-    );
+    let success_history =
+        run_json_ok_in_home(home.path(), &["--json", "history", "--status", "success"]);
     let success_entries = success_history["entries"]
         .as_array()
         .expect("success filtered entries");
@@ -2886,10 +3148,8 @@ fn workflow_history_persistence_and_status_filtering() {
     assert_eq!(success_entries[0]["status"], "success");
 
     // Step 5: Filter by denied/error status.
-    let denied_history = run_json_ok_in_home(
-        home.path(),
-        &["--json", "history", "--status", "denied"],
-    );
+    let denied_history =
+        run_json_ok_in_home(home.path(), &["--json", "history", "--status", "denied"]);
     let denied_entries = denied_history["entries"]
         .as_array()
         .expect("denied filtered entries");

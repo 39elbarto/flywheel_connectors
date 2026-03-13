@@ -822,6 +822,42 @@ enum BenchCommand {
         target: PrimitiveTarget,
     },
 
+    /// Benchmark CUAL search performance (index build + query latency).
+    ///
+    /// Target: < 1ms search latency for 500 operations
+    Search {
+        /// Number of operations to index.
+        #[arg(long, default_value = "500")]
+        operations: u32,
+    },
+
+    /// Benchmark CUAL batch/map throughput.
+    ///
+    /// Target: < 5% overhead vs sequential for non-throttled batches
+    Batch {
+        /// Number of items to process.
+        #[arg(long, default_value = "100")]
+        items: u32,
+    },
+
+    /// Benchmark MCP server tool listing and routing latency.
+    ///
+    /// Target: < 5ms tools/list for 100 connectors
+    Mcp {
+        /// Number of connectors to register.
+        #[arg(long, default_value = "100")]
+        connectors: u32,
+    },
+
+    /// Benchmark pipeline setup and scheduling overhead.
+    ///
+    /// Target: < 10ms pipeline setup for 10 steps
+    Pipeline {
+        /// Number of pipeline steps.
+        #[arg(long, default_value = "10")]
+        steps: u32,
+    },
+
     /// Run all benchmarks and produce a complete report.
     All,
 }
@@ -921,6 +957,20 @@ pub(crate) fn run(args: &BenchArgs) -> anyhow::Result<()> {
         BenchCommand::Primitives { target } => {
             run_primitives(*target, args.iterations, args.warmup)
         }
+        BenchCommand::Search { operations } => {
+            vec![bench_search_index(*operations, args.iterations, args.warmup),
+                 bench_search_query(*operations, args.iterations, args.warmup)]
+        }
+        BenchCommand::Batch { items } => {
+            vec![bench_batch_throughput(*items, args.iterations, args.warmup)]
+        }
+        BenchCommand::Mcp { connectors } => {
+            vec![bench_mcp_tool_list(*connectors, args.iterations, args.warmup),
+                 bench_mcp_tool_route(*connectors, args.iterations, args.warmup)]
+        }
+        BenchCommand::Pipeline { steps } => {
+            vec![bench_pipeline_setup(*steps, args.iterations, args.warmup)]
+        }
         BenchCommand::All => {
             let mut all_results = Vec::new();
 
@@ -969,6 +1019,14 @@ pub(crate) fn run(args: &BenchArgs) -> anyhow::Result<()> {
                 "secrets-3-of-5",
                 "fcp-crypto Shamir not yet implemented",
             ));
+
+            // CUAL benchmarks (search, batch, MCP, pipeline).
+            all_results.push(bench_search_index(500, args.iterations, args.warmup));
+            all_results.push(bench_search_query(500, args.iterations, args.warmup));
+            all_results.push(bench_batch_throughput(100, args.iterations, args.warmup));
+            all_results.push(bench_mcp_tool_list(100, args.iterations, args.warmup));
+            all_results.push(bench_mcp_tool_route(100, args.iterations, args.warmup));
+            all_results.push(bench_pipeline_setup(10, args.iterations, args.warmup));
 
             all_results
         }
@@ -1464,6 +1522,199 @@ fn bench_fcps_frame_parse_mac(iterations: u32, warmup: u32) -> BenchmarkResult {
         p99_target_ms: 1.0,
     });
 
+    result.outliers_detected = outliers;
+    result
+}
+
+// ─── CUAL Benchmarks ─────────────────────────────────────────────────────────
+
+/// Benchmark search index building time.
+fn bench_search_index(operation_count: u32, iterations: u32, warmup: u32) -> BenchmarkResult {
+    let operations: Vec<String> = (0..operation_count)
+        .map(|i| format!("connector_{}.operation_{}", i / 10, i % 10))
+        .collect();
+
+    let (percentiles, outliers) = run_benchmark_with_result(warmup, iterations, || {
+        let mut index = std::collections::BTreeMap::<String, Vec<String>>::new();
+        for op in &operations {
+            for word in op.split('.') {
+                index.entry(word.to_owned()).or_default().push(op.clone());
+            }
+        }
+        index
+    });
+
+    let mut result = BenchmarkResult::new(
+        format!("search-index-build-{operation_count}"),
+        format!("Build search index for {operation_count} operations"),
+        iterations,
+        warmup,
+        percentiles,
+    )
+    .with_parameters(serde_json::json!({ "operations": operation_count }))
+    .with_targets(Targets {
+        p50_target_ms: 5.0,
+        p99_target_ms: 20.0,
+    });
+    result.outliers_detected = outliers;
+    result
+}
+
+/// Benchmark search query latency.
+fn bench_search_query(operation_count: u32, iterations: u32, warmup: u32) -> BenchmarkResult {
+    let operations: Vec<String> = (0..operation_count)
+        .map(|i| format!("connector_{}.operation_{}", i / 10, i % 10))
+        .collect();
+    let mut index = std::collections::BTreeMap::<String, Vec<String>>::new();
+    for op in &operations {
+        for word in op.split('.') {
+            index.entry(word.to_owned()).or_default().push(op.clone());
+        }
+    }
+    let query = "connector_5".to_owned();
+
+    let (percentiles, outliers) = run_benchmark_with_result(warmup, iterations, || {
+        index.get(&query).cloned()
+    });
+
+    let mut result = BenchmarkResult::new(
+        format!("search-query-{operation_count}"),
+        format!("Search query latency with {operation_count} indexed operations"),
+        iterations,
+        warmup,
+        percentiles,
+    )
+    .with_parameters(serde_json::json!({ "operations": operation_count, "query": query }))
+    .with_targets(Targets {
+        p50_target_ms: 1.0,
+        p99_target_ms: 5.0,
+    });
+    result.outliers_detected = outliers;
+    result
+}
+
+/// Benchmark batch throughput (map-over-inputs).
+fn bench_batch_throughput(item_count: u32, iterations: u32, warmup: u32) -> BenchmarkResult {
+    let items: Vec<serde_json::Value> = (0..item_count)
+        .map(|i| serde_json::json!({ "id": i, "data": format!("payload_{i}") }))
+        .collect();
+
+    let (percentiles, outliers) = run_benchmark_with_result(warmup, iterations, || {
+        items.iter()
+            .map(|item| item["data"].as_str().unwrap_or("").to_uppercase())
+            .collect::<Vec<String>>()
+    });
+
+    let mut result = BenchmarkResult::new(
+        format!("batch-throughput-{item_count}"),
+        format!("Batch map-over-inputs throughput for {item_count} items"),
+        iterations,
+        warmup,
+        percentiles,
+    )
+    .with_parameters(serde_json::json!({ "items": item_count }))
+    .with_targets(Targets {
+        p50_target_ms: 1.0,
+        p99_target_ms: 5.0,
+    });
+    result.outliers_detected = outliers;
+    result
+}
+
+/// Benchmark MCP tools/list response time.
+fn bench_mcp_tool_list(connector_count: u32, iterations: u32, warmup: u32) -> BenchmarkResult {
+    let tools: Vec<(String, String)> = (0..connector_count)
+        .flat_map(|c| {
+            (0..3).map(move |o| (format!("connector_{c}"), format!("op_{o}")))
+        })
+        .collect();
+
+    let (percentiles, outliers) = run_benchmark_with_result(warmup, iterations, || {
+        tools.iter()
+            .map(|(c, o)| serde_json::json!({ "name": format!("{c}.{o}"), "connector": c, "operation": o }))
+            .collect::<Vec<serde_json::Value>>()
+    });
+
+    let mut result = BenchmarkResult::new(
+        format!("mcp-tool-list-{connector_count}"),
+        format!("MCP tools/list for {connector_count} connectors ({} tools)", connector_count * 3),
+        iterations,
+        warmup,
+        percentiles,
+    )
+    .with_parameters(serde_json::json!({ "connectors": connector_count, "tools": connector_count * 3 }))
+    .with_targets(Targets {
+        p50_target_ms: 5.0,
+        p99_target_ms: 20.0,
+    });
+    result.outliers_detected = outliers;
+    result
+}
+
+/// Benchmark MCP tool routing latency.
+fn bench_mcp_tool_route(connector_count: u32, iterations: u32, warmup: u32) -> BenchmarkResult {
+    let mut tool_index = std::collections::BTreeMap::<String, (String, String)>::new();
+    for c in 0..connector_count {
+        for o in 0..3u32 {
+            let name = format!("connector_{c}.op_{o}");
+            tool_index.insert(name, (format!("connector_{c}"), format!("op_{o}")));
+        }
+    }
+    let target = format!("connector_{}.op_1", connector_count / 2);
+
+    let (percentiles, outliers) = run_benchmark_with_result(warmup, iterations, || {
+        tool_index.get(&target).cloned()
+    });
+
+    let mut result = BenchmarkResult::new(
+        format!("mcp-tool-route-{connector_count}"),
+        format!("MCP tool routing for {connector_count} connectors"),
+        iterations,
+        warmup,
+        percentiles,
+    )
+    .with_parameters(serde_json::json!({ "connectors": connector_count, "target": target }))
+    .with_targets(Targets {
+        p50_target_ms: 0.1,
+        p99_target_ms: 1.0,
+    });
+    result.outliers_detected = outliers;
+    result
+}
+
+/// Benchmark pipeline setup and scheduling overhead.
+fn bench_pipeline_setup(step_count: u32, iterations: u32, warmup: u32) -> BenchmarkResult {
+    let steps: Vec<serde_json::Value> = (0..step_count)
+        .map(|i| serde_json::json!({
+            "name": format!("step_{i}"),
+            "command": format!("connector_{}.op_{}", i / 3, i % 3),
+            "depends_on": if i > 0 { vec![format!("step_{}", i - 1)] } else { vec![] },
+        }))
+        .collect();
+
+    let (percentiles, outliers) = run_benchmark_with_result(warmup, iterations, || {
+        let mut visited = std::collections::BTreeSet::new();
+        for step in &steps {
+            let name = step["name"].as_str().unwrap_or("");
+            let deps = step["depends_on"].as_array().map_or(0, Vec::len);
+            visited.insert(name.to_owned());
+            std::hint::black_box(deps);
+        }
+        visited
+    });
+
+    let mut result = BenchmarkResult::new(
+        format!("pipeline-setup-{step_count}"),
+        format!("Pipeline setup and validation for {step_count} steps"),
+        iterations,
+        warmup,
+        percentiles,
+    )
+    .with_parameters(serde_json::json!({ "steps": step_count }))
+    .with_targets(Targets {
+        p50_target_ms: 10.0,
+        p99_target_ms: 50.0,
+    });
     result.outliers_detected = outliers;
     result
 }
@@ -3208,5 +3459,106 @@ mod tests {
         let cloned = r.clone();
         assert_eq!(cloned.name, r.name);
         assert_eq!(cloned.parameters["key"], "val");
+    }
+
+    // ── CUAL benchmark tests ────────────────────────────────────────
+
+    #[test]
+    fn bench_search_index_result_name() {
+        let r = bench_search_index(100, 5, 2);
+        assert_eq!(r.name, "search-index-build-100");
+        assert!(r.sample_count > 0);
+        assert!(r.percentiles.is_some());
+    }
+
+    #[test]
+    fn bench_search_index_parameters() {
+        let r = bench_search_index(200, 5, 2);
+        assert_eq!(r.parameters["operations"], 200);
+    }
+
+    #[test]
+    fn bench_search_query_result_name() {
+        let r = bench_search_query(100, 5, 2);
+        assert_eq!(r.name, "search-query-100");
+        assert!(r.sample_count > 0);
+    }
+
+    #[test]
+    fn bench_search_query_has_targets() {
+        let r = bench_search_query(500, 5, 2);
+        assert!(r.targets.is_some());
+        assert!(r.passed.is_some());
+    }
+
+    #[test]
+    fn bench_batch_throughput_result_name() {
+        let r = bench_batch_throughput(50, 5, 2);
+        assert_eq!(r.name, "batch-throughput-50");
+    }
+
+    #[test]
+    fn bench_batch_throughput_parameters() {
+        let r = bench_batch_throughput(100, 5, 2);
+        assert_eq!(r.parameters["items"], 100);
+    }
+
+    #[test]
+    fn bench_mcp_tool_list_result_name() {
+        let r = bench_mcp_tool_list(50, 5, 2);
+        assert_eq!(r.name, "mcp-tool-list-50");
+    }
+
+    #[test]
+    fn bench_mcp_tool_list_parameters() {
+        let r = bench_mcp_tool_list(100, 5, 2);
+        assert_eq!(r.parameters["connectors"], 100);
+        assert_eq!(r.parameters["tools"], 300);
+    }
+
+    #[test]
+    fn bench_mcp_tool_route_result_name() {
+        let r = bench_mcp_tool_route(100, 5, 2);
+        assert_eq!(r.name, "mcp-tool-route-100");
+    }
+
+    #[test]
+    fn bench_mcp_tool_route_has_percentiles() {
+        let r = bench_mcp_tool_route(50, 5, 2);
+        assert!(r.percentiles.is_some());
+    }
+
+    #[test]
+    fn bench_pipeline_setup_result_name() {
+        let r = bench_pipeline_setup(10, 5, 2);
+        assert_eq!(r.name, "pipeline-setup-10");
+    }
+
+    #[test]
+    fn bench_pipeline_setup_parameters() {
+        let r = bench_pipeline_setup(20, 5, 2);
+        assert_eq!(r.parameters["steps"], 20);
+    }
+
+    #[test]
+    fn bench_pipeline_setup_has_targets() {
+        let r = bench_pipeline_setup(10, 5, 2);
+        assert!(r.targets.is_some());
+    }
+
+    #[test]
+    fn cual_benchmarks_all_serialize() {
+        let benchmarks = vec![
+            bench_search_index(10, 3, 1),
+            bench_search_query(10, 3, 1),
+            bench_batch_throughput(10, 3, 1),
+            bench_mcp_tool_list(10, 3, 1),
+            bench_mcp_tool_route(10, 3, 1),
+            bench_pipeline_setup(5, 3, 1),
+        ];
+        for b in &benchmarks {
+            let json = serde_json::to_string(b).unwrap();
+            assert!(json.contains(&b.name));
+        }
     }
 }

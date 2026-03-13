@@ -107,6 +107,8 @@ mod manifest_cmd;
 mod mcp_resources;
 #[allow(dead_code)] // Mesh targeting and availability command family.
 mod mesh_cmd;
+#[allow(dead_code)] // Mesh context, targeting, placement, and rollout.
+mod mesh_targeting;
 mod net_cmd;
 #[allow(dead_code)] // Connector scaffolding command.
 mod new_cmd;
@@ -124,6 +126,8 @@ mod pipeline_defs;
 #[allow(dead_code)]
 mod pipeline_recipes;
 mod policy_cmd;
+#[allow(dead_code)] // Prerequisite onboarding, repair, and drift detection.
+mod prerequisite;
 #[allow(dead_code, clippy::cast_precision_loss)]
 mod rate_forecast;
 #[allow(dead_code)]
@@ -367,6 +371,9 @@ enum Commands {
 
     /// Manage named host contexts stored in `~/.fcp/contexts.toml`.
     Context(ContextArgs),
+
+    /// Inspect and persist explicit mesh execution targets.
+    Mesh(MeshArgs),
 
     /// Create and resume durable workflow capsules for connector jobs.
     #[command(visible_alias = "tasks")]
@@ -688,6 +695,61 @@ struct ContextRenameArgs {
 
     /// New context name.
     new_name: String,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct MeshArgs {
+    #[command(subcommand)]
+    command: MeshCommand,
+}
+
+#[derive(Subcommand, Debug, Serialize)]
+#[serde(tag = "subcommand", content = "args", rename_all = "kebab-case")]
+enum MeshCommand {
+    /// Show persisted mesh targeting state for the current host context.
+    Status(MeshStatusArgs),
+
+    /// List known mesh target candidates for the current host context.
+    Nodes(MeshNodesArgs),
+
+    /// Set the active default node for the current host context.
+    Use(MeshUseArgs),
+
+    /// Inspect or persist a connector-specific target node.
+    Target(MeshTargetArgs),
+}
+
+#[derive(Args, Debug, Default, Serialize)]
+struct MeshStatusArgs {}
+
+#[derive(Args, Debug, Default, Serialize)]
+struct MeshNodesArgs {
+    /// Optional connector id/alias to inspect connector-specific target candidates.
+    connector: Option<String>,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct MeshUseArgs {
+    /// Node id or alias to make active for the current context.
+    node: String,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct MeshTargetArgs {
+    /// Connector id, alias, or family name.
+    connector: String,
+
+    /// Persist this connector to a specific node.
+    #[arg(long)]
+    node: Option<String>,
+
+    /// Optional zone to remember alongside the target.
+    #[arg(long)]
+    zone: Option<String>,
+
+    /// Remove the persisted connector-specific target instead of setting it.
+    #[arg(long, default_value_t = false)]
+    clear: bool,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -2962,6 +3024,7 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
             DispatchOutcome { payload, exit_code }
         }
         Commands::Context(args) => context_dispatch(args)?,
+        Commands::Mesh(args) => mesh_dispatch(args)?,
         Commands::Task(args) => task_dispatch(args)?,
         Commands::Session(args) => session_dispatch(args)?,
         Commands::Agent(args) => agent_dispatch(args)?,
@@ -3518,8 +3581,42 @@ struct MeshContextFile {
     default_zone: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     node_identity: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "MeshTargetState::is_empty")]
+    mesh_targets: MeshTargetState,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     config_overrides: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct MeshTargetState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    active_node: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    connector_targets: BTreeMap<String, MeshConnectorTarget>,
+}
+
+impl MeshTargetState {
+    fn is_empty(&self) -> bool {
+        self.active_node.is_none() && self.connector_targets.is_empty()
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct MeshConnectorTarget {
+    node: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    zone: Option<String>,
+    persisted_at: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct MeshKnownNode {
+    node: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    zone: Option<String>,
+    connectors: Vec<String>,
+    sources: Vec<String>,
+    stale: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -3616,7 +3713,19 @@ fn resolve_host_config(explicit_host: Option<&str>) -> Result<Option<ResolvedHos
     }))
 }
 
+#[cfg(test)]
+thread_local! {
+    static TEST_CONTEXT_CONFIG_PATH_OVERRIDE: std::cell::RefCell<Option<PathBuf>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
 fn context_config_path() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(path) = TEST_CONTEXT_CONFIG_PATH_OVERRIDE.with(|slot| slot.borrow().clone()) {
+        return Some(path);
+    }
+
     if let Ok(dir) = std::env::var("FCP_CONFIG_DIR")
         && !dir.trim().is_empty()
     {
@@ -3637,6 +3746,7 @@ fn default_context_config() -> ContextConfigFile {
             endpoint: "unix:///tmp/fcp-dev.sock".to_owned(),
             default_zone: Some(ZoneId::work().to_string()),
             node_identity: None,
+            mesh_targets: MeshTargetState::default(),
             config_overrides: BTreeMap::new(),
         },
     );
@@ -3679,6 +3789,26 @@ fn save_context_config(path: &PathBuf, config: &ContextConfigFile) -> Result<()>
     let raw = toml::to_string_pretty(config)?;
     std::fs::write(path, raw)
         .with_context(|| format!("failed to write host context file `{}`", path.display()))
+}
+
+#[cfg(test)]
+struct ContextConfigPathOverrideGuard;
+
+#[cfg(test)]
+fn install_test_context_config_path(path: PathBuf) -> ContextConfigPathOverrideGuard {
+    TEST_CONTEXT_CONFIG_PATH_OVERRIDE.with(|slot| {
+        *slot.borrow_mut() = Some(path);
+    });
+    ContextConfigPathOverrideGuard
+}
+
+#[cfg(test)]
+impl Drop for ContextConfigPathOverrideGuard {
+    fn drop(&mut self) {
+        TEST_CONTEXT_CONFIG_PATH_OVERRIDE.with(|slot| {
+            slot.borrow_mut().take();
+        });
+    }
 }
 
 fn resolved_zone(explicit_zone: Option<&str>, host: &ResolvedHostConfig) -> String {
@@ -6062,6 +6192,527 @@ fn format_audit_gaps_toon(gaps: &[AuditGapReport], blocking_only: bool) -> Strin
     out
 }
 
+fn mesh_dispatch(args: &MeshArgs) -> Result<DispatchOutcome> {
+    match &args.command {
+        MeshCommand::Status(args) => mesh_status_dispatch(args),
+        MeshCommand::Nodes(args) => mesh_nodes_dispatch(args),
+        MeshCommand::Use(args) => mesh_use_dispatch(args),
+        MeshCommand::Target(args) => mesh_target_dispatch(args),
+    }
+}
+
+fn mesh_status_dispatch(_args: &MeshStatusArgs) -> Result<DispatchOutcome> {
+    let (path, config) = load_context_config()?;
+    let (context_name, context) = active_context_entry(&config)?;
+    let known_nodes = mesh_known_nodes(&context.mesh_targets, context.default_zone.as_deref());
+    let mut warnings = vec![
+        "Per-node mesh inventory is not yet exposed by the current fcp-host CLI/API; showing persisted target state only.".to_owned(),
+    ];
+
+    let active_session = cli_session_store().active_session().ok().flatten();
+    let active_session_value = active_session.as_ref().map_or(Value::Null, |session| {
+        let (count, warning) = session_active_lock_count(&session.agent_name);
+        if let Some(warning) = warning {
+            warnings.push(warning);
+        }
+        session_summary_value(session, count)
+    });
+
+    if context.mesh_targets.active_node.is_none() {
+        warnings.push(
+            "No active default node is configured for this host context.".to_owned(),
+        );
+    }
+
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "mesh");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "mesh",
+        "subcommand": "status",
+        "config_path": path.display().to_string(),
+        "current_context": &context_name,
+        "context": mesh_context_summary_value(&context_name, context),
+        "target_state": mesh_target_state_value(&context.mesh_targets, &known_nodes),
+        "active_session": active_session_value,
+        "live_inventory": {
+            "available": false,
+            "source": "none",
+            "reason": "current fcp-host routes do not expose authoritative per-node mesh inventory",
+        },
+        "next_actions": [
+            "fwc mesh nodes".to_owned(),
+            "fwc mesh use <node>".to_owned(),
+            "fwc mesh target <connector> --node <node>".to_owned(),
+        ],
+    });
+    payload["warnings"] = json!(warnings);
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn mesh_nodes_dispatch(args: &MeshNodesArgs) -> Result<DispatchOutcome> {
+    let (path, config) = load_context_config()?;
+    let (context_name, context) = active_context_entry(&config)?;
+    let target_state = &context.mesh_targets;
+    let mut warnings = vec![
+        "Per-node mesh inventory is not yet exposed by the current fcp-host CLI/API; showing persisted target candidates only.".to_owned(),
+    ];
+    let mut nodes = mesh_known_nodes(target_state, context.default_zone.as_deref());
+
+    if let Some(connector) = args.connector.as_ref() {
+        if let Some(target) = target_state.connector_targets.get(connector) {
+            nodes.retain(|node| node.node == target.node);
+        } else if let Some(active_node) = target_state.active_node.as_ref() {
+            nodes.retain(|node| &node.node == active_node);
+            warnings.push(format!(
+                "No connector-specific target exists for `{connector}`; showing the active default node instead."
+            ));
+        } else {
+            nodes.clear();
+            warnings.push(format!(
+                "No persisted target exists for `{connector}`, and there is no active default node to fall back to."
+            ));
+        }
+    }
+
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "mesh");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "mesh",
+        "subcommand": "nodes",
+        "config_path": path.display().to_string(),
+        "current_context": &context_name,
+        "context": mesh_context_summary_value(&context_name, context),
+        "connector_filter": &args.connector,
+        "inventory_source": "persisted-targets",
+        "node_count": nodes.len(),
+        "nodes": nodes,
+        "next_actions": [
+            "fwc mesh status".to_owned(),
+            "fwc mesh use <node>".to_owned(),
+            "fwc mesh target <connector> --node <node>".to_owned(),
+        ],
+    });
+    payload["warnings"] = json!(warnings);
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn mesh_use_dispatch(args: &MeshUseArgs) -> Result<DispatchOutcome> {
+    let node = args.node.trim();
+    if node.is_empty() {
+        return Ok(DispatchOutcome {
+            payload: json!({
+                "status": "error",
+                "command": "mesh",
+                "subcommand": "use",
+                "error": {
+                    "type": "invalid-mesh-node",
+                    "message": "Mesh node id cannot be empty.",
+                    "recoverable": true,
+                },
+                "next_actions": [
+                    "fwc mesh nodes".to_owned(),
+                    "fwc mesh use <node>".to_owned(),
+                ],
+            }),
+            exit_code: CliExitCode::Validation,
+        });
+    }
+
+    let (path, mut config) = load_context_config()?;
+    let (context_name, context_summary, target_state, unverified) = {
+        let (context_name, context) = active_context_entry_mut(&mut config)?;
+        let known_before = mesh_known_nodes(&context.mesh_targets, context.default_zone.as_deref());
+        let unverified = !known_before.iter().any(|known| known.node == node);
+        context.mesh_targets.active_node = Some(node.to_owned());
+        let known_after = mesh_known_nodes(&context.mesh_targets, context.default_zone.as_deref());
+        let context_summary = mesh_context_summary_value(&context_name, context);
+        let target_state = mesh_target_state_value(&context.mesh_targets, &known_after);
+        (context_name, context_summary, target_state, unverified)
+    };
+    save_context_config(&path, &config)?;
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "mesh");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "mesh",
+        "subcommand": "use",
+        "message": format!("Set the active default mesh node for `{context_name}` to `{node}`."),
+        "config_path": path.display().to_string(),
+        "current_context": &context_name,
+        "context": context_summary,
+        "target_state": target_state,
+        "next_actions": [
+            "fwc mesh status".to_owned(),
+            "fwc mesh nodes".to_owned(),
+            "fwc mesh target <connector> --node <node>".to_owned(),
+        ],
+    });
+    if unverified {
+        payload["warnings"] = json!([
+            "This node is now the active default, but it does not appear in any persisted connector target yet, so the selection is currently unverified.".to_owned(),
+        ]);
+    }
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn mesh_target_dispatch(args: &MeshTargetArgs) -> Result<DispatchOutcome> {
+    let (path, mut config) = load_context_config()?;
+
+    if args.clear {
+        let clear_result = {
+            let (context_name, context) = active_context_entry_mut(&mut config)?;
+            let removed = context.mesh_targets.connector_targets.remove(&args.connector);
+            removed.map(|_| {
+                let known_nodes =
+                    mesh_known_nodes(&context.mesh_targets, context.default_zone.as_deref());
+                let context_summary = mesh_context_summary_value(&context_name, context);
+                (
+                    context_name,
+                    context_summary,
+                    mesh_target_state_value(&context.mesh_targets, &known_nodes),
+                    mesh_effective_target_value(&context.mesh_targets, &args.connector),
+                )
+            })
+        };
+        let Some((context_name, context_summary, target_state, effective_target)) = clear_result
+        else {
+            return Ok(mesh_target_not_found_dispatch(&args.connector));
+        };
+
+        save_context_config(&path, &config)?;
+        let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "mesh");
+        let mut payload = json!({
+            "status": "ok",
+            "command": "mesh",
+            "subcommand": "target",
+            "message": format!("Removed the persisted mesh target for `{}` in `{}`.", args.connector, context_name),
+            "connector": &args.connector,
+            "config_path": path.display().to_string(),
+            "current_context": &context_name,
+            "context": context_summary,
+            "target_state": target_state,
+            "effective_target": effective_target,
+            "next_actions": [
+                format!("fwc mesh target {} --node <node>", args.connector),
+                "fwc mesh status".to_owned(),
+            ],
+        });
+        envelope.inject_into(&mut payload);
+        return Ok(DispatchOutcome {
+            payload,
+            exit_code: CliExitCode::Success,
+        });
+    }
+
+    if let Some(node) = args.node.as_ref() {
+        let node = node.trim();
+        if node.is_empty() {
+            return Ok(DispatchOutcome {
+                payload: json!({
+                    "status": "error",
+                    "command": "mesh",
+                    "subcommand": "target",
+                    "connector": &args.connector,
+                    "error": {
+                        "type": "invalid-mesh-node",
+                        "message": "Connector target node cannot be empty.",
+                        "recoverable": true,
+                    },
+                    "next_actions": [
+                        format!("fwc mesh target {} --node <node>", args.connector),
+                        "fwc mesh status".to_owned(),
+                    ],
+                }),
+                exit_code: CliExitCode::Validation,
+            });
+        }
+
+        let (context_name, context_summary, target_state, effective_target, zone_source) = {
+            let (context_name, context) = active_context_entry_mut(&mut config)?;
+            let zone = args.zone.clone().or_else(|| context.default_zone.clone());
+            let zone_source = if args.zone.is_some() {
+                "explicit"
+            } else if context.default_zone.is_some() {
+                "context-default"
+            } else {
+                "unset"
+            };
+            context.mesh_targets.connector_targets.insert(
+                args.connector.clone(),
+                MeshConnectorTarget {
+                    node: node.to_owned(),
+                    zone,
+                    persisted_at: Utc::now().to_rfc3339(),
+                },
+            );
+            let known_nodes =
+                mesh_known_nodes(&context.mesh_targets, context.default_zone.as_deref());
+            let context_summary = mesh_context_summary_value(&context_name, context);
+            (
+                context_name,
+                context_summary,
+                mesh_target_state_value(&context.mesh_targets, &known_nodes),
+                mesh_effective_target_value(&context.mesh_targets, &args.connector),
+                zone_source,
+            )
+        };
+        save_context_config(&path, &config)?;
+
+        let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "mesh");
+        let mut payload = json!({
+            "status": "ok",
+            "command": "mesh",
+            "subcommand": "target",
+            "message": format!("Pinned `{}` to mesh node `{}` in `{}`.", args.connector, node, context_name),
+            "connector": &args.connector,
+            "config_path": path.display().to_string(),
+            "current_context": &context_name,
+            "context": context_summary,
+            "target_state": target_state,
+            "effective_target": effective_target,
+            "zone_source": zone_source,
+            "next_actions": [
+                format!("fwc mesh target {}", args.connector),
+                "fwc mesh status".to_owned(),
+                "fwc mesh nodes".to_owned(),
+            ],
+        });
+        envelope.inject_into(&mut payload);
+        return Ok(DispatchOutcome {
+            payload,
+            exit_code: CliExitCode::Success,
+        });
+    }
+
+    let inspect_result = {
+        let (context_name, context) = active_context_entry_mut(&mut config)?;
+        context
+            .mesh_targets
+            .connector_targets
+            .contains_key(&args.connector)
+            .then(|| {
+                let known_nodes =
+                    mesh_known_nodes(&context.mesh_targets, context.default_zone.as_deref());
+                let context_summary = mesh_context_summary_value(&context_name, context);
+                (
+                    context_name,
+                    context_summary,
+                    mesh_target_state_value(&context.mesh_targets, &known_nodes),
+                    mesh_effective_target_value(&context.mesh_targets, &args.connector),
+                )
+            })
+    };
+
+    if let Some((context_name, context_summary, target_state, effective_target)) = inspect_result {
+        let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "mesh");
+        let mut payload = json!({
+            "status": "ok",
+            "command": "mesh",
+            "subcommand": "target",
+            "connector": &args.connector,
+            "config_path": path.display().to_string(),
+            "current_context": &context_name,
+            "context": context_summary,
+            "target_state": target_state,
+            "effective_target": effective_target,
+            "next_actions": [
+                format!("fwc mesh target {} --node <node>", args.connector),
+                format!("fwc mesh target {} --clear", args.connector),
+                "fwc mesh status".to_owned(),
+            ],
+        });
+        envelope.inject_into(&mut payload);
+        Ok(DispatchOutcome {
+            payload,
+            exit_code: CliExitCode::Success,
+        })
+    } else {
+        Ok(mesh_target_not_found_dispatch(&args.connector))
+    }
+}
+
+fn mesh_target_not_found_dispatch(connector: &str) -> DispatchOutcome {
+    DispatchOutcome {
+        payload: json!({
+            "status": "error",
+            "command": "mesh",
+            "subcommand": "target",
+            "connector": connector,
+            "error": {
+                "type": "mesh-target-not-found",
+                "message": format!("`{connector}` does not have a persisted mesh target in the current context."),
+                "recoverable": true,
+            },
+            "next_actions": [
+                format!("fwc mesh target {connector} --node <node>"),
+                "fwc mesh status".to_owned(),
+            ],
+        }),
+        exit_code: CliExitCode::Validation,
+    }
+}
+
+fn active_context_entry(config: &ContextConfigFile) -> Result<(String, &MeshContextFile)> {
+    let name = config.current_context.clone();
+    let context = config.contexts.get(&name).ok_or_else(|| {
+        anyhow::anyhow!("active host context `{name}` is missing from the stored context config")
+    })?;
+    Ok((name, context))
+}
+
+fn active_context_entry_mut(
+    config: &mut ContextConfigFile,
+) -> Result<(String, &mut MeshContextFile)> {
+    let name = config.current_context.clone();
+    let context = config.contexts.get_mut(&name).ok_or_else(|| {
+        anyhow::anyhow!("active host context `{name}` is missing from the stored context config")
+    })?;
+    Ok((name, context))
+}
+
+fn mesh_context_summary_value(name: &str, context: &MeshContextFile) -> Value {
+    json!({
+        "name": name,
+        "endpoint": &context.endpoint,
+        "default_zone": &context.default_zone,
+        "node_identity": context.node_identity.as_ref().map(|path| path.display().to_string()),
+        "persistence_scope": "host-context",
+    })
+}
+
+fn mesh_target_state_value(state: &MeshTargetState, known_nodes: &[MeshKnownNode]) -> Value {
+    let active_default_node_stale = state.active_node.as_ref().is_some_and(|node| {
+        known_nodes
+            .iter()
+            .find(|known| &known.node == node)
+            .is_some_and(|known| known.stale)
+    });
+
+    let connector_targets = state
+        .connector_targets
+        .iter()
+        .map(|(connector, target)| {
+            json!({
+                "connector": connector,
+                "node": &target.node,
+                "zone": &target.zone,
+                "persisted_at": &target.persisted_at,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    json!({
+        "selection_precedence": [
+            "connector-target",
+            "active-default",
+            "none"
+        ],
+        "active_default_node": &state.active_node,
+        "active_default_node_stale": active_default_node_stale,
+        "connector_target_count": state.connector_targets.len(),
+        "known_node_count": known_nodes.len(),
+        "connector_targets": connector_targets,
+        "known_nodes": known_nodes,
+    })
+}
+
+fn mesh_effective_target_value(state: &MeshTargetState, connector: &str) -> Value {
+    if let Some(target) = state.connector_targets.get(connector) {
+        return json!({
+            "connector": connector,
+            "node": &target.node,
+            "zone": &target.zone,
+            "source": "connector-target",
+            "persisted_at": &target.persisted_at,
+        });
+    }
+
+    state.active_node.as_ref().map_or(Value::Null, |node| {
+        json!({
+            "connector": connector,
+            "node": node,
+            "source": "active-default",
+        })
+    })
+}
+
+fn mesh_known_nodes(state: &MeshTargetState, default_zone: Option<&str>) -> Vec<MeshKnownNode> {
+    let mut connectors_by_node: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut zones_by_node: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut active_defaults = BTreeSet::new();
+
+    if let Some(node) = state.active_node.as_ref() {
+        active_defaults.insert(node.clone());
+        if let Some(zone) = default_zone {
+            zones_by_node
+                .entry(node.clone())
+                .or_default()
+                .insert(zone.to_owned());
+        }
+    }
+
+    for (connector, target) in &state.connector_targets {
+        connectors_by_node
+            .entry(target.node.clone())
+            .or_default()
+            .insert(connector.clone());
+        if let Some(zone) = target.zone.as_deref().or(default_zone) {
+            zones_by_node
+                .entry(target.node.clone())
+                .or_default()
+                .insert(zone.to_owned());
+        }
+    }
+
+    let mut node_ids = BTreeSet::new();
+    node_ids.extend(active_defaults.iter().cloned());
+    node_ids.extend(connectors_by_node.keys().cloned());
+
+    node_ids
+        .into_iter()
+        .map(|node| {
+            let connectors = connectors_by_node
+                .get(&node)
+                .map(|items| items.iter().cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
+            let zone = zones_by_node.get(&node).and_then(|zones| {
+                if zones.len() == 1 {
+                    zones.iter().next().cloned()
+                } else {
+                    default_zone.map(ToOwned::to_owned)
+                }
+            });
+            let active_default = active_defaults.contains(&node);
+            let stale = active_default && connectors.is_empty();
+            let mut sources = Vec::new();
+            if active_default {
+                sources.push("active-default".to_owned());
+            }
+            if !connectors.is_empty() {
+                sources.push("connector-target".to_owned());
+            }
+            MeshKnownNode {
+                node,
+                zone,
+                connectors,
+                sources,
+                stale,
+            }
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_lines)]
 fn context_dispatch(args: &ContextArgs) -> Result<DispatchOutcome> {
     match &args.command {
@@ -6199,6 +6850,7 @@ fn context_dispatch(args: &ContextArgs) -> Result<DispatchOutcome> {
                     endpoint: args.endpoint.clone(),
                     default_zone: args.zone.clone(),
                     node_identity: args.identity.clone(),
+                    mesh_targets: MeshTargetState::default(),
                     config_overrides: BTreeMap::new(),
                 },
             );

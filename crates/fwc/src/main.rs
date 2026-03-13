@@ -25,18 +25,24 @@ mod bench_cmd;
 mod catalog;
 #[allow(dead_code)] // Event checkpoint and replay from sequence/time.
 mod checkpoint;
+#[allow(dead_code)] // Workflow confusion corpus for task/session/pipeline cases.
+mod confusion_workflow;
 #[allow(dead_code)] // Auth verify + credential backend trait.
 mod credential;
 #[allow(dead_code)]
 mod credential_store;
 #[allow(dead_code)]
 mod doctor;
+#[allow(dead_code)] // E2E scenario runner and artifact bundler.
+mod e2e_scenario;
 #[allow(dead_code)] // Error taxonomy wired when host-backed dispatch lands.
 mod error_taxonomy;
 mod event_stream;
 #[allow(dead_code)] // Comprehensive event filtering engine.
 mod events;
 mod export_tools;
+#[allow(dead_code)] // jq-style field extraction with --extract flag.
+mod extract;
 #[allow(dead_code)] // Fallback routing with circuit-breaker integration.
 mod fallback_routing;
 mod format_table;
@@ -57,6 +63,8 @@ mod identifier;
 mod intent;
 #[allow(dead_code)]
 mod json_diff;
+#[allow(dead_code)] // Lifecycle mutation contract: enable/disable/start/stop/restart.
+mod lifecycle_mutations;
 mod manifest_cmd;
 #[allow(dead_code)]
 mod mcp_resources;
@@ -65,6 +73,8 @@ mod net_cmd;
 mod new_cmd;
 #[allow(dead_code)]
 mod op_lock;
+#[allow(dead_code)] // Operation replay from history with input override.
+mod op_replay;
 mod package_cmd;
 #[allow(dead_code)]
 mod pipe;
@@ -108,6 +118,8 @@ mod snapshot_recovery;
 mod snapshot_workflow;
 mod supply_chain_cmd;
 mod template;
+#[allow(dead_code)] // Handlebars-style template rendering with --template flag.
+mod template_render;
 #[allow(dead_code)] // Test observability contract: logging, artifact, redaction, and replay.
 mod test_observability;
 #[allow(dead_code)]

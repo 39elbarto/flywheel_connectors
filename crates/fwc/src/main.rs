@@ -10,6 +10,8 @@ mod agent_mail;
 mod audit;
 #[allow(dead_code)] // Legacy file-based audit-chain verify/timeline support.
 mod audit_chain;
+#[allow(dead_code)] // Audit command family wiring for connector compliance.
+mod audit_cmd;
 #[allow(dead_code)]
 mod auth_status;
 #[allow(
@@ -28,6 +30,8 @@ mod batch_progress;
     clippy::needless_borrows_for_generic_args
 )]
 mod bench_cmd;
+#[cfg(test)]
+mod bench_helpers;
 mod catalog;
 #[allow(dead_code)] // Event checkpoint and replay from sequence/time.
 mod checkpoint;

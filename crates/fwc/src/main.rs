@@ -455,6 +455,9 @@ enum Commands {
     /// Remove a connector pin.
     Unpin(TargetArgs),
 
+    /// Lifecycle preflight checks and state-machine queries.
+    Lifecycle(LifecycleArgs),
+
     /// Manage canary rollout state and manual rollback.
     Rollout(RolloutArgs),
 
@@ -1460,6 +1463,32 @@ struct AuthRemoveArgs {
     /// Confirm deleting the stored credential from the local credential store.
     #[arg(long)]
     yes: bool,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct LifecycleArgs {
+    /// Connector id, alias, or family name.
+    connector: String,
+
+    /// Lifecycle action to evaluate: enable, disable, start, stop, restart, force-stop.
+    #[arg(long)]
+    action: Option<String>,
+
+    /// Run a preflight safety check for the specified action.
+    #[arg(long, default_value_t = false)]
+    preflight: bool,
+
+    /// Show valid actions for the connector's current state.
+    #[arg(long, default_value_t = false)]
+    valid_actions: bool,
+
+    /// Force flag for preflight checks.
+    #[arg(long, default_value_t = false)]
+    force: bool,
+
+    /// Simulate (dry-run) for preflight checks.
+    #[arg(long, default_value_t = false)]
+    dry_run: bool,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -2937,6 +2966,7 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         Commands::Update(args) => update_dispatch(args, cli.host.as_deref())?,
         Commands::Pin(args) => pin_dispatch(args, cli.host.as_deref())?,
         Commands::Unpin(args) => unpin_dispatch(args, cli.host.as_deref())?,
+        Commands::Lifecycle(args) => lifecycle_dispatch(args, cli.host.as_deref())?,
         Commands::Rollout(args) => rollout_dispatch(args, cli.host.as_deref())?,
         Commands::Auth(args) => auth_dispatch(args)?,
         Commands::Config(args) => config_dispatch(args, cli.host.as_deref())?,
@@ -7974,6 +8004,211 @@ fn unpin_dispatch(args: &TargetArgs, explicit_host: Option<&str>) -> Result<Disp
         payload,
         exit_code: CliExitCode::Success,
     })
+}
+
+fn lifecycle_dispatch(args: &LifecycleArgs, explicit_host: Option<&str>) -> Result<DispatchOutcome> {
+    let Some(host) = resolve_host_config(explicit_host)? else {
+        return Ok(missing_host_dispatch(
+            "lifecycle",
+            serde_json::to_value(args)?,
+            vec![
+                format!("fwc lifecycle {} --valid-actions --host <endpoint>", args.connector),
+                "Set `FWC_HOST` or `FCP_HOST_ENDPOINT`, or configure an active FCP context."
+                    .to_owned(),
+            ],
+        ));
+    };
+    let client = HostAdminClient::new(&host.endpoint)?;
+    let (catalog, _) = client.catalog(None)?;
+    let connector = match catalog.resolve_connector(&args.connector) {
+        Ok(c) => c,
+        Err(error) => {
+            return Ok(connector_resolution_dispatch("lifecycle", &args.connector, &error));
+        }
+    };
+
+    // Determine current lifecycle state from catalog health
+    let current_state = lifecycle_state_from_catalog(connector);
+
+    // --valid-actions: show valid lifecycle actions for the current state
+    if args.valid_actions {
+        let valid = lifecycle_mutations::valid_actions(current_state);
+        let valid_labels: Vec<&str> = valid.iter().map(|a| a.label()).collect();
+        let toon = format!(
+            "Lifecycle: {}\n  State: {}\n  Valid actions: {}",
+            connector.slug,
+            current_state.label(),
+            if valid_labels.is_empty() { "none".to_owned() } else { valid_labels.join(", ") },
+        );
+        let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "lifecycle");
+        let mut payload = json!({
+            "status": "ok",
+            "command": "lifecycle",
+            "mode": "valid-actions",
+            "connector": {
+                "slug": &connector.slug,
+                "canonical_id": connector.summary.id.as_str(),
+            },
+            "current_state": current_state.label(),
+            "valid_actions": valid_labels,
+            "toon": toon,
+            "next_actions": valid.iter().map(|a| {
+                format!("fwc lifecycle {} --action {} --preflight --host {}", connector.slug, a.label(), host.endpoint)
+            }).collect::<Vec<_>>(),
+        });
+        envelope.inject_into(&mut payload);
+        return Ok(DispatchOutcome {
+            payload,
+            exit_code: CliExitCode::Success,
+        });
+    }
+
+    // --preflight: run a preflight safety check for the specified action
+    if args.preflight {
+        let Some(ref action_str) = args.action else {
+            return Ok(DispatchOutcome {
+                payload: json!({
+                    "status": "error",
+                    "command": "lifecycle",
+                    "error": {
+                        "type": "missing-action",
+                        "message": "--preflight requires --action <action>",
+                        "recoverable": true,
+                    },
+                    "next_actions": [
+                        format!("fwc lifecycle {} --valid-actions --host {}", args.connector, host.endpoint),
+                    ],
+                }),
+                exit_code: CliExitCode::Validation,
+            });
+        };
+        let action = match parse_lifecycle_action(action_str) {
+            Some(a) => a,
+            None => {
+                return Ok(DispatchOutcome {
+                    payload: json!({
+                        "status": "error",
+                        "command": "lifecycle",
+                        "error": {
+                            "type": "invalid-action",
+                            "message": format!("Unknown lifecycle action: `{action_str}`. Valid: enable, disable, start, stop, restart, force-stop."),
+                            "recoverable": true,
+                        },
+                        "next_actions": [
+                            format!("fwc lifecycle {} --valid-actions --host {}", args.connector, host.endpoint),
+                        ],
+                    }),
+                    exit_code: CliExitCode::Validation,
+                });
+            }
+        };
+
+        let request = lifecycle_mutations::MutationRequest::new(
+            connector.summary.id.to_string(),
+            action,
+        )
+        .with_force(args.force)
+        .with_dry_run(args.dry_run);
+        let check = lifecycle_mutations::preflight(&request, current_state);
+        let toon = lifecycle_mutations::format_preflight_toon(&check);
+
+        let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "lifecycle");
+        let mut payload = json!({
+            "status": "ok",
+            "command": "lifecycle",
+            "mode": "preflight",
+            "connector": {
+                "slug": &connector.slug,
+                "canonical_id": connector.summary.id.as_str(),
+            },
+            "current_state": current_state.label(),
+            "action": action.label(),
+            "preflight": {
+                "risk_level": check.risk_level.label(),
+                "requires_confirmation": check.requires_confirmation,
+                "is_noop": check.is_noop,
+                "can_proceed": check.can_proceed(),
+                "estimated_duration_ms": check.estimated_duration.as_millis(),
+                "warnings": check.warnings,
+                "blockers": check.blockers,
+            },
+            "toon": toon,
+            "next_actions": if check.can_proceed() {
+                vec![
+                    format!("fwc lifecycle {} --action {} --host {} (when ready to execute)", connector.slug, action.label(), host.endpoint),
+                ]
+            } else {
+                vec![
+                    format!("fwc lifecycle {} --valid-actions --host {}", connector.slug, host.endpoint),
+                ]
+            },
+        });
+        envelope.inject_into(&mut payload);
+        return Ok(DispatchOutcome {
+            payload,
+            exit_code: CliExitCode::Success,
+        });
+    }
+
+    // Default: show current lifecycle state summary
+    let valid = lifecycle_mutations::valid_actions(current_state);
+    let valid_labels: Vec<&str> = valid.iter().map(|a| a.label()).collect();
+    let toon = format!(
+        "Lifecycle: {}\n  State: {}\n  Valid actions: {}",
+        connector.slug,
+        current_state.label(),
+        if valid_labels.is_empty() { "none".to_owned() } else { valid_labels.join(", ") },
+    );
+    let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "lifecycle");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "lifecycle",
+        "connector": {
+            "slug": &connector.slug,
+            "canonical_id": connector.summary.id.as_str(),
+        },
+        "current_state": current_state.label(),
+        "valid_actions": valid_labels,
+        "toon": toon,
+        "next_actions": [
+            format!("fwc lifecycle {} --valid-actions --host {}", connector.slug, host.endpoint),
+            format!("fwc lifecycle {} --action start --preflight --host {}", connector.slug, host.endpoint),
+        ],
+    });
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Success,
+    })
+}
+
+/// Map catalog connector status to lifecycle_mutations::LifecycleState.
+fn lifecycle_state_from_catalog(
+    connector: &HostConnectorRecord,
+) -> lifecycle_mutations::LifecycleState {
+    if !connector.summary.enabled {
+        return lifecycle_mutations::LifecycleState::Disabled;
+    }
+    if connector.summary.health.is_healthy() {
+        lifecycle_mutations::LifecycleState::Running
+    } else if connector.summary.health.is_available() {
+        lifecycle_mutations::LifecycleState::Running // degraded but running
+    } else {
+        lifecycle_mutations::LifecycleState::Failed
+    }
+}
+
+/// Parse a lifecycle action string to the enum variant.
+fn parse_lifecycle_action(s: &str) -> Option<lifecycle_mutations::LifecycleAction> {
+    match s {
+        "enable" => Some(lifecycle_mutations::LifecycleAction::Enable),
+        "disable" => Some(lifecycle_mutations::LifecycleAction::Disable),
+        "start" => Some(lifecycle_mutations::LifecycleAction::Start),
+        "stop" => Some(lifecycle_mutations::LifecycleAction::Stop),
+        "restart" => Some(lifecycle_mutations::LifecycleAction::Restart),
+        "force-stop" | "force_stop" => Some(lifecycle_mutations::LifecycleAction::ForceStop),
+        _ => None,
+    }
 }
 
 fn rollout_dispatch(args: &RolloutArgs, explicit_host: Option<&str>) -> Result<DispatchOutcome> {
@@ -30500,6 +30735,149 @@ depends_on = ["missing"]
                 .as_array()
                 .is_some_and(|actions| !actions.is_empty())
         );
+    }
+
+    // ── lifecycle command tests ────────────────────────────────
+
+    #[test]
+    fn lifecycle_offline_reports_missing_host() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "lifecycle", "github", "--valid-actions",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "lifecycle");
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
+    }
+
+    #[test]
+    fn lifecycle_valid_actions_shows_state() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([(
+                "POST /rpc/discover".to_owned(),
+                mock_discovery_response_json(),
+            )]),
+            1,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "--host", &host, "lifecycle",
+            "github", "--valid-actions",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "lifecycle");
+        assert_eq!(payload["mode"], "valid-actions");
+        assert!(payload["current_state"].is_string());
+        assert!(payload["valid_actions"].is_array());
+        assert!(payload["toon"].as_str().is_some_and(|t| t.contains("Lifecycle:")));
+    }
+
+    #[test]
+    fn lifecycle_preflight_requires_action() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([(
+                "POST /rpc/discover".to_owned(),
+                mock_discovery_response_json(),
+            )]),
+            1,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "--host", &host, "lifecycle",
+            "github", "--preflight",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["error"]["type"], "missing-action");
+    }
+
+    #[test]
+    fn lifecycle_preflight_invalid_action_reports_error() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([(
+                "POST /rpc/discover".to_owned(),
+                mock_discovery_response_json(),
+            )]),
+            1,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "--host", &host, "lifecycle",
+            "github", "--preflight", "--action", "teleport",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["error"]["type"], "invalid-action");
+    }
+
+    #[test]
+    fn lifecycle_preflight_valid_action_returns_check() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([(
+                "POST /rpc/discover".to_owned(),
+                mock_discovery_response_json(),
+            )]),
+            1,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "--host", &host, "lifecycle",
+            "github", "--preflight", "--action", "restart",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "lifecycle");
+        assert_eq!(payload["mode"], "preflight");
+        assert!(payload["preflight"]["risk_level"].is_string());
+        assert!(payload["preflight"]["can_proceed"].is_boolean());
+        assert!(payload["toon"].as_str().is_some_and(|t| t.contains("Preflight:")));
+    }
+
+    #[test]
+    fn lifecycle_default_shows_state_and_actions() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([(
+                "POST /rpc/discover".to_owned(),
+                mock_discovery_response_json(),
+            )]),
+            1,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "--host", &host, "lifecycle",
+            "github",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "lifecycle");
+        assert!(payload["current_state"].is_string());
+        assert!(payload["valid_actions"].is_array());
+    }
+
+    #[test]
+    fn lifecycle_unknown_connector_reports_error() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([(
+                "POST /rpc/discover".to_owned(),
+                mock_discovery_response_json(),
+            )]),
+            1,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "--host", &host, "lifecycle",
+            "nonexistent-connector", "--valid-actions",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["error"]["type"], "connector-not-found");
     }
 
     #[test]

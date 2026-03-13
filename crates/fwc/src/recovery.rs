@@ -42,7 +42,8 @@ pub fn command_alias(token: &str) -> Option<&'static str> {
         "template" | "templates" => Some("template"),
 
         // Lifecycle aliases
-        "health" | "state" | "check" | "healthcheck" => Some("status"),
+        "healthcheck" | "health-check" => Some("health"),
+        "state" | "check" => Some("status"),
         "diagnose" | "diagnostics" => Some("doctor"),
         "budgets" | "usage" | "spend" => Some("budget"),
         "caps" | "permissions" | "grants" => Some("capabilities"),
@@ -604,10 +605,12 @@ mod tests {
     }
 
     #[test]
-    fn alias_health_resolves_to_status() {
-        assert_eq!(command_alias("health"), Some("status"));
+    fn alias_health_resolves() {
+        // "health" is now a dedicated subcommand, no longer an alias.
+        assert_eq!(command_alias("health"), None);
+        assert_eq!(command_alias("healthcheck"), Some("health"));
+        assert_eq!(command_alias("health-check"), Some("health"));
         assert_eq!(command_alias("check"), Some("status"));
-        assert_eq!(command_alias("healthcheck"), Some("status"));
     }
 
     #[test]
@@ -971,6 +974,7 @@ mod tests {
             "template",
             "doctor",
             "status",
+            "health",
             "budget",
             "capabilities",
             "install",
@@ -1215,6 +1219,7 @@ mod tests {
             "template",
             "doctor",
             "status",
+            "health",
             "budget",
             "capabilities",
             "install",
@@ -1251,7 +1256,6 @@ mod tests {
             "query",
             "operations",
             "sample",
-            "health",
             "contract",
             "capsule",
             "grep",
@@ -1327,6 +1331,7 @@ mod tests {
             "template",
             "doctor",
             "status",
+            "health",
             "budget",
             "capabilities",
             "install",

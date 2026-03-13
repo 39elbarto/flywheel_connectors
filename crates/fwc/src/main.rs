@@ -33,6 +33,8 @@ mod credential;
 mod credential_store;
 #[allow(dead_code)]
 mod doctor;
+#[allow(dead_code)] // E2E playbooks for agent workflow scenarios.
+mod e2e_playbooks;
 #[allow(dead_code)] // E2E scenario runner and artifact bundler.
 mod e2e_scenario;
 #[allow(dead_code)] // Error taxonomy wired when host-backed dispatch lands.
@@ -46,10 +48,13 @@ mod extract;
 #[allow(dead_code)] // Fallback routing with circuit-breaker integration.
 mod fallback_routing;
 mod format_table;
-#[allow(dead_code)] // Cross-connector health aggregation dashboard.
+#[allow(dead_code)] // Fleet-wide health aggregation and bulk operations.
+mod fleet_health;
 mod health;
 #[allow(dead_code)] // History replay, clone, and input-override flows.
 mod history_replay;
+#[allow(dead_code)] // Host integration test harness with archetype fixtures.
+mod host_harness;
 #[allow(
     dead_code,
     clippy::writeln_empty_string,
@@ -63,6 +68,8 @@ mod identifier;
 mod intent;
 #[allow(dead_code)]
 mod json_diff;
+#[allow(dead_code)] // Install, verify, update, pin, unpin, rollback with supply-chain evidence.
+mod lifecycle_install;
 #[allow(dead_code)] // Lifecycle mutation contract: enable/disable/start/stop/restart.
 mod lifecycle_mutations;
 mod manifest_cmd;
@@ -80,6 +87,8 @@ mod package_cmd;
 mod pipe;
 #[allow(dead_code)] // Pipeline conditional branching and error handling.
 mod pipeline_cond;
+#[allow(dead_code)] // Named multi-step pipeline definitions in TOML.
+mod pipeline_defs;
 #[allow(dead_code)]
 mod pipeline_recipes;
 mod policy_cmd;
@@ -396,6 +405,13 @@ enum Commands {
 
     /// Report connector or fleet status.
     Status(StatusArgs),
+
+    /// Cross-connector health aggregation dashboard.
+    ///
+    /// Shows traffic-light health status for all configured connectors
+    /// with auth status, latency, and detected issues. Use `--unhealthy`
+    /// to filter to only degraded/error connectors.
+    Health(HealthArgs),
 
     /// Report live usage-budget state through `fcp-host`.
     Budget(BudgetArgs),
@@ -1136,6 +1152,16 @@ struct WatchArgs {
 struct StatusArgs {
     /// Optional connector id. Omit for fleet status.
     connector: Option<String>,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct HealthArgs {
+    /// Optional connector id for single-connector detail. Omit for fleet dashboard.
+    connector: Option<String>,
+
+    /// Only show connectors that are not healthy (degraded, error, or unknown).
+    #[arg(long)]
+    unhealthy: bool,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -2864,6 +2890,7 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         Commands::Package(_) => passthrough_only_dispatch("package"),
         Commands::Doctor(args) => doctor_dispatch(args, cli.host.as_deref())?,
         Commands::Status(args) => status_dispatch(args, cli.host.as_deref())?,
+        Commands::Health(args) => health_dispatch(args, cli.host.as_deref())?,
         Commands::Budget(args) => budget_dispatch(args, cli.host.as_deref())?,
         Commands::Capabilities(args) => capabilities_dispatch(args, cli.host.as_deref())?,
         Commands::Install(args) => install_dispatch(args, cli.host.as_deref())?,
@@ -7153,6 +7180,171 @@ fn status_dispatch(args: &StatusArgs, explicit_host: Option<&str>) -> Result<Dis
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
+        exit_code: CliExitCode::Success,
+    })
+}
+
+/// Build a health dashboard from the host catalog's connector entries.
+fn build_health_dashboard_from_catalog(
+    catalog: &HostConnectorCatalog,
+    now: chrono::DateTime<chrono::Utc>,
+) -> health::HealthDashboard {
+    let mut entries: Vec<health::ConnectorHealth> = catalog
+        .connectors
+        .iter()
+        .map(|connector| {
+            let core_health = &connector.summary.health;
+            let status = if core_health.is_healthy() {
+                health::HealthStatus::Healthy
+            } else if core_health.is_available() {
+                health::HealthStatus::Degraded
+            } else {
+                health::HealthStatus::Error
+            };
+            let mut entry =
+                health::ConnectorHealth::new(connector.summary.id.as_str(), status, now);
+            if !connector.summary.enabled {
+                entry.auth_status = health::AuthCheckResult::NotConfigured;
+            }
+            health::detect_issues(&mut entry);
+            entry
+        })
+        .collect();
+    entries.sort_by_key(|e| e.status);
+    entries.reverse();
+    health::HealthDashboard::from_connectors_at(entries, now)
+}
+
+/// Render a single-connector health detail payload.
+fn health_connector_payload(
+    entry: &health::ConnectorHealth,
+    host_health: &HostHealthResponse,
+    endpoint: &str,
+) -> Value {
+    let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "health");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "health",
+        "scope": "connector",
+        "source": "host-admin-api",
+        "message": format!("Health detail for `{}`.", entry.connector_id),
+        "connector": {
+            "id": &entry.connector_id,
+            "health_status": health::status_indicator(entry.status),
+            "auth_status": health::auth_indicator(&entry.auth_status),
+            "latency_ms": entry.latency_ms,
+            "last_check": entry.last_check,
+            "issues": &entry.issues,
+        },
+        "host_health": {
+            "status": host_health.status,
+            "uptime_seconds": host_health.uptime_seconds,
+            "active_connections": host_health.active_connections,
+            "timestamp": host_health.timestamp,
+        },
+        "next_actions": [
+            format!("fwc doctor --zone z:work --connector {} --host {endpoint}", entry.connector_id),
+            format!("fwc status {} --host {endpoint}", entry.connector_id),
+            format!("fwc health --host {endpoint}"),
+        ],
+    });
+    envelope.inject_into(&mut payload);
+    payload
+}
+
+/// Render the fleet-level health dashboard payload.
+fn health_fleet_payload(
+    filtered: &health::HealthDashboard,
+    host_health: &HostHealthResponse,
+    endpoint: &str,
+) -> Value {
+    let toon = health::format_dashboard_toon(filtered);
+    let dashboard_json = health::format_dashboard_json(filtered)
+        .unwrap_or_else(|_| json!({"error": "serialization failed"}));
+    let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "health");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "health",
+        "scope": "fleet",
+        "source": "host-admin-api",
+        "message": format!("Fleet health dashboard: {} connectors checked.", filtered.summary.total),
+        "summary": {
+            "total": filtered.summary.total,
+            "healthy": filtered.summary.healthy,
+            "degraded": filtered.summary.degraded,
+            "error": filtered.summary.error,
+            "unknown": filtered.summary.unknown,
+            "auth_issues": filtered.summary.auth_issues,
+        },
+        "dashboard": dashboard_json,
+        "toon": toon,
+        "host_health": {
+            "status": host_health.status,
+            "uptime_seconds": host_health.uptime_seconds,
+            "active_connections": host_health.active_connections,
+            "timestamp": host_health.timestamp,
+        },
+        "next_actions": [
+            format!("fwc health <connector> --host {endpoint}"),
+            format!("fwc health --unhealthy --host {endpoint}"),
+            format!("fwc doctor --zone z:work --host {endpoint}"),
+        ],
+    });
+    envelope.inject_into(&mut payload);
+    payload
+}
+
+fn health_dispatch(args: &HealthArgs, explicit_host: Option<&str>) -> Result<DispatchOutcome> {
+    let Some(host) = resolve_host_config(explicit_host)? else {
+        return Ok(missing_host_dispatch(
+            "health",
+            serde_json::to_value(args)?,
+            vec![
+                "fwc health --host <endpoint>".to_owned(),
+                "Set `FWC_HOST` or `FCP_HOST_ENDPOINT`, or configure an active FCP context."
+                    .to_owned(),
+            ],
+        ));
+    };
+    let client = HostAdminClient::new(&host.endpoint)?;
+    let (catalog, _) = client.catalog(None)?;
+    let host_health = client.health()?;
+    let now = chrono::Utc::now();
+
+    let dashboard = build_health_dashboard_from_catalog(&catalog, now);
+    let filter = health::HealthFilter {
+        unhealthy_only: args.unhealthy,
+        connector_id: args.connector.clone(),
+    };
+    let filtered = dashboard.filter(&filter);
+
+    if let Some(ref connector_id) = args.connector {
+        if filtered.connectors.is_empty() {
+            return Ok(DispatchOutcome {
+                payload: json!({
+                    "status": "error",
+                    "command": "health",
+                    "error": {
+                        "type": "connector-not-found",
+                        "message": format!("No connector matching `{connector_id}` found in fleet health."),
+                        "recoverable": true,
+                    },
+                    "next_actions": [
+                        format!("fwc health --host {}", host.endpoint),
+                        format!("fwc list --host {}", host.endpoint),
+                    ],
+                }),
+                exit_code: CliExitCode::Validation,
+            });
+        }
+        return Ok(DispatchOutcome {
+            payload: health_connector_payload(&filtered.connectors[0], &host_health, &host.endpoint),
+            exit_code: CliExitCode::Success,
+        });
+    }
+
+    Ok(DispatchOutcome {
+        payload: health_fleet_payload(&filtered, &host_health, &host.endpoint),
         exit_code: CliExitCode::Success,
     })
 }
@@ -22519,14 +22711,15 @@ deny_ptrace = true
     }
 
     #[test]
-    fn execute_health_alias_resolves_to_status() {
+    fn execute_health_is_dedicated_subcommand() {
         let args = vec!["fwc".to_owned(), "--json".to_owned(), "health".to_owned()];
         let outcome = execute(&args).expect("execution should not fail internally");
         let payload: Value =
             serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
 
+        // health is now its own subcommand, not an alias for status.
         assert_eq!(outcome.exit_code, CliExitCode::Transport.into());
-        assert_eq!(payload["command"], "status");
+        assert_eq!(payload["command"], "health");
         assert_eq!(payload["error"]["type"], "missing-host-endpoint");
     }
 
@@ -27880,6 +28073,204 @@ depends_on = ["missing"]
         assert_eq!(exit_code, CliExitCode::Validation.into());
         assert_eq!(payload["status"], "error");
         assert_eq!(payload["error"]["type"], "connector-not-found");
+    }
+
+    // ── health dashboard command ──────────────────────────────
+
+    #[test]
+    fn health_fleet_offline_reports_missing_host() {
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "health"]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["status"], "error");
+        assert_eq!(payload["command"], "health");
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
+        assert!(payload["error"]["recoverable"].as_bool().unwrap_or(false));
+    }
+
+    #[test]
+    fn health_connector_offline_reports_missing_host() {
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "health", "github"]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["status"], "error");
+        assert_eq!(payload["command"], "health");
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
+    }
+
+    #[test]
+    fn health_unhealthy_flag_offline_reports_missing_host() {
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "health", "--unhealthy"]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "health");
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
+    }
+
+    #[test]
+    fn health_fleet_host_returns_dashboard() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "GET /rpc/health".to_owned(),
+                    json!({
+                        "status": "healthy",
+                        "connectors": {},
+                        "uptime_seconds": 7200,
+                        "active_connections": 3,
+                        "timestamp": "2026-03-12T00:00:00Z",
+                    }),
+                ),
+            ]),
+            2,
+        );
+
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "--host", &host, "health"]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "health");
+        assert_eq!(payload["scope"], "fleet");
+        assert_eq!(payload["source"], "host-admin-api");
+        assert!(payload["dashboard"]["connectors"].is_array());
+        assert!(payload["dashboard"]["summary"]["total"]
+            .as_u64()
+            .is_some_and(|n| n > 0));
+        assert!(payload["toon"].is_string());
+        assert_eq!(payload["host_health"]["status"], "healthy");
+        assert_eq!(payload["host_health"]["uptime_seconds"], 7200);
+    }
+
+    #[test]
+    fn health_fleet_host_filter_unhealthy() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "GET /rpc/health".to_owned(),
+                    json!({
+                        "status": "healthy",
+                        "connectors": {},
+                        "uptime_seconds": 3600,
+                        "active_connections": 1,
+                        "timestamp": "2026-03-12T00:00:00Z",
+                    }),
+                ),
+            ]),
+            2,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "health",
+            "--unhealthy",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "health");
+        // When --unhealthy is applied, healthy connectors are filtered out.
+        assert_eq!(
+            payload["dashboard"]["summary"]["healthy"],
+            0,
+            "unhealthy filter should remove healthy connectors"
+        );
+    }
+
+    #[test]
+    fn health_connector_host_filter_by_id() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "GET /rpc/health".to_owned(),
+                    json!({
+                        "status": "healthy",
+                        "connectors": {},
+                        "uptime_seconds": 3600,
+                        "active_connections": 1,
+                        "timestamp": "2026-03-12T00:00:00Z",
+                    }),
+                ),
+            ]),
+            2,
+        );
+
+        // Use the canonical connector ID from the mock discovery.
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "health",
+            "fcp.github:enterprise:v1",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "health");
+        assert_eq!(payload["scope"], "connector");
+    }
+
+    #[test]
+    fn health_dashboard_toon_output_contains_header() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "GET /rpc/health".to_owned(),
+                    json!({
+                        "status": "healthy",
+                        "connectors": {},
+                        "uptime_seconds": 3600,
+                        "active_connections": 1,
+                        "timestamp": "2026-03-12T00:00:00Z",
+                    }),
+                ),
+            ]),
+            2,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "health",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        let toon = payload["toon"].as_str().unwrap_or("");
+        assert!(toon.contains("Health:"));
+        assert!(toon.contains("total"));
+        assert!(toon.contains("Connector"));
+    }
+
+    #[test]
+    fn healthcheck_alias_resolves_to_health() {
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "healthcheck"]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "health");
     }
 
     // ── lifecycle commands: pin ────────────────────────────────

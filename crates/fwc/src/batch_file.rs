@@ -350,6 +350,81 @@ pub struct OpResult {
     pub error: Option<Value>,
 }
 
+// ── TOON formatting ───────────────────────────────────────────────────
+
+/// Format an execution plan as human-readable TOON output.
+pub fn format_plan_toon(plan: &ExecutionPlan) -> String {
+    use std::fmt::Write;
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "Batch Plan: {} operations, concurrency: {}, on_error: {}",
+        plan.total_operations, plan.concurrency, plan.on_error,
+    );
+
+    if !plan.connectors.is_empty() {
+        let _ = writeln!(out, "Connectors: {}", plan.connectors.join(", "));
+    }
+
+    out.push('\n');
+    for wave in &plan.waves {
+        let _ = writeln!(
+            out,
+            "  Wave {} ({} ops): {}",
+            wave.wave,
+            wave.operation_ids.len(),
+            wave.operation_ids.join(", "),
+        );
+    }
+
+    out
+}
+
+/// Format batch execution results as human-readable TOON output.
+pub fn format_results_toon(results: &[OpResult]) -> String {
+    use std::fmt::Write;
+
+    let mut out = String::new();
+
+    if results.is_empty() {
+        out.push_str("No results.\n");
+        return out;
+    }
+
+    let total = results.len();
+    let successes = results.iter().filter(|r| r.status == OpStatus::Success).count();
+    let errors = results.iter().filter(|r| r.status == OpStatus::Error).count();
+    let skipped = results.iter().filter(|r| r.status == OpStatus::Skipped).count();
+
+    let _ = write!(out, "Batch Results: {successes}/{total} succeeded");
+    if errors > 0 {
+        let _ = write!(out, ", {errors} failed");
+    }
+    if skipped > 0 {
+        let _ = write!(out, ", {skipped} skipped");
+    }
+    out.push('\n');
+
+    out.push('\n');
+    let _ = writeln!(out, "{:<20}{:<24}{:<10}{}", "ID", "Operation", "Wave", "Status");
+    out.push_str(&"-".repeat(64));
+    out.push('\n');
+
+    for r in results {
+        let wave_str = r.wave.map_or("-".to_owned(), |w| w.to_string());
+        let status_str = match r.status {
+            OpStatus::Success => "OK",
+            OpStatus::Error => "FAIL",
+            OpStatus::Skipped => "SKIP",
+            OpStatus::Pending => "PEND",
+        };
+        let _ = writeln!(out, "{:<20}{:<24}{:<10}{}", r.id, r.operation, wave_str, status_str);
+    }
+
+    out
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -2142,5 +2217,993 @@ mod tests {
             assert_eq!(wave.wave, idx);
             assert_eq!(wave.operation_ids.len(), 1);
         }
+    }
+
+    // ── Dependency ordering: topological sort edge cases ─────────
+
+    #[test]
+    fn topo_deep_chain_25_steps() {
+        let mut lines = Vec::new();
+        for i in 0..25 {
+            let deps = if i == 0 {
+                String::new()
+            } else {
+                format!(r#","depends_on":["s{}"]"#, i - 1)
+            };
+            lines.push(format!(
+                r#"{{"id":"s{i}","connector":"g","operation":"o","input":{{}}{deps}}}"#
+            ));
+        }
+        let content = lines.join("\n");
+        let batch = BatchFile::parse(&content).unwrap();
+        let waves = topological_waves(&batch);
+        assert_eq!(waves.len(), 25);
+        for (idx, w) in waves.iter().enumerate() {
+            assert_eq!(w.operation_ids.len(), 1);
+            assert_eq!(w.operation_ids[0], format!("s{idx}"));
+        }
+    }
+
+    #[test]
+    fn topo_double_diamond() {
+        // A -> B,C -> D -> E,F -> G
+        let content = r#"{"id":"A","connector":"g","operation":"o","input":{}}
+{"id":"B","connector":"g","operation":"o","input":{},"depends_on":["A"]}
+{"id":"C","connector":"g","operation":"o","input":{},"depends_on":["A"]}
+{"id":"D","connector":"g","operation":"o","input":{},"depends_on":["B","C"]}
+{"id":"E","connector":"g","operation":"o","input":{},"depends_on":["D"]}
+{"id":"F","connector":"g","operation":"o","input":{},"depends_on":["D"]}
+{"id":"G","connector":"g","operation":"o","input":{},"depends_on":["E","F"]}"#;
+        let batch = BatchFile::parse(content).unwrap();
+        let waves = topological_waves(&batch);
+        assert_eq!(waves.len(), 5);
+        assert_eq!(waves[0].operation_ids, vec!["A"]);
+        assert_eq!(waves[1].operation_ids.len(), 2); // B, C
+        assert_eq!(waves[2].operation_ids, vec!["D"]);
+        assert_eq!(waves[3].operation_ids.len(), 2); // E, F
+        assert_eq!(waves[4].operation_ids, vec!["G"]);
+    }
+
+    #[test]
+    fn topo_hourglass_pattern() {
+        // Multiple roots -> single bottleneck -> multiple leaves
+        let content = r#"{"id":"r1","connector":"g","operation":"o","input":{}}
+{"id":"r2","connector":"g","operation":"o","input":{}}
+{"id":"r3","connector":"g","operation":"o","input":{}}
+{"id":"bottle","connector":"g","operation":"o","input":{},"depends_on":["r1","r2","r3"]}
+{"id":"l1","connector":"g","operation":"o","input":{},"depends_on":["bottle"]}
+{"id":"l2","connector":"g","operation":"o","input":{},"depends_on":["bottle"]}
+{"id":"l3","connector":"g","operation":"o","input":{},"depends_on":["bottle"]}
+{"id":"l4","connector":"g","operation":"o","input":{},"depends_on":["bottle"]}"#;
+        let batch = BatchFile::parse(content).unwrap();
+        let waves = topological_waves(&batch);
+        assert_eq!(waves.len(), 3);
+        assert_eq!(waves[0].operation_ids.len(), 3);
+        assert_eq!(waves[1].operation_ids.len(), 1);
+        assert_eq!(waves[2].operation_ids.len(), 4);
+    }
+
+    #[test]
+    fn topo_multiple_roots_multiple_sinks() {
+        // r1->m1, r2->m1, r1->m2, r3->m2; m1 and m2 are sinks
+        let content = r#"{"id":"r1","connector":"g","operation":"o","input":{}}
+{"id":"r2","connector":"g","operation":"o","input":{}}
+{"id":"r3","connector":"g","operation":"o","input":{}}
+{"id":"m1","connector":"g","operation":"o","input":{},"depends_on":["r1","r2"]}
+{"id":"m2","connector":"g","operation":"o","input":{},"depends_on":["r1","r3"]}"#;
+        let batch = BatchFile::parse(content).unwrap();
+        let waves = topological_waves(&batch);
+        assert_eq!(waves.len(), 2);
+        assert_eq!(waves[0].operation_ids.len(), 3);
+        assert_eq!(waves[1].operation_ids.len(), 2);
+    }
+
+    #[test]
+    fn topo_ladder_graph() {
+        // a1->a2->a3; b1->b2->b3; cross-links a1->b2, b1->a2
+        let content = r#"{"id":"a1","connector":"g","operation":"o","input":{}}
+{"id":"b1","connector":"g","operation":"o","input":{}}
+{"id":"a2","connector":"g","operation":"o","input":{},"depends_on":["a1","b1"]}
+{"id":"b2","connector":"g","operation":"o","input":{},"depends_on":["a1","b1"]}
+{"id":"a3","connector":"g","operation":"o","input":{},"depends_on":["a2"]}
+{"id":"b3","connector":"g","operation":"o","input":{},"depends_on":["b2"]}"#;
+        let batch = BatchFile::parse(content).unwrap();
+        let waves = topological_waves(&batch);
+        assert_eq!(waves.len(), 3);
+        assert_eq!(waves[0].operation_ids.len(), 2); // a1, b1
+        assert_eq!(waves[1].operation_ids.len(), 2); // a2, b2
+        assert_eq!(waves[2].operation_ids.len(), 2); // a3, b3
+    }
+
+    #[test]
+    fn topo_single_node_no_deps() {
+        let content = r#"{"id":"only","connector":"g","operation":"o","input":{}}"#;
+        let batch = BatchFile::parse(content).unwrap();
+        let waves = topological_waves(&batch);
+        assert_eq!(waves.len(), 1);
+        assert_eq!(waves[0].operation_ids, vec!["only"]);
+    }
+
+    #[test]
+    fn topo_reversed_declaration_order() {
+        // Declare child first, parent second — should still work
+        let content = r#"{"id":"child","connector":"g","operation":"o","input":{},"depends_on":["parent"]}
+{"id":"parent","connector":"g","operation":"o","input":{}}"#;
+        let batch = BatchFile::parse(content).unwrap();
+        let waves = topological_waves(&batch);
+        assert_eq!(waves.len(), 2);
+        assert!(waves[0].operation_ids.contains(&"parent".to_owned()));
+        assert!(waves[1].operation_ids.contains(&"child".to_owned()));
+    }
+
+    #[test]
+    fn topo_three_independent_chains_different_lengths() {
+        // chain1: a->b (2), chain2: c (1), chain3: d->e->f->g (4)
+        let content = r#"{"id":"a","connector":"g","operation":"o","input":{}}
+{"id":"b","connector":"g","operation":"o","input":{},"depends_on":["a"]}
+{"id":"c","connector":"g","operation":"o","input":{}}
+{"id":"d","connector":"g","operation":"o","input":{}}
+{"id":"e","connector":"g","operation":"o","input":{},"depends_on":["d"]}
+{"id":"f","connector":"g","operation":"o","input":{},"depends_on":["e"]}
+{"id":"g","connector":"g","operation":"o","input":{},"depends_on":["f"]}"#;
+        let batch = BatchFile::parse(content).unwrap();
+        let waves = topological_waves(&batch);
+        assert_eq!(waves.len(), 4);
+        // Wave 0: a, c, d
+        assert_eq!(waves[0].operation_ids.len(), 3);
+        // Wave 3: only g
+        assert_eq!(waves[3].operation_ids.len(), 1);
+    }
+
+    // ── Cycle detection edge cases (expanded) ───────────────────
+
+    #[test]
+    fn cycle_five_nodes() {
+        let content = r#"{"id":"a","connector":"g","operation":"o","input":{},"depends_on":["e"]}
+{"id":"b","connector":"g","operation":"o","input":{},"depends_on":["a"]}
+{"id":"c","connector":"g","operation":"o","input":{},"depends_on":["b"]}
+{"id":"d","connector":"g","operation":"o","input":{},"depends_on":["c"]}
+{"id":"e","connector":"g","operation":"o","input":{},"depends_on":["d"]}"#;
+        let err = BatchFile::parse(content).unwrap_err();
+        match err {
+            BatchFileError::CycleDetected { ids } => assert_eq!(ids.len(), 5),
+            other => panic!("expected CycleDetected, got {other}"),
+        }
+    }
+
+    #[test]
+    fn cycle_among_subset_with_acyclic_tail() {
+        // free -> a -> b -> c -> a (cycle on a,b,c); free is fine
+        let content = r#"{"id":"free","connector":"g","operation":"o","input":{}}
+{"id":"a","connector":"g","operation":"o","input":{},"depends_on":["c","free"]}
+{"id":"b","connector":"g","operation":"o","input":{},"depends_on":["a"]}
+{"id":"c","connector":"g","operation":"o","input":{},"depends_on":["b"]}"#;
+        let err = BatchFile::parse(content).unwrap_err();
+        match err {
+            BatchFileError::CycleDetected { ids } => {
+                assert_eq!(ids.len(), 3);
+                assert!(!ids.contains(&"free".to_owned()));
+            }
+            other => panic!("expected CycleDetected, got {other}"),
+        }
+    }
+
+    #[test]
+    fn cycle_two_disjoint_cycles() {
+        // cycle1: a<->b, cycle2: c<->d, plus free node e
+        let content = r#"{"id":"e","connector":"g","operation":"o","input":{}}
+{"id":"a","connector":"g","operation":"o","input":{},"depends_on":["b"]}
+{"id":"b","connector":"g","operation":"o","input":{},"depends_on":["a"]}
+{"id":"c","connector":"g","operation":"o","input":{},"depends_on":["d"]}
+{"id":"d","connector":"g","operation":"o","input":{},"depends_on":["c"]}"#;
+        let err = BatchFile::parse(content).unwrap_err();
+        match err {
+            BatchFileError::CycleDetected { ids } => {
+                assert_eq!(ids.len(), 4);
+                assert!(!ids.contains(&"e".to_owned()));
+            }
+            other => panic!("expected CycleDetected, got {other}"),
+        }
+    }
+
+    // ── All-independent (max parallelism) ───────────────────────
+
+    #[test]
+    fn all_independent_200_ops_single_wave() {
+        let mut lines = Vec::new();
+        for i in 0..200 {
+            lines.push(format!(
+                r#"{{"id":"op{i}","connector":"c{c}","operation":"o","input":{{}}}}"#,
+                c = i % 5
+            ));
+        }
+        let content = lines.join("\n");
+        let batch = BatchFile::parse(&content).unwrap();
+        assert_eq!(batch.len(), 200);
+        let waves = topological_waves(&batch);
+        assert_eq!(waves.len(), 1);
+        assert_eq!(waves[0].operation_ids.len(), 200);
+    }
+
+    #[test]
+    fn all_independent_varied_connectors() {
+        let content = r#"{"id":"a","connector":"github","operation":"list","input":{}}
+{"id":"b","connector":"slack","operation":"send","input":{}}
+{"id":"c","connector":"jira","operation":"create","input":{}}
+{"id":"d","connector":"discord","operation":"post","input":{}}
+{"id":"e","connector":"notion","operation":"query","input":{}}"#;
+        let batch = BatchFile::parse(content).unwrap();
+        let waves = topological_waves(&batch);
+        assert_eq!(waves.len(), 1);
+        assert_eq!(waves[0].operation_ids.len(), 5);
+        assert_eq!(batch.connectors().len(), 5);
+    }
+
+    // ── Linear chain (fully sequential) ─────────────────────────
+
+    #[test]
+    fn linear_chain_20_steps_all_different_connectors() {
+        let connectors = ["github", "slack", "jira", "notion", "discord"];
+        let mut lines = Vec::new();
+        for i in 0..20 {
+            let c = connectors[i % connectors.len()];
+            let deps = if i == 0 {
+                String::new()
+            } else {
+                format!(r#","depends_on":["s{}"]"#, i - 1)
+            };
+            lines.push(format!(
+                r#"{{"id":"s{i}","connector":"{c}","operation":"step","input":{{}}{deps}}}"#
+            ));
+        }
+        let content = lines.join("\n");
+        let batch = BatchFile::parse(&content).unwrap();
+        let waves = topological_waves(&batch);
+        assert_eq!(waves.len(), 20);
+        for w in &waves {
+            assert_eq!(w.operation_ids.len(), 1);
+        }
+    }
+
+    // ── Diamond dependency patterns ─────────────────────────────
+
+    #[test]
+    fn diamond_with_extra_branch() {
+        // root -> left, center, right -> join
+        let content = r#"{"id":"root","connector":"g","operation":"o","input":{}}
+{"id":"left","connector":"g","operation":"o","input":{},"depends_on":["root"]}
+{"id":"center","connector":"g","operation":"o","input":{},"depends_on":["root"]}
+{"id":"right","connector":"g","operation":"o","input":{},"depends_on":["root"]}
+{"id":"join","connector":"g","operation":"o","input":{},"depends_on":["left","center","right"]}"#;
+        let batch = BatchFile::parse(content).unwrap();
+        let waves = topological_waves(&batch);
+        assert_eq!(waves.len(), 3);
+        assert_eq!(waves[1].operation_ids.len(), 3);
+    }
+
+    #[test]
+    fn nested_diamonds() {
+        // A->B,C->D->E,F->G (two diamonds chained)
+        let content = r#"{"id":"A","connector":"g","operation":"o","input":{}}
+{"id":"B","connector":"g","operation":"o","input":{},"depends_on":["A"]}
+{"id":"C","connector":"g","operation":"o","input":{},"depends_on":["A"]}
+{"id":"D","connector":"g","operation":"o","input":{},"depends_on":["B","C"]}
+{"id":"E","connector":"g","operation":"o","input":{},"depends_on":["D"]}
+{"id":"F","connector":"g","operation":"o","input":{},"depends_on":["D"]}
+{"id":"G","connector":"g","operation":"o","input":{},"depends_on":["E","F"]}"#;
+        let batch = BatchFile::parse(content).unwrap();
+        let waves = topological_waves(&batch);
+        assert_eq!(waves.len(), 5);
+    }
+
+    // ── Duplicate operation IDs ─────────────────────────────────
+
+    #[test]
+    fn duplicate_id_at_end_of_large_batch() {
+        let mut lines = Vec::new();
+        for i in 0..50 {
+            lines.push(format!(
+                r#"{{"id":"s{i}","connector":"g","operation":"o","input":{{}}}}"#
+            ));
+        }
+        // Duplicate s25
+        lines.push(r#"{"id":"s25","connector":"g","operation":"o","input":{}}"#.to_owned());
+        let content = lines.join("\n");
+        let err = BatchFile::parse(&content).unwrap_err();
+        assert_eq!(
+            err,
+            BatchFileError::DuplicateId {
+                id: "s25".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn duplicate_id_consecutive() {
+        let content = r#"{"id":"dup","connector":"g","operation":"o","input":{}}
+{"id":"dup","connector":"g","operation":"o","input":{}}"#;
+        let err = BatchFile::parse(content).unwrap_err();
+        assert_eq!(
+            err,
+            BatchFileError::DuplicateId {
+                id: "dup".to_owned()
+            }
+        );
+    }
+
+    // ── Invalid JSONL parsing ───────────────────────────────────
+
+    #[test]
+    fn invalid_json_truncated_object() {
+        let content = r#"{"id":"a","connector":"g","operation":"o","input":{}}
+{"id":"b","connector":"g","oper"#;
+        let err = BatchFile::parse(content).unwrap_err();
+        match err {
+            BatchFileError::InvalidJson { line, .. } => assert_eq!(line, 2),
+            other => panic!("expected InvalidJson, got {other}"),
+        }
+    }
+
+    #[test]
+    fn invalid_json_array_instead_of_object() {
+        let content = r#"[1, 2, 3]"#;
+        let err = BatchFile::parse(content).unwrap_err();
+        match err {
+            BatchFileError::InvalidJson { .. } => {}
+            other => panic!("expected InvalidJson, got {other}"),
+        }
+    }
+
+    #[test]
+    fn invalid_json_bare_string() {
+        let content = r#""just a string""#;
+        let err = BatchFile::parse(content).unwrap_err();
+        match err {
+            BatchFileError::InvalidJson { .. } => {}
+            other => panic!("expected InvalidJson, got {other}"),
+        }
+    }
+
+    #[test]
+    fn invalid_json_missing_input_field() {
+        // serde will fail because `input` is required
+        let content = r#"{"id":"a","connector":"g","operation":"o"}"#;
+        let err = BatchFile::parse(content).unwrap_err();
+        match err {
+            BatchFileError::InvalidJson { line, .. } => assert_eq!(line, 1),
+            other => panic!("expected InvalidJson, got {other}"),
+        }
+    }
+
+    // ── Concurrency limit enforcement in plan ───────────────────
+
+    #[test]
+    fn plan_concurrency_limit_one() {
+        let content = r#"{"id":"a","connector":"g","operation":"o","input":{}}
+{"id":"b","connector":"g","operation":"o","input":{}}
+{"id":"c","connector":"g","operation":"o","input":{}}"#;
+        let batch = BatchFile::parse(content).unwrap();
+        let plan = ExecutionPlan::from_batch(&batch, 1, "abort");
+        // All three in one wave, but concurrency=1 means sequential execution
+        assert_eq!(plan.concurrency, 1);
+        assert_eq!(plan.waves.len(), 1);
+        assert_eq!(plan.waves[0].operation_ids.len(), 3);
+    }
+
+    #[test]
+    fn plan_concurrency_matches_wave_size() {
+        let mut lines = Vec::new();
+        for i in 0..8 {
+            lines.push(format!(
+                r#"{{"id":"s{i}","connector":"g","operation":"o","input":{{}}}}"#
+            ));
+        }
+        let content = lines.join("\n");
+        let batch = BatchFile::parse(&content).unwrap();
+        let plan = ExecutionPlan::from_batch(&batch, 4, "continue");
+        assert_eq!(plan.concurrency, 4);
+        // All 8 ops in one wave (no deps)
+        assert_eq!(plan.waves[0].operation_ids.len(), 8);
+    }
+
+    // ── on_error modes ──────────────────────────────────────────
+
+    #[test]
+    fn plan_on_error_abort() {
+        let content = r#"{"id":"a","connector":"g","operation":"o","input":{}}"#;
+        let batch = BatchFile::parse(content).unwrap();
+        let plan = ExecutionPlan::from_batch(&batch, 1, "abort");
+        assert_eq!(plan.on_error, "abort");
+    }
+
+    #[test]
+    fn plan_on_error_continue() {
+        let content = r#"{"id":"a","connector":"g","operation":"o","input":{}}"#;
+        let batch = BatchFile::parse(content).unwrap();
+        let plan = ExecutionPlan::from_batch(&batch, 1, "continue");
+        assert_eq!(plan.on_error, "continue");
+    }
+
+    #[test]
+    fn plan_on_error_skip() {
+        let content = r#"{"id":"a","connector":"g","operation":"o","input":{}}"#;
+        let batch = BatchFile::parse(content).unwrap();
+        let plan = ExecutionPlan::from_batch(&batch, 1, "skip");
+        assert_eq!(plan.on_error, "skip");
+    }
+
+    // ── Partial failure reporting ───────────────────────────────
+
+    #[test]
+    fn partial_failure_first_wave_fails() {
+        let results = vec![
+            OpResult {
+                id: "a".to_owned(),
+                operation: "g.list".to_owned(),
+                status: OpStatus::Success,
+                wave: Some(0),
+                result: Some(json!({"ok": true})),
+                error: None,
+            },
+            OpResult {
+                id: "b".to_owned(),
+                operation: "g.create".to_owned(),
+                status: OpStatus::Error,
+                wave: Some(0),
+                result: None,
+                error: Some(json!({"code": "RATE_LIMIT"})),
+            },
+        ];
+        let successes = results.iter().filter(|r| r.status == OpStatus::Success).count();
+        let failures = results.iter().filter(|r| r.status == OpStatus::Error).count();
+        assert_eq!(successes, 1);
+        assert_eq!(failures, 1);
+    }
+
+    #[test]
+    fn partial_failure_mixed_across_waves() {
+        let results = vec![
+            OpResult {
+                id: "w0a".to_owned(),
+                operation: "g.o".to_owned(),
+                status: OpStatus::Success,
+                wave: Some(0),
+                result: Some(json!({})),
+                error: None,
+            },
+            OpResult {
+                id: "w0b".to_owned(),
+                operation: "g.o".to_owned(),
+                status: OpStatus::Error,
+                wave: Some(0),
+                result: None,
+                error: Some(json!({"msg": "timeout"})),
+            },
+            OpResult {
+                id: "w1a".to_owned(),
+                operation: "g.o".to_owned(),
+                status: OpStatus::Success,
+                wave: Some(1),
+                result: Some(json!({})),
+                error: None,
+            },
+            OpResult {
+                id: "w1b".to_owned(),
+                operation: "g.o".to_owned(),
+                status: OpStatus::Skipped,
+                wave: Some(1),
+                result: None,
+                error: None,
+            },
+        ];
+        let by_status = |s: &OpStatus| results.iter().filter(|r| &r.status == s).count();
+        assert_eq!(by_status(&OpStatus::Success), 2);
+        assert_eq!(by_status(&OpStatus::Error), 1);
+        assert_eq!(by_status(&OpStatus::Skipped), 1);
+    }
+
+    #[test]
+    fn partial_failure_all_skipped_after_abort() {
+        let results: Vec<OpResult> = (0..5)
+            .map(|i| OpResult {
+                id: format!("s{i}"),
+                operation: "g.o".to_owned(),
+                status: if i == 0 {
+                    OpStatus::Error
+                } else {
+                    OpStatus::Skipped
+                },
+                wave: if i == 0 { Some(0) } else { None },
+                result: None,
+                error: if i == 0 {
+                    Some(json!({"msg": "fatal"}))
+                } else {
+                    None
+                },
+            })
+            .collect();
+        assert_eq!(results[0].status, OpStatus::Error);
+        for r in &results[1..] {
+            assert_eq!(r.status, OpStatus::Skipped);
+            assert!(r.wave.is_none());
+        }
+    }
+
+    #[test]
+    fn partial_failure_success_count() {
+        let results: Vec<OpResult> = (0..10)
+            .map(|i| OpResult {
+                id: format!("op{i}"),
+                operation: "g.o".to_owned(),
+                status: if i % 3 == 0 {
+                    OpStatus::Error
+                } else {
+                    OpStatus::Success
+                },
+                wave: Some(0),
+                result: if i % 3 != 0 { Some(json!({})) } else { None },
+                error: if i % 3 == 0 {
+                    Some(json!({"code": "ERR"}))
+                } else {
+                    None
+                },
+            })
+            .collect();
+        let success_count = results.iter().filter(|r| r.status == OpStatus::Success).count();
+        let error_count = results.iter().filter(|r| r.status == OpStatus::Error).count();
+        assert_eq!(success_count, 6); // i=1,2,4,5,7,8
+        assert_eq!(error_count, 4);   // i=0,3,6,9
+    }
+
+    // ── TOON output formatting ──────────────────────────────────
+
+    #[test]
+    fn toon_format_plan_header() {
+        let content = r#"{"id":"a","connector":"github","operation":"list","input":{}}
+{"id":"b","connector":"slack","operation":"send","input":{},"depends_on":["a"]}"#;
+        let batch = BatchFile::parse(content).unwrap();
+        let plan = ExecutionPlan::from_batch(&batch, 4, "abort");
+        let output = format_plan_toon(&plan);
+        assert!(output.contains("Batch Plan"));
+        assert!(output.contains("2 operations"));
+        assert!(output.contains("concurrency: 4"));
+        assert!(output.contains("on_error: abort"));
+    }
+
+    #[test]
+    fn toon_format_plan_waves() {
+        let content = r#"{"id":"a","connector":"g","operation":"o","input":{}}
+{"id":"b","connector":"g","operation":"o","input":{},"depends_on":["a"]}
+{"id":"c","connector":"g","operation":"o","input":{},"depends_on":["b"]}"#;
+        let batch = BatchFile::parse(content).unwrap();
+        let plan = ExecutionPlan::from_batch(&batch, 2, "continue");
+        let output = format_plan_toon(&plan);
+        assert!(output.contains("Wave 0"));
+        assert!(output.contains("Wave 1"));
+        assert!(output.contains("Wave 2"));
+    }
+
+    #[test]
+    fn toon_format_plan_connectors_listed() {
+        let content = r#"{"id":"a","connector":"github","operation":"list","input":{}}
+{"id":"b","connector":"slack","operation":"send","input":{}}"#;
+        let batch = BatchFile::parse(content).unwrap();
+        let plan = ExecutionPlan::from_batch(&batch, 1, "abort");
+        let output = format_plan_toon(&plan);
+        assert!(output.contains("github"));
+        assert!(output.contains("slack"));
+    }
+
+    #[test]
+    fn toon_format_results_all_success() {
+        let results = vec![
+            OpResult {
+                id: "a".to_owned(),
+                operation: "g.list".to_owned(),
+                status: OpStatus::Success,
+                wave: Some(0),
+                result: Some(json!({})),
+                error: None,
+            },
+            OpResult {
+                id: "b".to_owned(),
+                operation: "g.create".to_owned(),
+                status: OpStatus::Success,
+                wave: Some(1),
+                result: Some(json!({})),
+                error: None,
+            },
+        ];
+        let output = format_results_toon(&results);
+        assert!(output.contains("2/2 succeeded"));
+        assert!(!output.contains("failed"));
+    }
+
+    #[test]
+    fn toon_format_results_partial_failure() {
+        let results = vec![
+            OpResult {
+                id: "a".to_owned(),
+                operation: "g.list".to_owned(),
+                status: OpStatus::Success,
+                wave: Some(0),
+                result: Some(json!({})),
+                error: None,
+            },
+            OpResult {
+                id: "b".to_owned(),
+                operation: "g.create".to_owned(),
+                status: OpStatus::Error,
+                wave: Some(0),
+                result: None,
+                error: Some(json!({"code": "FAIL"})),
+            },
+            OpResult {
+                id: "c".to_owned(),
+                operation: "g.update".to_owned(),
+                status: OpStatus::Skipped,
+                wave: None,
+                result: None,
+                error: None,
+            },
+        ];
+        let output = format_results_toon(&results);
+        assert!(output.contains("1/3 succeeded"));
+        assert!(output.contains("1 failed"));
+        assert!(output.contains("1 skipped"));
+    }
+
+    #[test]
+    fn toon_format_results_empty() {
+        let results: Vec<OpResult> = vec![];
+        let output = format_results_toon(&results);
+        assert!(output.contains("No results"));
+    }
+
+    #[test]
+    fn toon_format_results_all_errors() {
+        let results: Vec<OpResult> = (0..3)
+            .map(|i| OpResult {
+                id: format!("e{i}"),
+                operation: "g.o".to_owned(),
+                status: OpStatus::Error,
+                wave: Some(0),
+                result: None,
+                error: Some(json!({"msg": format!("err{i}")})),
+            })
+            .collect();
+        let output = format_results_toon(&results);
+        assert!(output.contains("0/3 succeeded"));
+        assert!(output.contains("3 failed"));
+    }
+
+    #[test]
+    fn toon_format_results_includes_operation_ids() {
+        let results = vec![OpResult {
+            id: "my_special_op".to_owned(),
+            operation: "github.list_issues".to_owned(),
+            status: OpStatus::Success,
+            wave: Some(0),
+            result: Some(json!({})),
+            error: None,
+        }];
+        let output = format_results_toon(&results);
+        assert!(output.contains("my_special_op"));
+    }
+
+    // ── Empty batch files ───────────────────────────────────────
+
+    #[test]
+    fn empty_string_is_empty_error() {
+        assert_eq!(BatchFile::parse("").unwrap_err(), BatchFileError::Empty);
+    }
+
+    #[test]
+    fn only_newlines_is_empty_error() {
+        assert_eq!(
+            BatchFile::parse("\n\n\n").unwrap_err(),
+            BatchFileError::Empty
+        );
+    }
+
+    #[test]
+    fn only_tabs_and_spaces_is_empty_error() {
+        assert_eq!(
+            BatchFile::parse("  \t\n \t ").unwrap_err(),
+            BatchFileError::Empty
+        );
+    }
+
+    #[test]
+    fn comments_and_blanks_only_is_empty() {
+        let content = "# header\n# another\n\n# final\n\n";
+        assert_eq!(BatchFile::parse(content).unwrap_err(), BatchFileError::Empty);
+    }
+
+    // ── Extremely long chains (20+ steps) ───────────────────────
+
+    #[test]
+    fn chain_30_steps_preserves_order() {
+        let mut lines = Vec::new();
+        for i in 0..30 {
+            let deps = if i == 0 {
+                String::new()
+            } else {
+                format!(r#","depends_on":["step{}"]"#, i - 1)
+            };
+            lines.push(format!(
+                r#"{{"id":"step{i}","connector":"g","operation":"o","input":{{}}{deps}}}"#
+            ));
+        }
+        let content = lines.join("\n");
+        let batch = BatchFile::parse(&content).unwrap();
+        assert_eq!(batch.len(), 30);
+        let plan = ExecutionPlan::from_batch(&batch, 10, "abort");
+        assert_eq!(plan.waves.len(), 30);
+        assert_eq!(plan.waves[0].operation_ids[0], "step0");
+        assert_eq!(plan.waves[29].operation_ids[0], "step29");
+    }
+
+    #[test]
+    fn chain_50_steps() {
+        let mut lines = Vec::new();
+        for i in 0..50 {
+            let deps = if i == 0 {
+                String::new()
+            } else {
+                format!(r#","depends_on":["s{}"]"#, i - 1)
+            };
+            lines.push(format!(
+                r#"{{"id":"s{i}","connector":"g","operation":"o","input":{{}}{deps}}}"#
+            ));
+        }
+        let content = lines.join("\n");
+        let batch = BatchFile::parse(&content).unwrap();
+        let waves = topological_waves(&batch);
+        assert_eq!(waves.len(), 50);
+    }
+
+    // ── Unknown dependency ──────────────────────────────────────
+
+    #[test]
+    fn unknown_dep_in_second_of_three() {
+        let content = r#"{"id":"a","connector":"g","operation":"o","input":{}}
+{"id":"b","connector":"g","operation":"o","input":{},"depends_on":["missing"]}
+{"id":"c","connector":"g","operation":"o","input":{},"depends_on":["a"]}"#;
+        let err = BatchFile::parse(content).unwrap_err();
+        match err {
+            BatchFileError::UnknownDependency { id, dependency } => {
+                assert_eq!(id, "b");
+                assert_eq!(dependency, "missing");
+            }
+            other => panic!("expected UnknownDependency, got {other}"),
+        }
+    }
+
+    #[test]
+    fn unknown_dep_multiple_deps_one_missing() {
+        let content = r#"{"id":"a","connector":"g","operation":"o","input":{}}
+{"id":"b","connector":"g","operation":"o","input":{}}
+{"id":"c","connector":"g","operation":"o","input":{},"depends_on":["a","ghost","b"]}"#;
+        let err = BatchFile::parse(content).unwrap_err();
+        match err {
+            BatchFileError::UnknownDependency { id, dependency } => {
+                assert_eq!(id, "c");
+                assert_eq!(dependency, "ghost");
+            }
+            other => panic!("expected UnknownDependency, got {other}"),
+        }
+    }
+
+    // ── Mixed connector plan ────────────────────────────────────
+
+    #[test]
+    fn plan_with_many_connectors_sorted() {
+        let content = r#"{"id":"a","connector":"zendesk","operation":"o","input":{}}
+{"id":"b","connector":"airtable","operation":"o","input":{}}
+{"id":"c","connector":"notion","operation":"o","input":{}}
+{"id":"d","connector":"github","operation":"o","input":{}}
+{"id":"e","connector":"airtable","operation":"o","input":{}}"#;
+        let batch = BatchFile::parse(content).unwrap();
+        let plan = ExecutionPlan::from_batch(&batch, 5, "abort");
+        assert_eq!(
+            plan.connectors,
+            vec!["airtable", "github", "notion", "zendesk"]
+        );
+    }
+
+    // ── OpResult collection patterns ────────────────────────────
+
+    #[test]
+    fn op_results_all_pending() {
+        let results: Vec<OpResult> = (0..5)
+            .map(|i| OpResult {
+                id: format!("p{i}"),
+                operation: "g.o".to_owned(),
+                status: OpStatus::Pending,
+                wave: None,
+                result: None,
+                error: None,
+            })
+            .collect();
+        assert!(results.iter().all(|r| r.status == OpStatus::Pending));
+    }
+
+    #[test]
+    fn op_result_transition_pending_to_success() {
+        let mut result = OpResult {
+            id: "t1".to_owned(),
+            operation: "g.o".to_owned(),
+            status: OpStatus::Pending,
+            wave: None,
+            result: None,
+            error: None,
+        };
+        assert_eq!(result.status, OpStatus::Pending);
+        result.status = OpStatus::Success;
+        result.wave = Some(0);
+        result.result = Some(json!({"data": [1, 2, 3]}));
+        assert_eq!(result.status, OpStatus::Success);
+        assert!(result.result.is_some());
+    }
+
+    #[test]
+    fn op_result_transition_pending_to_error() {
+        let mut result = OpResult {
+            id: "t2".to_owned(),
+            operation: "g.o".to_owned(),
+            status: OpStatus::Pending,
+            wave: None,
+            result: None,
+            error: None,
+        };
+        result.status = OpStatus::Error;
+        result.wave = Some(2);
+        result.error = Some(json!({"code": 503, "message": "service unavailable"}));
+        assert_eq!(result.status, OpStatus::Error);
+        assert_eq!(result.error.as_ref().unwrap()["code"], 503);
+    }
+
+    // ── Plan from diamond with varied connectors ────────────────
+
+    #[test]
+    fn plan_diamond_with_different_connectors() {
+        let content = r#"{"id":"root","connector":"github","operation":"list_repos","input":{}}
+{"id":"left","connector":"slack","operation":"notify","input":{},"depends_on":["root"]}
+{"id":"right","connector":"jira","operation":"create_ticket","input":{},"depends_on":["root"]}
+{"id":"join","connector":"datadog","operation":"log_event","input":{},"depends_on":["left","right"]}"#;
+        let batch = BatchFile::parse(content).unwrap();
+        let plan = ExecutionPlan::from_batch(&batch, 8, "continue");
+        assert_eq!(plan.total_operations, 4);
+        assert_eq!(plan.waves.len(), 3);
+        assert_eq!(plan.connectors.len(), 4);
+    }
+
+    // ── Batch file with zones across operations ─────────────────
+
+    #[test]
+    fn parse_mixed_zones_and_no_zones() {
+        let content = r#"{"id":"a","connector":"aws","operation":"deploy","input":{},"zone":"us-east-1"}
+{"id":"b","connector":"aws","operation":"deploy","input":{},"zone":"eu-west-1"}
+{"id":"c","connector":"gcp","operation":"run","input":{}}
+{"id":"d","connector":"aws","operation":"cleanup","input":{},"zone":"ap-south-1","depends_on":["a","b"]}"#;
+        let batch = BatchFile::parse(content).unwrap();
+        assert_eq!(batch.operations[0].zone.as_deref(), Some("us-east-1"));
+        assert_eq!(batch.operations[1].zone.as_deref(), Some("eu-west-1"));
+        assert!(batch.operations[2].zone.is_none());
+        assert_eq!(batch.operations[3].zone.as_deref(), Some("ap-south-1"));
+    }
+
+    // ── Execution plan serialization roundtrip ──────────────────
+
+    #[test]
+    fn plan_json_roundtrip_wave_ids() {
+        let content = r#"{"id":"root","connector":"g","operation":"o","input":{}}
+{"id":"child","connector":"g","operation":"o","input":{},"depends_on":["root"]}"#;
+        let batch = BatchFile::parse(content).unwrap();
+        let plan = ExecutionPlan::from_batch(&batch, 3, "abort");
+        let json = serde_json::to_value(&plan).unwrap();
+        let waves = json["waves"].as_array().unwrap();
+        assert_eq!(waves[0]["operation_ids"][0], "root");
+        assert_eq!(waves[1]["operation_ids"][0], "child");
+    }
+
+    // ── Partial failure reporting with all statuses ─────────────
+
+    #[test]
+    fn partial_failure_all_four_statuses_present() {
+        let results = vec![
+            OpResult {
+                id: "r1".to_owned(),
+                operation: "g.o".to_owned(),
+                status: OpStatus::Success,
+                wave: Some(0),
+                result: Some(json!({})),
+                error: None,
+            },
+            OpResult {
+                id: "r2".to_owned(),
+                operation: "g.o".to_owned(),
+                status: OpStatus::Error,
+                wave: Some(0),
+                result: None,
+                error: Some(json!({})),
+            },
+            OpResult {
+                id: "r3".to_owned(),
+                operation: "g.o".to_owned(),
+                status: OpStatus::Skipped,
+                wave: None,
+                result: None,
+                error: None,
+            },
+            OpResult {
+                id: "r4".to_owned(),
+                operation: "g.o".to_owned(),
+                status: OpStatus::Pending,
+                wave: None,
+                result: None,
+                error: None,
+            },
+        ];
+        let counts: HashMap<&str, usize> = results
+            .iter()
+            .fold(HashMap::new(), |mut acc, r| {
+                let key = match r.status {
+                    OpStatus::Success => "success",
+                    OpStatus::Error => "error",
+                    OpStatus::Skipped => "skipped",
+                    OpStatus::Pending => "pending",
+                };
+                *acc.entry(key).or_insert(0) += 1;
+                acc
+            });
+        assert_eq!(counts["success"], 1);
+        assert_eq!(counts["error"], 1);
+        assert_eq!(counts["skipped"], 1);
+        assert_eq!(counts["pending"], 1);
+    }
+
+    // ── TOON format for large plan ──────────────────────────────
+
+    #[test]
+    fn toon_format_plan_large_batch() {
+        let mut lines = Vec::new();
+        for i in 0..15 {
+            let deps = if i == 0 {
+                String::new()
+            } else {
+                format!(r#","depends_on":["s{}"]"#, i - 1)
+            };
+            lines.push(format!(
+                r#"{{"id":"s{i}","connector":"c{c}","operation":"op{i}","input":{{}}{deps}}}"#,
+                c = i % 3
+            ));
+        }
+        let content = lines.join("\n");
+        let batch = BatchFile::parse(&content).unwrap();
+        let plan = ExecutionPlan::from_batch(&batch, 4, "skip");
+        let output = format_plan_toon(&plan);
+        assert!(output.contains("15 operations"));
+        assert!(output.contains("on_error: skip"));
+        for i in 0..15 {
+            assert!(output.contains(&format!("s{i}")));
+        }
+    }
+
+    #[test]
+    fn toon_format_results_with_error_details() {
+        let results = vec![OpResult {
+            id: "fail_op".to_owned(),
+            operation: "slack.send".to_owned(),
+            status: OpStatus::Error,
+            wave: Some(0),
+            result: None,
+            error: Some(json!({"code": "CHANNEL_NOT_FOUND", "message": "Channel #nonexistent does not exist"})),
+        }];
+        let output = format_results_toon(&results);
+        assert!(output.contains("fail_op"));
+        assert!(output.contains("0/1 succeeded"));
+        assert!(output.contains("1 failed"));
     }
 }

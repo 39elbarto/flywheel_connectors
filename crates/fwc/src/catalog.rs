@@ -300,6 +300,15 @@ pub const COMMAND_CLASSIFICATIONS: &[CommandClassification] = &[
         transport_note: "GET /health — live host health and connector diagnostics",
     },
     CommandClassification {
+        command: "health",
+        truth_source: CommandTruthSource::LiveHost,
+        execution_mode: CommandExecutionMode::ReadOnly,
+        host_absent: HostAbsentBehavior::FailFast,
+        requires_capability_token: false,
+        may_need_approval: false,
+        transport_note: "GET /health — fleet and per-connector health dashboard",
+    },
+    CommandClassification {
         command: "status",
         truth_source: CommandTruthSource::LiveHost,
         execution_mode: CommandExecutionMode::ReadOnly,
@@ -3325,6 +3334,7 @@ pub const COMMANDS: &[&str] = &[
     "package",
     "doctor",
     "status",
+    "health",
     "budget",
     "capabilities",
     "install",
@@ -3448,7 +3458,7 @@ pub fn guide_payload(command: Option<&str>) -> Value {
                     },
                     {
                         "name": "lifecycle",
-                        "commands": ["doctor", "status", "budget", "install", "update", "pin", "unpin", "rollout"],
+                        "commands": ["doctor", "status", "health", "budget", "install", "update", "pin", "unpin", "rollout"],
                     },
                     {
                         "name": "capability-governance",
@@ -3648,6 +3658,10 @@ fn command_contract(command: &str) -> Option<Value> {
         "status" => Some(lifecycle_contract(
             "Report desired state, observed runtime state, and current health for one connector or the fleet.",
             "Desired-vs-observed lifecycle summary with audit-aware context.",
+        )),
+        "health" => Some(lifecycle_contract(
+            "Cross-connector health aggregation dashboard with traffic-light status, auth checks, and latency.",
+            "Live host-backed health dashboard showing per-connector status, auth state, latency, and detected issues.",
         )),
         "budget" => Some(lifecycle_contract(
             "Report current usage-budget state for configured zones through `fcp-host`.",

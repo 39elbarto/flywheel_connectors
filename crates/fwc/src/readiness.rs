@@ -831,6 +831,10 @@ pub const COMMAND_FAMILY_CLASSIFICATION: &[CommandFamilyEntry] = &[
         mode: CommandTruthMode::LiveOnly,
     },
     CommandFamilyEntry {
+        name: "health",
+        mode: CommandTruthMode::LiveOnly,
+    },
+    CommandFamilyEntry {
         name: "budget",
         mode: CommandTruthMode::LiveOnly,
     },
@@ -9285,7 +9289,7 @@ output_schema = { type = "object" }
             .iter()
             .filter(|e| e.mode == CommandTruthMode::LiveOnly)
             .count();
-        assert_eq!(count, 17, "Expected 17 live-only commands, got {count}");
+        assert_eq!(count, 18, "Expected 18 live-only commands, got {count}");
     }
 
     #[test]
@@ -9992,6 +9996,7 @@ output_schema = { type = "object" }
             "batch-file",
             "doctor",
             "status",
+            "health",
             "budget",
             "pin",
             "unpin",
@@ -10748,7 +10753,7 @@ output_schema = { type = "object" }
     #[test]
     fn golden_classification_count() {
         // Pinned count — if commands are added/removed, update this.
-        assert_eq!(COMMAND_FAMILY_CLASSIFICATION.len(), 56);
+        assert_eq!(COMMAND_FAMILY_CLASSIFICATION.len(), 57);
     }
 
     #[test]

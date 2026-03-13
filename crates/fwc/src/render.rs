@@ -1576,6 +1576,142 @@ mod tests {
         assert_eq!(text.trim(), "42");
     }
 
+    #[test]
+    fn ndjson_empty_result_streaming() {
+        // Empty array should produce no lines
+        let text = render(json!([]), OutputFormat::Ndjson).unwrap();
+        assert!(text.trim().is_empty());
+    }
+
+    #[test]
+    fn ndjson_large_payload_items() {
+        // Test with many items to verify no buffering issues
+        let items: Vec<serde_json::Value> = (0..500)
+            .map(|i| json!({"id": i, "payload": "x".repeat(200)}))
+            .collect();
+        let data = Value::Array(items);
+        let text = render(data, OutputFormat::Ndjson).unwrap();
+        assert_eq!(text.lines().count(), 500);
+        // Every line should parse back as valid JSON
+        for line in text.lines() {
+            assert!(serde_json::from_str::<Value>(line).is_ok());
+        }
+    }
+
+    #[test]
+    fn ndjson_nested_array_items_preserved() {
+        // Items that themselves contain arrays should be serialized intact
+        let data = json!([
+            {"tags": ["a", "b"], "count": 2},
+            {"tags": ["c"], "count": 1}
+        ]);
+        let text = render(data, OutputFormat::Ndjson).unwrap();
+        assert_eq!(text.lines().count(), 2);
+        let first: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+        assert!(first["tags"].is_array());
+    }
+
+    #[test]
+    fn ndjson_wrapper_issues_field() {
+        let data = json!({
+            "total": 3,
+            "issues": [{"key": "BUG-1"}, {"key": "BUG-2"}, {"key": "BUG-3"}]
+        });
+        let text = render(data, OutputFormat::Ndjson).unwrap();
+        assert_eq!(text.lines().count(), 3);
+    }
+
+    #[test]
+    fn ndjson_wrapper_messages_field() {
+        let data = json!({
+            "channel": "general",
+            "messages": [{"text": "hello"}, {"text": "world"}]
+        });
+        let text = render(data, OutputFormat::Ndjson).unwrap();
+        assert_eq!(text.lines().count(), 2);
+    }
+
+    #[test]
+    fn ndjson_wrapper_entries_field() {
+        let data = json!({
+            "entries": [{"ts": 1}, {"ts": 2}]
+        });
+        let text = render(data, OutputFormat::Ndjson).unwrap();
+        assert_eq!(text.lines().count(), 2);
+    }
+
+    #[test]
+    fn ndjson_wrapper_rows_field() {
+        let data = json!({
+            "rows": [{"a": 1}, {"a": 2}, {"a": 3}, {"a": 4}]
+        });
+        let text = render(data, OutputFormat::Ndjson).unwrap();
+        assert_eq!(text.lines().count(), 4);
+    }
+
+    #[test]
+    fn ndjson_wrapper_records_field() {
+        let data = json!({
+            "records": [{"id": "r1"}]
+        });
+        let text = render(data, OutputFormat::Ndjson).unwrap();
+        assert_eq!(text.lines().count(), 1);
+    }
+
+    #[test]
+    fn ndjson_boolean_value() {
+        let text = render(json!(true), OutputFormat::Ndjson).unwrap();
+        assert_eq!(text.trim(), "true");
+    }
+
+    #[test]
+    fn ndjson_string_value() {
+        let text = render(json!("hello"), OutputFormat::Ndjson).unwrap();
+        assert_eq!(text.trim(), "\"hello\"");
+    }
+
+    #[test]
+    fn ndjson_mixed_type_array() {
+        // Array with different item types
+        let data = json!([1, "two", true, null, {"key": "val"}]);
+        let text = render(data, OutputFormat::Ndjson).unwrap();
+        assert_eq!(text.lines().count(), 5);
+        // Each line is valid JSON
+        for line in text.lines() {
+            assert!(serde_json::from_str::<Value>(line).is_ok());
+        }
+    }
+
+    #[test]
+    fn ndjson_deeply_nested_objects() {
+        let data = json!([
+            {"level1": {"level2": {"level3": "deep"}}},
+            {"level1": {"level2": {"level3": "also deep"}}}
+        ]);
+        let text = render(data, OutputFormat::Ndjson).unwrap();
+        assert_eq!(text.lines().count(), 2);
+        let parsed: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+        assert_eq!(parsed["level1"]["level2"]["level3"], "deep");
+    }
+
+    #[test]
+    fn ndjson_unicode_content() {
+        let data = json!([
+            {"name": "日本語テスト"},
+            {"name": "émojis 🎉🚀"}
+        ]);
+        let text = render(data, OutputFormat::Ndjson).unwrap();
+        assert_eq!(text.lines().count(), 2);
+    }
+
+    #[test]
+    fn ndjson_single_item_array() {
+        let data = json!([{"only": "one"}]);
+        let text = render(data, OutputFormat::Ndjson).unwrap();
+        assert_eq!(text.lines().count(), 1);
+        assert!(text.contains("only"));
+    }
+
     // ── relative_time_label tests ─────────────────────────────────
 
     #[test]
